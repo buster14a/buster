@@ -17,6 +17,14 @@ through `executable_write`. No padding is required. Empty selection is valid
 and emits just the null symbol and empty string. The caller owns selection,
 including omission of discarded or unwanted local symbols.
 
+This attachment describes the named symbols retained by `Link`. The current
+foreign-input representation does not retain original `STT_FILE` rows or the
+distinction between an unnamed `STT_SECTION` row and other untyped rows. A
+foreign producer must therefore define its selection as named semantic
+symbols; this API cannot reproduce an input linker's complete bookkeeping
+table. Corpus comparisons must separately check named definitions, sizes,
+types, binding and visibility, and report this omitted metadata explicitly.
+
 The writer validates bounded names and the total string-table capacity before
 opening the destination. The vector path checks sixteen IDs per batch using
 masked loads, including ordering across lane boundaries. Each lane validates
@@ -45,6 +53,11 @@ With both symbol and debug attachments, the explicit symbol selection controls
 an explicit selection, the debug descriptor retains its existing function
 table and ordering. With neither attachment there is no symbol-table scan.
 
+The debug descriptor currently retains its original serial name validation
+and aggregate name-size limit even when an explicit symbol selection replaces
+the debug-derived table. That conservative validation is unchanged in this
+slice and remains part of measured coexistence cost.
+
 ## Validation and measurement boundary
 
 `test-executable` includes independent ELF expectations for local ordering,
@@ -55,6 +68,9 @@ across exact/vector writers and 1, 2, 3 and 8
 lanes, recomputes the build ID, executes the original fixture, and checks that
 invalid selections and missing TLS sections preserve an existing destination.
 Existing `test-debug --cross-check` covers the debug-only attachment's consumers.
+It also compares all five finalized DWARF sections with explicit empty and
+single-function symbol selections across exact/vector writers and all four
+lane counts, then restores the debug-only file for the external consumers.
 Builds and tests run on the approved 9700X through the shared host lock.
 
 The exact twin retains the scalar lane-zero baseline. The vector path's ID
