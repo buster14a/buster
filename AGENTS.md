@@ -160,6 +160,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_gnu.c` retains bounded GNU attribute groups/arguments
+  and declarator asm labels when `ParseOptions.extension_metadata` is enabled.
+  `test-gnu --clang` checks exact records, scalar/vector agreement and guarded
+  capacities; `benchmark-gnu [-E's options] file.c` measures collection,
+  allocation and the parser handoff. `test-types` also checks GNU machine-mode
+  type actions. [The GNU extension guide](docs/c-gnu-extensions.md) records
+  the source-checker/lowering work still required before #147 can close.
+
 - `test-differential-harness` validates the Csmith/YARPGen harness with original
   fixtures. `test-differential` requires explicit compiler/tier configuration
   and preserves generators, commands, artifacts and failures. Missing tools or
@@ -240,7 +248,7 @@ designs and the compilers already built this way.
   with exit status 0 for a unit without errors and 1 otherwise. Nothing is
   written yet. With no file it prints its usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as eight translation units: `main.c` itself, the driver's unit, and each
+  it as ten translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -420,6 +428,24 @@ designs and the compilers already built this way.
   included by `dynamic_test.c`, checks high library indices, foreign imports,
   malformed metadata and exact/vector identity at 1/2/3/8 lanes. Missing import
   version definitions are refused in the existing symbol pass before output.
+- `src/buster/compiler/debug.c` emits bounded DWARF 5 function names, ranges
+  and source lines with scalar/vector twins and explicit late address slots.
+  `ExecutableOptions.debug` attaches one contribution at final TEXT addresses,
+  with nonallocated debug sections and a regular function symbol table.
+  `test-debug --cross-check` checks original fixtures with readelf, GDB and
+  perf; `benchmark-debug` measures validation through address finalization.
+  [The debug guide](docs/debug.md) records the contract and the source-row
+  production and streaming integration still pending.
+- `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
+  from valid Tier 0 records after branch sizing; `unwind.c` emits original
+  CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
+  the producer unchanged and does not repeat generic instruction validation.
+  `test-unwind --cross-check` checks independent frame-state oracles, protected
+  tails and actual Tier 0 code with native GDB/perf consumers. `benchmark-unwind`
+  charges analysis/emission to the existing Tier 0, sizing and encoding chain,
+  including per-function arena cleanup. [The unwind guide](docs/unwind.md)
+  records the trusted private-slot contract, Link fixups and pending target-host
+  qualification. Use the shared 9700X lock per command and CPU 2 for timing.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
   part, and step 6's for the other kinds): what `runtime_import` (or
   `runtime_import_static`, `runtime_import_static_pie` or
@@ -3422,7 +3448,37 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
+## Fragment experiment tests
+
+The test-only expression-fragment experiment is described in
+[docs/c-parser-fragments.md](docs/c-parser-fragments.md).
+`./build/compiler test-fragment-interleave [--seed N]` compares scalar and
+AVX-512 byte routing, including exhaustive short masks and exact protected-page
+boundaries. `./build/compiler test-fragments` checks the scalar recognizer's
+experimental sink, compiled separately in `main_unit_fragments.c`; production
+parser units have no fragment sink. These checks do not establish semantic or
+SSA IR identity. The complete #107 comparison still requires the shared
+semantic consumer and its actual output.
+
 ## Scoped binding kernels
+
+`test-environments [--seed N]` checks the immutable file-scope position index,
+tag-completion positions and parser-role body ranges for #113, including
+guarded tails and queries on 1, 2, 3 and 8 lanes. `benchmark-environments`
+measures the synthetic index/query handoff and completeness checks; use
+`--only full-vector [--after-scalar 100]` for its vector states, under the
+9700X's per-run lock and pinned to CPU 2. `check_input` publishes the real
+source reader's retained events, declaration types, tag completion positions
+and body slots through `c_check_environment.c`; `test-checker` checks their
+scratch lifetime and scalar/vector replay. Actual deferred body/effect
+checking and corpus acceptance are still pending.
+[docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
+`c_check_body_bindings.c` supplies the next independent name-resolution
+consumer: private per-body views/replay, source-position file fallbacks and
+stable declaration identities. `test-checker` compares both kernels on
+reversed one/eight-lane body schedules and guarded columns.
+[docs/c-body-bindings.md](docs/c-body-bindings.md) records its contract and the
+semantic/type/effect/corpus integration still required for #113.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
 binding kernels: stack replay and the vector batch against an independent
