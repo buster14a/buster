@@ -88,6 +88,16 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
 
+// Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
+#include "buster/compiler/dominators.c"
+#include "buster/compiler/dominators_test.c"
+int run_dominator_benchmark(int argc, char** argv);
+
+#include "buster/compiler/tier1_allocate.c"
+#include "buster/compiler/tier1_rematerialize.c"
+#include "buster/compiler/tier1_allocate_test.c"
+int run_tier1_allocate_benchmark(int argc, char** argv);
+
 // The preprocessor's fuzz tooling (#109): the generator, the clang oracle, the comparison and the minimizer, and their
 // self-tests, for the test-preprocessor-fuzz command. test-preprocessor --fuzz runs the preprocessor against them
 // (c_preprocessor_fuzz.c).
@@ -228,6 +238,15 @@ int run_type_benchmark(int argc, char** argv);
 
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
+#include "buster/compiler/c_check_actions.c"
+#include "buster/compiler/c_checker.c"
+#include "buster/compiler/c_check_literals.c"
+#include "buster/compiler/c_check_data.c"
+#include "buster/compiler/c_check_input.c"
+#include "buster/compiler/c_check_data_input.c"
+#include "buster/compiler/c_checker_driver.c"
+#include "buster/compiler/c_checker_test.c"
+int run_checker_benchmark(int argc, char** argv);
 int run_builtin_benchmark(int argc, char** argv);
 
 // The System V calling convention (each type's classes, and each call's argument locations) and its tests, for the
@@ -235,6 +254,13 @@ int run_builtin_benchmark(int argc, char** argv);
 #include "buster/compiler/calling_convention.c"
 #include "buster/compiler/calling_convention_test.c"
 int run_calling_convention_benchmark(int argc, char** argv);
+
+// Frame storage, explicit prologue/epilogue planning and its native instruction consumer.
+#include "buster/compiler/tier1_frame.c"
+#include "buster/compiler/tier1_frame_test.c"
+#include "buster/compiler/tier1_frame_emit.c"
+#include "buster/compiler/tier1_frame_execution_test.c"
+int run_tier1_frame_benchmark(int argc, char** argv);
 
 // Tier 0 (a function's typed stream to instruction records, by templates with registers from the value stack's
 // depths), the programs its tests and benchmark generate, and its tests, for the test-tier0 command. Its benchmark
@@ -388,6 +414,22 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-dominators") == 0)
+    {
+        result = run_dominator_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-dominators") == 0)
+    {
+        result = run_dominator_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-allocation") == 0)
+    {
+        result = run_tier1_allocate_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-allocation") == 0)
+    {
+        result = run_tier1_allocate_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-schedule") == 0)
     {
         result = run_tier1_schedule_tests(argc - 2, argv + 2);
@@ -508,6 +550,18 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_files_benchmark(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "check") == 0)
+    {
+        result = run_check_command(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
+    {
+        result = run_checker_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-checker") == 0)
+    {
+        result = run_checker_benchmark(argc - 1, argv + 1);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-types") == 0)
     {
         result = run_type_tests(argc - 2, argv + 2);
@@ -539,6 +593,18 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential-harness") == 0)
     {
         result = run_differential_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-frame") == 0)
+    {
+        result = run_tier1_frame_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-frame-execution") == 0)
+    {
+        result = run_tier1_frame_execution_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-frame") == 0)
+    {
+        result = run_tier1_frame_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier0") == 0)
     {
