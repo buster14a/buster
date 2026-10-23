@@ -31,6 +31,9 @@
 //     each of the offsets and the fixup ends, on random instructions of every form (with empty X86_FORM_NONE
 //     instructions among them, and one in BUSTER_X86_TEST_MARKED marked with the fixup flag): every count from 0 to
 //     BUSTER_X86_TEST_SHORT_COUNTS - 1, then N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once.
+//   - Lengths without bytes, in 64-bit mode: x86_measure and its scalar twin against both encoders, on known
+//     encodings, every form with generated operands and accepted FS/GS/fixup variants, random streams, legal batch
+//     partitions and empty records. Exact guarded tails and every dword alignment include the 1024-record boundary.
 //   - Page edges: instructions that end exactly at the end of a readable page, and an output capacity (or, for the
 //     variants that write only the instructions' bytes, the machine code), offsets and fixup ends (or their capacity)
 //     that end exactly at the end of a writable one, with a PROT_NONE page after them, for every count from 0 to
@@ -3786,6 +3789,37 @@ struct X86Buffers
     uint32_t* fixup_ends;
 };
 
+// The lengths-only paths against the scalar and vector encoders. `offsets` can be the guarded output of the bounds
+// check; the byte-producing encoders use the ordinary buffers, whose spare capacity is part of their contract.
+static bool x86_compare_measures(const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, uint32_t* offsets, bool report)
+{
+    const int64_t expected = x86_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets, 0);
+    const int64_t encoded = x86_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), buffers->offsets, 0);
+    bool result = expected >= 0 && encoded == expected && memcmp(buffers->offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0;
+    for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+    {
+        memset(offsets, 0xa5, count * sizeof(uint32_t));
+        const int64_t length = vectorized ? x86_measure(instructions, count, offsets) : x86_measure_scalar(instructions, count, offsets);
+        const bool same = expected >= 0 && length == expected && memcmp(offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0;
+        if (!same && report)
+        {
+            printf("  x86_measure%s on %lu instructions: %lld bytes, expected %lld\n", vectorized ? "" : "_scalar", (unsigned long)count,
+                   (long long)length, (long long)expected);
+            uint64_t first = 0;
+            while (first < count && offsets[first] == buffers->expected_offsets[first])
+            {
+                first += 1;
+            }
+            if (first < count)
+            {
+                printf("    offset %lu: %u, expected %u\n", (unsigned long)first, offsets[first], buffers->expected_offsets[first]);
+            }
+        }
+        result = result && same;
+    }
+    return result;
+}
+
 // Compares a variant with the mode's scalar encoder on `count` instructions, with each combination of offsets and fixup
 // ends. Prints the first difference if `report`.
 static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report)
@@ -3997,6 +4031,229 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
     {
         munmap(fixup_ends_end - (fixup_ends_mapped - 2 * page) - page, fixup_ends_mapped);
     }
+    return result;
+}
+
+// Lengths-only boundaries include branch sizing's former chunks, as well as the encoder's vector widths.
+static const uint32_t x86_measure_test_boundaries[] = {
+    0,
+    1,
+    3,
+    4,
+    7,
+    8,
+    15,
+    16,
+    17,
+    31,
+    32,
+    33,
+    63,
+    64,
+    65,
+    255,
+    256,
+    257,
+    1023,
+    1024,
+    1025,
+};
+#define BUSTER_X86_TEST_MEASURE_CHUNK 1025
+#define BUSTER_X86_TEST_MEASURE_PARTITIONS 2051
+
+static bool x86_check_measure(uint64_t* state, uint64_t count, X86Instruction* instructions, X86Buffers* buffers)
+{
+    uint64_t failures = 0;
+    uint32_t untouched = UINT32_MAX;
+    for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+    {
+        const int64_t empty = vectorized ? x86_measure(0, 0, 0) : x86_measure_scalar(0, 0, 0);
+        const int64_t empty_output = vectorized ? x86_measure(0, 0, &untouched) : x86_measure_scalar(0, 0, &untouched);
+        const uint64_t excessive = (uint64_t)BUSTER_X86_ENCODER_MAX_INSTRUCTIONS + 1;
+        const int64_t rejected = vectorized ? x86_measure(0, excessive, 0) : x86_measure_scalar(0, excessive, 0);
+        const int64_t rejected_max = vectorized ? x86_measure(0, UINT64_MAX, 0) : x86_measure_scalar(0, UINT64_MAX, 0);
+        failures += empty != 0 || empty_output != 0 || untouched != UINT32_MAX || rejected != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS ||
+                    rejected_max != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
+    }
+    // Pin the lengths to the independent known encodings too, rather than to agreement between implementations.
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_known_encodings); i += 1)
+    {
+        const KnownEncoding* known = &x86_known_encodings[i];
+        for (uint32_t marked = 0; marked < 2; marked += 1)
+        {
+            X86Instruction instruction = known->instruction;
+            instruction.form |= marked ? BUSTER_X86_FORM_FIXUP : 0;
+            uint32_t offsets[3] = {
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+            };
+            const int64_t scalar = x86_measure_scalar(&instruction, 1, offsets + 1);
+            bool same = scalar == known->length && offsets[1] == 0 && offsets[0] == UINT32_MAX && offsets[2] == UINT32_MAX;
+            offsets[1] = UINT32_MAX;
+            const int64_t vectorized = x86_measure(&instruction, 1, offsets + 1);
+            same = same && vectorized == known->length && offsets[1] == 0 && offsets[0] == UINT32_MAX && offsets[2] == UINT32_MAX;
+            if (!same && failures < BUSTER_X86_TEST_REPORTED)
+            {
+                printf("  x86_measure known encoding %lu%s: %lld bytes scalar, %lld vectorized, expected %u\n", (unsigned long)i,
+                       marked ? " with fixup" : "", (long long)scalar, (long long)vectorized, known->length);
+            }
+            failures += !same;
+        }
+    }
+    // Every admitted form, not just whichever the random stream happens to select. Generated operands exercise
+    // special registers, memory shapes, immediate widths and EVEX displacement scaling. Reject unavailable overrides.
+    uint64_t generated = 0;
+    uint32_t used = 0;
+    for (uint32_t form = 0; form < BUSTER_X86_FORM_LEGACY_MODES; form += 1)
+    {
+        if (form == X86_FORM_NONE || x86_test_form_exists(form))
+        {
+            for (uint32_t sample = 0; sample < 4; sample += 1)
+            {
+                const X86Instruction original = x86_random_instruction(state, (uint16_t)form, false);
+                for (uint32_t segment = 0; segment < 3; segment += 1)
+                {
+                    for (uint32_t marked = 0; marked < 2; marked += 1)
+                    {
+                        X86Instruction instruction = original;
+                        instruction.form = (uint16_t)(form + segment * X86_FORM_COUNT + (marked ? BUSTER_X86_FORM_FIXUP : 0));
+                        if (x86_instruction_is_valid(&instruction))
+                        {
+                            instructions[used] = instruction;
+                            used += 1;
+                            generated += 1;
+                            if (used == BUSTER_X86_TEST_MEASURE_CHUNK)
+                            {
+                                failures += !x86_compare_measures(instructions, used, buffers, buffers->offsets, failures < BUSTER_X86_TEST_REPORTED);
+                                used = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    failures += !x86_compare_measures(instructions, used, buffers, buffers->offsets, failures < BUSTER_X86_TEST_REPORTED);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_measure_test_boundaries); i += 1)
+    {
+        const uint32_t n = x86_measure_test_boundaries[i];
+        x86_random_instructions(state, instructions, n, true, false);
+        x86_mark_random(state, instructions, n);
+        failures += !x86_compare_measures(instructions, n, buffers, buffers->offsets, failures < BUSTER_X86_TEST_REPORTED);
+    }
+    x86_random_instructions(state, instructions, count, true, false);
+    x86_mark_random(state, instructions, count);
+    failures += !x86_compare_measures(instructions, count, buffers, buffers->offsets, failures < BUSTER_X86_TEST_REPORTED);
+    // Each call starts its offsets at zero. Rebase legal partitions of the same stream, including entirely empty
+    // records, to check that no state from a vector or a preceding call leaks into the next batch.
+    for (uint32_t empty = 0; empty < 2; empty += 1)
+    {
+        if (empty)
+        {
+            memset(instructions, 0, BUSTER_X86_TEST_MEASURE_PARTITIONS * sizeof(X86Instruction));
+        }
+        else
+        {
+            x86_random_instructions(state, instructions, BUSTER_X86_TEST_MEASURE_PARTITIONS, true, false);
+        }
+        x86_mark_random(state, instructions, BUSTER_X86_TEST_MEASURE_PARTITIONS);
+        const int64_t expected = x86_encode_scalar(instructions, BUSTER_X86_TEST_MEASURE_PARTITIONS, buffers->expected,
+                                                   BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_MEASURE_PARTITIONS), buffers->expected_offsets, 0);
+        for (uint32_t partition = 1; partition < BUSTER_ARRAY_LENGTH(x86_measure_test_boundaries); partition += 1)
+        {
+            const uint32_t width = x86_measure_test_boundaries[partition];
+            for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+            {
+                int64_t total = 0;
+                bool same = expected >= 0;
+                for (uint32_t first = 0; same && first < BUSTER_X86_TEST_MEASURE_PARTITIONS; first += width)
+                {
+                    const uint32_t remaining = BUSTER_X86_TEST_MEASURE_PARTITIONS - first;
+                    const uint32_t n = remaining < width ? remaining : width;
+                    const int64_t length = vectorized ? x86_measure(instructions + first, n, buffers->offsets) : x86_measure_scalar(instructions + first, n, buffers->offsets);
+                    same = length >= 0;
+                    for (uint32_t i = 0; same && i < n; i += 1)
+                    {
+                        same = (uint64_t)total + buffers->offsets[i] == buffers->expected_offsets[first + i];
+                    }
+                    total += length;
+                }
+                failures += !same || total != expected;
+            }
+        }
+    }
+    printf("lengths only: %lu generated form/operand cases, %lu random instructions, boundaries and partitions, %lu differ\n",
+           (unsigned long)generated, (unsigned long)count, (unsigned long)failures);
+    return failures == 0;
+}
+
+static bool x86_check_measure_bounds(uint64_t* state, X86Instruction* scratch, X86Buffers* buffers)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint64_t input_mapped = 0;
+    uint64_t offsets_mapped = 0;
+    uint8_t* input_end = x86_map_guarded(BUSTER_X86_TEST_MEASURE_CHUNK * sizeof(X86Instruction) + 64, page, &input_mapped);
+    uint8_t* offsets_end = x86_map_guarded(BUSTER_X86_TEST_MEASURE_CHUNK * sizeof(uint32_t) + 128, page, &offsets_mapped);
+    uint64_t failures = 0;
+    bool result = input_end != 0 && offsets_end != 0;
+    if (result)
+    {
+        struct sigaction action;
+        struct sigaction previous_segv;
+        struct sigaction previous_bus;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = x86_test_report_fault;
+        sigaction(SIGSEGV, &action, &previous_segv);
+        sigaction(SIGBUS, &action, &previous_bus);
+        x86_test_page_edge_variant = "x86_measure/scalar";
+        x86_test_page_edge_outputs = BUSTER_X86_TEST_WITH_OFFSETS;
+        for (uint32_t test = 0; test < BUSTER_X86_TEST_SHORT_COUNTS + 3; test += 1)
+        {
+            const uint32_t n = test < BUSTER_X86_TEST_SHORT_COUNTS ? test : 1023 + test - BUSTER_X86_TEST_SHORT_COUNTS;
+            x86_test_page_edge_count = n;
+            x86_random_instructions(state, scratch, n, true, false);
+            x86_mark_random(state, scratch, n);
+            for (uint32_t alignment = 0; alignment < 16; alignment += 1)
+            {
+                // Alignment zero ends both logical arrays at the guard. The others cover every dword alignment,
+                // with canaries in the readable offset suffix and before its first element.
+                const uint32_t input_padding = alignment * sizeof(uint32_t);
+                const uint32_t output_padding = ((alignment * 5) & 15) * sizeof(uint32_t);
+                X86Instruction* instructions = (X86Instruction*)(input_end - n * sizeof(X86Instruction) - input_padding);
+                uint32_t* offsets = (uint32_t*)(offsets_end - n * sizeof(uint32_t) - output_padding);
+                memcpy(instructions, scratch, n * sizeof(X86Instruction));
+                memset((uint8_t*)offsets - 64, 0xa5, 64 + n * sizeof(uint32_t) + output_padding);
+                bool same = x86_compare_measures(instructions, n, buffers, offsets, failures < BUSTER_X86_TEST_REPORTED);
+                for (uint32_t byte = 0; byte < 64; byte += 1)
+                {
+                    same = same && ((uint8_t*)offsets)[(int32_t)byte - 64] == 0xa5;
+                }
+                for (uint32_t byte = 0; byte < output_padding; byte += 1)
+                {
+                    same = same && ((uint8_t*)(offsets + n))[byte] == 0xa5;
+                }
+                failures += !same;
+            }
+        }
+        sigaction(SIGSEGV, &previous_segv, 0);
+        sigaction(SIGBUS, &previous_bus, 0);
+        result = failures == 0;
+    }
+    else
+    {
+        printf("lengths-only page edges: can't map the guarded buffers\n");
+    }
+    if (input_end != 0)
+    {
+        munmap(input_end - (input_mapped - 2 * page) - page, input_mapped);
+    }
+    if (offsets_end != 0)
+    {
+        munmap(offsets_end - (offsets_mapped - 2 * page) - page, offsets_mapped);
+    }
+    printf("lengths-only page edges: counts 0 to %u and 1023 to 1025, 16 alignments, %lu differ\n", BUSTER_X86_TEST_SHORT_COUNTS - 1,
+           (unsigned long)failures);
     return result;
 }
 
@@ -5396,6 +5653,12 @@ static bool x86_check_mode(uint64_t seed, uint64_t count, X86Instruction* instru
     passed = x86_check_digest(instructions, buffers->output) && passed;
     passed = x86_check_random(&state, count, instructions, buffers) && passed;
     passed = x86_check_page_edges(&state, instructions, buffers) && passed;
+    if (x86_test_mode == X86_ENCODER_MODE_64)
+    {
+        uint64_t measure_state = seed * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
+        passed = x86_check_measure(&measure_state, count, instructions, buffers) && passed;
+        passed = x86_check_measure_bounds(&measure_state, instructions, buffers) && passed;
+    }
     if (x86_mode_is_legacy(x86_test_mode))
     {
         passed = x86_check_overlong(&state) && passed;
