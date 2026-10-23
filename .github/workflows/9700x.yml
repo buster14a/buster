@@ -131,12 +131,6 @@ jobs:
           test -x build/compiler
           test "$(find build -type f -executable | wc -l)" -eq 1
 
-      - name: Qualify the draft refinement budget candidates
-        # Temporary #116 experiment. The runner hook holds the host lock; remove before merge.
-        if: github.head_ref == 'codex/116-refinement-budget'
-        timeout-minutes: 6
-        run: bash docs/measurements/refinement-budget-2026-10-23/ci-splice-screen.sh
-
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
         # flags such as -funsigned-char.

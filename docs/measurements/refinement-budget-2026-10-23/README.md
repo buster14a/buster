@@ -52,9 +52,9 @@ is fixed; the runner job hooks hold the shared host lock. Manual reproduction
 must add `--lock /home/david/buster-fast-bench/exclusive.sh` to `ab` and use
 `exclusive.sh` for each build, test and profile run separately.
 
-The extra workflow step is temporary and restricted to this draft branch. It
-does not change the required tests, CI priority or timeout. It will be removed
-before the final implementation is submitted for merge. The candidates are
+The extra workflow step was temporary and restricted to this draft branch. It
+did not change the required tests, CI priority or timeout, and was removed when
+the hash fix was merged; the script is kept to reproduce the screen. The candidates are
 experiments, not production alternatives or runtime dispatch paths.
 
 ## Correctness so far
@@ -552,7 +552,7 @@ patches to the triggering revision's current sources, preserving intervening
 preprocessor/accounting changes. It compares the fixed-hash production
 control with `lexprecise`, `precisearena` and `blockgap`, including setup,
 whole preprocessing and kernel power-state/corpus measurements. The temporary
-workflow call will be removed before merge.
+workflow call was removed before merge.
 
 ## Precise-splice CI screen: the budget is still unmet
 
