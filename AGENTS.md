@@ -214,6 +214,15 @@ designs and the compilers already built this way.
   the API and the checking, C selector, feature-query and corpus integration
   still required before #148 can close.
 
+- The companion [builtin integration guide](docs/c-builtins-integration.md)
+  records the shared capability catalog, typed integer/varargs/misc actions and
+  existing-stream runtime expansion. `test-check-builtins`,
+  `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
+  `test-builtin-varargs` distinguish semantic constraints from emitted execution.
+  Source hooks belong to the active #133 owner. Incoming variadic frame setup,
+  full Tier 1 coverage and corpus acceptance remain separate requirements.
+  Every build/test/measurement uses the approved 9700X lock per run.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;
@@ -489,6 +498,18 @@ designs and the compilers already built this way.
   unsupported expressions retain the original unmerged Link. The kernel,
   consumer and executable cross-checks run under `test-foreign`. See
   [foreign string merging](docs/foreign-string-merging.md) for the contract.
+- `src/buster/compiler/foreign_unwind.c` and `foreign_unwind_link.c` prune
+  losing COMDAT FDEs and unused CIEs before canonical foreign symbols hide
+  their original ownership. They retain matching CFI/personality/LSDA
+  records and map symbols into compact unwind bytes; compatible live-CIE
+  deduplication is separate. `test-foreign --cross-check` includes their
+  malformed/rollback tests and original C++ throw/catch/cleanup fixture.
+  `benchmark-foreign-unwind [--runs N] [--fdes N] [--profile mixed|all|none]`
+  measures full pruning with exact/vector parity and independent expected
+  bytes/maps. Run each measurement under the shared 9700X lock on CPU 2;
+  these synthetic phase results are not whole-link acceptance. The linker
+  guide's "Foreign COMDAT unwind pruning" documents the supported encodings,
+  incoming-reference restrictions and benchmark memory/timing boundaries.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
@@ -3517,6 +3538,17 @@ and the combined parser/adapter/consumer path. Run benchmarks on the locked
 opt-in adapter, the declaration-token columns, corpus provenance and the
 explicit cost of its scalar grammar replay. The syntax-only driver does not
 request these columns.
+
+## Selective lowering
+
+`./build/compiler test-lowering --clang` compares selective function/object
+emission planning with an independent graph oracle and Clang object symbols
+on original, manually modeled C fixtures. `benchmark-lowering` measures
+synthetic graph preparation and vector/scalar selection; use the shared 9700X
+lock and pin timings to CPU 2. [The lowering guide](docs/c-lowering.md) records
+the semantic producer contract and the source/checker/backend integration
+still required for #129. These commands do not establish corpus lowering or
+whole-compiler savings.
 
 ## Type tests
 
