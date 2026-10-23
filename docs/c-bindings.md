@@ -279,9 +279,12 @@ Cloud correctness checks on 2026-10-23 used Clang 23.1.1
 (`6dfe1677ab8dffbc6ec13d53a1e0215d75147689`) and an AVX-512 EPYC VM.
 The focused executable used `-O1 -march=native -fwrapv -funsigned-char
 -fno-strict-aliasing -Wall -Werror -Wno-unused-function`. These are correctness
-runs, not Zen 5 performance evidence. The final fixture/generator run before
-integrating main's #296/#301 parser and radix changes passed 975,195 checks
-with no failures, including AddressSanitizer and UndefinedBehaviorSanitizer.
+runs, not Zen 5 performance evidence. After integrating main's #296/#301
+parser and radix changes, the final fixture/generator run passed 975,195
+checks with no failures under AddressSanitizer and UndefinedBehaviorSanitizer.
+The three external corpus runs below also passed under both sanitizers on
+that merged tree: 58,909,221 checks across 954 files, with no rejected input
+or declaration-column mismatch.
 
 | External source | Input identity | Files | Source identifiers | Candidate walks |
 | --- | --- | ---: | ---: | ---: |
@@ -312,7 +315,8 @@ label preparation and the scalar grammar replay. `scalar` includes reusable
 stack replay and output-column mapping; `batch` includes key construction,
 sorting, scope resolution and mapping; `sort` includes key construction.
 `source-*` includes syntax parsing, event production and the chosen resolver.
-Preprocessing is outside all these measurements.
+Both source modes use the default vector syntax parser; scalar/batch selects
+the resolver only. Preprocessing is outside all these measurements.
 
 The protected 9700X workflow runs the source fixtures and main/SQLite
 comparisons, then measures `main.c` and the existing frozen SQLite corpus.
@@ -320,7 +324,60 @@ It also isolates SQLite's scalar and batch paths and runs the batch after
 200 ms of scalar work. The runner acquires the repository's shared host lock;
 manual runs must acquire it separately and pin to CPU 2. A batch path that
 loses to stacks is retained as the tested alternative, not advertised as a
-speedup. Target-host results are recorded after the exact PR head passes.
+speedup.
+
+### Ryzen 7 9700X qualification, October 23, 2026
+
+[Workflow run 39933524737](https://github.com/buster14a/buster/actions/runs/39933524737)
+passed the full production build, all 48 parallel test commands and all
+executed benchmark stages with Clang 23.1.1. It checked out GitHub's test merge
+`3f8fcd5e14b0683cbe5c7cebb19346645c201943`, whose tree
+`a379d706a27a9b6b8fdf3bb66ddca05e3d2285f7` is identical to PR #320's source
+head `d7cdc07f835173e89eb5b9c878e0525046b4b977`. The runner's job hook held
+the shared host lock; each benchmark used `taskset` on its first permitted
+CPU. These are 21-pass medians, with preprocessing excluded. Time and cycle
+medians are selected independently.
+
+The main input has 2,295,937 tokens and 466,590 source identifier tokens.
+SQLite is the workflow's frozen `preprocessor-391e729af658` corpus, verified
+against its pinned manifests and headers; it has 705,670 tokens and 143,019
+source identifier tokens. This differs from the cloud SQLite 3.53.4 input
+above. The [captured commands and output](measurements/parser-bindings-128-2026-10-23/9700x-source-bindings.log)
+preserve the exact flags and timings.
+
+| Path | main.c cycles/identifier | SQLite cycles/identifier | main.c ms/unit | SQLite ms/unit |
+| --- | ---: | ---: | ---: | ---: |
+| Event production (`prepare`) | 492.701 | 521.836 | 41.649 | 13.528 |
+| Reusable stacks plus column | 40.109 | 48.302 | 3.377 | 1.246 |
+| Batch plus column | 98.779 | 94.318 | 8.315 | 2.446 |
+| Key construction plus sort | 42.648 | 30.367 | 3.590 | 0.783 |
+| Syntax, production and stacks | 774.782 | 793.126 | 73.621 | 24.286 |
+| Syntax, production and batch | 832.172 | 847.128 | 78.418 | 25.701 |
+
+Sort/packing accounts for 43.17% of main's batch-and-column time and 32.01%
+of SQLite's. Main inspects 1,854 previous candidates across 434 uses, with
+187 uses reaching the bounded scalar fallback; SQLite has zero walks or
+fallback uses. Every measured declaration column matches the direct producer.
+
+Separate SQLite processes measured stacks at 45.468 cycles/identifier
+(1.172 ms/unit), batch at 85.646 (2.211 ms/unit), and batch following 200 ms
+of scalar work at 84.677 (2.187 ms/unit). Thus reusable stacks win on both
+measured sources, including the isolated SQLite comparison. The batch remains
+an exact tested alternative. Its kernel timing does not justify replacing
+the stacks on these inputs, and the larger event-production cost supports
+keeping the source adapter opt-in until a consumer can fuse the recorder
+with its parse.
+
+Reported permanent output capacities are 299,205,750 bytes for main and
+92,026,236 bytes for SQLite; reusable replay/result capacities add
+129,305,958 and 39,806,256 bytes respectively. These conservative capacities
+include spare slots and omit parser/trace scratch and peak RSS. They are not
+measurements of the minimum binding representation.
+
+The same target run passed 975,195 source fixture/generator checks,
+27,551,260 main-source checks and 8,468,056 frozen-SQLite checks. Its call
+graph gate covered 32 translation units, 16,624 functions and 90,761 calls,
+with zero unapproved cycles. Scalar/vector parser and binding outputs agree.
 
 The implementation, tests, generator and timing/counter code are original
 project code. No external implementation, generated table or corpus is
