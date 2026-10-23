@@ -306,6 +306,13 @@ jobs:
           ./build/compiler test-ir-gvn
           ./build/compiler test-ir-licm
           ./build/compiler test-ir-sroa
+          == Test Tier 1 selection, liveness and native fragments
+          ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
+          ./build/compiler test-tier1-liveness
+          ./build/compiler test-tier1-emit
+          ./build/compiler test-tier1-pipeline --cross-check
+          ./build/compiler test-tier1-model
+          ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
           == Test differential harness accounting, subprocesses and failure preservation
           ./build/compiler test-differential-harness
           == Test Tier 1 allocation, reload splitting and rematerialization
