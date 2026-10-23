@@ -71,8 +71,27 @@ int main(int argc, char** argv)
             metrics_path(transcript->files[0].path);
             printf(",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", variants, at, transcript->read_count, transcript->write_count, transcript->output_count, transcript->range_count, transcript->scratch_count, transcript->history_count, transcript->substitution_count, transcript->generated_count, transcript->source_count);
         }
+        ok = fflush(stdout) == 0;
         fprintf(stderr, "units=%d transcripts=%u hits=%lu misses=%lu checks=%lu reads=%lu writes=%lu rejected=%lu retained=%lu\n", argc - split - 1, cache.count, cache.hits, cache.misses, cache.checks, cache.recorded_reads, cache.recorded_writes, cache.rejected, cache.retained.length);
     }
+    const char* manifest = getenv("PROBE_FILES_MANIFEST");
+    if (ok && manifest != 0)
+    {
+        FILE* stream = fopen(manifest, "w");
+        ok = stream != 0;
+        for (uint32_t at = 0; ok && at < files.path_count; at += 1)
+        {
+            if (files.paths[at].record != BUSTER_PP_NONE && files.paths[at].record != BUSTER_FILE_CACHE_PENDING)
+            {
+                ok = fprintf(stream, "%s\n", files.paths[at].path) > 0;
+            }
+        }
+        if (stream != 0)
+        {
+            ok &= fclose(stream) == 0;
+        }
+    }
+    ok = ok && fflush(stderr) == 0;
     replay_release(&cache);
     file_cache_release(&files);
     intern_release(&table);

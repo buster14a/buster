@@ -62,6 +62,11 @@ it does not prove that every future inclusion-cache design must lose. The
 complete target corpus checks, per-header diagnostics and additional timing
 boundaries remain pending before the issue's final disposition.
 
+A [compact read-column variant](soa/README.md) removes cold location metadata
+from validation and reduces retained read-set storage. It has passed local
+diagnostic comparisons, while its target build and performance remain queued.
+The initial result above therefore does not yet close the wider idea.
+
 ## Compared paths
 
 `header-clocks.patch` adds only the outer header timing probes to the original
@@ -92,7 +97,8 @@ and expansion-start tables.
 
 Header clocks start **after entering** the outermost included file and end
 **before popping** it; nested files are included in that interval. This excludes
-the include directive, path lookup and initial file preparation. Thus the
+the outer include directive, its path lookup and initial preparation; nested
+lookup/preparation still occurs inside the interval. Thus the
 header/main ratio describes repeated execution, not all inclusion overhead,
 and the total batch comparison remains necessary. The probes use the same
 timing instructions on both paths. `__rdtsc` values are TSC ticks, not measured
@@ -214,7 +220,9 @@ resource observations. It does not replace the benchmark's timing intervals.
 cache and intern table inside each contiguous whole-batch interval, charging
 the common output-digest consumer too. It uses the frozen kernels and is not
 yet built or measured in this record; warm-file-cache observations must not
-be presented as those fresh whole-process results.
+be presented as those fresh whole-batch results. Process startup, option parsing
+and once-per-process discovery are outside the new batch timer; file-cache,
+intern-table and transcript-cache setup/release are inside it.
 
 ## Provenance and status
 

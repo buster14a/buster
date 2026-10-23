@@ -77,7 +77,14 @@ int main(int argc, char** argv)
             const ParseOptions parse_options = {
                 .tree_only = true
             };
-            ok = ok && (!parse || parse_initialize(&parser, &parse_options, options.language));
+            uint64_t parse_setup = 0;
+            if (parse && ok)
+            {
+                const uint64_t parse_begin = probe_now();
+                ok = parse_initialize(&parser, &parse_options, options.language);
+                parse_setup = probe_now() - parse_begin;
+                parse_ns += parse_setup;
+            }
             const uint32_t file = ok ? pp_lookup_path(&pp, argv[unit], (uint32_t)strlen(argv[unit]), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
             const uint64_t main_begin = probe_now();
             const uint64_t tick_begin = __rdtsc();
@@ -87,7 +94,7 @@ int main(int argc, char** argv)
             main_ticks += __rdtsc() - tick_begin;
             const uint64_t main_end = probe_now();
             main_ns += main_end - main_begin;
-            pp_ns += main_end - pp_begin;
+            pp_ns += main_end - pp_begin - parse_setup;
             uint64_t digest = 1469598103934665603ull;
             if (parse && ok)
             {
@@ -116,7 +123,9 @@ int main(int argc, char** argv)
             }
             if (parse)
             {
+                const uint64_t parse_begin = probe_now();
                 parse_release(&parser);
+                parse_ns += probe_now() - parse_begin;
             }
             const uint64_t release = probe_now();
             pp_release(&pp);
