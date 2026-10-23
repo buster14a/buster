@@ -1,0 +1,65 @@
+2026-10-23T14:40:39Z
+Linux benchpress 6.18.50-2-lts #1 SMP PREEMPT_DYNAMIC Tue, 08 Sep 2026 10:48:06 +0000 x86_64 GNU/Linux
+clang version 23.1.1
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin
+CPU ONLINE CORE SOCKET NODE
+  0    yes    0      0    0
+  1    yes    1      0    0
+  2    yes    2      0    0
+  3    yes    3      0    0
+  4    yes    4      0    0
+  5    yes    5      0    0
+  6    yes    6      0    0
+  7    yes    7      0    0
+  8    yes    0      0    0
+  9    yes    1      0    0
+ 10     no    -      -    -
+ 11    yes    3      0    0
+ 12    yes    4      0    0
+ 13    yes    5      0    0
+ 14    yes    6      0    0
+ 15    yes    7      0    0
+performance
+1
+TARGET SOURCE FSTYPE OPTIONS
+/tmp   tmpfs  tmpfs  rw,nosuid,nodev,size=32717744k,nr_inodes=1048576,inode64,usrquota
+98d76691c6d97233c9e1a062f32ea2d7a89f047632156d1bf7b811727fb19921  /usr/lib64/Scrt1.o
+e4c262fda945a76df8aaefc8343a4d09dd2add671735a322797c7dfe9352645e  /usr/lib64/crt1.o
+98d76691c6d97233c9e1a062f32ea2d7a89f047632156d1bf7b811727fb19921  /usr/lib64/rcrt1.o
+caf7f0c99019735e97e9bfabf52c376e86e1ef92d1b53a63c36a5bc2688e8fcc  /usr/lib64/crti.o
+71236f0a232a3686adf2319f3ae172831e8fd8166b9f0764ed184bc4df11be3c  /usr/lib64/crtn.o
+557581ba917a932911a5269f36d1c2f7f6924c88052a4cdd911c862b980678df  /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o
+d9e0937208f169dde4fea579f1c974b5e3b1fd44017362367c7ce1f6a7ed7a33  /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginT.o
+bcbcd1dcbc7b235c96ab3ff1f06e5b7f44677fed502fa22c2a0b2f8360db71fd  /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o
+bcbcd1dcbc7b235c96ab3ff1f06e5b7f44677fed502fa22c2a0b2f8360db71fd  /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtend.o
+c70c91346f314b52a3e709b1dad72f37c126c843e90664b475f15c3e63cde47d  /usr/lib/gcc/x86_64-pc-linux-gnu/16/libgcc.a
+ebbc3de25d7317afd5bf3c11f59df8567d2a80dab443246330c41d2de8915a8f  /usr/lib/gcc/x86_64-pc-linux-gnu/16/libgcc_eh.a
+8cbf6e0d77738882441f356402b70b76f26a6fa796c9572d5a9b23776b91989b  /usr/lib/gcc/x86_64-pc-linux-gnu/16/libatomic_asneeded.a
+02c8c3d06180beee9c7d0392aa85736c7d19f274a81e7f8f0b3d9e28e0641524  /usr/lib/libc.so.6
+f5e11cc62f8f2c24dff532982559f4303dba3b17e7450551372a88c8e7ea8757  /usr/lib/ld-linux-x86-64.so.2
+de2e822b005fc8ab5a2e6c99ad5067ff9e548f495f9e54c6a027506125507430  /usr/lib/libc_nonshared.a
+b52f81cd228a9ca437746b5ae1b1501672540d3d81238226a2be3c68a13c1df0  /usr/lib64/libc.a
+362665345c2d0149815700776a1e3e1a7fff45ab16f32352dbe224c55d12c964  /usr/lib64/libc.so
+9007ad8a6398b10e0ee2e6a5a8b48373b3e115f2ef41a4a65117bf65b5dd5f07  /home/david/buster-fast-bench/codex-linker-tls85/tls85-measure
+422d00b2961fc4f145dce6a42a3598feb8bc811a8758e20c996dd8625f5a1e3c  /home/david/buster-fast-bench/codex-linker-streaming88/befbec5/streaming-control
+/usr/lib64/Scrt1.o size=2048 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.445830841 +0000
+/usr/lib64/crt1.o size=2416 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.445921532 +0000
+/usr/lib64/rcrt1.o size=2048 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.464194711 +0000
+/usr/lib64/crti.o size=1240 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.445928395 +0000
+/usr/lib64/crtn.o size=808 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.445935057 +0000
+/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o size=2768 mtime=2026-08-10 20:04:46.000000000 +0000 ctime=2026-09-11 16:47:00.599004383 +0000
+/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginT.o size=2992 mtime=2026-08-10 20:04:46.000000000 +0000 ctime=2026-09-11 16:47:00.599013470 +0000
+/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o size=1168 mtime=2026-08-10 20:04:46.000000000 +0000 ctime=2026-09-11 16:47:00.599032166 +0000
+/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtend.o size=1168 mtime=2026-08-10 20:04:46.000000000 +0000 ctime=2026-09-11 16:47:00.599023249 +0000
+/usr/lib/gcc/x86_64-pc-linux-gnu/16/libgcc.a size=3264396 mtime=2026-08-10 20:04:46.000000000 +0000 ctime=2026-09-11 16:47:00.602398975 +0000
+/usr/lib/gcc/x86_64-pc-linux-gnu/16/libgcc_eh.a size=72998 mtime=2026-08-10 20:04:46.000000000 +0000 ctime=2026-09-11 16:47:00.604154065 +0000
+/usr/lib/gcc/x86_64-pc-linux-gnu/16/libatomic_asneeded.a size=155192 mtime=2026-08-10 20:04:46.000000000 +0000 ctime=2026-09-11 16:47:00.602259753 +0000
+/usr/lib/libc.so.6 size=2215072 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.457076171 +0000
+/usr/lib/ld-linux-x86-64.so.2 size=263152 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.452917171 +0000
+/usr/lib/libc_nonshared.a size=7266 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.458830874 +0000
+/usr/lib64/libc.a size=7000522 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.453205721 +0000
+/usr/lib64/libc.so size=255 mtime=2026-09-27 16:35:47.000000000 +0000 ctime=2026-10-05 13:50:53.453205721 +0000
+/home/david/buster-fast-bench/codex-linker-tls85/tls85-measure size=16480 mtime=2026-10-23 10:36:09.204773168 +0000 ctime=2026-10-23 10:36:09.204777345 +0000
+/home/david/buster-fast-bench/codex-linker-streaming88/befbec5/streaming-control size=2215768 mtime=2026-10-23 13:59:23.383913537 +0000 ctime=2026-10-23 13:59:23.383919809 +0000
