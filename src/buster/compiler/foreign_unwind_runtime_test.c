@@ -125,6 +125,9 @@ static bool foreign_unwind_runtime_test(const char* directory, Arena* arena, boo
     if (ready)
     {
         foreign_test_add(line, (char*)"-lstdc++", true, true);
+        // Keep this unwind gate on the explicit C++ runtime line used by the system driver. Resolving dependencies
+        // named only by another DSO's DT_NEEDED entries is a separate foreign-resolution capability.
+        foreign_test_add(line, (char*)"-lm", true, true);
         foreign_test_pie_end(line, system);
         for (uint32_t i = 0; i < line->our_count; i += 1)
         {
@@ -150,6 +153,13 @@ static bool foreign_unwind_runtime_test(const char* directory, Arena* arena, boo
                      built.object, built.name, (unsigned)built.import.error, built.import.section, built.import.symbol, (unsigned long long)built.import.offset);
             const bool linked = foreign.failure.error == FOREIGN_ERROR_NONE && built.error == FOREIGN_LINK_ERROR_NONE;
             foreign_test_expect(&tally, linked, "convert C++ COMDAT and exception data", detail);
+            if (!linked && built.name != 0 && built.name <= foreign.names.count)
+            {
+                const uint32_t name = built.name - 1;
+                const uint32_t length = foreign.names.length[name] < 256 ? foreign.names.length[name] : 256;
+                fprintf(stderr, "C++ unwind name %.*s: resolution %u, flags %u, library %u\n", (int)length,
+                        (const char*)foreign.names.bytes[name], foreign.names.resolution[name], foreign.names.flags[name], foreign.names.library[name]);
+            }
             ForeignTestPath executable;
             snprintf(executable, sizeof(executable), "%s/fw_runtime_output_%u_%u", directory, path, foreign_test_lanes[l]);
             bool published = false;
