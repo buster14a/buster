@@ -323,6 +323,18 @@ scope. Metadata recognition, prototype checking, special operand constraints,
 source constant evaluation, target-feature eligibility and runtime emission
 are distinct requirements. None alone grants a preprocessor capability.
 
+`c_builtin_intrinsic_catalog.c` looks up the 3,775 exact records from the
+installed Clang 23.1.1 generic, common-x86 and x86-64 tables. The C generator
+hash-pins all four inputs before publishing output. Derived LLVM data retains
+its own attribution and license in `THIRD_PARTY_NOTICES.md`; exact package,
+input, tool and output provenance is in
+[`builtin-metadata/clang-23.1.1-inputs.json`](builtin-metadata/clang-23.1.1-inputs.json).
+The 1,506-row frozen own-main subset includes explicit `bit_cast` parser and
+`va_list` predefined-type gaps. These are not invented function declarations
+and are absent from the ordinary 3,775-record catalogue. A catalogue miss is
+not a general `__has_builtin` answer. Header/language restrictions and custom
+rules remain consumer obligations.
+
 `c_builtin_intrinsic_types.c` decodes bounded Clang 23.1.1 descriptors through
 the existing Linux/x86-64 LP64 type factories. It retains exact integer
 identities, fixed vector element/lane types, parameter adjustment and a
@@ -354,6 +366,16 @@ ranges. Runtime suppression and proven call reachability independently select
 ready, deferred or suppressed events. Unknown reachability cannot silently
 discard one. These checks establish no target-feature or runtime capability.
 
+`c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
+shuffle, conversion, nondeterministic and nontemporal spellings. Its exact
+type relations are separate from #147's ordinary vector operators. Shuffle
+indices use the full bounded source slice; conversion carries a separate type
+operand. Nondeterministic values inspect their argument's type without
+evaluating it. Nontemporal stores retain explicit initialization policy and
+conversions. Floating arithmetic/conversions retain environment and exception
+obligations. Missing vector constant and complex memory representations stay
+explicit; the module provides no numerical fold or runtime implementation.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -363,6 +385,9 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtin-intrinsic-types
 ./build/compiler test-builtin-intrinsic-features
 ./build/compiler test-check-builtins-x86
+./build/compiler test-check-builtins-vector
+./build/compiler test-builtin-intrinsic-catalog
+./build/compiler test-builtin-intrinsic-inventory
 ./build/compiler test-check-builtins
 ./build/compiler test-builtin-lowering
 ./build/compiler test-check-varargs
@@ -392,7 +417,9 @@ claim.
 
 ## Provenance
 
-The modules, recipes and fixtures are original material under the project's
-default license. The existing type, checker, typed-stream, encoder and ABI
-interfaces are reused. Clang is an external behavior and execution oracle;
-no Clang implementation or external fixture corpus is imported.
+The action modules, recipes, extractor, lookup and fixtures are original
+material under the project's default license. Generated builtin metadata
+retains its separate LLVM provenance and terms. The existing type, checker,
+typed-stream, encoder and ABI interfaces are reused. Clang is an external
+behavior and execution oracle; no Clang implementation or external fixture
+corpus is imported.
