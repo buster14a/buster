@@ -985,6 +985,7 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(EXPECTED_BRACE_OR_COMMA, "expected '}' or ','") \
     X(EXTRANEOUS_CLOSING_BRACE, "extraneous closing brace ('}')") \
     X(FUNCTION_DEFINITION_NOT_ALLOWED, "function definition is not allowed here") \
+    X(FUNCTION_DEFINITION_TYPEDEF, "function definition declared 'typedef'") \
     X(EXPECTED_PARENTHESES_AROUND_TYPE_NAME, "expected parentheses around type name in %s expression") \
     X(NAMED_JUMP, "named '%s' is only supported in C2y") \
     X(ANONYMOUS_TAG_DECLARATION, "declaration of anonymous struct must be a definition") \
@@ -1246,8 +1247,11 @@ typedef enum ParseItemKind
     PARSE_ITEM_TOP_LEVEL_ASM,
     PARSE_ITEM_STATIC_ASSERT,
     PARSE_ITEM_DO_WHILE,
-    // In an initializer list: an initializer that started with a designator, so `=` comes before its value.
+    // An initializer started by a designator: `=` must precede its value unless it consists of one array subscript.
     PARSE_ITEM_DESIGNATOR,
+    PARSE_ITEM_ARRAY_DESIGNATOR,
+    // GNU's old-style `member: value` designator, whose colon precedes its value.
+    PARSE_ITEM_OLD_STYLE_DESIGNATOR,
 } ParseItemKind;
 
 typedef struct ParseFrame ParseFrame;
@@ -2403,7 +2407,14 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
         else if (kind == PARSE_KIND_L_SQUARE)
         {
             parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_OPERATOR, false, step);
-            frame->statement = PARSE_ITEM_DESIGNATOR;
+            frame->statement = PARSE_ITEM_ARRAY_DESIGNATOR;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON)
+        {
+            // GNU's old-style field designator names a member, even if an outer scope declares a typedef of that name.
+            step->role = PARSE_ROLE_MEMBER;
+            frame->mode = PARSE_MODE_OPERATOR;
+            frame->statement = PARSE_ITEM_OLD_STYLE_DESIGNATOR;
         }
         else if (kind == PARSE_KIND_R_BRACE)
         {
@@ -3258,6 +3269,17 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         {
             parse_scalar_error(parser, i, PARSE_MESSAGE_FUNCTION_DEFINITION_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
         }
+        else if (frame->flags & BUSTER_PARSE_FRAME_TYPEDEF)
+        {
+            // Clang points at the storage-class specifier, not the body. Search only this declaration's file-scope
+            // specifiers: the keyword may follow the type, or one inside an attribute may precede the real specifier.
+            uint32_t at = parser->item_begin;
+            while (at < i && (parser->kinds[at] != PARSE_KIND_TYPEDEF || parser->depths[at] != 0))
+            {
+                at += 1;
+            }
+            parse_scalar_error(parser, at < i ? at : i, PARSE_MESSAGE_FUNCTION_DEFINITION_TYPEDEF, BUSTER_PARSE_AT_TOKEN);
+        }
         else
         {
             parse_scalar_complete_declarator(parser, frame, true);
@@ -3536,6 +3558,16 @@ BUSTER_INLINE uint8_t parse_binary_role(uint8_t kind)
     return result;
 }
 
+// The first token of an initializer expression after GNU's single array designator without an '='.
+BUSTER_INLINE bool parse_kind_starts_initializer_value(uint8_t kind)
+{
+    return kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING ||
+           kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_MINUS || kind == PARSE_KIND_PLUS ||
+           kind == PARSE_KIND_EXCLAIM || kind == PARSE_KIND_TILDE || kind == PARSE_KIND_STAR || kind == PARSE_KIND_AMP ||
+           kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS || kind == PARSE_KIND_AMPAMP || kind == PARSE_KIND_EXTENSION ||
+           kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_GENERIC;
+}
+
 // In an expression, after an operand.
 static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
@@ -3545,10 +3577,12 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     const uint32_t flags = frame->flags;
     const bool conditional = (flags & BUSTER_PARSE_FRAME_CONDITIONAL) != 0;
     const bool initializer_list = group == PARSE_ROLE_OPEN_INITIALIZER || group == PARSE_ROLE_OPEN_COMPOUND_BODY;
-    const bool designator = frame->statement == PARSE_ITEM_DESIGNATOR && initializer_list;
+    const bool array_designator = frame->statement == PARSE_ITEM_ARRAY_DESIGNATOR && initializer_list;
+    const bool designator = initializer_list && (frame->statement == PARSE_ITEM_DESIGNATOR || array_designator);
     // A designator's subscript in an initializer list, where GNU's ranges `[1 ... 3]` may be.
     const bool designator_subscript = group == PARSE_ROLE_OPEN_SUBSCRIPT && parser->frame_count >= 2 &&
-                                      parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_DESIGNATOR;
+                                      (parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_DESIGNATOR ||
+                                       parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_ARRAY_DESIGNATOR);
     frame->flags &= ~BUSTER_PARSE_FRAME_NO_POSTFIX;
     if ((flags & BUSTER_PARSE_FRAME_NO_POSTFIX) && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_ARROW ||
                                                    kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS))
@@ -3581,6 +3615,20 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     {
         // An attribute's name is followed by its arguments, the next attribute or the list's end.
         parse_scalar_unexpected(parser, i, frame);
+    }
+    else if (initializer_list && frame->statement == PARSE_ITEM_OLD_STYLE_DESIGNATOR && kind == PARSE_KIND_COLON)
+    {
+        // GNU's `member: value`: treat ':' as the designator's assignment.
+        step->role = PARSE_ROLE_ASSIGN;
+        frame->mode = PARSE_MODE_INITIALIZER;
+        frame->statement = PARSE_ITEM_EXPRESSION;
+    }
+    else if (array_designator && parse_kind_starts_initializer_value(kind))
+    {
+        // GNU omits '=' after one `[index]`. Chained `[index].member` and `[index][index]` still require it.
+        frame->mode = PARSE_MODE_INITIALIZER;
+        frame->statement = PARSE_ITEM_EXPRESSION;
+        step->again = true;
     }
     else if (designator && kind != PARSE_KIND_EQUAL && kind != PARSE_KIND_PERIOD && kind != PARSE_KIND_L_SQUARE)
     {
@@ -3630,10 +3678,12 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     }
     else if (kind == PARSE_KIND_L_SQUARE)
     {
+        frame->statement = array_designator ? PARSE_ITEM_DESIGNATOR : frame->statement;
         parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_OPERATOR, false, step);
     }
     else if (kind == PARSE_KIND_PERIOD || (kind == PARSE_KIND_ARROW && !designator))
     {
+        frame->statement = designator ? PARSE_ITEM_DESIGNATOR : frame->statement;
         step->role = PARSE_ROLE_MEMBER_OPERATOR;
         frame->mode = PARSE_MODE_MEMBER;
     }
@@ -7069,7 +7119,8 @@ static void parse_check_body(ParseKernels* kernels, uint32_t body, uint8_t* reas
         const uint32_t at = kernels->node_depths[j];
         const uint8_t role = kernels->roles[j];
         done = at < depth || (at == depth && (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BODY));
-        fails = !done && at == depth && (role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_COMMA);
+        fails = !done && at == depth && (role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_COMMA ||
+                                         (role == PARSE_ROLE_SPECIFIER && kernels->vkinds[j] == PARSE_KIND_TYPEDEF));
         done |= fails;
     }
     kernels->flags[body] |= fails;

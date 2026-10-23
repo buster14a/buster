@@ -309,8 +309,9 @@ typedef enum ExecutablePhase
 // plain data: the program interpreter, the libraries that the imports come from (libc.so.6, and the loader that
 // libc.so's script names as needed) with their versions, a note to repeat (Scrt1.o's .note.ABI-tag), DT_INIT's and
 // DT_FINI's functions (crti.o's _init and _fini) and the definitions to export (Bind.exports). The imports are the
-// link's symbols of source RUNTIME_SHARED, each at the version its column holds (an ExecutableVersion's index, or 0 for
-// none).
+// link's symbols of source RUNTIME_SHARED or FOREIGN_SHARED, each at the version its column holds (an
+// ExecutableVersion's index, or 0/VER_NDX_GLOBAL for none). An imported version above VER_NDX_GLOBAL must occur in
+// the version metadata; the symbol pass refuses a missing definition before opening the output.
 typedef struct ExecutableVersion ExecutableVersion;
 struct ExecutableVersion
 {
@@ -320,21 +321,28 @@ struct ExecutableVersion
     // Its index among the libraries' version definitions, which runtime.c numbers apart (the loader's after
     // libc.so.6's).
     uint16_t index;
-    // The library it is a version of: its place in ExecutableDynamic.needed.
-    uint8_t library;
+    // The library it is a version of: its place in ExecutableDynamic.libraries.
+    uint32_t library;
 };
 
-// The most libraries an executable needs: libc.so.6 and the loader.
-#define BUSTER_EXECUTABLE_LIBRARIES 2
+typedef struct ExecutableLibrary ExecutableLibrary;
+struct ExecutableLibrary
+{
+    String8 name;
+    // The producer already selected this library, including an unversioned --as-needed dependency. Otherwise a
+    // used version selects it. The runtime uses that latter rule for libc.so's as-needed loader.
+    bool required;
+};
 
 typedef struct ExecutableDynamic ExecutableDynamic;
 struct ExecutableDynamic
 {
     String8 interpreter;
-    // The libraries the imports come from, in DT_NEEDED's order, empty for none: the first is needed whenever it is
-    // named, and each other only when one of its versions is (libc.so's AS_NEEDED, as GNU ld and lld take it), which an
-    // import from it is: glibc's exports all have versions. `versions` has each library's together, in this order.
-    String8 needed[BUSTER_EXECUTABLE_LIBRARIES];
+    // Bounded, borrowed arrays, immutable until executable_write returns. Library order is DT_NEEDED order;
+    // versions are grouped in that order, with unique indices above VER_NDX_GLOBAL and below 0x8000. Empty arrays
+    // may be null. The producer resolves --as-needed before publishing unversioned dependencies as required.
+    const ExecutableLibrary* libraries;
+    uint32_t library_count;
     const ExecutableVersion* versions;
     uint32_t version_count;
     String8 note;
@@ -2676,6 +2684,7 @@ struct ExecutableDynamicCounts
     uint64_t got_tpoff;
     uint64_t symbols;
     uint64_t name_bytes;
+    SymbolId unknown_version;
     uint64_t abs64_fixups;
     uint64_t absolute32;
     uint64_t refused;
@@ -2701,7 +2710,8 @@ struct ExecutableDynamicTotals
     uint64_t exports;
     uint64_t export_names;
     // Each needed library's name in .dynstr.
-    uint64_t needed_names[BUSTER_EXECUTABLE_LIBRARIES];
+    uint64_t* needed_names;
+    uint32_t library_count;
     uint64_t version_names;
     // A shared library's soname in .dynstr (DT_SONAME), or 0 for none.
     uint64_t soname_name;
@@ -2717,13 +2727,11 @@ struct ExecutableDynamicTotals
     uint64_t irelatives;
     // The needed versions, each library's, and the libraries with one (.gnu.version_r's entries).
     uint64_t versions;
-    uint64_t library_versions[BUSTER_EXECUTABLE_LIBRARIES];
+    uint64_t* library_versions;
     uint64_t verneed_files;
     uint64_t buckets;
     uint64_t bloom_words;
     uint32_t dynamic_entries;
-    // Whether each library is needed (a dynamic PIE's DT_NEEDED entries; see ExecutableDynamic.needed).
-    bool needed[BUSTER_EXECUTABLE_LIBRARIES];
     // Whether the output is a shared library, which has no DT_FLAGS_1 or DT_DEBUG, as lld writes one; and whether it
     // needs static TLS, for its initial-exec accesses (DF_STATIC_TLS in DT_FLAGS).
     bool shared;
@@ -3037,7 +3045,7 @@ static uint8_t executable_relocation_class(const Link* link, SymbolId symbol, ui
     const bool local = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
     const bool visible = (flags & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
     const bool named = symbols->name[symbol] != 0;
-    const bool shared = source == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+    const bool shared = source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || source == BUSTER_LINK_SOURCE_FOREIGN_SHARED;
     const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
     const bool library = scope == BUSTER_EXECUTABLE_SCOPE_SHARED;
     const bool preemptible = library && !local && visible && named && (symbols->atom[symbol] != 0 || absolute || nowhere);
@@ -3201,12 +3209,17 @@ static void executable_count_dynamic_symbol(const Link* link, ExecutableShared* 
 {
     const LinkSymbols* symbols = &link->symbols;
     ExecutableDynamicCounts* counts = &shared->dynamic_counts[lane];
-    const uint16_t version = symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED ? symbols->version[symbol] : 0;
+    const bool imported = symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED || symbols->source[symbol] == BUSTER_LINK_SOURCE_FOREIGN_SHARED;
+    const uint16_t version = imported ? symbols->version[symbol] : 0;
     counts->symbols += 1;
     counts->name_bytes += (uint64_t)link->names.length[symbols->name[symbol]] + 1;
     if (version < shared->version_limit)
     {
         shared->versions_used[lane * shared->version_words + version / 64] |= 1ull << (version % 64);
+    }
+    if (version > VER_NDX_GLOBAL && (version >= shared->version_limit || shared->version_numbers[version] == 0) && counts->unknown_version == 0)
+    {
+        counts->unknown_version = symbol;
     }
 }
 
@@ -3248,7 +3261,7 @@ static void executable_mark_symbols(Link* link, ExecutableShared* shared, uint32
                 const uint8_t class = symbol_valid ? executable_relocation_class(link, symbol, shared->scope) : BUSTER_EXECUTABLE_RELOCATION_NONE;
                 const uint8_t source = symbol_valid ? symbols->source[symbol] : BUSTER_LINK_SOURCE_PROGRAM;
                 const bool symbolic = class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
-                const bool is_outside = source == BUSTER_LINK_SOURCE_NONE || source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || source == BUSTER_LINK_SOURCE_ABSOLUTE || symbolic;
+                const bool is_outside = source == BUSTER_LINK_SOURCE_NONE || source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || source == BUSTER_LINK_SOURCE_FOREIGN_SHARED || source == BUSTER_LINK_SOURCE_ABSOLUTE || symbolic;
                 dynamic |= (uint64_t)symbolic << bit;
                 relative |= (uint64_t)(class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE) << bit;
                 tpoff |= (uint64_t)(class == BUSTER_EXECUTABLE_RELOCATION_TPOFF) << bit;
@@ -3260,12 +3273,12 @@ static void executable_mark_symbols(Link* link, ExecutableShared* shared, uint32
         {
             const __m512i source = _mm512_maskz_loadu_epi8(valid, symbols->source + first);
             const __m512i flags = _mm512_maskz_loadu_epi8(valid, symbols->flags + first);
-            const uint64_t import = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_RUNTIME_SHARED));
+            const uint64_t import = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_RUNTIME_SHARED)) |
+                                    _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_FOREIGN_SHARED));
             const uint64_t nowhere = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_NONE));
             const uint64_t absolute = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
-            // Without an atom and not a definition of the link's: the foreign libraries' symbols and the linker's.
-            const uint64_t elsewhere = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_FOREIGN_SHARED)) |
-                                       _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_LINKER));
+            // Without an atom and not a definition of the link's: the linker's symbols.
+            const uint64_t elsewhere = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_LINKER));
             const __m512i binding = _mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_BINDING));
             const uint64_t weak = _mm512_cmpeq_epi8_mask(binding, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_WEAK));
             const uint64_t local = _mm512_cmpeq_epi8_mask(binding, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_LOCAL));
@@ -3485,6 +3498,7 @@ static void executable_mark_relaxable(const Link* link, ExecutableShared* shared
             {
                 const __m512i source = _mm512_maskz_loadu_epi8(valid, symbols->source + first);
                 const uint64_t outside = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_RUNTIME_SHARED)) |
+                                         _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_FOREIGN_SHARED)) |
                                          _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_NONE)) |
                                          _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
                 const uint64_t tls = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TLS));
@@ -4279,7 +4293,7 @@ static void executable_check_relocations(const Link* link, const ExecutableShare
 // DT_DEBUG (a PIE's), the relocations' (.rela.dyn's, a static PIE's IRELATIVE ones among them, then .relr.dyn's), the
 // symbols' and strings', DT_GNU_HASH, the init and fini arrays', DT_INIT and DT_FINI, the versions', and DT_NULL. With
 // `entries` 0, only how many; otherwise their values from the layout, and DT_INIT's and DT_FINI's addresses.
-#define BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES 28
+#define BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES 26
 
 static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const ExecutableDynamicTotals* totals, uint64_t init, uint64_t fini, Elf64_Dyn* entries)
 {
@@ -4297,8 +4311,6 @@ static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const
     const ExecutableSectionLayout* init_array = sections != 0 ? &sections[EXECUTABLE_SECTION_INIT_ARRAY] : 0;
     const ExecutableSectionLayout* fini_array = sections != 0 ? &sections[EXECUTABLE_SECTION_FINI_ARRAY] : 0;
     const Elf64_Dyn all[BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES] = {
-        { .d_tag = totals->needed[0] ? DT_NEEDED : DT_NULL, .d_un.d_val = totals->needed_names[0] },
-        { .d_tag = totals->needed[1] ? DT_NEEDED : DT_NULL, .d_un.d_val = totals->needed_names[1] },
         { .d_tag = totals->soname_name != 0 ? DT_SONAME : DT_NULL, .d_un.d_val = totals->soname_name },
         { .d_tag = totals->static_tls ? DT_FLAGS : DT_NULL, .d_un.d_val = DF_STATIC_TLS },
         { .d_tag = totals->shared ? DT_NULL : DT_FLAGS_1, .d_un.d_val = DF_1_PIE },
@@ -4327,6 +4339,17 @@ static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const
     };
     // The entries that apply, in order, then DT_NULL.
     uint32_t count = 0;
+    for (uint32_t l = 0; l < totals->library_count; l += 1)
+    {
+        if (totals->needed_names[l] != 0)
+        {
+            if (entries != 0)
+            {
+                entries[count] = (Elf64_Dyn){ .d_tag = DT_NEEDED, .d_un.d_val = totals->needed_names[l] };
+            }
+            count += 1;
+        }
+    }
     for (uint32_t i = 0; i < BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES; i += 1)
     {
         if (all[i].d_tag != DT_NULL && entries != 0)
@@ -4437,9 +4460,14 @@ static bool executable_place_exports(Link* link, ExecutableShared* shared, const
 // power of two of 64-bit words above them, as lld sizes them. A static PIE (with the static runtime) has no interpreter,
 // library, versions or exports, and its IRELATIVE relocations in .rela.dyn: one for each stub's slot and for each
 // IFUNC's GOT slot without one.
-static void executable_dynamic_totals(const Link* link, const ExecutableShared* shared, const ExecutableDynamic* dynamic, uint32_t lanes, ExecutableDynamicTotals* totals)
+static void executable_dynamic_totals(const Link* link, const ExecutableShared* shared, const ExecutableDynamic* dynamic, uint32_t lanes, uint64_t* library_data, ExecutableDynamicTotals* totals)
 {
-    *totals = (ExecutableDynamicTotals){ 0 };
+    *totals = (ExecutableDynamicTotals){
+        .needed_names = library_data,
+        .library_count = dynamic->library_count,
+        .library_versions = library_data + dynamic->library_count,
+    };
+    memset(library_data, 0, 2 * (uint64_t)dynamic->library_count * sizeof(uint64_t));
     uint64_t name_bytes = 0;
     for (uint32_t lane = 0; lane < lanes; lane += 1)
     {
@@ -4468,9 +4496,8 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
         totals->library_versions[version->library] += used ? 1 : 0;
         version_name_bytes += used ? version->name.length + 1 : 0;
     }
-    for (uint32_t l = 0; l < BUSTER_EXECUTABLE_LIBRARIES; l += 1)
+    for (uint32_t l = 0; l < dynamic->library_count; l += 1)
     {
-        totals->needed[l] = dynamic->needed[l].length != 0 && (l == 0 || totals->library_versions[l] != 0);
         totals->verneed_files += totals->library_versions[l] != 0 ? 1 : 0;
     }
     uint64_t export_bytes = 0;
@@ -4483,9 +4510,13 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
     totals->has_fini = dynamic->fini != 0;
     totals->exports = dynamic->export_count;
     totals->export_names = 1 + name_bytes;
-    totals->needed_names[0] = totals->export_names + export_bytes;
-    totals->needed_names[1] = totals->needed_names[0] + (totals->needed[0] ? dynamic->needed[0].length + 1 : 0);
-    const uint64_t soname = totals->needed_names[1] + (totals->needed[1] ? dynamic->needed[1].length + 1 : 0);
+    uint64_t soname = totals->export_names + export_bytes;
+    for (uint32_t l = 0; l < dynamic->library_count; l += 1)
+    {
+        const bool needed = dynamic->libraries[l].required || totals->library_versions[l] != 0;
+        totals->needed_names[l] = needed ? soname : 0;
+        soname += needed ? dynamic->libraries[l].name.length + 1 : 0;
+    }
     totals->soname_name = dynamic->soname.length != 0 ? soname : 0;
     totals->version_names = soname + (dynamic->soname.length != 0 ? dynamic->soname.length + 1 : 0);
     totals->shared = dynamic->shared;
@@ -4985,7 +5016,7 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
             // Undefined, at its binding and type with default visibility; versioned at its import's version (the
             // executable's number for it), as unversioned for an import without one, or for a weak reference to
             // nothing as local (lld's 0).
-            const bool import = symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+            const bool import = symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED || symbols->source[symbol] == BUSTER_LINK_SOURCE_FOREIGN_SHARED;
             const NameId name = symbols->name[symbol];
             const uint64_t length = link->names.length[name];
             memcpy(dynstr + name_offset, link->names.bytes[name], length);
@@ -5406,12 +5437,12 @@ static bool executable_dynamic_sections(Link* link, ExecutableShared* shared, co
         // and .gnu.version_r as lld lays it out: an entry per library with a needed version, in ExecutableDynamic's
         // order, then the auxiliary entries, one per needed version, in ExecutableDynamic's order, which has each
         // library's together.
-        for (uint32_t l = 0; l < BUSTER_EXECUTABLE_LIBRARIES; l += 1)
+        for (uint32_t l = 0; l < dynamic->library_count; l += 1)
         {
-            if (totals->needed[l])
+            if (totals->needed_names[l] != 0)
             {
-                memcpy(dynstr + totals->needed_names[l], dynamic->needed[l].pointer, dynamic->needed[l].length);
-                dynstr[totals->needed_names[l] + dynamic->needed[l].length] = 0;
+                memcpy(dynstr + totals->needed_names[l], dynamic->libraries[l].name.pointer, dynamic->libraries[l].name.length);
+                dynstr[totals->needed_names[l] + dynamic->libraries[l].name.length] = 0;
             }
         }
         if (totals->soname_name != 0)
@@ -5423,7 +5454,7 @@ static bool executable_dynamic_sections(Link* link, ExecutableShared* shared, co
         const uint64_t files = totals->verneed_files;
         uint64_t file = 0;
         uint64_t first_auxiliary = 0;
-        for (uint32_t l = 0; l < BUSTER_EXECUTABLE_LIBRARIES; l += 1)
+        for (uint32_t l = 0; l < dynamic->library_count; l += 1)
         {
             if (totals->library_versions[l] != 0)
             {
@@ -5442,7 +5473,8 @@ static bool executable_dynamic_sections(Link* link, ExecutableShared* shared, co
         }
         uint64_t version_name = totals->version_names;
         uint32_t auxiliary = 0;
-        uint64_t library_auxiliaries[BUSTER_EXECUTABLE_LIBRARIES] = { 0 };
+        uint64_t library_auxiliaries = 0;
+        uint32_t previous_library = 0;
         for (uint32_t v = 0; v < dynamic->version_count; v += 1)
         {
             const ExecutableVersion* version = &dynamic->versions[v];
@@ -5453,13 +5485,14 @@ static bool executable_dynamic_sections(Link* link, ExecutableShared* shared, co
             {
                 memcpy(dynstr + version_name, version->name.pointer, version->name.length);
                 dynstr[version_name + version->name.length] = 0;
-                library_auxiliaries[version->library] += 1;
+                library_auxiliaries = previous_library == version->library ? library_auxiliaries + 1 : 1;
+                previous_library = version->library;
                 const Elf64_Vernaux entry = {
                     .vna_hash = version->hash,
                     .vna_flags = 0,
                     .vna_other = number,
                     .vna_name = (uint32_t)version_name,
-                    .vna_next = library_auxiliaries[version->library] < totals->library_versions[version->library] ? sizeof(Elf64_Vernaux) : 0,
+                    .vna_next = library_auxiliaries < totals->library_versions[version->library] ? sizeof(Elf64_Vernaux) : 0,
                 };
                 memcpy(verneed + files * sizeof(Elf64_Verneed) + auxiliary * sizeof(Elf64_Vernaux), &entry, sizeof(entry));
                 version_name += version->name.length + 1;
@@ -5549,6 +5582,16 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         fits = shared->dynamic_bits != 0 && shared->relative_bits != 0 && shared->tpoff_bits != 0 && (!shared->relr || shared->relr_words != 0) &&
                shared->versions_used != 0 && shared->version_numbers != 0 && shared->export_hashes != 0 && shared->bucket_counts != 0 &&
                shared->export_name_bytes != 0 && shared->export_places != 0 && shared->bucket_starts != 0;
+        if (fits)
+        {
+            // Until executable_number_versions, this is the metadata-presence table read by the existing symbol
+            // pass. The count barrier separates those reads from replacement with output version numbers.
+            memset(shared->version_numbers, 0, limit * sizeof(uint16_t));
+            for (uint32_t v = 0; v < dynamic->version_count; v += 1)
+            {
+                shared->version_numbers[dynamic->versions[v].index] = 1;
+            }
+        }
     }
     if (fits && shared->runtime)
     {
@@ -5827,6 +5870,48 @@ static bool executable_eh_frame_sort(uint8_t* bytes, uint64_t fdes, bool exact, 
     return result;
 }
 
+// Validate the producer's counted library/version metadata before any lane indexes it. ELF string offsets are
+// 32-bit and the high version bit is visibility, so malformed or overflowing metadata must fail before output.
+// The small library descriptors stay scalar; the symbol columns are already read by the normal batched passes.
+static bool executable_dynamic_valid(const ExecutableDynamic* dynamic)
+{
+    bool valid = dynamic == 0 || ((dynamic->library_count == 0 || dynamic->libraries != 0) &&
+                                (dynamic->version_count == 0 || dynamic->versions != 0) &&
+                                dynamic->library_count <= UINT32_MAX - BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES && dynamic->version_count < 0x8000);
+    uint64_t names = 0;
+    uint32_t previous_library = 0;
+    uint64_t indices[0x8000 / 64] = { 0 };
+    for (uint32_t l = 0; valid && dynamic != 0 && l < dynamic->library_count; l += 1)
+    {
+        const ExecutableLibrary* library = &dynamic->libraries[l];
+        valid = library->name.length <= UINT32_MAX && (library->name.length == 0 ? !library->required : library->name.pointer != 0);
+        if (valid && library->name.length != 0)
+        {
+            valid = memchr(library->name.pointer, 0, library->name.length) == 0;
+        }
+        names += library->name.length + 1;
+        valid = valid && names <= UINT32_MAX;
+    }
+    for (uint32_t v = 0; valid && dynamic != 0 && v < dynamic->version_count; v += 1)
+    {
+        const ExecutableVersion* version = &dynamic->versions[v];
+        valid = version->library < dynamic->library_count && version->library >= previous_library &&
+                version->index > VER_NDX_GLOBAL && version->index < 0x8000 &&
+                version->name.length != 0 && version->name.length <= UINT32_MAX && version->name.pointer != 0;
+        if (valid)
+        {
+            const uint64_t bit = 1ull << (version->index % 64);
+            valid = (indices[version->index / 64] & bit) == 0 && dynamic->libraries[version->library].name.length != 0 &&
+                    memchr(version->name.pointer, 0, version->name.length) == 0;
+            indices[version->index / 64] |= bit;
+            previous_library = version->library;
+            names += version->name.length + 1;
+            valid = valid && names <= UINT32_MAX;
+        }
+    }
+    return valid;
+}
+
 static bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result)
 {
     const uint32_t lane = lane_index();
@@ -5842,7 +5927,9 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         *result = (ExecutableResult){ 0 };
         result->start_time = executable_now();
-        allocated = executable_allocate(scratch.arena, link, lanes, options);
+        const bool valid = executable_dynamic_valid(dynamic_options);
+        result->error = valid ? EXECUTABLE_ERROR_NONE : EXECUTABLE_ERROR_UNSUPPORTED;
+        allocated = valid ? executable_allocate(scratch.arena, link, lanes, options) : 0;
     }
     ExecutableShared* shared = (ExecutableShared*)lane_broadcast((uint64_t)allocated, 0);
     bool ok = shared != 0;
@@ -5882,6 +5969,11 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     if (ok && lane == 0 && (entry != 0 || !library) && (entry_atom == 0 || link->atoms.class[entry_atom] != BUSTER_LINK_CLASS_TEXT))
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
+    }
+    if (ok && dynamic && shared->dynamic_counts[lane].unknown_version != 0)
+    {
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0,
+                             shared->dynamic_counts[lane].unknown_version, 0);
     }
     ExecutableFrames frames = { 0 };
     if (ok)
@@ -5944,7 +6036,16 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     ExecutableDynamicTotals totals = { 0 };
     if (ok && dynamic)
     {
-        executable_dynamic_totals(link, shared, dynamic_options, lanes, &totals);
+        uint64_t* library_data = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, 2 * (uint64_t)dynamic_options->library_count + 1);
+        if (library_data != 0)
+        {
+            executable_dynamic_totals(link, shared, dynamic_options, lanes, library_data, &totals);
+        }
+        else
+        {
+            executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
+            ok = false;
+        }
     }
     // A static executable's .rela.iplt and .iplt, with the C runtime (a static PIE's are in executable_dynamic_totals).
     for (uint32_t other = 0; ok && runtime && !dynamic && other < lanes; other += 1)
@@ -6153,7 +6254,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
                 result->fixup = error->fixup;
             }
         }
-        result->error = shared == 0 ? EXECUTABLE_ERROR_MEMORY : result->error;
+        result->error = shared == 0 && result->error == EXECUTABLE_ERROR_NONE ? EXECUTABLE_ERROR_MEMORY : result->error;
         bool written = patched && result->error == EXECUTABLE_ERROR_NONE;
         if (written)
         {

@@ -16,7 +16,8 @@
 #define BUSTER_UNIT_EXECUTABLE 5
 #define BUSTER_UNIT_DYNAMIC 6
 #define BUSTER_UNIT_TYPES 7
-#define BUSTER_UNIT_FRAGMENTS 8
+#define BUSTER_UNIT_BACKEND 8
+#define BUSTER_UNIT_FRAGMENTS 9
 #ifndef BUSTER_UNIT
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
@@ -187,6 +188,7 @@ int run_snapshot_benchmark(int argc, char** argv);
 // the archive members the link needs loaded and COMDAT groups picked) and their tests, for the test-foreign command. Its
 // benchmark is another translation unit.
 #include "buster/compiler/foreign.c"
+#include "buster/compiler/foreign_link.c"
 #include "buster/compiler/foreign_test.c"
 int run_foreign_benchmark(int argc, char** argv);
 // The link benchmark (the direct path against the object writer and the linkers, on the same programs) and the floors'
@@ -231,6 +233,14 @@ int run_builtin_benchmark(int argc, char** argv);
 #include "buster/compiler/calling_convention_test.c"
 int run_calling_convention_benchmark(int argc, char** argv);
 
+// Tier 0 (a function's typed stream to instruction records, by templates with registers from the value stack's
+// depths), the programs its tests and benchmark generate, and its tests, for the test-tier0 command. Its benchmark
+// (benchmark-backend) is another translation unit.
+#include "buster/compiler/tier0.c"
+#include "buster/compiler/tier0_generate.c"
+#include "buster/compiler/tier0_test.c"
+int run_backend_benchmark(int argc, char** argv);
+
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
 #include "buster/compiler/call_graph.c"
@@ -254,6 +264,7 @@ int main_unit_link(int argc, char** argv, bool* found);
 int main_unit_executable(int argc, char** argv, bool* found);
 int main_unit_dynamic(int argc, char** argv, bool* found);
 int main_unit_types(int argc, char** argv, bool* found);
+int main_unit_backend(int argc, char** argv, bool* found);
 int main_unit_fragments(int argc, char** argv, bool* found);
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
@@ -465,6 +476,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_foreign_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-output") == 0)
+    {
+        result = run_foreign_link_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
     {
         result = run_foreign_benchmark(argc - 1, argv + 1);
@@ -516,6 +531,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier0") == 0)
+    {
+        result = run_tier0_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-backend") == 0)
+    {
+        result = run_backend_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {
@@ -586,6 +609,10 @@ int main(int argc, char** argv)
     }
     if (!found)
     {
+        result = main_unit_backend(argc, argv, &found);
+    }
+    if (!found)
+    {
         result = main_unit_fragments(argc, argv, &found);
     }
     if (!found)
@@ -626,6 +653,11 @@ int main_unit_dynamic(int argc, char** argv, bool* found)
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_TYPES
 int main_unit_types(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_BACKEND
+int main_unit_backend(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
 }

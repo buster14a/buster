@@ -1475,6 +1475,35 @@ static int run_files_tests(int argument_count, char** arguments)
     {
         printf("usage: test-files [--lanes LIST] [--seed N] [--id-order N] [--keep] [--flat] [options] [path...]\n");
     }
+    Arena options_arena = { 0 };
+    PPOptions options = { 0 };
+    if (passed_all && file_count != 0)
+    {
+        options_arena = arena_reserve(1ull << 30);
+        const char* input;
+        const char* output;
+        bool markers;
+        // Validate the corpus options before starting workers. pp_parse_options wants one input: give it the first
+        // file, and use its options for every file.
+        passed[passed_count] = (char*)files[0];
+        passed_all = pp_parse_options(passed_count + 1, passed, &options, &options_arena, &input, &output, &markers);
+    }
+    // The built-in short-read cases also use two and three lanes. Keep those workers and every requested lane alive
+    // across the walks, so the existing scalar/corpus/determinism checks exercise command-owned thread reuse.
+    uint32_t capacity = file_count == 0 ? 3 : 1;
+    for (uint32_t l = 0; valid && l < lane_count; l += 1)
+    {
+        capacity = lanes[l] > capacity ? lanes[l] : capacity;
+    }
+    LaneTeam team = { 0 };
+    if (passed_all)
+    {
+        passed_all = lane_team_start(&team, capacity, 0);
+        if (!passed_all)
+        {
+            fprintf(stderr, "test-files: can't start the command's %u lanes\n", capacity);
+        }
+    }
     if (passed_all && file_count == 0)
     {
         for (uint32_t way = 0; way < 4; way += 1)
@@ -1495,17 +1524,10 @@ static int run_files_tests(int argument_count, char** arguments)
     }
     else if (passed_all)
     {
-        Arena arena = arena_reserve(1ull << 30);
-        PPOptions options;
-        const char* input;
-        const char* output;
-        bool markers;
-        // pp_parse_options wants one input: give it the first file, and use its options for every file.
-        passed[passed_count] = (char*)files[0];
-        passed_all = pp_parse_options(passed_count + 1, passed, &options, &arena, &input, &output, &markers) &&
-                     files_test_files(&options, files, file_count, flat, directory, lanes, lane_count, id_order);
-        arena_release(&arena);
+        passed_all = files_test_files(&options, files, file_count, flat, directory, lanes, lane_count, id_order);
     }
+    lane_team_stop(&team);
+    arena_release(&options_arena);
     if (!keep)
     {
         rmdir(directory);
