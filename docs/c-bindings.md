@@ -320,8 +320,9 @@ the resolver only. Preprocessing is outside all these measurements.
 
 The protected 9700X workflow runs the source fixtures and main/SQLite
 comparisons, then measures `main.c` and the existing frozen SQLite corpus.
-It also isolates SQLite's scalar and batch paths and runs the batch after
-200 ms of scalar work. The runner acquires the repository's shared host lock;
+On pushes to main, dispatched runs and pull requests that change the parser
+or the binding modules, it also isolates SQLite's scalar and batch paths and
+runs the batch after 200 ms of scalar work. The runner acquires the repository's shared host lock;
 manual runs must acquire it separately and pin to CPU 2. A batch path that
 loses to stacks is retained as the tested alternative, not advertised as a
 speedup.
