@@ -630,7 +630,7 @@ __attribute__((noinline)) static void executable_benchmark_after_scalar(const Li
         #pragma clang loop vectorize(disable) interleave(disable)
         for (FixupId i = begin; i < end; i += 1)
         {
-            const uint8_t kind = link->fixups.kinds[i];
+            const uint8_t kind = link->fixups.kind[i];
             found += kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD;
         }
         __asm__ volatile("" : : "r"(found) : "memory");
