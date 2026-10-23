@@ -643,6 +643,93 @@ static void interpreter_test_heap(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, ok && result.value.low == 0x5a5a5a5a5a5a5a5aull, "typed malloc memset load and free with allocation checks");
 }
 
+static void interpreter_test_mappings(InterpreterTestTally* tally, Arena* scratch)
+{
+    const Tier0Function functions[] = {
+        { 0 },
+        { 0 },
+    };
+    SymbolId symbols[] = {
+        1,
+        2,
+    };
+    uint64_t bytes = 0;
+    InterpreterBinding bindings[] = {
+        {
+            .symbol = 3,
+            .bytes = (uint8_t*)&bytes,
+            .size = sizeof(bytes),
+            .writable = true,
+        },
+        {
+            .symbol = 4,
+            .bytes = (uint8_t*)&bytes,
+            .size = sizeof(bytes),
+            .writable = true,
+        },
+    };
+    InterpreterNativeBinding natives[] = {
+        {
+            .symbol = 5,
+            .address = (void*)interpreter_test_native_mixed,
+        },
+        {
+            .symbol = 6,
+            .address = (void*)interpreter_test_native_mixed,
+        },
+    };
+    const InterpreterProgram program = {
+        .functions = functions,
+        .function_symbols = symbols,
+        .function_count = BUSTER_ARRAY_LENGTH(functions),
+        .bindings = bindings,
+        .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+        .natives = natives,
+        .native_count = BUSTER_ARRAY_LENGTH(natives),
+    };
+    InterpreterResult result;
+    bool ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, ok && result.status == INTERPRETER_OK, "distinct IDs may alias memory and native addresses");
+    SymbolId* ids[] = {
+        &symbols[0],
+        &symbols[1],
+        &bindings[0].symbol,
+        &bindings[1].symbol,
+        &natives[0].symbol,
+        &natives[1].symbol,
+    };
+    const SymbolId reserved[] = {
+        0,
+        UINT32_MAX,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ids); i += 1)
+    {
+        const SymbolId saved = *ids[i];
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(reserved); r += 1)
+        {
+            *ids[i] = reserved[r];
+            const uint64_t mark = scratch->length;
+            ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+            interpreter_test_expect(tally, !ok && result.status == INTERPRETER_INVALID && scratch->length == mark, "reserved IDs rejected before execution");
+        }
+        *ids[i] = saved;
+    }
+    for (uint32_t i = 1; i < BUSTER_ARRAY_LENGTH(ids); i += 1)
+    {
+        const SymbolId saved = *ids[i];
+        for (uint32_t p = 0; p < i; p += 1)
+        {
+            *ids[i] = *ids[p];
+            ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+            interpreter_test_expect(tally, !ok && result.status == INTERPRETER_INVALID, "duplicate and cross-kind IDs rejected before execution");
+        }
+        *ids[i] = saved;
+    }
+    interpreter_test_expect(tally, interpreter_mappings_valid(0, 0, 0, 0, 0, 0, 0), "empty mapping slices");
+    interpreter_test_expect(tally, !interpreter_mappings_valid(symbols, 1, 0, 0, 0, 0, 0), "undersized function-symbol stride");
+    interpreter_test_expect(tally, !interpreter_mappings_valid((const void*)(uintptr_t)(UINT64_MAX - 3), 1, sizeof(SymbolId), 0, 0, 0, 0), "function-symbol address overflow");
+}
+
 static void interpreter_test_guarded(InterpreterTestTally* tally, Arena* scratch)
 {
     const uint32_t counts[] = {
@@ -974,6 +1061,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);
         interpreter_test_heap(&tally, &scratch);
+        interpreter_test_mappings(&tally, &scratch);
         interpreter_test_guarded(&tally, &scratch);
         interpreter_test_text_native(&tally, &scratch);
         interpreter_test_programs(&tally, &scratch, seed, count);

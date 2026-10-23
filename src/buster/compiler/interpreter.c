@@ -131,6 +131,7 @@ static __attribute__((unused)) void interpreter_memory_remove(InterpreterRuntime
 static __attribute__((unused)) void interpreter_memory_remove_owner(InterpreterRuntime* runtime, uint32_t owner);
 static __attribute__((unused)) InterpreterStatus interpreter_memory_access(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write);
 static __attribute__((unused)) InterpreterOptions interpreter_default_options(void);
+static __attribute__((unused)) bool interpreter_mappings_valid(const void* function_symbols, uint32_t function_count, uint32_t function_stride, const InterpreterBinding* bindings, uint32_t binding_count, const InterpreterNativeBinding* natives, uint32_t native_count);
 static __attribute__((unused)) bool interpreter_typed_run(const InterpreterProgram* program, SymbolId entry, const InterpreterValue* arguments, uint32_t argument_count, Arena* scratch, const InterpreterOptions* options, InterpreterResult* result);
 
 static InterpreterOptions interpreter_default_options(void)
@@ -144,6 +145,69 @@ static InterpreterOptions interpreter_default_options(void)
         .check_memory = true,
         .check_undefined = true,
     };
+    return result;
+}
+
+// A function-symbol slice can be a SymbolId column or the first field of wider function rows. Exactly count
+// logical rows are read with memcpy, so no row alignment or trailing padding is required. All three symbol maps
+// share one namespace. Addresses may alias; identities may not. The quadratic scan keeps this oracle boundary
+// allocation-free and cannot reorder caller-owned mappings or introduce first-match ambiguity.
+static SymbolId interpreter_mapping_function(const void* rows, uint32_t stride, uint32_t index)
+{
+    SymbolId result;
+    memcpy(&result, (const uint8_t*)rows + (uint64_t)index * stride, sizeof(result));
+    return result;
+}
+
+static bool interpreter_mappings_valid(const void* function_symbols, uint32_t function_count, uint32_t function_stride, const InterpreterBinding* bindings, uint32_t binding_count, const InterpreterNativeBinding* natives, uint32_t native_count)
+{
+    bool result = function_count == 0 || (function_symbols != 0 && function_stride >= sizeof(SymbolId));
+    result = result && (binding_count == 0 || bindings != 0) && (native_count == 0 || natives != 0);
+    if (result && function_count != 0)
+    {
+        const uint64_t last = (uint64_t)(function_count - 1) * function_stride;
+        const uint64_t base = (uint64_t)(uintptr_t)function_symbols;
+        result = last <= UINT64_MAX - sizeof(SymbolId) && last + sizeof(SymbolId) <= UINT64_MAX - base;
+    }
+    for (uint32_t f = 0; result && f < function_count; f += 1)
+    {
+        const SymbolId symbol = interpreter_mapping_function(function_symbols, function_stride, f);
+        result = symbol != 0 && symbol != UINT32_MAX;
+        for (uint32_t p = 0; result && p < f; p += 1)
+        {
+            result = symbol != interpreter_mapping_function(function_symbols, function_stride, p);
+        }
+    }
+    for (uint32_t b = 0; result && b < binding_count; b += 1)
+    {
+        const SymbolId symbol = bindings[b].symbol;
+        result = symbol != 0 && symbol != UINT32_MAX;
+        for (uint32_t f = 0; result && f < function_count; f += 1)
+        {
+            result = symbol != interpreter_mapping_function(function_symbols, function_stride, f);
+        }
+        for (uint32_t p = 0; result && p < b; p += 1)
+        {
+            result = symbol != bindings[p].symbol;
+        }
+    }
+    for (uint32_t n = 0; result && n < native_count; n += 1)
+    {
+        const SymbolId symbol = natives[n].symbol;
+        result = symbol != 0 && symbol != UINT32_MAX;
+        for (uint32_t f = 0; result && f < function_count; f += 1)
+        {
+            result = symbol != interpreter_mapping_function(function_symbols, function_stride, f);
+        }
+        for (uint32_t b = 0; result && b < binding_count; b += 1)
+        {
+            result = symbol != bindings[b].symbol;
+        }
+        for (uint32_t p = 0; result && p < n; p += 1)
+        {
+            result = symbol != natives[p].symbol;
+        }
+    }
     return result;
 }
 
@@ -558,13 +622,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
     bool valid = program != 0 && program->function_count != 0 && program->functions != 0 && program->function_symbols != 0;
     valid = valid && (argument_count == 0 || arguments != 0) && (program->binding_count == 0 || program->bindings != 0) && (program->native_count == 0 || program->natives != 0);
     valid = valid && limits.max_frames != 0 && limits.max_frames < BUSTER_INTERPRETER_HEAP_OWNER && limits.max_values != 0 && limits.max_locals != 0 && limits.max_memories != 0;
+    valid = valid && interpreter_mappings_valid(program->function_symbols, program->function_count, sizeof(SymbolId), program->bindings, program->binding_count, program->natives, program->native_count);
     for (uint32_t f = 0; valid && f < program->function_count; f += 1)
     {
         valid = interpreter_typed_function_valid(&program->functions[f]);
-        for (uint32_t p = 0; valid && p < f; p += 1)
-        {
-            valid = program->function_symbols[p] != program->function_symbols[f];
-        }
     }
     uint32_t initial = valid ? interpreter_typed_find_function(program, entry) : UINT32_MAX;
     result->status = valid ? initial != UINT32_MAX ? INTERPRETER_OK : INTERPRETER_SYMBOL : INTERPRETER_INVALID;

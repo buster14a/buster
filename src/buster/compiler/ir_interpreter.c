@@ -597,7 +597,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     uint32_t depth = 0;
     uint64_t active_values = 0;
     uint64_t active_locals = 0;
-    if (program != 0 && (program->function_count == 0 || program->functions != 0) && (program->binding_count == 0 || program->bindings != 0) && (program->native_count == 0 || program->natives != 0))
+    if (program != 0 && interpreter_mappings_valid(program->functions, program->function_count, sizeof(IrInterpreterFunction), program->bindings, program->binding_count, program->natives, program->native_count))
     {
         frames = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterFrame, options->max_frames);
         runtime.memories = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterMemory, options->max_memories);

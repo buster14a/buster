@@ -120,6 +120,9 @@ Program recursion creates interpreter frames without recursive C calls. The IR
 front handles integer widths through 128 bits and host x87 extended precision;
 the current typed input only expresses its existing integer widths and f32/f64.
 Phi operands are snapshotted before any phi destination is written.
+Callable program mappings share one symbol namespace: IDs zero and UINT32_MAX
+are reserved, and function, data and native IDs must be distinct. Different IDs
+may intentionally refer to the same address.
 
 `InterpreterOptions` bounds steps, frames, values, locals and registered memory.
 Optional checks diagnose reads of undefined values/bytes and accesses outside

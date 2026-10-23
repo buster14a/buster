@@ -543,6 +543,74 @@ static void ir_interpreter_test_memory(IrInterpreterTestTally* tally, Arena* mem
     arena_pop_to(memory, mark);
 }
 
+static void ir_interpreter_test_mappings(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    IrFunction function = { 0 };
+    const IrSizes sizes = {
+        .instruction_count = 2,
+        .block_count = 1,
+        .constant_count = 1,
+    };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_interpreter_test_expect(tally, created, "symbol mapping fixture allocation");
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.constants[0].low = 7;
+        function.block_offsets[1] = 2;
+        ir_interpreter_test_instruction(&function, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 1, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        IrInterpreterFunction code[] = {
+            { .symbol = 10, .function = &function },
+            { .symbol = 20, .function = &function },
+        };
+        uint8_t bytes = 0;
+        InterpreterBinding data[] = {
+            { .symbol = 30, .bytes = &bytes, .size = 1, .writable = true },
+            { .symbol = 40, .bytes = &bytes, .size = 1, .writable = true },
+        };
+        InterpreterNativeBinding native[] = {
+            { .symbol = 50, .address = (void*)ir_interpreter_test_signed_native },
+            { .symbol = 60, .address = (void*)ir_interpreter_test_signed_native },
+        };
+        const IrInterpreterProgram program = {
+            .functions = code,
+            .function_count = 2,
+            .bindings = data,
+            .binding_count = 2,
+            .natives = native,
+            .native_count = 2,
+        };
+        ir_interpreter_test_run(tally, &program, 10, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 7 }, "distinct symbols may alias function/data/native addresses");
+        const SymbolId duplicate_functions[] = { 0, UINT32_MAX, 20 };
+        for (uint32_t i = 0; i < sizeof(duplicate_functions) / sizeof(duplicate_functions[0]); i += 1)
+        {
+            code[0].symbol = duplicate_functions[i];
+            ir_interpreter_test_run(tally, &program, 10, 0, 0, 0, execution, INTERPRETER_INVALID, (InterpreterValue){ 0 }, "reserved or duplicate function identity rejected");
+        }
+        code[0].symbol = 10;
+        const SymbolId duplicate_data[] = { 0, UINT32_MAX, 10, 40 };
+        for (uint32_t i = 0; i < sizeof(duplicate_data) / sizeof(duplicate_data[0]); i += 1)
+        {
+            data[0].symbol = duplicate_data[i];
+            ir_interpreter_test_run(tally, &program, 10, 0, 0, 0, execution, INTERPRETER_INVALID, (InterpreterValue){ 0 }, "reserved or colliding data identity rejected");
+        }
+        data[0].symbol = 30;
+        const SymbolId duplicate_native[] = { 0, UINT32_MAX, 10, 30, 60 };
+        for (uint32_t i = 0; i < sizeof(duplicate_native) / sizeof(duplicate_native[0]); i += 1)
+        {
+            native[0].symbol = duplicate_native[i];
+            ir_interpreter_test_run(tally, &program, 10, 0, 0, 0, execution, INTERPRETER_INVALID, (InterpreterValue){ 0 }, "reserved or colliding native identity rejected");
+        }
+        native[0].symbol = 50;
+        ir_interpreter_test_run(tally, &program, 20, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 7 }, "valid alias mapping remains usable after rejected mappings");
+        ir_interpreter_test_run(tally, &program, 0, 0, 0, 0, execution, INTERPRETER_SYMBOL, (InterpreterValue){ 0 }, "reserved zero entry never resolves");
+        ir_interpreter_test_run(tally, &program, UINT32_MAX, 0, 0, 0, execution, INTERPRETER_SYMBOL, (InterpreterValue){ 0 }, "sentinel entry never resolves");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static bool ir_interpreter_test_roundtrip(const IrFunction* original, Arena* source_memory, Arena* output, Arena* scratch, IrFunction* parsed)
 {
     FILE* first = tmpfile();
@@ -722,6 +790,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_dominance(&tally, &memory, &execution);
             ir_interpreter_test_calls(&tally, &memory, &execution);
             ir_interpreter_test_memory(&tally, &memory, &execution);
+            ir_interpreter_test_mappings(&tally, &memory, &execution);
             ir_interpreter_test_generated(&tally, seed, count);
         }
         arena_release(&memory);
