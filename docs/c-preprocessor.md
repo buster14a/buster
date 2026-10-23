@@ -499,8 +499,11 @@ makes its own; with one, the units and lanes that share it read each file once
 
 ### Macros
 
-The macro table is indexed by `IdentId` (`macro_of`). A bitset of the names
-that are macros (`is_macro`) is what the main loop tests. A definition records
+The macro table is indexed by `IdentId` (`macro_of`). The vectorized main loop
+tests a bitset of the names that have macro records (`is_macro`); the scalar
+reference tests `macro_of` directly. Both include the sentinel records for
+poisoned names and `defined`, which must stop a run even though `#ifdef` does
+not consider them definitions. A definition records
 where its replacement list is in the defining file's tokens, and nothing is
 copied (#121). A redefinition that differs (C 6.10.4p2: the same form,
 parameters, replacement list, and whitespace in the same places) is diagnosed,
@@ -1581,8 +1584,11 @@ EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
 - refinement;
 - the directive scan, and the conditionals' pairing;
 - the file and buffer runs;
+- macro-name lookup, directly through `macro_of` instead of the cached name
+  bitset;
 - the bulk copies (arguments, body runs, object-like bodies), and the
   argument scan;
+- temporary expansion-origin copies and output-history compression;
 - identifier pastes, which the vectorized kernels intern without lexing;
 - the keyword pass;
 - the printer.
@@ -1590,6 +1596,18 @@ EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
 `test-preprocessor` requires the two to produce the same stream, token for
 token (kind, flags, value and location), and the same directive tables.
 Both printers must give the same bytes, with line markers and without.
+
+Scalar preprocessing copies token columns and temporary origins one element
+at a time. Its macro eligibility checks, including those inside shared
+expansion and directive helpers, use `macro_of[id] != 0`. The vector run
+loops still call their bitset lookup directly. Macro updates keep both tables
+current, allowing the definition benchmark to change kernels on one state;
+`-dM` also enumerates the bitset. Neither is part of scalar expansion lookup.
+The scalar-reference regression deliberately makes every known identifier's
+cached bit disagree with its macro record before use, including after an
+undefine/redefine phase. It compares explicit expected tokens and diagnostics
+with the vector run's full stream, history and directive tables. Separate
+history-copy cases cover both overlap directions and empty copies.
 
 ## Data-parallel design, piece by piece
 
@@ -1603,9 +1621,9 @@ differ by up to 1% from code placement alone.
 | Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9%; 0.62 cycles per token on the C library corpus, against 3.99 |
 | Directive tables (#118) | The scan, the kinds and line ends, the pairing below, and the notes only where the pairing finds a file can have any | The stack, and the notes for every file | 2.31 cycles per token and 51 per directive on the C library corpus (`benchmark-preprocessor --tables`), against 6.50 and 143 |
 | Conditional pairing (#118) | Depth as a prefix sum, pairing as nearest smaller values by pointer jumping, 32 conditionals at a time | The stack; files with a continuation too many | 16% faster on a file of 36,868 conditionals; within noise on `sqlite3.c` |
-| File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | The scalar twins: 22.8 ms against 12.0 ms in all |
+| File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | Earlier scalar twins, still sharing the macro-name bitset: 22.8 ms against 12.0 ms in all |
 | Argument scan (#122) | Paren depth as a byte prefix sum; the `)` and the top-level commas from compares | Token at a time, through the contexts below | Equal on `sqlite3.c`; 0.4% faster on `main.c`, 1.5% fewer instructions |
-| Macro-name test (#122) | A scalar load per identifier a run's compare finds (a gather is 64 uops) | The same | 1.5% of `sqlite3.c`'s time; a postings index costs more to build |
+| Macro-name test (#122) | A scalar bitset load per identifier a run's compare finds (a gather is 64 uops) | `macro_of[id] != 0`, independent of the bitset | 1.5% of the vector run's `sqlite3.c` time; a postings index costs more to build |
 | Pastes (#122) | Two identifiers, or an identifier and a number, interned without lexing | Lexing every paste | `main.c` (66,520 pastes) 16.5 to 15.2 ms |
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |

@@ -2564,6 +2564,143 @@ static bool pp_test_final_copy_accounting(void)
     return result;
 }
 
+// The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
+// macros, then make every known name's bit disagree with macro_of before each use file. Repeating this after undef
+// and redefine prevents their normal bit updates from hiding a lookup through the cache. The third run selects the
+// scalar kernel directly, as the benchmarks do, without changing PPOptions.scalar.
+static bool pp_test_scalar_reference(const char* directory)
+{
+    static const char* const names[] =
+    {
+        "scalar-definitions.c",
+        "scalar-use.c",
+        "scalar-changed.c",
+    };
+    static const char* const sources[] =
+    {
+        "#define A 7\n#define ALIAS A\n#define ID(x) x\n#define SELF SELF\n#define F(x) x + F(x)\n"
+        "#define PLAIN ordinary\n#define ATTR noreturn\n#define CHANGE 1\n#define GONE 2\n#define EMPTY\n"
+        "#define POISONED bad\n#pragma GCC poison bad\n",
+        "ordinary A ALIAS ID(A) ID(SELF) F(A) PLAIN\n__COUNTER__ __LINE__\n"
+        "#if defined(A) && !defined(ordinary) && __has_attribute(ATTR)\ncondition\n#endif\nPOISONED\n"
+        "#undef GONE\n#undef CHANGE\n#define CHANGE 3\n#define NEW 4\nGONE CHANGE NEW\n"
+        "#embed <scalar-reference.bin> limit(1) prefix(A,) suffix(,ID(CHANGE))\n",
+        "A ALIAS ID(CHANGE) GONE NEW SELF __COUNTER__\n#if !defined(GONE) && defined(CHANGE)\nchanged\n#endif\n"
+        "#pragma GCC poison later\n__has_c_attribute(x EMPTY)\nbad later\n",
+    };
+    static const char expected[] =
+        "ordinary 7 7 7 SELF 7 + F(7) ordinary 0 2 condition bad GONE 3 4 7, 65, 3\n"
+        "7 7 3 GONE 4 SELF 1 changed 0 bad later\n";
+    char bytes[4096];
+    snprintf(bytes, sizeof(bytes), "%s/scalar-reference.bin", directory);
+    const char* directories[] =
+    {
+        directory,
+    };
+    static InternTable tables[3];
+    static Preprocessor runs[3];
+    char* diagnostics[3] = { 0 };
+    bool result = pp_test_write_file(bytes, "AB");
+    for (uint32_t k = 0; result && k < 3; k += 1)
+    {
+        size_t length = 0;
+        FILE* stream = open_memstream(&diagnostics[k], &length);
+        const PPOptions options =
+        {
+            .language =
+            {
+                .standard = 2023,
+                .gnu = true,
+            },
+            .scalar = k == 1,
+            .no_standard_includes = true,
+            .clang_features = true,
+            .embed_directories = directories,
+            .embed_directory_count = BUSTER_ARRAY_LENGTH(directories),
+            .expansion_starts = true,
+            .diagnostics = stream,
+        };
+        Preprocessor* pp = &runs[k];
+        result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+        uint32_t files[BUSTER_ARRAY_LENGTH(sources)];
+        if (result)
+        {
+            pp->vectorized = k == 0;
+        }
+        for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+        {
+            files[s] = pp_virtual_file(pp, names[s], sources[s], (uint32_t)strlen(sources[s]), BUSTER_PP_USER_FILE);
+            result = files[s] != BUSTER_PP_NONE && pp_prepare_data(pp, &pp->datas[pp->files[files[s]].data], names[s]);
+        }
+        result = result && pp_run_prelude(pp);
+        if (result)
+        {
+            pp_run_file(pp, files[0]);
+            result = pp->errors == 0 && pp->warnings == 0 && !pp->fatal;
+        }
+        for (uint32_t s = 1; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+        {
+            if (!pp->vectorized)
+            {
+                for (IdentId id = 0; id < pp->table->count; id += 1)
+                {
+                    const uint64_t bit = 1ull << (id % 64);
+                    if (pp->macro_of[id] != 0)
+                    {
+                        pp->is_macro[id / 64] &= ~bit;
+                    }
+                    else
+                    {
+                        pp->is_macro[id / 64] |= bit;
+                    }
+                }
+            }
+            const bool ran = pp_run_main(pp, files[s]);
+            // EMPTY must remain unexpanded after the scoped query's first name, making its operand invalid. The
+            // preexisting poisoned sentinel `bad` and newly poisoned `later` each diagnose one use on the last line.
+            result = ran == (s == 1) && pp->errors == (s == 1 ? 0u : 3u) && pp->warnings == 0 && !pp->fatal;
+            if (!result)
+            {
+                printf("scalar reference: run %u file %u: ran %u, errors %u, warnings %u, fatal %u\n", k, s, ran, pp->errors, pp->warnings, pp->fatal);
+            }
+        }
+        if (stream != 0)
+        {
+            fclose(stream);
+        }
+        result = result && diagnostics[k] != 0 && strstr(diagnostics[k], "builtin feature check macro requires a parenthesized identifier") != 0 &&
+                 strstr(diagnostics[k], "attempt to use a poisoned identifier") != 0;
+        if (result && k != 0)
+        {
+            result = pp_same_streams(&runs[0], pp, "scalar reference") && pp_same_directive_tables(&runs[0], pp, "scalar reference") &&
+                     strcmp(diagnostics[0], diagnostics[k]) == 0;
+        }
+    }
+    if (result)
+    {
+        PPSpellings ours = { 0 };
+        PPSpellings wanted = { 0 };
+        result = pp_stream_spellings(&runs[0], &ours) &&
+                 pp_text_spellings((const uint8_t*)expected, sizeof(expected) - 1, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &wanted) &&
+                 pp_compare_spellings(&runs[0], &ours, &wanted, "scalar reference", "wanted");
+        arena_release(&ours.arena);
+        arena_release(&wanted.arena);
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        if (!result && diagnostics[k] != 0)
+        {
+            printf("scalar reference run %u diagnostics:\n%s", k, diagnostics[k]);
+        }
+        free(diagnostics[k]);
+        pp_release(&runs[k]);
+        intern_release(&tables[k]);
+    }
+    unlink(bytes);
+    printf("scalar reference: %s (inverted macro-name bits, definitions, captures, builtins, poison and kernel override)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
 // c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
 static void predefines_test_drop_versions(char* text);
 
@@ -5320,6 +5457,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_embed_lookups(directory, with_clang);
         passed_all &= pp_test_lookup_accounting(directory);
         passed_all &= pp_test_final_copy_accounting();
+        passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);

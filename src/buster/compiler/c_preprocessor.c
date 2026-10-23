@@ -3473,9 +3473,16 @@ static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, u
 // ---------------------------------------------------------------------------------------------------------------------
 // Macros
 
-BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
+BUSTER_INLINE bool pp_is_macro_vector(const Preprocessor* pp, IdentId id)
 {
     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
+}
+
+// The scalar reference reads the macro table itself, independently of the cached name bits. Poisoned names and
+// `defined` also have records: both must stop a run, although pp_is_defined does not consider them definitions.
+BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
+{
+    return pp->vectorized ? pp_is_macro_vector(pp, id) : pp->macro_of[id] != 0;
 }
 
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
@@ -4843,7 +4850,7 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
         for (uint64_t bits = identifiers; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
-            if (pp_is_macro(pp, data->values[p + lane]))
+            if (pp_is_macro_vector(pp, data->values[p + lane]))
             {
                 take = lane;
                 stopped = true;
@@ -4857,7 +4864,7 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
     return p;
 }
 
-// The same, a token at a time.
+// The same, a token at a time, testing the macro table without the vector path's cached name bits.
 static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit)
 {
     PPTokens* target = pp_target(pp);
@@ -4866,7 +4873,7 @@ static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data
     while (!stopped && p < limit && pp_room(pp, target, 1))
     {
         const PPToken token = pp_file_token(data, base, p);
-        stopped = token.kind == C_TOKEN_RAW_IDENTIFIER && pp_is_macro(pp, token.value);
+        stopped = token.kind == C_TOKEN_RAW_IDENTIFIER && pp->macro_of[token.value] != 0;
         if (!stopped)
         {
             pp_tokens_set(target, target->count, token.kind, token.flags, token.value, token.location);
@@ -4899,7 +4906,7 @@ static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* toke
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
             const IdentId id = tokens->values[p + lane];
-            if (pp_is_macro(pp, id))
+            if (pp_is_macro_vector(pp, id))
             {
                 if (pp->macros[pp->macro_of[id]].disabled != 0)
                 {
@@ -4936,7 +4943,7 @@ static uint32_t pp_copy_buffer_run_scalar(Preprocessor* pp, const PPTokens* toke
     while (!stopped && p < end && pp_room(pp, target, 1))
     {
         uint8_t flags = tokens->flags[p];
-        const bool candidate = tokens->kinds[p] == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp_is_macro(pp, tokens->values[p]);
+        const bool candidate = tokens->kinds[p] == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp->macro_of[tokens->values[p]] != 0;
         if (candidate && pp->macros[pp->macro_of[tokens->values[p]]].disabled == 0)
         {
             stopped = true;

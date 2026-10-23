@@ -646,7 +646,8 @@ static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_
         now = pp_benchmark_read_counter(cycles_fd);
         sample->compile_cycles += now - before;
         before = now;
-        // As the main loop's runs test them: the identifiers of 64 kinds at a time from one compare, then each one's bit.
+        // Both rows classify 64 kinds at a time; the lookups use the selected main-loop kernel's macro-name bitset
+        // (vectorized) or direct macro table (scalar reference).
         uint64_t found = 0;
         uint64_t lookups = 0;
         for (uint32_t t = 0; t < data->token_count; t += 64)
