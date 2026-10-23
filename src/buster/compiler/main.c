@@ -17,6 +17,7 @@
 #define BUSTER_UNIT_DYNAMIC 6
 #define BUSTER_UNIT_TYPES 7
 #define BUSTER_UNIT_BACKEND 8
+#define BUSTER_UNIT_FRAGMENTS 9
 #ifndef BUSTER_UNIT
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
@@ -138,8 +139,13 @@ int run_files_benchmark(int argc, char** argv);
 
 // The parser (c_parser.c) and its tests, for the default command, which preprocesses and parses a file, and the
 // test-parser command.
+#include "buster/compiler/c_fragment_interleave.c"
+#include "buster/compiler/c_fragment_interleave_test.c"
 #include "buster/compiler/c_parser.c"
 #include "buster/compiler/c_parser_test.c"
+#if BUSTER_PARSE_FRAGMENT_SINK
+#include "buster/compiler/c_fragments_test.c"
+#endif
 #include "buster/compiler/c_gnu_test.c"
 #include "buster/compiler/c_gnu_benchmark.c"
 int run_parser_benchmark(int argc, char** argv);
@@ -308,6 +314,7 @@ int main_unit_executable(int argc, char** argv, bool* found);
 int main_unit_dynamic(int argc, char** argv, bool* found);
 int main_unit_types(int argc, char** argv, bool* found);
 int main_unit_backend(int argc, char** argv, bool* found);
+int main_unit_fragments(int argc, char** argv, bool* found);
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
 // is, so that the other units' branches fold to false (at the top). The driver's last branch, which no command takes,
@@ -360,6 +367,16 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_parser_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-fragment-interleave") == 0)
+    {
+        result = run_fragment_interleave_tests(argc - 2, argv + 2);
+    }
+#if BUSTER_PARSE_FRAGMENT_SINK
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS) && argc >= 2 && strcmp(argv[1], "test-fragments") == 0)
+    {
+        result = run_fragment_tests(argc - 2, argv + 2);
+    }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
     {
         result = run_parser_benchmark(argc - 1, argv + 1);
@@ -733,6 +750,10 @@ int main(int argc, char** argv)
     }
     if (!found)
     {
+        result = main_unit_fragments(argc, argv, &found);
+    }
+    if (!found)
+    {
         result = main_command(argc, argv, &found);
     }
     return result;
@@ -774,6 +795,11 @@ int main_unit_types(int argc, char** argv, bool* found)
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_BACKEND
 int main_unit_backend(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_FRAGMENTS
+int main_unit_fragments(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
 }
