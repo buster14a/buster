@@ -73,6 +73,43 @@ columns and alignment; `persistent_replay_bytes` counts initialized private
 scalar workspace. These exclude the source reader, parser, TypeTable and
 transient kernel scratch, so they are not whole-process or peak-live memory.
 
-Results remain pending target-host qualification. Correct independent name
-resolution still needs integration with private body types, source-order
-linkage effects, semantic/IR output and full corpus equivalence for #113.
+## Controlled source observations
+
+Head `2971a85c29ce32c3b6aa6ab178f970ab82417d4b` completed all 36 processes
+on the approved 9700X, Clang 23.1.1 and performance governor. Every process
+matched exact activation handles, declaration columns and complete checked
+output. The [raw results](results.txt) retain process medians, fingerprints,
+byte counts, digests and input/source/executable hashes. This snapshot precedes
+the subsequent main integration and direct parser-trace test additions.
+
+Each cell gives the observed range of three process medians, each over 21
+passes. Eight-lane user cycles are unavailable for the reason above:
+
+| Source, path/state | One lane ns/token | Eight lanes ns/token | One lane user cycles/token |
+| --- | ---: | ---: | ---: |
+| small, scalar | 204.827–214.391 | 161.453–168.712 | 309.584–312.337 |
+| small, vector | 222.679–227.218 | 241.523–243.626 | 351.700–369.082 |
+| small, conditioned | 305.840–346.206 | 258.300–274.753 | 551.753–593.765 |
+| large, scalar | 56.085–56.416 | 55.825–62.850 | 291.659–293.154 |
+| large, vector | 66.444–67.839 | 63.055–63.408 | 332.910–340.150 |
+| large, conditioned | 68.635–71.066 | 65.877–66.303 | 338.893–353.287 |
+
+The large vector path's median of process medians was 67.306 ns/token on
+one lane and 63.138 on eight, with useful throughput 14.74–15.05 versus
+15.77–15.86 million tokens/second. Scalar medians were 56.178 and 56.088;
+their ranges overlap. These complete paths still repeat binding after
+sequential semantic preparation. The observations qualify this consumer and
+do not establish a compiler speedup or scaling of deferred semantic checking.
+
+The small/large inputs have 243/237,579 tokens and 4/4,096 bodies. Each
+body has at most 23 events; total file fallbacks were 4/4,096. No bounded-walk
+fallback was needed in these sources; focused correctness tests exercise it.
+Result plans and use columns retain 928/835,696 bytes. Private scalar replay
+retains 8,032/57,120 bytes on one lane and 64,256/456,960 on eight; the batch
+path retains none of that replay workspace. The memory exclusions above apply.
+
+The same head passed 115,075 checker checks on the locked 9700X with ASan,
+UBSan and leak detection enabled and fatal errors; no findings were reported.
+Correct independent name resolution still needs integration with private body
+types, source-order linkage effects, semantic/IR output and full corpus
+equivalence for #113.

@@ -298,7 +298,7 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
                 checked[path] = check_graph_run(&types[path].table, &inputs[path].graph, &checked_storage[path], &scratch[path], &check_options, &streams[path]);
                 check_test_expect(test, checked[path] && streams[path].report_count == 0 && scratch[path].length == mark,
                                   "production history fixture lost valid sequential graph output after scratch reuse");
-                check_test_body_bindings(test, &inputs[path], fixture->body_fallback);
+                check_test_body_bindings(test, &inputs[path], &parsers[path], fixture->body_fallback);
                 check_test_environment_replay(test, &inputs[path], &scratch[path]);
                 if (fixture->name[0] != 0)
                 {

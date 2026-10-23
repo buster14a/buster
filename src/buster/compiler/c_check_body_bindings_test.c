@@ -70,7 +70,8 @@ static void check_test_body_binding_failures(CheckTest* test, const CheckEnviron
         {
             const uint64_t prefix = scratch.length;
             valid = c_body_bindings_resolve(&result, environment, span, true, &replay, &output, &scratch);
-            check_test_expect(test, !valid && result.status == C_BODY_BINDINGS_INVALID && output.length == 0 && scratch.length == prefix,
+            check_test_expect(test, (span->begin == span->end ? valid && result.status == C_BODY_BINDINGS_OK : !valid && result.status == C_BODY_BINDINGS_INVALID) &&
+                                   output.length == 0 && scratch.length == prefix,
                               "body replay capacity failure changed its prefix");
         }
         arena_pop_to(&scratch, mark);
@@ -331,9 +332,8 @@ static void check_test_body_binding_guards(CheckTest* test)
     }
 }
 
-static void check_test_body_bindings(CheckTest* test, const CheckInput* input, bool fallback)
+static void check_test_body_binding_environment(CheckTest* test, const CheckEnvironment* environment, const CheckInput* input, const uint32_t* declarations, bool fallback)
 {
-    const CheckEnvironment* environment = &input->environment;
     const CBindings* source = environment->bindings;
     const uint32_t count = environment->body_count;
     Arena plans = arena_reserve(1u << 20);
@@ -426,9 +426,9 @@ static void check_test_body_bindings(CheckTest* test, const CheckInput* input, b
                             {
                                 const uint32_t handle = result->handles[used];
                                 const uint32_t declaration = handle != 0 && handle <= source->count ? source->declaration[handle - 1] : BUSTER_CHECK_NONE;
-                                check_test_expect(test, result->tokens[used] == token && handle == reference[event] && declaration == input->declarations[token],
+                                check_test_expect(test, result->tokens[used] == token && handle == reference[event] && declaration == declarations[token],
                                                   "independent body binding differs from production sequential resolution");
-                                if (declaration < input->token_count && input->declared_types[token] != 0)
+                                if (input != 0 && declaration < input->token_count && input->declared_types[token] != 0)
                                 {
                                     check_test_expect(test, environment->declaration_types[declaration] == input->declared_types[token],
                                                       "body binding acquired a different historical TypeId");
@@ -453,4 +453,30 @@ static void check_test_body_bindings(CheckTest* test, const CheckInput* input, b
     }
     arena_release(&reference_scratch);
     arena_release(&plans);
+}
+
+// Qualify both real producers. The parser trace has different restore/activation conventions and source-less
+// builtin typedefs; its immediate grammar declaration column is an oracle separate from the full event replay.
+// A private Parser value borrows immutable tokens/tree/meaning metadata and owns only its replacement scratch.
+static void check_test_body_bindings(CheckTest* test, const CheckInput* input, const Parser* parser, bool fallback)
+{
+    check_test_body_binding_environment(test, &input->environment, input, input->declarations, fallback);
+    Arena storage = arena_reserve(1u << 24);
+    Parser view = *parser;
+    view.scratch = arena_reserve(1u << 24);
+    ParseBindings parsed;
+    CEnvironment file;
+    const bool built = storage.base != 0 && view.scratch.base != 0 && parse_bindings_build(&parsed, &view, &storage) &&
+                       c_environment_build(&file, &parsed.events, &storage, &view.scratch);
+    check_test_expect(test, built, "parser trace body environment construction");
+    if (built)
+    {
+        CheckEnvironment environment = input->environment;
+        environment.bindings = &parsed.events;
+        environment.file = file;
+        environment.declaration_types = 0;
+        check_test_body_binding_environment(test, &environment, 0, parsed.declarations, fallback);
+    }
+    arena_release(&view.scratch);
+    arena_release(&storage);
 }

@@ -305,7 +305,7 @@ static bool c_body_bindings_resolve(CBodyBindings* output, const CheckEnvironmen
     const uint64_t temporary = scratch->length;
     const CBindings* source = environment->bindings;
     bool valid = arena != scratch && environment->valid && source != 0 && source->valid && span->slot < environment->body_count &&
-                 span->valid && span->begin <= span->end && span->end <= source->count;
+                 span->valid && span->base <= source->count && span->begin <= span->end && span->end <= source->count;
     const uint32_t count = valid ? span->end - span->begin : 0;
     valid = valid && (!scalar || (replay != 0 && replay->heads != 0 && replay->name_capacity == source->name_capacity && replay->capacity >= count));
     CBodyBindingStatus status = C_BODY_BINDINGS_INVALID;

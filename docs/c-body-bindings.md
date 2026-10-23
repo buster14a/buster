@@ -75,7 +75,9 @@ publish linkage effects. Join before merging source-order result slots.
 ## Qualification boundary
 
 `test-checker` compares the helper with the real whole-unit declaration column
-through both parser/producer paths. Scalar and batch body resolution run in
+through both parser/producer paths. It also builds actual `ParseBindings`
+histories, comparing private body results with the grammar's immediate
+declaration column and an independent complete event replay. Scalar and batch body resolution run in
 reverse order on one/eight lanes with private replay and arenas. Fixtures cover
 parameter/function-name shadowing, nested local scopes, a closed block
 prototype followed by a file lookup, later prototypes and array bounds,
@@ -92,7 +94,17 @@ undersized replay capacity, invalid slots and undo underflow are covered.
 
 The [source-pipeline harness](measurements/c-body-bindings-2026-10-23/README.md)
 includes the available producer, handoff and body-binding consumer on frozen
-small/large source inputs. Its target-host results are pending. Independent
+small/large source inputs. Head `2971a85` passed
+[full 9700X CI](https://github.com/buster14a/buster/actions/runs/39963802924)
+with 115,075 checker and 420,202 environment checks and zero unapproved
+recursion cycles. Its tested merge `6b048f92a9f9f9454847f8c6051a7c96d8086512`
+has the exact head tree `c59a50f90cc17f590659cf7ecc0d17d231ef4d47`.
+It also passed 115,075 checker checks with ASan, UBSan and leak detection on
+the locked host. All 36 source measurement processes matched; the large
+vector pipeline measured 66.444–67.839 ns/token on one lane and 63.055–63.408
+on eight. The measurement guide records costs, states, memory and revision
+boundaries. Subsequent main integration and actual parser-trace test additions
+require fresh qualification. Independent
 name resolution alone does not satisfy #113: complete top-level initializer
 checking, private body types, source-order effects/output reconciliation and
 actual deferred semantic/IR/corpus equivalence remain required.
