@@ -177,7 +177,11 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
                 meanings[name] = PARSE_MEANING_TYPEDEF;
             }
             trace.builtin_count = output->events.active_count;
-            ParseMeanings initial = { .meanings = meanings, .capacity = parser->meanings.capacity };
+            ParseMeanings initial = {
+                .meanings = meanings,
+                .capacity = parser->meanings.capacity,
+                .table = parser->meanings.table,
+            };
             uint32_t diagnostic_count = 0;
             const ParseScalarResult result = parse_scalar_traced(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, count, parser->language,
                                                                  &initial, &tree, &parser->scratch, 0, 0, &diagnostic_count, &trace);
