@@ -1101,3 +1101,39 @@ were 1.000, but alone large-local took 0.2% more cycles (116.27 cycles per
 block per sweep against 116.06, more in every pair) and large-dispatch 0.1%
 more (113.58 against 113.44), which "Where the caller's Dataflow falls" looks
 into.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The dataflow API](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/dataflow.c#L4)
+is implemented independently of IR: caller CFG/use/def → `dataflow_postorder`
+→ `dataflow_liveness`/scalar twin → `in`/`out` rows, with
+`dataflow_intersects_vector`/scalar as additional row consumers. The current
+producer is the synthetic CFG generator/tests; a main-branch general selected-IR
+producer and allocator consumer are absent at this pin.
+
+Successors are u32 CSR (`block_count + 1` offsets, `edge_count` targets);
+postorder includes unreachable components. Use/def/in/out are separate matrices,
+each row rounded to eight u64 words, with **64-byte alignment and zero padding
+bits** supplied by the producer. This is a real padded-readable contract,
+unlike the natural-alignment/no-padding checker arrays. Zero values give zero
+words and no matrix access. Creation preserves result/arena on failure;
+postorder failure preserves its previous output. Solvers consume a successfully
+prepared CFG, allocate nothing and iterate to a stable `in` state, including
+the final unchanged sweep in the reported count.
+
+The logical operation is a CFG fixpoint, not an independent batch of blocks.
+Changing successor/use/def data invalidates prior analysis; reusing it needs an
+explicit invalidation boundary. Phi operands belong to predecessor edges in
+future SSA consumers, and selected instructions' actual uses/defs may differ
+from source IR. Dense-value mapping, construction/clearing and any interval
+extraction must be included in performance, not charged to an imaginary free
+producer. Row intersections do not themselves construct an interference graph.
+
+Disposition: retain the module and its measured row alternatives, alignment
+and padding. `test-dataflow` compares scalar/vector fixpoints, independent
+reachability/bitset expectations, guards and degenerate CFGs. [#143](https://github.com/buster14a/buster/issues/143)/[#141](https://github.com/buster14a/buster/issues/141)/[#140](https://github.com/buster14a/buster/issues/140)
+own selected-use production, phi/CFG integration, live intervals and complete
+producer + analysis + allocation measurements. Existing synthetic cycles/bitset
+and power-state results do not establish that total or source-program quality.

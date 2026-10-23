@@ -867,6 +867,9 @@ second's counts after the first's. The inputs:
 `--raw-strings` enables C11's raw prefixes in C; `--raw-strings-c99`
 enables `R` and `LR`. Raw literals and near misses are checked around
 chunk and page boundaries. Both modes run in the 9700X workflow.
+The separate raw-error query is checked on invalid/unterminated literals and
+every truncated prefix against a protected page; diagnostic offsets are
+physical bytes even when a prefix has line splices.
 `--no-digraphs` and `--no-line-comments` tokenize C without digraphs and without
 `//` comments (`C_TOKENIZER_NO_DIGRAPHS` and `C_TOKENIZER_NO_LINE_COMMENTS`), as
 the preprocessor lexes `-std=c89` (both), C94 (the second) and `-fno-digraphs`
@@ -2973,6 +2976,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     pasted and stringized too, and `-f[no-]digraphs` in four modes (#288);
   - each difference from clang that #109's fuzzing found, minimized, and the
     ones probing around it found;
+  - raw-string errors in active text, definitions and unused macro arguments,
+    suppressed in excluded group bodies and opaque headers/messages (an
+    untaken `#elif` line still diagnoses); exact Clang
+    diagnostic/location comparisons; contextual recovery beyond 8/64/256
+    repairs with earlier macro snapshots retained, and failure injection for
+    allocation, data-index exhaustion and an unchanged recovery mask (#285);
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
