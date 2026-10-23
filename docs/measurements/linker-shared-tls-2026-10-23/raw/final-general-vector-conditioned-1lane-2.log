@@ -1,0 +1,51 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:14:06+00:00 CI job of buster14a/buster (run 39976500552, worker 3500431)
+  title: 9700X test / test: Complete preprocessor lookup accounting and independent scalar reference (#323)
+  link: https://github.com/buster14a/buster/actions/runs/39976500552/attempts/1
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:20:41+00:00 CI job of buster14a/buster (run 39977071335, worker 3557350)
+  title: 9700X test / test: #325: Add selective function and object emission planner (#129)
+  link: https://github.com/buster14a/buster/actions/runs/39977071335/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/325
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:23:48+00:00 CI job of buster14a/buster (run 39977794567, worker 3593109)
+  title: 9700X test / test: #349: Prune foreign unwind records with discarded COMDAT code
+  link: https://github.com/buster14a/buster/actions/runs/39977794567/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/349
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:26:55+00:00 CI job of buster14a/buster (run 39977855398, worker 3628763)
+  title: 9700X test / test: #350: Reject unsupported executable-stack requests from selected foreign objects
+  link: https://github.com/buster14a/buster/actions/runs/39977855398/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/350
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:30:02+00:00 CI job of buster14a/buster (run 39978650065, worker 3664741)
+  title: 9700X test / test: Add selective function and object emission planner (#325)
+  link: https://github.com/buster14a/buster/actions/runs/39978650065/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:36:38+00:00 CI job of buster14a/buster (run 39978173038, worker 3722391)
+  title: 9700X test / test: #328: Add transactional pooling for eligible foreign string sections
+  link: https://github.com/buster14a/buster/actions/runs/39978173038/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/328
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:39:45+00:00 CI job of buster14a/buster (run 39978053699, worker 3758984)
+  title: 9700X test / test: #339: Add builtin semantic actions and baseline runtime adapters
+  link: https://github.com/buster14a/buster/actions/runs/39978053699/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/339
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:42:57+00:00 CI job of buster14a/buster (run 39979944885, worker 3797657)
+  title: 9700X test / test: #351: Add optional regular symbol tables to native executable output
+  link: https://github.com/buster14a/buster/actions/runs/39979944885/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/351
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:46:05+00:00 CI job of buster14a/buster (run 39980966110, worker 3834100)
+  title: 9700X test / test: Add builtin semantic actions and baseline runtime adapters (#339)
+  link: https://github.com/buster14a/buster/actions/runs/39980966110/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 
+Each complete writer sample after 100 ms of scalar fixup classification.
+64 workers, bound against the shared library's runtime and written as a shared library: 284 atoms, 1064 fixups, 13858 bytes of code, 172 dynamic symbols, 235 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 43 stubs, a 39928-byte file in 1 chunks, 1 lane:
+  replace         19.9 us ( 2.00 GB/s): count 3.5 layout 1.5 symbols 1.1 dynamic 1.5 open 1.5 chunks 8.3 finish 2.6
+  new file        18.5 us ( 2.16 GB/s): count 3.4 layout 1.5 symbols 1.1 dynamic 1.5 open 1.6 chunks 8.2 finish 1.1
+  general-dynamic TLS: 64 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place         1.3 us (31.64 GB/s): the floor, one pwrite
+  new file         3.3 us (12.26 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 365516 atoms, 2702790 fixups, 37410098 bytes of code, 450012 dynamic symbols, 605636 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113885 stubs, a 93509416-byte file in 357 chunks, 1 lane:
+  replace      43807.7 us ( 2.13 GB/s): count 7481.3 layout 1816.4 symbols 1812.2 dynamic 6868.4 open 78.3 chunks 23409.4 finish 2417.9
+  new file     42002.9 us ( 2.23 GB/s): count 7474.7 layout 1819.6 symbols 1820.9 dynamic 6843.4 open 77.9 chunks 23968.1 finish 13.8
+  general-dynamic TLS: 180000 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place      7143.8 us (13.09 GB/s): the floor, one pwrite
+  new file     12472.7 us ( 7.50 GB/s): the floor, one pwrite
+peak_rss_kib 375204
+user_seconds 11.234016
+system_seconds 0.684846
