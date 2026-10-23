@@ -301,8 +301,10 @@ static void check_builtins(TypeTable* table, const CheckBuiltinAction* actions, 
                     }
                     else
                     {
+                        const bool unevaluated = batch.statuses[lane] == CBUILTIN_UNDEFINED && (result->action.value.flags & BUSTER_CHECK_ICE) != 0;
                         check_action_set_fault(&result->action.value, CHECK_FAULT_UNSUPPORTED_CONSTANT, actions[begin + lane].node);
                         result->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED);
+                        result->action.value.flags |= unevaluated ? BUSTER_CHECK_ICE_UNEVALUATED : 0;
                     }
                 }
             }

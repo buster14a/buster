@@ -110,8 +110,22 @@ static void check_builtin_test_fixtures(CheckBuiltinTest* test, TypeTable* table
         result = check_builtin_test_action(test, table, action);
         check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == CBUILTIN_UNDEFINED &&
                                   result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.action.value.fault == CHECK_FAULT_UNSUPPORTED_CONSTANT &&
-                                  result.action.value.fault_node == action.node && (result.action.value.flags & BUSTER_CHECK_ICE) == 0,
+                                  result.action.value.fault_node == action.node && (result.action.value.flags & BUSTER_CHECK_ICE) == 0 &&
+                                  (result.action.value.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0,
                                   "zero search retains a deferred evaluation fault instead of a folded width");
+        const CheckAction conditional = {
+            .op = CHECK_OP_CONDITIONAL,
+            .operands = {
+                check_test_integer(BUSTER_TYPE_INT, 1),
+                check_test_integer(BUSTER_TYPE_INT, 3),
+                result.action.value,
+            },
+        };
+        CheckActionResult selected;
+        check_action_scalar(table, &conditional, &selected);
+        check_builtin_test_expect(test, selected.diagnostic == CHECK_DIAG_NONE && selected.value.fault == CHECK_FAULT_NONE &&
+                                  selected.value.integer == 3 && (selected.value.flags & BUSTER_CHECK_ICE) != 0,
+                                  "an unevaluated undefined builtin does not invalidate the selected constant arm");
     }
     action.id = CBUILTIN_POPCOUNT;
     action.operands[0] = check_test_integer(BUSTER_TYPE_INT, 1);
@@ -462,6 +476,7 @@ static void check_builtin_test_clang(CheckBuiltinTest* test, const char* clang)
         "void f(void) { __builtin_popcount(1,2); }\n",
         "void f(void) { __builtin_add_overflow(1,2); }\n",
         "void f(void) { __builtin_popcount((int*)0); }\n",
+        "enum { A=sizeof(__builtin_ctz(0)), B=1?3:__builtin_clz(0) }; _Static_assert(B==3, \"unevaluated builtin\");\n",
     };
     const bool rejected[] = {
         false,
@@ -475,6 +490,7 @@ static void check_builtin_test_clang(CheckBuiltinTest* test, const char* clang)
         true,
         true,
         true,
+        false,
     };
     char directory[] = "/tmp/buster-check-builtins-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
