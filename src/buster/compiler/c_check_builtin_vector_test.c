@@ -343,6 +343,100 @@ static void check_builtin_vector_test_shuffle(CheckBuiltinVectorTest* test, Type
         "shufflevector checks raw vector operands before atomic lvalue conversion");
 }
 
+static void check_builtin_vector_test_shuffle_ice(CheckBuiltinVectorTest* test, TypeTable* table)
+{
+    const TypeId vector = type_vector(table, BUSTER_TYPE_INT, 4, false);
+    CheckValue arguments[3] = { check_builtin_vector_test_value(vector), check_builtin_vector_test_value(vector), check_test_integer(BUSTER_TYPE_INT, 0) };
+    uint8_t witness = CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT;
+    CheckBuiltinVectorAction action = { .id = CBUILTIN_SHUFFLEVECTOR, .arguments = arguments, .argument_count = 3,
+        .shuffle_index_ice = &witness, .shuffle_index_ice_count = 1 };
+    CheckBuiltinVectorResult result;
+    arguments[2].flags &= ~BUSTER_CHECK_ICE;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.lane_count == 1 && result.evaluated_argument_count == 2,
+        "an explicit strict source-ICE witness is independent of the local ICE flag");
+    witness = CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU;
+    arguments[2].flags |= BUSTER_CHECK_ICE;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.constraint == CHECK_BUILTIN_VECTOR_CONSTRAINT_ICE,
+        "a GNU source-ICE witness requires explicit permission even when a local ICE bit is present");
+    action.allow_gnu_index_ice = true;
+    arguments[2].flags &= ~BUSTER_CHECK_ICE;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.warnings == 0,
+        "permitted GNU source ICE carries no duplicate source-owned warning metadata");
+    witness = CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE;
+    arguments[2].flags |= BUSTER_CHECK_ICE;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 2 &&
+        result.constraint == CHECK_BUILTIN_VECTOR_CONSTRAINT_ICE, "an explicit NONE witness overrides the local ICE fallback");
+    witness = UINT8_MAX;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE && result.action.diagnostic_operand == 2,
+        "unknown source-ICE witness bytes are rejected at the exact index");
+    for (uint32_t proof = CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT; proof <= CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU; proof += 1)
+    {
+        witness = (uint8_t)proof;
+        for (uint32_t invalid = 0; invalid < 5; invalid += 1)
+        {
+            arguments[2] = check_test_integer(BUSTER_TYPE_INT, invalid == 3 ? 8 : 0);
+            if (invalid == 0)
+            {
+                arguments[2].type = BUSTER_TYPE_DOUBLE;
+            }
+            else if (invalid == 1)
+            {
+                arguments[2].flags |= BUSTER_CHECK_SIDE_EFFECT;
+            }
+            else if (invalid == 2)
+            {
+                arguments[2].fault = CHECK_FAULT_SHIFT_COUNT;
+            }
+            else if (invalid == 4)
+            {
+                arguments[2].type = 0;
+            }
+            check_builtin_vector_one(table, &action, &result);
+            check_builtin_vector_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE && result.action.diagnostic_operand == 2 &&
+                (invalid != 3 || result.constraint == CHECK_BUILTIN_VECTOR_CONSTRAINT_RANGE),
+                "source-ICE witnesses never bypass integer type, effects, faults, range or validity checks");
+        }
+        arguments[2] = check_test_integer(BUSTER_TYPE_INT, 0);
+        arguments[2].constant_kind = CHECK_CONSTANT_NONE;
+        check_builtin_vector_one(table, &action, &result);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE &&
+            (result.unsupported & BUSTER_CHECK_BUILTIN_VECTOR_UNSUPPORTED_INDEX) != 0,
+            "source ICE without an integer payload retains the explicit range-validation gap");
+        arguments[2].constant_kind = CHECK_CONSTANT_INTEGER;
+        arguments[2].fault = CHECK_FAULT_UNSUPPORTED_CONSTANT;
+        check_builtin_vector_one(table, &action, &result);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE &&
+            (result.unsupported & BUSTER_CHECK_BUILTIN_VECTOR_UNSUPPORTED_INDEX) != 0,
+            "source ICE with an unsupported payload fault retains the explicit range-validation gap");
+    }
+    arguments[2] = check_test_integer(BUSTER_TYPE_INT, 0);
+    const uint32_t wrong_counts[] = { 0, 2, UINT32_MAX };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(wrong_counts); i += 1)
+    {
+        action.shuffle_index_ice_count = wrong_counts[i];
+        check_builtin_vector_one(table, &action, &result);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT,
+            "a supplied source-ICE slice must cover exactly the scalar shuffle indices");
+    }
+    action.shuffle_index_ice = NULL;
+    action.shuffle_index_ice_count = 1;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "a nonempty source-ICE slice requires storage");
+    action.shuffle_index_ice_count = 0;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "NULL/zero keeps the existing strict local-ICE fallback");
+    action.shuffle_index_ice = &witness;
+    action.argument_count = 2;
+    check_builtin_vector_one(table, &action, &result);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.lane_count == 4,
+        "the vector-mask shuffle form never reads an empty witness slice");
+}
+
 static void check_builtin_vector_test_memory(CheckBuiltinVectorTest* test, TypeTable* table)
 {
     const TypeId integer = type_vector(table, BUSTER_TYPE_INT, 4, false);
@@ -495,12 +589,15 @@ static void check_builtin_vector_test_pages(CheckBuiltinVectorTest* test, TypeTa
     const long page_value = sysconf(_SC_PAGESIZE);
     const size_t page = page_value > 0 ? (size_t)page_value : 0;
     const size_t arguments_region = page != 0 ? ((66 * sizeof(CheckValue) + 16 + page - 1) / page) * page : 0;
+    const size_t witness_region = page != 0 ? ((64 + 16 + page - 1) / page) * page : 0;
     const size_t input_region = page != 0 ? ((33 * sizeof(CheckBuiltinVectorAction) + 16 + page - 1) / page) * page : 0;
     const size_t output_region = page != 0 ? ((33 * sizeof(CheckBuiltinVectorResult) + 16 + page - 1) / page) * page : 0;
     uint8_t* argument_mapping = page != 0 ? mmap(NULL, arguments_region + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    uint8_t* witness_mapping = page != 0 ? mmap(NULL, witness_region + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
     uint8_t* input_mapping = page != 0 ? mmap(NULL, input_region + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
     uint8_t* output_mapping = page != 0 ? mmap(NULL, output_region + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-    const bool ready = argument_mapping != MAP_FAILED && input_mapping != MAP_FAILED && output_mapping != MAP_FAILED &&
+    const bool ready = argument_mapping != MAP_FAILED && witness_mapping != MAP_FAILED && input_mapping != MAP_FAILED && output_mapping != MAP_FAILED &&
+        mprotect(witness_mapping + witness_region, page, PROT_NONE) == 0 &&
         mprotect(argument_mapping + arguments_region, page, PROT_NONE) == 0 && mprotect(input_mapping + input_region, page, PROT_NONE) == 0 &&
         mprotect(output_mapping + output_region, page, PROT_NONE) == 0;
     check_builtin_vector_test_expect(test, ready, "guarded arguments/action/result allocation");
@@ -521,15 +618,54 @@ static void check_builtin_vector_test_pages(CheckBuiltinVectorTest* test, TypeTa
             CheckBuiltinVectorResult result = check_builtin_vector_test_action(table, CBUILTIN_SHUFFLEVECTOR, arguments, count);
             check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.lane_count == (count == 2 ? 4 : count - 2),
                 "arbitrary-length shuffle slices stop exactly before a protected page");
+            uint8_t* witnesses = witness_mapping + witness_region - (count - 2);
+            for (uint32_t i = 2; i < count; i += 1)
+            {
+                arguments[i].flags &= ~BUSTER_CHECK_ICE;
+                witnesses[i - 2] = CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT;
+            }
+            CheckBuiltinVectorAction witnessed = { .id = CBUILTIN_SHUFFLEVECTOR, .arguments = arguments, .argument_count = count,
+                .shuffle_index_ice = witnesses, .shuffle_index_ice_count = count - 2 };
+            check_builtin_vector_one(table, &witnessed, &result);
+            check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.lane_count == (count == 2 ? 4 : count - 2),
+                "source-ICE witnesses end exactly at a protected page without local ICE flags or padding");
             if (count > 2)
             {
+                witnesses[count - 3] = CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU;
+                check_builtin_vector_one(table, &witnessed, &result);
+                check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == count - 1 &&
+                    result.constraint == CHECK_BUILTIN_VECTOR_CONSTRAINT_ICE, "the last guarded GNU witness still requires permission");
+                witnessed.allow_gnu_index_ice = true;
+                check_builtin_vector_one(table, &witnessed, &result);
+                check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "permitted GNU witnesses retain the complete guarded index slice");
+                witnesses[count - 3] = CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE;
+                check_builtin_vector_one(table, &witnessed, &result);
+                check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == count - 1,
+                    "the final guarded NONE witness is consumed rather than silently truncated");
+                witnesses[count - 3] = CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT;
                 arguments[count - 1] = check_test_integer(BUSTER_TYPE_INT, 8);
-                result = check_builtin_vector_test_action(table, CBUILTIN_SHUFFLEVECTOR, arguments, count);
+                check_builtin_vector_one(table, &witnessed, &result);
                 check_builtin_vector_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE && result.action.diagnostic_operand == count - 1,
                     "guarded last shuffle index is validated rather than silently truncated");
             }
         }
         const CheckValue* inaccessible = (const CheckValue*)(argument_mapping + arguments_region);
+        const uint8_t* inaccessible_witness = witness_mapping + witness_region;
+        const CheckBuiltinVectorAction malformed[] =
+        {
+            { .id = CBUILTIN_SHUFFLEVECTOR, .arguments = inaccessible, .argument_count = 3, .shuffle_index_ice_count = 1 },
+            { .id = CBUILTIN_SHUFFLEVECTOR, .arguments = inaccessible, .argument_count = 3, .shuffle_index_ice = inaccessible_witness },
+            { .id = CBUILTIN_SHUFFLEVECTOR, .arguments = inaccessible, .argument_count = 3, .shuffle_index_ice = inaccessible_witness, .shuffle_index_ice_count = 2 },
+            { .id = CBUILTIN_SHUFFLEVECTOR, .arguments = inaccessible, .argument_count = UINT32_MAX, .shuffle_index_ice = inaccessible_witness, .shuffle_index_ice_count = UINT32_MAX },
+            { .id = CBUILTIN_SHUFFLEVECTOR, .arguments = inaccessible, .argument_count = 0, .shuffle_index_ice = inaccessible_witness, .shuffle_index_ice_count = UINT32_MAX },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(malformed); i += 1)
+        {
+            CheckBuiltinVectorResult result;
+            check_builtin_vector_one(table, malformed + i, &result);
+            check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT,
+                "malformed witness pointer/count/full-index bounds are rejected before protected arguments or witness bytes are read");
+        }
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_builtin_vector_test_cases); i += 1)
         {
             const CheckBuiltinVectorTestCase fixture = check_builtin_vector_test_cases[i];
@@ -540,6 +676,18 @@ static void check_builtin_vector_test_pages(CheckBuiltinVectorTest* test, TypeTa
         }
         CheckValue values[3] = { check_builtin_vector_test_value(vector), check_builtin_vector_test_value(vector),
             check_builtin_vector_test_value(type_pointer(table, vector)) };
+        CheckValue shuffle_arguments[6] = { check_builtin_vector_test_value(vector), check_builtin_vector_test_value(vector) };
+        for (uint32_t i = 2; i < BUSTER_ARRAY_LENGTH(shuffle_arguments); i += 1)
+        {
+            shuffle_arguments[i] = check_test_integer(BUSTER_TYPE_INT, i - 2);
+            shuffle_arguments[i].flags &= ~BUSTER_CHECK_ICE;
+        }
+        const uint8_t witnesses[3][4] =
+        {
+            { CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT },
+            { CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT },
+            { CHECK_BUILTIN_VECTOR_INDEX_ICE_NONE, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT, CHECK_BUILTIN_VECTOR_INDEX_ICE_STRICT },
+        };
         const CBuiltinId ids[] = { CBUILTIN_ELEMENTWISE_ADD_SAT, CBUILTIN_SHUFFLEVECTOR, CBUILTIN_CONVERTVECTOR, CBUILTIN_REDUCE_ADD,
             CBUILTIN_NONTEMPORAL_LOAD, CBUILTIN_NONDETERMINISTIC_VALUE };
         check_builtin_vector(NULL, NULL, NULL, 0);
@@ -555,6 +703,14 @@ static void check_builtin_vector_test_pages(CheckBuiltinVectorTest* test, TypeTa
                 actions[i] = (CheckBuiltinVectorAction){ .id = id, .arguments = id == CBUILTIN_NONTEMPORAL_LOAD ? values + 2 : values,
                     .argument_count = id == CBUILTIN_ELEMENTWISE_ADD_SAT || id == CBUILTIN_SHUFFLEVECTOR ? 2 : 1,
                     .destination_type = type_vector(table, BUSTER_TYPE_FLOAT, 4, true) };
+                if (id == CBUILTIN_SHUFFLEVECTOR)
+                {
+                    actions[i].arguments = shuffle_arguments;
+                    actions[i].argument_count = BUSTER_ARRAY_LENGTH(shuffle_arguments);
+                    actions[i].shuffle_index_ice = witnesses[(i / BUSTER_ARRAY_LENGTH(ids)) % BUSTER_ARRAY_LENGTH(witnesses)];
+                    actions[i].shuffle_index_ice_count = BUSTER_ARRAY_LENGTH(witnesses[0]);
+                    actions[i].allow_gnu_index_ice = ((i / BUSTER_ARRAY_LENGTH(ids)) & 1) != 0;
+                }
                 check_builtin_vector_one(table, actions + i, expected + i);
             }
             check_builtin_vector(table, actions, outputs, count);
@@ -586,6 +742,10 @@ static void check_builtin_vector_test_pages(CheckBuiltinVectorTest* test, TypeTa
     if (argument_mapping != MAP_FAILED)
     {
         munmap(argument_mapping, arguments_region + page);
+    }
+    if (witness_mapping != MAP_FAILED)
+    {
+        munmap(witness_mapping, witness_region + page);
     }
     if (input_mapping != MAP_FAILED)
     {
@@ -753,6 +913,9 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
         { "enum E{A=-1}; void f(enum E a){ (void)__builtin_elementwise_abs(a); (void)__builtin_elementwise_popcount(a); }", NULL, false },
         { "enum E{A=-1}; void f(enum E a){ (void)__builtin_elementwise_min(a,a); }", NULL, true },
         { "void f(ef*p,double _Complex a){ __builtin_nontemporal_store(a,p); }", NULL, true },
+        { "void f(vi a){ (void)__builtin_shufflevector(a,a,1 << -1); }", NULL, false },
+        { "void f(vi a){ (void)__builtin_shufflevector(a,a,1 << -1); }", "-Werror=shift-count-negative", true },
+        { "void f(vi a){ (void)__builtin_shufflevector(a,a,0); }", "-Werror=shift-count-negative", false },
     };
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
@@ -831,6 +994,7 @@ static __attribute__((unused)) int run_check_builtin_vector_tests(int argc, char
             check_builtin_vector_test_names(&test, &types.table);
             check_builtin_vector_test_math(&test, &types.table);
             check_builtin_vector_test_shuffle(&test, &types.table);
+            check_builtin_vector_test_shuffle_ice(&test, &types.table);
             check_builtin_vector_test_memory(&test, &types.table);
             check_builtin_vector_test_fp_effects(&test, &types.table);
             check_builtin_vector_test_pages(&test, &types.table);
