@@ -132,6 +132,10 @@ struct ImportObject
 {
     AtomId* section_atoms;
     uint32_t section_count;
+    // First exact .note.GNU-stack with SHF_EXECINSTR, by original section index; 0 for no explicit request.
+    // This is an input requirement, even for a non-ALLOC, excluded or COMDAT-discarded marker. Final consumers must
+    // honor it or refuse the input; neither dropping the marker nor collecting its object's code clears it.
+    uint32_t executable_stack_section;
     SymbolId* symbols;
     uint32_t symbol_count;
     ImportGroup* groups;
@@ -495,7 +499,7 @@ static bool import_table(const Elf64_Shdr* header, uint64_t entry_size, uint64_t
 // The bytes of a section's name the section pass compares: the longest of import_section_patterns fits.
 #define BUSTER_IMPORT_PATTERN_BYTES 16
 
-// The section names the classes depend on (import_section_class), each with how many of its bytes a name must match:
+// The section names the classes and input metadata depend on, each with how many of its bytes a name must match:
 // all of them and the NUL, or for .data.rel.ro, .ctors and .dtors, a prefix.
 typedef enum ImportPattern
 {
@@ -508,6 +512,7 @@ typedef enum ImportPattern
     IMPORT_PATTERN_FINI_ARRAY,
     IMPORT_PATTERN_CTORS,
     IMPORT_PATTERN_DTORS,
+    IMPORT_PATTERN_GNU_STACK,
     IMPORT_PATTERNS,
 } ImportPattern;
 
@@ -521,6 +526,7 @@ static const char import_section_patterns[IMPORT_PATTERNS][BUSTER_IMPORT_PATTERN
     [IMPORT_PATTERN_FINI_ARRAY] = ".fini_array",
     [IMPORT_PATTERN_CTORS] = ".ctors",
     [IMPORT_PATTERN_DTORS] = ".dtors",
+    [IMPORT_PATTERN_GNU_STACK] = ".note.GNU-stack",
 };
 
 static const uint8_t import_section_pattern_bytes[IMPORT_PATTERNS] = {
@@ -533,6 +539,7 @@ static const uint8_t import_section_pattern_bytes[IMPORT_PATTERNS] = {
     [IMPORT_PATTERN_FINI_ARRAY] = sizeof(".fini_array"),
     [IMPORT_PATTERN_CTORS] = sizeof(".ctors") - 1,
     [IMPORT_PATTERN_DTORS] = sizeof(".dtors") - 1,
+    [IMPORT_PATTERN_GNU_STACK] = sizeof(".note.GNU-stack"),
 };
 
 // A section without an init or fini array's priority.
@@ -810,6 +817,11 @@ static ImportResult import_sections(Link* link, const ImportElf* elf, uint32_t u
                 result.type = header.sh_type;
             }
             object->section_atoms[index] = atom;
+        }
+        if (result.error == IMPORT_ERROR_NONE && object->executable_stack_section == 0 && (header.sh_flags & SHF_EXECINSTR) != 0 &&
+            import_equal(name, import_section_patterns[IMPORT_PATTERN_GNU_STACK]))
+        {
+            object->executable_stack_section = index;
         }
     }
     return result;
@@ -1534,6 +1546,11 @@ static bool import_vector_sections(Link* link, const ImportElf* elf, uint32_t un
         result = failed == 0 && atom_count <= atoms->capacity - atoms->count;
         if (result)
         {
+            const uint32_t executable_stack = active & matches[IMPORT_PATTERN_GNU_STACK] & import_lanes_have(flags, SHF_EXECINSTR);
+            if (object->executable_stack_section == 0 && executable_stack != 0)
+            {
+                object->executable_stack_section = first + (uint32_t)__builtin_ctz(executable_stack);
+            }
             const uint32_t at = atoms->count;
             const __m512i bytes = _mm512_maskz_add_epi64((__mmask8)(classed & ~zero_fill & _mm512_test_epi64_mask(size, size)), file_base, offset);
             import_store8(atoms->class + at, _mm512_maskz_compress_epi64((__mmask8)classed, class), atom_count);
