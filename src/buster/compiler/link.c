@@ -1233,7 +1233,7 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     const bool shared = source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || source == BUSTER_LINK_SOURCE_FOREIGN_SHARED;
     const bool through_got = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
     const bool call = kind == BUSTER_LINK_FIXUP_CALL && (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
-    const bool reaches_shared = through_got || kind == BUSTER_LINK_FIXUP_ABS64 || call;
+    const bool reaches_shared = through_got || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_ABS64 || call;
     const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
     return (size_kind || tls_kind == tls_target) && (!local || absolute || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) &&
            (!shared || reaches_shared);
