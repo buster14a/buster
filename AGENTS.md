@@ -2868,6 +2868,8 @@ identifier must get the same id and every token the same leading-space bit, on:
   identifiers with paired changes in two lanes;
 - about 14,800 spellings where the same bit flipped in two lanes must change
   the hash;
+- four fixed paired keys that cancelled in the old hash's low half, requiring
+  separation after final mixing and distinct stable IDs;
 - the predefined names, every name's keyword answer in each of the ten modes
   from `c89` to `gnu23` and in five of them with `-fgnu-keywords` or
   `-fno-gnu-keywords` (#281), and 24 spellings chosen apart from the predefined

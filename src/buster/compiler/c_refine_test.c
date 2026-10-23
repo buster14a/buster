@@ -10,16 +10,20 @@
 //
 // main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c, and calls run_refinement_tests for
 // that command. The checks, in this order:
+//   - probe: every combination of matching prefix dwords in a guarded four-slot bucket, including misses and multiple
+//     candidates, returns the first matching id or zero.
 //   - hash: intern_hash_bytes, intern_hash_vector up to 64 bytes, and intern_hash_vectors4_short up to 32 (four at a
 //     time, with their first lanes), agree with intern_hash_bytes_scalar on random spellings of every length from 0 to
 //     200 bytes.
 //   - structured hashes: long spellings made of repeated or swapped 64-byte chunks and 16-byte lanes, and 32-byte ones
-//     whose two lanes change in bits their rotations line up, all hash differently; and a bit flipped in one lane with
-//     the bit its rotation lines up with in another always changes the hash.
+//     whose two lanes change in bits their rotations line up, all hash differently; selected paired bit flips must
+//     change the hash too. Four fixed pairs catch cancellation in the low half before the final mixing round.
 //   - names: every predefined name has its C_NAME id and spelling, and is a keyword in exactly the language modes
 //     clang makes it one in (every name in every mode from c89 to gnu23).
 //   - table: random spellings of 1 to 200 bytes, enough to grow the table three times, get ids in the order they are
 //     first added, and the same id again; absent ones aren't found.
+//   - batch growth: new names, preceding-batch repeats and long common-prefix names cross eight growth boundaries,
+//     with every variant retaining the scalar and independent oracle's ids.
 //   - fixtures: the boundary cases of docs/c-refinement.md, each with the leading-space bits and identifier equalities
 //     it must have, at each of the 64 misalignments from a cache line: line splices between tokens (with and without
 //     whitespace, \r\n, trigraphs), comments, identifiers spliced and written with UCNs, long identifiers and
@@ -665,6 +669,52 @@ static bool refine_check_aligned_flips(uint64_t* random)
     }
     printf("aligned flips: %lu of %u hashes unchanged and %lu differences\n", (unsigned long)unchanged, tried, (unsigned long)differences);
     return unchanged == 0 && differences == 0;
+}
+
+// Two lane changes can cancel in the low half of the old fold while changing its high half. Mix that complete fold
+// before truncation. The short cases are valid identifiers; seed 116 found the longer raw-key case independently.
+static bool refine_check_fold_mixing(void)
+{
+    static const uint32_t lengths[] = {
+        46,
+        47,
+        48,
+        167,
+    };
+    uint8_t before[167];
+    uint8_t after[167];
+    uint64_t failures = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(lengths); i += 1)
+    {
+        const uint32_t length = lengths[i];
+        const bool long_key = length == 167;
+        memset(before, long_key ? 'e' : 'b', length);
+        before[0] = long_key ? 'e' : 'a';
+        const uint32_t first = long_key ? 133 : 2;
+        const uint32_t second = long_key ? 165 : 34;
+        const uint8_t bit = long_key ? 2 : 8;
+        before[second] = long_key ? 6 : 'k';
+        memcpy(after, before, length);
+        after[first] ^= bit;
+        after[second] ^= bit;
+        const uint64_t before_hash = intern_hash_bytes_scalar(before, length);
+        const uint64_t after_hash = intern_hash_bytes_scalar(after, length);
+        bool passed = before_hash != after_hash && intern_hash_bytes(before, length) == before_hash && intern_hash_bytes(after, length) == after_hash;
+        InternTable table;
+        const bool initialized = intern_initialize(&table);
+        passed &= initialized;
+        if (initialized)
+        {
+            const IdentId before_id = intern_find_or_add(&table, before, length);
+            const IdentId after_id = intern_find_or_add(&table, after, length);
+            passed &= before_id != 0 && after_id != 0 && before_id != after_id;
+            passed &= intern_find(&table, before, length) == before_id && intern_find(&table, after, length) == after_id;
+            intern_release(&table);
+        }
+        failures += !passed;
+    }
+    printf("fold mixing: %lu failures in %lu paired keys\n", (unsigned long)failures, (unsigned long)BUSTER_ARRAY_LENGTH(lengths));
+    return failures == 0;
 }
 
 
@@ -1477,6 +1527,7 @@ static int run_refinement_tests(int argument_count, char** arguments)
         passed &= refine_check_hash(&random);
         passed &= refine_check_long_hashes(&random);
         passed &= refine_check_aligned_flips(&random);
+        passed &= refine_check_fold_mixing();
         passed &= refine_check_names(&state.scalar_table);
         passed &= refine_check_table(&random);
         passed &= refine_check_batch_growth();

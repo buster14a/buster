@@ -135,7 +135,7 @@ jobs:
         # Temporary #116 experiment. The normal runner hooks hold the host lock for this whole CI job.
         # Remove this branch-only step before merging the selected implementation.
         if: github.head_ref == 'codex/116-refinement-budget'
-        timeout-minutes: 4
+        timeout-minutes: 6
         run: |
           set -euo pipefail
           evidence=docs/measurements/refinement-budget-2026-10-23
@@ -151,19 +151,28 @@ jobs:
           uname -srvmo
           cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor /sys/devices/system/cpu/cpu10/online
           executables=()
-          for variant in base compress batch4 fused4 bitmap short16 outline combined; do
+          for variant in base finalmix compress batch4 ahead2 ahead4; do
               overlay="build/refine116/$variant"
               mkdir -p "$overlay/buster/compiler"
               cp src/buster/compiler/c_refine.c "$overlay/buster/compiler/c_refine.c"
-              if [ "$variant" != base ]; then
+              cp src/buster/compiler/c_intern.c "$overlay/buster/compiler/c_intern.c"
+              if [ "$variant" = base ]; then
+                  patch --fuzz=0 "$overlay/buster/compiler/c_intern.c" "$evidence/candidates/before-intern.patch"
+              elif [ "$variant" != finalmix ]; then
                   patch --fuzz=0 "$overlay/buster/compiler/c_refine.c" "$evidence/candidates/$variant.patch"
               fi
-              sha256sum "$overlay/buster/compiler/c_refine.c"
+              sha256sum "$overlay/buster/compiler/c_refine.c" "$overlay/buster/compiler/c_intern.c"
               clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
                   "$evidence/preprocessor-main.c" -o "build/refine116/pp-$variant"
               clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
-                  "$evidence/refinement-test-main.c" -o "build/refine116/test-$variant"
-              taskset -c 2 "build/refine116/test-$variant" --count 2000 --seed 42 src "$inputs/sqlite-3.53.4.c"
+                  "$evidence/refinement-main.c" -o "build/refine116/kernel-$variant"
+              # The old hash has a known seed-116/fixed-fold failure, recorded in hash-regression.md.
+              # It is a timing control, not a passing candidate. The first screen checked its semantics with seed 42.
+              if [ "$variant" != base ]; then
+                  clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
+                      "$evidence/refinement-test-main.c" -o "build/refine116/test-$variant"
+                  taskset -c 2 "build/refine116/test-$variant" --count 2000 --seed 116 src "$inputs/sqlite-3.53.4.c"
+              fi
               executables+=("build/refine116/pp-$variant")
           done
           sha256sum build/refine116/pp-*
@@ -172,6 +181,17 @@ jobs:
               -- --only vectorized "$inputs/sqlite-3.53.2.c" \
               -- --only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c \
               | tee build/refine116/screen.txt
+          ./build/compiler ab --rounds 3 --cpu 2 build/refine116/kernel-{base,finalmix,compress,batch4,ahead2,ahead4} \
+              -- --only refine_tokens_64 "$inputs/sqlite-3.53.4.c" \
+              -- --only refine_tokens_64 --after-scalar 100 "$inputs/sqlite-3.53.4.c" \
+              | tee build/refine116/kernels.txt
+          for variant in base finalmix ahead4; do
+              echo "Profile: $variant"
+              perf record -q -e cycles:u -c 20000 -o "build/refine116/$variant.perf" -- \
+                  taskset -c 2 "build/refine116/pp-$variant" --only vectorized "$inputs/sqlite-3.53.4.c"
+              perf report --stdio --no-children --sort symbol --percent-limit 1 -i "build/refine116/$variant.perf"
+              perf annotate --stdio --stdio-color never -s refine_pass_b_64_plain -i "build/refine116/$variant.perf" || true
+          done
 
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
