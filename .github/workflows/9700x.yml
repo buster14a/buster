@@ -322,6 +322,12 @@ jobs:
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C.
           ./build/compiler test-tier0 --cross-check
+          == Test verified Tier 1 optimization passes
+          ./build/compiler test-ir-optimize
+          ./build/compiler test-ir-gvn
+          ./build/compiler test-ir-licm
+          ./build/compiler test-ir-sroa
+          ./build/compiler test-ir-inline
           == Test native fixed-frame CFI and generated GDB/perf consumers
           ./build/compiler test-unwind --cross-check
           == Test differential harness accounting, subprocesses and failure preservation
@@ -784,3 +790,11 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
+
+      - name: Benchmark the verified Tier 1 optimization passes
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
