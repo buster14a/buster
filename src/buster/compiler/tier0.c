@@ -120,7 +120,8 @@
 //     value stored (and pushes nothing). STORE_LOCAL and SET_LOCAL store the operand in local `value`, and
 //     STORE_GLOBAL and SET_GLOBAL in the object at SymbolId `value`, likewise.
 //   - CALL: call `value` of the calls table, which pops its arguments, the first pushed first, and pushes its result
-//     (of `class`, or nothing for VOID).
+//     (of `class`, or nothing for VOID). An indirect call (a calls table's target 0) pops, under its arguments, the
+//     address it calls (U64), which was pushed before them.
 //   - DISCARD: pops the operand (of `class`): an expression statement's value.
 //   - BRANCH_FALSE and BRANCH_TRUE: pop the operand (an integer of `class`) and go to entry `value` if it is zero, or
 //     isn't.
@@ -195,10 +196,11 @@
 
 // A function, as the front end hands it to Tier 0: the body's columns, the locals (parameters first, in order) with
 // their classes and flags, the parameters' locations at entry and the result's (abi_assign of the function's own type),
-// and the calls: call c's callee (a SymbolId), its arguments' locations and classes (call_first[c] onward, in
-// `argument_locations` and `argument_classes`, call_argument_counts[c] of them), whether it is variadic (al counts its
-// vector registers), and its totals (AbiCall), from abi_assign of the call's signature. The ABI's work is the front
-// end's, in one batch per unit (abi_assign is vectorized across calls), so Tier 0 needs no type table.
+// and the calls: call c's callee (a SymbolId, or 0 for an indirect call), its arguments' locations and classes
+// (call_first[c] onward, in `argument_locations` and `argument_classes`, call_argument_counts[c] of them), whether it
+// is variadic (al counts its vector registers), and its totals (AbiCall), from abi_assign of the call's signature. The
+// ABI's work is the front end's, in one batch per unit (abi_assign is vectorized across calls), so Tier 0 needs no type
+// table.
 //
 // The locals that are objects in the frame (arrays, structs and unions: anything that isn't one value of a class) are
 // optional columns, 0 for a function without objects: local_sizes[l] is local l's size in bytes, nonzero for an
@@ -701,6 +703,12 @@ static Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
 #define BUSTER_TIER0_WORD_A_SHIFT 50
 #define BUSTER_TIER0_WORD_B_SHIFT 53
 #define BUSTER_TIER0_WORD_NO_OFFSET 7ull
+// A word without holes (an absorbed entry's, a deferred slot's), whose lane emission expands and later records
+// overwrite: no K or its scale, and no A or B, so that the lane looks no home up by a value that isn't a local's (with
+// more than 32 locals, a gather from the homes at that value).
+#define BUSTER_TIER0_WORD_NO_HOLES \
+    (BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_K_SHIFT | BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_K_SCALE_SHIFT | \
+     BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_A_SHIFT | BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_B_SHIFT)
 #define BUSTER_TIER0_WORD_HOME_UNIFORM (1ull << 56)
 #define BUSTER_TIER0_WORD_ABSORBED (1ull << 57)
 #define BUSTER_TIER0_WORD_ROW_SHIFT 58
@@ -2124,6 +2132,7 @@ static void tier0_raw_effects(const Tier0Function* function, uint32_t i, int32_t
         {
             counts[tier0_stack(function->argument_classes[first + a])] -= 1;
         }
+        counts[1] -= function->call_targets[call] == 0 ? 1 : 0;
         counts[tier0_stack(class)] += 1;
     }
     else
@@ -3132,13 +3141,15 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
     }
 }
 
-// A call: the depths below its arguments saved, the stack arguments stored, the register ones moved into place (al for
-// a variadic call), the call, the result moved to its depth, and the saved depths restored.
+// A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
+// ones moved into place, with an indirect call's callee into r11 (no argument's register, nor al's), al for a variadic
+// call, the call, the result moved to its depth, and the saved depths restored.
 static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t call = (uint32_t)function->values[i];
     const uint32_t first = function->call_first[call];
     const uint32_t count = function->call_argument_counts[call];
+    const bool indirect = function->call_targets[call] == 0;
     uint32_t integer_arguments = 0;
     uint32_t floating_arguments = 0;
     for (uint32_t a = 0; a < count; a += 1)
@@ -3147,7 +3158,9 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
         integer_arguments += floating ? 0 : 1;
         floating_arguments += floating ? 1 : 0;
     }
-    const uint32_t below = entries->depths[i] - integer_arguments;
+    // An indirect call's callee is at depth `below`, under its arguments, where the result goes.
+    const uint32_t below = entries->depths[i] - integer_arguments - (indirect ? 1 : 0);
+    const uint32_t arguments_base = below + (indirect ? 1 : 0);
     const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
     // The depths below the arguments in callee-saved registers survive the call by themselves.
     const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
@@ -3159,8 +3172,8 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
     {
         tier0_spill(writer, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), false);
     }
-    uint8_t to[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
-    uint8_t from[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+    uint8_t to[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
+    uint8_t from[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
     uint32_t moves = 0;
     uint32_t integer = 0;
     uint32_t floating = 0;
@@ -3169,7 +3182,7 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
         const uint32_t class = function->argument_classes[first + a];
         const AbiLocation location = function->argument_locations[first + a];
         const bool is_floating = tier0_class_floating(class);
-        const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[below + integer];
+        const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[arguments_base + integer];
         integer += is_floating ? 0 : 1;
         floating += is_floating ? 1 : 0;
         tier0_extend(writer, class, source);
@@ -3186,23 +3199,36 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
             moves += 1;
         }
     }
+    if (indirect)
+    {
+        to[moves] = X86_REGISTER_R11;
+        from[moves] = tier0_integer_depths[below];
+        moves += 1;
+    }
     tier0_parallel_moves(writer, to, from, moves);
     if (function->call_variadic[call])
     {
         tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
     }
-    if (writer->records != 0)
+    if (indirect)
     {
-        writer->references[writer->reference_count] = (LinkReference){
-            .instruction = writer->count,
-            .field = X86_FIXUP_DISPLACEMENT,
-            .kind = BUSTER_LINK_FIXUP_CALL,
-            .target = function->call_targets[call],
-            .addend = 0,
-        };
+        tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
     }
-    writer->reference_count += 1;
-    tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    else
+    {
+        if (writer->records != 0)
+        {
+            writer->references[writer->reference_count] = (LinkReference){
+                .instruction = writer->count,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_CALL,
+                .target = function->call_targets[call],
+                .addend = 0,
+            };
+        }
+        writer->reference_count += 1;
+        tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    }
     const uint32_t result = tier0_stack(function->classes[i]);
     if (result == 1 && below != 0)
     {
@@ -3359,9 +3385,10 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
         const uint32_t first = function->call_first[call];
         const uint32_t arguments = function->call_argument_counts[call];
         // One pass from the last argument back: an argument's register is its stack's depth less the arguments of its
-        // stack after it, so the counts before it aren't needed first.
-        uint8_t to[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
-        uint8_t from[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+        // stack after it, so the counts before it aren't needed first. An indirect call's callee is past the first.
+        const bool indirect = function->call_targets[call] == 0;
+        uint8_t to[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
+        uint8_t from[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
         uint32_t moves = 0;
         uint32_t integer_after = 0;
         uint32_t floating_after = 0;
@@ -3385,7 +3412,12 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
             moves += move ? 1 : 0;
             count += stack ? 1 : 0;
         }
-        const uint32_t below = depth - integer_after;
+        const uint32_t below = depth - integer_after - (indirect ? 1 : 0);
+        // (A direct call's `below` may be past the table: no move reads it then.)
+        const uint8_t callee = indirect ? tier0_integer_depths[below] : X86_REGISTER_R11;
+        to[moves] = X86_REGISTER_R11;
+        from[moves] = callee;
+        moves += callee != X86_REGISTER_R11 ? 1 : 0;
         const uint32_t floating_below = floating_depth - floating_after;
         const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
         count += 2 * (saved + floating_below);
@@ -3423,7 +3455,7 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
         count += 1;
         const uint32_t result = tier0_stack(function->classes[i]);
         count += (result == 1 && below != 0) || (result == 2 && floating_below != 0) ? 1 : 0;
-        *references += 1;
+        *references += indirect ? 0 : 1;
     }
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
@@ -3611,7 +3643,7 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
                         integer_arguments += is_floating ? 0 : 1;
                         floating_arguments += is_floating ? 1 : 0;
                     }
-                    const int32_t below = depth - (int32_t)integer_arguments;
+                    const int32_t below = depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
                     const int32_t floating_below = floating - (int32_t)floating_arguments;
                     const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? (uint32_t)below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
                     const uint32_t slots = saved + (uint32_t)floating_below;
@@ -4354,6 +4386,10 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                         tier0_reject(&validator, i, "a call's argument of another class");
                     }
                 }
+                if (function->call_targets[value] == 0 && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64)
+                {
+                    tier0_reject(&validator, i, "an indirect call's callee that isn't U64");
+                }
                 if (class != BUSTER_TYPED_CLASS_VOID)
                 {
                     tier0_push(&validator, class);
@@ -5089,7 +5125,7 @@ static bool tier0_build_words(void)
                 uint64_t word = BUSTER_TIER0_WORD_UNSUPPORTED;
                 if (slot == BUSTER_TIER0_SLOT_DEFERRED)
                 {
-                    word = BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ANY_DEPTH << BUSTER_TIER0_WORD_DEPTH_SHIFT;
+                    word = BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_NO_HOLES | BUSTER_TIER0_WORD_ANY_DEPTH << BUSTER_TIER0_WORD_DEPTH_SHIFT;
                 }
                 else if (slot != BUSTER_TIER0_SLOT_UNSUPPORTED)
                 {
@@ -5200,7 +5236,7 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
         const __m256i slot = _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(kind, 9), _mm256_slli_epi32(class, 5)), variant);
         const __m128i taken = _mm_maskz_loadu_epi8(lanes, absorbed + first);
         const __mmask8 own = lanes & (__mmask8)_mm_testn_epi8_mask(taken, taken);
-        __m512i word = _mm512_mask_i32gather_epi64(_mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_ABSORBED), own, slot, tier0_slot_words, 8);
+        __m512i word = _mm512_mask_i32gather_epi64(_mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_NO_HOLES)), own, slot, tier0_slot_words, 8);
         const __m512i depth = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, depths + first));
         const __m512i floating = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, floating_depths + first));
         const __m512i required = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_DEPTH_SHIFT), fifteen);
@@ -5237,7 +5273,7 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
                     integer_arguments += is_floating ? 0 : 1;
                     floating_arguments += is_floating ? 1 : 0;
                 }
-                const int32_t below = entry_depth - (int32_t)integer_arguments;
+                const int32_t below = entry_depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
                 const int32_t floating_below = entry_floating - (int32_t)floating_arguments;
                 const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? (uint32_t)below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
                 const uint32_t slots = saved + (uint32_t)floating_below;

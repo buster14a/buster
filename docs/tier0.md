@@ -16,6 +16,7 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
 - **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
+- **Indirect calls,** through `r11`.
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -58,7 +59,8 @@ Beside them are three tables:
   A function without objects leaves both columns 0.
 - **The parameters' locations** at entry, and the result's.
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
-  `AbiCall`.
+  `AbiCall`. A callee of 0 makes the call indirect: the stream pushes the address it calls (U64) before its
+  arguments, and the `CALL` pops it after them.
 
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
 vectorized across the unit that way, and Tier 0 needs no type table.
@@ -163,7 +165,7 @@ record index (ascending) and its target's; the function's end is the epilogue's 
 `branch_sizing_validate` accepts.
 
 **Symbolic fields** (`[rip + global]`, `call f`) are records with `BUSTER_X86_FORM_FIXUP` and a `LinkReference`:
-`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order.
+`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order. An indirect call is `call r11`, with none.
 
 ## The design
 
@@ -249,7 +251,8 @@ vector path's measuring counts a call's records with `tier0_count_deferred`, in 
 parallel move, without emitting it; the scalar path runs the emitter to count, which checks the count:
 
 - Calls: saves, stack arguments, the register arguments by a parallel move, al for a variadic call, the call, the
-  result moved, the restores. The moves' sources are distinct registers, as are their destinations, so they form
+  result moved, the restores. An indirect call's callee joins the parallel move, into r11, which no argument and not
+  al takes; then `call r11`. The moves' sources are distinct registers, as are their destinations, so they form
   paths and cycles, resolved on bitmasks: a move whose destination no other move still reads goes first, and what is
   left are cycles, each of n moves taking n − 1 `xchg`s. With rax first in the depth table and rdi first in the ABI's
   order, a call makes cycles of two alone; a test of the resolver's own covers every length.
@@ -341,7 +344,9 @@ Before the programs, checks of their own:
   `X86_FORM_NONE` (which keeps the record) and a random value.
 - **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
   places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
-  stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate).
+  stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate). And both must
+  compile 40 locals set from constants their stores absorb, from INT32_MIN on: past 32 locals emission gathers the
+  homes, and an absorbed lane mustn't look its value up as a local's.
 - **objects:**
   - `tier0_validate` must refuse each break of an object's rules at its locals: a class, no `ADDRESS_TAKEN`, a
     parameter, aligned to 32, sizes without alignments, a `LOCAL` of it, and past `BUSTER_TIER0_MAX_OBJECT_BYTES`.
@@ -350,6 +355,16 @@ Before the programs, checks of their own:
     values, some address-taken. Both paths compile them, and must agree. Each local's place, from its
     `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment, inside the frame and apart from every other local's
     bytes. Under an object aligned to 16, rsp must be a multiple of 16.
+- **variadic calls** (#363's review): two callers call a probe through a pointer, variadically, with six integers and
+  three doubles past a named first one. The probe, records of the test's own, stores what it sees: the argument
+  registers, rax, r11 and the vector registers. Its al must be 3, r11 its own address and the arguments the call's:
+  - with the callee in rax, under arguments whose moves are 2-cycles (rcx and rdi, rdx and rsi), so that al is set
+    only once the callee has gone to r11;
+  - with it in rdi, under four integers and two doubles saved around the call, so that the moves run through r11
+    (rbx to r8 to rdi to r11 to rcx) and the vector registers (xmm4 to xmm2 to xmm0). The caller returns what the
+    values below make of the result, which must come back right.
+
+  Both paths must compile each alike, and each encoder's bytes run in a child.
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
@@ -366,7 +381,15 @@ Before the programs, checks of their own:
   - each object's address modulo its alignment as a value (`(unsigned long)&v & 15`), 0 wherever the object is placed
     right.
 
-  A program without objects is the one the same seed gave before they existed.
+  A program without objects is the one the same seed gave before they existed;
+- with the `indirect` option (the shapes with calls), a third of the calls indirect: through locals that hold an
+  earlier function's address (C calls through them), or through the function's address itself:
+  - four functions in ten take an earlier function's type, so that a type has several functions;
+  - statements give a pointer one function of its type or another by a condition (`p = c ? f : g`), so that a call
+    through it reaches whichever it holds when it runs;
+  - the interpreter calls the function an address names, once its tag and its type are checked against the call's (its
+    result's class and each parameter's, apart from the generator's choice of candidates), and a call's work budget is
+    its costliest candidate's.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -402,7 +425,23 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
     - the frame not kept a multiple of 16 for them: 697 and 2;
     - objects overlapping: the objects test, and runs that crash, loop until the alarm, or differ;
     - the vector path giving objects slots too, or the scalar path: 1,951 and 599 (the paths disagree);
-    - each rule of the validator's for objects left out: its break taken.
+    - each rule of the validator's for objects left out: its break taken;
+  - and on indirect calls:
+    - the callee's register one depth off: the paths disagree and runs crash;
+    - its move left out of the vector path's count: 767; the call's depths, the emitter's: 767;
+    - the callee left out of the effects: 713; or of the validator: 764 (valid streams refused);
+    - the interpreter calling the generator's own choice, not the function the pointer holds: 29 programs' runs;
+    - the generator's candidates of one arity but other parameters' or result's classes: 3 and 6 programs, whose
+      calls the interpreter refuses. Checking the arity alone, as it did, the first passed and the second crashed
+      the test.
+    - al set before the moves have put the callee in r11, or not at all for an indirect call: the variadic calls'
+      child crashes (its callee in rax overwritten), and their probe sees al 0. The programs, whose calls aren't
+      variadic, see neither.
+
+    Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
+    changes no value.
+  - and absorbed lanes looking their value up as a local, past 32 locals (on main): the errors check's 40 locals,
+    whose stray gather faults.
 
 ## Measurements
 
@@ -465,7 +504,6 @@ path's 11.1.
   - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
   - variable-length arrays, inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table);
-  - indirect calls;
   - globals of shared libraries through the GOT (a front end's visibility decision).
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
   per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.

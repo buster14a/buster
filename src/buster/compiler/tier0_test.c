@@ -340,10 +340,13 @@ struct Tier0TestFrame
 #define BUSTER_TIER0_TEST_SLOTS (BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_GENERATE_MAX_LOCALS)
 // A frame's objects' bytes, each object at a multiple of 16 (the generator's take a few hundred at most).
 #define BUSTER_TIER0_TEST_OBJECT_BYTES 2048
+// A function's address in the interpreter: its index under this tag.
+#define BUSTER_TIER0_TEST_FUNCTION_TAG 0xf0f0000000000000ull
 #define BUSTER_TIER0_TEST_STEPS 200000000ull
 
 // Runs the program's entry (its last function) on three arguments over the globals at `globals` (the data layout's),
-// and returns its result; `fault` is set on a division the generator should have made safe, or past the step budget.
+// and returns its result; `fault` is set on a division the generator should have made safe, past the step budget, or
+// on an indirect call that reaches a function of another type.
 static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Functions* functions, const Tier0TestData* data, uint8_t* globals,
                                      const uint64_t* inputs, bool* fault)
 {
@@ -412,7 +415,9 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             stack[top++] = tier0_test_load(class, (uint64_t)(uintptr_t)(globals + data->offsets[value - 1]));
             break;
         case BUSTER_TYPED_GLOBAL_ADDRESS:
-            stack[top++] = (uint64_t)(uintptr_t)(globals + data->offsets[value - 1]);
+            // A function's address is its index under a tag, which only an indirect call reads.
+            stack[top++] = value <= program->global_count ? (uint64_t)(uintptr_t)(globals + data->offsets[value - 1])
+                                                          : BUSTER_TIER0_TEST_FUNCTION_TAG | (value - 1 - program->global_count);
             break;
         case BUSTER_TYPED_DUP:
             stack[top] = stack[top - 1];
@@ -466,7 +471,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             break;
         case BUSTER_TYPED_CALL:
         {
-            const uint32_t callee = program->call_callees[program->functions[frame->function].first_call + value];
+            uint32_t callee = program->call_callees[program->functions[frame->function].first_call + value];
             const uint32_t arguments = f->call_argument_counts[value];
             if (depth >= BUSTER_TIER0_TEST_FRAMES)
             {
@@ -481,6 +486,24 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             for (uint32_t a = 0; a < arguments; a += 1)
             {
                 locals[a] = stack[top + a];
+            }
+            if (f->call_targets[value] == 0)
+            {
+                // An indirect call's callee, under its arguments: a function's tagged index, the one the pointer holds
+                // when the call runs. Its type must be the call's, checked here apart from the generator's choice of
+                // candidates: its result's class the call's, and each parameter's class its argument's.
+                top -= 1;
+                const uint64_t address = stack[top];
+                const uint32_t held = (uint32_t)(address & 0xffff);
+                const bool function_held = (address & ~0xffffull) == BUSTER_TIER0_TEST_FUNCTION_TAG && held < program->function_count;
+                const Tier0GeneratedFunction* target = &program->functions[function_held ? held : callee];
+                bool typed = function_held && target->parameter_count == arguments && target->result_class == class;
+                for (uint32_t a = 0; a < arguments && typed; a += 1)
+                {
+                    typed = program->local_classes[target->first_local + a] == f->argument_classes[f->call_first[value] + a];
+                }
+                *fault |= !typed;
+                callee = function_held ? held : callee;
             }
             frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top };
             depth += 1;
@@ -785,7 +808,9 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
                     bool fault = false;
                     const uint64_t expected = tier0_test_interpret(program, functions, &data, globals, inputs[r], &fault);
                     const uint64_t hash = tier0_test_hash(globals, data.size);
-                    ok = tier0_test_expect(tally, !fault, "runs", "seed %" PRIu64 " input %u: the interpreter faulted", program_seed, r);
+                    ok = tier0_test_expect(tally, !fault, "runs",
+                                           "seed %" PRIu64 " input %u: the interpreter faulted (a division, its steps, or an indirect call of another type)",
+                                           program_seed, r);
                     ok = ok && tier0_test_expect(tally, native[r].result == expected && native[r].globals == hash, "runs",
                                                  "seed %" PRIu64 " input %u: %016" PRIx64 " (globals %016" PRIx64 "), the interpreter %016" PRIx64 " (%016" PRIx64 ")",
                                                  program_seed, r, native[r].result, native[r].globals, expected, hash);
@@ -1324,6 +1349,61 @@ static void tier0_test_errors(Tier0TestTally* tally)
                           "%u values at once: the scalar path's error %d, the vector path's %d, %d expected", deep, scalar.error, vector.error, expected);
         arena_pop_to(&arena, mark);
     }
+    {
+        // Past 32 locals, emission gathers each lane's homes; an absorbed constant's lane, whose value is no local,
+        // must look none up (a huge value read homes far past their end, which faulted).
+        enum
+        {
+            locals = 40,
+        };
+        uint8_t local_classes[locals];
+        uint8_t local_flags[locals];
+        uint32_t count = 0;
+        for (uint32_t l = 0; l < locals; l += 1)
+        {
+            local_classes[l] = BUSTER_TYPED_CLASS_I64;
+            local_flags[l] = 0;
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_I64;
+            // Each fits the store's imm32 (sign-extended), so that SET_LOCAL absorbs it: as an index, 2^31 homes before
+            // them, below the scratch arena (an index as far after them lands in its reserved range, and reads zeros).
+            values[count] = (uint64_t)(int64_t)(INT32_MIN + (int32_t)l);
+            kinds[count + 1] = BUSTER_TYPED_SET_LOCAL;
+            classes[count + 1] = BUSTER_TYPED_CLASS_I64;
+            values[count + 1] = l;
+            count += 2;
+        }
+        for (uint32_t l = 0; l < locals; l += 1)
+        {
+            kinds[count] = BUSTER_TYPED_LOCAL;
+            classes[count] = BUSTER_TYPED_CLASS_I64;
+            values[count] = l;
+            kinds[count + 1] = l == 0 ? BUSTER_TYPED_NONE : BUSTER_TYPED_ADD;
+            classes[count + 1] = BUSTER_TYPED_CLASS_I64;
+            values[count + 1] = 0;
+            count += l == 0 ? 1 : 2;
+        }
+        kinds[count] = BUSTER_TYPED_RETURN;
+        classes[count] = BUSTER_TYPED_CLASS_I64;
+        values[count] = 0;
+        count += 1;
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = count;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = locals;
+        const uint64_t mark = arena.length;
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "errors",
+                          "%u locals set from constants: the paths' errors %d and %d, or their code differs", (uint32_t)locals, scalar.error, vector.error);
+        arena_pop_to(&arena, mark);
+    }
     arena_release(&arena);
 }
 
@@ -1532,6 +1612,297 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
     arena_release(&arena);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Indirect variadic calls, run natively
+
+// What a probe that a call reaches through r11 sees: the general argument registers, rax (whose al a variadic call sets
+// to its vector registers' count), r11 and the vector argument registers' low halves; and what the caller returned.
+typedef struct Tier0TestProbe Tier0TestProbe;
+struct Tier0TestProbe
+{
+    uint64_t general[BUSTER_ABI_INTEGER_ARGUMENTS];
+    uint64_t rax;
+    uint64_t r11;
+    uint64_t vectors[BUSTER_ABI_VECTOR_ARGUMENTS];
+    uint64_t result;
+};
+
+#define BUSTER_TIER0_TEST_PROBE_RESULT 0x5a17c0deu
+#define BUSTER_TIER0_TEST_PROBE_RUNS 4
+
+// The probe's records: every register it watches stored into the state at `state` (movabs r10, then a store each),
+// then eax set to BUSTER_TIER0_TEST_PROBE_RESULT and ret. Returns the count.
+static uint32_t tier0_test_probe(X86Instruction* records, uint64_t state)
+{
+    static const uint8_t general[BUSTER_ABI_INTEGER_ARGUMENTS] = {
+        X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, X86_REGISTER_RCX, X86_REGISTER_R8, X86_REGISTER_R9,
+    };
+    uint32_t count = 0;
+    records[count] = tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_R10, 0, (int32_t)(state >> 32), (int32_t)(uint32_t)state);
+    count += 1;
+    for (uint32_t g = 0; g < BUSTER_ABI_INTEGER_ARGUMENTS; g += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOV_RM64_R64, general[g], X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(sizeof(uint64_t) * g), 0);
+        count += 1;
+    }
+    records[count] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestProbe, rax), 0);
+    records[count + 1] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_R11, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestProbe, r11), 0);
+    count += 2;
+    for (uint32_t v = 0; v < BUSTER_ABI_VECTOR_ARGUMENTS; v += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOVSD_XM64_X, (uint8_t)v, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE,
+                                           (int32_t)(offsetof(Tier0TestProbe, vectors) + sizeof(uint64_t) * v), 0);
+        count += 1;
+    }
+    records[count] = tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, (int32_t)BUSTER_TIER0_TEST_PROBE_RESULT);
+    records[count + 1] = tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0);
+    return count + 2;
+}
+
+// A variadic call through a pointer (#363's review): a caller whose argument is the probe's address calls it with six
+// integers and three doubles, past its named first one, so that al must be 3, as the probe sees it after the parallel
+// moves have put the callee in r11. In the first fixture the callee is at depth 0, rax itself, under arguments whose
+// moves are 2-cycles (rcx and rdi, rdx and rsi); in the second it is at depth 4, rdi, under four integers and two
+// doubles saved around the call, so that its arguments' moves run through r11 (rbx, r8, rdi, r11 and rcx) and through
+// the vector registers (xmm4, xmm2 and xmm0), and the values below must come back: the caller returns
+// d0 - (d1 - (d2 - (d3 - (long)(f0 - (f1 - (double)call))))), in postorder, so that each entry's last operand is the
+// entry before it. Both paths must compile each alike; the records encoded by each encoder run in a child, under an
+// alarm.
+static void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* tables)
+{
+    enum
+    {
+        capacity = 64,
+    };
+    static const uint64_t integers[BUSTER_ABI_INTEGER_ARGUMENTS] = {
+        0x1111111111111111ull, 0x2222222222222222ull, 0x3333333333333333ull, 0x4444444444444444ull, 0x5555555555555555ull, 0x6666666666666666ull,
+    };
+    static const double doubles[3] = { 3.25, 4.75, -5.5 };
+    static const uint64_t below_integers[4] = { 0x1000, 0x300, 0x50, 0x7 };
+    static const double below_doubles[2] = { 1.5, 4.5 };
+    // The caller's signature (the probe's address) and the call's (named: the first integer).
+    const TypeId u64 = tier0_program_class_type(BUSTER_TYPED_CLASS_U64);
+    const TypeId i64 = tier0_program_class_type(BUSTER_TYPED_CLASS_I64);
+    const TypeId f64 = tier0_program_class_type(BUSTER_TYPED_CLASS_F64);
+    const TypeId results[2] = { i64, i64 };
+    const uint32_t counts[2] = { 1, 9 };
+    const uint32_t named[2] = { 1, 1 };
+    const uint8_t variadic[2] = { 0, 1 };
+    const TypeId types[10] = { u64, u64, u64, u64, u64, u64, u64, f64, f64, f64 };
+    const AbiSignatures signatures = {
+        .results = results,
+        .counts = counts,
+        .named = named,
+        .variadic = variadic,
+        .count = 2,
+        .arguments = types,
+    };
+    AbiLocation locations[10];
+    AbiCall calls[2];
+    abi_assign(&tables->abi, signatures, locations, calls);
+    tier0_test_expect(tally, calls[1].vector_registers == 3 && calls[1].integer_registers == 6, "variadic calls", "the call's registers: %u general, %u vector",
+                      calls[1].integer_registers, calls[1].vector_registers);
+    Tier0TestProbe* shared = mmap(0, sizeof(Tier0TestProbe) * (BUSTER_TIER0_TEST_PROBE_RUNS + 1), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    Arena arena = arena_reserve(1ull << 28);
+    uint8_t* images[BUSTER_TIER0_TEST_PROBE_RUNS] = { 0 };
+    uint32_t lengths[BUSTER_TIER0_TEST_PROBE_RUNS] = { 0 };
+    uint64_t expected[BUSTER_TIER0_TEST_PROBE_RUNS] = { 0 };
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED, "variadic calls", "no shared memory");
+    for (uint32_t fixture = 0; fixture < 2 && ready; fixture += 1)
+    {
+        const uint32_t below = fixture == 0 ? 0 : 4;
+        const uint32_t floating_below = fixture == 0 ? 0 : 2;
+        uint8_t kinds[capacity];
+        uint8_t classes[capacity];
+        uint64_t values[capacity];
+        uint32_t count = 0;
+        for (uint32_t k = 0; k < below; k += 1)
+        {
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_I64;
+            values[count] = below_integers[k];
+            count += 1;
+        }
+        for (uint32_t k = 0; k < floating_below; k += 1)
+        {
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_F64;
+            memcpy(&values[count], &below_doubles[k], sizeof(values[count]));
+            count += 1;
+        }
+        kinds[count] = BUSTER_TYPED_LOCAL;
+        classes[count] = BUSTER_TYPED_CLASS_U64;
+        values[count] = 0;
+        count += 1;
+        for (uint32_t a = 0; a < BUSTER_ABI_INTEGER_ARGUMENTS; a += 1)
+        {
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_U64;
+            values[count] = integers[a];
+            count += 1;
+        }
+        for (uint32_t a = 0; a < 3; a += 1)
+        {
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_F64;
+            memcpy(&values[count], &doubles[a], sizeof(values[count]));
+            count += 1;
+        }
+        kinds[count] = BUSTER_TYPED_CALL;
+        classes[count] = BUSTER_TYPED_CLASS_I64;
+        values[count] = 0;
+        count += 1;
+        if (fixture != 0)
+        {
+            // The result as a double, from which the doubles below subtract in turn, then as an integer, from which the
+            // integers below do: none of it commutes, so values restored to each other's places show.
+            static const uint8_t tail_kinds[8] = {
+                BUSTER_TYPED_CONVERT, BUSTER_TYPED_SUB, BUSTER_TYPED_SUB, BUSTER_TYPED_CONVERT,
+                BUSTER_TYPED_SUB,     BUSTER_TYPED_SUB, BUSTER_TYPED_SUB, BUSTER_TYPED_SUB,
+            };
+            static const uint8_t tail_classes[8] = {
+                BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_I64,
+                BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64,
+            };
+            memcpy(kinds + count, tail_kinds, sizeof(tail_kinds));
+            memcpy(classes + count, tail_classes, sizeof(tail_classes));
+            memset(values + count, 0, sizeof(tail_kinds) * sizeof(values[0]));
+            count += 8;
+        }
+        kinds[count] = BUSTER_TYPED_RETURN;
+        classes[count] = BUSTER_TYPED_CLASS_I64;
+        values[count] = 0;
+        count += 1;
+        uint64_t result = BUSTER_TIER0_TEST_PROBE_RESULT;
+        if (fixture != 0)
+        {
+            const double difference = below_doubles[0] - (below_doubles[1] - (double)(int64_t)result);
+            const uint64_t truncated = (uint64_t)(int64_t)difference;
+            result = below_integers[0] - (below_integers[1] - (below_integers[2] - (below_integers[3] - truncated)));
+        }
+        static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_U64 };
+        static const uint8_t local_flags[1] = { 0 };
+        static const SymbolId targets[1] = { 0 };
+        static const uint32_t call_first[1] = { 0 };
+        static const uint32_t call_counts[1] = { 9 };
+        static const uint8_t call_variadic[1] = { 1 };
+        static const uint8_t argument_classes[9] = {
+            BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F64,
+        };
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = count;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = 1;
+        function.parameter_count = 1;
+        function.parameters = locations;
+        function.result = calls[0].result;
+        function.call_targets = targets;
+        function.call_first = call_first;
+        function.call_argument_counts = call_counts;
+        function.call_variadic = call_variadic;
+        function.calls = calls + 1;
+        function.argument_locations = locations + 1;
+        function.argument_classes = argument_classes;
+        function.call_count = 1;
+        function.argument_count = 9;
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "variadic calls",
+                                  "fixture %u: rule \"%s\" at %u, error %d, or the paths differ", fixture, check.rule != 0 ? check.rule : "", check.node, scalar.error);
+        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0 && scalar.reference_count == 0,
+                                           "variadic calls", "fixture %u: an invalid record, a branch or a reference", fixture);
+        // Each path's records by an encoder of its own: the vector path's by x86_encode, the scalar's by its twin.
+        for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+        {
+            const uint32_t run = fixture * 2 + encoder;
+            const Tier0Code* code = encoder == 0 ? &vector : &scalar;
+            const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(code->count);
+            images[run] = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room);
+            const int64_t length = images[run] == 0 ? -1
+                                   : encoder == 0   ? x86_encode(code->records, code->count, images[run], room, 0, 0)
+                                                    : x86_encode_scalar(code->records, code->count, images[run], room, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "variadic calls", "fixture %u: encoder %u failed", fixture, encoder);
+            lengths[run] = ready ? (uint32_t)length : 0;
+            expected[run] = result;
+        }
+        ready = ready && tier0_test_expect(tally, lengths[fixture * 2] == lengths[fixture * 2 + 1] && memcmp(images[fixture * 2], images[fixture * 2 + 1], lengths[fixture * 2]) == 0,
+                                           "variadic calls", "fixture %u: the encoders differ", fixture);
+    }
+    // The callers at page starts and the probe on a page after them, mapped before the fork, so that the probe's
+    // address, which r11 must hold when the probe runs, is known here.
+    const uint64_t pages = (BUSTER_TIER0_TEST_PROBE_RUNS + 1) * BUSTER_TIER0_TEST_PAGE;
+    uint8_t* region = ready ? mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    uint8_t* probe_code = region != MAP_FAILED ? region + BUSTER_TIER0_TEST_PROBE_RUNS * BUSTER_TIER0_TEST_PAGE : 0;
+    X86Instruction probe[32];
+    const uint32_t probe_count = ready ? tier0_test_probe(probe, (uint64_t)(uintptr_t)shared) : 0;
+    bool loaded = region != MAP_FAILED && x86_validate(probe, probe_count) == probe_count &&
+                  x86_encode_scalar(probe, probe_count, probe_code, BUSTER_TIER0_TEST_PAGE, 0, 0) > 0;
+    for (uint32_t run = 0; run < BUSTER_TIER0_TEST_PROBE_RUNS && loaded; run += 1)
+    {
+        memcpy(region + run * BUSTER_TIER0_TEST_PAGE, images[run], lengths[run]);
+    }
+    loaded = loaded && mprotect(region, pages, PROT_READ | PROT_EXEC) == 0;
+    ready = ready && tier0_test_expect(tally, loaded, "variadic calls", "the code can't be loaded");
+    const pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        for (uint32_t run = 0; run < BUSTER_TIER0_TEST_PROBE_RUNS; run += 1)
+        {
+            typedef uint64_t (*Tier0TestCaller)(uint64_t);
+            Tier0TestCaller caller = 0;
+            void* address = region + run * BUSTER_TIER0_TEST_PAGE;
+            memcpy(&caller, &address, sizeof(caller));
+            memset(&shared[0], 0xa5, sizeof(shared[0]));
+            const uint64_t returned = caller((uint64_t)(uintptr_t)probe_code);
+            shared[1 + run] = shared[0];
+            shared[1 + run].result = returned;
+        }
+        _exit(0);
+    }
+    if (child > 0)
+    {
+        int status = 0;
+        waitpid(child, &status, 0);
+        const bool ran = tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "variadic calls", "the child's status %d", status);
+        for (uint32_t run = 0; run < BUSTER_TIER0_TEST_PROBE_RUNS && ran; run += 1)
+        {
+            const Tier0TestProbe* seen = &shared[1 + run];
+            bool arguments = (seen->rax & 0xff) == 3 && seen->r11 == (uint64_t)(uintptr_t)probe_code;
+            for (uint32_t g = 0; g < BUSTER_ABI_INTEGER_ARGUMENTS; g += 1)
+            {
+                arguments &= seen->general[g] == integers[g];
+            }
+            for (uint32_t v = 0; v < 3; v += 1)
+            {
+                uint64_t bits = 0;
+                memcpy(&bits, &doubles[v], sizeof(bits));
+                arguments &= seen->vectors[v] == bits;
+            }
+            tier0_test_expect(tally, arguments, "variadic calls", "fixture %u encoder %u: the probe saw al %u, r11 %016" PRIx64 " and other arguments than the call's",
+                              run / 2, run % 2, (uint32_t)(seen->rax & 0xff), seen->r11);
+            tier0_test_expect(tally, seen->result == expected[run], "variadic calls", "fixture %u encoder %u: %016" PRIx64 ", not %016" PRIx64, run / 2, run % 2,
+                              seen->result, expected[run]);
+        }
+    }
+    if (region != MAP_FAILED)
+    {
+        munmap(region, pages);
+    }
+    arena_release(&arena);
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(Tier0TestProbe) * (BUSTER_TIER0_TEST_PROBE_RUNS + 1));
+    }
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -1593,9 +1964,9 @@ static int run_tier0_tests(int argc, char** argv)
         {
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
-                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false },
-                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true },
-                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true },
+                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true },
+                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
+                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             {
@@ -1623,6 +1994,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_objects(&tally, seed);
                 tier0_test_report("objects", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_variadic_calls(&tally, &tables);
+                tier0_test_report("variadic calls", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

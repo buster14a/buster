@@ -3857,7 +3857,8 @@ informational.
 `tier0_generate.c`, `--count` (300) of each of four shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); and larger. Their calls pass up to 12
-arguments, past the argument registers, and their pointer arithmetic has
+arguments, past the argument registers, a third of them (in the shapes with
+calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
 into, each address's remainder by its alignment a value. Before them it checks
@@ -3867,7 +3868,10 @@ of chosen forms against the scalar path's on random records, that both paths
 refuse unsupported entries and expressions past the depths alike, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects and values whose places both paths must give alike, aligned,
-inside the frame and apart. Every function must pass `tier0_validate`,
+inside the frame and apart; and variadic calls through a pointer, run natively:
+a probe must see `al` 3, `r11` its own address and the call's arguments, after
+moves that are cycles and that run through `r11`, with values saved around the
+call. Every function must pass `tier0_validate`,
 both paths must compile it to the same records, branch columns and references,
 and the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into

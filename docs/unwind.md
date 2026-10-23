@@ -27,12 +27,13 @@ common epilogue.
 
 The vector path resolves body effects eight records at a time, with a scalar
 twin. It rejects unknown effects, body writes to RSP or unsaved nonvolatile
-registers, and implicit stack operations except the producer's marked direct
-call. Calls use the normal returning SysV convention; their fallthrough frame
-is unchanged. Explicit RSP-relative stores must have a known fixed interval
-outside the saved-register and return-address slots. Compiler-private slots
-must also remain intact through ordinary pointer stores and callees. This is a
-contract for valid generated code, not a proof of arbitrary memory aliases or a
+registers, and implicit stack operations except the producer's calls: its marked
+direct call and its indirect one through r11. Calls use the normal
+returning SysV convention; their fallthrough frame is unchanged. Explicit
+RSP-relative stores must have a known fixed interval outside the saved-register
+and return-address slots. Compiler-private slots must also remain intact
+through ordinary pointer stores and callees. This is a contract for valid
+generated code, not a proof of arbitrary memory aliases or a
 validator for hostile machine instructions. Raw process entry, special calling
 conventions, inline assembly and post-sizing transformations are outside it.
 
