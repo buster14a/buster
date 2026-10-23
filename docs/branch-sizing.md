@@ -27,8 +27,10 @@ Contracts 1 and 2 of
   in a u32 column, and the function's length. The caller then encodes the
   records with `x86_encode` (and its fixup ends) and adds their fixups with
   `link_add_code_fixups`.
-- **Lengths** come from `x86_encode`'s offsets, so the encoder doesn't change;
-  a lengths-only entry point is for later, with #182.
+- **Lengths** come from `x86_measure` on the vector path and
+  `x86_measure_scalar` on the scalar path. These give the offsets and total
+  length of the same valid 64-bit-mode records without a machine-code buffer
+  ([the encoder's contract](x86-64-encoder.md#lengths-without-bytes)).
 
 `size_branches` is the vector path and `size_branches_scalar` its twin: the
 same phases a branch or a record at a time, the oracle of the tests, with the
@@ -45,6 +47,13 @@ that could pass `INT32_MAX` bytes with every branch long, or no scratch
 memory; then the records are as they were.
 
 ## Results
+
+The results below are from the original branch-sizing implementation, before
+[#305](https://github.com/buster14a/buster/issues/305) introduced lengths-only
+measurement. They describe its encode-and-discard lengths phase and are kept
+as historical evidence. The current implementation's comparison and
+reproduction commands are in
+[the lengths-only measurement record](measurements/x86-lengths-2026-10-23/README.md).
 
 On the Ryzen 7 9700X, CPU 2, `benchmark-branch-sizing`'s medians, in cycles per
 record (instruction). Each row is a pool of about 262,000 records of generated
@@ -91,7 +100,7 @@ record r_k, aiming at record t_k) has the displacement
 
     D0_k = offset(t_k) - offset(r_k) - 2
 
-that `x86_encode`'s offsets give (the first round's lengths). With growths g
+that `x86_measure`'s offsets give (the first round's lengths). With growths g
 (0 for a short branch, 3 for a long jmp, 4 for a long jcc) and P their
 exclusive prefix sums over the branches, its displacement is
 
@@ -157,13 +166,67 @@ one before.
 
 ### Lengths and memory
 
-The first round's `x86_encode` runs `BUSTER_BRANCH_SIZING_CHUNK` (1,024)
-records at a time into one scratch buffer, whose bytes are dropped: 15 KB that
-stay in L1, where the whole function's could take megabytes of fresh pages.
-Each chunk's offsets move by the bytes before it. Every column comes from one
-push on the thread's scratch arena (lane.c), cut into cache-line-aligned
-columns, before anything is written: a push per column cost small functions
-tens of cycles.
+The lengths phase passes the whole function to `x86_measure`, which computes
+16 records' lengths at a time and writes their offsets directly. It reads
+only the template flags needed for length, shares the encoder's length rules,
+and omits machine-code assembly and stores. There is no encoded-byte scratch
+column, `BUSTER_BRANCH_SIZING_CHUNK`, or pass to rebase chunks' offsets.
+`x86_measure_scalar` gets lengths from the scalar encoder's independent form
+rules, using a bounded local buffer for one instruction. Both paths produce
+the same initial offsets and total length as `x86_encode`.
+
+The branch map, ranks, growths, prefixes and worklist still come from one push
+on the thread's scratch arena (lane.c), cut into cache-line-aligned columns,
+before the lengths phase. The caller retains the offsets and encodes the
+sized records once to produce the final machine code and fixup ends.
+
+## Current benchmark
+
+`benchmark-branch-sizing` retains the workload rows described below and
+accepts:
+
+```text
+./build/compiler benchmark-branch-sizing [--seed N] [--rounds N] [--only ROW]
+    [--measure NAME] [--samples N] [--after-scalar MS]
+```
+
+With no `--measure`, it reports `x86_encode` of already-sized records,
+`size_branches`, `size_branches_scalar`, and `size_encode`, followed by the
+phase comparisons. `size_encode` sizes each function and immediately encodes
+its final records in the same timed interval; it checks that encoding returns
+the sized length. Both encoding rows produce offsets without collecting
+fixup ends. Adding the separately timed sizing and encoding rows does not
+measure the combined interval.
+
+`--only ROW` selects a workload, `--measure NAME` isolates one entry or one
+path through a phase (for example, `vector-lengths`), and `--samples N`
+changes the default 21 samples. `--after-scalar MS` runs the corresponding
+scalar work for at least that many milliseconds before every recorded sample,
+outside its timed interval. A nonzero value, at most 1,000 ms, requires one
+isolated vector measurement. For `size_encode` its conditioning is scalar
+sizing followed by scalar encoding. For example, under the benchmark host's
+lock and pinned to an allowed CPU:
+
+```sh
+taskset -c 2 ./build/compiler benchmark-branch-sizing --only tier0-mix --measure size_encode --samples 21
+taskset -c 2 ./build/compiler benchmark-branch-sizing --only tier0-mix --measure vector-lengths --samples 21 --after-scalar 100
+```
+
+Each sample processes the pool in groups, restoring and reading each group's
+records outside the timed interval. The benchmark reports median nanoseconds
+per record with p10 and p90, using `CLOCK_MONOTONIC_RAW`, as well as cycles per
+branch and per record and IPC when hardware counters are available. It
+subtracts the measured clock and counter-read overhead. Nanoseconds remain
+available when `perf_event_open` is denied; zero cycles or IPC in that case
+do not describe the processor's throughput. The default phase table reports
+differences between cumulative phase medians, in both cycles and nanoseconds
+per branch.
+
+The scalar sizing path now uses `x86_measure_scalar`; the historical scalar
+path used the vector encoder for its lengths. Its old timings are therefore
+not a baseline for the speedup of the vector change. Compare the old and new
+vector paths with the same workload, harness and conditioning, and include
+`size_encode` when assessing the effect on the caller.
 
 ## Compiled code
 
@@ -208,7 +271,12 @@ The optimized profile (a branch every 7 records, 29% jmp, 23% backward, near
 128, far 20%) gives 5.6%, 32.8%, 40.5% and 42.8%, against -O2's 3.9%, 26.0% to
 40.2%, 44.7% and 56.1%: close, if a little short on the largest functions.
 
-## Zen 5's costs, measured
+## Zen 5's costs, measured (historical)
+
+This section records the implementation before #305: its lengths phase
+encoded and discarded bytes, and both sizing paths used `x86_encode` there.
+The phase costs and chunk-size sweep below are historical; the current
+lengths-only path has no chunk-size setting.
 
 Every number here is a median of `benchmark-branch-sizing` on the 9700X, CPU 2,
 and every comparison was run three times in turn under the machine's lock
@@ -335,8 +403,8 @@ are as before.
 
   With 2, 25 of tier0-10000's 27 functions reach the worklist; with 3, 2 of
   them.
-- **`BUSTER_BRANCH_SIZING_CHUNK` = 1,024.** The lengths phase, in cycles per
-  branch:
+- **Former `BUSTER_BRANCH_SIZING_CHUNK` = 1,024.** The old lengths phase,
+  in cycles per branch:
 
   | Chunk | 256 | 512 | 1,024 | 2,048 | 4,096 | 16,384 |
   | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -368,13 +436,12 @@ be `x86_encode_scalar`'s of the sized records.
 
 - **Real functions**, once the code generator emits them (#136): the
   benchmark's rows for its output and the corpora.
-- **A lengths-only entry point** of the encoder, Phase II alone, if it
-  measures cheaper than the first round's `x86_encode` (most of sizing's cost),
-  with #182's session.
-- **The first round's bytes.** Where no branch grows (most small functions),
-  they are the final bytes but for the displacements, so the caller's second
-  `x86_encode` could become a patch of the rel8 bytes; that changes contract
-  1's output.
+- **Retaining first-round bytes as an alternative.** Where no branch grows
+  (most small functions), a full first-round encode could supply final bytes
+  except for the displacements, which the caller could patch. The current
+  lengths-only path produces no such bytes; this alternative would change
+  contract 1's output and must be compared on the combined sizing-and-encoding
+  cost.
 - **The window rounds for large functions**, behind a dispatch by size (see
   "What was tried").
 - **Loop-head alignment** with multi-byte NOPs, which changes offsets and so

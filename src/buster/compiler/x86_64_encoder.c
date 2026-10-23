@@ -12,6 +12,7 @@
 // Entry points: x86_encoder_initialize (builds the templates; call it once before encoding), x86_encode (the
 // vectorized encoder, the code generator's, which takes the valid instructions instruction selection and register
 // allocation make and checks nothing about them), x86_encode_scalar (a plain reference encoder, for testing),
+// x86_measure and x86_measure_scalar (the same offsets and length without retaining machine code),
 // x86_validate (which checks that every instruction is one x86_encode can take, for tests and debugging) and
 // x86_form_descriptions (the form table, for tests and diagnostics). The output needs room for
 // BUSTER_X86_ENCODER_CAPACITY(count) bytes; x86_encode writes nothing past that, but may write past the instructions'
@@ -5008,6 +5009,13 @@ static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instruct
 // ends need room for the marked instructions' alone.
 static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                          uint32_t* fixup_ends);
+// The offsets and length x86_encode would produce, without a machine-code buffer. Requires the same initialized
+// templates and validated 64-bit-mode instructions. The records and offsets are disjoint; offsets has room for count
+// uint32_t values, and no padding is read or written. A zero count permits null pointers. Counts past
+// BUSTER_X86_ENCODER_MAX_INSTRUCTIONS return X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS without accessing either array.
+// The scalar twin uses encode_one's independent form rules, with a bounded local buffer for one instruction.
+static __attribute__((unused)) int64_t x86_measure(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
+static __attribute__((unused)) int64_t x86_measure_scalar(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
 // The index of the first instruction that can't be encoded, or count if they all can (a memory operand in a form whose
 // template has no room for it among them: see x86_form_lacks_room). Requires x86_encoder_initialize.
 static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instructions, uint64_t count);
@@ -6750,6 +6758,27 @@ static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t co
     return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_64);
 }
 
+static int64_t x86_measure_scalar(const X86Instruction* instructions, uint64_t count, uint32_t* offsets)
+{
+    int64_t result;
+    if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
+    {
+        result = X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
+    }
+    else
+    {
+        uint32_t length = 0;
+        uint8_t bytes[BUSTER_X86_MAX_INSTRUCTION_BYTES];
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            offsets[i] = length;
+            length += encode_one(&instructions[i], bytes, X86_ENCODER_MODE_64);
+        }
+        result = length;
+    }
+    return result;
+}
+
 static int64_t x86_encode_scalar_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                            uint32_t* fixup_ends)
 {
@@ -7252,6 +7281,79 @@ static const uint8_t x86_first_qword_total[64] __attribute__((aligned(64))) = {
     0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
     0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
 };
+
+// Only a template's flags affect a 64-bit-mode instruction's length. Scalar loads avoid a hardware gather and the
+// full encoder's loads of template byte and layout vectors. memcpy also preserves the byte array's type.
+BUSTER_INLINE int32_t x86_measure_flags(const X86Instruction* instruction)
+{
+    int32_t flags;
+    memcpy(&flags, x86_templates[instruction->form].template.bytes + 12, sizeof(flags));
+    return flags;
+}
+
+// Measures one full group; a partial group is copied and zero-padded by x86_measure. compute_fields shares the
+// encoder's length rules, while its unused canonical bytes, prefixes and displacement are eliminated. In 64-bit mode
+// checks and extension affect those unused fields alone. No machine-code bytes, layout vectors or fixup ends are made.
+BUSTER_INLINE uint32_t x86_measure_group(const X86Instruction* instructions, uint32_t base, uint32_t* offsets, __mmask16 lanes)
+{
+    const __m512i record0 = _mm512_loadu_si512(instructions);
+    const __m512i record1 = _mm512_loadu_si512(instructions + 4);
+    const __m512i record2 = _mm512_loadu_si512(instructions + 8);
+    const __m512i record3 = _mm512_loadu_si512(instructions + 12);
+    const __m512i low01 = _mm512_unpacklo_epi32(record0, record1);
+    const __m512i low23 = _mm512_unpacklo_epi32(record2, record3);
+    const __m512i high01 = _mm512_unpackhi_epi32(record0, record1);
+    const __m512i high23 = _mm512_unpackhi_epi32(record2, record3);
+    const __m512i displacement = _mm512_unpackhi_epi64(low01, low23);
+    const __m512i operands = _mm512_unpacklo_epi64(high01, high23);
+    // Keep the scalar form loads separate from the record vectors: otherwise Clang widens each to 16 bytes and
+    // extracts its form through a vector-to-integer move instead of loading the word directly.
+    const X86Instruction* forms = instructions;
+    __asm__("" : "+r"(forms));
+    // Match the transpose above: instruction 4q + j occupies lane 4j + q.
+    const __m512i flags = _mm512_setr_epi32(
+        x86_measure_flags(forms + 0), x86_measure_flags(forms + 4), x86_measure_flags(forms + 8), x86_measure_flags(forms + 12),
+        x86_measure_flags(forms + 1), x86_measure_flags(forms + 5), x86_measure_flags(forms + 9), x86_measure_flags(forms + 13),
+        x86_measure_flags(forms + 2), x86_measure_flags(forms + 6), x86_measure_flags(forms + 10), x86_measure_flags(forms + 14),
+        x86_measure_flags(forms + 3), x86_measure_flags(forms + 7), x86_measure_flags(forms + 11), x86_measure_flags(forms + 15));
+    const __m512i zero = _mm512_setzero_si512();
+    const X86Fields fields = compute_fields(operands, displacement, zero, flags, zero, X86_ENCODER_MODE_64);
+    const __m128i lengths = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_load_si512(x86_length_bytes), fields.length));
+    // Each group has at most 240 bytes: byte-wise sums cannot carry into their neighbours. Zero-padded records
+    // contribute zero, so byte 15 is also the total of a partial group.
+    const __m128i qword_sums = _mm_mullo_epi64(lengths, _mm_set1_epi64x(0x0101010101010101ll));
+    const __m128i ends = _mm_add_epi8(qword_sums, _mm_shuffle_epi8(qword_sums, _mm_load_si128((const __m128i*)x86_first_qword_total)));
+    const __m512i starts = _mm512_cvtepu8_epi32(_mm_sub_epi8(ends, lengths));
+    _mm512_mask_storeu_epi32(offsets, lanes, _mm512_add_epi32(starts, _mm512_set1_epi32((int32_t)base)));
+    return base + (uint32_t)_mm_extract_epi8(ends, BUSTER_X86_GROUP_INSTRUCTIONS - 1);
+}
+
+static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, uint32_t* offsets)
+{
+    int64_t result;
+    if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
+    {
+        result = X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
+    }
+    else
+    {
+        uint32_t length = 0;
+        uint64_t i = 0;
+        for (; i + BUSTER_X86_GROUP_INSTRUCTIONS <= count; i += BUSTER_X86_GROUP_INSTRUCTIONS)
+        {
+            length = x86_measure_group(instructions + i, length, offsets + i, (__mmask16)0xffff);
+        }
+        if (i < count)
+        {
+            X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
+            memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
+            const __mmask16 lanes = (__mmask16)((1u << (count - i)) - 1);
+            length = x86_measure_group(tail, length, offsets + i, lanes);
+        }
+        result = length;
+    }
+    return result;
+}
 
 // Encodes the 4 * `quads` instructions at `instructions` (quads is 1, 2 or 4, and a constant), appending their
 // machine code at `out`, and returns where it ends. If `offsets` isn't null, stores the offsets (from `output`) of

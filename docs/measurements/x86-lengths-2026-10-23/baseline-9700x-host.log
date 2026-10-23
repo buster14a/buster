@@ -1,0 +1,41 @@
+2026-10-23T07:34:12.2575549Z Current runner version: '2.338.0'
+2026-10-23T07:34:12.2578392Z Runner name: 'buster-zen5-9700x'
+2026-10-23T07:34:12.2578753Z Runner group name: 'buster-9700x-service-dispatch'
+2026-10-23T07:34:12.2579216Z Machine name: 'benchpress'
+
+2026-10-23T07:34:13.0458634Z Complete job name: Build and execute on Ryzen 7 9700X
+
+2026-10-23T07:34:13.0762806Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'
+2026-10-23T07:34:13.0766948Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-23T07:34:13.0767308Z ##[endgroup]
+2026-10-23T07:34:14.0914715Z buster-9700x: this job has the machine
+2026-10-23T07:34:14.1003719Z ##[group]Run test "$(uname -s)" = Linux
+2026-10-23T07:34:14.1004248Z test "$(uname -s)" = Linux
+2026-10-23T07:34:14.1004679Z test "$(uname -m)" = x86_64
+2026-10-23T07:34:14.1005206Z grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+2026-10-23T07:34:14.1006079Z grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+2026-10-23T07:34:14.1006859Z clang --version
+2026-10-23T07:34:14.1010886Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-23T07:34:14.1011423Z ##[endgroup]
+2026-10-23T07:34:14.1047746Z model name	: AMD Ryzen 7 9700X 8-Core Processor
+2026-10-23T07:34:14.1128693Z clang version 23.1.1
+2026-10-23T07:34:14.1129007Z Target: x86_64-pc-linux-gnu
+2026-10-23T07:34:14.1129349Z Thread model: posix
+2026-10-23T07:34:14.1129644Z InstalledDir: /usr/bin
+
+2026-10-23T07:34:17.1798968Z HEAD is now at fc45e674d Merge pull request #300 from buster14a/codex/9700x-profile-opt
+2026-10-23T07:34:17.1801446Z ##[endgroup]
+2026-10-23T07:34:17.1822824Z [command]/usr/bin/git log -1 --format=%H
+2026-10-23T07:34:17.1834259Z fc45e674d13d9257d66c02b05d78adf85ddae7ea
+
+2026-10-23T07:34:17.2258563Z ##[group]Run ./build.sh
+2026-10-23T07:34:17.2258724Z ./build.sh
+2026-10-23T07:34:17.2258856Z test -x build/compiler
+2026-10-23T07:34:17.2259036Z test "$(find build -type f -executable | wc -l)" -eq 1
+2026-10-23T07:34:17.2262870Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-23T07:34:17.2263046Z ##[endgroup]
+
+2026-10-23T07:39:44.8500574Z ##[group]Run '/usr/local/libexec/buster-9700x/job-completed.sh'
+2026-10-23T07:39:44.8502659Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-23T07:39:44.8502817Z ##[endgroup]
+2026-10-23T07:39:44.8539125Z buster-9700x: gave the machine back
