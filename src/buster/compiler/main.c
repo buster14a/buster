@@ -107,6 +107,10 @@ int run_tier1_allocate_benchmark(int argc, char** argv);
 #include "buster/compiler/preprocessor_fuzz_test.c"
 #include "buster/compiler/preprocessor_fuzz_benchmark.c"
 
+// External randomized C compiler comparison and its independent process/accounting fixtures.
+#include "buster/compiler/differential.c"
+#include "buster/compiler/differential_test.c"
+
 // Token refinement: identifier interning (c_intern.c) and the per-file pass after the lexer (c_refine.c), and their
 // tests, for the test-refinement command. Its benchmark is another translation unit.
 #include "buster/compiler/c_intern.c"
@@ -581,6 +585,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential") == 0)
+    {
+        result = run_differential_command(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential-harness") == 0)
+    {
+        result = run_differential_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-frame") == 0)
     {
