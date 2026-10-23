@@ -77,6 +77,14 @@ static void check_test_overload_declarations(CheckTest* test, TypeTable* table)
     next.type = wrong_return;
     result = check_overload_declare(table, candidates, 2, 1, &next, &context);
     check_test_expect(test, result.status == CHECK_OVERLOAD_CONFLICT, "return type cannot create another overload");
+    next.type = type_function_abi(table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_MICROSOFT);
+    result = check_overload_declare(table, candidates, 2, 1, &next, &context);
+    check_test_expect(test, result.status == CHECK_OVERLOAD_CONFLICT, "calling convention cannot create another same-parameter overload");
+    candidates[0].type = next.type;
+    result = check_overload_declare(table, candidates, 2, 1, &next, &context);
+    check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.canonical == 10 && result.object == 100,
+                      "already inherited matching function ABI retains canonical identity");
+    candidates[0].type = fi;
     next.type = fi;
     next.flags = 0;
     result = check_overload_declare(table, candidates, 2, 1, &next, &context);
@@ -206,7 +214,7 @@ static void check_test_overload_selection(CheckTest* test, TypeTable* table, con
                 .source_position = 100,
             };
             CheckActionResult checked;
-            const CheckOverloadResult result = check_overload_call(table, &action, candidates, fixture->count, fixture->count - 1, &scratch, path != 0, &checked, 0);
+            const CheckOverloadResult result = check_overload_call(table, &action, candidates, fixture->count, fixture->count - 1, &scratch, path != 0, &checked, 0, 0);
             check_test_expect(test, result.status == fixture->status, fixture->name);
             if (result.status == CHECK_OVERLOAD_OK || result.status == CHECK_OVERLOAD_UNAVAILABLE)
             {
@@ -362,7 +370,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
     for (uint32_t path = 0; path < 2; path += 1)
     {
         CheckActionResult checked;
-        result = check_overload_call(table, &action, candidates, 2, 1, &scratch, path != 0, &checked, 0);
+        result = check_overload_call(table, &action, candidates, 2, 1, &scratch, path != 0, &checked, 0, 0);
         check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.candidate == 0 && checked.diagnostic == CHECK_DIAG_NONE && checked.value.type == BUSTER_TYPE_INT,
                           "arbitrary argument slices cross all rank vector boundaries");
         for (uint32_t i = 0; i < 257; i += 1)
@@ -371,6 +379,99 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
                               "selected wide call retains every argument conversion");
         }
     }
+    arena_release(&scratch);
+}
+
+static void check_test_overload_arguments(CheckTest* test, TypeTable* table)
+{
+    const TypeId integer = BUSTER_TYPE_INT;
+    const TypeId floating = BUSTER_TYPE_DOUBLE;
+    const TypeId fi = type_function(table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+    const TypeId fd = type_function(table, floating, &floating, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+    const TypeId pi = type_pointer(table, fi);
+    const TypeId pd = type_pointer(table, fd);
+    const TypeId pc = type_pointer(table, BUSTER_TYPE_CHAR);
+    const TypeId take_i = type_function(table, integer, &pi, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+    const TypeId take_d = type_function(table, floating, &pd, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+    const TypeId take_c = type_function(table, floating, &pc, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+    const TypeId old = type_function(table, integer, 0, 0, 0);
+    CheckOverloadCandidate candidates[4] = {
+        { .type = fi, .declaration = 10, .canonical = 10, .object = 100, .previous = UINT32_MAX, .scope = 1, .position = 11, .flags = BUSTER_CHECK_OVERLOADABLE },
+        { .type = fd, .declaration = 20, .canonical = 20, .object = 200, .previous = 0, .scope = 1, .position = 21, .flags = BUSTER_CHECK_OVERLOADABLE },
+        { .type = take_i, .declaration = 30, .canonical = 30, .object = 300, .previous = UINT32_MAX, .scope = 2, .position = 31, .flags = BUSTER_CHECK_OVERLOADABLE },
+        { .type = take_c, .declaration = 40, .canonical = 40, .object = 400, .previous = 2, .scope = 2, .position = 41, .flags = BUSTER_CHECK_OVERLOADABLE },
+    };
+    CheckValue argument = { .type = fd, .category = CHECK_FUNCTION, .flags = BUSTER_CHECK_STATIC_OBJECT, .constant_kind = CHECK_CONSTANT_ADDRESS, .object = 200, .overload_head = 2 };
+    CheckConversion conversion;
+    CheckAction action = {
+        .op = CHECK_OP_CALL,
+        .operands = {{ .type = take_c, .category = CHECK_FUNCTION, .object = 400, .overload_head = 4 }},
+        .arguments = &argument,
+        .argument_count = 1,
+        .argument_conversions = &conversion,
+        .source_position = 100,
+    };
+    Arena scratch = arena_reserve(65536);
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        CheckActionResult checked;
+        CheckOverloadResult identity;
+        uint64_t peak = 0;
+        CheckOverloadResult selected = check_overload_call(table, &action, candidates, 4, 3, &scratch, path != 0, &checked, &identity, &peak);
+        check_test_expect(test, selected.status == CHECK_OVERLOAD_OK && selected.candidate == 2 && selected.object == 300 && checked.diagnostic == CHECK_DIAG_NONE,
+                          "outer overload is selected by contextual function argument");
+        check_test_expect(test, identity.status == CHECK_OVERLOAD_OK && identity.candidate == 0 && identity.declaration == 10 && identity.object == 100 && identity.type == fi,
+                          "contextual argument publishes exact earlier function identity");
+        check_test_expect(test, conversion.type == pi && (conversion.flags & (BUSTER_CHECK_CONVERT_FUNCTION | BUSTER_CHECK_CONVERT_ASSIGNMENT)) ==
+                              (BUSTER_CHECK_CONVERT_FUNCTION | BUSTER_CHECK_CONVERT_ASSIGNMENT) && argument.overload_head == 2 && argument.object == 200 && scratch.length == 0,
+                          "contextual conversion retains decay and immutable source designator");
+        check_test_expect(test, peak != 0 && peak <= scratch.capacity && scratch.length == 0,
+                          "overload scratch peak retains popped nested argument allocations");
+        candidates[3].type = take_d;
+        selected = check_overload_call(table, &action, candidates, 4, 3, &scratch, path != 0, &checked, &identity, 0);
+        check_test_expect(test, selected.status == CHECK_OVERLOAD_AMBIGUOUS && checked.diagnostic == CHECK_DIAG_INCOMPATIBLE &&
+                              identity.status == CHECK_OVERLOAD_INVALID && identity.candidate == UINT32_MAX && identity.object == 0 && scratch.length == 0,
+                          "ambiguous outer call commits no contextual argument identity");
+        candidates[3].type = take_c;
+        CheckAction ordinary = action;
+        ordinary.operands[0] = (CheckValue){ .type = type_pointer(table, take_i), .category = CHECK_RVALUE };
+        selected = check_overload_call(table, &ordinary, candidates, 4, UINT32_MAX, &scratch, path != 0, &checked, &identity, 0);
+        check_test_expect(test, selected.status == CHECK_OVERLOAD_OK && selected.candidate == UINT32_MAX && checked.diagnostic == CHECK_DIAG_NONE && identity.object == 100,
+                          "ordinary function pointer prototype supplies contextual argument type");
+        ordinary.operands[0].type = type_pointer(table, old);
+        selected = check_overload_call(table, &ordinary, candidates, 4, UINT32_MAX, &scratch, path != 0, &checked, &identity, 0);
+        check_test_expect(test, selected.status == CHECK_OVERLOAD_AMBIGUOUS && checked.diagnostic == CHECK_DIAG_INCOMPATIBLE && identity.candidate == UINT32_MAX,
+                          "old-style callee cannot invent context for multiple function identities");
+        argument.overload_head = 1;
+        argument.type = fi;
+        argument.object = 100;
+        selected = check_overload_call(table, &ordinary, candidates, 4, UINT32_MAX, &scratch, path != 0, &checked, &identity, 0);
+        check_test_expect(test, selected.status == CHECK_OVERLOAD_OK && checked.diagnostic == CHECK_DIAG_NONE && identity.object == 100,
+                          "old-style callee accepts an already unique function designator");
+        candidates[0].flags |= BUSTER_CHECK_OVERLOAD_UNAVAILABLE;
+        selected = check_overload_call(table, &ordinary, candidates, 4, UINT32_MAX, &scratch, path != 0, &checked, &identity, 0);
+        check_test_expect(test, selected.status == CHECK_OVERLOAD_UNAVAILABLE && checked.diagnostic == CHECK_DIAG_INCOMPATIBLE && identity.candidate == UINT32_MAX,
+                          "unavailable singleton argument remains a hard use constraint");
+        candidates[0].flags &= ~BUSTER_CHECK_OVERLOAD_UNAVAILABLE;
+        argument.overload_head = 2;
+        argument.type = fd;
+        argument.object = 200;
+    }
+    const uint64_t capacity = scratch.capacity;
+    bool succeeded = false;
+    for (uint64_t limit = 0; limit < 2048; limit += 31)
+    {
+        scratch.capacity = limit;
+        CheckActionResult checked;
+        CheckOverloadResult identity;
+        const CheckOverloadResult selected = check_overload_call(table, &action, candidates, 4, 3, &scratch, false, &checked, &identity, 0);
+        succeeded |= selected.status == CHECK_OVERLOAD_OK;
+        check_test_expect(test, (selected.status == CHECK_OVERLOAD_FULL || (selected.status == CHECK_OVERLOAD_OK && identity.object == 100)) &&
+                              (selected.status != CHECK_OVERLOAD_FULL || identity.candidate == UINT32_MAX) && scratch.length == 0,
+                          "contextual argument scratch exhaustion never publishes a partial selection");
+    }
+    check_test_expect(test, succeeded, "contextual argument arena sweep reaches a successful control");
+    scratch.capacity = capacity;
     arena_release(&scratch);
 }
 
@@ -408,6 +509,8 @@ static void check_test_overload_sources(CheckTest* test, const char* clang)
         { .name = "raw cast selects exact function address", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; typedef int T [[gnu::aligned(sizeof((int(*)(int))f))]]; _Static_assert(_Alignof(T)==8,\"raw cast\");\n" },
         { .name = "typeof cannot choose latest overload", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O;\n__typeof__(f) p;\n", .rejected = true },
         { .name = "typeof cast supplies exact overload context", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; __typeof__((int(*)(int))f) p; _Static_assert(__builtin_types_compatible_p(__typeof__(p),int(*)(int)),\"typed address\");\n" },
+        { .name = "unavailable singleton in unchosen generic association", .source = "int f(int) __attribute__((overloadable,unavailable));\n_Static_assert(_Generic(0,int:1,default:f),\"type\");\n", .rejected = true },
+        { .name = "unavailable selected address from a set remains usable", .source = "#define O __attribute__((overloadable))\nint f(int) O __attribute__((unavailable)); double f(double) O; int take(int(*)(int)) O; double take(char*) O; _Static_assert(_Generic(take(_Generic(0,int:f,default:0)),int:1,default:0),\"selected argument\"); int g(void){return ((int(*)(int))f)(1);}\n" },
     };
     char directory[] = "/tmp/buster-check-overload-source-XXXXXX";
     bool ready = mkdtemp(directory) != 0;
@@ -445,6 +548,7 @@ static void check_test_overloads(CheckTest* test, const char* clang)
         check_test_overload_declarations(test, &types.table);
         check_test_overload_selection(test, &types.table, clang);
         check_test_overload_history(test, &types.table);
+        check_test_overload_arguments(test, &types.table);
         check_test_overload_ranks(test);
     }
     check_test_types_close(&types);

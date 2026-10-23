@@ -88,6 +88,7 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         "int tested(int); int oracle_tested(int);\n"
         "void terminal_probe(void) __attribute__((weak));\n"
         "int external_data=17; int external_helper(int n){return n*3;}\n"
+        "int external_apply(int(*function)(int),int n){return function(n);}\n"
         "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
         "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
         "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
@@ -381,11 +382,13 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 
 #include "c_check_program_select_test.c"
 #include "c_check_program_query_test.c"
+#include "c_check_region_input_test.c"
 
 static void check_test_programs(CheckTest* test, const char* clang)
 {
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);
+    check_test_program_region_proofs(test, clang);
     check_test_program_helpers(test);
     check_test_program_diagnostics(test, clang);
     check_test_program_source(test,

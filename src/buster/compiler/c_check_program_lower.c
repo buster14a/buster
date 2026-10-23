@@ -36,6 +36,7 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_BUILTIN_FLOAT,
     CHECK_LOWER_BUILTIN_FLOAT_STRICT,
     CHECK_LOWER_CONSTANT,
+    CHECK_LOWER_ADDRESS,
     CHECK_LOWER_QUERY,
     CHECK_LOWER_TERMINATE,
 } CheckLowerTaskKind;
@@ -349,7 +350,7 @@ static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to
 
 static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool address, TypeId target)
 {
-    if (node < writer->program->stream->count)
+    if (node < writer->program->stream->count && writer->program->stream->values[node].overload_head == 0)
     {
         if (!address)
         {
@@ -360,6 +361,39 @@ static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool
     else
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+}
+
+// Pending overload leaves carry a lexical placeholder. Only the checked consuming edge supplies an address.
+static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_t operand, bool address, TypeId target)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOverloadResult* selected = check_program_overload_address(program, node, operand);
+    if (selected != NULL)
+    {
+        if (!check_program_overload_valid(program, selected))
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        else if ((selected->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
+        }
+        else
+        {
+            if (!address)
+            {
+                check_lower_convert(writer, selected->type, target);
+            }
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_ADDRESS, .node = selected->object });
+        }
+    }
+    else
+    {
+        const uint32_t child = operand == 0 ? graph->operand0[node] : operand == 1 ? graph->operand1[node] : operand == 2 ? graph->operand2[node] :
+                               operand - 3 < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + operand - 3] : BUSTER_CHECK_NONE;
+        check_lower_expression(writer, child, address, target);
     }
 }
 
@@ -619,7 +653,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(types, stream->values[node].type), call);
         for (uint32_t a = count; a-- > 0;)
         {
-            check_lower_expression(writer, graph->argument_nodes[first + a], false, stream->argument_conversions[first + a].type);
+            check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
         }
     }
 }
@@ -680,7 +714,7 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             {
                 const TypeId checked = stream->argument_conversions[first + a].type;
                 check_lower_convert(writer, checked, helper->parameter_types[a]);
-                check_lower_expression(writer, graph->argument_nodes[first + a], false, checked);
+                check_lower_operand(writer, node, a + 3, false, checked);
             }
         }
     }
@@ -769,7 +803,7 @@ static void check_lower_math(CheckLowerWriter* writer, uint32_t node, const Chec
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
-                check_lower_expression(writer, graph->argument_nodes[first + i], false, stream->argument_conversions[first + i].type);
+                check_lower_operand(writer, node, i + 3, false, stream->argument_conversions[first + i].type);
             }
         }
     }
@@ -801,7 +835,6 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
     const uint32_t left = graph->operand0[node];
-    const uint32_t right = graph->operand1[node];
     const TypeId stored = stream->values[left].type;
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const TypeId right_type = stream->conversions[node].operands[1].type;
@@ -842,7 +875,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         }
         else
         {
-            check_lower_expression(writer, right, false, BUSTER_TYPE_LONG);
+            check_lower_operand(writer, node, 1, false, BUSTER_TYPE_LONG);
         }
     }
     else
@@ -863,7 +896,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         }
         else
         {
-            check_lower_expression(writer, right, false, right_type);
+            check_lower_operand(writer, node, 1, false, right_type);
         }
     }
     check_lower_convert(writer, stored, calculated);
@@ -879,7 +912,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     {
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
         check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
-        check_lower_expression(writer, left, true, 0);
+        check_lower_operand(writer, node, 0, true, 0);
     }
     else
     {
@@ -889,7 +922,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
-        check_lower_expression(writer, left, true, 0);
+        check_lower_operand(writer, node, 0, true, 0);
     }
 }
 
@@ -932,7 +965,6 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
         }
     }
     const uint32_t count = overflow ? 3 : 1;
-    const uint32_t operands[3] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
     uint32_t locals[3] = { 0 };
     for (uint32_t i = 0; i < count; i += 1)
     {
@@ -948,7 +980,7 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
     for (uint32_t i = count; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
     {
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->local_classes[locals[i]], locals[i]);
-        check_lower_expression(writer, operands[i], false, conversions->operands[i].type);
+        check_lower_operand(writer, node, i, false, conversions->operands[i].type);
     }
 }
 
@@ -1055,7 +1087,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         {
             const uint32_t local = call->arguments[i];
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->local_classes[local], local);
-            check_lower_expression(writer, graph->argument_nodes[first + i], false, stream->argument_conversions[first + i].type);
+            check_lower_operand(writer, node, i + 3, false, stream->argument_conversions[first + i].type);
         }
     }
 }
@@ -1168,7 +1200,6 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
     const CheckStream* stream = program->stream;
     const uint32_t selected = check_program_builtin_index(stream->floating, stream->floating_count, sizeof(CheckBuiltinFloatEffect), node);
     const uint32_t count = graph->argument_counts[node];
-    const uint32_t first = graph->argument_offsets[node];
     if (selected == BUSTER_CHECK_NONE)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -1198,7 +1229,7 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                     {
                         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, result);
                     }
-                    check_lower_expression(writer, graph->argument_nodes[first + operand], false,
+                    check_lower_operand(writer, node, operand + 3, false,
                                            operand == effect->selected_selector ? BUSTER_TYPE_INT : BUSTER_TYPE_VOID);
                 }
             }
@@ -1221,15 +1252,15 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, subnormal);
                 check_lower_selector_test(writer, category, 3, end, false);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, subnormal);
-                check_lower_expression(writer, graph->argument_nodes[first + 3], false, BUSTER_TYPE_INT);
+                check_lower_operand(writer, node, 6, false, BUSTER_TYPE_INT);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, result);
-                check_lower_expression(writer, graph->argument_nodes[first + 2], false, BUSTER_TYPE_INT);
+                check_lower_operand(writer, node, 5, false, BUSTER_TYPE_INT);
                 for (uint32_t i = 3; i-- > 0;)
                 {
                     const uint32_t operand = i == 0 ? 4 : i - 1;
                     check_lower_selector_test(writer, category, operand, end, true);
                     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, result);
-                    check_lower_expression(writer, graph->argument_nodes[first + operand], false, BUSTER_TYPE_INT);
+                    check_lower_operand(writer, node, operand + 3, false, BUSTER_TYPE_INT);
                 }
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, category);
             }
@@ -1239,7 +1270,7 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                 .type = stream->values[node].type,
             });
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, argument);
-            check_lower_expression(writer, graph->argument_nodes[first + (selectors ? 5 : 0)], false, effect->floating_type);
+            check_lower_operand(writer, node, selectors ? 8 : 3, false, effect->floating_type);
         }
         else if (stream->values[node].constant_kind == CHECK_CONSTANT_FLOATING &&
                  (stream->values[node].flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0)
@@ -1249,7 +1280,7 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
             {
                 if (i < 32 && (effect->evaluated_operands & (1u << i)) != 0)
                 {
-                    check_lower_expression(writer, graph->argument_nodes[first + i], false, BUSTER_TYPE_VOID);
+                    check_lower_operand(writer, node, i + 3, false, BUSTER_TYPE_VOID);
                 }
             }
         }
@@ -1298,7 +1329,7 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, result);
         }
         const TypeId converted = program->stream->conversions[task.node].operands[0].type;
-        check_lower_expression(writer, region->result, task.address, converted);
+        check_lower_operand(writer, task.node, 0, task.address, converted);
         for (uint32_t i = region->count; i-- > 0;)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONTROL, .node = region->first + i });
@@ -1317,7 +1348,6 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     const CheckValue value = stream->values[node];
     const uint32_t a = graph->operand0[node];
     const uint32_t b = graph->operand1[node];
-    const uint32_t c = graph->operand2[node];
     const TypeId type_a = stream->conversions[node].operands[0].type;
     const TypeId type_b = stream->conversions[node].operands[1].type;
     const uint8_t class = check_lower_class(types, value.type);
@@ -1389,7 +1419,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     }
     else if (op == CHECK_OP_SELECT)
     {
-        check_lower_expression(writer, a, task.address, 0);
+        check_lower_operand(writer, node, 0, task.address, 0);
     }
     else if (op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY)
     {
@@ -1397,12 +1427,12 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         const bool complex = type_kind(types, type_strip_aligned(types, input_type)) == BUSTER_TYPE_KIND_COMPLEX;
         if (!complex && op == CHECK_OP_REAL)
         {
-            check_lower_expression(writer, a, task.address, 0);
+            check_lower_operand(writer, node, 0, task.address, 0);
         }
         else if (!complex)
         {
             check_lower_instruction(writer, BUSTER_TYPED_CONST, class, 0);
-            check_lower_expression(writer, a, false, BUSTER_TYPE_VOID);
+            check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
         }
         else if (stream->values[a].category == CHECK_LVALUE)
         {
@@ -1415,7 +1445,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
                 check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
                 check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, type_size(types, type_element(types, input_type)));
             }
-            check_lower_expression(writer, a, true, 0);
+            check_lower_operand(writer, node, 0, true, 0);
         }
         else
         {
@@ -1439,13 +1469,13 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             check_lower_instruction(writer, op == CHECK_OP_VLA_BOUND ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
             if (op == CHECK_OP_VLA_BOUND)
             {
-                check_lower_expression(writer, a, false, BUSTER_TYPE_ULONG);
+                check_lower_operand(writer, node, 0, false, BUSTER_TYPE_ULONG);
             }
         }
     }
     else if (op == CHECK_OP_SIZEOF_VLA)
     {
-        check_lower_expression(writer, a, false, BUSTER_TYPE_ULONG);
+        check_lower_operand(writer, node, 0, false, BUSTER_TYPE_ULONG);
     }
     else if (op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW)
     {
@@ -1467,7 +1497,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     {
         check_lower_helper(writer, node);
     }
-    else if (op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86)
+    else if (op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_BIT_CAST)
     {
         check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
     }
@@ -1502,7 +1532,6 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         else
         {
             const uint32_t count = graph->argument_counts[node];
-            const uint32_t first = graph->argument_offsets[node];
             const uint32_t evaluated = stream->queries[selected].evaluated_operands;
             const uint32_t mask = count < 32 ? (UINT32_C(1) << count) - 1 : UINT32_MAX;
             const bool constant_query = graph->members[node] == CBUILTIN_CONSTANT_P;
@@ -1516,14 +1545,14 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             {
                 if (i < 32 && (evaluated & (UINT32_C(1) << i)) != 0)
                 {
-                    check_lower_expression(writer, graph->argument_nodes[first + i], false, BUSTER_TYPE_VOID);
+                    check_lower_operand(writer, node, i + 3, false, BUSTER_TYPE_VOID);
                 }
             }
         }
     }
     else if (op == CHECK_OP_ADDRESS)
     {
-        check_lower_expression(writer, a, true, 0);
+        check_lower_operand(writer, node, 0, true, 0);
     }
     else if (op == CHECK_OP_DEREFERENCE)
     {
@@ -1531,7 +1560,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
         }
-        check_lower_expression(writer, a, false, type_a);
+        check_lower_operand(writer, node, 0, false, type_a);
     }
     else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
     {
@@ -1555,26 +1584,26 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
             check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset / 8);
         }
-        check_lower_expression(writer, a, op == CHECK_OP_MEMBER, type_a);
+        check_lower_operand(writer, node, 0, op == CHECK_OP_MEMBER, type_a);
     }
     else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
     {
-        check_lower_expression(writer, a, false, value.type);
+        check_lower_operand(writer, node, 0, false, value.type);
     }
     else if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT)
     {
         check_lower_instruction(writer, op == CHECK_OP_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, class, 0);
-        check_lower_expression(writer, a, false, type_a);
+        check_lower_operand(writer, node, 0, false, type_a);
     }
     else if (op == CHECK_OP_NOT || op == CHECK_OP_CONDITION)
     {
         check_lower_truth(writer, type_a, op == CHECK_OP_NOT);
-        check_lower_expression(writer, a, false, type_a);
+        check_lower_operand(writer, node, 0, false, type_a);
     }
     else if (op == CHECK_OP_COMMA)
     {
-        check_lower_expression(writer, b, task.address, value.type);
-        check_lower_expression(writer, a, false, BUSTER_TYPE_VOID);
+        check_lower_operand(writer, node, 1, task.address, value.type);
+        check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
     }
     else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)
     {
@@ -1584,7 +1613,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         {
             if (op == CHECK_OP_CONDITIONAL)
             {
-                check_lower_expression(writer, truth ? b : c, false, value.type);
+                check_lower_operand(writer, node, truth ? 1 : 2, false, value.type);
             }
             else if ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth))
             {
@@ -1593,11 +1622,11 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             else
             {
                 check_lower_truth(writer, type_b, false);
-                check_lower_expression(writer, b, false, type_b);
+                check_lower_operand(writer, node, 1, false, type_b);
             }
             if ((!reuse || !truth) && check_program_runtime_effects(program, a))
             {
-                check_lower_expression(writer, a, false, BUSTER_TYPE_VOID);
+                check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
             }
         }
         else
@@ -1608,7 +1637,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             check_lower_mark(writer, end);
             if (op == CHECK_OP_CONDITIONAL)
             {
-                check_lower_expression(writer, c, false, value.type);
+                check_lower_operand(writer, node, 2, false, value.type);
             }
             else
             {
@@ -1625,13 +1654,13 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
                 }
                 else
                 {
-                    check_lower_expression(writer, b, false, value.type);
+                    check_lower_operand(writer, node, 1, false, value.type);
                 }
             }
             else
             {
                 check_lower_truth(writer, type_b, false);
-                check_lower_expression(writer, b, false, type_b);
+                check_lower_operand(writer, node, 1, false, type_b);
             }
             check_lower_instruction(writer, op == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, alternate);
             check_lower_truth(writer, type_a, false);
@@ -1640,7 +1669,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL, check_lower_class(types, type_a), retained);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(types, type_a), retained);
             }
-            check_lower_expression(writer, a, false, type_a);
+            check_lower_operand(writer, node, 0, false, type_a);
         }
     }
     else if (op == CHECK_OP_CALL)
@@ -1657,13 +1686,13 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         {
             check_lower_instruction(writer, local != BUSTER_CHECK_NONE ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
                                      local != BUSTER_CHECK_NONE ? local : symbol);
-            check_lower_expression(writer, op == CHECK_OP_INITIALIZE ? a : b, false, value.type);
+            check_lower_operand(writer, node, op == CHECK_OP_INITIALIZE ? 0 : 1, false, value.type);
         }
         else if (op == CHECK_OP_ASSIGN)
         {
             check_lower_instruction(writer, BUSTER_TYPED_STORE, class, 0);
-            check_lower_expression(writer, b, false, value.type);
-            check_lower_expression(writer, a, true, 0);
+            check_lower_operand(writer, node, 1, false, value.type);
+            check_lower_operand(writer, node, 0, true, 0);
         }
         else
         {
@@ -1680,8 +1709,6 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         const bool right_pointer = type_kind(types, type_strip_aligned(types, type_b)) == BUSTER_TYPE_KIND_POINTER;
         if (left_pointer || right_pointer)
         {
-            const uint32_t pointer = left_pointer ? a : b;
-            const uint32_t index = left_pointer ? b : a;
             const TypeId pointer_type = left_pointer ? type_a : type_b;
             const uint64_t size = check_lower_stride(writer, pointer_type);
             if (left_pointer && right_pointer && op == CHECK_OP_SUBTRACT)
@@ -1690,8 +1717,8 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
                 check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size);
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
                 check_lower_instruction(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
-                check_lower_expression(writer, b, false, type_b);
-                check_lower_expression(writer, a, false, type_a);
+                check_lower_operand(writer, node, 1, false, type_b);
+                check_lower_operand(writer, node, 0, false, type_a);
             }
             else
             {
@@ -1704,22 +1731,22 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
                 }
-                check_lower_expression(writer, index, false, BUSTER_TYPE_LONG);
-                check_lower_expression(writer, pointer, false, pointer_type);
+                check_lower_operand(writer, node, left_pointer ? 1 : 0, false, BUSTER_TYPE_LONG);
+                check_lower_operand(writer, node, left_pointer ? 0 : 1, false, pointer_type);
             }
         }
         else
         {
             check_lower_instruction(writer, check_lower_binary(op), class, 0);
-            check_lower_expression(writer, b, false, type_b);
-            check_lower_expression(writer, a, false, type_a);
+            check_lower_operand(writer, node, 1, false, type_b);
+            check_lower_operand(writer, node, 0, false, type_a);
         }
     }
     else if (check_lower_binary(op) != BUSTER_TYPED_NONE)
     {
         check_lower_instruction(writer, check_lower_binary(op), class, 0);
-        check_lower_expression(writer, b, false, type_b);
-        check_lower_expression(writer, a, false, type_a);
+        check_lower_operand(writer, node, 1, false, type_b);
+        check_lower_operand(writer, node, 0, false, type_a);
     }
     else
     {
@@ -1763,6 +1790,10 @@ static void check_lower_drain(CheckLowerWriter* writer)
         else if (task.kind == CHECK_LOWER_CONSTANT)
         {
             check_lower_constant(writer, writer->program->stream->values + task.node);
+        }
+        else if (task.kind == CHECK_LOWER_ADDRESS)
+        {
+            check_lower_address(writer, task.node, (int64_t)task.value);
         }
         else if (task.kind == CHECK_LOWER_QUERY)
         {
@@ -1813,7 +1844,30 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             else
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
-                check_lower_expression(writer, write->node, false, write->conversion.type);
+                if (write->overload_candidate != 0)
+                {
+                    const CheckGraph* graph = &program->input->graph;
+                    const CheckOverloadCandidate* candidate = write->overload_candidate <= graph->overload_candidate_count ?
+                                                              graph->overload_candidates + write->overload_candidate - 1 : NULL;
+                    if (candidate == NULL || write->value.overload_head != 0 || write->value.constant_kind != CHECK_CONSTANT_ADDRESS ||
+                        write->value.object != candidate->object || write->value.object == 0 || write->value.object >= program->object_count)
+                    {
+                        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+                    }
+                    else if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
+                    {
+                        check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
+                    }
+                    else
+                    {
+                        check_lower_convert(writer, write->value.type, write->conversion.type);
+                        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_ADDRESS, .node = write->value.object, .value = (uint64_t)write->value.offset });
+                    }
+                }
+                else
+                {
+                    check_lower_expression(writer, write->node, false, write->conversion.type);
+                }
             }
         }
     }

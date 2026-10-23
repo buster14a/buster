@@ -184,6 +184,21 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
     return source;
 }
 
+static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
+{
+    uint32_t source = check_input_report_source(parser, report);
+    for (uint32_t i = 0; report->pragma != 0 && i < input->fp_pragma_count; i += 1)
+    {
+        const CheckInputFpPragma* record = input->fp_pragmas + i;
+        if (record->pragma == report->pragma - 1)
+        {
+            source = check_diagnostic_pragma_source(record);
+            break;
+        }
+    }
+    return source;
+}
+
 static bool check_diagnostic_first_pragma_error_mode(const CheckInput* input, uint32_t before_token, uint32_t* token, uint32_t* source, bool quiet)
 {
     uint32_t first = BUSTER_CHECK_NONE;

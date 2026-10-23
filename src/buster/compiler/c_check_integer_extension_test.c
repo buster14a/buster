@@ -87,6 +87,12 @@ static void check_test_integer_source_warnings(CheckTest* test, const char* clan
         "typedef __typeof__(1<<32) T;\n",
         "typedef __typeof__(1073741824<<2) T;\n",
         "typedef _BitInt((8>>-1)+1) T;\n",
+        "enum { N=__builtin_constant_p((int)1.0e100+1) };\n",
+        "enum { N=__builtin_constant_p((__int128)1.0e100+1) };\n",
+        "typedef int T [[gnu::aligned(__builtin_constant_p((int)1.0e100+1)*16)]];\n",
+        "int f(void){return __builtin_constant_p((int)1.0e100+1);}\n",
+        "enum { N=__builtin_constant_p((int)1.0e100) };\n",
+        "enum { N=__builtin_constant_p((unsigned)-1.0e100+1) };\n",
     };
     const struct
     {

@@ -80,6 +80,15 @@ Linked declarations also retain translation-unit identity across closed blocks.
 An out-of-scope prototype constrains later declarations of the same entity but
 does not silently change the type visible to an unprototyped call.
 
+Overloadable declarations retain source-position candidate sets. A call selects
+its candidate from the checked argument types; a function address selects from
+the destination function-pointer type. Initializers, casts, assignments,
+callbacks and returns retain that selected object and conversion on the use
+edge, without rewriting a shared identifier leaf. Candidate availability is
+checked at the use's source position. Function calling conventions participate
+in canonical type identity and compatibility; checking their types does not
+claim backend support for emitting each convention.
+
 Source-point type history prevents a later tag definition or declaration from
 retroactively changing an earlier expression. Runtime VLA bounds have stable
 extent identities and explicit captures; an unevaluated operand suppresses
@@ -202,6 +211,16 @@ already checked expressions, not syntax that the call action must reparse.
 context bits before reading child results. Empty graphs need no node columns;
 an empty action batch may use null input and output pointers.
 
+Counted auxiliary records retain builtin calls, overload candidates/selections
+and statement-expression proof regions. A region owns a contiguous bounded
+slice of `EVAL`, `BRANCH`, `CASE`, `JUMP` and `END` steps over earlier typed
+nodes. The source adapter builds these steps from the existing parser tree and
+checked expression roots. A `CASE` retains both the switch expression and case
+operand so comparison uses the promoted switch type. Validation checks node
+order, ownership, slice coverage and branch targets before interpreting a
+region. Body extraction includes these dependencies and remaps every retained
+node reference while preserving branch targets within each compacted slice.
+
 ### Typed output
 
 `CheckStream.count` matches the input graph's count. Operators, source tokens
@@ -277,6 +296,12 @@ remain necessary: scalar/vector equality alone cannot validate shared C rules.
 counts, and arena bytes. The node counts describe the path executed, not merely
 which operations could theoretically use SIMD. The schedule is currently
 single-threaded; it does not establish useful multicore scaling.
+`query_proof_nodes` counts visits across the three constant-query proof lanes;
+`query_replay_nodes` counts the subsequent graph replay. These are additional
+work, separate from the initial scalar/vector scheduling counts. Scratch bytes
+are the peak live allocation above the caller's initial arena position,
+including temporary overload, region and query allocations that are released
+before return.
 
 ## Constant evaluation
 
@@ -313,6 +338,23 @@ an ordinary floating arithmetic expression is not made an ICE merely by
 folding. Source contexts explicitly request integer constant expressions,
 static assertions or constant static initializers.
 
+Constant-query answers keep source proof, speculative proof and runtime effects
+separate. A source constant answer does not erase a floating-point exception or
+rounding dependency in an evaluated operand. Statement-expression proofs follow
+one known control path and refuse a revisited step or unsupported transfer;
+runtime effect collection visits reachable steps once and combines unknown
+branches. Both consume the existing checked values rather than interpreting a
+second variable environment. The ordinary program body remains responsible for
+runtime execution.
+
+`__builtin_bit_cast` retains its destination type and raw source operand before
+array decay or ordinary argument promotion. Type constraints, representation
+availability and a usable constant payload are separate results. A valid cast
+with unavailable representation data remains semantically valid and carries an
+explicit downstream requirement; it does not acquire invented bytes or a
+guessed result type. Floating representation transfer does not read a poisoned
+or unavailable host floating payload.
+
 Address constants retain an object identity and signed byte addend. The source
 adapter marks static-storage objects and functions. Taking the address of an
 automatic object retains identity for checking but does not create a static
@@ -340,6 +382,11 @@ ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
 External targets may remain unresolved. A referenced internal function needs
 its real code atom: standalone data inspection reports that limitation, while
 combined object/data output uses the program's actual symbol space.
+Initializer plans retain the exact selected overload candidate and object.
+The standalone source bridge refuses a referenced overloadable symbol until
+its ABI symbol name is available, before publishing any Link state. An unused
+overloadable declaration needs no symbol; the lower-level emitter can consume
+an explicitly supplied object-to-symbol map.
 
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are

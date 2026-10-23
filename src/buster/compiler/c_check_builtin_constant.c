@@ -16,7 +16,35 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     check_input_builtin_evidence(reader, first, end, &evidence);
     CheckActionResult result = { 0 };
     const CheckOp family = check_graph_builtin_op(builtin);
-    if (family == CHECK_OP_BUILTIN_MISC)
+    if (builtin == CBUILTIN_BIT_CAST)
+    {
+        // Integer operands provide an exact object representation only after the complete expression has
+        // evaluated without effects, faults or volatile access. The module independently checks destination
+        // eligibility and size; no lvalue conversion, array decay or half promotion precedes that check.
+        const CheckValue* source = count == 1 ? arguments : 0;
+        const bool constant = source != 0 && type_is_valid(reader->types, source->type) && type_is_valid(reader->types, destination_type) &&
+                              source->category == CHECK_RVALUE && source->constant_kind == CHECK_CONSTANT_INTEGER &&
+                              source->fault == CHECK_FAULT_NONE && (source->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_BIT_FIELD)) == 0 &&
+                              (type_qualifiers(type_strip_aligned(reader->types, source->type)) & BUSTER_TYPE_VOLATILE) == 0 &&
+                              check_action_is_integer(reader->types, source->type);
+        const bool ice = constant && (source->flags & BUSTER_CHECK_ICE) != 0 && check_action_is_integer(reader->types, destination_type) &&
+                         type_kind(reader->types, type_strip_aligned(reader->types, destination_type)) != BUSTER_TYPE_KIND_ATOMIC;
+        const CheckBuiltinBitCastAction action =
+        {
+            .id = builtin, .destination_type = destination_type, .arguments = arguments, .argument_count = count, .node = closing,
+            .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
+            .source_position = closing + 1,
+            .source_proof = ice ? CHECK_BUILTIN_BIT_CAST_PROOF_ICE : constant ? CHECK_BUILTIN_BIT_CAST_PROOF_CONSTANT : CHECK_BUILTIN_BIT_CAST_PROOF_NONE,
+        };
+        CheckBuiltinBitCastResult checked;
+        check_builtin_bit_cast(reader->types, &action, &checked, 1);
+        result = checked.action;
+        if (result.diagnostic == CHECK_DIAG_NONE && (checked.unsupported & BUSTER_CHECK_BUILTIN_BIT_CAST_RESULT_TYPE) != 0)
+        {
+            check_action_diagnose(&result, CHECK_DIAG_UNSUPPORTED, 0);
+        }
+    }
+    else if (family == CHECK_OP_BUILTIN_MISC)
     {
         const CheckBuiltinMiscAction action =
         {

@@ -161,6 +161,8 @@ static void check_init_test_diagnostics(CheckTest* test, const char* clang)
     check_init_test_diagnostic_source(test, "int f(void){int a[1]={1,2};return *1;}\n", BUSTER_CHECK_NONE, false, true);
     check_init_test_diagnostic_source(test, "struct S{int *p;} a={3};\nint z;double z;\n", 1, true, false);
     check_init_test_diagnostic_source(test, "struct S{int *p;} a={3};\nint f(void){return missing;}\n", 1, true, false);
+    check_init_test_diagnostic_source(test, "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{float(*p)(float);} a={f};\nint g(void){return *1;}\n", 1, false, 0);
+    check_init_test_diagnostic_source(test, "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{float(*p)(float);} a={f};\nint g(void){return missing;}\n", 1, true, 0);
     check_init_test_diagnostic_source(test, "int f(void){return *1;}\nint a[1]={1,2};\n", BUSTER_CHECK_NONE, false, false);
     check_init_test_diagnostic_source(test, "int a[1]={1};\nint f(void){return *1;}\n", BUSTER_CHECK_NONE, false, false);
     check_init_test_diagnostic_source(test, "int a[1]={1,*1};\n", BUSTER_CHECK_NONE, false, false);
@@ -173,6 +175,8 @@ static void check_init_test_diagnostics(CheckTest* test, const char* clang)
         "struct S{int *p;} a={3};\nint f(void){return *1;}\n",
         "struct S{int *p;} a={3};\nint z;double z;\n",
         "int f(void){return *1;}\nstruct S{int *p;} a={3};\n",
+        "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{float(*p)(float);} a={f};\nint g(void){return *1;}\n",
+        "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{float(*p)(float);} a={f};\nint g(void){return missing;}\n",
     };
     char directory[] = "/tmp/buster-initializer-order-XXXXXX";
     bool ready = mkdtemp(directory) != 0;

@@ -355,6 +355,18 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
             }
         }
     }
+    const CheckGraph* graph = stream->graph;
+    for (uint32_t i = 0; valid && graph != 0 && i < graph->overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object <= count && needed[candidate->object])
+        {
+            // A selected overload object still needs its ABI symbol name before standalone publication.
+            valid = false;
+            result->status = CHECK_DATA_INPUT_UNSUPPORTED;
+            result->token = candidate->declaration;
+        }
+    }
     if (valid)
     {
         LinkCapacity capacity = prepared.capacity;

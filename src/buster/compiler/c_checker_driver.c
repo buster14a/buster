@@ -252,7 +252,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t phase = (uint32_t)(first[token] >> 32);
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
                                                                                      check_driver_input_message(input->reports[index].message);
-                const uint32_t source = phase == 0 ? check_input_report_source(parser, input->reports + index) : BUSTER_CHECK_NONE;
+                const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (source != BUSTER_CHECK_NONE)
                 {
                     pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);

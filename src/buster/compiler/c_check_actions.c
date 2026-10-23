@@ -160,6 +160,7 @@ typedef enum CheckOp
     CHECK_OP_IMAGINARY,
     CHECK_OP_BUILTIN_VECTOR,
     CHECK_OP_BUILTIN_X86,
+    CHECK_OP_BUILTIN_BIT_CAST,
     CHECK_OP_COUNT,
 } CheckOp;
 
@@ -2056,7 +2057,8 @@ static uint32_t check_action_operand_count(const CheckAction* action)
         case CHECK_OP_BUILTIN_QUERY:
         case CHECK_OP_BUILTIN_ATOMIC:
         case CHECK_OP_BUILTIN_VECTOR:
-        case CHECK_OP_BUILTIN_X86: count = 0; break;
+        case CHECK_OP_BUILTIN_X86:
+        case CHECK_OP_BUILTIN_BIT_CAST: count = 0; break;
         case CHECK_OP_VALUE:
         case CHECK_OP_POSITIVE:
         case CHECK_OP_NEGATIVE:
@@ -2373,7 +2375,8 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
             case CHECK_OP_BUILTIN_QUERY:
             case CHECK_OP_BUILTIN_ATOMIC:
             case CHECK_OP_BUILTIN_VECTOR:
-            case CHECK_OP_BUILTIN_X86: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
+            case CHECK_OP_BUILTIN_X86:
+            case CHECK_OP_BUILTIN_BIT_CAST: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
             default: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
         }
     }

@@ -551,6 +551,18 @@ static int run_checker_driver_tests(int argc, char** argv)
             .quiet = true,
         },
         {
+            .name = "misplaced floating pragma retains macro invocation source",
+            .source = "#define ACCESS _Pragma(\"STDC FENV_ACCESS ON\")\nvoid f(void)\n{\nint value=0;\nACCESS\nvalue++;\n}\n",
+            .rejected = true,
+        },
+        {
+            .name = "misplaced floating pragma survives quiet mode at forwarded invocation",
+            .source = "#define ACCESS _Pragma(\"STDC FENV_ACCESS ON\")\n#define FORWARD(x) x\n#line 70 \"placement.c\"\n"
+                      "void f(void)\n{\nint value=0;\nFORWARD(ACCESS)\nvalue++;\n}\n",
+            .rejected = true,
+            .quiet = true,
+        },
+        {
             .name = "late assembler label retains its ignored attribute warning",
             .source = "int object=1;\nextern int object asm(\"renamed\");\n",
             .warnings = 1,

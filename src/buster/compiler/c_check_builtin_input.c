@@ -20,10 +20,13 @@ static bool check_input_builtin_type_prepare(CheckInputReader* reader, uint32_t 
              check_constant_punctuation(parser, separator + 1, closing, PARSE_KIND_COMMA) == closing;
     if (valid)
     {
+        const bool first_type = builtin == CBUILTIN_BIT_CAST;
+        const uint32_t type_first = first_type ? opening + 1 : separator + 1;
+        const uint32_t type_end = first_type ? separator : closing;
         reader->builtins[closing] = builtin;
-        reader->builtin_type_ends[separator + 1] = closing;
+        reader->builtin_type_ends[type_first] = closing;
         reader->ignored[keyword] = true;
-        memset(reader->ignored + separator + 1, 1, closing - separator - 1);
+        memset(reader->ignored + type_first, 1, type_end - type_first);
     }
     else
     {
@@ -35,7 +38,9 @@ static bool check_input_builtin_type_prepare(CheckInputReader* reader, uint32_t 
 static void check_input_builtin_type(CheckInputReader* reader, uint32_t first)
 {
     const uint32_t closing = reader->builtin_type_ends[first];
-    const TypeId type = check_input_constant_type(reader, first, closing);
+    const uint32_t end = reader->builtins[closing] == CBUILTIN_BIT_CAST ?
+                         check_constant_punctuation(reader->parser, first, closing, PARSE_KIND_COMMA) : closing;
+    const TypeId type = check_input_constant_type(reader, first, end);
     reader->query_types[closing] = type;
     if (type == 0)
     {

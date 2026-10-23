@@ -42,6 +42,7 @@ struct String8
 #include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
 #include "buster/compiler/c_check_builtin_vector.c"
+#include "buster/compiler/c_check_builtin_bit_cast.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
 #include "buster/compiler/c_checker.c"
@@ -101,7 +102,7 @@ static bool check_benchmark_value_equal(const CheckValue* x, const CheckValue* y
     const bool imaginary = (isnan(x->imaginary) && isnan(y->imaginary)) ||
                            (x->imaginary == y->imaginary && signbit(x->imaginary) == signbit(y->imaginary));
     const bool equal = x->type == y->type && x->category == y->category && x->flags == y->flags && x->constant_kind == y->constant_kind &&
-                       x->integer == y->integer && floating && imaginary && x->object == y->object && x->offset == y->offset &&
+                       x->integer == y->integer && floating && imaginary && x->object == y->object && x->offset == y->offset && x->overload_head == y->overload_head &&
                        x->bit_width == y->bit_width && x->fault == y->fault && x->fault_node == y->fault_node;
     return equal;
 }

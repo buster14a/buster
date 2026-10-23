@@ -268,7 +268,8 @@ static uint32_t check_corpus_source(const CheckCorpusPath* path, const Parser* p
         .token = path->token,
         .pragma = path->pragma,
     };
-    return path->pragma != 0 && strcmp(path->phase, "promoted-warning") == 0 ? path->warning_source : check_input_report_source(parser, &report);
+    return path->pragma != 0 && strcmp(path->phase, "promoted-warning") == 0 ? path->warning_source :
+           check_diagnostic_input_report_source(&path->input, parser, &report);
 }
 
 static void check_corpus_location(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp)
@@ -852,7 +853,8 @@ static bool check_corpus_initializers_equal(const CheckInitializers* x, const Ch
             const CheckInitPart* p = a->parts + part;
             const CheckInitPart* q = b->parts + part;
             equal = p->kind == q->kind && p->type == q->type && p->node == q->node && p->token == q->token && p->bit_offset == q->bit_offset &&
-                    p->bit_width == q->bit_width && p->byte_count == q->byte_count && p->conversion.type == q->conversion.type &&
+                    p->bit_width == q->bit_width && p->byte_count == q->byte_count && p->overload_candidate == q->overload_candidate &&
+                    p->conversion.type == q->conversion.type &&
                     p->conversion.flags == q->conversion.flags && check_test_value_equal(&p->value, &q->value) &&
                     (p->kind != CHECK_INIT_BYTES || p->byte_count == 0 || memcmp(p->bytes, q->bytes, p->byte_count) == 0);
         }
@@ -1126,7 +1128,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left->parser_binding_event_count == right->parser_binding_event_count &&
             left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
             (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL) &&
-            (left->overload_heads == NULL) == (right->overload_heads == NULL);
+            (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL);
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
@@ -1155,7 +1157,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = (left->intrinsic_ids == NULL || left->intrinsic_ids[token] == right->intrinsic_ids[token]) &&
                 (left->deferred_tokens == NULL || left->deferred_tokens[token] == right->deferred_tokens[token]) &&
-                (left->overload_heads == NULL || left->overload_heads[token] == right->overload_heads[token]);
+                (left->overload_heads == NULL || left->overload_heads[token] == right->overload_heads[token]) &&
+                (left->explicit_abis == NULL || left->explicit_abis[token] == right->explicit_abis[token]);
     }
     for (uint32_t declaration = 0; equal && !a->resource && declaration < left->intrinsic_declaration_count; declaration += 1)
     {
@@ -1249,6 +1252,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             graph->extensions == other->extensions && graph->builtin_count == other->builtin_count && graph->vector_member_count == other->vector_member_count &&
             graph->x86_count == other->x86_count && graph->overload_count == other->overload_count &&
             graph->overload_candidate_count == other->overload_candidate_count &&
+            graph->region_proof_count == other->region_proof_count && graph->region_step_count == other->region_step_count &&
             graph->tag_completion_count == other->tag_completion_count && (graph->tag_completions == 0) == (other->tag_completions == 0) &&
             (graph->transparent_unions == NULL) == (other->transparent_unions == NULL) &&
             (graph->source_positions == 0) == (other->source_positions == 0) && (graph->fp_environments == NULL) == (other->fp_environments == NULL) &&
@@ -1311,6 +1315,14 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     for (uint32_t call = 0; equal && !a->resource && call < graph->overload_count; call += 1)
     {
         equal = graph->overload_calls[call].node == other->overload_calls[call].node && graph->overload_calls[call].head == other->overload_calls[call].head;
+    }
+    for (uint32_t region = 0; equal && !a->resource && region < graph->region_proof_count; region += 1)
+    {
+        equal = check_region_proof_equal(graph->region_proofs + region, other->region_proofs + region);
+    }
+    for (uint32_t step = 0; equal && !a->resource && step < graph->region_step_count; step += 1)
+    {
+        equal = check_region_step_equal(graph->region_steps + step, other->region_steps + step);
     }
     if (equal && a->checked)
     {

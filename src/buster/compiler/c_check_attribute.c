@@ -1067,6 +1067,130 @@ static bool check_input_attribute_string_type(TypeTable* types, TypeId type)
     return result;
 }
 
+static TypeFunctionABI check_input_attribute_requested_abi(const CheckInputAttributes* attributes)
+{
+    const CheckInputCallingConvention call = attributes != 0 ? attributes->calling_convention : CHECK_CALL_DEFAULT;
+    const TypeFunctionABI result = call == CHECK_CALL_SYSV ? TYPE_FUNCTION_ABI_SYSV : call == CHECK_CALL_MICROSOFT ? TYPE_FUNCTION_ABI_MICROSOFT :
+                                   call == CHECK_CALL_VECTOR ? TYPE_FUNCTION_ABI_VECTOR : call == CHECK_CALL_REG ? TYPE_FUNCTION_ABI_REG :
+                                   call == CHECK_CALL_PRESERVE_MOST ? TYPE_FUNCTION_ABI_PRESERVE_MOST :
+                                   call == CHECK_CALL_PRESERVE_ALL ? TYPE_FUNCTION_ABI_PRESERVE_ALL :
+                                   call == CHECK_CALL_PRESERVE_NONE ? TYPE_FUNCTION_ABI_PRESERVE_NONE : TYPE_FUNCTION_ABI_INVALID;
+    return result;
+}
+
+// The canonical default and explicit sysv_abi function types are identical. Keep explicitness on the spelling
+// instead: zero means implicit, and an ABI plus one names the first function's explicit convention. New outer
+// function declarators start a new origin; pointer, array, aligned, grouping and typedef wrappers preserve it.
+static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckInputAttributes* attributes, uint8_t origin)
+{
+    uint8_t result = origin;
+    const TypeFunctionABI requested = check_input_attribute_requested_abi(attributes);
+    if (requested != TYPE_FUNCTION_ABI_INVALID && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        if (origin == 0 || origin == (uint8_t)requested + 1)
+        {
+            result = (uint8_t)requested + 1;
+        }
+        else
+        {
+            for (uint32_t i = 0; i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value != CHECK_CALL_IGNORED_X86_32)
+                {
+                    check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_CONFLICT);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// Calling conventions attach to the first function inside a completed declarator, through its pointer, array and
+// aligned-typedef wrappers. Preserve all those wrappers and their qualifiers; attributes on a scalar subject are
+// warning-only ignored metadata. A prefix caller waits for the full declarator before invoking this helper.
+static TypeId check_input_attribute_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
+{
+    TypeId result = type;
+    const TypeFunctionABI abi = check_input_attribute_requested_abi(attributes);
+    const bool requested = abi != TYPE_FUNCTION_ABI_INVALID;
+    if (type != 0 && requested && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        const uint64_t mark = reader->scratch->length;
+        TypeId function = type;
+        uint32_t depth = 0;
+        bool wrapped = true;
+        while (wrapped)
+        {
+            const uint8_t kind = type_kind(reader->types, function);
+            wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED;
+            if (wrapped)
+            {
+                function = reader->types->types.base[type_index(function)];
+                depth += 1;
+            }
+        }
+        const bool is_function = type_kind(reader->types, function) == BUSTER_TYPE_KIND_FUNCTION;
+        TypeId* wrappers = is_function && depth != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, TypeId, depth) : 0;
+        if (is_function && (depth == 0 || wrappers != 0))
+        {
+            const TypeFunctionABI previous = type_function_abi_kind(reader->types, function);
+            uint32_t count = 0;
+            const TypeId* parameters = type_parameters(reader->types, function, &count);
+            TypeId cursor = type;
+            for (uint32_t i = 0; i < depth; i += 1)
+            {
+                wrappers[i] = cursor;
+                cursor = reader->types->types.base[type_index(cursor)];
+            }
+            result = previous == TYPE_FUNCTION_ABI_SYSV || previous == abi ?
+                     type_function_abi(reader->types, type_return(reader->types, function), parameters, count,
+                                       reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY, abi) : 0;
+            if (previous == TYPE_FUNCTION_ABI_SYSV || previous == abi)
+            {
+                result = check_input_type_result(reader, result);
+            }
+            for (uint32_t i = depth; result != 0 && i != 0; i -= 1)
+            {
+                const TypeId wrapper = wrappers[i - 1];
+                const uint32_t index = type_index(wrapper);
+                const uint8_t kind = reader->types->types.kind[index];
+                const uint64_t extent = reader->types->types.extent[index];
+                result = kind == BUSTER_TYPE_KIND_POINTER ? type_pointer(reader->types, result) :
+                         kind == BUSTER_TYPE_KIND_ARRAY ? type_array(reader->types, result, extent) :
+                         kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? type_incomplete_array(reader->types, result) :
+                         kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(reader->types, result, (uint32_t)extent) :
+                         type_aligned(reader->types, result, (uint32_t)extent);
+                result = check_input_type_result(reader, result);
+                if (result != 0)
+                {
+                    result = type_qualify(reader->types, result, type_qualifiers(wrapper));
+                }
+            }
+        }
+        else if (is_function)
+        {
+            reader->output->resource = true;
+            result = 0;
+        }
+        for (uint32_t i = 0; i < attributes->count; i += 1)
+        {
+            CheckInputAttribute* attribute = attributes->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION)
+            {
+                attribute->ignored |= !is_function;
+                if (result == 0)
+                {
+                    check_input_attribute_error(reader, attributes, attribute->first, attribute->end,
+                                                reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : CHECK_ATTRIBUTE_ERROR_CONFLICT);
+                }
+            }
+        }
+        arena_pop_to(reader->scratch, mark);
+    }
+    return attributes == 0 || attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? result : 0;
+}
+
 // Run after a full declarator is available, including a function-pointer typedef. Prefix attributes cannot perform
 // these checks before the function's parameters have been read. Warnings with no C semantic effect are retained as
 // ignored metadata; malformed parameter indices/types are errors. Per-argument values must already be evaluated.

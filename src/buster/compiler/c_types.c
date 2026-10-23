@@ -184,7 +184,8 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_KIND_ENUM 18
 #define BUSTER_TYPE_KIND_COUNT 19
 
-// Flags. The first two are part of a derived type's key; the rest are properties the table computes.
+// Flags. The first two are part of a derived type's key. Functions additionally use the three record-only high
+// bits for calling convention; pointers retain it through their base TypeId, never through inherited flags.
 #define BUSTER_TYPE_FLAG_UNSIGNED 0x01
 #define BUSTER_TYPE_FLAG_VARIADIC 0x01
 #define BUSTER_TYPE_FLAG_PROTOTYPE 0x02
@@ -201,6 +202,24 @@ typedef uint32_t TypeId;
 // A validated GNU transparent union. This nominal-record property does not make the union itself compatible with
 // its members. The source owner retains activation history when an attribute is added after earlier uses.
 #define BUSTER_TYPE_FLAG_TRANSPARENT_UNION 0x80
+#define BUSTER_TYPE_FUNCTION_ABI_SHIFT 5
+#define BUSTER_TYPE_FUNCTION_ABI_MASK 0xe0
+#define BUSTER_TYPE_FLAG_FUNCTION_KEY (BUSTER_TYPE_FLAG_KEY | BUSTER_TYPE_FUNCTION_ABI_MASK)
+
+// Semantic function identity on the supported x86-64 target. This is not a claim that code generation implements
+// every convention. The ordinary constructor and explicit sysv_abi/cdecl have the same default identity.
+typedef enum TypeFunctionABI
+{
+    TYPE_FUNCTION_ABI_SYSV,
+    TYPE_FUNCTION_ABI_MICROSOFT,
+    TYPE_FUNCTION_ABI_VECTOR,
+    TYPE_FUNCTION_ABI_REG,
+    TYPE_FUNCTION_ABI_PRESERVE_MOST,
+    TYPE_FUNCTION_ABI_PRESERVE_ALL,
+    TYPE_FUNCTION_ABI_PRESERVE_NONE,
+    TYPE_FUNCTION_ABI_COUNT,
+    TYPE_FUNCTION_ABI_INVALID = 255,
+} TypeFunctionABI;
 
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
@@ -483,6 +502,8 @@ static __attribute__((unused)) TypeId type_element(const TypeTable* table, TypeI
 // A function's parameters (count of them) and return type.
 static __attribute__((unused)) const TypeId* type_parameters(const TypeTable* table, TypeId function, uint32_t* count);
 static __attribute__((unused)) TypeId type_return(const TypeTable* table, TypeId function);
+// A function's semantic calling convention; INVALID for a non-function or invalid TypeId.
+static __attribute__((unused)) TypeFunctionABI type_function_abi_kind(const TypeTable* table, TypeId function);
 // The type without ALIGNED at its top: its base, with the ALIGNED type's qualifiers.
 static __attribute__((unused)) TypeId type_strip_aligned(const TypeTable* table, TypeId type);
 
@@ -497,6 +518,8 @@ static __attribute__((unused)) TypeId type_variable_array(TypeTable* table, Type
 // flags: BUSTER_TYPE_FLAG_PROTOTYPE and BUSTER_TYPE_FLAG_VARIADIC. Parameters must be adjusted (type_adjust_parameter);
 // their qualifiers are dropped.
 static __attribute__((unused)) TypeId type_function(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags);
+// As type_function, with an explicit calling convention. Vectorcall and regcall cannot be variadic.
+static __attribute__((unused)) TypeId type_function_abi(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi);
 // A vector of `count` elements; ext chooses clang's ext_vector_type over GNU's vector_size (type_vector_size converts
 // the latter's size in bytes).
 static __attribute__((unused)) TypeId type_vector(TypeTable* table, TypeId element, uint32_t count, bool ext);
@@ -1089,8 +1112,15 @@ static uint64_t type_key_hash(uint8_t kind, uint8_t flags, TypeId base, uint64_t
     return type_hash_finish(hash);
 }
 
+static uint8_t type_key_flags(uint8_t kind, uint8_t flags)
+{
+    return flags & (kind == BUSTER_TYPE_KIND_FUNCTION ? BUSTER_TYPE_FLAG_FUNCTION_KEY : BUSTER_TYPE_FLAG_KEY);
+}
+
 static uint32_t type_slot_key(uint8_t kind, uint8_t flags, uint64_t extent, uint64_t hash)
 {
+    // Functions have a 32-bit parameter count. Their ABI can share the WIDE bit because key matching dispatches
+    // on FUNCTION before reading WIDE; non-functions never carry the function-only high flag bits.
     const uint32_t wide = extent > UINT32_MAX ? BUSTER_TYPE_SLOT_WIDE : 0;
     return (uint32_t)kind | (uint32_t)flags << 8 | wide | (uint32_t)(hash >> 48) << 16;
 }
@@ -1209,7 +1239,7 @@ static bool type_index_grow(TypeTable* table)
         {
             if ((BUSTER_TYPE_HASHED_KINDS >> types->kind[i] & 1) != 0)
             {
-                const uint8_t flags = types->flags[i] & BUSTER_TYPE_FLAG_KEY;
+                const uint8_t flags = type_key_flags(types->kind[i], types->flags[i]);
                 const uint64_t hash = types->hash[i];
                 type_index_place(index, i, types->base[i], types->extent[i], type_slot_key(types->kind[i], flags, types->extent[i], hash), hash);
             }
@@ -1339,7 +1369,11 @@ static TypeError type_check_derivation(const TypeTable* table, uint8_t kind, uin
         const TypeId result_type = type_strip_aligned(table, base);
         const uint8_t result_kind = type_kind(table, result_type);
         const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
-        if ((flags & ~BUSTER_TYPE_FLAG_KEY) != 0 || (!prototype && (flags != 0 || extent != 0)) || extent > UINT32_MAX)
+        const uint8_t abi = (flags & BUSTER_TYPE_FUNCTION_ABI_MASK) >> BUSTER_TYPE_FUNCTION_ABI_SHIFT;
+        const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        if ((flags & ~BUSTER_TYPE_FLAG_FUNCTION_KEY) != 0 || abi >= TYPE_FUNCTION_ABI_COUNT ||
+            (!prototype && ((flags & BUSTER_TYPE_FLAG_KEY) != 0 || extent != 0)) || extent > UINT32_MAX ||
+            (variadic && (abi == TYPE_FUNCTION_ABI_VECTOR || abi == TYPE_FUNCTION_ABI_REG)))
         {
             result = TYPE_ERROR_OPERAND;
         }
@@ -2047,14 +2081,29 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
     return result;
 }
 
+static TypeFunctionABI type_function_abi_kind(const TypeTable* table, TypeId function)
+{
+    TypeFunctionABI result = TYPE_FUNCTION_ABI_INVALID;
+    if (type_is_valid(table, function))
+    {
+        const TypeId stripped = type_strip_aligned(table, function);
+        if (type_kind(table, stripped) == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            result = (TypeFunctionABI)((table->types.flags[type_index(stripped)] & BUSTER_TYPE_FUNCTION_ABI_MASK) >> BUSTER_TYPE_FUNCTION_ABI_SHIFT);
+        }
+    }
+    return result;
+}
+
 // Parameters are stored unqualified: a qualified one is copied without its qualifiers into scratch memory first.
-static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags)
+static TypeId type_function_abi(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi)
 {
     TypeId result = 0;
     Scratch scratch = scratch_begin(0);
     const TypeId* normal = parameters;
     bool qualified = false;
-    for (uint32_t i = 0; i < count; i += 1)
+    const bool valid = (flags & ~BUSTER_TYPE_FLAG_KEY) == 0 && (uint32_t)abi < TYPE_FUNCTION_ABI_COUNT && (count == 0 || parameters != 0);
+    for (uint32_t i = 0; valid && i < count; i += 1)
     {
         qualified = qualified || type_qualifiers(parameters[i]) != 0;
     }
@@ -2070,7 +2119,11 @@ static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* 
         }
         normal = copy;
     }
-    if (normal == 0 && count != 0)
+    if (!valid)
+    {
+        table->last_error = TYPE_ERROR_OPERAND;
+    }
+    else if (normal == 0 && count != 0)
     {
         table->last_error = TYPE_ERROR_FULL;
     }
@@ -2080,11 +2133,17 @@ static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* 
     }
     else
     {
-        const uint32_t index = type_find_or_add(table, BUSTER_TYPE_KIND_FUNCTION, flags, result_type, count, normal);
+        const uint8_t key_flags = flags | (uint8_t)((uint32_t)abi << BUSTER_TYPE_FUNCTION_ABI_SHIFT);
+        const uint32_t index = type_find_or_add(table, BUSTER_TYPE_KIND_FUNCTION, key_flags, result_type, count, normal);
         result = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
     }
     scratch_end(scratch);
     return result;
+}
+
+static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags)
+{
+    return type_function_abi(table, result_type, parameters, count, flags, TYPE_FUNCTION_ABI_SYSV);
 }
 
 static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
@@ -4060,6 +4119,7 @@ static bool type_merge_shallow(const TypeTable* table, TypeId left, TypeId right
         {
             result = type_prototype_matches_promotions(table, left_prototype ? l : r);
         }
+        result = result && type_function_abi_kind(table, l) == type_function_abi_kind(table, r);
         *leaf = false;
     }
     else if (left_kind == BUSTER_TYPE_KIND_VECTOR || left_kind == BUSTER_TYPE_KIND_EXT_VECTOR)
@@ -4210,7 +4270,7 @@ static bool type_canonical_shallow(const TypeTable* table, TypeId l, TypeId r)
     const uint32_t ri = type_index(r);
     const uint8_t kind = types->kind[li];
     const bool inside = ((types->flags[li] | types->flags[ri]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE) != 0;
-    return inside && type_qualifiers(l) == type_qualifiers(r) && kind == types->kind[ri] && (types->flags[li] & BUSTER_TYPE_FLAG_KEY) == (types->flags[ri] & BUSTER_TYPE_FLAG_KEY) &&
+    return inside && type_qualifiers(l) == type_qualifiers(r) && kind == types->kind[ri] && type_key_flags(kind, types->flags[li]) == type_key_flags(kind, types->flags[ri]) &&
            types->extent[li] == types->extent[ri] && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_ATOMIC);
 }
 
@@ -4478,17 +4538,17 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         }
         else if (left_prototype && right_prototype)
         {
-            result = type_function(table, merged, results + 1, count, left_flags & BUSTER_TYPE_FLAG_KEY);
+            result = type_function_abi(table, merged, results + 1, count, left_flags & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, l));
         }
         else if (left_prototype || right_prototype)
         {
             const TypeId prototype = left_prototype ? l : r;
             const TypeId* parameters = type_parameters(table, prototype, &count);
-            result = type_function(table, merged, parameters, count, table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY);
+            result = type_function_abi(table, merged, parameters, count, table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, prototype));
         }
         else
         {
-            result = type_function(table, merged, 0, 0, 0);
+            result = type_function_abi(table, merged, 0, 0, 0, type_function_abi_kind(table, l));
         }
     }
     if (full)
@@ -4676,6 +4736,7 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
 #define BUSTER_TYPE_PRINT_VECTOR_END 9
 #define BUSTER_TYPE_PRINT_EXT_VECTOR_END 10
 #define BUSTER_TYPE_PRINT_NAME 11
+#define BUSTER_TYPE_PRINT_FUNCTION_ABI 12
 
 typedef struct TypePrintFrame TypePrintFrame;
 struct TypePrintFrame
@@ -4925,6 +4986,10 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
         type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        if (type_function_abi_kind(table, type) != TYPE_FUNCTION_ABI_SYSV)
+        {
+            type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_ABI, type, false, false, 0);
+        }
         if ((table->types.flags[index] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0)
         {
             type_print_text(printer, "(");
@@ -5026,6 +5091,25 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
                 type_print_text(printer, "void");
             }
             type_print_text(printer, ")");
+        }
+    }
+    else if (frame.operation == BUSTER_TYPE_PRINT_FUNCTION_ABI)
+    {
+        static const char* const spellings[] = {
+            "sysv_abi",
+            "ms_abi",
+            "vectorcall",
+            "regcall",
+            "preserve_most",
+            "preserve_all",
+            "preserve_none",
+        };
+        const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
+        if ((uint32_t)abi < BUSTER_ARRAY_LENGTH(spellings))
+        {
+            type_print_text(printer, " __attribute__((");
+            type_print_text(printer, spellings[abi]);
+            type_print_text(printer, "))");
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_ATOMIC_END)

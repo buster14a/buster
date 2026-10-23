@@ -1832,7 +1832,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             for (uint32_t i = 0; i < input[p].report_count; i += 1)
             {
                 const CheckInputReport* report = &input[p].reports[i];
-                const uint32_t source = check_input_report_source(&parsers[p], report);
+                const uint32_t source = check_diagnostic_input_report_source(&input[p], &parsers[p], report);
                 first = source < first ? source : first;
                 unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED;
             }
@@ -2449,6 +2449,7 @@ static void check_test_target_options(CheckTest* test)
 #include "c_check_source_test.c"
 #include "c_check_overload_test.c"
 #include "c_check_overload_address_test.c"
+#include "c_types_function_abi_test.c"
 #include "c_check_constant_test.c"
 #include "c_check_enum_test.c"
 #include "c_check_vla_test.c"
@@ -2474,6 +2475,8 @@ static void check_test_target_options(CheckTest* test)
 #include "c_check_program_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
+
+static void check_test_source_benchmark(CheckTest* test);
 
 static int run_checker_tests(int argc, char** argv)
 {
@@ -2536,6 +2539,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_overloads(&test, clang);
             check_test_overload_sources(&test, clang);
             check_test_overload_addresses(&test, clang);
+            check_test_function_abis(&test, clang);
             check_test_constant_sources(&test, clang);
             check_test_enum_sources(&test, clang);
             check_test_vla_sources(&test, clang);
@@ -2573,6 +2577,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_programs(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
+            check_test_source_benchmark(&test);
         }
         check_test_types_close(&types);
     }

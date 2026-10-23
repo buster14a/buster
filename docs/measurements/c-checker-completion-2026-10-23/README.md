@@ -22,13 +22,32 @@ evidence.
 | Clang 23.1.1 binary | `939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa3eae` |
 | `config/libc-ch.txt` | `1c1f215dd07bb2235a098e25a7d05ae74b53a65f2939457ffb50a806cf76f904` |
 | `provenance/gnu17-pinned-predefines.txt` | `a39036d8215977b5a205f7fd3c4e7dfe6576b58eaa76a7bb0b0e214a164e8d33` |
-| c-testsuite checkout | Git commit `5c7275656d751de0e68b2d340a95b5681858ed07` |
+| c-testsuite source | Git commit `5c7275656d751de0e68b2d340a95b5681858ed07` |
+| `c-testsuite-5c727565.sha256` | `19e6e89f1cde52dc79bacf88f41822ae7b5c230f3fd7e2152154c99b121e5428` |
 
 The launcher checks the first four hashes, the selected musl list/configuration
 hashes, and the own-main configuration hash. `verify` also checks every listed
 SQLite, libc, bundled-header, generated-musl-header, and frozen-repository byte.
-Verify the external c-testsuite checkout separately; its path is
-`tests/single-exec` within that checkout.
+Verify the external c-testsuite source separately; its path is
+`tests/single-exec` within the verified root.
+
+The [complete c-testsuite hash manifest](c-testsuite-5c727565.sha256) records all
+910 tracked files from a clean local checkout of the named commit. It contains
+hashes and relative paths only; no upstream source is copied here. The approved
+host's `/home/david/buster-fast-bench/codex-lowering-129/inputs/c-testsuite` is an
+archive without Git metadata. The coordinator checked all 910 files there with
+this manifest: `sha256sum --check --quiet` exited 0 and produced an empty log at
+`work/c-testsuite-target-verification.log`. This verifies input bytes, not checker
+acceptance or performance. To repeat the identity check under the shared lock,
+set the manifest to its absolute retained path and run from the archive root:
+
+```sh
+check_suite_root=/home/david/buster-fast-bench/codex-lowering-129/inputs/c-testsuite
+check_manifest=/absolute/path/to/buster/docs/measurements/c-checker-completion-2026-10-23/c-testsuite-5c727565.sha256
+cd "$check_suite_root"
+EXCLUSIVE_OWNER=checker-133 ~/buster-fast-bench/exclusive.sh \
+    sha256sum --check --quiet "$check_manifest"
+```
 
 System modes use `--no-default-config --target=x86_64-linux-gnu -march=znver5
 -std=gnu17 -nostdinc`, with these `-isystem` paths in order under the bundle:
@@ -103,6 +122,9 @@ All benchmark modes use 21 passes and retain preparation costs separately from
 graph-only cycles/node, scalar-node share, and vector-node share. Alternate
 isolated scalar/vector/after invocations on the same immutable inputs and binary;
 compare repeated distributions before making a performance claim.
+Scalar/vector node counts describe the initial scheduling pass. The separately
+reported query-proof lane visits, query-replay node visits, and scratch high-water
+bytes retain work and storage beyond that initial pass; graph timing includes it.
 
 ## Reports and failure states
 

@@ -42,6 +42,9 @@ struct CheckBuiltinCall
     bool constant_p_side_effects;
     const uint8_t* shuffle_index_ice;
     uint32_t shuffle_index_ice_count;
+    CheckBuiltinBitCastProof bit_cast_proof;
+    const uint8_t* bit_cast_bytes;
+    uint32_t bit_cast_byte_count;
     bool object_size_known[4];
     bool object_size_source_constant[4];
     uint64_t object_sizes[4];
@@ -74,6 +77,37 @@ struct CheckOverloadCall
 {
     uint32_t node;
     uint32_t head;
+};
+
+typedef enum CheckRegionProofOp
+{
+    CHECK_REGION_EVAL,
+    CHECK_REGION_BRANCH,
+    CHECK_REGION_CASE,
+    CHECK_REGION_JUMP,
+    CHECK_REGION_END,
+} CheckRegionProofOp;
+
+#define CHECK_REGION_UNSUPPORTED 0x01u
+
+typedef struct CheckRegionProofStep CheckRegionProofStep;
+struct CheckRegionProofStep
+{
+    CheckRegionProofOp op;
+    uint32_t node;
+    // CASE's integer constant; other instructions use BUSTER_CHECK_NONE.
+    uint32_t operand;
+    // Relative to the owning region's first step. A branch's false edge jumps; its true edge falls through.
+    uint32_t target;
+};
+
+typedef struct CheckRegionProof CheckRegionProof;
+struct CheckRegionProof
+{
+    uint32_t node;
+    uint32_t first;
+    uint32_t count;
+    uint32_t flags;
 };
 
 struct CheckGraph
@@ -132,6 +166,14 @@ struct CheckGraph
     CheckOverloadCall* overload_calls;
     uint32_t overload_count;
     uint32_t overload_capacity;
+    // Optional typed prefix control for statement expressions. Sorted owners consume contiguous step slices;
+    // every expression dependency precedes the owning STATEMENT_VALUE. Runtime execution still uses the body.
+    CheckRegionProof* region_proofs;
+    uint32_t region_proof_count;
+    uint32_t region_proof_capacity;
+    CheckRegionProofStep* region_steps;
+    uint32_t region_step_count;
+    uint32_t region_step_capacity;
 };
 
 typedef enum CheckStatus
@@ -176,6 +218,9 @@ struct CheckStatistics
     uint32_t batches;
     uint32_t scalar_nodes;
     uint32_t vector_nodes;
+    // Separate source/speculative/emitted lane visits and the ordered publication replay.
+    uint64_t query_proof_nodes;
+    uint64_t query_replay_nodes;
     uint64_t output_bytes;
     uint64_t scratch_bytes;
 };
@@ -335,6 +380,24 @@ struct CheckBuiltinX86Effect
     CheckBuiltinX86RangeEvent range_events[BUSTER_CHECK_BUILTIN_X86_EVENTS];
 };
 
+typedef struct CheckBuiltinBitCastEffect CheckBuiltinBitCastEffect;
+struct CheckBuiltinBitCastEffect
+{
+    uint32_t node;
+    TypeId source_type;
+    TypeId representation_type;
+    uint64_t byte_count;
+    uint32_t evaluated_operands;
+    uint32_t unsupported;
+    CBuiltinId runtime_builtin;
+    uint8_t bytes[BUSTER_CHECK_BUILTIN_BIT_CAST_BYTES];
+    uint32_t payload_count;
+    bool representation_known;
+    bool folded;
+    bool runtime_required;
+    bool volatile_read;
+};
+
 typedef struct CheckOverloadEffect CheckOverloadEffect;
 struct CheckOverloadEffect
 {
@@ -373,6 +436,7 @@ struct CheckStream
     CheckBuiltinAtomicEffect* atomics;
     CheckBuiltinVectorEffect* vectors;
     CheckBuiltinX86Effect* x86;
+    CheckBuiltinBitCastEffect* bit_casts;
     CheckOverloadEffect* overloads;
     CheckOverloadAddressEffect* overload_addresses;
     uint32_t count;
@@ -385,6 +449,7 @@ struct CheckStream
     uint32_t atomic_count;
     uint32_t vector_count;
     uint32_t x86_count;
+    uint32_t bit_cast_count;
     uint32_t overload_count;
     uint32_t overload_address_count;
     uint32_t overload_address_capacity;
@@ -484,7 +549,7 @@ static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, u
 static bool check_graph_has_arguments(CheckOp op)
 {
     return op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY ||
-           op == CHECK_OP_BUILTIN_ATOMIC || op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86;
+           op == CHECK_OP_BUILTIN_ATOMIC || op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_BIT_CAST;
 }
 
 static __attribute__((unused)) uint64_t check_graph_x86_ice_mask(const BuiltinIntrinsicInfo* info, bool constant_evaluated_context)
@@ -519,7 +584,11 @@ static __attribute__((unused)) uint64_t check_graph_x86_ice_mask(const BuiltinIn
 static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
 {
     CheckOp op = CHECK_OP_COUNT;
-    if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
+    if (id == CBUILTIN_BIT_CAST)
+    {
+        op = CHECK_OP_BUILTIN_BIT_CAST;
+    }
+    else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR)
     {
         op = CHECK_OP_BUILTIN_MISC;
@@ -610,7 +679,7 @@ static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8
     return result;
 }
 
-static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_t* maximum_arguments, uint32_t* maximum_effects, uint32_t builtins[5], uint32_t* failed)
+static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_t* maximum_arguments, uint32_t* maximum_effects, uint32_t builtins[6], uint32_t* failed)
 {
     bool result = graph->count <= graph->capacity && graph->count <= (1u << 30) && graph->argument_count <= graph->argument_capacity && graph->argument_count <= (1u << 30);
     result = result && graph->varargs_count <= graph->varargs_capacity && graph->varargs_count <= graph->count &&
@@ -624,6 +693,31 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
     result = result && graph->overload_count <= graph->overload_capacity && graph->overload_count <= graph->count &&
              (graph->overload_count == 0 || graph->overload_calls != NULL) && graph->overload_candidate_count <= (1u << 30) &&
              (graph->overload_candidate_count == 0 || graph->overload_candidates != NULL);
+    result = result && graph->region_proof_count <= graph->region_proof_capacity && graph->region_proof_count <= graph->count &&
+             (graph->region_proof_count == 0 || graph->region_proofs != NULL) &&
+             graph->region_step_count <= graph->region_step_capacity && graph->region_step_count <= (1u << 30) &&
+             (graph->region_step_count == 0 || graph->region_steps != NULL);
+    uint32_t region_steps = 0;
+    for (uint32_t i = 0; result && i < graph->region_proof_count; i += 1)
+    {
+        const CheckRegionProof* region = graph->region_proofs + i;
+        result = region->node < graph->count && graph->ops != NULL && graph->ops[region->node] == CHECK_OP_STATEMENT_VALUE &&
+                 (i == 0 || graph->region_proofs[i - 1].node < region->node) && region->first == region_steps &&
+                 region->count != 0 && region->count <= graph->region_step_count - region_steps &&
+                 (region->flags & ~CHECK_REGION_UNSUPPORTED) == 0;
+        for (uint32_t j = 0; result && j < region->count; j += 1)
+        {
+            const CheckRegionProofStep* step = graph->region_steps + region->first + j;
+            const bool expression = step->op == CHECK_REGION_EVAL || step->op == CHECK_REGION_BRANCH || step->op == CHECK_REGION_CASE;
+            const bool target = step->op == CHECK_REGION_BRANCH || step->op == CHECK_REGION_CASE || step->op == CHECK_REGION_JUMP;
+            result = (unsigned)step->op <= CHECK_REGION_END && (expression ? step->node < region->node : step->node == BUSTER_CHECK_NONE) &&
+                     (step->op == CHECK_REGION_CASE ? step->operand < region->node : step->operand == BUSTER_CHECK_NONE) &&
+                     (target ? step->target < region->count : step->target == BUSTER_CHECK_NONE) &&
+                     (j + 1 < region->count || step->op == CHECK_REGION_END);
+        }
+        region_steps += result ? region->count : 0;
+    }
+    result = result && region_steps == graph->region_step_count;
     for (uint32_t i = 0; result && i < graph->overload_candidate_count; i += 1)
     {
         const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
@@ -636,7 +730,7 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
     result = result && (graph->extensions & ~(BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT)) == 0;
     *maximum_arguments = 0;
     *maximum_effects = 0;
-    memset(builtins, 0, 5 * sizeof(*builtins));
+    memset(builtins, 0, 6 * sizeof(*builtins));
     *failed = BUSTER_CHECK_NONE;
     uint32_t consumed_arguments = 0;
     uint32_t consumed_varargs = 0;
@@ -674,6 +768,10 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
             result = result && (i < arity ? operands[i] < node : operands[i] == BUSTER_CHECK_NONE);
         }
         result = result && (op != CHECK_OP_VALUE || graph->leaves != 0);
+        if (result && op == CHECK_OP_VALUE)
+        {
+            result = graph->leaves[node].overload_head <= graph->overload_candidate_count;
+        }
         result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
         result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
         result = result && (graph->contexts == 0 || (graph->contexts[node] & ~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_GNU_CONSTANT)) == 0);
@@ -699,13 +797,18 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
         {
             const CheckBuiltinCall* call = graph->builtin_calls + consumed_builtins;
             result = call->node == node &&
-                     (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC || op == CHECK_OP_BUILTIN_VECTOR);
+                     (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+                      op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_BIT_CAST);
             const bool shuffle = op == CHECK_OP_BUILTIN_VECTOR && graph->members != NULL && graph->members[node] == CBUILTIN_SHUFFLEVECTOR;
             result = result && (call->shuffle_index_ice != NULL ? shuffle && count >= 2 && call->shuffle_index_ice_count == count - 2 : call->shuffle_index_ice_count == 0);
             for (uint32_t i = 0; result && i < call->shuffle_index_ice_count; i += 1)
             {
                 result = call->shuffle_index_ice[i] <= CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU;
             }
+            result = result && (unsigned)call->bit_cast_proof <= CHECK_BUILTIN_BIT_CAST_PROOF_ICE &&
+                     (call->bit_cast_bytes != NULL || call->bit_cast_byte_count == 0) &&
+                     (op == CHECK_OP_BUILTIN_BIT_CAST || (call->bit_cast_proof == CHECK_BUILTIN_BIT_CAST_PROOF_NONE &&
+                      call->bit_cast_bytes == NULL && call->bit_cast_byte_count == 0));
             consumed_builtins += 1;
         }
         if (result && consumed_vectors < graph->vector_member_count && graph->vector_members[consumed_vectors].node <= node)
@@ -739,6 +842,7 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
             builtins[2] += op == CHECK_OP_BUILTIN_QUERY;
             builtins[3] += op == CHECK_OP_BUILTIN_ATOMIC;
             builtins[4] += op == CHECK_OP_BUILTIN_VECTOR;
+            builtins[5] += op == CHECK_OP_BUILTIN_BIT_CAST;
         }
         else
         {
@@ -1164,6 +1268,33 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
         }
     }
+    else if (action->op == CHECK_OP_BUILTIN_BIT_CAST)
+    {
+        const CheckBuiltinBitCastAction input = { .id = (CBuiltinId)action->member, .destination_type = action->type,
+            .arguments = action->arguments, .argument_count = action->argument_count, .node = node,
+            .tag_completions = action->tag_completions, .tag_completion_count = action->tag_completion_count,
+            .source_position = action->source_position,
+            .source_proof = witness != NULL ? witness->bit_cast_proof : CHECK_BUILTIN_BIT_CAST_PROOF_NONE,
+            .source_bytes = witness != NULL ? witness->bit_cast_bytes : NULL,
+            .source_byte_count = witness != NULL ? witness->bit_cast_byte_count : 0 };
+        CheckBuiltinBitCastResult checked;
+        check_builtin_bit_cast(types, &input, &checked, 1);
+        *result = checked.action;
+        CheckBuiltinBitCastEffect* effect = stream->bit_casts + stream->bit_cast_count++;
+        *effect = (CheckBuiltinBitCastEffect){ .node = node, .source_type = checked.source_type,
+            .representation_type = checked.representation_type, .byte_count = checked.byte_count,
+            .evaluated_operands = checked.evaluated_operands, .unsupported = checked.unsupported,
+            .runtime_builtin = checked.runtime_builtin, .payload_count = checked.payload_count,
+            .representation_known = checked.representation_known, .folded = checked.folded,
+            .runtime_required = checked.runtime_required, .volatile_read = checked.volatile_read };
+        memcpy(effect->bytes, checked.bytes, sizeof(effect->bytes));
+        if ((checked.unsupported & BUSTER_CHECK_BUILTIN_BIT_CAST_RESULT_TYPE) != 0)
+        {
+            // The module cannot recover which qualified array spelling produced this canonical TypeId.
+            // Retain its representation descriptor, but do not invent a type for subsequent constraints.
+            check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 1);
+        }
+    }
     else if (action->op == CHECK_OP_BUILTIN_X86)
     {
         check_graph_x86_action(types, graph, stream, action, result);
@@ -1227,6 +1358,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                              action->op == CHECK_OP_BUILTIN_ATOMIC ? stream->atomics[stream->atomic_count - 1].evaluated_operands :
                              action->op == CHECK_OP_BUILTIN_VECTOR ? (1u << stream->vectors[stream->vector_count - 1].evaluated_argument_count) - 1 :
                              action->op == CHECK_OP_BUILTIN_X86 ? UINT32_MAX :
+                             action->op == CHECK_OP_BUILTIN_BIT_CAST ? stream->bit_casts[stream->bit_cast_count - 1].evaluated_operands :
                              stream->queries[stream->query_count - 1].evaluated_operands;
         const bool strict_comparison = action->op == CHECK_OP_BUILTIN_FLOAT &&
                                        (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
@@ -1271,6 +1403,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
 }
 
 #include "c_check_overload_graph.c"
+#include "c_check_region_graph.c"
 
 static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
 {
@@ -1292,10 +1425,19 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     {
         const uint32_t head = overload ? graph->overload_calls[stream->overload_count].head :
                               action.operands[0].overload_head != 0 ? action.operands[0].overload_head - 1 : BUSTER_CHECK_NONE;
-        const CheckOverloadResult selected = check_graph_overload_call(types, graph, stream, &action, head, scratch, scalar, &result);
-        if (overload)
+        const bool captured = action.operands[0].overload_head == 0 ||
+                              (overload && action.operands[0].overload_head == head + 1);
+        if (!captured)
         {
-            stream->overloads[stream->overload_count++] = (CheckOverloadEffect){ .node = node, .selected = selected };
+            result = (CheckActionResult){ .diagnostic = CHECK_DIAG_INVALID_TYPE };
+        }
+        else
+        {
+            const CheckOverloadResult selected = check_graph_overload_call(types, graph, stream, &action, head, scratch, scalar, &result);
+            if (overload)
+            {
+                stream->overloads[stream->overload_count++] = (CheckOverloadEffect){ .node = node, .selected = selected };
+            }
         }
     }
     else if (action.op == CHECK_OP_BUILTIN_UNARY || action.op == CHECK_OP_BUILTIN_OVERFLOW)
@@ -1372,6 +1514,10 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     else
     {
         check_action_scalar(types, &action, &result);
+    }
+    if (action.op == CHECK_OP_STATEMENT_VALUE)
+    {
+        check_graph_region_effects(types, graph, stream, node, scratch, &result);
     }
     check_graph_store(stream, node, &result);
     stream->statistics.scalar_nodes += 1;
@@ -1674,7 +1820,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     }
     uint32_t maximum_arguments = 0;
     uint32_t maximum_effects = 0;
-    uint32_t maximum_builtins[5];
+    uint32_t maximum_builtins[6];
     if (result)
     {
         result = check_graph_validate(graph, pure, &maximum_arguments, &maximum_effects, maximum_builtins, &stream->failed_node);
@@ -1697,9 +1843,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->queries = maximum_builtins[2] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinQueryEffect, maximum_builtins[2]) : 0;
         stream->atomics = maximum_builtins[3] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinAtomicEffect, maximum_builtins[3]) : 0;
         stream->vectors = maximum_builtins[4] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinVectorEffect, maximum_builtins[4]) : 0;
+        stream->bit_casts = maximum_builtins[5] != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinBitCastEffect, maximum_builtins[5]) : 0;
         stream->x86 = graph->x86_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckBuiltinX86Effect, graph->x86_count) : 0;
         stream->overloads = graph->overload_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadEffect, graph->overload_count) : 0;
-        const bool overload_capacity = check_graph_overload_capacity(graph, scratch, &stream->overload_address_capacity);
+        const bool overload_capacity = check_graph_overload_capacity(graph, scratch, &stream->overload_address_capacity, &stream->statistics.scratch_bytes);
         stream->overload_addresses = stream->overload_address_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadAddressEffect, stream->overload_address_capacity) : 0;
         result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->warnings != 0 && stream->warning_ignored != 0 && stream->reports != 0 &&
                  (maximum_arguments == 0 || arguments != 0) && (graph->argument_count == 0 || stream->argument_conversions != 0) &&
@@ -1707,6 +1854,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                  (maximum_builtins[0] == 0 || stream->misc != 0) && (maximum_builtins[1] == 0 || stream->floating != 0) &&
                  (maximum_builtins[2] == 0 || stream->queries != 0) && (maximum_builtins[3] == 0 || stream->atomics != 0) &&
                  (maximum_builtins[4] == 0 || stream->vectors != 0) && (graph->x86_count == 0 || stream->x86 != NULL) &&
+                 (maximum_builtins[5] == 0 || stream->bit_casts != NULL) &&
                  (graph->overload_count == 0 || stream->overloads != NULL) && overload_capacity &&
                  (stream->overload_address_capacity == 0 || stream->overload_addresses != NULL);
         stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_RESOURCE;
@@ -1717,7 +1865,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->graph = graph;
         stream->statistics.nodes = count;
         stream->statistics.output_bytes = output->length - output_start;
-        stream->statistics.scratch_bytes = scratch->length - scratch_start;
+        if (stream->statistics.scratch_bytes < scratch->length)
+        {
+            stream->statistics.scratch_bytes = scratch->length;
+        }
         if (count != 0)
         {
             memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
@@ -1760,7 +1911,11 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, options->scalar);
             }
         }
-        stream->statistics.scratch_bytes = scratch->length - scratch_start;
+        if (stream->statistics.scratch_bytes < scratch->length)
+        {
+            stream->statistics.scratch_bytes = scratch->length;
+        }
+        stream->statistics.scratch_bytes -= scratch_start;
         if (result)
         {
             if (count != 0)

@@ -124,6 +124,7 @@ struct CheckInput
     TypeId* declared_types;
     uint8_t* declaration_kinds;
     uint8_t* function_flags;
+    uint8_t* explicit_abis;
     uint32_t* objects;
     uint8_t* static_objects;
     uint8_t* registers;
@@ -183,6 +184,8 @@ struct CheckInputSpecifierJob
     TypeId base;
     TypeId result;
     CheckInputAttributes* attributes;
+    uint8_t abi_origin;
+    uint8_t result_abi_origin;
     bool integer_seen;
     bool saw;
     bool thread_local;
@@ -271,14 +274,19 @@ struct CheckInputReader
     uint32_t* vla_sizes;
     uint8_t* expression_commas;
     uint8_t* conditions;
+    uint32_t* region_roots;
     uint8_t* constant_contexts;
     uint8_t* warning_suppressed;
     TypeId* declaration_bases;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
+    uint8_t* declaration_abis;
     CheckInputAttributes** attribute_bases;
     CheckInputAttributes* specifier_attributes;
     CheckInputAttributes* declarator_attributes;
+    uint8_t specifier_abi_origin;
+    uint8_t declarator_abi_origin;
+    uint8_t constant_abi_origin;
     bool specifier_thread_local;
     uint32_t* activate;
     uint32_t* activation_next;
@@ -362,6 +370,22 @@ static TypeId check_input_type_result(CheckInputReader* reader, TypeId type)
 }
 
 #include "c_check_attribute.c"
+
+static TypeId check_input_declarator_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint8_t* origin)
+{
+    TypeId function = type;
+    uint8_t kind = type_kind(reader->types, function);
+    while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+    {
+        function = reader->types->types.base[type_index(function)];
+        kind = type_kind(reader->types, function);
+    }
+    if (kind == BUSTER_TYPE_KIND_FUNCTION)
+    {
+        *origin = check_input_attribute_abi_origin(reader, attributes, *origin);
+    }
+    return check_input_attribute_abi(reader, attributes, type);
+}
 
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes);
 static TypeId check_input_constant_type(CheckInputReader* reader, uint32_t first, uint32_t end);
@@ -576,6 +600,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     uint32_t signedness = 0;
     uint32_t storage = 0;
     TypeId base = 0;
+    uint8_t abi_origin = 0;
     bool integer_seen = false;
     bool valid = true;
     bool saw = false;
@@ -595,6 +620,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         signedness = job->signedness;
         storage = job->storage;
         base = job->base;
+        abi_origin = job->abi_origin;
         attributes = job->attributes;
         integer_seen = job->integer_seen;
         saw = job->saw;
@@ -674,7 +700,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                     {
                         .first = first, .keyword = i, .closing = close, .qualifiers = qualifiers,
                         .longs = longs, .shorts = shorts, .signedness = signedness, .storage = storage,
-                        .base = base, .attributes = attributes, .integer_seen = integer_seen, .saw = saw,
+                        .base = base, .attributes = attributes, .abi_origin = abi_origin, .integer_seen = integer_seen, .saw = saw,
                         .thread_local = thread_local, .complex = complex, .atomic = atomic,
                         .is_typedef = *is_typedef, .is_inline = *is_inline,
                     };
@@ -687,8 +713,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 }
                 return 0;
             }
+            reader->constant_abi_origin = 0;
             selected = job != 0 && job->ready && job->keyword == i ? job->result :
                        close > i + 1 && close < end ? check_input_constant_type(reader, i, close + 1) : 0;
+            abi_origin = job != 0 && job->ready && job->keyword == i ? job->result_abi_origin : reader->constant_abi_origin;
             valid &= selected != 0 && base == 0;
             base = selected;
             reader->declared_types[i] = selected;
@@ -760,8 +788,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
                 base = reader->declared_types[declaration];
+                abi_origin = reader->output->explicit_abis[declaration];
                 reader->output->declarations[i] = declaration;
                 reader->declared_types[i] = base;
+                reader->output->explicit_abis[i] = abi_origin;
             }
         }
         else
@@ -837,6 +867,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         base = check_input_attribute_type(reader, attributes, base, false);
     }
     reader->specifier_attributes = attributes;
+    reader->specifier_abi_origin = abi_origin;
     reader->specifier_thread_local = thread_local;
     *cursor = i;
     *storage_class = storage;
@@ -1105,6 +1136,7 @@ struct CheckDeclaratorFrame
     uint32_t array_qualifiers;
     CheckInputAttributes* attributes;
     CheckInputAttributes* common_attributes;
+    uint8_t abi_origin;
     uint8_t state;
     bool group;
     bool parameter;
@@ -1112,7 +1144,7 @@ struct CheckDeclaratorFrame
     bool star_array;
 };
 
-static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t first, uint32_t end, bool group, bool parameter, uint32_t storage)
+static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t first, uint32_t end, bool group, bool parameter, uint32_t storage, uint8_t abi_origin)
 {
     return (CheckDeclaratorFrame)
     {
@@ -1125,6 +1157,7 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
         .pointers = BUSTER_CHECK_NONE,
         .function = BUSTER_CHECK_NONE,
         .storage = storage,
+        .abi_origin = abi_origin,
         .group = group,
         .parameter = parameter,
         .parameter_context = parameter,
@@ -1177,9 +1210,10 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
     *name = BUSTER_CHECK_NONE;
     *names = BUSTER_CHECK_NONE;
     reader->declarator_attributes = 0;
+    reader->declarator_abi_origin = 0;
     if (valid)
     {
-        frames[depth++] = check_input_declarator_frame(base, *cursor, stop, false, false, 0);
+        frames[depth++] = check_input_declarator_frame(base, *cursor, stop, false, false, 0, reader->specifier_abi_origin);
     }
     while (valid && depth != 0)
     {
@@ -1242,7 +1276,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     reader->ignored[i] = true;
                     reader->ignored[close] = true;
                     frame->cursor = close + 1;
-                    frames[depth++] = check_input_declarator_frame(base, i + 1, close, true, false, 0);
+                    frames[depth++] = check_input_declarator_frame(base, i + 1, close, true, false, 0, frame->abi_origin);
                     frames[depth - 1].parameter_context = frame->parameter_context;
                 }
             }
@@ -1280,7 +1314,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                 valid = parameter != 0 && !is_typedef && !is_inline && (storage == 0 || storage == C_NAME_REGISTER);
                 if (valid)
                 {
-                    frames[depth++] = check_input_declarator_frame(parameter, i, close, false, true, storage);
+                    frames[depth++] = check_input_declarator_frame(parameter, i, close, false, true, storage, reader->specifier_abi_origin);
                     frames[depth - 1].common_attributes = reader->specifier_attributes;
                     valid &= !reader->specifier_thread_local;
                 }
@@ -1422,6 +1456,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     part = next;
                 }
                 TypeId type = frame->base;
+                uint8_t abi_origin = frame->abi_origin;
                 for (uint32_t p = reverse; type != 0 && p != BUSTER_CHECK_NONE; p = parts[p].next)
                 {
                     const CheckDeclaratorPart* part = &parts[p];
@@ -1433,6 +1468,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     }
                     else if (part->kind == BUSTER_TYPE_KIND_FUNCTION)
                     {
+                        abi_origin = 0;
                         const bool bare = part->parameter_count == 0 && (part->flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 && parser->language.standard < 2023;
                         const bool overloadable = reader->declarator_overloadable ||
                                                   (check_input_overload_flags(frame->attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
@@ -1456,6 +1492,11 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                 if (type != 0 && frame->attributes != 0)
                 {
                     type = check_input_attribute_type(reader, frame->attributes, type, false);
+                }
+                if (type != 0)
+                {
+                    type = check_input_declarator_abi(reader, frame->common_attributes, type, &abi_origin);
+                    type = check_input_declarator_abi(reader, frame->attributes, type, &abi_origin);
                 }
                 valid = type != 0;
                 valid &= !frame->parameter || ((frame->common_attributes == 0 || !frame->common_attributes->has_alignas) &&
@@ -1508,6 +1549,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                                 reader->registers[token] = frame->storage == C_NAME_REGISTER;
                                 reader->objects[token] = token + 1;
                                 reader->output->declarations[token] = token;
+                                reader->output->explicit_abis[token] = abi_origin;
                                 reader->output->attributes[token] = check_input_merge_attributes(reader, frame->common_attributes, frame->attributes);
                                 if (reader->output->attributes[token] != 0)
                                 {
@@ -1547,6 +1589,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     *name = frame->name;
                     *names = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_FUNCTION ? parts[first].names : BUSTER_CHECK_NONE;
                     reader->declarator_attributes = frame->attributes;
+                    reader->declarator_abi_origin = abi_origin;
                     depth -= 1;
                 }
             }
@@ -1788,6 +1831,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                 bool is_inline;
                 uint32_t storage;
                 const TypeId base = check_input_specifiers(reader, &i, frame->close, &is_typedef, &storage, &is_inline);
+                const uint8_t base_abi = reader->specifier_abi_origin;
                 CheckInputAttributes* common_attributes = reader->specifier_attributes;
                 valid = base != 0 && !is_typedef && !is_inline && storage == 0 && !reader->specifier_thread_local;
                 bool more = valid;
@@ -1796,9 +1840,16 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     const uint32_t declarator = i;
                     uint32_t name;
                     uint32_t parameters;
-                    const TypeId type = check_input_declarator(reader, base, &i, frame->close, &name, &parameters);
+                    reader->specifier_abi_origin = base_abi;
+                    TypeId type = check_input_declarator(reader, base, &i, frame->close, &name, &parameters);
                     failed_token = name != BUSTER_CHECK_NONE ? name : declarator;
                     CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
+                    uint8_t abi_origin = reader->declarator_abi_origin;
+                    type = check_input_declarator_abi(reader, attributes, type, &abi_origin);
+                    if (name != BUSTER_CHECK_NONE)
+                    {
+                        reader->output->explicit_abis[name] = abi_origin;
+                    }
                     valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0;
                     uint32_t width = BUSTER_TYPE_NOT_BIT_FIELD;
                     if (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COLON)
@@ -1986,6 +2037,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         return;
     }
     CheckInputAttributes* common_attributes = continuation ? reader->attribute_bases[first] : reader->specifier_attributes;
+    const uint8_t base_abi = continuation ? reader->declaration_abis[first] : reader->specifier_abi_origin;
     const bool thread_local = continuation ? (reader->declaration_flags[first] & 4) != 0 : reader->specifier_thread_local;
     const bool is_static = storage == C_NAME_STATIC;
     bool valid = base != 0;
@@ -1997,11 +2049,14 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     {
         uint32_t name;
         uint32_t parameters = BUSTER_CHECK_NONE;
+        reader->specifier_abi_origin = base_abi;
         reader->declarator_overloadable = (check_input_overload_flags(common_attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
         reader->declarator_overloadable = false;
         CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
         valid &= (common_attributes == 0 && reader->declarator_attributes == 0) || attributes != 0;
+        uint8_t abi_origin = reader->declarator_abi_origin;
+        type = check_input_declarator_abi(reader, attributes, type, &abi_origin);
         if (is_typedef && type != 0 && attributes != 0 && attributes->alignment_log2 != 0)
         {
             type = check_input_type_result(reader, type_aligned(reader->types, type, attributes->alignment_log2 - 1));
@@ -2044,6 +2099,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             if (valid)
             {
                 check_input_schedule(reader, name, i, type, is_typedef ? C_BINDING_TYPEDEF : function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
+                reader->output->explicit_abis[name] = abi_origin;
                 reader->defined[name] = kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE);
                 reader->defined[name] |= !is_typedef && !function && !file && is_static;
                 reader->definition_seen[name] = reader->defined[name];
@@ -2110,6 +2166,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->declaration_bases[i] = base;
                     reader->declaration_storage[i] = storage;
                     reader->declaration_flags[i] = is_typedef | (is_inline << 1) | (thread_local << 2);
+                    reader->declaration_abis[i] = base_abi;
                     reader->attribute_bases[i] = common_attributes;
                     more = false;
                 }
@@ -2126,6 +2183,45 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     }
 }
 
+// An unannotated redeclaration inherits the linked function's calling convention. Explicit sysv_abi shares
+// the canonical default TypeId, so its retained spelling origin must prevent this inheritance just as ms_abi does.
+static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, uint32_t old, bool overload)
+{
+    const TypeId type = reader->declared_types[token];
+    if (reader->declaration_kinds[token] == C_BINDING_FUNCTION && reader->output->explicit_abis[token] == 0 &&
+        type_function_abi_kind(reader->types, type) == TYPE_FUNCTION_ABI_SYSV)
+    {
+        const uint32_t name = reader->parser->tokens.names[token];
+        TypeId previous = 0;
+        if (overload)
+        {
+            for (uint32_t linked = reader->overload_linked_heads[name]; previous == 0 && linked != 0; linked = reader->overload_linked_next[linked - 1])
+            {
+                const TypeId candidate = reader->overload_candidates[linked - 1].type;
+                const TypeAnswer signature = check_overload_signature(reader->types, candidate, type);
+                reader->output->resource |= signature == TYPE_ANSWER_FULL;
+                previous = signature == TYPE_ANSWER_YES ? candidate : 0;
+            }
+        }
+        else if (old != 0 && reader->bindings.kind[old - 1] == C_BINDING_FUNCTION)
+        {
+            previous = reader->declared_types[reader->bindings.declaration[old - 1]];
+        }
+        else if (reader->linked_declarations[name] != 0 && reader->declaration_kinds[reader->linked_declarations[name] - 1] == C_BINDING_FUNCTION)
+        {
+            previous = reader->linked_types[name];
+        }
+        const TypeFunctionABI abi = previous != 0 ? type_function_abi_kind(reader->types, previous) : TYPE_FUNCTION_ABI_SYSV;
+        if (abi != TYPE_FUNCTION_ABI_SYSV && abi != TYPE_FUNCTION_ABI_INVALID)
+        {
+            uint32_t count = 0;
+            const TypeId* parameters = type_parameters(reader->types, type, &count);
+            reader->declared_types[token] = check_input_type_result(reader, type_function_abi(reader->types, type_return(reader->types, type),
+                                                    parameters, count, reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_KEY, abi));
+        }
+    }
+}
+
 static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
     const uint32_t name = reader->parser->tokens.names[token];
@@ -2134,6 +2230,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && reader->linkage[old_declaration] != 0 && reader->linkage[token] != 0;
     const bool overload = check_input_overload_active(reader, token);
+    check_input_inherit_abi(reader, token, old, overload);
     if (old == 0 && reader->scope_count == 0)
     {
         const TypeId predefined = check_input_predefined_type(reader, name);
@@ -2295,9 +2392,11 @@ static void check_input_resolve(CheckInputReader* reader)
         {
             CheckValue value = { 0 };
             uint32_t failed_token = BUSTER_CHECK_NONE;
+            reader->constant_abi_origin = 0;
             const bool evaluated = check_input_evaluate_cached_at(reader, job->keyword + 2, job->closing, &value, &failed_token);
             check_input_warning_suppress(reader, job->keyword + 2, job->closing, check_constant_unevaluated_warnings());
             job->result = evaluated ? value.type : 0;
+            job->result_abi_origin = evaluated ? reader->constant_abi_origin : 0;
             if (!evaluated && failed_token < parser->tokens.count && !reader->output->resource)
             {
                 check_input_report(reader, failed_token, CHECK_INPUT_DECLARATION);
@@ -2337,9 +2436,9 @@ static void check_input_resolve(CheckInputReader* reader)
         {
             check_input_vararg_prepare(reader, i, CBUILTIN_VA_ARG);
         }
-        if (!reader->ignored[i] && parser->tokens.names[i] == C_NAME_BUILTIN_CONVERTVECTOR)
+        if (!reader->ignored[i] && (parser->tokens.names[i] == C_NAME_BUILTIN_CONVERTVECTOR || parser->tokens.names[i] == C_NAME_BUILTIN_BIT_CAST))
         {
-            check_input_builtin_type_prepare(reader, i, CBUILTIN_CONVERTVECTOR);
+            check_input_builtin_type_prepare(reader, i, parser->tokens.names[i] == C_NAME_BUILTIN_BIT_CAST ? CBUILTIN_BIT_CAST : CBUILTIN_CONVERTVECTOR);
         }
         if (!reader->ignored[i] && (parser->tokens.names[i] == C_NAME_GENERIC || parser->tokens.names[i] == C_NAME_BUILTIN_CHOOSE_EXPR))
         {
@@ -2753,6 +2852,8 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
     return offset;
 }
 
+#include "c_check_region_input.c"
+
 static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -2815,13 +2916,11 @@ static void check_input_expressions(CheckInputReader* reader)
             }
             if (region->result != BUSTER_CHECK_NONE)
             {
+                const uint32_t proof = check_input_region_proof(reader, region);
                 node = check_input_add(reader, CHECK_OP_STATEMENT_VALUE, token, region->result, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-                for (uint32_t child = reader->first_child[region->block]; node != BUSTER_CHECK_NONE && child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+                if (node != BUSTER_CHECK_NONE && proof != BUSTER_CHECK_NONE)
                 {
-                    if (child != region->final_statement && parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK)
-                    {
-                        graph->members[node] |= BUSTER_CHECK_SIDE_EFFECT;
-                    }
+                    graph->region_proofs[proof].node = node;
                 }
             }
         }
@@ -3082,12 +3181,25 @@ static void check_input_expressions(CheckInputReader* reader)
                 supported &= count == 1;
                 reader->output->regions[selected - 1].result = count == 1 ? first : BUSTER_CHECK_NONE;
             }
+            uint32_t last_discard = BUSTER_CHECK_NONE;
             for (uint32_t value = first; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
             {
                 const uint32_t discard = check_input_add(reader, reader->conditions[token] ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, value, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (discard != BUSTER_CHECK_NONE)
                 {
                     graph->types[discard] = BUSTER_TYPE_VOID;
+                    if (reader->region_roots != NULL)
+                    {
+                        if (last_discard == BUSTER_CHECK_NONE)
+                        {
+                            reader->region_roots[token] = discard;
+                        }
+                        else
+                        {
+                            reader->value_next[last_discard] = discard;
+                        }
+                        last_discard = discard;
+                    }
                 }
             }
         }
@@ -3490,6 +3602,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 #define BUSTER_CHECK_OUTPUT_ARRAY(field, type) input->field = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(type), 8) : 0; valid &= input->field != 0
     BUSTER_CHECK_OUTPUT_ARRAY(static_objects, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(function_flags, uint8_t);
+    BUSTER_CHECK_OUTPUT_ARRAY(explicit_abis, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(registers, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(thread_local, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(compound_objects, uint8_t);
@@ -3581,6 +3694,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(declaration_bases, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(declaration_storage, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(declaration_flags, uint8_t);
+    BUSTER_CHECK_INPUT_ARRAY(declaration_abis, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(attribute_bases, CheckInputAttributes*);
     BUSTER_CHECK_INPUT_ARRAY(activate, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(activation_next, uint32_t);
@@ -3685,6 +3799,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.declaration_bases, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.declaration_storage, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.declaration_flags, 0, (uint64_t)count + 1);
+        memset(reader.declaration_abis, 0, (uint64_t)count + 1);
         memset(reader.conditions, 0, (uint64_t)count + 1);
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         memset(reader.warning_suppressed, 0, (uint64_t)count + 1);
@@ -3707,6 +3822,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(input->thread_local, 0, (uint64_t)count + 1);
         memset(input->compound_objects, 0, (uint64_t)count + 1);
         memset(input->function_flags, 0, (uint64_t)count + 1);
+        memset(input->explicit_abis, 0, (uint64_t)count + 1);
         memset(input->expression_regions, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->attributes, 0, ((uint64_t)count + 1) * sizeof(CheckInputAttributes*));
@@ -3924,7 +4040,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         }
                     }
                 }
-                check_input_expressions(&reader);
+                if (check_input_region_initialize(&reader))
+                {
+                    check_input_expressions(&reader);
+                }
                 if (!input->resource)
                 {
                     check_input_asm_finish(&reader);

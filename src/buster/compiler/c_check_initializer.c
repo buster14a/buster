@@ -47,6 +47,8 @@ struct CheckInitPart
     TypeId type;
     uint32_t node;
     uint32_t token;
+    // One-based selection in stream->graph->overload_candidates; zero for an ordinary expression.
+    uint32_t overload_candidate;
     uint64_t bit_offset;
     uint32_t bit_width;
     const uint8_t* bytes;
@@ -1251,6 +1253,46 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
     }
 }
 
+// Source graph checking leaves aggregate elements pending until the subobject cursor supplies their exact
+// destination type. Resolve that edge without changing its shared leaf or admitting later declarations.
+static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction* action, uint32_t* candidate)
+{
+    CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
+    *candidate = 0;
+    if (action->operands[0].overload_head != 0)
+    {
+        const CheckGraph* graph = walker->stream->graph;
+        if (graph == NULL || action->node >= graph->count)
+        {
+            diagnostic = CHECK_DIAG_INCOMPATIBLE;
+        }
+        else
+        {
+            const CheckOverloadContext context = {
+                .tag_completions = graph->tag_completions,
+                .transparent_unions = graph->transparent_unions,
+                .tag_completion_count = graph->tag_completion_count,
+                .source_position = graph->source_positions != NULL ? graph->source_positions[action->node] : BUSTER_CHECK_NONE,
+                .extensions = action->extensions,
+            };
+            CheckValue resolved = { 0 };
+            const CheckOverloadResult selected = check_overload_argument(walker->types, action->operands, action->type,
+                                                                         graph->overload_candidates, graph->overload_candidate_count,
+                                                                         &context, walker->scratch, &resolved);
+            if (selected.status != CHECK_OVERLOAD_OK)
+            {
+                diagnostic = selected.status == CHECK_OVERLOAD_FULL ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE;
+            }
+            else
+            {
+                action->operands[0] = resolved;
+                *candidate = selected.candidate + 1;
+            }
+        }
+    }
+    return diagnostic;
+}
+
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
@@ -1333,7 +1375,12 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             };
             action.operands[0] = check_init_constant_value(walker, node);
             CheckActionResult converted = { 0 };
-            check_action_scalar(walker->types, &action, &converted);
+            uint32_t candidate = 0;
+            converted.diagnostic = check_init_overload(walker, &action, &candidate);
+            if (converted.diagnostic == CHECK_DIAG_NONE)
+            {
+                check_action_scalar(walker->types, &action, &converted);
+            }
             if (converted.diagnostic != CHECK_DIAG_NONE)
             {
                 check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
@@ -1352,6 +1399,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                     .type = selected->type,
                     .node = node,
                     .token = token,
+                    .overload_candidate = candidate,
                     .bit_offset = selected->offset,
                     .bit_width = selected->width,
                     .value = converted.value,

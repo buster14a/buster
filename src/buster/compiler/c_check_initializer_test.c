@@ -181,6 +181,18 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
                                check_init_test_elf_reference(&ours, "complex_bits", 0, "complex_values", 43),
                           "complex component addresses preserve array offsets, component widths and symbolic integer addends");
     }
+    if (built && check_init_test_symbol(link, "overload_pair") != 0)
+    {
+        check_test_expect(test, check_init_test_elf_reference(&ours, "overload_pair", 0, "_Z6choosei", 0) &&
+                               check_init_test_elf_reference(&ours, "overload_pair", 8, "_Z6choosed", 0),
+                          "source initializer fields preserve selected overload identities through the supplied ELF symbol map");
+    }
+    if (built && check_init_test_symbol(link, "plain_address") != 0)
+    {
+        check_test_expect(test, check_init_test_elf_reference(&ours, "plain_address", 0, "plain", 0) &&
+                               check_init_test_elf_reference(&ours, "plain_record", 0, "plain", 0),
+                          "an unmarked overload member keeps its ordinary C name in standalone data publication");
+    }
     char directory[] = "/tmp/buster-initializer-XXXXXX";
     const bool directory_ready = clang != 0 && mkdtemp(directory) != 0;
     char source_path[160];
@@ -252,6 +264,18 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
                                check_init_test_elf_reference(&theirs, "complex_bits", 0, "complex_values", 43),
                           "Clang confirms all complex component address relocations and addends");
     }
+    if (oracle && check_init_test_symbol(link, "overload_pair") != 0)
+    {
+        check_test_expect(test, check_init_test_elf_reference(&theirs, "overload_pair", 0, "_Z6choosei", 0) &&
+                               check_init_test_elf_reference(&theirs, "overload_pair", 8, "_Z6choosed", 0),
+                          "Clang independently confirms the two context-selected function relocations");
+    }
+    if (oracle && check_init_test_symbol(link, "plain_address") != 0)
+    {
+        check_test_expect(test, check_init_test_elf_reference(&theirs, "plain_address", 0, "plain", 0) &&
+                               check_init_test_elf_reference(&theirs, "plain_record", 0, "plain", 0),
+                          "Clang confirms the selected unmarked function's ordinary C relocations");
+    }
     if (directory_ready)
     {
         unlink(source_path);
@@ -262,6 +286,8 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
     }
     arena_release(&arena);
 }
+
+#include "c_check_initializer_overload_test.c"
 
 static void check_init_test_source_language(CheckTest* test, const char* source, const CheckInitExpected* expected, uint32_t count,
                                             bool accept, bool emit, const char* clang, CLanguage language)
@@ -302,6 +328,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
         check_test_expect(test, checked == accept, description);
         if (checked)
         {
+            check_init_test_overload_parts(test, &input, &stream, &parser, &identifiers, &types.table, &initializers, source, clang);
             for (uint32_t i = 0; i < initializers.count; i += 1)
             {
                 if (initializers.plans[i].warning_count != 0)
@@ -383,6 +410,41 @@ static void check_init_test_source(CheckTest* test, const char* source, const Ch
         .gnu = true,
     };
     check_init_test_source_language(test, source, expected, count, accept, emit, clang, language);
+}
+
+static void check_init_test_overload_constraints(CheckTest* test, const char* clang)
+{
+    static const char* const source[] = {
+        "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{float(*p)(float);} x={f};",
+        "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{int(*p)();} x={f};",
+        "int f(int) __attribute__((overloadable));double f(double) __attribute__((overloadable));struct S{_Atomic(int(*)(int)) p;} x={f};",
+        "int f(int) __attribute__((overloadable));struct S{_Atomic(int(*)(int)) p;} x={f};",
+    };
+    char directory[] = "/tmp/buster-initializer-overload-XXXXXX";
+    const bool available = clang != NULL && mkdtemp(directory) != NULL;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(source); i += 1)
+    {
+        const bool accept = i == BUSTER_ARRAY_LENGTH(source) - 1;
+        check_init_test_source(test, source[i], NULL, 0, accept, false, NULL);
+        if (available)
+        {
+            char path[192];
+            snprintf(path, sizeof(path), "%s/case-%u.c", directory, i);
+            char* paths[] = { path };
+            const char* arguments[] = { "-std=gnu17" };
+            ParseTestClang oracle = { 0 };
+            const bool ran = parse_test_write(path, source[i], strlen(source[i])) &&
+                             parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &oracle);
+            check_test_expect(test, ran && oracle.rejected != accept,
+                              "Clang confirms exact aggregate target constraints, preserving the atomic target distinction");
+            unlink(path);
+        }
+    }
+    check_test_expect(test, clang == NULL || available, "initializer overload constraint oracle storage");
+    if (available)
+    {
+        rmdir(directory);
+    }
 }
 
 static void check_init_test_ranges(CheckTest* test, const char* clang)
@@ -1104,6 +1166,35 @@ static void check_init_test_vectors(CheckTest* test, const char* clang)
 
 static void check_test_initializers(CheckTest* test, const char* clang)
 {
+    check_init_test_overload_constraints(test, clang);
+    static const char overloads[] =
+        "#define O __attribute__((overloadable))\n"
+        "int choose(int) O; int (*overload_early)(int)=choose;\n"
+        "double choose(double) O;\n"
+        "int (*overload_i)(int)=(choose); double (*overload_d)(double)=&choose;\n"
+        "struct Pair{int (*i)(int);double (*d)(double);};\n"
+        "struct Pair overload_pair={.d=choose,.i=choose};\n"
+        "struct Pair overload_rows[2]={{choose,choose},{.d=&choose,.i=(int(*)(int))choose}};\n"
+        "int choose(int) O __attribute__((unavailable));\n"
+        "struct Pair overload_after={_Generic(0,int:choose),choose};\n"
+        "void body(void){struct Pair overload_auto={choose,choose};}\n";
+    check_init_test_source(test, overloads, NULL, 0, true, false, clang);
+    static const char unmarked[] =
+        "int plain(int); double plain(double) __attribute__((overloadable));\n"
+        "int (*plain_address)(int)=plain; struct P{int (*p)(int);} plain_record={plain};\n";
+    static const CheckInitExpected plain[] = {
+        {
+            .name = "plain_address",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "plain_record",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    check_init_test_source(test, unmarked, plain, BUSTER_ARRAY_LENGTH(plain), true, true, clang);
     check_init_test_vectors(test, clang);
     check_init_test_ranges(test, clang);
     check_init_test_flexible(test, clang);

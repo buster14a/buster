@@ -37,6 +37,7 @@ struct CheckOverloadContext
     uint32_t tag_completion_count;
     uint32_t source_position;
     uint32_t extensions;
+    uint64_t* scratch_peak;
 };
 
 typedef enum CheckOverloadStatus
@@ -173,7 +174,11 @@ static CheckOverloadResult check_overload_declare(const TypeTable* table, const 
                 else if (signature == TYPE_ANSWER_YES)
                 {
                     const TypeAnswer returns = check_overload_compatible(table, type_return(table, candidate->type), type_return(table, prior->type), context);
-                    if (returns != TYPE_ANSWER_YES)
+                    if (type_function_abi_kind(table, candidate->type) != type_function_abi_kind(table, prior->type))
+                    {
+                        result.status = CHECK_OVERLOAD_CONFLICT;
+                    }
+                    else if (returns != TYPE_ANSWER_YES)
                     {
                         result.status = returns == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_CONFLICT;
                     }
@@ -601,13 +606,17 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
         result.flags = selected->flags;
         result.status = (selected->flags & BUSTER_CHECK_OVERLOAD_UNAVAILABLE) != 0 ? CHECK_OVERLOAD_UNAVAILABLE : CHECK_OVERLOAD_OK;
     }
+    if (request != 0 && request->context.scratch_peak != 0 && scratch->length > *request->context.scratch_peak)
+    {
+        *request->context.scratch_peak = scratch->length;
+    }
     arena_pop_to(scratch, mark);
     return result;
 }
 
 // The selected call uses ordinary CALL constraints and conversions. Only certified standard multilevel pointer
 // qualifications need an adjusted argument view; their original lvalue/volatile/effect conversion is retained.
-static CheckOverloadResult check_overload_call(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, Arena* scratch, bool scalar, CheckActionResult* output, CheckOverloadResult* argument_selected)
+static CheckOverloadResult check_overload_call(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, Arena* scratch, bool scalar, CheckActionResult* output, CheckOverloadResult* argument_selected, uint64_t* scratch_peak)
 {
     const CheckOverloadRequest request = {
         .candidates = candidates,
@@ -621,6 +630,7 @@ static CheckOverloadResult check_overload_call(TypeTable* table, const CheckActi
             .tag_completion_count = action->tag_completion_count,
             .source_position = action->source_position,
             .extensions = action->extensions,
+            .scratch_peak = scratch_peak,
         },
         .scalar = scalar,
     };
@@ -723,6 +733,10 @@ static CheckOverloadResult check_overload_call(TypeTable* table, const CheckActi
     if (selected.status != CHECK_OVERLOAD_OK)
     {
         output->diagnostic = selected.status == CHECK_OVERLOAD_FULL ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE;
+    }
+    if (scratch_peak != 0 && scratch->length > *scratch_peak)
+    {
+        *scratch_peak = scratch->length;
     }
     arena_pop_to(scratch, mark);
     return selected;

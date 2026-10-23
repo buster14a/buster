@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Contextual addresses of C overload sets. Include after c_check_overload.c. The immutable chain and source-time
+// Contextual addresses of C overload sets. Include from c_check_overload.c after declaration validation. The immutable chain and source-time
 // context are the same as ordinary overload calls. A singleton is already an ordinary function designator: select
 // it before conversions, including its availability constraint. Several distinct declarations need an expected
 // function-pointer type and exactly one canonical whole-function match. C compatible enum/integer, old-style
@@ -102,6 +102,10 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
     }
     if (scratch != 0)
     {
+        if (context != 0 && context->scratch_peak != 0 && scratch->length > *context->scratch_peak)
+        {
+            *context->scratch_peak = scratch->length;
+        }
         arena_pop_to(scratch, mark);
     }
     return result;

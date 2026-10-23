@@ -191,6 +191,7 @@ static void check_test_data_source(CheckTest* test, const CheckDataSourceFixture
         Arena scratch = arena_reserve(UINT64_C(1) << 24);
         const ParseOptions parse_options = {
             .scalar = path == 0,
+            .extension_metadata = true,
         };
         bool ready = check_test_types_open(&types) && parse_initialize(&parser, &parse_options, pp_options.language) && input_arena.base != 0 && stream_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0;
         ready = ready && parse_translation_unit(&parser, &pp) && parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE;
@@ -527,6 +528,16 @@ static void check_test_data_sources(CheckTest* test)
             .source = "static int f(void){return 0;} int (*p)(void)=f;",
             .status = CHECK_DATA_INPUT_UNSUPPORTED,
             .failed_name = "f",
+        },
+        {
+            .name = "static-overload-needs-symbol-mangling.c",
+            .source = "int f(void) __attribute__((overloadable)); int (*p)(void)=f;",
+            .status = CHECK_DATA_INPUT_UNSUPPORTED,
+            .failed_name = "f",
+        },
+        {
+            .name = "static-unused-overload-needs-no-symbol.c",
+            .source = "int f(void) __attribute__((overloadable));",
         },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)

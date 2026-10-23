@@ -111,6 +111,8 @@ struct CheckConstantInput
     uint32_t pending_tag;
     uint32_t failure;
     CheckValue* values;
+    CheckValue* proof_values;
+    uint8_t* proof_active;
     uint8_t* present;
     uint8_t* syntax;
     uint8_t* statement_syntax;
@@ -120,6 +122,7 @@ struct CheckConstantInput
     uint32_t* type_begin;
     uint32_t* warning_begin;
     TypeId* queries;
+    uint8_t* abi_origins;
     uint8_t* attribute_syntax;
     CheckConstantAttributes** attribute_starts;
     CheckConstantAttributes** attribute_ends;
@@ -131,7 +134,7 @@ struct CheckConstantInput
     bool deferred_tags;
 };
 
-static bool check_constant_resolve(CheckConstantInput* input, const CheckValue* source, TypeId target, CheckValue* resolved)
+static CheckOverloadResult check_constant_address(CheckConstantInput* input, const CheckValue* source, TypeId target, CheckValue* resolved)
 {
     CheckInputReader* reader = input->reader;
     const CheckOverloadContext context = {
@@ -145,7 +148,30 @@ static bool check_constant_resolve(CheckConstantInput* input, const CheckValue* 
     const CheckOverloadResult selected = check_overload_argument(reader->types, source, target, graph->overload_candidates,
         graph->overload_candidate_count, &context, reader->scratch, resolved);
     reader->output->resource |= selected.status == CHECK_OVERLOAD_FULL;
+    return selected;
+}
+
+static bool check_constant_resolve(CheckConstantInput* input, const CheckValue* source, TypeId target, CheckValue* resolved)
+{
+    const CheckOverloadResult selected = check_constant_address(input, source, target, resolved);
     return selected.status == CHECK_OVERLOAD_OK;
+}
+
+static bool check_constant_designator(CheckConstantInput* input, const CheckValue* value)
+{
+    CheckValue resolved;
+    const CheckOverloadResult selected = check_constant_address(input, value, 0, &resolved);
+    return selected.status == CHECK_OVERLOAD_OK || selected.status == CHECK_OVERLOAD_AMBIGUOUS;
+}
+
+static bool check_constant_arguments(CheckConstantInput* input, CheckValue* arguments, uint32_t count)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        valid = check_constant_resolve(input, arguments + i, 0, arguments + i);
+    }
+    return valid;
 }
 
 static uint32_t check_constant_unevaluated_warnings(void)
@@ -221,6 +247,13 @@ struct CheckConstantParameter
 };
 
 typedef struct CheckConstantTypeFrame CheckConstantTypeFrame;
+typedef struct CheckConstantTypeAttribute CheckConstantTypeAttribute;
+struct CheckConstantTypeAttribute
+{
+    CheckConstantAttributes* attributes;
+    uint32_t next;
+};
+
 struct CheckConstantTypeFrame
 {
     TypeId base;
@@ -231,7 +264,10 @@ struct CheckConstantTypeFrame
     uint32_t pointers;
     uint32_t function;
     uint32_t name;
+    uint32_t attribute_first;
+    uint32_t attribute_last;
     uint8_t state;
+    uint8_t abi_origin;
     bool group;
     bool parameter;
 };
@@ -248,14 +284,38 @@ static CheckConstantTypeFrame check_constant_type_frame(TypeId base, uint32_t fi
         .pointers = BUSTER_CHECK_NONE,
         .function = BUSTER_CHECK_NONE,
         .name = BUSTER_CHECK_NONE,
+        .attribute_first = BUSTER_CHECK_NONE,
+        .attribute_last = BUSTER_CHECK_NONE,
         .group = group,
         .parameter = parameter,
     };
 }
 
+static bool check_constant_type_attribute(CheckConstantTypeFrame* frame, CheckConstantTypeAttribute* attributes,
+                                          uint32_t* count, uint32_t capacity, CheckConstantAttributes* value)
+{
+    const bool valid = *count < capacity;
+    if (valid)
+    {
+        const uint32_t index = (*count)++;
+        attributes[index] = (CheckConstantTypeAttribute){ .attributes = value, .next = BUSTER_CHECK_NONE };
+        if (frame->attribute_last != BUSTER_CHECK_NONE)
+        {
+            attributes[frame->attribute_last].next = index;
+        }
+        else
+        {
+            frame->attribute_first = index;
+        }
+        frame->attribute_last = index;
+    }
+    return valid;
+}
+
 // This intentionally does not call check_input_specifiers: that reader may evaluate an attribute operand.
 // All identifier and tag lookup was captured by check_constant_bind in source order before this pass.
-static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cursor, uint32_t end, bool parameter)
+static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cursor, uint32_t end, bool parameter,
+                                       CheckConstantTypeFrame* frame, CheckConstantTypeAttribute* links, uint32_t* link_count, uint32_t capacity)
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
@@ -308,6 +368,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             base = selected;
             named_type = true;
             bit_int_specifier = name == C_NAME_BITINT || name == C_NAME_EXTINT;
+            frame->abi_origin = selected != 0 ? input->abi_origins[close - input->first] : 0;
             i = close > i + 1 && close < end ? close : i;
         }
         else if (name == C_NAME_LONG)
@@ -360,6 +421,8 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         else if (kind == PARSE_KIND_IDENTIFIER && (parser->tree.roles[i] == PARSE_ROLE_SPECIFIER || input->raw) && base == 0 && !integer_seen && !longs && !shorts && !signedness)
         {
             base = reader->declared_types[i];
+            const uint32_t declaration = reader->output->declarations[i];
+            frame->abi_origin = reader->output->explicit_abis != 0 && declaration < parser->tokens.count ? reader->output->explicit_abis[declaration] : 0;
             named_type = true;
             valid &= base != 0;
         }
@@ -436,7 +499,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         if (attributes != 0)
         {
             base = check_input_attribute_type(reader, &attributes->parsed, base, false);
-            valid = base != 0;
+            valid = base != 0 && check_constant_type_attribute(frame, links, link_count, capacity, attributes);
             token = attributes->end;
         }
         else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
@@ -456,7 +519,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
     return valid ? check_input_type_result(reader, type_qualify(reader->types, base, qualifiers)) : 0;
 }
 
-static bool check_constant_range_value(CheckConstantInput* input, uint32_t first, uint32_t end, CheckValue* value)
+static uint32_t check_constant_range_root(const CheckConstantInput* input, uint32_t first, uint32_t end)
 {
     const Parser* parser = input->reader->parser;
     uint32_t root = BUSTER_CHECK_NONE;
@@ -475,7 +538,13 @@ static bool check_constant_range_value(CheckConstantInput* input, uint32_t first
             roots += 1;
         }
     }
-    const bool valid = roots == 1 && root >= input->first && root < input->end && input->present[root - input->first];
+    return roots == 1 && root >= input->first && root < input->end && input->present[root - input->first] ? root : BUSTER_CHECK_NONE;
+}
+
+static bool check_constant_range_value(CheckConstantInput* input, uint32_t first, uint32_t end, CheckValue* value)
+{
+    const uint32_t root = check_constant_range_root(input, first, end);
+    const bool valid = root != BUSTER_CHECK_NONE;
     if (valid)
     {
         *value = input->values[root - input->first];
@@ -483,26 +552,37 @@ static bool check_constant_range_value(CheckConstantInput* input, uint32_t first
     return valid;
 }
 
+static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t token);
+
 static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uint32_t end)
 {
     CheckInputReader* reader = input->reader;
+    reader->constant_abi_origin = 0;
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
     const uint32_t capacity = end - first + 1;
     CheckConstantTypeFrame* frames = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantTypeFrame), 8);
     CheckConstantPart* parts = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantPart), 8);
     CheckConstantParameter* parameters = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantParameter), 4);
-    reader->output->resource |= frames == 0 || parts == 0 || parameters == 0;
+    CheckConstantTypeAttribute* attributes = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckConstantTypeAttribute, capacity);
+    reader->output->resource |= frames == 0 || parts == 0 || parameters == 0 || attributes == 0;
     uint32_t cursor = first;
     TypeId result = 0;
-    const TypeId base = !reader->output->resource ? check_constant_specifiers(input, &cursor, end, false) : 0;
+    uint32_t attribute_count = 0;
+    if (!reader->output->resource)
+    {
+        frames[0] = check_constant_type_frame(0, first, end, false, false);
+    }
+    const TypeId base = !reader->output->resource ? check_constant_specifiers(input, &cursor, end, false, frames, attributes, &attribute_count, capacity) : 0;
     bool valid = base != 0;
     uint32_t depth = 0;
     uint32_t part_count = 0;
     uint32_t parameter_count = 0;
     if (valid)
     {
-        frames[depth++] = check_constant_type_frame(base, cursor, end, false, false);
+        frames[0].base = base;
+        frames[0].cursor = cursor;
+        depth = 1;
     }
     while (valid && depth != 0)
     {
@@ -510,15 +590,32 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
         uint32_t i = frame->cursor;
         if (frame->state == 0)
         {
-            while (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_STAR)
+            while (valid && i < frame->end && (parser->tokens.kinds[i] == PARSE_KIND_STAR || input->attribute_starts[i - input->first] != 0))
             {
+                CheckConstantAttributes* attribute = input->attribute_starts[i - input->first];
+                if (attribute != 0)
+                {
+                    valid = check_constant_type_attribute(frame, attributes, &attribute_count, capacity, attribute);
+                    i = attribute->end;
+                    continue;
+                }
                 const uint32_t token = i++;
                 uint32_t qualifiers = 0;
                 bool atomic = false;
-                while (i < frame->end && (check_input_qualifier(parser->tokens.names[i], &qualifiers) || parser->tokens.names[i] == C_NAME_ATOMIC))
+                while (valid && i < frame->end && (input->attribute_starts[i - input->first] != 0 ||
+                       check_input_qualifier(parser->tokens.names[i], &qualifiers) || parser->tokens.names[i] == C_NAME_ATOMIC))
                 {
-                    atomic |= parser->tokens.names[i] == C_NAME_ATOMIC;
-                    i += 1;
+                    CheckConstantAttributes* pointer_attribute = input->attribute_starts[i - input->first];
+                    if (pointer_attribute != 0)
+                    {
+                        valid = check_constant_type_attribute(frame, attributes, &attribute_count, capacity, pointer_attribute);
+                        i = pointer_attribute->end;
+                    }
+                    else
+                    {
+                        atomic |= parser->tokens.names[i] == C_NAME_ATOMIC;
+                        i += 1;
+                    }
                 }
                 parts[part_count] = (CheckConstantPart)
                 {
@@ -535,7 +632,9 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             {
                 frame->name = i++;
             }
-            else if (i < frame->end && parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP)
+            else if (i < frame->end && parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP &&
+                     (!input->raw || (i + 1 < frame->end && parser->tokens.kinds[i + 1] != PARSE_KIND_R_PAREN &&
+                      parser->tokens.kinds[i + 1] != PARSE_KIND_ELLIPSIS && !check_constant_raw_type_start(input, i + 1))))
             {
                 const uint32_t close = parser->tree.parents[i];
                 valid = close > i && close < frame->end;
@@ -564,17 +663,26 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             }
             else if (i < close)
             {
-                const TypeId parameter = check_constant_specifiers(input, &i, close, true);
+                frames[depth] = check_constant_type_frame(0, i, close, false, true);
+                const TypeId parameter = check_constant_specifiers(input, &i, close, true, frames + depth, attributes, &attribute_count, capacity);
                 valid = parameter != 0;
                 if (valid)
                 {
-                    frames[depth++] = check_constant_type_frame(parameter, i, close, false, true);
+                    frames[depth].base = parameter;
+                    frames[depth].cursor = i;
+                    depth += 1;
                 }
             }
             else
             {
                 valid = false;
             }
+        }
+        else if (i < frame->end && input->attribute_starts[i - input->first] != 0)
+        {
+            CheckConstantAttributes* attribute = input->attribute_starts[i - input->first];
+            valid = check_constant_type_attribute(frame, attributes, &attribute_count, capacity, attribute);
+            frame->cursor = attribute->end;
         }
         else if (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_L_SQUARE)
         {
@@ -623,7 +731,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             }
         }
         else if (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_L_PAREN &&
-                 (parser->tree.roles[i] == PARSE_ROLE_OPEN_FUNCTION || parser->tree.roles[i] == PARSE_ROLE_OPEN_CALL))
+                 (input->raw || parser->tree.roles[i] == PARSE_ROLE_OPEN_FUNCTION || parser->tree.roles[i] == PARSE_ROLE_OPEN_CALL))
         {
             const uint32_t close = parser->tree.parents[i];
             valid = close > i && close < frame->end;
@@ -677,6 +785,18 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 parent->name = frame->name;
                 parent->first = frame->first;
                 parent->last = frame->last;
+                if (frame->attribute_first != BUSTER_CHECK_NONE)
+                {
+                    if (parent->attribute_last != BUSTER_CHECK_NONE)
+                    {
+                        attributes[parent->attribute_last].next = frame->attribute_first;
+                    }
+                    else
+                    {
+                        parent->attribute_first = frame->attribute_first;
+                    }
+                    parent->attribute_last = frame->attribute_last;
+                }
                 depth -= 1;
             }
             else if (valid)
@@ -702,6 +822,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     }
                     else if (part->kind == BUSTER_TYPE_KIND_FUNCTION)
                     {
+                        frame->abi_origin = 0;
                         const uint64_t parameter_mark = reader->scratch->length;
                         TypeId* types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
                         reader->output->resource |= types == 0;
@@ -719,6 +840,12 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                                part->kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(reader->types, type, (uint32_t)part->extent) :
                                                                               type_incomplete_array(reader->types, type));
                     }
+                }
+                for (uint32_t attribute = frame->attribute_first; type != 0 && attribute != BUSTER_CHECK_NONE; attribute = attributes[attribute].next)
+                {
+                    CheckInputAttributes* parsed = &attributes[attribute].attributes->parsed;
+                    frame->abi_origin = check_input_attribute_abi_origin(reader, parsed, frame->abi_origin);
+                    type = check_input_attribute_abi(reader, parsed, type);
                 }
                 valid = type != 0;
                 if (valid && frame->parameter)
@@ -767,6 +894,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 {
                     valid = frame->name == BUSTER_CHECK_NONE;
                     result = type;
+                    reader->constant_abi_origin = frame->abi_origin;
                     depth -= 1;
                 }
             }
@@ -836,9 +964,9 @@ static bool check_constant_type_start(const Parser* parser, uint32_t token)
 static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t token);
 static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t first, uint32_t end);
 
-// convertvector has two source operands but only one value operand. Keep the destination as a type job so
+// These builtins have two source operands but only one value operand. Keep the destination as a type job so
 // nested typeof/attribute queries finish before the call, without entering the source declaration reader.
-static bool check_constant_convert_prepare(CheckConstantInput* input, uint32_t opening)
+static bool check_constant_type_builtin_prepare(CheckConstantInput* input, uint32_t opening, uint16_t builtin)
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
@@ -848,10 +976,13 @@ static bool check_constant_convert_prepare(CheckConstantInput* input, uint32_t o
                        check_constant_punctuation(parser, separator + 1, closing, PARSE_KIND_COMMA) == closing;
     if (valid)
     {
+        const bool first_type = builtin == CBUILTIN_BIT_CAST;
+        const uint32_t first = first_type ? opening + 1 : separator + 1;
+        const uint32_t end = first_type ? separator : closing;
         input->syntax[opening - 1 - input->first] = true;
-        input->type_begin[closing - input->first] = separator + 1;
-        check_constant_mark_type(input, separator + 1, closing);
-        reader->builtins[closing] = CBUILTIN_CONVERTVECTOR;
+        input->type_begin[closing - input->first] = first;
+        check_constant_mark_type(input, first, end);
+        reader->builtins[closing] = builtin;
     }
     return valid;
 }
@@ -1209,9 +1340,9 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     }
                 }
             }
-            else if (valid && keyword == C_NAME_BUILTIN_CONVERTVECTOR)
+            else if (valid && (keyword == C_NAME_BUILTIN_CONVERTVECTOR || keyword == C_NAME_BUILTIN_BIT_CAST))
             {
-                valid = check_constant_convert_prepare(input, token);
+                valid = check_constant_type_builtin_prepare(input, token, keyword == C_NAME_BUILTIN_BIT_CAST ? CBUILTIN_BIT_CAST : CBUILTIN_CONVERTVECTOR);
             }
         }
         if (valid && input->syntax[index] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM))
@@ -1291,7 +1422,7 @@ static TypeId check_constant_control_type(CheckInputReader* reader, const CheckV
     return type;
 }
 
-static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword, uint32_t first, uint32_t separator, uint32_t token, CheckValue* value)
+static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword, uint32_t first, uint32_t separator, uint32_t token, CheckValue* value, CheckValue* proof)
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
@@ -1305,6 +1436,16 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         if (valid)
         {
             valid = check_constant_range_value(input, condition ? separator + 1 : next + 1, condition ? next : token, value);
+            if (valid)
+            {
+                const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
+                input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
+            }
+            if (valid && input->proof_values != 0)
+            {
+                const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
+                *proof = input->proof_values[root - input->first];
+            }
             check_input_constant_fold_warning(reader, first, separator, &control, true);
             check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? token : next, CHECK_WARNING_INTEGER_OVERFLOW);
         }
@@ -1370,6 +1511,16 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         if (valid)
         {
             valid = check_constant_range_value(input, chosen_first, chosen_end, value);
+            if (valid)
+            {
+                const uint32_t root = check_constant_range_root(input, chosen_first, chosen_end);
+                input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
+            }
+            if (valid && input->proof_values != 0)
+            {
+                const uint32_t root = check_constant_range_root(input, chosen_first, chosen_end);
+                *proof = input->proof_values[root - input->first];
+            }
             check_input_warning_suppress(reader, first, separator, check_constant_unevaluated_warnings());
             association = separator + 1;
             while (association < token)
@@ -1483,7 +1634,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
     return valid;
 }
 
-static bool check_constant_builtin(CheckConstantInput* input, uint32_t token, CheckValue* value)
+static bool check_constant_builtin(CheckConstantInput* input, uint32_t token, CheckValue* value, CheckValue* proof)
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
@@ -1496,7 +1647,7 @@ static bool check_constant_builtin(CheckConstantInput* input, uint32_t token, Ch
     valid &= separator < token;
     if (valid && selection)
     {
-        valid = check_constant_selection(input, name, first, separator, token, value);
+        valid = check_constant_selection(input, name, first, separator, token, value, proof);
     }
     else if (valid)
     {
@@ -1590,7 +1741,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         const CheckGraph* graph = &reader->output->graph;
         check_overload_call(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
-                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, reader->parser->options.scalar, checked, 0);
+                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, reader->parser->options.scalar, checked, 0, 0);
     }
     else
     {
@@ -1602,7 +1753,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             const bool defer = action->op == CHECK_OP_ADDRESS || action->op == CHECK_OP_SELECT || action->op == CHECK_OP_VALUE;
             if (!defer && action->operands[i].overload_head != 0)
             {
-                const TypeId target = (i == 0 && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE)) ? action->type :
+                const TypeId target = (i == 0 && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT)) ? action->type :
                                       (i == 1 && action->op == CHECK_OP_ASSIGN) ? action->operands[0].type : 0;
                 valid = check_constant_resolve(input, action->operands + i, target, resolved.operands + i);
             }
@@ -1616,6 +1767,37 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             *checked = (CheckActionResult){ .diagnostic = reader->output->resource ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE };
         }
     }
+}
+
+// These values exist only in constant_p argument closures. Ordinary actions and their diagnostics remain the
+// authoritative source result. Speculative folding uses Clang's query policy, including saturated FP casts and
+// integer wrapping, without publishing its non-ICE result as an ordinary expression. Operator warnings retain
+// their actual source token: a saturated cast can make a subsequent integer operation overflow in Clang's query.
+static bool check_constant_speculate(CheckConstantInput* input, const CheckAction* action, uint32_t callee, CheckValue* value)
+{
+    CheckAction speculative = *action;
+    speculative.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
+    CheckActionResult checked;
+    check_constant_action(input, &speculative, callee, &checked);
+    input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
+    if (checked.diagnostic == CHECK_DIAG_NONE)
+    {
+        input->reader->output->constant_warnings[action->node] |= (uint8_t)checked.warnings;
+    }
+    if (checked.diagnostic == CHECK_DIAG_NONE && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_INITIALIZE))
+    {
+        check_query_speculative_conversion(input->reader->types, action->operands, action->node, &checked.value);
+    }
+    *value = checked.value;
+    return checked.diagnostic == CHECK_DIAG_NONE;
+}
+
+static bool check_constant_speculative_call(CheckConstantInput* input, uint32_t keyword, uint32_t closing, CBuiltinId builtin, TypeId type, CheckValue* arguments, uint32_t count, CheckValue* value)
+{
+    const uint8_t warnings = input->reader->output->constant_warnings[closing];
+    const bool valid = check_constant_arguments(input, arguments, count) && check_constant_call(input, keyword, closing, builtin, type, arguments, count, value);
+    input->reader->output->constant_warnings[closing] = warnings;
+    return valid;
 }
 
 static CheckValue check_constant_void_statement(const CheckConstantInput* input, uint32_t first)
@@ -1677,6 +1859,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             continue;
         }
         const uint8_t kind = parser->tokens.kinds[token];
+        CheckValue proof = { 0 };
         uint32_t first = BUSTER_CHECK_NONE;
         uint32_t last = BUSTER_CHECK_NONE;
         uint32_t count = 0;
@@ -1771,6 +1954,8 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .object = reader->objects[declaration],
                     .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                 };
+                valid = check_constant_designator(input, &input->values[index]);
+                input->abi_origins[index] = reader->output->explicit_abis != 0 ? reader->output->explicit_abis[declaration] : 0;
                 produced = true;
             }
         }
@@ -1836,6 +2021,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             {
                 valid = count == 1;
                 input->values[index] = action.operands[0];
+                input->abi_origins[index] = valid ? input->abi_origins[first - input->first] : 0;
+                if (valid && input->proof_values != 0)
+                {
+                    proof = input->proof_values[first - input->first];
+                }
                 produced = true;
             }
         }
@@ -1843,6 +2033,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         {
             const uint32_t type_first = input->type_begin[index];
             action.type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : 0;
+            input->abi_origins[index] = reader->constant_abi_origin;
             action.op = CHECK_OP_CAST;
             valid = count == 1 && action.type != 0;
         }
@@ -1856,6 +2047,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 valid = check_constant_resolve(input, &action.operands[0], 0, &action.operands[0]);
             }
             TypeId type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : count == 1 && valid ? action.operands[0].type : 0;
+            input->abi_origins[index] = type_first != BUSTER_CHECK_NONE ? reader->constant_abi_origin : count == 1 && valid ? input->abi_origins[first - input->first] : 0;
             if (name == C_NAME_BITINT || name == C_NAME_EXTINT)
             {
                 int64_t width = 0;
@@ -1914,6 +2106,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             valid = parser->language.gnu && reader->function_body < parser->tokens.count &&
                     (expression || (input->cached && opening >= input->first && opening < token && parser->tree.roles[opening] == PARSE_ROLE_OPEN_BLOCK));
             CheckValue selected = { .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+            CheckValue selected_proof = selected;
             uint32_t effects = 0;
             for (uint32_t child = opening; valid && child != BUSTER_CHECK_NONE; child = reader->next_child[child])
             {
@@ -1921,12 +2114,17 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     selected = input->present[child - input->first] ? input->values[child - input->first] :
                                (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+                    selected_proof = input->proof_values != 0 && input->present[child - input->first] ? input->proof_values[child - input->first] : selected;
+                    input->abi_origins[index] = expression && input->present[child - input->first] ? input->abi_origins[child - input->first] : 0;
                     effects |= selected.flags & BUSTER_CHECK_SIDE_EFFECT;
                 }
             }
             selected.flags |= effects;
             selected.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_GNU_ICE_FORM);
             input->values[index] = expression ? selected : check_constant_void_statement(input, first);
+            selected_proof.flags |= effects;
+            selected_proof.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_GNU_ICE_FORM);
+            proof = expression ? selected_proof : input->values[index];
             produced = true;
         }
         else if (input->cached && role == PARSE_ROLE_CLOSE_CONDITION)
@@ -1971,16 +2169,23 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         else if (role == PARSE_ROLE_CLOSE_KEYWORD)
         {
-            if (reader->builtins[token] == CBUILTIN_CONVERTVECTOR)
+            if (reader->builtins[token] == CBUILTIN_CONVERTVECTOR || reader->builtins[token] == CBUILTIN_BIT_CAST)
             {
+                const uint16_t builtin = reader->builtins[token];
                 const uint32_t type_first = input->type_begin[index];
-                const TypeId type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : 0;
-                valid = count == 1 && type != 0 && check_constant_call(input, reader->first_child[token], token, CBUILTIN_CONVERTVECTOR,
+                const uint32_t type_end = builtin == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, type_first, token, PARSE_KIND_COMMA) : token;
+                const TypeId type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, type_end) : 0;
+                valid = count == 1 && type != 0 && check_constant_arguments(input, action.operands, count) && check_constant_call(input, reader->first_child[token], token, (CBuiltinId)builtin,
                                                                      type, action.operands, count, &input->values[index]);
+                if (valid && input->proof_values != 0 && input->proof_active[index])
+                {
+                    CheckValue argument = input->proof_values[first - input->first];
+                    valid = check_constant_speculative_call(input, reader->first_child[token], token, (CBuiltinId)builtin, type, &argument, 1, &proof);
+                }
             }
             else
             {
-                valid = check_constant_builtin(input, token, &input->values[index]);
+                valid = check_constant_builtin(input, token, &input->values[index], &proof);
             }
             produced = true;
         }
@@ -2012,10 +2217,19 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 uint32_t argument = 0;
                 for (uint32_t child = first; valid && child != BUSTER_CHECK_NONE && argument < count; child = input->next_value[child - input->first])
                 {
-                    arguments[argument++] = input->values[child - input->first];
+                    arguments[argument++] = builtin == CBUILTIN_CONSTANT_P && input->proof_values != 0 ? input->proof_values[child - input->first] : input->values[child - input->first];
                 }
-                valid = valid && argument == count && check_constant_call(input, reader->first_child[token], token, (CBuiltinId)builtin,
+                valid = valid && argument == count && check_constant_arguments(input, arguments, count) && check_constant_call(input, reader->first_child[token], token, (CBuiltinId)builtin,
                                                                           0, arguments, count, &input->values[index]);
+                if (valid && input->proof_values != 0 && input->proof_active[index])
+                {
+                    argument = 0;
+                    for (uint32_t child = first; child != BUSTER_CHECK_NONE && argument < count; child = input->next_value[child - input->first])
+                    {
+                        arguments[argument++] = input->proof_values[child - input->first];
+                    }
+                    valid = check_constant_speculative_call(input, reader->first_child[token], token, (CBuiltinId)builtin, 0, arguments, count, &proof);
+                }
                 arena_pop_to(reader->scratch, mark);
                 produced = true;
             }
@@ -2071,6 +2285,26 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
+                if (first != BUSTER_CHECK_NONE && (action.op == CHECK_OP_ADDRESS || action.op == CHECK_OP_DEREFERENCE || action.op == CHECK_OP_SELECT ||
+                    action.op == CHECK_OP_SUBSCRIPT || action.op == CHECK_OP_ASSIGN || action.op == CHECK_OP_STATEMENT_VALUE))
+                {
+                    input->abi_origins[index] = input->abi_origins[first - input->first];
+                }
+                if (valid && input->proof_values != 0 && input->proof_active[index])
+                {
+                    CheckAction speculative = action;
+                    uint32_t operand = 0;
+                    for (uint32_t child = first; child != BUSTER_CHECK_NONE && operand < 3; child = input->next_value[child - input->first])
+                    {
+                        speculative.operands[operand++] = input->proof_values[child - input->first];
+                    }
+                    if (action.op == CHECK_OP_CONDITIONAL && count == 2)
+                    {
+                        speculative.operands[2] = speculative.operands[1];
+                        speculative.operands[1] = speculative.operands[0];
+                    }
+                    valid = check_constant_speculate(input, &speculative, first, &proof);
+                }
                 if (void_statement)
                 {
                     input->values[index] = check_constant_void_statement(input, first);
@@ -2082,6 +2316,10 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         if (valid && produced)
         {
+            if (input->proof_values != 0)
+            {
+                input->proof_values[index] = proof.type != 0 ? proof : input->values[index];
+            }
             input->present[index] = true;
             input->first_value[index] = token;
             input->last_value[index] = token;
@@ -2110,6 +2348,7 @@ struct CheckConstantOperator
     uint8_t precedence;
     uint8_t marker;
     uint16_t builtin;
+    uint8_t abi_origin;
 };
 
 typedef struct CheckConstantRange CheckConstantRange;
@@ -2144,7 +2383,7 @@ static uint8_t check_constant_precedence(CheckOp op)
     return precedence;
 }
 
-static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOperator* operators, uint32_t* operator_count, CheckValue* values, CheckConstantRange* ranges, uint32_t* value_count)
+static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOperator* operators, uint32_t* operator_count, CheckValue* values, CheckValue* proofs, CheckConstantRange* ranges, uint32_t* value_count)
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
@@ -2172,6 +2411,18 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
             {
                 action.operands[i] = values[*value_count + i];
             }
+            CheckAction speculative = action;
+            for (uint32_t i = 0; proofs != 0 && i < operation.arity && i < 3; i += 1)
+            {
+                speculative.operands[i] = proofs[*value_count + i];
+            }
+            CheckValue proof = { 0 };
+            uint8_t abi_origin = operation.abi_origin;
+            if (operation.arity != 0 && (action.op == CHECK_OP_ADDRESS || action.op == CHECK_OP_DEREFERENCE || action.op == CHECK_OP_SELECT ||
+                action.op == CHECK_OP_SUBSCRIPT || action.op == CHECK_OP_ASSIGN))
+            {
+                abi_origin = input->abi_origins[ranges[*value_count].first - input->first];
+            }
             for (uint32_t i = 0; i < operation.arity; i += 1)
             {
                 const CheckConstantRange child = ranges[*value_count + i];
@@ -2195,8 +2446,14 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
             {
                 const uint32_t close = reader->parser->tree.parents[operation.token + 1];
                 checked = (CheckActionResult){ 0 };
-                valid &= check_constant_call(input, operation.token, close, (CBuiltinId)operation.builtin,
-                                              operation.type, values + *value_count, operation.arity, &checked.value);
+                CheckValue* arguments = operation.builtin == CBUILTIN_CONSTANT_P && proofs != 0 ? proofs + *value_count : values + *value_count;
+                valid &= check_constant_arguments(input, arguments, operation.arity) && check_constant_call(input, operation.token, close, (CBuiltinId)operation.builtin,
+                                              operation.type, arguments, operation.arity, &checked.value);
+                if (valid && proofs != 0 && input->proof_active[operation.token - input->first])
+                {
+                    valid = check_constant_speculative_call(input, operation.token, close, (CBuiltinId)operation.builtin,
+                        operation.type, proofs + *value_count, operation.arity, &proof);
+                }
             }
             else
             {
@@ -2222,6 +2479,14 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 if (valid)
                 {
                     check_constant_action(input, &action, callee, &checked);
+                    if (checked.diagnostic == CHECK_DIAG_NONE && proofs != 0 && input->proof_active[operation.token - input->first])
+                    {
+                        speculative.arguments = action.arguments;
+                        speculative.argument_count = action.argument_count;
+                        speculative.argument_conversions = action.argument_conversions;
+                        check_constant_runtime_query(input, &speculative);
+                        valid = check_constant_speculate(input, &speculative, callee, &proof);
+                    }
                 }
                 arena_pop_to(reader->scratch, mark);
             }
@@ -2229,7 +2494,13 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
             ranges[*value_count] = range;
-            values[(*value_count)++] = checked.value;
+            input->abi_origins[range.first - input->first] = abi_origin;
+            values[*value_count] = checked.value;
+            if (proofs != 0)
+            {
+                proofs[*value_count] = proof.type != 0 ? proof : checked.value;
+            }
+            *value_count += 1;
         }
     }
     return valid;
@@ -2246,9 +2517,10 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
     const uint32_t capacity = end - first + 1;
     CheckConstantOperator* operators = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantOperator), 8);
     CheckValue* values = arena_push_array(reader->scratch, capacity, sizeof(CheckValue), 16);
+    CheckValue* proofs = input->proof_values != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckValue, capacity) : 0;
     CheckConstantRange* ranges = arena_push_array(reader->scratch, capacity, sizeof(CheckConstantRange), 4);
-    reader->output->resource |= operators == 0 || values == 0 || ranges == 0;
-    bool valid = first < end && operators != 0 && values != 0 && ranges != 0;
+    reader->output->resource |= operators == 0 || values == 0 || ranges == 0 || (input->proof_values != 0 && proofs == 0);
+    bool valid = first < end && operators != 0 && values != 0 && ranges != 0 && (input->proof_values == 0 || proofs != 0);
     bool operand = true;
     uint32_t operator_count = 0;
     uint32_t value_count = 0;
@@ -2275,6 +2547,10 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             valid = literal.valid;
             ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1 };
             values[value_count++] = check_literal_value(literal);
+            if (proofs != 0)
+            {
+                proofs[value_count - 1] = values[value_count - 1];
+            }
             operand = false;
             token += 1;
         }
@@ -2290,8 +2566,9 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 first_argument = check_constant_punctuation(parser, first_argument, close, PARSE_KIND_COMMA) + 1;
             }
             valid = builtin != CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT);
-            const TypeId destination = builtin == CBUILTIN_CONVERTVECTOR ? input->queries[close - input->first] : 0;
-            if (builtin == CBUILTIN_CONVERTVECTOR)
+            const bool type_builtin = builtin == CBUILTIN_CONVERTVECTOR || builtin == CBUILTIN_BIT_CAST;
+            const TypeId destination = type_builtin ? input->queries[close - input->first] : 0;
+            if (type_builtin)
             {
                 valid &= arguments == 2 && destination != 0;
                 arguments = 1;
@@ -2309,7 +2586,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 };
                 operators[operator_count++] = (CheckConstantOperator){ .token = open, .marker = 3 };
             }
-            token = open + 1;
+            token = builtin == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, open + 1, close, PARSE_KIND_COMMA) + 1 : open + 1;
         }
         else if (operand && kind == PARSE_KIND_IDENTIFIER)
         {
@@ -2331,6 +2608,12 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .object = reader->objects[declaration],
                     .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                 };
+                valid = check_constant_designator(input, &values[value_count - 1]);
+                input->abi_origins[token - input->first] = reader->output->explicit_abis != 0 ? reader->output->explicit_abis[declaration] : 0;
+                if (proofs != 0)
+                {
+                    proofs[value_count - 1] = values[value_count - 1];
+                }
             }
             operand = false;
             token += 1;
@@ -2350,6 +2633,10 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
                 };
+                if (proofs != 0)
+                {
+                    proofs[value_count - 1] = values[value_count - 1];
+                }
             }
             do
             {
@@ -2391,10 +2678,11 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .token = token,
                     .precedence = 14,
                     .arity = query ? 0 : 1,
+                    .abi_origin = query ? 0 : input->abi_origins[close - input->first],
                 };
                 if (query)
                 {
-                    valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+                    valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
                     operand = false;
                 }
                 token = close + 1;
@@ -2428,14 +2716,14 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     operators[operator_count - 2].arity == (operators[operator_count - 2].op == CHECK_OP_CALL ? 1u : 0u));
             while (valid && operator_count != 0 && operators[operator_count - 1].marker == 0)
             {
-                valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+                valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
             }
             const uint8_t marker = operator_count != 0 ? operators[operator_count - 1].marker : 0;
             valid &= marker == 1 || marker == 3;
             operator_count -= valid;
             if (valid && marker == 3)
             {
-                valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+                valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
             }
             operand = false;
             token += 1;
@@ -2444,7 +2732,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
         {
             while (valid && operator_count != 0 && operators[operator_count - 1].marker == 0)
             {
-                valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+                valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
             }
             const bool destination = operator_count >= 2 && operators[operator_count - 2].builtin == CBUILTIN_CONVERTVECTOR;
             operand = !destination;
@@ -2454,7 +2742,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
         {
             while (valid && operator_count != 0 && operators[operator_count - 1].marker == 0 && operators[operator_count - 1].precedence > 3)
             {
-                valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+                valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
             }
             operators[operator_count++] = (CheckConstantOperator)
             {
@@ -2475,13 +2763,17 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 if (valid)
                 {
                     values[value_count] = values[value_count - 1];
+                    if (proofs != 0)
+                    {
+                        proofs[value_count] = proofs[value_count - 1];
+                    }
                     ranges[value_count] = ranges[value_count - 1];
                     value_count += 1;
                 }
             }
             while (valid && operator_count != 0 && operators[operator_count - 1].marker == 0)
             {
-                valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+                valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
             }
             valid &= operator_count != 0 && operators[operator_count - 1].marker == 2;
             if (valid)
@@ -2521,7 +2813,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             while (valid && operator_count != 0 && operators[operator_count - 1].marker == 0 &&
                    (operators[operator_count - 1].precedence > precedence || (!right && operators[operator_count - 1].precedence == precedence)))
             {
-                valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+                valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
             }
             if (valid)
             {
@@ -2540,12 +2832,17 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
     valid &= !operand;
     while (valid && operator_count != 0)
     {
-        valid = check_constant_raw_reduce(input, operators, &operator_count, values, ranges, &value_count);
+        valid = check_constant_raw_reduce(input, operators, &operator_count, values, proofs, ranges, &value_count);
     }
     valid &= value_count == 1;
     if (valid)
     {
         input->values[first - input->first] = values[0];
+        input->abi_origins[first - input->first] = input->abi_origins[ranges[0].first - input->first];
+        if (input->proof_values != 0)
+        {
+            input->proof_values[first - input->first] = proofs[0];
+        }
         input->present[first - input->first] = true;
     }
     arena_pop_to(reader->scratch, mark);
@@ -2611,9 +2908,9 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
         {
             const uint32_t close = parser->tree.parents[token];
             valid = close > token && close < input->end;
-            if (valid && token > input->first && parser->tokens.names[token - 1] == C_NAME_BUILTIN_CONVERTVECTOR)
+            if (valid && token > input->first && (parser->tokens.names[token - 1] == C_NAME_BUILTIN_CONVERTVECTOR || parser->tokens.names[token - 1] == C_NAME_BUILTIN_BIT_CAST))
             {
-                valid = check_constant_convert_prepare(input, token);
+                valid = check_constant_type_builtin_prepare(input, token, parser->tokens.names[token - 1] == C_NAME_BUILTIN_BIT_CAST ? CBUILTIN_BIT_CAST : CBUILTIN_CONVERTVECTOR);
             }
             else if (valid && token + 1 < close && check_constant_raw_type_start(input, token + 1))
             {
@@ -2696,12 +2993,13 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
             TypeId type = 0;
             if (first != BUSTER_CHECK_NONE)
             {
-                for (uint32_t item = first; valid && item < close; item += 1)
+                const uint32_t type_end = reader->builtins[close] == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, first, close, PARSE_KIND_COMMA) : close;
+                for (uint32_t item = first; valid && item < type_end; item += 1)
                 {
                     if (parser->tokens.kinds[item] == PARSE_KIND_L_SQUARE)
                     {
                         const uint32_t finish = parser->tree.parents[item];
-                        valid = finish > item && finish < close;
+                        valid = finish > item && finish < type_end;
                         if (valid && item + 1 != finish)
                         {
                             valid = check_constant_raw_expression(input, item + 1, finish);
@@ -2709,7 +3007,8 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
                         item = finish;
                     }
                 }
-                type = valid ? check_constant_type(input, first, close) : 0;
+                type = valid ? check_constant_type(input, first, type_end) : 0;
+                input->abi_origins[close - input->first] = reader->constant_abi_origin;
                 valid &= type != 0;
             }
             else if (specifier)
@@ -2718,6 +3017,7 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
                 CheckValue value = valid ? input->values[token + 1 - input->first] : (CheckValue){ 0 };
                 valid = valid && check_constant_resolve(input, &value, 0, &value);
                 type = valid ? value.type : 0;
+                input->abi_origins[close - input->first] = input->abi_origins[token + 1 - input->first];
             }
             if (valid && specifier)
             {
@@ -2763,6 +3063,67 @@ static void check_constant_values_reset(CheckConstantInput* input)
     memset(input->next_value, 0xff, (uint64_t)count * sizeof(uint32_t));
     memset(input->warning_begin, 0xff, (uint64_t)count * sizeof(uint32_t));
     memset(input->queries, 0, (uint64_t)count * sizeof(TypeId));
+    memset(input->abi_origins, 0, count);
+    if (input->proof_values != 0)
+    {
+        memset(input->proof_values, 0, (uint64_t)count * sizeof(CheckValue));
+    }
+}
+
+static bool check_constant_proof_keyword(const CheckConstantInput* input, uint32_t token)
+{
+    const CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    bool query = token + 1 < input->end && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
+    if (query)
+    {
+        const uint32_t identifier = parser->tokens.names[token];
+        const InternSpan span = reader->pp->table->spans[identifier];
+        const char* spelling = (const char*)reader->pp->table->records + span.offset;
+        query = cbuiltin_resolve(spelling, span.length) == CBUILTIN_CONSTANT_P;
+    }
+    return query;
+}
+
+static bool check_constant_proof_initialize(CheckConstantInput* input)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const uint32_t count = input->end - input->first;
+    bool needed = false;
+    for (uint32_t token = input->first; !needed && token + 1 < input->end; token += 1)
+    {
+        needed = check_constant_proof_keyword(input, token);
+    }
+    bool valid = true;
+    if (needed)
+    {
+        input->proof_values = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckValue, count);
+        input->proof_active = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
+        const uint64_t mark = reader->scratch->length;
+        uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
+        valid = input->proof_values != 0 && input->proof_active != 0 && ends != 0;
+        reader->output->resource |= !valid;
+        uint32_t depth = 0;
+        for (uint32_t token = input->first; valid && token < input->end; token += 1)
+        {
+            while (depth != 0 && token >= ends[depth - 1])
+            {
+                depth -= 1;
+            }
+            input->proof_active[token - input->first] = depth != 0;
+            if (check_constant_proof_keyword(input, token))
+            {
+                const uint32_t close = parser->tree.parents[token + 1];
+                if (close > token + 1 && close < input->end)
+                {
+                    ends[depth++] = close;
+                }
+            }
+        }
+        arena_pop_to(reader->scratch, mark);
+    }
+    return valid;
 }
 
 static bool check_constant_input_initialize(CheckConstantInput* input, CheckInputReader* reader, uint32_t first, uint32_t end, bool cached, uint32_t* failed_token)
@@ -2796,6 +3157,7 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
     BUSTER_CHECK_CONSTANT_ARRAY(type_begin, uint32_t);
     BUSTER_CHECK_CONSTANT_ARRAY(warning_begin, uint32_t);
     BUSTER_CHECK_CONSTANT_ARRAY(queries, TypeId);
+    BUSTER_CHECK_CONSTANT_ARRAY(abi_origins, uint8_t);
     BUSTER_CHECK_CONSTANT_ARRAY(attribute_syntax, uint8_t);
     BUSTER_CHECK_CONSTANT_ARRAY(attribute_starts, CheckConstantAttributes*);
     BUSTER_CHECK_CONSTANT_ARRAY(attribute_ends, CheckConstantAttributes*);
@@ -2803,6 +3165,7 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
     input->tag_finishes = valid ? arena_push_array(reader->scratch, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
     valid &= input->tag_finishes != 0;
 #undef BUSTER_CHECK_CONSTANT_ARRAY
+    valid = valid && check_constant_proof_initialize(input);
     reader->output->resource |= count != 0 && end <= reader->parser->tokens.count && !valid;
     if (valid)
     {
@@ -2871,12 +3234,18 @@ static bool check_constant_job_header(CheckConstantInput* input, uint32_t token)
         BUSTER_CHECK_CONSTANT_SLICE(type_begin);
         BUSTER_CHECK_CONSTANT_SLICE(warning_begin);
         BUSTER_CHECK_CONSTANT_SLICE(queries);
+        BUSTER_CHECK_CONSTANT_SLICE(abi_origins);
         BUSTER_CHECK_CONSTANT_SLICE(attribute_syntax);
         BUSTER_CHECK_CONSTANT_SLICE(attribute_starts);
         BUSTER_CHECK_CONSTANT_SLICE(attribute_ends);
         BUSTER_CHECK_CONSTANT_SLICE(tag_finishes);
         BUSTER_CHECK_CONSTANT_SLICE(tag_next);
 #undef BUSTER_CHECK_CONSTANT_SLICE
+        if (header.proof_values != 0)
+        {
+            header.proof_values += offset;
+            header.proof_active += offset;
+        }
         check_constant_values_reset(&header);
         valid = header.raw ? check_constant_raw_prepare(&header) : check_constant_evaluate(&header);
     }
@@ -2915,6 +3284,7 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
 {
     const uint64_t mark = reader->scratch->length;
     CheckConstantInput input;
+    reader->constant_abi_origin = 0;
     bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
     if (valid)
     {
@@ -2937,6 +3307,8 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
     else if (valid)
     {
         valid = check_constant_range_value(&input, first, end, value) && check_constant_resolve(&input, value, 0, value);
+        const uint32_t root = valid ? check_constant_range_root(&input, first, end) : BUSTER_CHECK_NONE;
+        reader->constant_abi_origin = root != BUSTER_CHECK_NONE ? input.abi_origins[root - first] : 0;
     }
     arena_pop_to(reader->scratch, mark);
     return valid;

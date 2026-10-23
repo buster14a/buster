@@ -4,7 +4,7 @@
 // Context flows into a function designator only at its consuming edge. Keep each selected object on that edge;
 // changing the shared source leaf would select the wrong function when a graph reuses it in another context.
 
-static bool check_graph_overload_capacity(const CheckGraph* graph, Arena* scratch, uint32_t* capacity)
+static bool check_graph_overload_capacity(const CheckGraph* graph, Arena* scratch, uint32_t* capacity, uint64_t* scratch_peak)
 {
     *capacity = 0;
     const uint64_t mark = scratch->length;
@@ -40,11 +40,15 @@ static bool check_graph_overload_capacity(const CheckGraph* graph, Arena* scratc
     {
         *capacity = (uint32_t)count;
     }
+    if (scratch_peak != NULL && *scratch_peak < scratch->length)
+    {
+        *scratch_peak = scratch->length;
+    }
     arena_pop_to(scratch, mark);
     return valid;
 }
 
-static CheckOverloadContext check_graph_overload_context(const CheckAction* action)
+static CheckOverloadContext check_graph_overload_context(const CheckAction* action, CheckStream* stream)
 {
     const CheckOverloadContext context = {
         .tag_completions = action->tag_completions,
@@ -52,6 +56,7 @@ static CheckOverloadContext check_graph_overload_context(const CheckAction* acti
         .tag_completion_count = action->tag_completion_count,
         .source_position = action->source_position,
         .extensions = action->extensions,
+        .scratch_peak = &stream->statistics.scratch_bytes,
     };
     return context;
 }
@@ -74,7 +79,18 @@ static CheckDiagnostic check_graph_overload_operands(TypeTable* types, const Che
 {
     CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
     const bool preserve = action->op == CHECK_OP_VALUE || action->op == CHECK_OP_SELECT || action->op == CHECK_OP_ADDRESS;
-    const CheckOverloadContext context = check_graph_overload_context(action);
+    const CheckOverloadContext context = check_graph_overload_context(action, stream);
+    if (action->op == CHECK_OP_VALUE && action->operands[0].overload_head != 0)
+    {
+        // Availability belongs to the original use, even when a surrounding generic association is unchosen.
+        // Multiple candidates remain unresolved until a consuming edge supplies its actual expected type.
+        const CheckOverloadResult selected = check_overload_address(types, graph->overload_candidates, graph->overload_candidate_count,
+                                                                    action->operands[0].overload_head - 1, 0, &context, scratch);
+        if (selected.status != CHECK_OVERLOAD_OK && selected.status != CHECK_OVERLOAD_AMBIGUOUS)
+        {
+            diagnostic = selected.status == CHECK_OVERLOAD_FULL ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE;
+        }
+    }
     const uint32_t count = check_action_operand_count(action);
     for (uint32_t i = 0; !preserve && diagnostic == CHECK_DIAG_NONE && i < count; i += 1)
     {
@@ -138,7 +154,7 @@ static CheckOverloadResult check_graph_overload_call(TypeTable* types, const Che
     if (!pending || arguments != 0)
     {
         selected = check_overload_call(types, action, graph->overload_candidates, graph->overload_candidate_count,
-                                      head, scratch, scalar, result, arguments);
+                                      head, scratch, scalar, result, arguments, &stream->statistics.scratch_bytes);
         for (uint32_t i = 0; arguments != 0 && i < action->argument_count; i += 1)
         {
             if (arguments[i].status == CHECK_OVERLOAD_OK && arguments[i].candidate != BUSTER_CHECK_NONE &&
@@ -152,6 +168,10 @@ static CheckOverloadResult check_graph_overload_call(TypeTable* types, const Che
     else
     {
         *result = (CheckActionResult){ .diagnostic = CHECK_DIAG_RESOURCE };
+    }
+    if (scratch->length > stream->statistics.scratch_bytes)
+    {
+        stream->statistics.scratch_bytes = scratch->length;
     }
     arena_pop_to(scratch, mark);
     return selected;

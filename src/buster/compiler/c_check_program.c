@@ -217,6 +217,36 @@ static uint32_t check_program_builtin_index(const void* items, uint32_t count, u
     return result;
 }
 
+static const CheckOverloadResult* check_program_overload_address(const CheckProgram* program, uint32_t node, uint32_t operand)
+{
+    const CheckStream* stream = program->stream;
+    uint32_t first = 0;
+    uint32_t end = stream->overload_address_count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        const CheckOverloadAddressEffect* effect = stream->overload_addresses + middle;
+        if (effect->node < node || (effect->node == node && effect->operand < operand))
+        {
+            first = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    const CheckOverloadAddressEffect* effect = first < stream->overload_address_count ? stream->overload_addresses + first : NULL;
+    const CheckOverloadResult* selected = effect != NULL && effect->node == node && effect->operand == operand ? &effect->selected : NULL;
+    return selected;
+}
+
+static bool check_program_overload_valid(const CheckProgram* program, const CheckOverloadResult* selected)
+{
+    const bool valid = selected->status == CHECK_OVERLOAD_OK && selected->object != 0 && selected->object < program->object_count &&
+                       type_kind(program->types, type_strip_aligned(program->types, selected->type)) == BUSTER_TYPE_KIND_FUNCTION;
+    return valid;
+}
+
 static uint32_t check_program_argument_mask(CheckProgram* program, uint32_t node)
 {
     const CheckOp op = program->input->graph.ops[node];
@@ -257,6 +287,11 @@ static uint32_t check_program_argument_mask(CheckProgram* program, uint32_t node
     else if (op == CHECK_OP_BUILTIN_X86)
     {
         index = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
+    }
+    else if (op == CHECK_OP_BUILTIN_BIT_CAST)
+    {
+        index = check_program_builtin_index(stream->bit_casts, stream->bit_cast_count, sizeof(CheckBuiltinBitCastEffect), node);
+        mask = index != BUSTER_CHECK_NONE ? stream->bit_casts[index].evaluated_operands : 0;
     }
     if (op != CHECK_OP_CALL && index == BUSTER_CHECK_NONE)
     {
@@ -984,8 +1019,44 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 
 // Collect actual expression edges, never all graph nodes: sizeof/alignof and statically selected generic arms do
 // not make an object referenced by an executing body. A declaration identity maps through its canonical object.
-static void check_program_reference_roots(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
-                                          uint32_t* nodes, uint32_t* stack, uint32_t* depth)
+static uint32_t check_program_reference_initializer(CheckProgram* program, const CheckInitializer* plan, uint32_t epoch,
+                                                     uint32_t* nodes, uint32_t* stack, uint32_t* depth, uint32_t* seen,
+                                                     uint64_t* references, uint8_t* needed, uint32_t reference_count)
+{
+    const CheckGraph* graph = &program->input->graph;
+    for (uint32_t part = 0; part < plan->count; part += 1)
+    {
+        const CheckInitPart* write = plan->parts + part;
+        const uint32_t expression = write->node;
+        if (write->kind == CHECK_INIT_VALUE && expression < graph->count)
+        {
+            if (program->stream->values[expression].overload_head != 0)
+            {
+                const CheckValue value = write->value;
+                if (value.overload_head != 0 || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 || value.object >= program->object_count)
+                {
+                    check_program_fail(program, CHECK_PROGRAM_INVALID, write->token);
+                }
+                else if (seen[value.object] != epoch)
+                {
+                    seen[value.object] = epoch;
+                    needed[value.object] = 1;
+                    references[reference_count++] = (uint64_t)value.object << 32;
+                }
+            }
+            else if (nodes[expression] != epoch)
+            {
+                nodes[expression] = epoch;
+                stack[(*depth)++] = expression;
+            }
+        }
+    }
+    return reference_count;
+}
+
+static uint32_t check_program_reference_roots(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
+                                              uint32_t* nodes, uint32_t* stack, uint32_t* depth, uint32_t* seen,
+                                              uint64_t* references, uint8_t* needed, uint32_t reference_count)
 {
     const CheckGraph* graph = &program->input->graph;
     for (uint32_t i = 0; i < count; i += 1)
@@ -1012,17 +1083,10 @@ static void check_program_reference_roots(CheckProgram* program, const CheckCont
         if (controls[i].kind == CHECK_CONTROL_INITIALIZE)
         {
             const CheckInitializer* plan = &program->initializers->plans[controls[i].target];
-            for (uint32_t part = 0; part < plan->count; part += 1)
-            {
-                const uint32_t expression = plan->parts[part].node;
-                if (plan->parts[part].kind == CHECK_INIT_VALUE && expression < graph->count && nodes[expression] != epoch)
-                {
-                    nodes[expression] = epoch;
-                    stack[(*depth)++] = expression;
-                }
-            }
+            reference_count = check_program_reference_initializer(program, plan, epoch, nodes, stack, depth, seen, references, needed, reference_count);
         }
     }
+    return reference_count;
 }
 
 static uint32_t check_program_references(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
@@ -1031,7 +1095,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
     const CheckGraph* graph = &program->input->graph;
     uint32_t depth = 0;
     uint32_t reference_count = 0;
-    check_program_reference_roots(program, controls, count, epoch, nodes, stack, &depth);
+    reference_count = check_program_reference_roots(program, controls, count, epoch, nodes, stack, &depth, seen, references, needed, reference_count);
     while (depth != 0)
     {
         const uint32_t node = stack[--depth];
@@ -1039,7 +1103,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         if (op == CHECK_OP_VALUE)
         {
             const CheckValue value = graph->leaves[node];
-            if (value.object != 0 && value.object < program->object_count &&
+            if (value.overload_head == 0 && value.object != 0 && value.object < program->object_count &&
                 ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || program->input->static_objects[value.object - 1]) && seen[value.object] != epoch)
             {
                 seen[value.object] = epoch;
@@ -1057,15 +1121,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 else
                 {
                     const CheckInitializer* plan = program->initializers->plans + selected - 1;
-                    for (uint32_t part = 0; part < plan->count; part += 1)
-                    {
-                        const uint32_t expression = plan->parts[part].node;
-                        if (plan->parts[part].kind == CHECK_INIT_VALUE && expression < graph->count && nodes[expression] != epoch)
-                        {
-                            nodes[expression] = epoch;
-                            stack[depth++] = expression;
-                        }
-                    }
+                    reference_count = check_program_reference_initializer(program, plan, epoch, nodes, stack, &depth, seen, references, needed, reference_count);
                 }
             }
         }
@@ -1081,7 +1137,8 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 else
                 {
                     const CheckProgramRegion* region = program->regions + selected - 1;
-                    check_program_reference_roots(program, controls + region->first, region->count, epoch, nodes, stack, &depth);
+                    reference_count = check_program_reference_roots(program, controls + region->first, region->count, epoch,
+                                                                    nodes, stack, &depth, seen, references, needed, reference_count);
                 }
             }
             uint32_t operands[] = {
@@ -1097,8 +1154,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 {
                     const CheckOverloadResult* selected = &stream->overloads[overload].selected;
                     const uint32_t object = selected->object;
-                    if (selected->status != CHECK_OVERLOAD_OK || object == 0 || object >= program->object_count ||
-                        type_kind(program->types, type_strip_aligned(program->types, selected->type)) != BUSTER_TYPE_KIND_FUNCTION)
+                    if (!check_program_overload_valid(program, selected))
                     {
                         check_program_fail(program, CHECK_PROGRAM_INVALID, graph->tokens[node]);
                     }
@@ -1144,7 +1200,21 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
             {
                 const uint32_t operand = operands[k];
-                if (operand != BUSTER_CHECK_NONE && nodes[operand] != epoch)
+                const CheckOverloadResult* selected = operand != BUSTER_CHECK_NONE ? check_program_overload_address(program, node, k) : NULL;
+                if (selected != NULL)
+                {
+                    if (!check_program_overload_valid(program, selected))
+                    {
+                        check_program_fail(program, CHECK_PROGRAM_INVALID, graph->tokens[node]);
+                    }
+                    else if (seen[selected->object] != epoch)
+                    {
+                        seen[selected->object] = epoch;
+                        needed[selected->object] = 1;
+                        references[reference_count++] = (uint64_t)selected->object << 32;
+                    }
+                }
+                else if (operand != BUSTER_CHECK_NONE && nodes[operand] != epoch)
                 {
                     nodes[operand] = epoch;
                     stack[depth++] = operand;
@@ -1156,10 +1226,27 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                    if ((op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0)) && nodes[argument] != epoch)
+                    if (op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0))
                     {
-                        nodes[argument] = epoch;
-                        stack[depth++] = argument;
+                        const CheckOverloadResult* selected = check_program_overload_address(program, node, a + 3);
+                        if (selected != NULL)
+                        {
+                            if (!check_program_overload_valid(program, selected))
+                            {
+                                check_program_fail(program, CHECK_PROGRAM_INVALID, graph->tokens[node]);
+                            }
+                            else if (seen[selected->object] != epoch)
+                            {
+                                seen[selected->object] = epoch;
+                                needed[selected->object] = 1;
+                                references[reference_count++] = (uint64_t)selected->object << 32;
+                            }
+                        }
+                        else if (nodes[argument] != epoch)
+                        {
+                            nodes[argument] = epoch;
+                            stack[depth++] = argument;
+                        }
                     }
                 }
             }
@@ -1466,7 +1553,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const CheckOp op = input->graph.ops[node];
         program->builtin_count += nodes[node] != 0 && (op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW ||
                                   op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-                                  op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86);
+                                  op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_BIT_CAST);
     }
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;
     valid = valid && (program->builtin_count == 0 || program->builtin_nodes != 0);
@@ -1476,7 +1563,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const CheckOp op = input->graph.ops[node];
         if (nodes[node] != 0 && (op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW ||
             op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-            op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86))
+            op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_BIT_CAST))
         {
             program->builtin_nodes[builtin++] = node;
         }

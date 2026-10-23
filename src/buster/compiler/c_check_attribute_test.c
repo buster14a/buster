@@ -77,6 +77,101 @@ static void check_test_attribute_storage(CheckTest* test)
     arena_release(&storage);
 }
 
+static void check_test_attribute_abis(CheckTest* test)
+{
+    CheckTestTypes types = { 0 };
+    Arena scratch = arena_reserve(65536);
+    CheckInputReport reports[8];
+    CheckInput input = { .reports = reports, .report_capacity = BUSTER_ARRAY_LENGTH(reports) };
+    CheckInputReader reader = { .output = &input, .types = &types.table, .scratch = &scratch };
+    const bool ready = check_test_types_open(&types) && scratch.base != 0;
+    check_test_expect(test, ready, "attribute ABI type and scratch storage initializes");
+    if (ready)
+    {
+        const CheckInputCallingConvention conventions[] = {
+            CHECK_CALL_SYSV, CHECK_CALL_MICROSOFT, CHECK_CALL_VECTOR, CHECK_CALL_REG,
+            CHECK_CALL_PRESERVE_MOST, CHECK_CALL_PRESERVE_ALL, CHECK_CALL_PRESERVE_NONE,
+        };
+        const TypeId integer = BUSTER_TYPE_INT;
+        const TypeId function = type_function(&types.table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
+        const TypeId pointer = type_qualify(&types.table, type_pointer(&types.table, function), BUSTER_TYPE_CONST);
+        const TypeId array = type_array(&types.table, pointer, 7);
+        const TypeId aligned = type_aligned(&types.table, array, 5);
+        const TypeId wrapped = type_qualify(&types.table, type_pointer(&types.table, aligned), BUSTER_TYPE_VOLATILE);
+        uint8_t* prefix = arena_push(&scratch, 31, 1);
+        check_test_expect(test, prefix != 0, "ABI wrapper scratch prefix allocates");
+        if (prefix != 0)
+        {
+            memset(prefix, 0xa5, 31);
+        }
+        for (uint32_t abi = 0; abi < BUSTER_ARRAY_LENGTH(conventions); abi += 1)
+        {
+            CheckInputAttribute record = { .first = 70, .end = 74, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = conventions[abi] };
+            CheckInputAttributes attributes = { .records = &record, .count = 1, .calling_convention = conventions[abi] };
+            const TypeId changed = type_function_abi(&types.table, integer, &integer, 1, BUSTER_TYPE_FLAG_PROTOTYPE, (TypeFunctionABI)abi);
+            const TypeId changed_pointer = type_qualify(&types.table, type_pointer(&types.table, changed), BUSTER_TYPE_CONST);
+            const TypeId changed_array = type_array(&types.table, changed_pointer, 7);
+            const TypeId changed_aligned = type_aligned(&types.table, changed_array, 5);
+            const TypeId expected = type_qualify(&types.table, type_pointer(&types.table, changed_aligned), BUSTER_TYPE_VOLATILE);
+            const TypeId result = check_input_attribute_abi(&reader, &attributes, wrapped);
+            check_test_expect(test, result == expected && attributes.error == CHECK_ATTRIBUTE_ERROR_NONE && scratch.length == 31 &&
+                                   prefix != 0 && prefix[30] == 0xa5,
+                              "explicit ABI application retains all pointer qualifiers, array extent and typedef alignment");
+            check_test_expect(test, check_input_attribute_abi(&reader, &attributes, result) == expected && scratch.length == 31,
+                              "reapplying the same explicit ABI preserves the exact wrapped type");
+            for (uint8_t origin = 0; origin <= TYPE_FUNCTION_ABI_COUNT; origin += 1)
+            {
+                input.report_count = 0;
+                attributes.error = CHECK_ATTRIBUTE_ERROR_NONE;
+                const uint32_t type_count = types.table.types.count;
+                const uint8_t actual = check_input_attribute_abi_origin(&reader, &attributes, origin);
+                const bool matches = origin == 0 || origin == abi + 1;
+                check_test_expect(test, actual == (matches ? abi + 1 : origin) &&
+                                       attributes.error == (matches ? CHECK_ATTRIBUTE_ERROR_NONE : CHECK_ATTRIBUTE_ERROR_CONFLICT) &&
+                                       input.report_count == (matches ? 0 : 1) &&
+                                       (matches || (attributes.error_first == 70 && attributes.error_end == 74 && reports[0].token == 70)) &&
+                                       types.table.types.count == type_count && scratch.length == 31,
+                                  "spelling ABI provenance distinguishes explicit SysV from implicit default without changing canonical types");
+            }
+        }
+        CheckInputAttribute record = { .first = 80, .end = 84, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = CHECK_CALL_MICROSOFT };
+        CheckInputAttributes attributes = { .records = &record, .count = 1, .calling_convention = CHECK_CALL_MICROSOFT };
+        const uint64_t capacity = scratch.capacity;
+        uint32_t full = 0;
+        uint32_t complete = 0;
+        for (uint64_t room = 0; room <= 20; room += 1)
+        {
+            input.report_count = 0;
+            input.resource = false;
+            attributes.error = CHECK_ATTRIBUTE_ERROR_NONE;
+            scratch.capacity = 31 + room;
+            const TypeId result = check_input_attribute_abi(&reader, &attributes, wrapped);
+            full += input.resource;
+            complete += result != 0;
+            check_test_expect(test, (result != 0 || (input.resource && attributes.error == CHECK_ATTRIBUTE_ERROR_RESOURCE &&
+                                                    attributes.error_first == 80 && attributes.error_end == 84)) && scratch.length == 31 &&
+                                   prefix != 0 && prefix[30] == 0xa5,
+                              "each bounded wrapper scratch capacity applies the complete ABI or reports exact-range exhaustion and rolls back");
+        }
+        check_test_expect(test, full != 0 && complete != 0, "ABI wrapper scratch controls exercise both exhaustion and success");
+        scratch.capacity = capacity;
+        input.report_count = 0;
+        input.resource = false;
+        attributes.error = CHECK_ATTRIBUTE_ERROR_NONE;
+        check_test_expect(test, check_input_attribute_abi(&reader, &attributes, integer) == integer && record.ignored && input.report_count == 0,
+                          "calling convention on a scalar remains deliberately ignored metadata");
+        attributes.calling_convention = CHECK_CALL_IGNORED_X86_32;
+        check_test_expect(test, check_input_attribute_abi_origin(&reader, &attributes, TYPE_FUNCTION_ABI_MICROSOFT + 1) == TYPE_FUNCTION_ABI_MICROSOFT + 1 &&
+                               check_input_attribute_abi(&reader, &attributes, wrapped) == wrapped,
+                          "ignored x86-32 convention does not replace a retained ABI or its origin");
+        check_test_expect(test, check_input_attribute_abi_origin(&reader, 0, TYPE_FUNCTION_ABI_SYSV + 1) == TYPE_FUNCTION_ABI_SYSV + 1 &&
+                               check_input_attribute_abi(&reader, 0, wrapped) == wrapped,
+                          "absent attributes preserve explicit-default provenance and the full type");
+    }
+    check_test_types_close(&types);
+    arena_release(&scratch);
+}
+
 static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFixture* fixture)
 {
     for (uint32_t variant = 0; variant < 2; variant += 1)
@@ -228,6 +323,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
 static void check_test_attributes(CheckTest* test, const char* clang)
 {
     check_test_attribute_storage(test);
+    check_test_attribute_abis(test);
     const CheckAttributeFixture fixtures[] =
     {
         {

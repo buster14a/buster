@@ -189,6 +189,19 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));int tested(int n){return pick(n);}",
         "selected-unmarked-overload-identity-excludes-lexical-placeholder", 2, 0, clang);
     check_test_program_selection_case(test,
+        "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));int external_apply(int(*)(int),int);"
+        "int tested(int n){int(*p)(int)=pick;int(*q)(int);q=&pick;return external_apply(p,n)+external_apply(q,n)+"
+        "external_apply((int(*)(int))pick,n)+external_apply(pick,n)+external_apply(_Generic(0,int:pick,default:0),n);}",
+        "contextual-overload-local-initializer-assignment-cast-and-argument", 2, 0, clang);
+    check_test_program_selection_case(test,
+        "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));int external_apply(int(*)(int),int);"
+        "int(*saved)(int)=pick;int(*give(void))(int){return pick;}int tested(int n){return external_apply(saved,n)+external_apply(give(),n);}",
+        "contextual-overload-static-initializer-and-return", 3, 1, clang);
+    check_test_program_selection_run(test,
+        "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));double take(double(*)(double));"
+        "int tested(int n){return (int)take(pick)+n;}",
+        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+    check_test_program_selection_case(test,
         "static int dead(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
         "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang);
     check_test_program_selection_run(test,

@@ -364,6 +364,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
+#include "buster/compiler/c_check_source_benchmark_test.c"
 
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.

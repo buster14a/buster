@@ -72,6 +72,10 @@ static void check_test_overload_address_oracle(CheckTest* test, TypeTable* table
         { .name = "void target does not select an overload", .source = "int f(int) O;double f(double) O;void*p=(void*)f;", .types = {fi,fd}, .target = vp, .count = 2, .status = CHECK_OVERLOAD_AMBIGUOUS },
         { .name = "singleton typeof resolves without target", .source = "int f(int) O;__typeof__(f)*p=f;", .types = {fi}, .count = 1 },
         { .name = "singleton is selected before ordinary cast", .source = "int f(int) O;void*p=(void*)f;", .types = {fi}, .target = vp, .count = 1 },
+        { .name = "qualified pointer preserves exact context", .source = "int f(int) O;double f(double) O;int(*const p)(int)=f;", .types = {fi,fd}, .target = type_qualify(table, pi, BUSTER_TYPE_CONST), .count = 2 },
+        { .name = "aligned typedef preserves exact context", .source = "int f(int) O;double f(double) O;typedef int(*P)(int) __attribute__((aligned(16)));P p=f;", .types = {fi,fd}, .target = type_aligned(table, pi, 4), .count = 2 },
+        { .name = "atomic target does not select an overload", .source = "int f(int) O;double f(double) O;_Atomic(int(*)(int))p=f;", .types = {fi,fd}, .target = type_atomic(table, pi), .count = 2, .status = CHECK_OVERLOAD_AMBIGUOUS },
+        { .name = "singleton precedes ordinary atomic conversion", .source = "int f(int) O;_Atomic(int(*)(int))p=f;", .types = {fi}, .target = type_atomic(table, pi), .count = 1 },
         { .name = "unavailable singleton address rejects", .source = "int f(int) O U;int(*p)(int)=f;", .types = {fi}, .target = pi, .count = 1, .unavailable = 1, .status = CHECK_OVERLOAD_UNAVAILABLE },
         { .name = "unavailable singleton typeof rejects", .source = "int f(int) O U;__typeof__(f)*p;", .types = {fi}, .count = 1, .unavailable = 1, .status = CHECK_OVERLOAD_UNAVAILABLE },
         { .name = "contextual unavailable address remains selected", .source = "int f(int) O U;double f(double) O;int(*p)(int)=f;", .types = {fi,fd}, .target = pi, .count = 2, .unavailable = 1 },
@@ -248,7 +252,8 @@ static void check_test_overload_address_capacity(CheckTest* test, TypeTable* tab
     }
     CheckOverloadCandidate original[COUNT];
     memcpy(original, candidates, sizeof(original));
-    const CheckOverloadContext context = { .source_position = COUNT };
+    uint64_t peak = 0;
+    const CheckOverloadContext context = { .source_position = COUNT, .scratch_peak = &peak };
     const TypeId target = type_pointer(table, candidates[0].type);
     Arena scratch = arena_reserve(65536);
     const uint64_t capacity = scratch.capacity;
@@ -261,6 +266,7 @@ static void check_test_overload_address_capacity(CheckTest* test, TypeTable* tab
         uint32_t complete = 0;
         for (uint64_t room = 0; room <= 4096; room += 1)
         {
+            peak = 0;
             scratch.length = 31;
             scratch.capacity = 31 + room;
             const CheckOverloadResult result = check_overload_address(table, candidates, COUNT, COUNT - 1, target, &context, &scratch);
@@ -268,7 +274,8 @@ static void check_test_overload_address_capacity(CheckTest* test, TypeTable* tab
             complete += result.status == CHECK_OVERLOAD_OK;
             const bool selected = result.status == CHECK_OVERLOAD_OK && result.candidate == 0 && result.declaration == 1 && result.canonical == 512 && result.object == 101;
             check_test_expect(test, (result.status == CHECK_OVERLOAD_FULL || selected) && scratch.length == 31 && bytes[30] == 0xa5 &&
-                                   memcmp(candidates, original, sizeof(original)) == 0,
+                                   memcmp(candidates, original, sizeof(original)) == 0 && peak >= 31 && peak <= scratch.capacity &&
+                                   (result.status != CHECK_OVERLOAD_OK || peak > 31),
                               "every poisoned scratch capacity either selects the exact oldest colliding identity or reports exhaustion and rolls back");
         }
         check_test_expect(test, full != 0 && complete != 0, "address scratch controls exercise exhaustion and success");

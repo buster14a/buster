@@ -78,10 +78,15 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
     {
         selected[node] = source->tokens[node] < input->token_count && tokens[source->tokens[node]] != 0;
     }
-    // Operands always precede their parent, so one reverse scan closes the selected roots over all dependencies.
+    // Operands and typed region dependencies precede their parent, so one reverse scan closes all roots.
+    uint32_t region = source->region_proof_count;
     for (uint32_t node = source->count; valid && node != 0; )
     {
         node -= 1;
+        while (region != 0 && source->region_proofs[region - 1].node > node)
+        {
+            region -= 1;
+        }
         if (selected[node])
         {
             const uint32_t operands[] =
@@ -100,6 +105,22 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
             for (uint32_t argument = 0; check_graph_has_arguments(source->ops[node]) && argument < source->argument_counts[node]; argument += 1)
             {
                 selected[source->argument_nodes[source->argument_offsets[node] + argument]] = 1;
+            }
+            if (region != 0 && source->region_proofs[region - 1].node == node)
+            {
+                const CheckRegionProof* proof = source->region_proofs + region - 1;
+                for (uint32_t step = 0; step < proof->count; step += 1)
+                {
+                    const CheckRegionProofStep* dependency = source->region_steps + proof->first + step;
+                    if (dependency->op == CHECK_REGION_EVAL || dependency->op == CHECK_REGION_BRANCH || dependency->op == CHECK_REGION_CASE)
+                    {
+                        selected[dependency->node] = 1;
+                    }
+                    if (dependency->op == CHECK_REGION_CASE)
+                    {
+                        selected[dependency->operand] = 1;
+                    }
+                }
             }
         }
     }
@@ -124,16 +145,22 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
         graph->overload_candidate_count = source->overload_candidate_count;
         graph->overload_calls = source->overload_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadCall, source->overload_count) : NULL;
         graph->overload_capacity = source->overload_count;
+        graph->region_proofs = source->region_proof_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckRegionProof, source->region_proof_count) : NULL;
+        graph->region_proof_capacity = source->region_proof_count;
+        graph->region_steps = source->region_step_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckRegionProofStep, source->region_step_count) : NULL;
+        graph->region_step_capacity = source->region_step_count;
         valid = (source->varargs_count == 0 || graph->varargs_calls != 0) && (source->builtin_count == 0 || graph->builtin_calls != 0) &&
                 (source->fp_environments == NULL || graph->fp_environments != NULL) &&
                 (source->warning_suppressed == NULL || graph->warning_suppressed != NULL) &&
                 (source->vector_member_count == 0 || graph->vector_members != NULL) && (source->x86_count == 0 || graph->x86_calls != NULL) &&
-                (source->overload_count == 0 || graph->overload_calls != NULL);
+                (source->overload_count == 0 || graph->overload_calls != NULL) &&
+                (source->region_proof_count == 0 || graph->region_proofs != NULL) && (source->region_step_count == 0 || graph->region_steps != NULL);
     }
     uint32_t builtin = 0;
     uint32_t vector = 0;
     uint32_t x86 = 0;
     uint32_t overload = 0;
+    region = 0;
     for (uint32_t node = 0; valid && node < source->count; node += 1)
     {
         if (selected[node])
@@ -218,6 +245,33 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
                     CheckOverloadCall* call = graph->overload_calls + graph->overload_count++;
                     *call = source->overload_calls[overload++];
                     call->node = added;
+                }
+                while (region < source->region_proof_count && source->region_proofs[region].node < node)
+                {
+                    region += 1;
+                }
+                if (region < source->region_proof_count && source->region_proofs[region].node == node)
+                {
+                    const CheckRegionProof* original = source->region_proofs + region++;
+                    CheckRegionProof* proof = graph->region_proofs + graph->region_proof_count++;
+                    *proof = *original;
+                    proof->node = added;
+                    proof->first = graph->region_step_count;
+                    for (uint32_t step = 0; valid && step < original->count; step += 1)
+                    {
+                        CheckRegionProofStep* dependency = graph->region_steps + graph->region_step_count++;
+                        *dependency = source->region_steps[original->first + step];
+                        if (dependency->op == CHECK_REGION_EVAL || dependency->op == CHECK_REGION_BRANCH || dependency->op == CHECK_REGION_CASE)
+                        {
+                            dependency->node = mapping[dependency->node];
+                            valid = dependency->node != BUSTER_CHECK_NONE;
+                        }
+                        if (dependency->op == CHECK_REGION_CASE)
+                        {
+                            dependency->operand = mapping[dependency->operand];
+                            valid = valid && dependency->operand != BUSTER_CHECK_NONE;
+                        }
+                    }
                 }
             }
         }
@@ -407,6 +461,19 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
         }
     }
     equal = equal && selected_vector == stream->vector_count;
+    uint32_t selected_bit_casts = 0;
+    for (uint32_t effect = 0; equal && effect < source->bit_cast_count; effect += 1)
+    {
+        CheckBuiltinBitCastEffect expected = source->bit_casts[effect];
+        equal = expected.node < source_graph->count;
+        if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
+        {
+            expected.node = mapping[expected.node];
+            equal = selected_bit_casts < stream->bit_cast_count &&
+                    check_builtin_bit_cast_effect_equal(&expected, stream->bit_casts + selected_bit_casts++);
+        }
+    }
+    equal = equal && selected_bit_casts == stream->bit_cast_count;
     uint32_t selected_x86 = 0;
     for (uint32_t effect = 0; equal && effect < source->x86_count; effect += 1)
     {
@@ -445,6 +512,47 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
         }
     }
     equal = equal && selected_overloads == stream->overload_count;
+    uint32_t selected_addresses = 0;
+    for (uint32_t effect = 0; equal && effect < source->overload_address_count; effect += 1)
+    {
+        CheckOverloadAddressEffect expected = source->overload_addresses[effect];
+        equal = expected.node < source_graph->count;
+        if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
+        {
+            expected.node = mapping[expected.node];
+            equal = selected_addresses < stream->overload_address_count &&
+                    check_overload_address_effect_equal(&expected, stream->overload_addresses + selected_addresses++);
+        }
+    }
+    equal = equal && selected_addresses == stream->overload_address_count;
+    uint32_t selected_regions = 0;
+    uint32_t selected_steps = 0;
+    for (uint32_t region = 0; equal && region < source_graph->region_proof_count; region += 1)
+    {
+        CheckRegionProof expected = source_graph->region_proofs[region];
+        const uint32_t original_first = expected.first;
+        equal = expected.node < source_graph->count;
+        if (equal && mapping[expected.node] != BUSTER_CHECK_NONE)
+        {
+            expected.node = mapping[expected.node];
+            expected.first = selected_steps;
+            equal = selected_regions < graph->region_proof_count && check_region_proof_equal(&expected, graph->region_proofs + selected_regions++);
+            for (uint32_t step = 0; equal && step < expected.count; step += 1)
+            {
+                CheckRegionProofStep dependency = source_graph->region_steps[original_first + step];
+                if (dependency.op == CHECK_REGION_EVAL || dependency.op == CHECK_REGION_BRANCH || dependency.op == CHECK_REGION_CASE)
+                {
+                    dependency.node = mapping[dependency.node];
+                }
+                if (dependency.op == CHECK_REGION_CASE)
+                {
+                    dependency.operand = mapping[dependency.operand];
+                }
+                equal = selected_steps < graph->region_step_count && check_region_step_equal(&dependency, graph->region_steps + selected_steps++);
+            }
+        }
+    }
+    equal = equal && selected_regions == graph->region_proof_count && selected_steps == graph->region_step_count;
     return equal;
 }
 
@@ -614,10 +722,11 @@ static int run_checker_source_benchmark(int count, char** arguments)
             {
                 const double nodes = (double)graph.count * (double)iterations;
                 const CheckStatistics statistics = streams[path].statistics;
-                printf("body_graph: path=%s ns_per_node=%.3f cycles_per_node=%.3f cycles_available=%u scalar_nodes=%u vector_nodes=%u scalar_share=%.6f output_bytes=%" PRIu64 "\n",
+                printf("body_graph: path=%s ns_per_node=%.3f cycles_per_node=%.3f cycles_available=%u scalar_nodes=%u vector_nodes=%u scalar_share=%.6f query_proof_nodes=%" PRIu64 " query_replay_nodes=%" PRIu64 " output_bytes=%" PRIu64 " scratch_bytes=%" PRIu64 "\n",
                        path == 0 ? "scalar" : "vector", (double)check_source_median(nanoseconds[path], (uint32_t)passes) / nodes,
                        counters ? (double)check_source_median(cycles[path], (uint32_t)passes) / nodes : -1.0, counters,
-                       statistics.scalar_nodes, statistics.vector_nodes, (double)statistics.scalar_nodes / graph.count, outputs[path].length);
+                       statistics.scalar_nodes, statistics.vector_nodes, (double)statistics.scalar_nodes / graph.count,
+                       statistics.query_proof_nodes, statistics.query_replay_nodes, outputs[path].length, statistics.scratch_bytes);
             }
         }
     }

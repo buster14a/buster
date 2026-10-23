@@ -4,6 +4,16 @@
 // Exact, padding-independent metadata comparisons shared by graph tests and extracted-body/corpus proofs.
 // The value comparator supplies the harness's floating/NaN policy; production checking does not call these.
 
+static __attribute__((unused)) bool check_region_proof_equal(const CheckRegionProof* a, const CheckRegionProof* b)
+{
+    return a->node == b->node && a->first == b->first && a->count == b->count && a->flags == b->flags;
+}
+
+static __attribute__((unused)) bool check_region_step_equal(const CheckRegionProofStep* a, const CheckRegionProofStep* b)
+{
+    return a->op == b->op && a->node == b->node && a->operand == b->operand && a->target == b->target;
+}
+
 static __attribute__((unused)) bool check_builtin_call_equal(const CheckBuiltinCall* a, const CheckBuiltinCall* b)
 {
     bool equal = a->node == b->node && a->nan_payload_length == b->nan_payload_length && a->nan_payload_known == b->nan_payload_known &&
@@ -11,6 +21,8 @@ static __attribute__((unused)) bool check_builtin_call_equal(const CheckBuiltinC
                  a->complex_constant == b->complex_constant && a->constant_p_side_effects == b->constant_p_side_effects &&
                  a->minimum_alignment == b->minimum_alignment && a->alignment_known == b->alignment_known &&
                  a->shuffle_index_ice_count == b->shuffle_index_ice_count && (a->shuffle_index_ice == NULL) == (b->shuffle_index_ice == NULL);
+    equal = equal && a->bit_cast_proof == b->bit_cast_proof && a->bit_cast_byte_count == b->bit_cast_byte_count &&
+            (a->bit_cast_bytes == NULL) == (b->bit_cast_bytes == NULL);
     if (equal && a->nan_payload_known && a->nan_payload_length != 0)
     {
         equal = a->nan_payload == NULL ? b->nan_payload == NULL : b->nan_payload != NULL && memcmp(a->nan_payload, b->nan_payload, a->nan_payload_length) == 0;
@@ -18,6 +30,10 @@ static __attribute__((unused)) bool check_builtin_call_equal(const CheckBuiltinC
     if (equal && a->shuffle_index_ice_count != 0)
     {
         equal = memcmp(a->shuffle_index_ice, b->shuffle_index_ice, a->shuffle_index_ice_count) == 0;
+    }
+    if (equal && a->bit_cast_byte_count != 0)
+    {
+        equal = memcmp(a->bit_cast_bytes, b->bit_cast_bytes, a->bit_cast_byte_count) == 0;
     }
     for (uint32_t i = 0; equal && i < 4; i += 1)
     {
@@ -135,11 +151,30 @@ static __attribute__((unused)) bool check_overload_effect_equal(const CheckOverl
            a->selected.object == b->selected.object && a->selected.type == b->selected.type && a->selected.flags == b->selected.flags;
 }
 
+static __attribute__((unused)) bool check_builtin_bit_cast_effect_equal(const CheckBuiltinBitCastEffect* a, const CheckBuiltinBitCastEffect* b)
+{
+    return a->node == b->node && a->source_type == b->source_type && a->representation_type == b->representation_type &&
+           a->byte_count == b->byte_count && a->evaluated_operands == b->evaluated_operands && a->unsupported == b->unsupported &&
+           a->runtime_builtin == b->runtime_builtin && a->payload_count == b->payload_count &&
+           a->representation_known == b->representation_known && a->folded == b->folded &&
+           a->runtime_required == b->runtime_required && a->volatile_read == b->volatile_read &&
+           memcmp(a->bytes, b->bytes, sizeof(a->bytes)) == 0;
+}
+
+static __attribute__((unused)) bool check_overload_address_effect_equal(const CheckOverloadAddressEffect* a, const CheckOverloadAddressEffect* b)
+{
+    return a->node == b->node && a->operand == b->operand && a->selected.status == b->selected.status &&
+           a->selected.candidate == b->selected.candidate && a->selected.declaration == b->selected.declaration &&
+           a->selected.canonical == b->selected.canonical && a->selected.object == b->selected.object &&
+           a->selected.type == b->selected.type && a->selected.flags == b->selected.flags;
+}
+
 static __attribute__((unused)) bool check_builtin_stream_metadata_equal(const CheckStream* a, const CheckStream* b,
                                                                       bool (*value_equal)(const CheckValue*, const CheckValue*))
 {
     bool equal = a->misc_count == b->misc_count && a->floating_count == b->floating_count && a->query_count == b->query_count &&
-                 a->atomic_count == b->atomic_count && a->vector_count == b->vector_count && a->x86_count == b->x86_count;
+                 a->atomic_count == b->atomic_count && a->vector_count == b->vector_count && a->x86_count == b->x86_count &&
+                 a->bit_cast_count == b->bit_cast_count;
     for (uint32_t i = 0; equal && i < a->misc_count; i += 1)
     {
         equal = check_builtin_misc_effect_equal(a->misc + i, b->misc + i, value_equal);
@@ -164,10 +199,18 @@ static __attribute__((unused)) bool check_builtin_stream_metadata_equal(const Ch
     {
         equal = check_builtin_x86_effect_equal(a->x86 + i, b->x86 + i, value_equal);
     }
-    equal = equal && a->overload_count == b->overload_count;
+    for (uint32_t i = 0; equal && i < a->bit_cast_count; i += 1)
+    {
+        equal = check_builtin_bit_cast_effect_equal(a->bit_casts + i, b->bit_casts + i);
+    }
+    equal = equal && a->overload_count == b->overload_count && a->overload_address_count == b->overload_address_count;
     for (uint32_t i = 0; equal && i < a->overload_count; i += 1)
     {
         equal = check_overload_effect_equal(a->overloads + i, b->overloads + i);
+    }
+    for (uint32_t i = 0; equal && i < a->overload_address_count; i += 1)
+    {
+        equal = check_overload_address_effect_equal(a->overload_addresses + i, b->overload_addresses + i);
     }
     return equal;
 }

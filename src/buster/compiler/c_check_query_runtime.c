@@ -50,6 +50,31 @@ static CheckQueryNumber check_query_float(long double value)
     return check_query_normalize(number);
 }
 
+// Clang's builtin speculative evaluator retains the saturated APValue from an undefined FP-to-integer
+// conversion. This proof-only repair never changes an ordinary action's fault or grants lexical ICE provenance.
+static bool check_query_speculative_conversion(const TypeTable* types, const CheckValue* original, uint32_t node, CheckValue* converted)
+{
+    const CheckValue real = original->constant_kind == CHECK_CONSTANT_COMPLEX ? check_complex_component(types, original, false) : *original;
+    uint32_t width = 0;
+    bool sign = false;
+    const bool applied = original->fault == CHECK_FAULT_NONE && real.constant_kind == CHECK_CONSTANT_FLOATING &&
+                         converted->fault == CHECK_FAULT_FLOAT_RANGE && converted->fault_node == node &&
+                         check_action_integer_type(types, converted->type, &width, &sign);
+    if (applied)
+    {
+        const CheckQueryNumber number = check_query_float(real.floating);
+        const unsigned __int128 limit = (unsigned __int128)1 << (width - 1);
+        converted->integer = number.special >= 2 ? 0 : number.negative ? (sign ? limit : 0) : (sign ? limit - 1 : check_action_mask(width));
+        converted->constant_kind = CHECK_CONSTANT_INTEGER;
+        converted->floating = 0;
+        converted->imaginary = 0;
+        converted->fault = CHECK_FAULT_NONE;
+        converted->fault_node = 0;
+        converted->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
+    }
+    return applied;
+}
+
 static bool check_query_number_equal(CheckQueryNumber a, CheckQueryNumber b)
 {
     a = check_query_normalize(a);
@@ -181,6 +206,7 @@ struct CheckQueryProof
     bool valid[3];
     bool syntax_effects;
     uint8_t evaluated;
+    uint32_t source_warnings;
 };
 
 static uint32_t check_query_effect_index(const void* records, uint32_t count, size_t stride, uint32_t node)
@@ -204,7 +230,7 @@ static uint32_t check_query_effect_index(const void* records, uint32_t count, si
     return first;
 }
 
-static CheckValue check_query_convert(TypeTable* types, const CheckAction* action, CheckValue value, CheckConversion conversion)
+static CheckValue check_query_convert(TypeTable* types, const CheckAction* action, CheckValue value, CheckConversion conversion, bool speculative)
 {
     if ((conversion.flags & (BUSTER_CHECK_CONVERT_LVALUE | BUSTER_CHECK_CONVERT_ARRAY | BUSTER_CHECK_CONVERT_FUNCTION)) != 0)
     {
@@ -215,7 +241,12 @@ static CheckValue check_query_convert(TypeTable* types, const CheckAction* actio
     }
     if (conversion.type != 0 && conversion.type != value.type)
     {
+        const CheckValue original = value;
         check_action_convert_value(types, &value, conversion.type, action->node);
+        if (speculative)
+        {
+            check_query_speculative_conversion(types, &original, action->node, &value);
+        }
     }
     return value;
 }
@@ -235,7 +266,26 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
     bool effect = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_ASSIGN || op == CHECK_OP_BUILTIN_OVERFLOW ||
                   op == CHECK_OP_VARARGS || op == CHECK_OP_BUILTIN_ATOMIC || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
     effect |= op == CHECK_OP_VALUE && (graph->leaves[node].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
-    effect |= op == CHECK_OP_STATEMENT_VALUE && ((graph->members != NULL ? graph->members[node] : 0) & BUSTER_CHECK_SIDE_EFFECT) != 0;
+    const CheckRegionProof* region = op == CHECK_OP_STATEMENT_VALUE ? check_graph_region_proof(graph, node) : NULL;
+    effect |= op == CHECK_OP_STATEMENT_VALUE && region == NULL && ((graph->members != NULL ? graph->members[node] : 0) & BUSTER_CHECK_SIDE_EFFECT) != 0;
+    if (region != NULL)
+    {
+        effect |= (region->flags & CHECK_REGION_UNSUPPORTED) != 0;
+        for (uint32_t i = 0; i < region->count; i += 1)
+        {
+            const CheckRegionProofStep* step = graph->region_steps + region->first + i;
+            if (step->node != BUSTER_CHECK_NONE)
+            {
+                const CheckValue* value = stream->values + step->node;
+                effect |= proofs[indices[step->node]].syntax_effects ||
+                          (value->category == CHECK_LVALUE && ((type_qualifiers(value->type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                           (value->flags & BUSTER_CHECK_VOLATILE_PART) != 0 || check_action_kind(types, value->type) == BUSTER_TYPE_KIND_ATOMIC));
+                effect |= graph->ops[step->node] == CHECK_OP_INITIALIZE && graph->types != NULL &&
+                          ((type_qualifiers(graph->types[step->node]) & BUSTER_TYPE_VOLATILE) != 0 ||
+                           check_action_kind(types, graph->types[step->node]) == BUSTER_TYPE_KIND_ATOMIC);
+            }
+        }
+    }
     effect |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP || builtin == CBUILTIN_PREFETCH ||
               builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET || builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA);
     effect |= op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_NONTEMPORAL_STORE;
@@ -295,14 +345,24 @@ static uint32_t check_query_operand_mask(const TypeTable* types, const CheckActi
 }
 
 static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const CheckStream* stream, const uint32_t* indices,
-                             CheckQueryProof* proofs, uint32_t node, uint32_t lane, CheckValue* arguments, CheckConversion* conversions)
+                             CheckQueryProof* proofs, uint32_t node, uint32_t lane, CheckValue* arguments, CheckConversion* conversions,
+                             Arena* scratch, uint64_t* scratch_peak)
 {
     CheckQueryProof* proof = proofs + indices[node];
     CheckAction action;
     check_graph_action(graph, stream, node, arguments, &action);
+    const CheckRegionProof* region = action.op == CHECK_OP_STATEMENT_VALUE ? check_graph_region_proof(graph, node) : NULL;
+    if (region != NULL)
+    {
+        action.member = 0;
+    }
     action.argument_conversions = conversions;
     const bool strict = lane != 0 && action.fp_environment != 0;
     action.fp_environment = 0;
+    if (lane != 2)
+    {
+        action.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;
+    }
     const uint32_t operands[3] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
     for (uint32_t i = 0; i < 3; i += 1)
     {
@@ -320,21 +380,24 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     }
     CheckActionResult result = { 0 };
     uint32_t argument_mask = action.argument_count >= 32 ? UINT32_MAX : (1u << action.argument_count) - 1;
-    bool builtin_fp_effect = false;
-    if (action.op == CHECK_OP_BUILTIN_MISC || action.op == CHECK_OP_BUILTIN_FLOAT)
+    bool builtin_fp_effect = strict && action.op == CHECK_OP_BUILTIN_FLOAT &&
+                             (action.member == CBUILTIN_FPCLASSIFY || action.member == CBUILTIN_ISINF_SIGN);
+    if (action.op == CHECK_OP_BUILTIN_MISC || action.op == CHECK_OP_BUILTIN_FLOAT || action.op == CHECK_OP_BUILTIN_BIT_CAST)
     {
         CheckBuiltinMiscEffect misc;
         CheckBuiltinFloatEffect floating;
-        CheckStream temporary = { .misc = &misc, .floating = &floating };
+        CheckBuiltinBitCastEffect bit_cast;
+        CheckStream temporary = { .misc = &misc, .floating = &floating, .bit_casts = &bit_cast };
         check_graph_special_action(types, graph, &temporary, &action, &result);
-        argument_mask = action.op == CHECK_OP_BUILTIN_MISC ? (lane != 2 ? misc.constant_evaluated_operands : misc.evaluated_operands) : floating.evaluated_operands;
+        argument_mask = action.op == CHECK_OP_BUILTIN_MISC ? (lane != 2 ? misc.constant_evaluated_operands : misc.evaluated_operands) :
+                        action.op == CHECK_OP_BUILTIN_FLOAT ? floating.evaluated_operands : bit_cast.evaluated_operands;
         if (action.op == CHECK_OP_BUILTIN_MISC && lane != 2)
         {
             result.value = misc.constant_value;
         }
         if (action.op == CHECK_OP_BUILTIN_FLOAT)
         {
-            builtin_fp_effect = floating.reads_fp_environment || floating.may_raise_fp_exceptions;
+            builtin_fp_effect |= floating.reads_fp_environment || floating.may_raise_fp_exceptions;
             if (builtin_fp_effect)
             {
                 // Floating-environment work is not Clang AST HasSideEffects. Keep actual C operand effects
@@ -370,6 +433,10 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     else
     {
         check_action_scalar(types, &action, &result);
+        if (lane != 2 && (action.op == CHECK_OP_CAST || action.op == CHECK_OP_CONVERT || action.op == CHECK_OP_INITIALIZE))
+        {
+            check_query_speculative_conversion(types, action.operands, node, &result.value);
+        }
     }
     const uint32_t mask = check_query_operand_mask(types, &action);
     bool valid = result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
@@ -382,7 +449,7 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     {
         if (operands[i] != BUSTER_CHECK_NONE && (mask & (1u << i)) != 0)
         {
-            converted[i] = check_query_convert(types, &action, action.operands[i], result.conversions[i]);
+            converted[i] = check_query_convert(types, &action, action.operands[i], result.conversions[i], lane != 2);
             const CheckQueryProof* child = proofs + indices[operands[i]];
             valid &= child->valid[lane] && (converted[i].constant_kind != CHECK_CONSTANT_NONE || check_action_kind(types, converted[i].type) == BUSTER_TYPE_KIND_VOID);
             exact &= check_query_conversion_exact(types, action.operands + i, converted + i);
@@ -394,7 +461,7 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     {
         if (i < 32 && (argument_mask & (1u << i)) != 0)
         {
-            const CheckValue value = check_query_convert(types, &action, arguments[i], conversions[i]);
+            const CheckValue value = check_query_convert(types, &action, arguments[i], conversions[i], lane != 2);
             const CheckQueryProof* child = proofs + indices[graph->argument_nodes[graph->argument_offsets[node] + i]];
             valid &= child->valid[lane] && value.constant_kind != CHECK_CONSTANT_NONE;
             exact &= check_query_conversion_exact(types, arguments + i, &value);
@@ -416,20 +483,34 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
         {
             const uint8_t left = check_query_float(converted[0].floating).special;
             const uint8_t right = check_query_float(converted[1].floating).special;
-            const bool ordered = action.op <= CHECK_OP_GREATER_EQUAL;
-            exact &= left != 3 && right != 3 && (!ordered || (left < 2 && right < 2));
+            exact &= left < 2 && right < 2;
         }
-        constrained |= binary_real || ((action.op >= CHECK_OP_LESS && action.op <= CHECK_OP_LOGICAL_OR) &&
+        const bool floating_truth = (action.op == CHECK_OP_NOT || action.op == CHECK_OP_CONDITION || action.op == CHECK_OP_CONDITIONAL) &&
+                                    check_action_floating_type(types, action.operands[0].type);
+        constrained |= binary_real || floating_truth || ((action.op >= CHECK_OP_LESS && action.op <= CHECK_OP_LOGICAL_OR) &&
                         (check_action_floating_type(types, action.operands[0].type) || check_action_floating_type(types, action.operands[1].type)));
     }
     if (lane == 1 && strict && !exact)
     {
         valid = false;
     }
+    if (region != NULL)
+    {
+        const CheckRegionValues values = { .values = proofs[0].values + lane, .valid = proofs[0].valid + lane,
+                                          .indices = indices, .stride = sizeof(CheckQueryProof) };
+        CheckRegionResult prefix;
+        if (!check_region_walk(types, graph, region, &values, lane == 2, false, scratch, scratch_peak, &prefix))
+        {
+            return false;
+        }
+        check_action_inherit(&result.value, &prefix.effects);
+        valid &= prefix.constant;
+        fp_effect |= (prefix.effects.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0;
+    }
     if (lane == 2)
     {
         // Emitting a constrained instruction produces an SSA value even when its operands happen to be exact.
-        if (constrained)
+        if (constrained || region != NULL)
         {
             result.value.constant_kind = CHECK_CONSTANT_NONE;
         }
@@ -443,6 +524,10 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
         result.value.constant_kind = CHECK_CONSTANT_NONE;
     }
     proof->values[lane] = result.value;
+    if (lane == 0)
+    {
+        proof->source_warnings = result.warnings;
+    }
     proof->valid[lane] = valid && (result.value.constant_kind != CHECK_CONSTANT_NONE || check_action_kind(types, result.value.type) == BUSTER_TYPE_KIND_VOID);
     return result.diagnostic != CHECK_DIAG_RESOURCE;
 }
@@ -463,7 +548,7 @@ static void check_query_prove(TypeTable* types, const CheckGraph* graph, const C
     for (uint32_t lane = 0; lane < 3; lane += 1)
     {
         const CheckValue value = check_query_convert(types, &(CheckAction){ .node = node, .extensions = graph->extensions },
-                                                   child->values[lane], stream->argument_conversions[graph->argument_offsets[node]]);
+                                                   child->values[lane], stream->argument_conversions[graph->argument_offsets[node]], lane != 2);
         input.complex_constant = value.constant_kind == CHECK_CONSTANT_COMPLEX;
         folded[lane] = child->valid[lane] && check_builtin_query_constant(types, &input, &value);
         proof->values[lane] = stream->values[node];
@@ -479,6 +564,11 @@ static void check_query_prove(TypeTable* types, const CheckGraph* graph, const C
     const uint8_t kind = check_action_kind(types, child->values[2].type);
     const bool numeric = check_action_is_integer(types, child->values[2].type) || kind == BUSTER_TYPE_KIND_FLOATING;
     proof->evaluated = !proof->valid[1] && !syntax && numeric;
+    if (child->values[2].fault != CHECK_FAULT_NONE && (child->values[2].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0)
+    {
+        // A pure invalid constant emits poison, not a CPU operation. is.constant(poison) answers false.
+        proof->evaluated = 0;
+    }
     proof->values[2].integer = proof->valid[1] ? proof->values[1].integer : proof->evaluated && folded[2];
     proof->values[2].flags = proof->evaluated ? child->values[2].flags & BUSTER_CHECK_FP_ENVIRONMENT : 0;
     const bool differs = proof->values[0].integer != proof->values[2].integer;
@@ -526,6 +616,19 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
                     marked[graph->argument_nodes[graph->argument_offsets[node] + i]] = 1;
                 }
             }
+            const CheckRegionProof* region = graph->ops[node] == CHECK_OP_STATEMENT_VALUE ? check_graph_region_proof(graph, node) : NULL;
+            for (uint32_t i = 0; region != NULL && i < region->count; i += 1)
+            {
+                const CheckRegionProofStep* step = graph->region_steps + region->first + i;
+                if (step->node != BUSTER_CHECK_NONE)
+                {
+                    marked[step->node] = 1;
+                }
+                if (step->operand != BUSTER_CHECK_NONE)
+                {
+                    marked[step->operand] = 1;
+                }
+            }
         }
     }
     uint32_t count = 0;
@@ -564,7 +667,7 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
             {
                 for (uint32_t lane = 0; lane < 3; lane += 1)
                 {
-                    if (!check_query_lane(types, graph, stream, indices, proofs, node, lane, arguments, conversions))
+                    if (!check_query_lane(types, graph, stream, indices, proofs, node, lane, arguments, conversions, scratch, &stream->statistics.scratch_bytes))
                     {
                         stream->status = CHECK_STATUS_RESOURCE;
                         stream->failed_node = node;
@@ -575,6 +678,10 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
         }
     }
     const CheckStatistics statistics = stream->statistics;
+    if (stream->statistics.scratch_bytes < scratch->length)
+    {
+        stream->statistics.scratch_bytes = scratch->length;
+    }
     stream->effect_count = 0;
     stream->varargs_count = 0;
     stream->misc_count = 0;
@@ -583,11 +690,16 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
     stream->atomic_count = 0;
     stream->vector_count = 0;
     stream->x86_count = 0;
+    stream->bit_cast_count = 0;
     stream->overload_count = 0;
     stream->overload_address_count = 0;
     for (uint32_t node = 0; node < graph->count; node += 1)
     {
         check_graph_scalar_node(types, graph, stream, node, arguments, scratch, scalar);
+        if (marked[node] != 0)
+        {
+            stream->warnings[node] |= proofs[indices[node]].source_warnings;
+        }
         if (graph->ops[node] == CHECK_OP_BUILTIN_QUERY && (graph->members != NULL ? graph->members[node] : 0) == CBUILTIN_CONSTANT_P && graph->argument_counts[node] == 1 && stream->diagnostics[node] == CHECK_DIAG_NONE)
         {
             const CheckQueryProof* proof = proofs + indices[node];
@@ -631,7 +743,11 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
             effect->known = checked.known;
         }
     }
+    const uint64_t scratch_peak = stream->statistics.scratch_bytes;
     stream->statistics = statistics;
+    stream->statistics.scratch_bytes = scratch_peak;
+    stream->statistics.query_proof_nodes += (uint64_t)count * 3;
+    stream->statistics.query_replay_nodes += graph->count;
     return true;
 }
 

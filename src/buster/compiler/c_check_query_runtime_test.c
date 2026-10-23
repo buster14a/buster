@@ -75,8 +75,53 @@ static void check_test_query_source(CheckTest* test, const CheckQueryFixture* fi
     intern_release(&identifiers);
 }
 
+static void check_test_query_conversion_proofs(CheckTest* test, TypeTable* table)
+{
+    const TypeId targets[] = { BUSTER_TYPE_INT, BUSTER_TYPE_UINT, BUSTER_TYPE_INT128, BUSTER_TYPE_UINT128 };
+    const long double values[] = { 1.0e100L, -1.0e100L, __builtin_nanl("") };
+    for (uint32_t target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (uint32_t value = 0; value < BUSTER_ARRAY_LENGTH(values); value += 1)
+        {
+            Arena storage = arena_reserve(65536);
+            Arena output = arena_reserve(65536);
+            Arena scratch = arena_reserve(65536);
+            CheckGraph graph;
+            uint8_t environments[3] = { 0 };
+            const bool ready = check_graph_initialize(&graph, &storage, 3, 1);
+            check_test_expect(test, ready, "speculative query conversion graph allocation");
+            if (ready)
+            {
+                graph.fp_environments = environments;
+                const uint32_t leaf = check_test_leaf(&graph, 1, check_test_float(BUSTER_TYPE_LONG_DOUBLE, values[value]));
+                const uint32_t cast = check_graph_add(&graph, CHECK_OP_CAST, 2, leaf, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+                graph.types[cast] = targets[target];
+                environments[cast] = BUSTER_CHECK_FP_ENV_ACCESS;
+                const uint32_t query = check_test_special_node(&graph, CHECK_OP_BUILTIN_QUERY, CBUILTIN_CONSTANT_P, &cast, 1);
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    const CheckOptions options = { .scalar = path == 0 };
+                    CheckStream stream;
+                    check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &options, &stream) && stream.report_count == 0 &&
+                        stream.values[cast].fault == CHECK_FAULT_FLOAT_RANGE && stream.values[cast].constant_kind == CHECK_CONSTANT_NONE &&
+                        stream.values[query].integer == 1 && stream.queries[0].runtime_value.integer == 1 &&
+                        stream.queries[0].runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_SKIP && stream.queries[0].evaluated_operands == 0 &&
+                        stream.statistics.query_proof_nodes == 9 && stream.statistics.query_replay_nodes == 3 &&
+                        stream.statistics.scalar_nodes + stream.statistics.vector_nodes == 3,
+                        "speculative FP saturation proves query without weakening the strict conversion or hiding proof work");
+                    arena_pop_to(&output, 0);
+                }
+            }
+            arena_release(&scratch);
+            arena_release(&output);
+            arena_release(&storage);
+        }
+    }
+}
+
 static void check_test_query_runtime(CheckTest* test, TypeTable* table, const char* clang)
 {
+    check_test_query_conversion_proofs(test, table);
     const CheckQueryFixture fixtures[] = {
         { "1.0/2.0", 1, 1, 0, false },
         { "1.0/3.0", 1, 0, 1, true },
@@ -107,10 +152,15 @@ static void check_test_query_runtime(CheckTest* test, TypeTable* table, const ch
         { "(1.0+2.0i)/(2.0+3.0i)", 1, 1, 0, false },
         { "1.0/__builtin_inf()", 1, 1, 0, false },
         { "__builtin_nan(\"\")<0.0", 1, 0, 1, false },
-        { "__builtin_nan(\"\")==0.0", 1, 1, 0, false },
+        { "__builtin_nan(\"\")==0.0", 1, 0, 1, false, true },
         { "__builtin_sqrt(4.0)", 0, 0, 0, false },
-        { "__builtin_floor(1.5)", 0, 0, 1, false },
+        { "__builtin_floor(1.5)", 0, 0, 1, false, true },
         { "__builtin_fabs(1.0/3.0)", 1, 0, 1, true },
+        { "!x", 0, 0, 1, false },
+        { "x?1:2", 0, 0, 1, false },
+        { "__builtin_isinf_sign(x)", 0, 0, 1, false },
+        { "__builtin_fpclassify(0,1,2,3,4,x)", 0, 0, 1, false },
+        { "1/0", 0, 0, 0, false },
     };
     char directory[] = "/tmp/buster-check-query-runtime-XXXXXX";
     const bool directory_ready = mkdtemp(directory) != NULL;
