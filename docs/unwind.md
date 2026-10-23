@@ -112,11 +112,76 @@ The latter runs the scalar CFI emitter alone before every timed path, with the
 same duration for each; it does not condition with the vector backend chain.
 
 All builds, tests and measurements use the approved 9700X through the shared
-lock; measurements use CPU 2. Repeated independent processes and inspection of
-generated assembly are required before a performance conclusion. File I/O,
-source-map production, parsing and compilation/output overlap are excluded from
-this bounded backend comparison. At this source checkpoint, target-host
-validation and measured performance remain pending.
+lock; measurements use CPU 2. File I/O, source-map production, parsing and
+compilation/output overlap are excluded from this bounded backend comparison.
+
+### Qualification on 2026-10-23
+
+[Required run 39959200295](https://github.com/buster14a/buster/actions/runs/39959200295)
+passed all 57 test commands on merge result
+`0324a8514398a5e38b5d4b0165724d9ae900d2cb`, combining submitted
+`02f25658311a2385376af8f56a13885a85d7684e` with main
+`de751b9996157d61d3a112f91a5d7d86e056811e`. It passed 704 emitter combinations,
+protected tails, 3,631 analyzer checks across 79 actual functions, native writer
+checks, GDB at entry and all 14 stack transitions, and the native perf chain.
+The GDB fixture checks all six caller registers as well as the three frames.
+
+The controlled measurements below use the separately frozen source checkpoint
+`422d099500db10578d6722dfb2261589f48d2948`, whose six unwind modules and
+Tier0/branch-sizing/semantics/encoder producers match that submitted head.
+Other main changes are present in the hosted merge, so its evidence is kept
+separate. The 155-file source/build archive has SHA256
+`13fa05ee0f19780308880a633ae551797a7568e469a69dae61f7f24d1a16cca4`;
+the resulting compiler has SHA256
+`bf349d71d5c0267f570f5d33dd1e0812db78b7411bd2978b3b07aa15124d3cd0`.
+Its independently locked `test-unwind --cross-check --keep` also passed all
+checks, including native GDB and perf, on CPU 2.
+
+Three independent processes ran each workload. Each command took the shared
+lock separately; each process rotated the three paths over 21 samples after
+the byte-identity preflight. The table gives the range of process medians in
+nanoseconds per typed entry, with all analysis, emission and per-function arena
+cleanup charged to the relevant path.
+
+| Functions | Typed entries | Without CFI | Scalar CFI | Vector CFI |
+|---:|---:|---:|---:|---:|
+| 8 | 202 | 16.812–16.911 | 24.950–25.149 | 22.168–22.515 |
+| 256 | 20,299 | 19.543–19.703 | 33.219–33.339 | 28.153–28.203 |
+| 4,096 | 337,279 | 20.521–20.549 | 33.907–34.024 | 28.974–29.085 |
+
+Using the median of each three-process set, vector CFI lowers the complete
+backend time versus scalar CFI by 10.7%, 15.2% and 14.5%, respectively. It still
+adds 32.6%, 44.2% and 41.5% versus producing no CFI. This is a material cost of
+deriving frame information from records, and the consumer remains opt-in.
+Publishing frame events directly from a future producer could avoid part of
+that analysis; these results do not measure such an interface.
+
+The 4,096-function unit emits 1,460,104 code bytes and 490,376 CFI bytes. Its
+peak per-function temporary arena use is 21,373 bytes; that excludes retained
+typed inputs, descriptors and caller output buffers. Each descriptor is 68
+bytes and each fixup location is four bytes. These are bounded synthetic typed
+units, not a corpus compilation or a claim of DRAM throughput.
+
+Separate 256-function processes measured 19.398–19.450 ns/entry without CFI,
+33.289–33.523 with scalar CFI, and 28.204–28.364 with vector CFI. Vector runs
+after 100 ms of scalar-emitter work before every sample measured
+30.252–30.412 ns/entry. Their corresponding user-cycle ranges were
+107.334–107.735, 184.645–185.912, 156.413–157.274 and 167.754–168.475.
+Conditioning changed the observed cost; it does not by itself identify a power
+or frequency mechanism. The raw measurement report has SHA256
+`ab1a0efe11957a1d674f450bad827f1292cd6c4170697f53fff6ea7a0fa8f365`.
+
+The same binary's assembly inlines effects resolution and eliminates unused
+read-set work. It still constructs the complete write-resource set before the
+CFI GPR check, then performs the bounded per-record checks. The eight-result
+write array is an intentional vector-to-scalar handoff. Template expansion uses
+aligned template/index loads, `vpermi2b`, masked merging and masked stores,
+without stack spills in that expansion loop. A separate locked user-cycle
+profile of the 4,096-function vector process lost no samples and attributed
+23.01% of self samples to frame analysis; the emitter was below its 0.5% display
+threshold. That profile includes generation and all preflight paths, so those
+shares are not fractions of just the timed vector chain. The disassembly report
+has SHA256 `1f78a179ac56d426cb9d2db9b667bb3b4b9aaece39b11ff76e1f9061ba4af72c`.
 
 All implementation, templates, fixtures and test oracles here are original.
 The format documents supply facts; GNU as, GDB and perf run externally. No
