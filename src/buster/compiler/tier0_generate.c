@@ -92,6 +92,8 @@ struct Tier0GeneratedFunction
 // A program: its functions' streams, locals and calls in shared columns (each function's a range of them), its globals
 // (a class, an element count, 1 or BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS, and their initial values) and its C text. An
 // object local has class VOID and its size and alignment's log2 in `local_sizes` and `local_alignments` (0 for a value).
+// A program a test makes by hand may leave out `local_sizes`, `local_alignments` and `call_indirect` (0): no objects
+// and no indirect calls.
 typedef struct Tier0Program Tier0Program;
 struct Tier0Program
 {
@@ -2404,7 +2406,8 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
                 types[argument] = tier0_program_class_type(program->argument_classes[program->call_first[c] + a]);
                 argument += 1;
             }
-            functions->call_targets[c] = program->call_indirect[c] != 0 ? 0 : program->global_count + 1 + program->call_callees[c];
+            const bool indirect = program->call_indirect != 0 && program->call_indirect[c] != 0;
+            functions->call_targets[c] = indirect ? 0 : program->global_count + 1 + program->call_callees[c];
             functions->call_variadic[c] = 0;
         }
         const AbiSignatures batch = {
@@ -2436,7 +2439,7 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
             bool objects = false;
             for (uint32_t l = 0; l < function->local_count; l += 1)
             {
-                objects |= program->local_sizes[function->first_local + l] != 0;
+                objects |= program->local_sizes != 0 && program->local_sizes[function->first_local + l] != 0;
             }
             t->local_sizes = objects ? program->local_sizes + function->first_local : 0;
             t->local_alignments = objects ? program->local_alignments + function->first_local : 0;
