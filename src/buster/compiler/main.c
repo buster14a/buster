@@ -215,6 +215,8 @@ int run_snapshot_benchmark(int argc, char** argv);
 // the archive members the link needs loaded and COMDAT groups picked) and their tests, for the test-foreign command. Its
 // benchmark is another translation unit.
 #include "buster/compiler/foreign.c"
+#include "buster/compiler/foreign_unwind.c"
+#include "buster/compiler/foreign_unwind_benchmark.c"
 #include "buster/compiler/foreign_link.c"
 #include "buster/compiler/foreign_test.c"
 int run_foreign_benchmark(int argc, char** argv);
@@ -255,6 +257,10 @@ int run_tier1_schedule_benchmark(int argc, char** argv);
 #include "buster/compiler/c_types_test.c"
 int run_type_benchmark(int argc, char** argv);
 
+#include "buster/compiler/c_builtin_intrinsic_types.c"
+#include "buster/compiler/c_builtin_intrinsic_features.c"
+#include "buster/compiler/c_builtin_intrinsic_catalog.c"
+
 // Immutable source-position environments for deferred bodies. The checker adapter supplies the semantic events.
 #include "buster/compiler/c_environment.c"
 #include "buster/compiler/c_environment_test.c"
@@ -265,6 +271,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
 #include "buster/compiler/c_check_actions.c"
+#include "buster/compiler/c_check_builtin_x86.c"
 #include "buster/compiler/c_check_builtin.c"
 #include "buster/compiler/c_check_varargs.c"
 #include "buster/compiler/c_check_builtin_misc.c"
@@ -272,6 +279,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_float.c"
 #include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
+#include "buster/compiler/c_check_builtin_vector.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
 #include "buster/compiler/c_checker.c"
@@ -281,6 +289,11 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_data_input.c"
 #include "buster/compiler/c_checker_driver.c"
 #include "buster/compiler/c_checker_test.c"
+#include "buster/compiler/c_builtin_intrinsic_types_test.c"
+#include "buster/compiler/c_builtin_intrinsic_features_test.c"
+#include "buster/compiler/c_builtin_intrinsic_catalog_test.c"
+#include "buster/compiler/c_builtin_intrinsic_inventory_test.c"
+#include "buster/compiler/c_check_builtin_x86_test.c"
 #include "buster/compiler/c_check_builtin_test.c"
 #include "buster/compiler/c_check_varargs_test.c"
 #include "buster/compiler/c_check_builtin_misc_test.c"
@@ -288,6 +301,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_float_test.c"
 #include "buster/compiler/c_check_builtin_math_test.c"
 #include "buster/compiler/c_check_builtin_atomic_test.c"
+#include "buster/compiler/c_check_builtin_vector_test.c"
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 int run_checker_benchmark(int argc, char** argv);
@@ -640,6 +654,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_foreign_link_benchmark(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-unwind") == 0)
+    {
+        result = run_foreign_unwind_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
     {
         result = run_foreign_benchmark(argc - 1, argv + 1);
@@ -691,6 +709,30 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-calling-convention") == 0)
     {
         result = run_calling_convention_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-types") == 0)
+    {
+        result = run_builtin_intrinsic_type_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-features") == 0)
+    {
+        result = run_builtin_intrinsic_features_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-catalog") == 0)
+    {
+        result = test_builtin_intrinsic_catalog(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-inventory") == 0)
+    {
+        result = run_builtin_intrinsic_inventory_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-vector") == 0)
+    {
+        result = run_check_builtin_vector_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-x86") == 0)
+    {
+        result = run_check_builtin_x86_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtins") == 0)
     {

@@ -1,0 +1,29 @@
+Name            : clang
+Version         : 23.1.1-1
+Description     : C language family frontend for LLVM
+Architecture    : x86_64
+URL             : https://clang.llvm.org/
+Licenses        : Apache-2.0 WITH LLVM-exception
+Groups          : None
+Provides        : clang-analyzer=23.1.1  clang-tools-extra=23.1.1
+Depends On      : llvm-libs  gcc  compiler-rt  libgcc  libxml2
+Optional Deps   : openmp: OpenMP support in clang with -fopenmp
+                  python: for scan-view and git-clang-format [installed]
+                  llvm: referenced by some clang headers [installed]
+Required By     : lldb
+Optional For    : None
+Conflicts With  : clang-analyzer  clang-tools-extra
+Replaces        : clang-analyzer  clang-tools-extra
+Installed Size  : 268.68 MiB
+Packager        : Leonidas Spyropoulos <artafinde@archlinux.org>
+Build Date      : Tue Sep 15 14:55:25 2026
+Install Date    : Mon Oct 12 08:32:43 2026
+Install Reason  : Explicitly installed
+Install Script  : No
+Validated By    : Signature
+
+939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa3eae  /usr/bin/clang
+72fe0f2489802c4ac25b263d545c51c36fc1afae08e8151a33b15821548945ec  /usr/include/clang/Basic/Builtins.inc
+821ca469485d5079920df9d695781a8bdad6576739be0d3ad8fb52c6bca91b03  /usr/include/clang/Basic/BuiltinsX86.inc
+bc85a6cefc1bb94b25f73a2158cbe3ddc1c3d3ce82c9d170e5ca2becd8818628  /usr/include/clang/Basic/BuiltinsX86_64.inc
+2cf74bd66f8958e1936307158bec163fac911e30f4534bab376dd2dff067d5fd  /usr/include/clang/Basic/Version.inc

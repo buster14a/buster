@@ -3236,6 +3236,70 @@ from the mapped files. Each step is a lane phase (see "Lanes"):
 Steps 1–3 and 7 are where most of the foreign path's work is, and where the
 vector kernels go. Steps 4–6 are graph walks bound by memory latency.
 
+#### Foreign COMDAT unwind pruning
+
+`foreign_unwind.c` filters an object's `.eh_frame` while the original
+section ownership is still available. A unique `R_X86_64_PC32` relocation
+at the FDE's initial-address field identifies its original code section.
+The selected section-to-atom map decides whether that FDE survives. A
+canonical symbol with the same name in a winning COMDAT group cannot keep
+the losing group's FDE alive. The pass also drops CIEs no retained FDE uses;
+deduplicating compatible live CIEs is a separate pass.
+
+The supported input is DWARF32 CIE version 1 or 3 with `zR`/`zPLR` augmentation
+and the optional signal-frame marker, and PC-relative signed four-byte FDE
+addresses. Personalities and LSDAs can use fixed absolute four/eight-byte
+or PC-relative four-byte pointers, including indirect pointers. Their
+relocations follow the owning record; they do not decide code liveness.
+Unsupported encodings, missing or ambiguous ownership, overlapping fields
+and malformed records are refused before the executable is written.
+
+The producer returns fresh compact bytes, relocation records and an
+original-to-compact interval map. It rewrites CIE backlinks and relocation
+offsets, preserves retained CFI and augmentation bytes, and leaves the input
+unchanged. A failed prune restores the output arena and leaves the result
+untouched. An all-discarded section stays empty; the pass does not invent a
+terminator. The original section endpoint has an explicit mapping.
+
+`foreign_unwind_link.c` applies this only to selected objects with discarded
+COMDAT sections, before canonical names and relocation requirements are
+finished. It remaps retained symbols and their extents. A section symbol at
+zero names the compact section even if its first original record was dropped.
+References with nonzero addends into a changed unwind fragment are currently
+refused because their address-expression bias is not retained. Local labels
+in discarded records become inert slots; any surviving use is rejected.
+The ordinary relocation importer consumes the compact records through
+`import_relocation_entries`; its existing section-table wrappers retain their
+contract. Mapped foreign inputs and the conversion arena outlive writing.
+
+`test-foreign --cross-check` exercises original records, malformed fields,
+relocation tails, rollback, symbol endpoints and COMDAT ownership through the
+exact and vector paths. Its C++ fixture compiles two original translation
+units with a duplicated throwing template. The losing object retains another
+function; throwing through that function must run both cleanup destructors
+and reach the caller's catch. GNU ld and lld link and run the same inputs.
+The explicit runtime line includes `-lstdc++ -lm`, as the observed system C++
+driver does. Finding libraries named only in another DSO's `DT_NEEDED` is
+outside this unwind test's contract.
+
+`benchmark-foreign-unwind [--runs N] [--fdes N] [--profile mixed|all|none]`
+measures the complete prune call on original synthetic `zR`/`zPLR` records.
+Defaults are 21 paired samples after two warm-up pairs, 33/4,097/65,537
+FDEs, and mixed/all/no retained-code profiles. An independent compact byte,
+relocation and interval-map oracle validates both paths before timing; every
+sample is checked afterward and the frozen input must remain identical.
+Both paths share variable-record parsing and ownership lookup. The vector
+path batches relocation classification and transposes retained output records.
+
+Each measurement process runs under the shared 9700X lock on CPU 2. Timing
+includes validation, sorting, scratch/output allocation, copying and relocation
+transposition. Arena resets, verification and statistics are outside the clock;
+the reusable arenas retain committed pages. Reported arena lengths are logical
+bytes, and the labelled temporary-payload estimate excludes alignment, VM
+reservations and RSS. These are synthetic phase measurements, not complete
+foreign-link throughput, corpus acceptance or evidence that the wider linker
+performance target has been reached.
+
 #### Steps 1 to 5, as built
 
 `foreign.c` (the first part of step 7) resolves a command line on a group of
