@@ -63,6 +63,10 @@ static bool x86_target_test_forms(void)
         { X86_FORM_ADDSD_X_XM64, 0 },
         { X86_FORM_FNSTCW_M16, 0 },
         { X86_FORM_STMXCSR_M32, 0 },
+        { X86_FORM_LOCK_CMPXCHG_M8_R8, 0 },
+        { X86_FORM_LOCK_CMPXCHG_M16_R16, 0 },
+        { X86_FORM_LOCK_CMPXCHG_M32_R32, 0 },
+        { X86_FORM_LOCK_CMPXCHG_M64_R64, 0 },
         { X86_FORM_POPCNT_R64_RM64, 1 },
         { X86_FORM_LAHF, 1 },
         { X86_FORM_PSHUFB_X_XM128, 1 },
@@ -112,6 +116,19 @@ static bool x86_target_test_forms(void)
         };
         passed &= scalar[X86_FORM_STMXCSR_M32] != 0 && vector[X86_FORM_STMXCSR_M32] != 0;
         passed &= x86_target_validate(vector, &sse_control, 1) == 1;
+        const uint16_t scalar_cas[] = { X86_FORM_LOCK_CMPXCHG_M8_R8, X86_FORM_LOCK_CMPXCHG_M16_R16, X86_FORM_LOCK_CMPXCHG_M32_R32, X86_FORM_LOCK_CMPXCHG_M64_R64 };
+        for (uint32_t c = 0; c < sizeof(scalar_cas) / sizeof(scalar_cas[0]); c += 1)
+        {
+            const X86Instruction compare =
+            {
+                .reg = X86_REGISTER_RDX,
+                .rm = X86_REGISTER_RDI,
+                .mode = BUSTER_X86_MEMORY_BASE,
+                .form = scalar_cas[c],
+            };
+            passed &= scalar[scalar_cas[c]] != 0 && vector[scalar_cas[c]] != 0;
+            passed &= x86_target_validate(vector, &compare, 1) == 1;
+        }
         for (uint32_t c = 0; p < 5 && c < sizeof(cases) / sizeof(cases[0]); c += 1)
         {
             if ((scalar[cases[c].form] != 0) != (p >= cases[c].first))

@@ -363,7 +363,9 @@ jobs:
           ./build/compiler test-builtin-float-lowering
           ./build/compiler test-builtin-terminal-helpers
           ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-builtin-atomic-rmw-helpers
           ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-atomic-rmw
           ./build/compiler test-check-builtins-typed-overflow
           ./build/compiler test-check-builtins-rounds
           ./build/compiler test-check-builtins-math
@@ -629,6 +631,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-foreign
+
+      - name: Benchmark foreign string pooling through executable output
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-foreign-strings --counts 64,4096 --runs 3
 
       - name: Benchmark the whole link against GNU ld, lld, mold and wild
         # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need

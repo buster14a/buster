@@ -195,6 +195,11 @@ static const uint64_t x86_target_requirements[X86_FORM_COUNT] = {
     BUSTER_X86_TARGET_ROW(FNSTCW_M16)
     // #148's raw-bit math leaves read the SSE rounding/DAZ controls without changing them.
     BUSTER_X86_TARGET_ROW(STMXCSR_M32)
+    // #148's naturally aligned scalar atomic RMW leaves use baseline locked compare-exchange only.
+    BUSTER_X86_TARGET_ROW(LOCK_CMPXCHG_M8_R8)
+    BUSTER_X86_TARGET_ROW(LOCK_CMPXCHG_M16_R16)
+    BUSTER_X86_TARGET_ROW(LOCK_CMPXCHG_M32_R32)
+    BUSTER_X86_TARGET_ROW(LOCK_CMPXCHG_M64_R64)
     BUSTER_X86_TARGET_ROW(SYSCALL)
     BUSTER_X86_TARGET_ROW(CPUID)
     BUSTER_X86_TARGET_ROW(BSWAP_R32)
