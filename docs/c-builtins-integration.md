@@ -262,7 +262,9 @@ value types, qualifiers, all argument effects, ordinary `int` order conversions,
 and known/dynamic order metadata. Orders do not generally require ICE. Invalid
 known load/store orders carry warnings; fence handling retains its own rules.
 GNU `_Atomic` wrappers and unsupported families are not treated as ordinary
-integer objects. Other recognized atomic/sync IDs remain explicit refusals.
+integer objects. Read/modify/write checking and runtime leaves are separate
+modules described below; other recognized atomic/sync families remain
+explicit refusals.
 The source-domain rules follow the approved Clang 23.1.1 release: real and
 floating-complex `_n` objects are valid, while direct x87 long double and
 `_BitInt` objects are rejected. F32/F64 retain exact source conversions;
@@ -282,10 +284,58 @@ pointer and value expression must still execute once even when the helper
 does not inspect its numeric order.
 
 The producer must establish natural alignment at least `required_alignment`.
-Unknown or insufficient alignment, packed objects, wider objects and RMW
-families need another real fallback; this module must not make unaligned
+Unknown or insufficient alignment, wider objects and formats outside the
+selected helper need another real fallback. A helper must not make unaligned
 ordinary MOV appear atomic. The semantic result retains alignment evidence
 and unsupported requirements without turning valid source into fake success.
+
+`c_check_builtin_atomic_rmw.c` checks 30 scalar GNU and legacy spellings:
+exchange, compare-exchange, old/new-value add/sub/AND/OR/XOR/NAND, legacy
+lock-test-and-set and lock-release. It retains actual source types, converted
+fixed operands, old/new/boolean/void result kind, conditional object/expected
+writes and explicit runtime format. Checking never reads or folds a source
+memory object. GNU pointer add/sub converts the delta to LP64 `ptrdiff_t`
+(`long`) and uses bytes without element-size scaling. Legacy pointer
+operations convert their fixed values to the pointer value type before raw
+address-bit operations. GNU `_BitInt` pointees are rejected. Legacy `_BitInt`
+accepts power-of-two bit widths; widths below eight retain a distinct
+sub-byte representation gap.
+
+GNU calls require exact arity. Every fixed operand, including dynamic weak
+and order expressions, evaluates exactly once. The source producer retains
+prior diagnostics within legacy protected-variable tails. Those tails are
+never evaluated or passed to a helper; their effects and evaluation faults
+do not propagate. Known orders remain separate from source ICE witnesses
+after ordinary conversion. Only witnessed invalid orders acquire Clang's
+order warning; dynamic orders remain valid. Clang 23.1.1 also permits failure
+orders stronger than success.
+The consumer must retain all these evaluation and warning distinctions even
+when the machine implementation strengthens the ordering.
+
+`c_builtin_atomic_rmw_helpers.c` emits naturally aligned 1/2/4/8-byte baseline
+SysV leaves, using U64 raw bits and at most six integer argument registers.
+Integer and pointer arithmetic is modular. LOCK CMPXCHG loops strengthen
+valid orders to sequential consistency, retry from the newly observed value,
+and return the successful desired register for new-value operations. Strong
+CAS implements weak requests. GNU CAS takes an expected address, reads its
+exact object width once, and stores the observed value there only on failure.
+Success permits read-only expected storage and `expected == object` without
+overwriting the desired object value. Legacy CAS instead takes an expected
+value. Legacy lock-release is a pure exact-width MOV of zero followed by
+MFENCE: it adds no object read or read/modify/write event. All calls remain
+unknown-effect compiler barriers, including release, and require proven
+natural object alignment and operation-appropriate accessibility.
+
+Source-valid operations can still require an unsupported runtime format.
+Canonical boolean exchange/CAS/AND/OR/XOR/release preserve 0/1 storage.
+Boolean add/sub/NAND may produce noncanonical bytes and remain explicit
+runtime gaps rather than being silently normalized. Floating exchange alone
+has F32/F64 raw-bit leaves; floating arithmetic, wider/complex formats,
+sub-byte integer representations, objects wider than eight bytes and absent
+or insufficient alignment proof need another consumer. Floating helper
+transport never numerically converts between FP and integer bits. No module
+grants source, constant-expression or either-tier capability merely because
+typed checking or an isolated helper succeeds.
 
 `c_builtin_terminal_helpers.c` emits one baseline UD2 record for trap and a
 conservative realization of unreachable behavior. Its source consumer must
@@ -337,12 +387,96 @@ No helper calls a math symbol that could recurse when the source defines it.
 The helper body requires normal branch sizing and unknown-effect call
 semantics. These adapters do not establish source or Tier1 acceptance.
 
+## Intrinsic checking contracts
+
+The later maintainer decision in #156 includes target intrinsics in #148's
+scope. Metadata recognition, prototype checking, special operand constraints,
+source constant evaluation, target-feature eligibility and runtime emission
+are distinct requirements. None alone grants a preprocessor capability.
+
+`c_builtin_intrinsic_catalog.c` looks up the 3,775 exact records from the
+installed Clang 23.1.1 generic, common-x86 and x86-64 tables. The C generator
+hash-pins all four inputs before publishing output. Derived LLVM data retains
+its own attribution and license in `THIRD_PARTY_NOTICES.md`; exact package,
+input, tool and output provenance is in
+[`builtin-metadata/clang-23.1.1-inputs.json`](builtin-metadata/clang-23.1.1-inputs.json).
+The 1,506-row frozen own-main subset includes explicit `bit_cast` parser and
+`va_list` predefined-type gaps. These are not invented function declarations
+and are absent from the ordinary 3,775-record catalogue. A catalogue miss is
+not a general `__has_builtin` answer. Header/language restrictions and custom
+rules remain consumer obligations.
+
+`builtin_intrinsic_own_main_lookup` exposes that frozen subset, including its
+two explicit gap rows. `builtin_intrinsic_own_main_x86_in_scope` accepts exactly
+the 1,457 recorded x86/x86-64 members. Neither a name prefix nor membership in
+the complete installed catalogue attests the audited operand-constraint scope.
+Membership also does not replace successful ordinary prototype checking.
+
+`c_builtin_intrinsic_types.c` decodes bounded Clang 23.1.1 descriptors through
+the existing Linux/x86-64 LP64 type factories. It retains exact integer
+identities, fixed vector element/lane types, parameter adjustment and a
+64-argument ICE bitmap. Custom `t` signatures return `CUSTOM`; `T` additionally
+marks a decoded signature as ignored for ordinary call checking. Missing
+context and unrepresented forms return `UNSUPPORTED`. Malformed input and
+factory exhaustion publish no partial prototype. Earlier interned subtypes
+can remain in the monotonic type table after a later failure.
+
+`c_builtin_intrinsic_features.c` evaluates the exact comma/pipe/parenthesis
+grammar against a caller-supplied, complete and already closed target-feature
+table. It distinguishes missing features, unknown atoms, invalid syntax and
+insufficient nesting storage. Every alternative is validated, even after a
+true alternative. CPU defaults and per-function target-attribute closure
+remain producer obligations. These modules do not implement instructions or
+establish source constant-expression acceptance.
+
+`c_check_builtin_x86.c` adds the 185 audited SemaX86 constraint facts for the
+183 affected names in the frozen 1,457-name own-main target-builtin scope.
+The producer attests exact catalogue membership and successful ordinary
+prototype checking, and supplies both the generated required-ICE bitmap and
+independent source ICE witnesses. Existing ordinary-call diagnostics remain
+first. Generated ICEs precede hard rounding/SAE sets and cumulative direct
+ranges; both rules for each `rndscale` spelling are retained.
+
+Direct range failures are deferred diagnostic events of warning class with
+default error severity. Source constant-evaluated context skips only these
+ranges. Runtime suppression and proven call reachability independently select
+ready, deferred or suppressed events. Unknown reachability cannot silently
+discard one. These checks establish no target-feature or runtime capability.
+
+`c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
+shuffle, conversion, nondeterministic and nontemporal spellings. Its exact
+type relations are separate from #147's ordinary vector operators. Shuffle
+indices use the full bounded source slice; conversion carries a separate type
+operand. Nondeterministic values inspect their argument's type without
+evaluating it. Nontemporal stores retain explicit initialization policy and
+conversions. Floating arithmetic/conversions retain environment and exception
+obligations. Missing vector constant and complex memory representations stay
+explicit; the module provides no numerical fold or runtime implementation.
+
+An optional bounded shuffle-index witness distinguishes strict C ICE from a
+GNU source extension. It contains one byte per scalar index, excluding the
+first two vector arguments; its exact count is checked before access. A GNU
+witness requires `allow_gnu_index_ice`. Null/zero preserves the original strict
+local-ICE fallback. Source witnesses preserve payload, type, effect, fault and
+range checks, and the producer retains the extension diagnostics. In
+particular, a source-certified GNU fold must not retain a stale runtime shift
+fault in its supplied value. Ordinary C complex-scalar initialization of a
+vector nontemporal destination is rejected; matching complex memory types
+retain their explicit payload gap. System-macro-specific conversion exceptions
+are not attested by this ordinary source contract.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
 
 ```sh
 ./build/compiler test-builtins
+./build/compiler test-builtin-intrinsic-types
+./build/compiler test-builtin-intrinsic-features
+./build/compiler test-check-builtins-x86
+./build/compiler test-check-builtins-vector
+./build/compiler test-builtin-intrinsic-catalog
+./build/compiler test-builtin-intrinsic-inventory
 ./build/compiler test-check-builtins
 ./build/compiler test-builtin-lowering
 ./build/compiler test-check-varargs
@@ -354,6 +488,8 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtin-float-lowering
 ./build/compiler test-check-builtins-atomic
 ./build/compiler test-builtin-atomic-helpers
+./build/compiler test-check-builtins-atomic-rmw
+./build/compiler test-builtin-atomic-rmw-helpers
 ./build/compiler test-builtin-terminal-helpers
 ./build/compiler test-check-builtins-typed-overflow
 ./build/compiler test-check-builtins-rounds
@@ -365,14 +501,22 @@ On the approved 9700X, through a separate shared-host lock for each command:
 The tests distinguish typed constraints and fold metadata from native execution
 of the emitted recipes. Scalar/vector agreement is supplemented with Clang's
 builtin behavior, boundary inputs, real destination writes and guarded-capacity
-checks. The CI workflow registers the new suites alongside the existing
-integer-action suite. Results and full source/two-tier acceptance must be
-reported for the exact tested revision; this document makes no throughput
-claim.
+checks. Command/workflow registration, results and full source/two-tier
+acceptance must be reported for the exact tested revision; this document
+makes no throughput claim.
 
 ## Provenance
 
-The modules, recipes and fixtures are original material under the project's
-default license. The existing type, checker, typed-stream, encoder and ABI
-interfaces are reused. Clang is an external behavior and execution oracle;
-no Clang implementation or external fixture corpus is imported.
+The action modules, recipes, extractor, lookup and fixtures are original
+material under the project's default license. Generated builtin metadata
+retains its separate LLVM provenance and terms. The existing type, checker,
+typed-stream, encoder and ABI interfaces are reused. Clang is an external
+behavior and execution oracle; no Clang implementation or external fixture
+corpus is imported.
+
+The atomic RMW modules and fixtures are original C. Exact
+[Clang 23.1.1 checking](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaChecking.cpp),
+[atomic emission rules](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/CodeGen/CGAtomic.cpp),
+[legacy builtin emission](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/CodeGen/CGBuiltin.cpp)
+and [LLVM's atomic code-generation description](https://llvm.org/docs/Atomics.html#atomics-and-codegen)
+supply behavior facts; their implementation and tests are not copied.

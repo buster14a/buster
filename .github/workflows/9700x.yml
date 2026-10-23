@@ -346,6 +346,12 @@ jobs:
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins
+          ./build/compiler test-builtin-intrinsic-types
+          ./build/compiler test-builtin-intrinsic-features
+          ./build/compiler test-check-builtins-x86
+          ./build/compiler test-check-builtins-vector
+          ./build/compiler test-builtin-intrinsic-catalog
+          ./build/compiler test-builtin-intrinsic-inventory
           ./build/compiler test-check-builtins
           ./build/compiler test-builtin-lowering
           ./build/compiler test-check-varargs
@@ -357,7 +363,9 @@ jobs:
           ./build/compiler test-builtin-float-lowering
           ./build/compiler test-builtin-terminal-helpers
           ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-builtin-atomic-rmw-helpers
           ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-atomic-rmw
           ./build/compiler test-check-builtins-typed-overflow
           ./build/compiler test-check-builtins-rounds
           ./build/compiler test-check-builtins-math
