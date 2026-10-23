@@ -614,3 +614,43 @@ after scalar work takes 3.6% more time, with non-overlapping process ranges.
 These runs establish the observed difference, not its cause. The other vector
 ranges overlap or touch. This check covers the named integration revision;
 it is not a measurement of subsequent main changes.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Sources:
+[frontend](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/assembler.c#L4)
+and [I/O/object consumer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/assembler_driver.c#L4).
+Assembly is a real alternative producer of encoder records and Link data and
+must remain in the shared-interface inventory.
+
+| Producer → consumer | Contract |
+| --- | --- |
+| Counted assembly bytes → `asm_lex` → statements/operands | `AsmToken` is four u32 fields: start/end/kind/reserved. Vector register classification caches its bounded result in reserved; source spans remain for diagnostics. |
+| `.S` preprocessing → printed assembly bytes → assembly lexer | Uses the PP assembly mode and spacing rules. This materialized text handoff is real; it is not C parser token conversion. |
+| Statements/expressions → shared `x86_match` → fragments/records | Symbols and relative expressions retain identity/addends. Public input rejects unsupported forms and validates records before trusted encoding. |
+| Fragments/labels/alignment → monotone layout → encoding/Link | Variable fragment counts and final offsets; branches promote, alignment is recalculated. `asm_object` passes the shared Link to object preparation/building. |
+
+The public source is bounded (16 MiB limit); the driver can read streams and
+keeps its own terminator, while reusable `asm_assemble` takes a counted slice.
+Caller arenas own tokens, fragments, symbols, emitted bytes and Link, and must
+outlive object construction. Logical counts, allocated capacities and section
+size limits (256 MiB) are distinct. Internal vector operations remain bounded;
+spare arena space is not public readable padding. Failure returns diagnostics
+rather than sending an invalid record to the unchecked encoder.
+
+A logical assembly unit/section contains ordered directives, labels and
+alignment, so sorting instructions or independently sizing arbitrary fragments
+is invalid. Layout terminates by monotone promotion and checks rel8-only
+instructions after final placement. This differs from C `size_branches`, whose
+record order is fixed and has no assembly alignment fragments; replacing one
+with the other would lose a real dependency.
+
+Disposition: retain shared form matching, cached register classification and
+direct Link output. `.S` text materialization and per-fragment layout are
+candidates only with producer + PP printing + lex/match/layout + object costs;
+a faster matcher alone cannot justify another token representation.
+`test-assembler --cross-check` checks scalar/vector/GNU as bytes and execution;
+`benchmark-assembler` includes its documented phase/initialization/memory costs.
+#233 retains compiler-generated assembly coverage and real-tool/workload
+qualification, including exceptional syntax, tails, capacities and output order.
