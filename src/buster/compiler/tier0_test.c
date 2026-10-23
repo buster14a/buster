@@ -1061,6 +1061,197 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
     arena_release(&arena);
 }
 
+// The argument moves' resolution (tier0_parallel_moves), apart from the depth table that decides which moves a call
+// makes (with rax first, only cycles of two): random sets of moves among 16 general registers, each a random injection
+// of distinct sources into distinct destinations (paths and cycles of every length, and moves to themselves), and among
+// 16 XMM registers without cycles (each source above its destination: xchg has no XMM form, and a call's floating
+// arguments only ever move down). The records, run on a register file, must give each destination its source's value and
+// leave every other register as it was, and be as many as the moves less the cycles (tier0_count_deferred's count).
+static void tier0_test_moves(Tier0TestTally* tally)
+{
+    uint64_t random = 0x9e3779b97f4a7c15ull;
+    X86Instruction records[64];
+    for (uint32_t round = 0; round < 20000; round += 1)
+    {
+        const uint32_t base = round % 2 == 0 ? 0 : 16;
+        uint8_t to[16];
+        uint8_t from[16];
+        uint8_t used_to[16] = { 0 };
+        uint8_t used_from[16] = { 0 };
+        const uint32_t count = 1 + tier0_generate_below(&random, 16);
+        uint32_t moves = 0;
+        while (moves < count)
+        {
+            const uint32_t destination = tier0_generate_below(&random, 16);
+            const uint32_t source = round % 7 == 0 ? destination : tier0_generate_below(&random, 16);
+            if (used_to[destination] == 0 && used_from[source] == 0 && (base == 0 || source >= destination))
+            {
+                used_to[destination] = 1;
+                used_from[source] = 1;
+                to[moves] = (uint8_t)(base + destination);
+                from[moves] = (uint8_t)(base + source);
+                moves += 1;
+            }
+            else if (moves == 16 || tier0_generate_below(&random, 8) == 0)
+            {
+                break;
+            }
+        }
+        // The cycles, found apart: from each move not yet seen, follow the move that writes its source.
+        uint32_t cycles = 0;
+        uint32_t real = 0;
+        uint32_t seen = 0;
+        for (uint32_t k = 0; k < moves; k += 1)
+        {
+            real += to[k] != from[k] ? 1 : 0;
+            uint32_t at = k;
+            uint32_t steps = 0;
+            while (to[k] != from[k] && (seen >> at & 1) == 0 && steps <= moves)
+            {
+                seen |= 1u << at;
+                uint32_t writer = moves;
+                for (uint32_t j = 0; j < moves; j += 1)
+                {
+                    writer = to[j] == from[at] ? j : writer;
+                }
+                cycles += writer == k ? 1 : 0;
+                at = writer == moves ? at : writer;
+                steps = writer == moves ? moves + 1 : steps + 1;
+            }
+        }
+        Tier0Writer writer = { records, 0, 0, 0 };
+        tier0_parallel_moves(&writer, to, from, moves);
+        uint64_t file[32];
+        for (uint32_t r = 0; r < 32; r += 1)
+        {
+            file[r] = 0x1000 + r;
+        }
+        for (uint32_t r = 0; r < writer.count; r += 1)
+        {
+            const X86Instruction* record = &records[r];
+            const uint32_t reg = base + record->reg;
+            const uint32_t rm = base + record->rm;
+            const uint64_t swapped = file[reg];
+            file[reg] = file[rm];
+            file[rm] = record->form == X86_FORM_XCHG_RM64_R64 ? swapped : file[rm];
+        }
+        bool right = writer.count == real - cycles;
+        for (uint32_t r = 0; r < 16; r += 1)
+        {
+            uint64_t expected = 0x1000 + base + r;
+            for (uint32_t k = 0; k < moves; k += 1)
+            {
+                expected = to[k] == base + r ? 0x1000 + from[k] : expected;
+            }
+            right &= file[base + r] == expected;
+        }
+        tier0_test_expect(tally, right, "moves", "round %u: %u moves, %u cycles, %u records", round, moves, cycles, writer.count);
+    }
+}
+
+// The errors both paths must report alike, on streams of the test's own: the first unsupported entry (a conversion from
+// U64 to a floating class, which the first slice leaves out) wherever it falls among 64-entry blocks and after another,
+// and an expression deeper than the integer depths.
+static void tier0_test_errors(Tier0TestTally* tally)
+{
+    enum
+    {
+        capacity = 512,
+    };
+    uint8_t kinds[capacity];
+    uint8_t classes[capacity];
+    uint64_t values[capacity];
+    Arena arena = arena_reserve(1ull << 28);
+    for (uint32_t place = 0; place < 200; place += 1)
+    {
+        // `place` constants discarded, a conversion that fails, more constants, another, the return.
+        uint32_t count = 0;
+        uint32_t expected = 0;
+        for (uint32_t c = 0; c < 2; c += 1)
+        {
+            for (uint32_t k = 0; k < (c == 0 ? place : 37); k += 1)
+            {
+                kinds[count] = BUSTER_TYPED_CONST;
+                classes[count] = BUSTER_TYPED_CLASS_I64;
+                values[count] = k;
+                kinds[count + 1] = BUSTER_TYPED_DISCARD;
+                classes[count + 1] = BUSTER_TYPED_CLASS_I64;
+                values[count + 1] = 0;
+                count += 2;
+            }
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_U64;
+            values[count] = c + 1;
+            kinds[count + 1] = BUSTER_TYPED_CONVERT;
+            classes[count + 1] = BUSTER_TYPED_CLASS_F64;
+            values[count + 1] = 0;
+            kinds[count + 2] = BUSTER_TYPED_DISCARD;
+            classes[count + 2] = BUSTER_TYPED_CLASS_F64;
+            values[count + 2] = 0;
+            expected = c == 0 ? count + 1 : expected;
+            count += 3;
+        }
+        kinds[count] = BUSTER_TYPED_RETURN;
+        classes[count] = BUSTER_TYPED_CLASS_VOID;
+        values[count] = 0;
+        count += 1;
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = count;
+        const uint64_t mark = arena.length;
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        tier0_test_expect(tally, scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == scalar.error && scalar.node == expected && vector.node == expected,
+                          "errors", "the conversion at entry %u: the scalar path's error %d at %u, the vector path's %d at %u", expected, scalar.error, scalar.node,
+                          vector.error, vector.node);
+        arena_pop_to(&arena, mark);
+    }
+    for (uint32_t deep = 14; deep <= 17; deep += 1)
+    {
+        // `deep` constants on the integer stack at once, added up and discarded. The last one is the first add's
+        // immediate, so 16 fit the 15 depths and 17 are refused.
+        uint32_t count = 0;
+        for (uint32_t k = 0; k < deep; k += 1)
+        {
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_I64;
+            values[count] = k;
+            count += 1;
+        }
+        for (uint32_t k = 1; k < deep; k += 1)
+        {
+            kinds[count] = BUSTER_TYPED_ADD;
+            classes[count] = BUSTER_TYPED_CLASS_I64;
+            values[count] = 0;
+            count += 1;
+        }
+        kinds[count] = BUSTER_TYPED_DISCARD;
+        classes[count] = BUSTER_TYPED_CLASS_I64;
+        values[count] = 0;
+        kinds[count + 1] = BUSTER_TYPED_RETURN;
+        classes[count + 1] = BUSTER_TYPED_CLASS_VOID;
+        values[count + 1] = 0;
+        count += 2;
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = count;
+        const uint64_t mark = arena.length;
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        const Tier0Error expected = deep > BUSTER_TIER0_INTEGER_DEPTHS + 1 ? TIER0_ERROR_DEPTH : TIER0_OK;
+        tier0_test_expect(tally, scalar.error == expected && vector.error == expected && (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)), "errors",
+                          "%u values at once: the scalar path's error %d, the vector path's %d, %d expected", deep, scalar.error, vector.error, expected);
+        arena_pop_to(&arena, mark);
+    }
+    arena_release(&arena);
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -1127,6 +1318,20 @@ static int run_tier0_tests(int argc, char** argv)
                 { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_moves(&tally);
+                tier0_test_report("moves", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_errors(&tally);
+                tier0_test_report("errors", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
             for (uint32_t s = 0; s < 4; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
