@@ -6,6 +6,10 @@
 // constraints and constant expressions. Existing arena/type and fieldwise comparison helpers are reused. No
 // external implementation, payload table or fixture corpus is imported. Tests do not claim Buster source support.
 
+#include <spawn.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+
 typedef struct CheckBuiltinFloatTest CheckBuiltinFloatTest;
 struct CheckBuiltinFloatTest
 {
@@ -230,17 +234,18 @@ static void check_builtin_float_test_classification(CheckBuiltinFloatTest* test,
         {
             const long double number = check_action_round_float(formats[format], samples[s]);
             CheckValue value = check_test_float(formats[format], number);
-            for (uint32_t op = 0; op < 4; op += 1)
+            const CBuiltinId unary[] = { CBUILTIN_ISNAN, CBUILTIN_ISINF, CBUILTIN_ISFINITE, CBUILTIN_SIGNBIT, CBUILTIN_ISINF_SIGN };
+            for (uint32_t op = 0; op < BUSTER_ARRAY_LENGTH(unary); op += 1)
             {
                 const CheckBuiltinFloatAction action = {
-                    .id = (CBuiltinId)(CBUILTIN_ISNAN + op),
+                    .id = unary[op],
                     .arguments = &value,
                     .argument_count = 1,
                 };
                 CheckBuiltinFloatResult result;
                 check_builtin_float_one(table, &action, &result);
                 const uint32_t expected = op == 0 ? !!__builtin_isnan(number) : op == 1 ? !!__builtin_isinf(number) :
-                                          op == 2 ? !!__builtin_isfinite(number) : !!__builtin_signbit(number);
+                                          op == 2 ? !!__builtin_isfinite(number) : op == 3 ? !!__builtin_signbit(number) : (uint32_t)__builtin_isinf_sign(number);
                 check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_INT &&
                                                 result.floating_type == formats[format] && result.folded && result.action.value.integer == expected &&
                                                 (result.action.value.flags & BUSTER_CHECK_ICE) != 0, "classification preserves source type and matches Clang's oracle");
@@ -327,6 +332,111 @@ static void check_builtin_float_test_classification(CheckBuiltinFloatTest* test,
                                     "selector prototypes convert arithmetic arguments to int while leaving FP argument unpromoted");
 }
 
+static void check_builtin_float_test_absolute(CheckBuiltinFloatTest* test, TypeTable* table)
+{
+    const CBuiltinId ids[] = { CBUILTIN_FABSF, CBUILTIN_FABS, CBUILTIN_FABSL };
+    const TypeId formats[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
+    const long double samples[] = { -0.0L, 0.0L, -1.75L, -0x1.000001p0L, -0x1p-149L, -0x1p-1074L, -0x1p-16445L, -__builtin_infl(), -__builtin_nanl("123") };
+    for (uint32_t target = 0; target < BUSTER_ARRAY_LENGTH(ids); target += 1)
+    {
+        for (uint32_t source = 0; source < BUSTER_ARRAY_LENGTH(formats); source += 1)
+        {
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(samples); i += 1)
+            {
+                const long double number = check_action_round_float(formats[source], samples[i]);
+                CheckValue value = check_test_float(formats[source], number);
+                const CheckBuiltinFloatAction action = { .id = ids[target], .arguments = &value, .argument_count = 1 };
+                CheckBuiltinFloatResult result;
+                check_builtin_float_one(table, &action, &result);
+                const long double expected = target == 0 ? __builtin_fabsf((float)number) : target == 1 ? __builtin_fabs((double)number) : __builtin_fabsl(number);
+                check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.folded && result.action.value.type == formats[target] &&
+                    result.floating_type == formats[target] && result.argument_conversions[0].type == formats[target] &&
+                    (result.argument_conversions[0].flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && result.evaluated_operands == 1 && result.definite_operands == 1 &&
+                    result.action.value.constant_kind == CHECK_CONSTANT_FLOATING && check_builtin_float_test_bits(formats[target], result.action.value.floating, expected) &&
+                    (result.action.value.flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL)) == 0,
+                    "fabs converts to its declared format before exact sign removal and never invents integer/literal provenance");
+                const bool warning = type_size(table, formats[source]) > type_size(table, formats[target]);
+                check_builtin_float_test_expect(test, ((result.warnings & BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE) != 0) == warning,
+                    "fabs narrowing warning follows source storage size");
+            }
+        }
+        CheckValue integer = check_test_integer(BUSTER_TYPE_INT, (uint32_t)-7);
+        CheckBuiltinFloatAction action = { .id = ids[target], .arguments = &integer, .argument_count = 1 };
+        CheckBuiltinFloatResult result;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.folded && result.action.value.floating == 7 && result.action.value.type == formats[target] &&
+            (result.warnings & BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE) != 0, "fabs accepts a signed integer with Clang's absolute-value warning");
+        integer.type = BUSTER_TYPE_UINT128;
+        integer.integer = (unsigned __int128)1 << 100;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.folded && result.action.value.floating == 0x1p100L &&
+            (result.warnings & BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE) != 0, "unsigned 128-bit fabs argument warns but converts normally");
+        integer.type = BUSTER_TYPE_INT128;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.folded && result.warnings == 0, "signed 128-bit fabs has no available integer-abs replacement warning");
+        integer = check_test_integer(BUSTER_TYPE_BOOL, 1);
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.folded && result.action.value.floating == 1 &&
+            (result.warnings & BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE) != 0, "fabs accepts bool through the declared FP parameter conversion");
+        const TypeId enumeration = type_tag(table, BUSTER_TYPE_KIND_ENUM, 14895 + target);
+        check_builtin_float_test_expect(test, type_enum_complete(table, enumeration, BUSTER_TYPE_INT, 0), "fabs enum input fixture");
+        integer = check_test_integer(enumeration, (uint32_t)-7);
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.folded && result.action.value.floating == 7, "fabs accepts an enum using its actual signed underlying type");
+        const TypeId unsigned_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 14898 + target);
+        check_builtin_float_test_expect(test, type_enum_complete(table, unsigned_enum, BUSTER_TYPE_UINT128, 0), "fabs unsigned enum input fixture");
+        integer = check_test_integer(unsigned_enum, 7);
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.folded && (result.warnings & BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE) != 0,
+            "fabs unsigned enum warns even when no equally wide signed absolute-value replacement exists");
+        integer = (CheckValue){ .type = type_bit_int(table, 256, false), .category = CHECK_RVALUE };
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.folded && result.action.value.fault == CHECK_FAULT_NONE &&
+            (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION) != 0, "fabs keeps a wider integer conversion typed without synthesizing constant faults");
+        integer = (CheckValue){ .type = type_atomic(table, formats[target]), .category = CHECK_LVALUE };
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.folded && result.warnings == 0 &&
+            (result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0, "fabs retains an atomic source load and Clang's warning suppression for its original type");
+        integer = check_test_float(formats[target], -2);
+        integer.flags |= BUSTER_CHECK_SIDE_EFFECT;
+        integer.fault = CHECK_FAULT_DIVIDE_BY_ZERO;
+        integer.fault_node = 41;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, !result.folded && result.evaluated_operands == 1 && result.action.value.fault == CHECK_FAULT_DIVIDE_BY_ZERO &&
+            result.action.value.fault_node == 41 && (result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0, "fabs preserves its sole operand's effects and fault");
+        integer = check_test_float(BUSTER_TYPE_FLOAT128, -2);
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.folded && result.action.value.fault == CHECK_FAULT_NONE &&
+            result.action.value.type == formats[target] && (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION) != 0,
+            "fabs wider conversion is typed and explicitly unsupported without host approximation");
+        integer.type = type_complex(table, BUSTER_TYPE_DOUBLE);
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.folded && result.action.value.type == formats[target] &&
+            (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION) != 0 && (result.warnings & BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE) != 0,
+            "fabs complex argument requires real-component conversion rather than complex magnitude");
+        integer = check_test_integer(type_pointer(table, BUSTER_TYPE_INT), 0);
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED, "fabs does not accept a pointer as an FP prototype argument");
+        action.arguments = NULL;
+        action.argument_count = 0;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "fabs checks zero arity before reading its argument slice");
+    }
+    CheckValue signaling = { .type = BUSTER_TYPE_LONG_DOUBLE, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_FLOATING };
+    const uint64_t significand = UINT64_C(0x8000000000000123);
+    const uint16_t negative = 0xffff;
+    memcpy(&signaling.floating, &significand, sizeof(significand));
+    memcpy((uint8_t*)&signaling.floating + 8, &negative, sizeof(negative));
+    const CheckBuiltinFloatAction action = { .id = CBUILTIN_FABSL, .arguments = &signaling, .argument_count = 1 };
+    CheckBuiltinFloatResult result;
+    check_builtin_float_one(table, &action, &result);
+    uint64_t stored = 0;
+    uint16_t exponent = 0;
+    memcpy(&stored, &result.action.value.floating, sizeof(stored));
+    memcpy(&exponent, (uint8_t*)&result.action.value.floating + 8, sizeof(exponent));
+    check_builtin_float_test_expect(test, result.folded && stored == significand && exponent == 0x7fff, "same-format fabsl clears only a signaling NaN's sign bit");
+}
+
 static void check_builtin_float_test_constraints(CheckBuiltinFloatTest* test, TypeTable* table)
 {
     CheckValue value = check_test_integer(BUSTER_TYPE_INT, 1);
@@ -403,9 +513,9 @@ static void check_builtin_float_test_batches(CheckBuiltinFloatTest* test, TypeTa
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(actions); i += 1)
     {
         actions[i] = (CheckBuiltinFloatAction){
-            .id = i % 3 == 0 ? CBUILTIN_INF : i % 3 == 1 ? CBUILTIN_FPCLASSIFY : CBUILTIN_ISNAN,
-            .arguments = i % 3 == 1 ? values : values + 5,
-            .argument_count = i % 3 == 0 ? 0 : i % 3 == 1 ? 6 : 1,
+            .id = i % 5 == 0 ? CBUILTIN_INF : i % 5 == 1 ? CBUILTIN_FPCLASSIFY : i % 5 == 2 ? CBUILTIN_ISNAN : i % 5 == 3 ? CBUILTIN_ISINF_SIGN : CBUILTIN_FABSF,
+            .arguments = i % 5 == 1 ? values : values + 5,
+            .argument_count = i % 5 == 0 ? 0 : i % 5 == 1 ? 6 : 1,
             .node = i,
         };
     }
@@ -505,6 +615,42 @@ static void check_builtin_float_test_pages(CheckBuiltinFloatTest* test, TypeTabl
     }
 }
 
+static bool check_builtin_float_test_clang_run(const char* clang, const char* path, bool* rejected)
+{
+    // parse_test_clang deliberately supplies -w. These cases also test pragma-upgraded warnings, which -w would
+    // suppress even after an error mapping; use an explicit diagnostic-preserving boundary for the source oracle.
+    char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-color-diagnostics", (char*)path, NULL };
+    posix_spawn_file_actions_t actions;
+    bool ready = posix_spawn_file_actions_init(&actions) == 0;
+    const bool initialized = ready;
+    if (ready)
+    {
+        ready = posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0) == 0 &&
+                posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) == 0;
+    }
+    pid_t child = -1;
+    if (ready)
+    {
+        ready = posix_spawnp(&child, clang, &actions, NULL, arguments, environ) == 0;
+    }
+    if (initialized)
+    {
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    int status = 0;
+    if (ready)
+    {
+        pid_t waited;
+        do
+        {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        ready = waited == child && WIFEXITED(status);
+    }
+    *rejected = ready && WEXITSTATUS(status) != 0;
+    return ready;
+}
+
 static void check_builtin_float_test_oracle(CheckBuiltinFloatTest* test, const char* clang)
 {
     const char* sources[] = {
@@ -528,27 +674,43 @@ static void check_builtin_float_test_oracle(CheckBuiltinFloatTest* test, const c
         "double x=__builtin_nan(\"1\\0two\");\n",
         "double x=__builtin_nan(\"340282366920938463463374607431768211456123456789\");\n",
         "int f(__float128 x) { return __builtin_isfinite(x); }\n",
+        "_Static_assert(_Generic(__builtin_fabs(-3),double:1,default:0),\"double\");\n"
+        "_Static_assert(_Generic(__builtin_fabsf(2),float:1,default:0),\"float\");\n"
+        "_Static_assert(_Generic(__builtin_fabsl(2),long double:1,default:0),\"long double\");\n"
+        "double d=__builtin_fabs(-3); float f=__builtin_fabsf(-2.25); long double l=__builtin_fabsl(-2.0L);\n",
+        "enum { A=__builtin_isinf_sign(-__builtin_inf()), B=__builtin_isinf_sign(__builtin_inf()), C=__builtin_isinf_sign(-0.0), D=__builtin_isinf_sign(__builtin_nan(\"\")) };\n"
+        "_Static_assert(A==-1 && B==1 && C==0 && D==0,\"signed infinity classification\");\n",
+        "int n=__builtin_choose_expr((int)__builtin_fabs(-2.0),1,2);\n",
+        "int n=__builtin_choose_expr(0&&__builtin_fabs(-2.0),1,2);\n",
+        "double x; int n=__builtin_choose_expr(sizeof(__builtin_fabs(x))==sizeof(double),1,2);\n",
+        "double x=__builtin_fabs(3.0+4.0i);\n",
+        "int n=__builtin_choose_expr(__builtin_isinf_sign(__builtin_fabs(-__builtin_inf()))==1,1,2);\n",
+        "#pragma clang diagnostic error \"-Wabsolute-value\"\ndouble f(int x) { return __builtin_fabs(x); }\n",
+        "#pragma clang diagnostic error \"-Wabsolute-value\"\nfloat f(double x) { return __builtin_fabsf(x); }\n",
+        "#pragma clang diagnostic error \"-Wabsolute-value\"\ndouble f(__int128 x) { return __builtin_fabs(x); }\n",
+        "#pragma clang diagnostic error \"-Wabsolute-value\"\ndouble f(_Atomic(double)*p) { return __builtin_fabs(*p); }\n",
+        "#pragma clang diagnostic error \"-Wabsolute-value\"\nenum E : unsigned __int128 { A }; double f(enum E x) { return __builtin_fabs(x); }\n",
+        "double f(void*p) { return __builtin_fabs(p); }\n",
+        "int f(int x) { return __builtin_isinf_sign(x); }\n",
     };
-    const bool rejected[] = { false, false, false, true, true, true, true, false, false, true, true, false, false };
+    const bool rejected[] = { false, false, false, true, true, true, true, false, false, true, true, false, false,
+                             false, false, true, true, false, false, false, true, true, false, false, true, true, true };
     _Static_assert(BUSTER_ARRAY_LENGTH(sources) == BUSTER_ARRAY_LENGTH(rejected), "every floating oracle source has an expected result");
     char directory[] = "/tmp/buster-check-builtin-float-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
     char paths[BUSTER_ARRAY_LENGTH(sources)][160];
-    char* pointers[BUSTER_ARRAY_LENGTH(sources)];
-    ParseTestClang results[BUSTER_ARRAY_LENGTH(sources)];
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
         ready = parse_test_write(paths[i], sources[i], strlen(sources[i]));
     }
-    const char* arguments[] = { "-std=gnu23" };
-    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, BUSTER_ARRAY_LENGTH(sources), results);
-    check_builtin_float_test_expect(test, ready, "independent Clang floating constraint/constant oracle could not run");
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
-        check_builtin_float_test_expect(test, results[i].rejected == rejected[i], "Clang disagrees with a floating builtin source fixture");
+        bool failed = false;
+        ready = check_builtin_float_test_clang_run(clang, paths[i], &failed);
+        check_builtin_float_test_expect(test, ready && failed == rejected[i], "Clang disagrees with a floating builtin source constraint/constant/warning fixture");
     }
+    check_builtin_float_test_expect(test, ready, "independent Clang floating constraint/constant oracle could not run");
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
@@ -584,6 +746,7 @@ static int run_check_builtin_float_tests(int argc, char** argv)
         {
             check_builtin_float_test_constants(&test, &types.table);
             check_builtin_float_test_classification(&test, &types.table);
+            check_builtin_float_test_absolute(&test, &types.table);
             check_builtin_float_test_constraints(&test, &types.table);
             check_builtin_float_test_batches(&test, &types.table);
             check_builtin_float_test_pages(&test, &types.table);
