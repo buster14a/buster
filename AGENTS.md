@@ -415,10 +415,15 @@ designs and the compilers already built this way.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
+  General-dynamic TLS uses a separate two-word GOT pair per symbol and
+  local-dynamic TLS one module pair, preserving `__tls_get_addr` calls;
+  DTPMOD64/DTPOFF64 relocations and module offsets are emitted as appropriate.
   Regular shared-library outputs use a new file and rename, preserving any
   old inode that a process still maps.
-  Local-exec and general/local-dynamic TLS accesses in shared libraries are
-  refused; their implementations remain a later part of #85.
+  Local-exec accesses and undefined DTPOFF32 module offsets in shared
+  libraries are refused. Distinct general-/initial-exec slot columns allow
+  both models to reference the same symbol. TLSGD target bitsets are reduced
+  by whole symbol words, then expanded into slots with an exact scalar twin.
   `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
@@ -490,6 +495,14 @@ designs and the compilers already built this way.
   `foreign_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-foreign` runs them) and `foreign_benchmark.c`
   provides `benchmark-foreign`.
+- `src/buster/compiler/foreign_strings.c` builds a deterministic pool and
+  original-offset map for one-, two- and four-byte `SHF_MERGE | SHF_STRINGS`
+  entries. Its bounded vector scans and hashes have exact scalar twins.
+  `foreign_strings_link.c` groups compatible foreign sections and remaps
+  symbols and supported address expressions before layout, transactionally;
+  unsupported expressions retain the original unmerged Link. The kernel,
+  consumer and executable cross-checks run under `test-foreign`. See
+  [foreign string merging](docs/foreign-string-merging.md) for the contract.
 - `src/buster/compiler/foreign_unwind.c` and `foreign_unwind_link.c` prune
   losing COMDAT FDEs and unused CIEs before canonical foreign symbols hide
   their original ownership. They retain matching CFI/personality/LSDA
@@ -3756,7 +3769,11 @@ informational.
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals); and larger. Their calls pass up to 12 arguments, past
 the argument registers, and their pointer arithmetic has element sizes for each
-of its templates, past imul's imm32 too. Every function must pass `tier0_validate`,
+of its templates, past imul's imm32 too. Before them it checks the call
+emitter's move resolver on 20,000 random sets of moves (paths and cycles of
+every length) run on a register file, the vector path's application of chosen
+forms against the scalar path's on random records, and that both paths refuse
+unsupported entries and expressions past the depths alike. Every function must pass `tier0_validate`,
 both paths must compile it to the same records, branch columns and references,
 and the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into
