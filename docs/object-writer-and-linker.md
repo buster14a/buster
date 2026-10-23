@@ -3271,6 +3271,40 @@ from the mapped files. Each step is a lane phase (see "Lanes"):
 Steps 1–3 and 7 are where most of the foreign path's work is, and where the
 vector kernels go. Steps 4–6 are graph walks bound by memory latency.
 
+#### Explicit executable-stack requests in foreign objects
+
+The executable writer emits a non-executable `PT_GNU_STACK`. Foreign
+conversion therefore refuses a selected ET_REL object whose exact
+`.note.GNU-stack` section has `SHF_EXECINSTR`; it does not silently discard
+the request or enable an executable stack for the whole output.
+
+The existing scalar and vector section-import passes preserve the first
+requesting section index in `ImportObject.executable_stack_section`, including
+non-ALLOC notes whose bytes do not become atoms. Conversion checks that
+metadata before importing the object's local symbols. The refusal is
+`FOREIGN_LINK_ERROR_IMPORT` with `IMPORT_ERROR_UNSUPPORTED`, identifying the
+original object, section, section-header offset and type. Scalar retry clears
+the metadata before rebuilding it.
+
+Selection is at the object boundary. Direct inputs and extracted regular or
+thin archive members contribute; a member that was never extracted does not.
+Forced and whole-archive extraction still selects the requesting object.
+Discarding its code, including all of its COMDAT code, does not erase its
+stack request. This bounded policy also conservatively refuses an executable
+marker that itself has `SHF_EXCLUDE` or belongs to a losing COMDAT group;
+that policy is not a claim of identical GNU/lld/mold behavior for unusual
+markers. Missing notes and notes without `SHF_EXECINSTR` retain the existing
+behavior. DSO `PT_GNU_STACK`, automatic executable-stack support and other
+importer consumers are outside this change.
+
+`test-import` checks exact names, flags, positions across vector batches and
+tails, first-request selection, reused output objects and failed-vector scalar
+retry. `test-foreign` assembles original direct/archive/COMDAT cases and checks
+selection and the original diagnostics through the exact/vector paths at
+1/2/3/8 lanes, including the dynamic conversion entrypoint. These are producer
+and section-import checks; they do not claim an executable runtime, GC
+composition or external-linker oracle for the refusal policy.
+
 #### Foreign COMDAT unwind pruning
 
 `foreign_unwind.c` filters an object's `.eh_frame` while the original

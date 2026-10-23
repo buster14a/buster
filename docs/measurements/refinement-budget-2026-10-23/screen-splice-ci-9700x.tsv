@@ -1,0 +1,13 @@
+tree	input	rounds	refine_min_ms	refine_median_ms	refine_max_ms	lex_min_ms	lex_median_ms	lex_max_ms	directives_median_ms	whole_min_ms	whole_median_ms	whole_max_ms
+build/refine116/pp-fixed	sqlite-3.53.4.c	3	1.720	1.729	1.731	2.418	2.439	2.442	0.292	11.848	11.851	11.915
+build/refine116/pp-lexprecise	sqlite-3.53.4.c	3	1.468	1.473	1.485	2.418	2.419	2.420	0.305	11.625	11.694	11.721
+build/refine116/pp-precisearena	sqlite-3.53.4.c	3	1.542	1.557	1.558	2.406	2.418	2.433	0.232	11.560	11.612	11.628
+build/refine116/pp-blockgap	sqlite-3.53.4.c	3	1.519	1.519	1.534	2.405	2.410	2.413	0.231	11.503	11.530	11.545
+build/refine116/pp-fixed	sqlite-3.53.2.c	3	1.720	1.721	1.725	2.414	2.419	2.440	0.289	11.879	11.917	11.948
+build/refine116/pp-lexprecise	sqlite-3.53.2.c	3	1.468	1.468	1.479	2.405	2.407	2.414	0.307	11.567	11.613	11.623
+build/refine116/pp-precisearena	sqlite-3.53.2.c	3	1.543	1.547	1.564	2.405	2.407	2.409	0.233	11.540	11.552	11.568
+build/refine116/pp-blockgap	sqlite-3.53.2.c	3	1.524	1.534	1.535	2.399	2.410	2.412	0.233	11.545	11.563	11.655
+build/refine116/pp-fixed	main.c	3	4.070	4.077	4.091	4.228	4.233	4.237	0.313	41.654	41.728	41.768
+build/refine116/pp-lexprecise	main.c	3	3.783	3.791	3.793	4.338	4.341	4.355	0.311	41.464	41.489	41.561
+build/refine116/pp-precisearena	main.c	3	3.782	3.799	3.820	4.356	4.366	4.380	0.310	41.576	41.925	42.032
+build/refine116/pp-blockgap	main.c	3	3.788	3.793	3.811	4.319	4.329	4.332	0.313	41.501	41.516	41.543

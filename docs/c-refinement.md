@@ -529,6 +529,10 @@ across inputs, so most identifiers are found rather than added, and every path
 must give every identifier the same id and every token the same leading-space
 bit. The checks are:
 
+- **probe:** 8,192 guarded bucket patterns cover every combination of prefix
+  dword matches in four slots, with low and near-limit IDs. A miss returns zero
+  and multiple candidates return the first match. The bucket ends at a
+  `PROT_NONE` page.
 - **hash:** the four forms of the hash agree on 200,000 spellings of 0 to 200
   bytes: `intern_hash_bytes`, `intern_hash_vector` up to 64 bytes and
   `intern_hash_vectors4_short` up to 32, four at a time (with the four first
@@ -544,6 +548,9 @@ bit. The checks are:
 - **aligned flips:** the same bit flipped in two lanes of a chunk must change
   the hash, in about 14,800 random spellings of 17 to 200 bytes. Half of them
   repeat one letter, and in a third the two bytes are equal once whitened.
+- **fold mixing:** four fixed pairs, including three valid identifier pairs,
+  cancelled in the old fold's low half. Final mixing must separate them, all
+  hash paths must agree, and the table must retain distinct stable IDs.
 - **names:** every predefined name has its id and spelling, and every name is a
   keyword in exactly the modes clang makes it one in, in all ten modes from
   `c89` to `gnu23`: 2,080 answers. The modes of the names that depend on them
@@ -557,6 +564,10 @@ bit. The checks are:
 - **table:** 300,000 random spellings of 1 to 200 bytes, enough to grow the
   table three times, get ids in first-seen order and the same id again. Absent
   spellings are not found.
+- **batch growth:** eight cases leave 1, 4, 15, 16, 31, 32, 63 or 64 insertions
+  before growth, then mix new names, repeated names from preceding batches and
+  long names sharing a prefix. Every batch size must preserve token-order IDs
+  through growth and on a repeated pass, against both independent references.
 - **fixtures:** 22 boundary cases, each at all 64 misalignments from a cache
   line: splices between tokens (with whitespace, `\r\n` and trigraphs),
   comments, spliced identifiers and identifiers written with UCNs, and
