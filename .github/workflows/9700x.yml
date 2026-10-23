@@ -210,6 +210,14 @@ jobs:
           ./build.sh check-call-graph
           == Test the runner
           ./build/compiler test-parallel
+          == Test the IR and typed-stream lowering
+          ./build/compiler test-ir
+          ./build/compiler test-ir-lowering
+          ./build/compiler test-ir-parse
+          ./build/compiler test-interpreter
+          ./build/compiler test-interpreter-native
+          ./build/compiler test-interpreter-link
+          ./build/compiler test-ir-interpreter
           == Test the preprocessor's cases against clang
           # --clang also preprocesses each case with clang -E and compares the tokens.
           ./build/compiler test-preprocessor --clang
@@ -315,6 +323,19 @@ jobs:
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C.
           ./build/compiler test-tier0 --cross-check
+          == Test verified Tier 1 optimization passes
+          ./build/compiler test-ir-optimize
+          ./build/compiler test-ir-gvn
+          ./build/compiler test-ir-licm
+          ./build/compiler test-ir-sroa
+          ./build/compiler test-ir-inline
+          == Test Tier 1 selection, liveness and native fragments
+          ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
+          ./build/compiler test-tier1-liveness
+          ./build/compiler test-tier1-emit
+          ./build/compiler test-tier1-pipeline --cross-check
+          ./build/compiler test-tier1-model
+          ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
           == Test native fixed-frame CFI and generated GDB/perf consumers
           ./build/compiler test-unwind --cross-check
           == Test differential harness accounting, subprocesses and failure preservation
@@ -392,6 +413,10 @@ jobs:
           ./build/compiler test-dataflow
           == Test dominators, frontiers and natural loops
           ./build/compiler test-dominators
+          == Test local SSA construction and its memory interpreter
+          ./build/compiler test-ssa
+          == Test shared IR local promotion and typed-stream semantics
+          ./build/compiler test-ssa-ir
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           == Test fragment byte interleave and protected-page tails
@@ -593,6 +618,18 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-dataflow
 
+      - name: Benchmark local SSA construction on synthetic CFGs
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ssa
+          # Compare isolated execution and vector samples after warm scalar work across separate processes.
+          for repetition in 1 2 3; do
+              echo "SSA repetition $repetition"
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only scalar
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector --after-scalar 200
+          done
+
       - name: Benchmark the preprocessor fuzz harness
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -768,3 +805,23 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
+
+      - name: Benchmark the IR verifier and derived arrays
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir
+          taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
+
+      - name: Benchmark typed-stream lowering through IR verification
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
+          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
+
+      - name: Benchmark the verified Tier 1 optimization passes
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
