@@ -176,7 +176,8 @@
     X(CONVERTVECTOR, 0x313u, "__builtin_convertvector") \
     X(NONDETERMINISTIC_VALUE, 0x314u, "__builtin_nondeterministic_value") \
     X(NONTEMPORAL_LOAD, 0x315u, "__builtin_nontemporal_load") \
-    X(NONTEMPORAL_STORE, 0x316u, "__builtin_nontemporal_store")
+    X(NONTEMPORAL_STORE, 0x316u, "__builtin_nontemporal_store") \
+    X(BIT_CAST, 0x317u, "__builtin_bit_cast")
 
 typedef enum CBuiltinId
 {

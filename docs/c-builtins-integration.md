@@ -222,6 +222,34 @@ ICE eligibility; `runtime_value` separately carries the real bound or fallback
 become a static initializer or an evaluated ICE. Mode conversion to `int`
 precedes the 0..3 range check, while original ICE provenance remains required.
 
+## Type-first bit casts
+
+`c_check_builtin_bit_cast.c` checks the separately parsed destination type and
+one raw value operand. It preserves the source type without array/function
+decay, atomic loading or half promotion. Complete, equally sized, trivially
+copyable C object types are required; valid aggregate, vector and complex
+types retain explicit payload/runtime gaps when this representation model
+cannot carry them. The one operand's evaluation and effects remain visible.
+
+Known representation bytes do not establish source constant proof. The
+producer supplies that proof separately as NONE, CONSTANT or ICE, and optional
+bounded object-representation bytes must match the exact type size. Integer
+bits are reinterpreted without numeric conversion. Raw floating results stay
+in the result's byte payload; the checker never reads or constructs a host
+floating value, including for signaling NaNs. A representation-aware consumer
+can use proven bytes while retaining the explicit CheckValue payload gap.
+Wider, padding-sensitive and invalid-representation cases remain explicit;
+missing runtime lowering does not by itself make otherwise valid source types
+incompatible. The existing generated `bit_cast` parser-gap row remains a gap
+in ordinary prototype decoding, independent of this type-first action.
+
+Qualified array destination spellings can collapse into one canonical TypeId
+while Clang retains different result qualifiers. Those cases report the
+explicit `RESULT_TYPE` gap and an unknown result TypeId (zero), retaining
+`representation_type` for object constraints. Consumers must check the gap
+before using the result type. Unqualified arrays and scalar half types do
+not have that ambiguity.
+
 ## Floating checking
 
 `c_check_builtin_float.c` retains the declared real format and constructs
@@ -486,6 +514,7 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-tier0-variadic-frame
 ./build/compiler test-check-builtins-misc
 ./build/compiler test-check-builtins-query
+./build/compiler test-check-builtins-bit-cast
 ./build/compiler test-check-builtins-float
 ./build/compiler test-builtin-misc-lowering
 ./build/compiler test-builtin-float-lowering

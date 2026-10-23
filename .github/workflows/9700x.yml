@@ -360,6 +360,7 @@ jobs:
           ./build/compiler test-check-builtins-misc
           ./build/compiler test-check-builtins-float
           ./build/compiler test-check-builtins-query
+          ./build/compiler test-check-builtins-bit-cast
           ./build/compiler test-builtin-misc-lowering
           ./build/compiler test-builtin-float-lowering
           ./build/compiler test-builtin-terminal-helpers
