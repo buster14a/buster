@@ -148,6 +148,9 @@ jobs:
           # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
           # and runs them.
           ./build/compiler test-object-writer --cross-check
+          == Test DWARF source lines and late address finalization
+          # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
+          ./build/compiler test-debug --cross-check
           == Test the preprocessor on the repository's translation units against clang
           # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
           # tokens. -target and its triple (clang's default) go to both.
@@ -386,6 +389,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-object-writer
+
+      - name: Benchmark DWARF validation, sizing, emission and final addresses
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-debug
 
       - name: Benchmark the import path
         run: |

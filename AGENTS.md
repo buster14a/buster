@@ -376,6 +376,14 @@ designs and the compilers already built this way.
   included by `dynamic_test.c`, checks high library indices, foreign imports,
   malformed metadata and exact/vector identity at 1/2/3/8 lanes. Missing import
   version definitions are refused in the existing symbol pass before output.
+- `src/buster/compiler/debug.c` emits bounded DWARF 5 function names, ranges
+  and source lines with scalar/vector twins and explicit late address slots.
+  `ExecutableOptions.debug` attaches one contribution at final TEXT addresses,
+  with nonallocated debug sections and a regular function symbol table.
+  `test-debug --cross-check` checks original fixtures with readelf, GDB and
+  perf; `benchmark-debug` measures validation through address finalization.
+  [The debug guide](docs/debug.md) records the contract and the Tier 0 frame
+  events, source-row production and streaming integration still pending.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
   part, and step 6's for the other kinds): what `runtime_import` (or
   `runtime_import_static`, `runtime_import_static_pie` or
