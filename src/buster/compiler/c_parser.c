@@ -1298,6 +1298,10 @@ struct ParseFrame
     uint8_t comma_role;
     // The asm statement's volatile, inline and goto qualifiers, checked before its `(`.
     uint8_t asm_qualifiers;
+#if BUSTER_PARSE_FRAGMENT_SINK
+    // Attribute arguments may contain nested C groups even though the experiment retains all attribute syntax.
+    bool fragment_attribute;
+#endif
 };
 
 // What a name is bound as: an ordinary identifier or a typedef name, and for a K&R identifier list's names, which are
@@ -1470,6 +1474,12 @@ BUSTER_INLINE void parse_scalar_error(ParseScalar* parser, uint32_t token, uint8
 // `argument` is the token the message names, or BUSTER_PARSE_NONE.
 static void parse_scalar_note(ParseScalar* parser, uint32_t token, uint8_t message, uint32_t argument, bool error)
 {
+#if BUSTER_PARSE_FRAGMENT_SINK
+    if (error && parser->fragments != 0)
+    {
+        parser->fragments->syntax_error = true;
+    }
+#endif
     if (parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
@@ -1621,6 +1631,9 @@ BUSTER_INLINE ParseFrame* parse_scalar_push(ParseScalar* parser, uint32_t opener
     const bool commas = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_FOR;
     parser->frame_count += 1;
     *frame = (ParseFrame){
+#if BUSTER_PARSE_FRAGMENT_SINK
+        .fragment_attribute = parent->fragment_attribute || (parent->flags & BUSTER_PARSE_FRAME_ATTRIBUTE) != 0,
+#endif
         .opener = opener,
         .scope = scope ? parser->log_count : BUSTER_PARSE_NONE,
         .flags = parent->flags & BUSTER_PARSE_FRAME_INHERITED,
@@ -3995,7 +4008,8 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
         const bool declaration_comma = kind == PARSE_KIND_COMMA && ((frame->flags & BUSTER_PARSE_FRAME_DECLARATION) || frame->role == PARSE_ROLE_OPEN_ENUM) && !keyword_boundary;
         const bool assertion_comma = kind == PARSE_KIND_COMMA && frame->role == PARSE_ROLE_OPEN_KEYWORD && frame->keyword == PARSE_KIND_STATIC_ASSERT;
         step.expression = (expression_mode || keyword_expression || keyword_boundary || initializer_item) &&
-                          (frame->flags & (BUSTER_PARSE_FRAME_ATTRIBUTE | BUSTER_PARSE_FRAME_ASM)) == 0 && !unspecified_array && !declaration_comma && !assertion_comma;
+                          !frame->fragment_attribute && (frame->flags & (BUSTER_PARSE_FRAME_ATTRIBUTE | BUSTER_PARSE_FRAME_ASM)) == 0 &&
+                          !unspecified_array && !declaration_comma && !assertion_comma;
         step.fragment_context = frame->opener;
         step.fragment_context_role = frame->role;
 #endif

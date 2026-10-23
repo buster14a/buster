@@ -253,7 +253,7 @@ static bool c_fragment_test_source(const CFragmentSink* sink, const CFragmentTes
     return result;
 }
 
-static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* sink, Arena* arena, uint64_t* nodes, uint64_t* events)
+static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* sink, const CFragmentCoverage* coverage, Arena* arena, uint64_t* nodes, uint64_t* events)
 {
     const uint32_t count = sink->token_count;
     const uint64_t slots = 2 * (uint64_t)count + 4;
@@ -270,14 +270,21 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
     uint32_t* sorted = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * slots);
     uint32_t* normalized_parents = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1);
     result &= stack != 0 && scalar != 0 && vector != 0 && scalar_ids != 0 && vector_ids != 0 && work != 0 && actual != 0 && expected != 0 && sorted != 0 && normalized_parents != 0;
+    result = result && sink->expression_count == coverage->roots && c_fragment_test_root_controls(coverage, count);
     for (uint32_t e = 0; result && e < sink->expression_count; e += 1)
     {
         const CFragmentHandle* handle = &sink->expressions[e].handle;
         result = c_fragment_read(&sink->store, handle, scalar, scalar_ids, (uint32_t)slots, false) &&
                  c_fragment_read(&sink->store, handle, vector, vector_ids, (uint32_t)slots, true);
         result = result && memcmp(scalar, vector, handle->positions) == 0 && memcmp(scalar_ids, vector_ids, (uint64_t)handle->positions * sizeof(uint32_t)) == 0;
-        uint32_t root;
+        uint32_t root = BUSTER_C_FRAGMENT_NONE;
         result = result && c_fragment_test_decode(sink, scalar, scalar_ids, handle->positions, &tree, stack, &root);
+        if (result && !c_fragment_coverage_root_matches(coverage, count, root, sink->expressions[e].root))
+        {
+            fprintf(stderr, "fragment publication: decoded root %u expected raw boundary %u actual %u\n",
+                    root, root < count ? coverage->nodes[root].boundary : BUSTER_C_FRAGMENT_NONE, sink->expressions[e].root);
+            result = false;
+        }
         result = result && c_fragment_test_source(sink, &tree, root, scalar_ids, handle->positions, work, actual, expected, sorted, events);
         if (!result)
         {
@@ -292,11 +299,11 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
         {
             uint32_t parent = parser->tree.parents[token];
             uint32_t depth = 0;
-            while (parent < count && (sink->syntax[parent].transparent || sink->syntax[parent].bridge))
+            while (parent < count && (coverage->nodes[parent].transparent || coverage->nodes[parent].bridge))
             {
                 // An omitted-'=' designator's index is a separate expression. Only its later RHS child bypasses
                 // the raw closer, which forwards that handle at the live reduction. This is source-side specific.
-                if (sink->syntax[parent].bridge && token < parent)
+                if (coverage->nodes[parent].bridge && token < parent)
                 {
                     parent = count;
                     break;
@@ -310,11 +317,11 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
                 depth += 1;
                 parent = parser->tree.parents[parent];
             }
-            if (parent < count && sink->syntax[parent].emitted)
+            if (parent < count && coverage->nodes[parent].kind != C_FRAGMENT_KIND_COUNT)
             {
                 // An opaque zero-arity reference keeps its full raw subtree for the consumer. Expressions inside
                 // that type/designator/block publish separately; they are not children of the reference leaf.
-                const bool opaque = sink->syntax[parent].type_root != BUSTER_C_FRAGMENT_NONE && c_fragment_arities[sink->kinds[parent]] == 0;
+                const bool opaque = c_fragment_coverage_opaque(&coverage->nodes[parent]);
                 parent = opaque ? count : parent;
             }
             else
@@ -344,7 +351,7 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
         for (uint32_t k = count; result && k != 0; k -= 1)
         {
             const uint32_t token = parser->postorder[k - 1];
-            if (sink->syntax[token].emitted)
+            if (coverage->nodes[token].kind != C_FRAGMENT_KIND_COUNT)
             {
                 const uint32_t parent = normalized_parents[token];
                 normalized_roots[token] = parent < count ? normalized_roots[parent] : token;
@@ -355,7 +362,7 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
         for (uint32_t k = 0; result && k < count; k += 1)
         {
             const uint32_t token = parser->postorder[k];
-            const bool emitted = sink->syntax[token].emitted;
+            const bool emitted = coverage->nodes[token].kind != C_FRAGMENT_KIND_COUNT;
             result = tree.seen[token] == emitted;
             if (result && emitted)
             {
@@ -500,6 +507,7 @@ static uint32_t c_fragment_test_file(const char* path, const PPOptions* options,
                 {
                     uint64_t nodes = 0;
                     uint64_t events = 0;
+                    CFragmentCoverage coverage = { 0 };
                     if (!sink.store.valid || sink.unsupported != 0)
                     {
                         const uint32_t token = sink.first_unsupported;
@@ -508,9 +516,9 @@ static uint32_t c_fragment_test_file(const char* path, const PPOptions* options,
                         c_fragment_test_failure_context(&parser, &pp, token);
                     }
                     good = good && sink.store.valid && !sink.syntax_error && sink.unsupported == 0;
-                    good = good && c_fragment_test_coverage(&parser, &sink, &arena);
+                    good = good && c_fragment_test_coverage(&parser, &sink, &arena, &coverage);
                     good = good && c_fragment_test_coverage_fixture(&parser, &sink, fixture);
-                    good = good && c_fragment_test_oracle(&parser, &sink, &arena, &nodes, &events);
+                    good = good && c_fragment_test_oracle(&parser, &sink, &coverage, &arena, &nodes, &events);
                     if (good)
                     {
                         totals[candidate].nodes += nodes;
@@ -577,6 +585,7 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
         "const char *a[]={ [0] \"a\" \"b\" \"c\" };\n",
         "int f(int x,int y) { int a[]={ [(((0)))] (((x+y))) }; return a[0]; }\n",
         "int f(int x) { return (int)(x); }\n",
+        "int f(int x) { (x+1); (x+1); return x; }\n",
     };
     static const char* const invalid[] = {
         "int f(void) { return +; }\n",
@@ -704,6 +713,25 @@ static void c_fragment_test_print_totals(const char* dataset, const CFragmentTes
     }
 }
 
+// Corpus acceptance uses explicit files, so directory traversal cannot silently omit unreadable entries.
+static bool c_fragment_test_add_file(const char* path, char** files, uint32_t* count, uint32_t capacity)
+{
+    struct stat status;
+    bool result = *count < capacity && stat(path, &status) == 0 && S_ISREG(status.st_mode);
+    char* copy = result ? strdup(path) : 0;
+    result &= copy != 0;
+    if (result)
+    {
+        files[*count] = copy;
+        *count += 1;
+    }
+    else
+    {
+        fprintf(stderr, "test-fragments: expected an accessible regular file with available input capacity: %s\n", path);
+    }
+    return result;
+}
+
 static int run_fragment_tests(int argument_count, char** arguments)
 {
     uint32_t failures = c_fragment_store_tests();
@@ -737,13 +765,7 @@ static int run_fragment_tests(int argument_count, char** arguments)
                 path[length] = 0;
                 if (valid && length != 0)
                 {
-                    const uint32_t before = file_count;
-                    file_count = parse_test_collect(path, files, file_count, 1u << 20);
-                    valid = file_count > before && file_count < (1u << 20);
-                    if (!valid)
-                    {
-                        fprintf(stderr, "test-fragments: requested corpus path failed or capacity exhausted: %s\n", path);
-                    }
+                    valid = c_fragment_test_add_file(path, files, &file_count, 1u << 20);
                 }
             }
             if (list != 0)
@@ -755,13 +777,7 @@ static int run_fragment_tests(int argument_count, char** arguments)
         }
         else if (argument[0] != '-')
         {
-            const uint32_t before = file_count;
-            file_count = parse_test_collect(argument, files, file_count, 1u << 20);
-            valid = file_count > before && file_count < (1u << 20);
-            if (!valid)
-            {
-                fprintf(stderr, "test-fragments: requested corpus path failed or capacity exhausted: %s\n", argument);
-            }
+            valid = c_fragment_test_add_file(argument, files, &file_count, 1u << 20);
         }
         else
         {
@@ -807,7 +823,7 @@ static int run_fragment_tests(int argument_count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: test-fragments [--no-fixtures] [--files-from FILE] [-E options] [file or directory...]\n");
+        fprintf(stderr, "usage: test-fragments [--no-fixtures] [--files-from FILE] [-E options] [file...]\n");
         failures += 1;
     }
     if (fixtures)

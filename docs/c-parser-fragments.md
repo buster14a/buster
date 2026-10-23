@@ -58,7 +58,16 @@ Fixed-arity kinds describe ordinary expressions; variable lists have an
 explicit end marker. Grouping nodes are transparent. Type-name and
 statement-expression syntax remains available through parser-subtree handles.
 The test representation retains cold syntax metadata so that stripping or
-mapping punctuation can be checked exactly.
+mapping punctuation can be checked exactly. Attribute token trees remain with
+their declarations in ordinary postorder, including nested attribute arguments.
+Implicit-int declarator grouping in C89 is declaration syntax, not an expression.
+
+Each published expression records the exact raw completed subtree immediately
+below its publication boundary, including transparent grouping. The forced
+GNU index publication uses the raw child below its designator bracket. A
+separate ordinary-tree walk derives these attachment points; the decoder must
+match both the expression contents and the attachment. Negative controls reject
+unrelated roots, lower grouping aliases and swapped roots of the same kind.
 
 GNU `member: value` has a distinct field-initializer kind, retaining the member
 name and colon identities. For accepted `[index] value` syntax with an omitted
@@ -120,8 +129,10 @@ mode, accepted/rejected expectation and exact first diagnostic. Dedicated
 fixtures, parser snippets and requested corpus inputs have separate totals.
 Every source runs with 16-, 32- and 48-byte operator payloads. Corpus inputs use
 the preprocessor's normal options; additional preprocessing flags may be
-passed on the command line. Missing input paths, empty requested file lists,
-overlong list lines and exhausted input capacity fail the command.
+passed on the command line. Corpus paths must name regular files, directly or
+through an explicit file list; directories are rejected so traversal cannot
+silently omit inputs. Missing paths, empty requested lists, overlong list lines
+and exhausted input capacity fail the command.
 
 The fragment run compares the instrumented scalar parser's roles, depths,
 parents and diagnostics with the ordinary parser's output. The decoded

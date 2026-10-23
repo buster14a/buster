@@ -554,6 +554,7 @@ struct CFragmentSyntax
 {
     CFragmentHandle children;
     uint32_t child_count;
+    uint32_t child_root;
     uint32_t first;
     uint32_t last;
     uint32_t group;
@@ -576,6 +577,8 @@ typedef struct CFragmentExpression CFragmentExpression;
 struct CFragmentExpression
 {
     CFragmentHandle handle;
+    // The raw completed subtree immediately below its publication boundary, including any transparent closer.
+    // GNU's forced index publication uses the raw child immediately below the designator bridge.
     uint32_t root;
 };
 
@@ -615,6 +618,7 @@ static bool c_fragment_sink_initialize(CFragmentSink* sink, Arena* arena, const 
         {
             sink->syntax[k] = (CFragmentSyntax){
                 .children = c_fragment_empty(),
+                .child_root = BUSTER_C_FRAGMENT_NONE,
                 .first = k,
                 .last = k,
                 .group = BUSTER_C_FRAGMENT_NONE,
@@ -850,17 +854,13 @@ static void c_fragment_sink_implicit_initializer(CFragmentSink* sink, uint32_t t
             CFragmentSyntax* node = &sink->syntax[token];
             valid = !node->reduced && !node->bridge && node->group < token && node->role == PARSE_ROLE_CLOSE_SUBSCRIPT &&
                     node->child_count == 1 && node->children.positions != 0;
-            uint32_t root = node->children.leaf;
-            if (valid && node->children.head != BUSTER_C_FRAGMENT_NONE)
-            {
-                valid = c_fragment_record_valid(&sink->store, node->children.head);
-                root = valid ? c_fragment_identities(&sink->store, node->children.head)[0] : BUSTER_C_FRAGMENT_NONE;
-            }
-            valid &= root > node->group && root < token;
+            const uint32_t root = node->child_root;
+            valid = valid && root > node->group && root < token && sink->syntax[root].reduced && sink->syntax[root].parent == token;
             if (valid)
             {
                 c_fragment_sink_publish(sink, root, &node->children);
                 node->child_count = 0;
+                node->child_root = BUSTER_C_FRAGMENT_NONE;
                 node->first = token;
                 node->last = token;
                 node->bridge = true;
@@ -907,6 +907,7 @@ static void c_fragment_sink_attach(CFragmentSink* sink, uint32_t child, uint32_t
     {
         sink->store.valid = false;
     }
+    target->child_root = target->child_count == 0 ? child : BUSTER_C_FRAGMENT_NONE;
     target->child_count += 1;
 }
 
@@ -966,6 +967,7 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
         sink->kinds[token] = kind;
         CFragmentHandle handle = node->children;
         node->children = c_fragment_empty();
+        node->child_root = BUSTER_C_FRAGMENT_NONE;
         if (kind < C_FRAGMENT_KIND_COUNT)
         {
             const uint8_t arity = c_fragment_arities[kind];

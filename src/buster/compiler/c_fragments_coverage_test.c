@@ -36,12 +36,27 @@ struct CFragmentCoverageNode
     uint32_t auxiliary;
     uint32_t type_root;
     uint32_t children;
+    uint32_t canonical;
+    uint32_t boundary;
     uint8_t context;
     uint8_t kind;
     bool transparent;
     bool bridge;
     bool visited;
 };
+
+typedef struct CFragmentCoverage CFragmentCoverage;
+struct CFragmentCoverage
+{
+    CFragmentCoverageNode* nodes;
+    uint32_t roots;
+};
+
+static bool c_fragment_coverage_opaque(const CFragmentCoverageNode* node)
+{
+    return node->kind == C_FRAGMENT_TYPE_NAME || node->kind == C_FRAGMENT_TYPE_DEFAULT ||
+           node->kind == C_FRAGMENT_DESIGNATOR || node->kind == C_FRAGMENT_STATEMENT_EXPRESSION;
+}
 
 static bool c_fragment_coverage_type(uint8_t role)
 {
@@ -125,8 +140,9 @@ static uint8_t c_fragment_coverage_operator(uint8_t role, uint8_t kind, IdentId 
     return result;
 }
 
-static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* sink, Arena* arena)
+static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* sink, Arena* arena, CFragmentCoverage* coverage)
 {
+    *coverage = (CFragmentCoverage){ 0 };
     const uint32_t count = parser->tokens.count;
     CFragmentCoverageNode* nodes = BUSTER_ARENA_PUSH_ARRAY(arena, CFragmentCoverageNode, (uint64_t)count + 1);
     bool result = nodes != 0 && count != UINT32_MAX && count == sink->token_count && parser->postorder != 0;
@@ -146,6 +162,8 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
                 .source = k,
                 .auxiliary = BUSTER_C_FRAGMENT_NONE,
                 .type_root = BUSTER_C_FRAGMENT_NONE,
+                .canonical = BUSTER_C_FRAGMENT_NONE,
+                .boundary = BUSTER_C_FRAGMENT_NONE,
                 .context = C_FRAGMENT_COVER_UNSET,
                 .kind = C_FRAGMENT_KIND_COUNT,
             };
@@ -329,7 +347,9 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
             }
             else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
             {
-                left = middle = right = C_FRAGMENT_COVER_ITEM;
+                // File scope contains declarations, including C89 implicit-int forms such as `(x);`. The same
+                // grouped spelling inside a function is an expression. Group nesting, not sink flags, distinguishes it.
+                left = middle = right = role == PARSE_ROLE_TERMINATOR && node->enclosing == count ? C_FRAGMENT_COVER_DECLARATION : C_FRAGMENT_COVER_ITEM;
             }
             else if (role == PARSE_ROLE_LABEL)
             {
@@ -555,6 +575,7 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
         CFragmentCoverageNode* node = &nodes[token];
         uint32_t children = 0;
         uint32_t indices = 0;
+        uint32_t forwarded = BUSTER_C_FRAGMENT_NONE;
         for (uint32_t child = node->first; child != BUSTER_C_FRAGMENT_NONE; child = nodes[child].next)
         {
             const uint32_t add = nodes[child].kind != C_FRAGMENT_KIND_COUNT ? 1 :
@@ -568,6 +589,11 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
             {
                 result &= children <= count - add;
                 children += add;
+                if (add != 0)
+                {
+                    forwarded = nodes[child].canonical;
+                    result &= forwarded < count;
+                }
             }
         }
         node->children = children;
@@ -589,6 +615,7 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
         }
         const CFragmentSyntax* actual = &sink->syntax[token];
         const bool emitted = node->kind != C_FRAGMENT_KIND_COUNT;
+        node->canonical = emitted ? token : (node->transparent || node->bridge) && children == 1 ? forwarded : BUSTER_C_FRAGMENT_NONE;
         result &= node->visited && (!node->transparent || children == 1) && (!node->bridge || (indices == 1 && children <= 1)) &&
                   actual->emitted == emitted && actual->transparent == node->transparent && actual->bridge == node->bridge;
         if (result && emitted)
@@ -604,10 +631,90 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
                     token, node->kind, sink->kinds[token], emitted, actual->emitted, node->transparent, actual->transparent, node->bridge, actual->bridge);
         }
     }
+    // A descriptor names the exact raw attachment boundary, not an arbitrary transparent alias of its payload
+    // root. Compute those boundaries from ordinary edges and the independently classified nodes. Opaque references
+    // retain their inner syntax separately; the index side of an omitted-'=' bridge is its own publication boundary.
+    uint32_t roots = 0;
+    for (uint32_t token = 0; result && token < count; token += 1)
+    {
+        const uint32_t canonical = nodes[token].canonical;
+        const uint32_t parent = parser->tree.parents[token];
+        const bool index = parent < count && nodes[parent].bridge && token < parent;
+        const bool receiver = parent < count && !index &&
+                              ((nodes[parent].kind != C_FRAGMENT_KIND_COUNT && !c_fragment_coverage_opaque(&nodes[parent])) ||
+                               nodes[parent].transparent || nodes[parent].bridge);
+        if (canonical < count && !receiver)
+        {
+            result = nodes[canonical].boundary == BUSTER_C_FRAGMENT_NONE;
+            if (result)
+            {
+                nodes[canonical].boundary = token;
+                roots += 1;
+            }
+            else
+            {
+                failed = token;
+                reason = "duplicate ordinary publication boundary";
+            }
+        }
+    }
+    if (result)
+    {
+        *coverage = (CFragmentCoverage){
+            .nodes = nodes,
+            .roots = roots,
+        };
+    }
     if (!result)
     {
         fprintf(stderr, "fragment coverage: %s at token %u role=%s\n", reason, failed,
                 failed < count && parser->tree.roles[failed] < PARSE_ROLE_COUNT ? parse_role_names[parser->tree.roles[failed]] : "none");
+    }
+    return result;
+}
+
+static bool c_fragment_coverage_root_matches(const CFragmentCoverage* coverage, uint32_t count, uint32_t decoded, uint32_t raw)
+{
+    return decoded < count && raw < count && coverage->nodes[decoded].kind != C_FRAGMENT_KIND_COUNT && coverage->nodes[decoded].boundary == raw;
+}
+
+static bool c_fragment_test_root_controls(const CFragmentCoverage* coverage, uint32_t count)
+{
+    uint32_t previous[C_FRAGMENT_KIND_COUNT];
+    memset(previous, 0xff, sizeof(previous));
+    bool result = true;
+    for (uint32_t token = 0; result && token < count; token += 1)
+    {
+        const CFragmentCoverageNode* node = &coverage->nodes[token];
+        const uint32_t boundary = node->boundary;
+        if (boundary != BUSTER_C_FRAGMENT_NONE)
+        {
+            result = c_fragment_coverage_root_matches(coverage, count, token, boundary) &&
+                     !c_fragment_coverage_root_matches(coverage, count, token, count) && !c_fragment_coverage_root_matches(coverage, count, count, boundary);
+            if (result && count > 1)
+            {
+                const uint32_t unrelated = boundary == 0 ? 1 : 0;
+                result = !c_fragment_coverage_root_matches(coverage, count, token, unrelated);
+            }
+            if (result)
+            {
+                const uint32_t other = previous[node->kind];
+                if (other != BUSTER_C_FRAGMENT_NONE)
+                {
+                    // Same-kind roots can have identical payload shapes and different source associations. Swapping
+                    // their anchors must fail even though either anchor is a valid boundary elsewhere in the file.
+                    result = !c_fragment_coverage_root_matches(coverage, count, token, coverage->nodes[other].boundary) &&
+                             !c_fragment_coverage_root_matches(coverage, count, other, boundary);
+                }
+                previous[node->kind] = token;
+            }
+        }
+        const uint32_t canonical = node->canonical;
+        if (result && canonical < count && coverage->nodes[canonical].boundary != BUSTER_C_FRAGMENT_NONE && coverage->nodes[canonical].boundary != token)
+        {
+            // This includes the emitted root and every lower transparent/bridge alias below its exact raw boundary.
+            result = !c_fragment_coverage_root_matches(coverage, count, canonical, token);
+        }
     }
     return result;
 }
@@ -917,6 +1024,15 @@ static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_31[] = {
     BUSTER_FRAGMENT_EXPECT_TYPE(10, CAST, 8, 9),
     BUSTER_FRAGMENT_EXPECT(12, IDENTIFIER),
 };
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_32[] = {
+    BUSTER_FRAGMENT_EXPECT(8, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(9, ADD),
+    BUSTER_FRAGMENT_EXPECT(10, NUMBER),
+    BUSTER_FRAGMENT_EXPECT(14, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(15, ADD),
+    BUSTER_FRAGMENT_EXPECT(16, NUMBER),
+    BUSTER_FRAGMENT_EXPECT(20, IDENTIFIER),
+};
 
 #undef BUSTER_FRAGMENT_EXPECT
 #undef BUSTER_FRAGMENT_EXPECT_GROUP
@@ -1004,6 +1120,7 @@ static bool c_fragment_test_coverage_fixture(const Parser* parser, const CFragme
         BUSTER_FRAGMENT_FIXTURE(29),
         BUSTER_FRAGMENT_FIXTURE(30),
         BUSTER_FRAGMENT_FIXTURE(31),
+        BUSTER_FRAGMENT_FIXTURE(32),
 #undef BUSTER_FRAGMENT_FIXTURE
     };
     bool result = true;
