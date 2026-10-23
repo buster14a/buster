@@ -35,6 +35,32 @@ static void check_test_environment_queries(CheckTest* test, const CheckEnvironme
     }
     check_test_expect(test, name != 0 && environment.body_count == fixture->body_count && fixture->body_count <= 2,
                       "production environment identifier/body count");
+    // Pin real activation positions independently of the event's point: after the whole declarator, before its
+    // initializer; after a tag name; after the fixed A=1 enumerator definition in the macro fixture.
+    for (uint32_t event = 0; occurrence_count != 0 && event < environment.bindings->count; event += 1)
+    {
+        const CBindings* bindings = environment.bindings;
+        if (bindings->operation[event] == C_BINDING_DECLARE && bindings->depth[event] == 0 && bindings->declaration[event] == occurrences[0] &&
+            bindings->key[event] == (uint32_t)fixture->space * bindings->name_capacity + name)
+        {
+            const uint32_t declaration = occurrences[0];
+            uint32_t point = declaration + 1;
+            const TypeId type = environment.declaration_types[declaration];
+            const uint8_t kind = type_kind(types, type);
+            if (fixture->space == C_BINDING_ORDINARY && (kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind)))
+            {
+                point = parser->tree.parents[declaration + 1] + 1;
+            }
+            else if (bindings->kind[event] == C_BINDING_ENUMERATOR)
+            {
+                point = declaration + 3;
+            }
+            check_test_expect(test, bindings->point[event] == point &&
+                                   c_environment_lookup(&environment.file, fixture->space, name, point - 1) == 0 &&
+                                   c_environment_lookup(&environment.file, fixture->space, name, point) == event + 1,
+                              "production declaration activated before/after its C declaration point");
+        }
+    }
     uint32_t keys[5];
     uint32_t points[5];
     uint32_t expected[5];
@@ -368,6 +394,17 @@ static void check_test_environments(CheckTest* test)
             },
             .body_count = 2,
             .history_types = true,
+        },
+        {
+            .source = "int x=sizeof x; int f(void) { return x; }\n",
+            .name = "x",
+            .declarations =
+            {
+                0,
+                0,
+                0,
+            },
+            .body_count = 1,
         },
         {
             .source = "extern int a[]; int before(void) { return a[0]; } extern int a[7]; int after(void) { return a[6]; }\n",
