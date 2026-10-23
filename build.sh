@@ -14,7 +14,7 @@
 # src/buster/compiler/c_lexer_variant.c into c_lexer_variant_NAME), or that file's assembly (.s), which
 # ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s writes with debug information, and label-spills may label.
 set -e
-sources=(src/buster/compiler/main.c src/buster/compiler/main_unit_x86.c src/buster/compiler/main_unit_frontend.c src/buster/compiler/main_unit_assembler.c src/buster/compiler/main_unit_link.c src/buster/compiler/main_unit_executable.c src/buster/compiler/main_unit_dynamic.c src/buster/compiler/main_unit_types.c src/buster/compiler/main_unit_backend.c src/buster/compiler/c_lexer_benchmark.c src/buster/compiler/x86_64_encoder_benchmark.c src/buster/compiler/lane_benchmark.c src/buster/compiler/dataflow_benchmark.c src/buster/compiler/object_writer_benchmark.c src/buster/compiler/executable_benchmark.c src/buster/compiler/import_benchmark.c src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/bind_benchmark.c src/buster/compiler/c_refine_benchmark.c src/buster/compiler/c_preprocessor_benchmark.c src/buster/compiler/c_files_benchmark.c src/buster/compiler/c_parser_benchmark.c src/buster/compiler/c_types_benchmark.c src/buster/compiler/c_builtin_benchmark.c src/buster/compiler/calling_convention_benchmark.c src/buster/compiler/snapshot_benchmark.c src/buster/compiler/link_benchmark.c src/buster/compiler/foreign_benchmark.c src/buster/compiler/floors_benchmark.c src/buster/compiler/x86_64_disassembler_benchmark.c src/buster/compiler/x86_semantics_benchmark.c src/buster/compiler/tier0_benchmark.c)
+sources=(src/buster/compiler/main.c src/buster/compiler/main_unit_x86.c src/buster/compiler/main_unit_frontend.c src/buster/compiler/main_unit_assembler.c src/buster/compiler/main_unit_link.c src/buster/compiler/main_unit_executable.c src/buster/compiler/main_unit_dynamic.c src/buster/compiler/main_unit_types.c src/buster/compiler/main_unit_backend.c src/buster/compiler/c_lexer_benchmark.c src/buster/compiler/x86_64_encoder_benchmark.c src/buster/compiler/lane_benchmark.c src/buster/compiler/dataflow_benchmark.c src/buster/compiler/dominators_benchmark.c src/buster/compiler/tier1_allocate_benchmark.c src/buster/compiler/object_writer_benchmark.c src/buster/compiler/executable_benchmark.c src/buster/compiler/import_benchmark.c src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/bind_benchmark.c src/buster/compiler/c_refine_benchmark.c src/buster/compiler/c_preprocessor_benchmark.c src/buster/compiler/c_files_benchmark.c src/buster/compiler/c_parser_benchmark.c src/buster/compiler/c_types_benchmark.c src/buster/compiler/c_builtin_benchmark.c src/buster/compiler/c_checker_benchmark.c src/buster/compiler/calling_convention_benchmark.c src/buster/compiler/tier1_frame_benchmark.c src/buster/compiler/snapshot_benchmark.c src/buster/compiler/link_benchmark.c src/buster/compiler/foreign_benchmark.c src/buster/compiler/floors_benchmark.c src/buster/compiler/x86_64_disassembler_benchmark.c src/buster/compiler/x86_semantics_benchmark.c src/buster/compiler/tier0_benchmark.c src/buster/compiler/tier1_schedule_benchmark.c)
 flags=(-march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror)
 optimization=-O3
 capture()
@@ -71,7 +71,25 @@ build_compiler()
     for i in "${!sources[@]}"; do
         cat "$object_directory/$i.json"
     done > build/compile_commands.json
-    clang "${linked[@]}" "$@" -o build/compiler
+    clang "${linker_flags[@]}" "${linked[@]}" "$@" -o build/compiler
+}
+# Choose the linker for build/compiler only; compilation and IR capture keep their existing flags.
+select_linker()
+{
+    local linker="${BUSTER_LINKER-auto}"
+    linker_flags=()
+    case "$linker" in
+        auto) linker="$(command -v wild || command -v mold || true)" ;;
+        system) linker="" ;;
+        lld|bfd) linker="ld.$linker" ;;
+        wild|mold|/*) ;;
+        *) echo "build.sh: BUSTER_LINKER must be auto, system, wild, mold, lld, bfd or an absolute path" >&2; return 1 ;;
+    esac
+    if [ -n "$linker" ]; then
+        linker="$(command -v "$linker")" && [ -f "$linker" ] && [ -x "$linker" ] || { echo "build.sh: requested linker is not an executable file on PATH or at the specified path" >&2; return 1; }
+        linker_flags=("--ld-path=$linker")
+    fi
+    echo "build.sh: stage 1 linker: ${linker:-system default}" >&2
 }
 defines=()
 if [ "$1" = check-call-graph ]; then
@@ -101,6 +119,7 @@ elif [ "$1" = lexer-variant-assembly ]; then
 elif [ "$1" = lexer-variant ]; then
     shift
     [ $# -ne 0 ] || { echo "usage: ./build.sh lexer-variant NAME=SOURCE..." >&2; exit 1; }
+    select_linker
     rm -rf build || true
     mkdir -p build
     variants=""
@@ -134,6 +153,7 @@ elif [ "$1" = lexer-variant ]; then
         rm -rf "$(dirname "$object")"
     done
 else
+    select_linker
     rm -rf build || true
     mkdir -p build
     build_compiler

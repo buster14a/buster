@@ -13,7 +13,7 @@
 // are records marked BUSTER_X86_FORM_FIXUP, which sizing leaves alone; it changes forms and lengths, never indices.
 //
 // Branch space. The rounds work on the branches alone. With every branch short, branch k (at record r_k, aiming at
-// record t_k) has the displacement D0_k = offset(t_k) - offset(r_k) - 2 that x86_encode's offsets give (the first
+// record t_k) has the displacement D0_k = offset(t_k) - offset(r_k) - 2 that x86_measure's offsets give (the first
 // round's lengths). With growths g (0 for a short branch, 3 or 4 for a long one) and P their exclusive prefix sums over
 // the branches, its displacement is D0_k + P[rank_k] - P[k + 1], where rank_k is the number of branches before record
 // t_k: the growth between its end and its target, which for a backward branch is negative and holds its own. So a round
@@ -46,7 +46,7 @@
 //   - Forms: the branches' rel8 forms (branch_sizing_forms), branch_sizing_growth and the rel8 range.
 //   - Columns: BranchSizingColumns and branch_sizing_allocate.
 //   - Validation: branch_sizing_check and branch_sizing_validate.
-//   - The phases, each a vector function and a scalar one: lengths (x86_encode's offsets: the first round), setup (D0,
+//   - The phases, each a vector function and a scalar one: lengths (x86_measure's offsets: the first round), setup (D0,
 //     each branch's growth if it's long, and the first round's growths), ranks (only when a branch grew), round, prefix,
 //     the worklist's marks (branch_sizing_mark_vector and branch_sizing_mark_scalar) and offsets; then the shared ones,
 //     branch_sizing_worklist (the rare cases) and branch_sizing_write (the records).
@@ -140,10 +140,6 @@ static __attribute__((unused)) BranchSizingCheck branch_sizing_validate(const X8
 #define BUSTER_BRANCH_SIZING_REACH 63
 // Dwords in a ZMM register: branches or records per vector operation.
 #define BUSTER_BRANCH_SIZING_LANES 16
-// Records per x86_encode call of the first round, whose bytes go into one scratch buffer and are dropped: 1,024
-// records' 15 KB stay in L1, where the whole function's could take megabytes of fresh pages. From 512 to 16,384 the
-// 9700X sizes functions as fast, and 256 is 2% to 3% slower on large ones.
-#define BUSTER_BRANCH_SIZING_CHUNK 1024
 // Rounds before the rare cases' path takes over (see the file's comment): the fewest that the benchmark's functions
 // shaped like compiled code never reach (they take at most 4), since every round before the worklist costs a chain a
 // pass over its branches. On the 9700X, 2 and 3 cost those functions 45% and 5% more in the rounds, and each round past 4
@@ -248,8 +244,6 @@ BUSTER_INLINE __mmask16 branch_sizing_lanes(uint64_t start, uint64_t count)
 typedef struct BranchSizingColumns BranchSizingColumns;
 struct BranchSizingColumns
 {
-    // The first round's bytes, BUSTER_BRANCH_SIZING_CHUNK records at a time.
-    uint8_t* encoded;
     // The vector path's map: a byte per record, up to a whole BUSTER_BRANCH_SIZING_MAP_RECORDS past the count, 1 for a
     // branch's.
     uint8_t* map;
@@ -285,21 +279,19 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
 {
     const uint64_t padded = ((branch_count + BUSTER_BRANCH_SIZING_LANES - 1) & ~(uint64_t)(BUSTER_BRANCH_SIZING_LANES - 1)) + BUSTER_BRANCH_SIZING_LANES;
     const uint64_t units = count / BUSTER_BRANCH_SIZING_MAP_RECORDS + 1;
-    const uint64_t encoded_bytes = branch_sizing_lines(BUSTER_X86_ENCODER_CAPACITY(BUSTER_BRANCH_SIZING_CHUNK), 1);
     const uint64_t map_bytes = vector ? branch_sizing_lines(units * BUSTER_BRANCH_SIZING_MAP_RECORDS, 1) : 0;
     const uint64_t ranks_bytes = branch_sizing_lines(units * (BUSTER_BRANCH_SIZING_MAP_RECORDS / BUSTER_BRANCH_SIZING_RANK_RECORDS), sizeof(uint64_t));
     const uint64_t column_bytes = branch_sizing_lines(padded, sizeof(uint32_t));
     const uint64_t prefix_bytes = branch_sizing_lines(padded + BUSTER_BRANCH_SIZING_LANES, sizeof(uint32_t));
     const uint64_t dirty_bytes = branch_sizing_lines(branch_count / 64 + 2, sizeof(uint64_t));
-    uint8_t* base = arena_push(arena, encoded_bytes + map_bytes + ranks_bytes + 5 * column_bytes + 2 * prefix_bytes + dirty_bytes, 64);
+    uint8_t* base = arena_push(arena, map_bytes + ranks_bytes + 5 * column_bytes + 2 * prefix_bytes + dirty_bytes, 64);
     BranchSizingColumns result = {
         .valid = base != 0,
     };
     if (base != 0)
     {
-        result.encoded = base;
-        result.map = vector ? base + encoded_bytes : 0;
-        uint8_t* columns = base + encoded_bytes + map_bytes;
+        result.map = vector ? base : 0;
+        uint8_t* columns = base + map_bytes;
         result.ranks = (uint64_t*)columns;
         columns += ranks_bytes;
         result.grow = (uint32_t*)columns;
@@ -369,38 +361,13 @@ static BranchSizingCheck branch_sizing_validate(const X86Instruction* records, u
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Lengths: the first round's offsets, x86_encode's, BUSTER_BRANCH_SIZING_CHUNK records at a time into one buffer, each
-// chunk's moved by the bytes before it. Returns the function's length with every branch short.
+// Lengths: the first round's offsets, directly from the encoder's length rules, without assembling discarded bytes
+// or rebasing chunks. The driver has already checked the count; records and offsets are disjoint bounded slices.
+// The scalar twin derives its lengths independently by encoding one record at a time into a local buffer.
 
-static uint64_t branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, uint8_t* encoded, bool vector)
+static uint64_t branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, bool vector)
 {
-    uint64_t result = 0;
-    for (uint64_t start = 0; start < count; start += BUSTER_BRANCH_SIZING_CHUNK)
-    {
-        const uint64_t chunk = count - start < BUSTER_BRANCH_SIZING_CHUNK ? count - start : BUSTER_BRANCH_SIZING_CHUNK;
-        // It can't fail: the chunk is below the count's limit and the buffer has the chunk's capacity.
-        const uint64_t length = (uint64_t)x86_encode(records + start, chunk, encoded, BUSTER_X86_ENCODER_CAPACITY(BUSTER_BRANCH_SIZING_CHUNK), offsets + start, 0);
-        // The first chunk's offsets are the function's; the others move by the bytes before them.
-        if (start != 0 && vector)
-        {
-            const __m512i base = _mm512_set1_epi32((int32_t)result);
-            for (uint64_t i = 0; i < chunk; i += BUSTER_BRANCH_SIZING_LANES)
-            {
-                const __mmask16 lanes = branch_sizing_lanes(i, chunk);
-                const __m512i offset = _mm512_maskz_loadu_epi32(lanes, offsets + start + i);
-                _mm512_mask_storeu_epi32(offsets + start + i, lanes, _mm512_add_epi32(offset, base));
-            }
-        }
-        else if (start != 0)
-        {
-            for (uint64_t i = 0; i < chunk; i += 1)
-            {
-                offsets[start + i] += (uint32_t)result;
-            }
-        }
-        result += length;
-    }
-    return result;
+    return (uint64_t)(vector ? x86_measure(records, count, offsets) : x86_measure_scalar(records, count, offsets));
 }
 
 // Whether a function of `length` bytes with every branch short could pass INT32_MAX bytes with every branch long.
@@ -896,7 +863,7 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
         }
         else
         {
-            length = branch_sizing_lengths(records, count, offsets, columns.encoded, vector);
+            length = branch_sizing_lengths(records, count, offsets, vector);
             result.error = branch_sizing_too_large(length, branch_count) ? BRANCH_SIZING_ERROR_TOO_LARGE : BRANCH_SIZING_OK;
         }
         if (result.error == BRANCH_SIZING_OK)

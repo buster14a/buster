@@ -1,0 +1,23 @@
+Command: SOURCE_DATE_EPOCH=1792454400 PATH=/usr/lib/llvm-18/bin:$PATH /workspace/scratch/61c60105fb18/measurement/final-compiler test-parser
+Working directory: /workspace/scratch/61c60105fb18/buster
+Binary SHA256: 48e7f97e6fcd963c4396cc496c13a9cdc6338b41294d799cd912ff09eb256dff
+Exit status: 0
+
+snippets: 230, 0 failures
+fixtures: 4 trees checked by hand, 0 failures
+streams: 2000 random streams (half with balanced brackets), 2000 rejected, 0 where the paths or a kernel and its twin differ
+alignments: 14720 inputs (the snippets at 64 alignments), 0 where the paths or a kernel and its twin differ
+nesting: 100000 levels of `(` ... `)`: parsed
+nesting: 100000 levels of `(` ... `)`: parsed
+nesting: 100000 levels of `{` ... `}`: parsed
+nesting: 100000 levels of `(` ... `)`: parsed
+nesting: 100000 levels of `a[` ... `]`: parsed
+nesting: 100000 levels of `1 ? ` ... ` : 3`: parsed
+nesting: 100000 levels of `1 ? 0, ` ... ` : 3`: parsed
+nesting: 100000 levels of `(int)` ... ``: parsed
+nesting: 100000 levels of `if (q) ` ... ``: parsed
+nesting: 100000 levels of `__attribute__((unused)) ` ... ``: parsed
+driver: 11 cases, 176 runs: the expected statuses and messages, nothing left behind
+driver: a valid file: 77 reservations and mappings failed in turn, each reported and released
+driver: an invalid file: 78 reservations and mappings failed in turn, each reported and released
+test-parser: passed

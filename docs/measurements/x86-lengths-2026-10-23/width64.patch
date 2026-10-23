@@ -1,0 +1,10 @@
+--- encoder16
++++ encoder64
+@@ -7339,6 +7339,7 @@
+     {
+         uint32_t length = 0;
+         uint64_t i = 0;
++        #pragma clang loop unroll_count(4)
+         for (; i + BUSTER_X86_GROUP_INSTRUCTIONS <= count; i += BUSTER_X86_GROUP_INSTRUCTIONS)
+         {
+             length = x86_measure_group(instructions + i, length, offsets + i, (__mmask16)0xffff);

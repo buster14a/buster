@@ -1,0 +1,90 @@
+file: conditioned-1-tier0-2000-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-2000: 132 functions in 66 groups, 264000 records, 29508 branches (a branch per 8.95 records), 4.09 bytes per record; 32.1% of the branches long, 2.73 rounds per function (at most 4), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   3.007 ns per record [2.972, 3.270]
+file: conditioned-1-tier0-2000-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-2000: 132 functions in 66 groups, 264000 records, 29508 branches (a branch per 8.95 records), 4.09 bytes per record; 32.1% of the branches long, 2.73 rounds per function (at most 4), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   0.878 ns per record [0.813, 1.168]
+file: conditioned-1-tier0-40-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-40: 6554 functions in 127 groups, 262160 records, 28932 branches (a branch per 9.06 records), 4.00 bytes per record; 4.9% of the branches long, 1.20 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   4.368 ns per record [4.301, 4.689]
+file: conditioned-1-tier0-40-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-40: 6554 functions in 127 groups, 262160 records, 28932 branches (a branch per 9.06 records), 4.00 bytes per record; 4.9% of the branches long, 1.20 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   1.283 ns per record [1.278, 1.443]
+file: conditioned-1-tier0-mix-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-mix: 2814 functions in 107 groups, 262166 records, 29094 branches (a branch per 9.01 records), 4.06 bytes per record; 21.8% of the branches long, 1.42 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   4.032 ns per record [3.846, 4.541]
+file: conditioned-1-tier0-mix-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-mix: 2814 functions in 107 groups, 262166 records, 29094 branches (a branch per 9.01 records), 4.06 bytes per record; 21.8% of the branches long, 1.42 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   1.195 ns per record [1.135, 1.967]
+file: conditioned-2-tier0-2000-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-2000: 132 functions in 66 groups, 264000 records, 29508 branches (a branch per 8.95 records), 4.09 bytes per record; 32.1% of the branches long, 2.73 rounds per function (at most 4), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   3.036 ns per record [2.999, 3.428]
+file: conditioned-2-tier0-2000-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-2000: 132 functions in 66 groups, 264000 records, 29508 branches (a branch per 8.95 records), 4.09 bytes per record; 32.1% of the branches long, 2.73 rounds per function (at most 4), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   0.901 ns per record [0.810, 0.987]
+file: conditioned-2-tier0-40-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-40: 6554 functions in 127 groups, 262160 records, 28932 branches (a branch per 9.06 records), 4.00 bytes per record; 4.9% of the branches long, 1.20 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   4.551 ns per record [4.400, 5.444]
+file: conditioned-2-tier0-40-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-40: 6554 functions in 127 groups, 262160 records, 28932 branches (a branch per 9.06 records), 4.00 bytes per record; 4.9% of the branches long, 1.20 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   1.323 ns per record [1.265, 1.519]
+file: conditioned-2-tier0-mix-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-mix: 2814 functions in 107 groups, 262166 records, 29094 branches (a branch per 9.01 records), 4.06 bytes per record; 21.8% of the branches long, 1.42 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   4.037 ns per record [3.866, 4.267]
+file: conditioned-2-tier0-mix-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-mix: 2814 functions in 107 groups, 262166 records, 29094 branches (a branch per 9.01 records), 4.06 bytes per record; 21.8% of the branches long, 1.42 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   1.200 ns per record [1.144, 1.374]
+file: conditioned-3-tier0-2000-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-2000: 132 functions in 66 groups, 264000 records, 29508 branches (a branch per 8.95 records), 4.09 bytes per record; 32.1% of the branches long, 2.73 rounds per function (at most 4), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   3.251 ns per record [3.018, 3.414]
+file: conditioned-3-tier0-2000-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-2000: 132 functions in 66 groups, 264000 records, 29508 branches (a branch per 8.95 records), 4.09 bytes per record; 32.1% of the branches long, 2.73 rounds per function (at most 4), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   0.815 ns per record [0.812, 1.115]
+file: conditioned-3-tier0-40-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-40: 6554 functions in 127 groups, 262160 records, 28932 branches (a branch per 9.06 records), 4.00 bytes per record; 4.9% of the branches long, 1.20 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   4.747 ns per record [4.378, 5.169]
+file: conditioned-3-tier0-40-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-40: 6554 functions in 127 groups, 262160 records, 28932 branches (a branch per 9.06 records), 4.00 bytes per record; 4.9% of the branches long, 1.20 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   1.340 ns per record [1.267, 1.912]
+file: conditioned-3-tier0-mix-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-mix: 2814 functions in 107 groups, 262166 records, 29094 branches (a branch per 9.01 records), 4.06 bytes per record; 21.8% of the branches long, 1.42 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   4.078 ns per record [3.850, 4.579]
+file: conditioned-3-tier0-mix-vector-lengths-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 11 samples [p10, p90], round limit 4, after-scalar 100 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-mix: 2814 functions in 107 groups, 262166 records, 29094 branches (a branch per 9.01 records), 4.06 bytes per record; 21.8% of the branches long, 1.42 rounds per function (at most 3), 0 with the worklist (0 evaluations)
+  vector through lengths:     0.00 cycles per branch   0.000 per record  0.00 IPC;   1.191 ns per record [1.136, 1.537]

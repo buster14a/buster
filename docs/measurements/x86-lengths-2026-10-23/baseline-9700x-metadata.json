@@ -1,0 +1,348 @@
+{
+  "repository": "buster14a/buster",
+  "requested_baseline_sha": "fc45e674d13d9257d66c02b05d78adf85ddae7ea",
+  "actual_checked_out_sha": "fc45e674d13d9257d66c02b05d78adf85ddae7ea",
+  "exact_baseline_match": true,
+  "workflow_name": "9700X test",
+  "workflow_path": ".github/workflows/9700x.yml",
+  "run_id": 39918626782,
+  "run_number": 617,
+  "run_attempt": 1,
+  "event": "push",
+  "branch": "main",
+  "run_status": "completed",
+  "run_conclusion": "success",
+  "run_started_at": "2026-10-23T07:34:09Z",
+  "run_updated_at": "2026-10-23T07:39:49Z",
+  "run_url": "https://github.com/buster14a/buster/actions/runs/39918626782",
+  "job_id": 120298143545,
+  "job_name": "Build and execute on Ryzen 7 9700X",
+  "job_status": "completed",
+  "job_conclusion": "success",
+  "job_url": "https://github.com/buster14a/buster/actions/runs/39918626782/job/120298143545",
+  "job_log_api_url": "https://api.github.com/repos/buster14a/buster/actions/jobs/120298143545/logs",
+  "host": {
+    "cpu": "AMD Ryzen 7 9700X 8-Core Processor",
+    "runner": "buster-zen5-9700x",
+    "machine": "benchpress",
+    "compiler": "clang version 23.1.1",
+    "target": "x86_64-pc-linux-gnu",
+    "compiler_installed_dir": "/usr/bin"
+  },
+  "benchmark_steps": [
+    {
+      "name": "Benchmark the x86-64 encoder",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 13
+    },
+    {
+      "name": "Benchmark branch sizing",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 15
+    }
+  ],
+  "log_extraction": {
+    "timestamps_preserved": true,
+    "ansi_color_codes_removed": true,
+    "original_line_ranges_1_based": {
+      "host": [
+        [
+          1,
+          4
+        ],
+        [
+          15,
+          15
+        ],
+        [
+          17,
+          33
+        ],
+        [
+          115,
+          118
+        ],
+        [
+          147,
+          152
+        ],
+        [
+          6290,
+          6293
+        ]
+      ],
+      "encoder": [
+        [
+          5229,
+          5249
+        ]
+      ],
+      "branch_sizing": [
+        [
+          5260,
+          5353
+        ]
+      ]
+    }
+  },
+  "method": {
+    "affinity": "Both benchmark commands use taskset on the first CPU in /proc/self/status Cpus_allowed_list; the resolved CPU number is not printed.",
+    "exclusion_evidence": "Runner hook reports 'this job has the machine' before execution and 'gave the machine back' afterward.",
+    "branch_sizing": "Default all-row run; base seed 1, with the benchmark passing seed + row index to each pool (tier0-mix uses seed 5); medians of 21 samples, round limit 4, chunk 1024. Historical log reports cycles and IPC only.",
+    "branch_seed_source": "https://github.com/buster14a/buster/blob/fc45e674d13d9257d66c02b05d78adf85ddae7ea/src/buster/compiler/branch_sizing_benchmark.c",
+    "encoder": "16384 mixed instructions, 65072 encoded bytes; calls of 16384; 21 interleaved passes of 256 runs; medians.",
+    "limitations": [
+      "This is one existing successful qualification run, not repeated isolated or scalar-conditioned throughput measurement.",
+      "The baseline does not print branch-sizing nanoseconds or a size-plus-encode pipeline measurement.",
+      "The default all-row tier0-mix pool differs from the standalone scaling harness's seed-1 single-row pool; compare CI rows with matching pool statistics.",
+      "Runner lock messages establish the configured job exclusion, not independent proof of the absence of all host background activity.",
+      "No new workflow was triggered, and no source or workflow was modified."
+    ]
+  },
+  "branch_sizing_metrics": [
+    {
+      "row": "tier0-40",
+      "functions": 6554,
+      "groups": 127,
+      "records": 262160,
+      "branches": 28932,
+      "x86_encode": {
+        "cycles_per_branch": 38.71,
+        "cycles_per_record": 4.272,
+        "ipc": 4.5
+      },
+      "size_branches": {
+        "cycles_per_branch": 79.11,
+        "cycles_per_record": 8.73,
+        "ipc": 3.69
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 87.23,
+        "cycles_per_record": 9.627,
+        "ipc": 3.84
+      }
+    },
+    {
+      "row": "tier0-250",
+      "functions": 1049,
+      "groups": 117,
+      "records": 262250,
+      "branches": 29210,
+      "x86_encode": {
+        "cycles_per_branch": 29.13,
+        "cycles_per_record": 3.245,
+        "ipc": 4.45
+      },
+      "size_branches": {
+        "cycles_per_branch": 52.7,
+        "cycles_per_record": 5.869,
+        "ipc": 3.57
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 96.37,
+        "cycles_per_record": 10.734,
+        "ipc": 3.49
+      }
+    },
+    {
+      "row": "tier0-2000",
+      "functions": 132,
+      "groups": 66,
+      "records": 264000,
+      "branches": 29508,
+      "x86_encode": {
+        "cycles_per_branch": 28.1,
+        "cycles_per_record": 3.141,
+        "ipc": 4.33
+      },
+      "size_branches": {
+        "cycles_per_branch": 46.36,
+        "cycles_per_record": 5.182,
+        "ipc": 3.61
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 90.91,
+        "cycles_per_record": 10.162,
+        "ipc": 3.64
+      }
+    },
+    {
+      "row": "tier0-10000",
+      "functions": 27,
+      "groups": 27,
+      "records": 270000,
+      "branches": 29975,
+      "x86_encode": {
+        "cycles_per_branch": 28.38,
+        "cycles_per_record": 3.151,
+        "ipc": 4.31
+      },
+      "size_branches": {
+        "cycles_per_branch": 48.76,
+        "cycles_per_record": 5.413,
+        "ipc": 3.48
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 93.54,
+        "cycles_per_record": 10.384,
+        "ipc": 3.63
+      }
+    },
+    {
+      "row": "tier0-mix",
+      "functions": 2814,
+      "groups": 107,
+      "records": 262166,
+      "branches": 29094,
+      "x86_encode": {
+        "cycles_per_branch": 35.51,
+        "cycles_per_record": 3.941,
+        "ipc": 4.05
+      },
+      "size_branches": {
+        "cycles_per_branch": 69.5,
+        "cycles_per_record": 7.712,
+        "ipc": 3.21
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 107.48,
+        "cycles_per_record": 11.928,
+        "ipc": 3.26
+      }
+    },
+    {
+      "row": "optimized-40",
+      "functions": 6554,
+      "groups": 127,
+      "records": 262160,
+      "branches": 37475,
+      "x86_encode": {
+        "cycles_per_branch": 29.58,
+        "cycles_per_record": 4.228,
+        "ipc": 4.55
+      },
+      "size_branches": {
+        "cycles_per_branch": 65.61,
+        "cycles_per_record": 9.378,
+        "ipc": 3.54
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 78.72,
+        "cycles_per_record": 11.253,
+        "ipc": 3.57
+      }
+    },
+    {
+      "row": "optimized-250",
+      "functions": 1049,
+      "groups": 117,
+      "records": 262250,
+      "branches": 37677,
+      "x86_encode": {
+        "cycles_per_branch": 22.61,
+        "cycles_per_record": 3.248,
+        "ipc": 4.44
+      },
+      "size_branches": {
+        "cycles_per_branch": 44.48,
+        "cycles_per_record": 6.39,
+        "ipc": 3.39
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 90.66,
+        "cycles_per_record": 13.024,
+        "ipc": 3.14
+      }
+    },
+    {
+      "row": "optimized-2000",
+      "functions": 132,
+      "groups": 66,
+      "records": 264000,
+      "branches": 37569,
+      "x86_encode": {
+        "cycles_per_branch": 22.15,
+        "cycles_per_record": 3.151,
+        "ipc": 4.32
+      },
+      "size_branches": {
+        "cycles_per_branch": 39.66,
+        "cycles_per_record": 5.644,
+        "ipc": 3.43
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 88.4,
+        "cycles_per_record": 12.58,
+        "ipc": 3.22
+      }
+    },
+    {
+      "row": "optimized-10000",
+      "functions": 27,
+      "groups": 27,
+      "records": 270000,
+      "branches": 38490,
+      "x86_encode": {
+        "cycles_per_branch": 22.14,
+        "cycles_per_record": 3.156,
+        "ipc": 4.3
+      },
+      "size_branches": {
+        "cycles_per_branch": 41.59,
+        "cycles_per_record": 5.93,
+        "ipc": 3.29
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 90.08,
+        "cycles_per_record": 12.842,
+        "ipc": 3.21
+      }
+    },
+    {
+      "row": "chain-forward",
+      "functions": 18,
+      "groups": 18,
+      "records": 270720,
+      "branches": 18000,
+      "x86_encode": {
+        "cycles_per_branch": 46.3,
+        "cycles_per_record": 3.078,
+        "ipc": 4.41
+      },
+      "size_branches": {
+        "cycles_per_branch": 209.05,
+        "cycles_per_record": 13.899,
+        "ipc": 3.31
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 759.58,
+        "cycles_per_record": 50.504,
+        "ipc": 4.24
+      }
+    },
+    {
+      "row": "chain-backward",
+      "functions": 18,
+      "groups": 18,
+      "records": 270720,
+      "branches": 18000,
+      "x86_encode": {
+        "cycles_per_branch": 46.33,
+        "cycles_per_record": 3.08,
+        "ipc": 4.41
+      },
+      "size_branches": {
+        "cycles_per_branch": 210.26,
+        "cycles_per_record": 13.98,
+        "ipc": 3.28
+      },
+      "size_branches_scalar": {
+        "cycles_per_branch": 773.91,
+        "cycles_per_record": 51.457,
+        "ipc": 4.16
+      }
+    }
+  ]
+}

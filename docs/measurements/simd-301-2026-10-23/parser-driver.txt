@@ -1,0 +1,80 @@
+Cloud isolated syntax-driver follow-up, 2026-10-23
+
+Same input, compiler and old/refine source isolation as parser-k6.txt.
+Seven fresh processes per version, alternating the pair order, all exited 0
+without diagnostics. Baseline median 0.275 s (range 0.231-0.299), refinement
+median 0.273 s (range 0.248-0.357). Large shared-cloud timing variation and
+mixed paired direction establish no end-to-end timing effect.
+
+Recorded binaries' SHA-256:
+old:    1ed39d2a0fd9c5e12f2c1b01ff30b65fad3a93e3e7b0059aa7d67db7a3e4c20f
+refine: 06f650261e659c1a88ebbf59a26fbc0e8e8789a63a59b7238c3bb91265ed6cd3
+
+After preparing the source directories and frozen input in parser-k6.txt,
+build and run from the repository root:
+
+cat > ../parser-k6-driver.c <<'EOF'
+#define BUSTER_UNIT 99
+#include "buster/compiler/main.c"
+int main(int argc, char** argv)
+{
+    return run_parse_command(argc - 1, argv + 1);
+}
+EOF
+/usr/lib/llvm-18/bin/clang -O3 -march=native -mmwaitx -I../simd-frozen-src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -Wno-bitwise-instead-of-logical -Wno-unused-function ../parser-k6-driver.c -o ../parser-k6-driver-old
+/usr/lib/llvm-18/bin/clang -O3 -march=native -mmwaitx -I../k6-refine-only-src -I../simd-frozen-src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -Wno-bitwise-instead-of-logical -Wno-unused-function ../parser-k6-driver.c -o ../parser-k6-driver-refine
+flock /tmp/buster-simd-bench.lock bash -c '
+TIMEFORMAT="elapsed=%R"
+for trial in 1 2 3 4 5 6 7; do
+    if (( trial % 2 )); then variants="refine old"; else variants="old refine"; fi
+    for variant in $variants; do
+        printf "trial=%s variant=%s\n" "$trial" "$variant"
+        time taskset -c 2 ../parser-k6-driver-$variant -fsyntax-only -nostdinc ../parser-k6-main.i
+        printf "status=%s\n" "$?"
+    done
+done'
+
+Raw output follows, verbatim:
+
+trial=1 variant=refine
+elapsed=0.339
+status=0
+trial=1 variant=old
+elapsed=0.299
+status=0
+trial=2 variant=old
+elapsed=0.231
+status=0
+trial=2 variant=refine
+elapsed=0.248
+status=0
+trial=3 variant=refine
+elapsed=0.273
+status=0
+trial=3 variant=old
+elapsed=0.293
+status=0
+trial=4 variant=old
+elapsed=0.298
+status=0
+trial=4 variant=refine
+elapsed=0.258
+status=0
+trial=5 variant=refine
+elapsed=0.357
+status=0
+trial=5 variant=old
+elapsed=0.275
+status=0
+trial=6 variant=old
+elapsed=0.243
+status=0
+trial=6 variant=refine
+elapsed=0.263
+status=0
+trial=7 variant=refine
+elapsed=0.293
+status=0
+trial=7 variant=old
+elapsed=0.257
+status=0

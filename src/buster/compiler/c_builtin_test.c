@@ -304,6 +304,110 @@ static bool cbuiltin_test_boundaries(void)
     return passed;
 }
 
+// Invalid ids can have every low five-bit descriptor index. Keep valid operations beside them, so the bit-operation
+// branch runs, and move the invalid lane through every position of each vector. The full id must still reject them.
+static bool cbuiltin_test_id_aliases(void)
+{
+    CBuiltinTestRows rows;
+    CBuiltinIntegers input = { rows.id, rows.a, rows.b, rows.at, rows.bt, rows.rt };
+    CBuiltinIntegerResults scalar = { rows.value[0], rows.overflow[0], rows.status[0] };
+    CBuiltinIntegerResults vector = { rows.value[1], rows.overflow[1], rows.status[1] };
+    const uint32_t high_bits[] =
+    {
+        32,
+        64,
+        256,
+        UINT32_MAX & ~31u,
+    };
+    bool passed = true;
+    uint32_t checked = 0;
+    for (uint32_t high = 0; high < sizeof(high_bits) / sizeof(high_bits[0]) && passed; high += 1)
+    {
+        for (uint32_t lane = 0; lane < BUSTER_CBUILTIN_LANES && passed; lane += 1)
+        {
+            for (uint32_t i = 0; i < BUSTER_CBUILTIN_TEST_ROWS; i += 1)
+            {
+                rows.id[i] = i % BUSTER_CBUILTIN_LANES == lane ? high_bits[high] | ((i / BUSTER_CBUILTIN_LANES) & 31) : 1 + i % CBUILTIN_FFSLL;
+                rows.a[i] = i % 3 == 0 ? 0 : (UINT64_MAX >> (i % 64));
+                rows.b[i] = i;
+                rows.at[i] = 64;
+                rows.bt[i] = 64;
+                rows.rt[i] = 64;
+            }
+            passed = cbuiltin_test_check(input, scalar, vector, BUSTER_CBUILTIN_TEST_ROWS);
+            checked += BUSTER_CBUILTIN_TEST_ROWS;
+        }
+    }
+    printf("builtin full-id checks with aliased descriptor indices: %s (%u Clang oracle rows)\n", passed ? "pass" : "FAIL", checked);
+    return passed;
+}
+
+// The caller may flush a partial batch at any boundary. Compare one scalar result with complete output from slices
+// of 1..17 rows, including empty inputs and lengths on either side of vector boundaries, without sharing a tail.
+static bool cbuiltin_test_partitions(void)
+{
+    CBuiltinTestRows rows;
+    CBuiltinIntegers input = { rows.id, rows.a, rows.b, rows.at, rows.bt, rows.rt };
+    CBuiltinIntegerResults scalar = { rows.value[0], rows.overflow[0], rows.status[0] };
+    CBuiltinIntegerResults vector = { rows.value[1], rows.overflow[1], rows.status[1] };
+    const uint32_t counts[] =
+    {
+        0,
+        1,
+        7,
+        8,
+        9,
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+        BUSTER_CBUILTIN_TEST_ROWS,
+    };
+    for (uint32_t i = 0; i < BUSTER_CBUILTIN_TEST_ROWS; i += 1)
+    {
+        rows.id[i] = i % 7 == 0 ? 32 + i % 32 : i % CBUILTIN_COUNT;
+        rows.a[i] = i % 3 == 0 ? 0 : (UINT64_MAX >> (i % 64));
+        rows.b[i] = i % 5 == 0 ? UINT64_MAX : i;
+        rows.at[i] = 64 | ((i & 1) != 0 ? BUSTER_CBUILTIN_SIGNED : 0);
+        rows.bt[i] = 1 + i % 64;
+        rows.rt[i] = 1 + (i * 7) % 64;
+    }
+    bool passed = cbuiltin_test_check(input, scalar, vector, BUSTER_CBUILTIN_TEST_ROWS);
+    for (uint32_t c = 0; c < sizeof(counts) / sizeof(counts[0]) && passed; c += 1)
+    {
+        const uint32_t count = counts[c];
+        for (uint32_t width = 1; width <= 17 && passed; width += 1)
+        {
+            memset(rows.value[1], 0xA5, sizeof(rows.value[1]));
+            memset(rows.overflow[1], 0xA5, sizeof(rows.overflow[1]));
+            memset(rows.status[1], 0xA5, sizeof(rows.status[1]));
+            for (uint32_t first = 0; first < count;)
+            {
+                const uint32_t length = count - first < width ? count - first : width;
+                CBuiltinIntegers part = { rows.id + first, rows.a + first, rows.b + first, rows.at + first, rows.bt + first, rows.rt + first };
+                CBuiltinIntegerResults result = { rows.value[1] + first, rows.overflow[1] + first, rows.status[1] + first };
+                cbuiltin_fold(part, result, length);
+                first += length;
+            }
+            passed = memcmp(rows.value[0], rows.value[1], count * sizeof(rows.value[0][0])) == 0 &&
+                memcmp(rows.overflow[0], rows.overflow[1], count * sizeof(rows.overflow[0][0])) == 0 &&
+                memcmp(rows.status[0], rows.status[1], count * sizeof(rows.status[0][0])) == 0;
+            for (uint32_t i = count; i < BUSTER_CBUILTIN_TEST_ROWS && passed; i += 1)
+            {
+                passed = rows.value[1][i] == UINT64_C(0xA5A5A5A5A5A5A5A5) && rows.overflow[1][i] == 0xA5A5A5A5u && rows.status[1][i] == 0xA5A5A5A5u;
+            }
+            if (!passed)
+            {
+                printf("builtin partition mismatch: count=%u width=%u\n", count, width);
+            }
+        }
+    }
+    printf("builtin batch partitions 1..17: %s\n", passed ? "pass" : "FAIL");
+    return passed;
+}
+
 static bool cbuiltin_test_pages(void)
 {
     const size_t page = (size_t)sysconf(_SC_PAGESIZE);
@@ -394,6 +498,8 @@ static int run_builtin_tests(int argc, char** argv)
     if (valid)
     {
         passed = cbuiltin_test_pages();
+        passed &= cbuiltin_test_id_aliases();
+        passed &= cbuiltin_test_partitions();
         passed &= cbuiltin_test_boundaries();
         passed &= cbuiltin_test_generated(seed);
     }

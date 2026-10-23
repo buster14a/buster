@@ -1625,3 +1625,50 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   levels waiting for what it reads.
 - **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it;
   `-funsigned-char` would need a setting the type table doesn't have yet.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[Classification, assignment and ownership](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/calling_convention.c#L4)
+are implemented; source-to-function construction is still an integration.
+
+| Producer → consumer | Data and batch conditions |
+| --- | --- |
+| Completed TypeTable rows → `abi_classify` / `abi_classify_all` | Type-indexed 16-byte class rows plus pass/storage/layout/result metadata. Member/element dependencies must be classified first; level discovery is part of the cost. |
+| Classified member rows → aggregate fold → `abi_finish` | Reuses shifted rows instead of recursive reclassification. LLVM-shape/storage exceptional rules still inspect member/type data; psABI classes alone are insufficient. |
+| Signature ranges/types → `abi_assign` → argument locations and `AbiCall` | Contiguous arguments and per-call boundaries, named/variadic counts and result metadata. Register demand is a segmented scan; a call that exceeds vector limits goes whole to the exact twin. |
+| ABI metadata → Tier 0 generated-function inputs / frame planner / `abi_va_arg` | Consumers use locations, hidden result, outgoing bytes/alignment, variadic state and copy/storage rules; they must not reclassify from size alone. Cross-link tests are real machine-code consumers. |
+
+The ABI table is caller-owned arena storage tied to the same live TypeTable;
+IDs from another table are invalid. `abi_initialize` sizes columns from type
+capacity, classifies builtins and accepts vector widths 16, 32 or 64 bytes;
+failure restores its arena. Rows and metadata include u8 class/alignment/storage,
+u32 pass/stack bytes, u64 layout and `AbiReturn` records. One writer classifies;
+readers cannot race classification or tag completion. `abi_assign` is a trusted
+consumer: all referenced types must already be classified, pass must not have
+`BUSTER_ABI_PASS_UNSUPPORTED` set, and stack bytes must not be `UINT32_MAX`. Its producer
+must reject unsupported types before assignment.
+
+Natural typed-column strides and explicit counts/capacities apply;
+assignment's masked tails do not require caller padding. Its padded internal
+scratch is private; scratch allocation failure uses the exact scalar path.
+Empty signatures and partial batches are tested. A call is not
+splittable into independent batches because earlier arguments consume registers;
+only full independent call ranges may be repartitioned.
+
+A future frontend can collect signatures across a unit, avoiding a one-call API
+that underfills vector work. It must expose real completion/ready frontiers,
+not sort types through dependencies or give later tag completion to earlier
+source contexts. The current classification scans for readiness; a producer
+completion list is a candidate, not a demonstrated saving. `abi_finish`'s
+storage/LLVM-shape work is retained for correctness and must be charged, even
+when the two-byte class result looks cheap.
+
+Disposition: retain the shared ABI result rather than force each emitter to
+reconstruct it. `test-calling-convention --cross-check` validates generated
+callers/callees against Clang/GCC, including variadics, guards and exceptional
+counts; `test-types` covers its producer. Existing bulk and incremental type
+benchmarks and call batches are synthetic. [#133](https://github.com/buster14a/buster/issues/133)/[#137](https://github.com/buster14a/buster/issues/137)/[#136](https://github.com/buster14a/buster/issues/136)/[#177](https://github.com/buster14a/buster/issues/177) retain real
+source-signature production, whole type + ABI + emission costs, small/large
+occupancy, scratch/allocations and generated-program qualification.

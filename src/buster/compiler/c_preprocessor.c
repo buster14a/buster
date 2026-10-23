@@ -717,7 +717,7 @@ struct PPMacro
 // A body item of a compiled macro.
 typedef enum PPItemKind
 {
-    PP_ITEM_TOKEN, // A body token, copied.
+    PP_ITEM_TOKEN, // A body token, copied; `parameter` counts consecutive body tokens after it, capped at UINT16_MAX.
     PP_ITEM_PARAMETER, // A parameter, substituted (expanded, or raw next to ##).
     PP_ITEM_STRINGIZE, // # and a parameter: its raw argument as a string literal.
     PP_ITEM_PASTE, // ## between the items before and after it.
@@ -4413,8 +4413,21 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     // Without __VA_OPT__, the macro is BUSTER_PP_MACRO_IN_ORDER: each parameter's first such use is listed after the
     // items, as a PP_ITEM_PARAMETER item (`listed` has a bit per parameter), and its arguments are expanded in that order.
     // If there's no room for the list, its arguments are expanded by walking its body.
-    const PPItem* items = pp->items + macro->items_begin;
+    PPItem* items = pp->items + macro->items_begin;
     const uint32_t count = pp->item_count - macro->items_begin;
+    // Literal runs belong to the immutable recipe. Record each token's suffix once instead of walking the same
+    // items at every invocation. A removed __VA_OPT__ closing parenthesis leaves a gap in the source token indices,
+    // so no run crosses its boundary. Capping a suffix splits a longer run into copies without growing PPItem.
+    for (uint32_t i = count; result && i != 0;)
+    {
+        i -= 1;
+        if (items[i].kind == PP_ITEM_TOKEN)
+        {
+            const bool consecutive = i + 1 < count && items[i + 1].kind == PP_ITEM_TOKEN && items[i + 1].token == items[i].token + 1;
+            const uint32_t following = consecutive ? (uint32_t)items[i + 1].parameter + 1 : 0;
+            items[i].parameter = (uint16_t)(following < UINT16_MAX ? following : UINT16_MAX);
+        }
+    }
     Scratch scratch = scratch_begin(0);
     const uint64_t words = ((uint64_t)macro->parameter_count + 63) / 64;
     uint64_t* listed = arena_push_array(scratch.arena, words, sizeof(uint64_t), 8);
@@ -5525,13 +5538,10 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 const uint32_t at = out->count;
                 if (pp->vectorized)
                 {
-                    // The body tokens up to the next item of another kind (or the end of a __VA_OPT__'s content) are
-                    // consecutive tokens of the definition, whose own leading spaces are their items': one copy.
-                    uint32_t last = i;
-                    while (last + 1 < count && last + 1 != va_opt_end && items[last + 1].kind == PP_ITEM_TOKEN && items[last + 1].token == items[last].token + 1)
-                    {
-                        last += 1;
-                    }
+                    // The compiled suffix is a run of consecutive body tokens with their own leading spaces.
+                    // Keep the active __VA_OPT__ boundary explicit even though its removed ')' breaks the run.
+                    uint32_t last = i + item->parameter;
+                    last = va_opt_end > i && va_opt_end <= last ? va_opt_end - 1 : last;
                     pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, item->token, items[last].token + 1, true);
                     i = last;
                 }
@@ -6173,11 +6183,30 @@ static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, boo
             const uint64_t opens = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_L_PAREN));
             const uint64_t closes = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_R_PAREN));
             const uint64_t commas = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_COMMA));
-            const __m512i steps = _mm512_mask_mov_epi8(_mm512_maskz_mov_epi8(opens, _mm512_set1_epi8(1)), closes, _mm512_set1_epi8(-1));
-            const __m512i depths = _mm512_add_epi8(pp_prefix_sum_bytes(steps), _mm512_set1_epi8((char)depth));
-            const uint64_t closing = _mm512_mask_cmpeq_epi8_mask(valid, depths, _mm512_set1_epi8(-1));
-            const uint64_t before = closing != 0 ? _blsmsk_u64(closing) >> 1 : ~0ull;
-            uint64_t top = commas & before & _mm512_cmpeq_epi8_mask(depths, _mm512_setzero_si512());
+            const uint64_t before_first_close = closes != 0 ? _blsmsk_u64(closes) >> 1 : ~0ull;
+            uint64_t closing;
+            uint64_t top;
+            if (depth == 0 && (opens & before_first_close) == 0)
+            {
+                // Flat arguments: no nested opener before the first closer, so every earlier comma separates
+                // arguments. The masks already give the answer, without six dependent depth-prefix steps.
+                closing = closes;
+                top = commas & before_first_close;
+            }
+            else if ((opens | closes) == 0)
+            {
+                // A block wholly inside an open parenthesis changes no depth and has no argument separators.
+                closing = 0;
+                top = 0;
+            }
+            else
+            {
+                const __m512i steps = _mm512_mask_mov_epi8(_mm512_maskz_mov_epi8(opens, _mm512_set1_epi8(1)), closes, _mm512_set1_epi8(-1));
+                const __m512i depths = _mm512_add_epi8(pp_prefix_sum_bytes(steps), _mm512_set1_epi8((char)depth));
+                closing = _mm512_mask_cmpeq_epi8_mask(valid, depths, _mm512_set1_epi8(-1));
+                const uint64_t before = closing != 0 ? _blsmsk_u64(closing) >> 1 : ~0ull;
+                top = commas & before & _mm512_cmpeq_epi8_mask(depths, _mm512_setzero_si512());
+            }
             if (variadic)
             {
                 const uint32_t room = parameter_count - 1 > separator_count ? parameter_count - 1 - separator_count : 0;

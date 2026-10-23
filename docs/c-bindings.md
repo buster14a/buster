@@ -67,11 +67,26 @@ remain reusable because replay pops the file scope before returning.
 The batch path packs a 64-bit key per declaration/use: namespace and identifier
 in the high 32 bits, event index in the low 32. Namespace is encoded as
 `namespace * name_capacity + IdentId`, with an overflow check at construction.
-Input is already ordered by event index, so a stable four-pass byte radix sort
-only sorts the high half. Sixteen keys at a time use `vpconflictd` and population
+Input is already ordered by event index, so a stable byte radix sort only sorts
+the high half. While packing keys, `c_bindings_sorted` accumulates the bitwise
+OR and AND of their names; their XOR identifies every bit that varies. The
+vector sort omits any byte pass with no varying bit. This removes work even
+when constant bytes are nonzero or lie between changing bytes. The scalar
+oracle still runs all four passes. Sixteen keys at a time use `vpconflictd` and population
 counts for the lane's bucket rank. Only the last lane for each bucket updates
 the histogram or cursor. Scatters are scalar stores to computed addresses.
 There are no hardware gathers or scatters.
+
+The internal producer/consumer contract is explicit: `c_bindings_sort` receives
+the variability mask with the packed event count and returns the buffer that
+holds the result. An odd number of passes ends in the temporary buffer, so
+`c_bindings_sorted` hands that buffer directly to `c_bindings_scan` rather than
+copying it back. Both nonoverlapping buffers remain owned by the same scratch
+arena until the consumer finishes. Neither requires padding. Empty and
+one-record inputs take no radix pass; all-constant names retain event order
+without touching the temporary buffer. Allocation sizes and failure handling
+are unchanged. The mask may conservatively include extra bits, but must include
+every bit that differs between retained keys.
 
 A segmented inclusive maximum scan over sorted declaration indices gives each
 use its latest declaration candidate. The scan carries the last segment across
@@ -100,9 +115,11 @@ identifiers.
   reusable replay, a fresh replay, and the batch against a separate live-list
   oracle;
 - 100,000 nested bindings, including the bounded fallback after scopes close;
-- the radix sort against its scalar twin, all lengths from 0 through 96 at a
-  protected page edge, all-equal and repeated buckets and full-width random
-  names;
+- the radix sort against its scalar twin, all lengths from 0 through 96 with
+  both buffers ending at protected pages, all-equal and repeated buckets,
+  full-width random names, and every subset of varying name bytes with nonzero
+  constant bytes. These cover zero through four passes, odd-pass output in the
+  temporary buffer, and stable event ordering;
 - empty streams, invalid inputs, event exhaustion, intermediate allocation
   failures and insufficient scratch during the lazy fallback.
 
@@ -119,6 +136,48 @@ resolution is compared with the stack replay. Unavailable or multiplexed
 cycle counters are reported as unavailable. `--only` isolates a path;
 `--after-scalar 200` measures it after lighter work. Each target-host invocation
 takes `~/buster-fast-bench/exclusive.sh` separately and is pinned to CPU 2.
+
+### Constant-digit elimination: cloud measurements, October 23, 2026 (#301)
+
+The retained change was compared with `1f1e116ad358bed8d5a97824b916908d7cb44e96`
+on a cloud AMD EPYC 9V74, Ubuntu Clang 18.1.3, pinned to CPU 2 with one
+invocation holding the common experiment lock at a time. These are synthetic
+event-stream measurements on a different host from the 9700X. They do not
+establish parser integration or a complete compiler throughput gain.
+
+The final complete compiler executables each ran the existing default
+`benchmark-bindings` in three independently started, alternating processes.
+Each process reports the median of 21 passes over 246,065 identifier events
+from 262,144 generated events with 8,192 possible names. Both low name bytes
+vary, so two of the four radix passes remain. Timings include key packing;
+the batch also includes resolution and scope checks. Median process times
+and their minimum and maximum, in ns/identifier, were:
+
+| Path | Baseline | Constant-digit elimination |
+| --- | ---: | ---: |
+| Sort and packing | 10.859 [10.846, 11.846] | 7.986 [7.589, 8.727] |
+| Complete binding batch | 29.978 [27.539, 31.490] | 24.100 [22.442, 27.630] |
+
+The sort median falls by 26.5%, and the batch median by 19.6%. All three
+paired processes improve, although the batch ranges overlap. Earlier isolated
+`--only sort` and `--only batch` runs through a standalone entry point gave
+24.4% and 9.6% reductions respectively, illustrating the cloud timing spread.
+Every measured output matches the reusable scalar replay and retains the
+same scope-walk and fallback counts.
+
+Three-process standalone checks with `--names 2`, `256`, and `1000000`
+exercise zero, one, and three varying bytes. Their sort medians fall from
+7.220 to 1.053, 9.737 to 4.660, and 12.927 to 10.600 ns/identifier,
+respectively. These are controlled distribution checks, not estimates of
+real-source identifier distributions. The protected-page tests also cover
+all four varying bytes and every subset of constant middle bytes.
+
+The expanded suite passes 4,255,777 checks, including AddressSanitizer and
+UndefinedBehaviorSanitizer with leak detection disabled because the sandbox
+blocks LeakSanitizer's process inspection. The
+[measurement record](measurements/simd-301-2026-10-23/README.md) preserves
+raw process output, source and executable identities, commands, and limits.
+9700X qualification remains separate.
 
 ## Remaining acceptance for #128
 
@@ -138,3 +197,49 @@ takes `~/buster-fast-bench/exclusive.sh` separately and is pinned to CPU 2.
 The implementation, tests, generator and timing/counter code are original
 project code. No external implementation, generated table or corpus is
 incorporated. Existing arena and intrinsic interfaces are used directly.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). The
+[event producer/solver contract](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_bindings.c#L4)
+and [actual checker consumer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_check_binding.c#L4)
+are implemented. `check_input_resolve` emits declare/use/restore events while
+elaborating declarations; `check_input_bindings` invokes `c_bindings_batch` or
+its independent scalar replay and maps activation handles to original token
+identities/types for expression reading. Parser source-column extraction in
+PR [#320](https://github.com/buster14a/buster/pull/320) is a separate pending producer.
+
+The event SoA has u32 key/declaration/point/end/previous/depth columns and byte
+operation/kind columns, with explicit count/capacity and dense namespace heads.
+A result is activation event + 1 (zero unresolved), not a declaration token;
+`declaration[result - 1]` supplies that token. Declaration activation follows
+the complete declarator, before its initializer; repeated parameter activation
+retains original source identity. Tags and labels have separate namespaces;
+member lookup belongs to the type table. Restore closes visibility intervals.
+
+Caller arenas own the events/results; workspace is private to a compilation
+thread. Internal allocations are 64-byte aligned, but input padding is not
+required. Capacity failure is sticky; a caller rejects the unit and resets.
+Checker scratch results are released only after mapping them into retained
+columns. An empty stream allocates nothing there. On resolver/allocation
+failure it publishes no usable use results, rather than accepting partial IDs.
+
+The batch solver stably sorts by namespace/name/event position, then scans
+16 candidates and bounds backward visibility walks before one lazy scalar
+replay. Sorting does not reorder declarations in the language. A full event
+stream or an explicitly retained initial environment is needed: arbitrary
+independent event slices lose earlier declarations/restores. Reset reuses heads
+across units without clearing every process-wide name.
+
+The current checker constructs and resolves its own binding events. Integrating
+the pending parser's retained columns would create duplicate syntactic event
+production unless the two consumers share a contract. Sorting/mapping also
+costs work relative to reusable stacks. [#336](https://github.com/buster14a/buster/issues/336) requires
+joint parser + typed elaboration + resolution + checking measurements before
+choosing retained columns or another resolver. It preserves [#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)/[#113](https://github.com/buster14a/buster/issues/113)
+owners; synthetic batch timings are not a source acceptance result.
+Disposition: retain the integrated checker path at the pin. `test-bindings`
+and checker source tests cover scope order, guard tails, capacities, independent
+replay and source identities. [#128](https://github.com/buster14a/buster/issues/128) and [#336](https://github.com/buster14a/buster/issues/336) retain actual corpus, whole-path
+memory, sorting share, event/identifier denominators and fallback acceptance.
