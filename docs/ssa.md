@@ -182,9 +182,14 @@ verifies the rebuilt function with both shared IR verifiers. It borrows the
 analysis's `preorder` and `subtree_end` intervals for input checks and remaps
 them to the compact output block IDs for verification.
 Slot size and alignment are preserved for retained storage; final frame offsets
-remain the backend's responsibility. The implementation is tested against the
+remain the backend's responsibility. The implementation was first tested against the
 published IR in PR #322, commit
-`7a6ed05745a6b522209005d2423103caedb6c99a`, without changing IR-owned files.
+`7a6ed05745a6b522209005d2423103caedb6c99a`, without changing IR-owned files,
+and since against its merge head `e1df89446d001be3d45e65cae739b491811e38e1`.
+Promotion needs no refusal of Tier 0's variadic frame state of its own: both
+`ir_lower_typed` paths refuse a function with `incoming_variadic` or a local
+role other than ADDRESS_TAKEN, and the adapter first runs the full IR verifier,
+which refuses any slot flag other than ADDRESS_TAKEN, VOLATILE and TEMPORARY.
 Shared dominance comes from PR #327, commit
 `8f75a585aeaddd58e614a64c0afc6a914e99bd15`, without changing its implementation.
 

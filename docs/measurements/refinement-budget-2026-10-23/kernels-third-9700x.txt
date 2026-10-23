@@ -1,0 +1,325 @@
+== round 1 tree build/refine116/kernel-base config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.359 ms    1.16 ns/token    6.44 cycles/token [6.37-6.51]   22.35 instructions/token  IPC 3.47   16.55 cycles/identifier
+== round 1 tree build/refine116/kernel-ahead2 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.344 ms    1.15 ns/token    6.38 cycles/token [6.36-6.45]   20.97 instructions/token  IPC 3.29   16.38 cycles/identifier
+== round 1 tree build/refine116/kernel-prefetchloop1 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.309 ms    1.12 ns/token    6.21 cycles/token [6.20-6.28]   21.33 instructions/token  IPC 3.44   15.95 cycles/identifier
+== round 1 tree build/refine116/kernel-prefetchloop2 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.336 ms    1.14 ns/token    6.34 cycles/token [6.32-6.37]   21.42 instructions/token  IPC 3.38   16.28 cycles/identifier
+== round 1 tree build/refine116/kernel-block2k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.339 ms    1.15 ns/token    6.35 cycles/token [6.33-6.40]   20.84 instructions/token  IPC 3.28   16.32 cycles/identifier
+== round 1 tree build/refine116/kernel-block4k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.328 ms    1.14 ns/token    6.31 cycles/token [6.29-6.36]   20.77 instructions/token  IPC 3.29   16.20 cycles/identifier
+== round 1 tree build/refine116/kernel-block8k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.328 ms    1.14 ns/token    6.29 cycles/token [6.27-6.36]   20.73 instructions/token  IPC 3.30   16.16 cycles/identifier
+== round 1 tree build/refine116/kernel-loop2block2k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.322 ms    1.13 ns/token    6.26 cycles/token [6.21-6.33]   21.28 instructions/token  IPC 3.40   16.09 cycles/identifier
+== round 1 tree build/refine116/kernel-prefix28 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.210 ms    1.04 ns/token    5.69 cycles/token [5.67-5.84]   20.24 instructions/token  IPC 3.56   14.61 cycles/identifier
+== round 1 tree build/refine116/kernel-base config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.377 ms    1.18 ns/token    6.53 cycles/token [6.52-6.67]   22.35 instructions/token  IPC 3.42   16.78 cycles/identifier
+== round 1 tree build/refine116/kernel-ahead2 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.395 ms    1.19 ns/token    6.62 cycles/token [6.52-6.65]   20.97 instructions/token  IPC 3.17   17.00 cycles/identifier
+== round 1 tree build/refine116/kernel-prefetchloop1 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.344 ms    1.15 ns/token    6.38 cycles/token [6.36-6.44]   21.33 instructions/token  IPC 3.34   16.39 cycles/identifier
+== round 1 tree build/refine116/kernel-prefetchloop2 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.366 ms    1.17 ns/token    6.48 cycles/token [6.43-6.55]   21.42 instructions/token  IPC 3.31   16.64 cycles/identifier
+== round 1 tree build/refine116/kernel-block2k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.361 ms    1.17 ns/token    6.46 cycles/token [6.44-6.52]   20.84 instructions/token  IPC 3.23   16.59 cycles/identifier
+== round 1 tree build/refine116/kernel-block4k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.348 ms    1.15 ns/token    6.40 cycles/token [6.39-6.42]   20.77 instructions/token  IPC 3.25   16.44 cycles/identifier
+== round 1 tree build/refine116/kernel-block8k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.346 ms    1.15 ns/token    6.38 cycles/token [6.37-6.40]   20.73 instructions/token  IPC 3.25   16.40 cycles/identifier
+== round 1 tree build/refine116/kernel-loop2block2k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.356 ms    1.16 ns/token    6.43 cycles/token [6.36-6.45]   21.28 instructions/token  IPC 3.31   16.52 cycles/identifier
+== round 1 tree build/refine116/kernel-prefix28 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.248 ms    1.07 ns/token    5.92 cycles/token [5.90-6.06]   20.24 instructions/token  IPC 3.42   15.20 cycles/identifier
+== round 2 tree build/refine116/kernel-ahead2 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.345 ms    1.15 ns/token    6.38 cycles/token [6.36-6.44]   20.97 instructions/token  IPC 3.29   16.38 cycles/identifier
+== round 2 tree build/refine116/kernel-prefetchloop1 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.311 ms    1.12 ns/token    6.22 cycles/token [6.20-6.27]   21.33 instructions/token  IPC 3.43   15.98 cycles/identifier
+== round 2 tree build/refine116/kernel-prefetchloop2 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.333 ms    1.14 ns/token    6.32 cycles/token [6.30-6.36]   21.42 instructions/token  IPC 3.39   16.25 cycles/identifier
+== round 2 tree build/refine116/kernel-block2k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.342 ms    1.15 ns/token    6.36 cycles/token [6.35-6.43]   20.84 instructions/token  IPC 3.27   16.35 cycles/identifier
+== round 2 tree build/refine116/kernel-block4k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.330 ms    1.14 ns/token    6.31 cycles/token [6.29-6.37]   20.77 instructions/token  IPC 3.29   16.21 cycles/identifier
+== round 2 tree build/refine116/kernel-block8k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.330 ms    1.14 ns/token    6.31 cycles/token [6.29-6.34]   20.73 instructions/token  IPC 3.29   16.21 cycles/identifier
+== round 2 tree build/refine116/kernel-loop2block2k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.322 ms    1.13 ns/token    6.27 cycles/token [6.23-6.32]   21.28 instructions/token  IPC 3.39   16.10 cycles/identifier
+== round 2 tree build/refine116/kernel-prefix28 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.217 ms    1.04 ns/token    5.74 cycles/token [5.71-5.86]   20.24 instructions/token  IPC 3.53   14.73 cycles/identifier
+== round 2 tree build/refine116/kernel-base config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.358 ms    1.16 ns/token    6.41 cycles/token [6.40-6.59]   22.35 instructions/token  IPC 3.48   16.48 cycles/identifier
+== round 2 tree build/refine116/kernel-ahead2 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.377 ms    1.18 ns/token    6.53 cycles/token [6.48-6.58]   20.97 instructions/token  IPC 3.21   16.77 cycles/identifier
+== round 2 tree build/refine116/kernel-prefetchloop1 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.338 ms    1.15 ns/token    6.35 cycles/token [6.33-6.39]   21.33 instructions/token  IPC 3.36   16.31 cycles/identifier
+== round 2 tree build/refine116/kernel-prefetchloop2 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.351 ms    1.16 ns/token    6.41 cycles/token [6.39-6.44]   21.42 instructions/token  IPC 3.34   16.46 cycles/identifier
+== round 2 tree build/refine116/kernel-block2k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.376 ms    1.18 ns/token    6.53 cycles/token [6.51-6.59]   20.84 instructions/token  IPC 3.19   16.76 cycles/identifier
+== round 2 tree build/refine116/kernel-block4k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.348 ms    1.15 ns/token    6.39 cycles/token [6.37-6.43]   20.77 instructions/token  IPC 3.25   16.42 cycles/identifier
+== round 2 tree build/refine116/kernel-block8k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.344 ms    1.15 ns/token    6.38 cycles/token [6.36-6.40]   20.73 instructions/token  IPC 3.25   16.39 cycles/identifier
+== round 2 tree build/refine116/kernel-loop2block2k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.344 ms    1.15 ns/token    6.38 cycles/token [6.36-6.42]   21.28 instructions/token  IPC 3.34   16.39 cycles/identifier
+== round 2 tree build/refine116/kernel-prefix28 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.241 ms    1.06 ns/token    5.88 cycles/token [5.86-6.02]   20.24 instructions/token  IPC 3.44   15.10 cycles/identifier
+== round 2 tree build/refine116/kernel-base config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.386 ms    1.19 ns/token    6.58 cycles/token [6.54-6.60]   22.35 instructions/token  IPC 3.40   16.90 cycles/identifier
+== round 3 tree build/refine116/kernel-prefetchloop1 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.311 ms    1.12 ns/token    6.21 cycles/token [6.19-6.30]   21.33 instructions/token  IPC 3.43   15.96 cycles/identifier
+== round 3 tree build/refine116/kernel-prefetchloop2 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.327 ms    1.14 ns/token    6.29 cycles/token [6.28-6.38]   21.42 instructions/token  IPC 3.40   16.17 cycles/identifier
+== round 3 tree build/refine116/kernel-block2k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.347 ms    1.15 ns/token    6.38 cycles/token [6.37-6.42]   20.84 instructions/token  IPC 3.27   16.40 cycles/identifier
+== round 3 tree build/refine116/kernel-block4k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.328 ms    1.14 ns/token    6.30 cycles/token [6.28-6.36]   20.77 instructions/token  IPC 3.30   16.17 cycles/identifier
+== round 3 tree build/refine116/kernel-block8k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.328 ms    1.14 ns/token    6.30 cycles/token [6.28-6.37]   20.73 instructions/token  IPC 3.29   16.18 cycles/identifier
+== round 3 tree build/refine116/kernel-loop2block2k config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.318 ms    1.13 ns/token    6.25 cycles/token [6.23-6.31]   21.28 instructions/token  IPC 3.40   16.07 cycles/identifier
+== round 3 tree build/refine116/kernel-prefix28 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.202 ms    1.03 ns/token    5.65 cycles/token [5.62-5.82]   20.24 instructions/token  IPC 3.58   14.52 cycles/identifier
+== round 3 tree build/refine116/kernel-base config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.343 ms    1.15 ns/token    6.35 cycles/token [6.33-6.46]   22.35 instructions/token  IPC 3.52   16.31 cycles/identifier
+== round 3 tree build/refine116/kernel-ahead2 config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.345 ms    1.15 ns/token    6.36 cycles/token [6.34-6.46]   20.97 instructions/token  IPC 3.30   16.34 cycles/identifier
+== round 3 tree build/refine116/kernel-prefetchloop1 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.359 ms    1.16 ns/token    6.45 cycles/token [6.37-6.47]   21.33 instructions/token  IPC 3.31   16.56 cycles/identifier
+== round 3 tree build/refine116/kernel-prefetchloop2 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.363 ms    1.17 ns/token    6.47 cycles/token [6.44-6.49]   21.42 instructions/token  IPC 3.31   16.61 cycles/identifier
+== round 3 tree build/refine116/kernel-block2k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.389 ms    1.19 ns/token    6.58 cycles/token [6.53-6.67]   20.84 instructions/token  IPC 3.17   16.91 cycles/identifier
+== round 3 tree build/refine116/kernel-block4k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.351 ms    1.16 ns/token    6.41 cycles/token [6.38-6.43]   20.77 instructions/token  IPC 3.24   16.46 cycles/identifier
+== round 3 tree build/refine116/kernel-block8k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.397 ms    1.20 ns/token    6.63 cycles/token [6.59-6.66]   20.73 instructions/token  IPC 3.13   17.02 cycles/identifier
+== round 3 tree build/refine116/kernel-loop2block2k config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.345 ms    1.15 ns/token    6.38 cycles/token [6.36-6.45]   21.28 instructions/token  IPC 3.33   16.40 cycles/identifier
+== round 3 tree build/refine116/kernel-prefix28 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.248 ms    1.07 ns/token    5.92 cycles/token [5.90-6.18]   20.24 instructions/token  IPC 3.42   15.21 cycles/identifier
+== round 3 tree build/refine116/kernel-base config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.371 ms    1.17 ns/token    6.50 cycles/token [6.47-6.52]   22.35 instructions/token  IPC 3.44   16.70 cycles/identifier
+== round 3 tree build/refine116/kernel-ahead2 config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.379 ms    1.18 ns/token    6.54 cycles/token [6.52-6.71]   20.97 instructions/token  IPC 3.21   16.80 cycles/identifier
+ab: done, 0 failed runs

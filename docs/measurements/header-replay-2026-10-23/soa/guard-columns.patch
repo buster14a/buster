@@ -1,0 +1,84 @@
+--- a/guard.c
++++ b/guard.c
+@@ -3,6 +3,16 @@
+ #include "probe.c"
+ #undef main
+ 
++static bool guard_reads_scalar(const Preprocessor* pp, const ReplayTranscript* transcript)
++{
++    bool result = true;
++    for (uint32_t at = 0; at < transcript->read_count; at += 1)
++    {
++        result &= replay_key(pp, transcript->read_names[at]) == transcript->read_keys[at];
++    }
++    return result;
++}
++
+ #ifndef BUSTER_GUARD_MAIN
+ #define BUSTER_GUARD_MAIN main
+ #endif
+@@ -16,9 +26,9 @@
+     uint8_t* mapping = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+     ok = ok && mapping != MAP_FAILED && mprotect(mapping + page, (size_t)page, PROT_NONE) == 0;
+     const uint32_t bases[5] = { 100, 200, 300, 400, 500 };
+-    ReplayRead reads[1] = { { .name = C_NAME_FILE_MACRO } };
++    IdentId names[1] = { C_NAME_FILE_MACRO };
+     pp.macros[pp.macro_of[C_NAME_FILE_MACRO]].base = 600;
+-    ReplayTranscript transcript = { .range_count = 4, .scratch_count = 1, .read_count = 1, .reads = reads };
++    ReplayTranscript transcript = { .range_count = 4, .scratch_count = 1, .read_count = 1, .read_names = names };
+     uint64_t checked = 0;
+     for (uint32_t shape = 0; ok && shape < 4; shape += 1)
+     {
+@@ -46,6 +56,45 @@
+             }
+         }
+     }
++    uint8_t* name_mapping = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    ok = ok && name_mapping != MAP_FAILED && mprotect(name_mapping + page, (size_t)page, PROT_NONE) == 0;
++    PPReplayCache statistics = { 0 };
++    pp.options.replay = &statistics;
++    uint32_t read_checks = 0;
++    const IdentId choices[] = {
++        C_NAME_FILE_MACRO,
++        C_NAME_DEFINED,
++        C_NAME_LINE
++    };
++    for (uint32_t count = 0; ok && count <= 65; count += 1)
++    {
++        IdentId* guarded_names = count != 0 ? (IdentId*)(name_mapping + page - count * sizeof(IdentId)) : 0;
++        uint64_t* guarded_keys = count != 0 ? (uint64_t*)(mapping + page - count * sizeof(uint64_t)) : 0;
++        for (uint32_t at = 0; at < count; at += 1)
++        {
++            guarded_names[at] = choices[at % BUSTER_ARRAY_LENGTH(choices)];
++            guarded_keys[at] = replay_key(&pp, guarded_names[at]);
++        }
++        const ReplayTranscript reads = {
++            .read_count = count,
++            .read_names = guarded_names,
++            .read_keys = guarded_keys
++        };
++        const bool scalar = guard_reads_scalar(&pp, &reads);
++        ok &= scalar && replay_matches(&pp, &reads) == scalar;
++        read_checks += 1;
++        if (count != 0)
++        {
++            guarded_keys[count - 1] ^= 1;
++            const bool different = guard_reads_scalar(&pp, &reads);
++            ok &= !different && replay_matches(&pp, &reads) == different;
++            read_checks += 1;
++        }
++    }
++    if (name_mapping != MAP_FAILED)
++    {
++        munmap(name_mapping, (size_t)page * 2);
++    }
+     if (mapping != MAP_FAILED)
+     {
+         munmap(mapping, (size_t)page * 2);
+@@ -53,5 +102,6 @@
+     pp_release(&pp);
+     intern_release(&table);
+     printf("guarded replay locations: ok=%u checks=%lu\n", ok, checked);
++    printf("guarded replay read columns: ok=%u checks=%u\n", ok, read_checks);
+     return ok ? 0 : 1;
+ }

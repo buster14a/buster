@@ -1390,6 +1390,48 @@ static void ssa_ir_test_failures(SsaIrTestTally* tally)
                 ssa_ir_test_expect(tally, check.error == IR_ERROR_DOMINANCE && check.instruction == 5 && output.length == output_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "hidden non-dominating value use is rejected transactionally");
             }
         }
+        // Tier 0's frame roles (incoming variadic anchors, va_list objects) never reach promotion: ir_lower_typed
+        // refuses them, and a slot flag outside IR's three must fail the adapter's input verification rather than
+        // be promoted as an ordinary scalar.
+        const IrSizes role_sizes = {
+            .instruction_count = 5,
+            .block_count = 1,
+            .constant_count = 1,
+            .slot_count = 1,
+        };
+        IrFunction role = {0};
+        if (ssa_ir_test_expect(tally, ir_create(&input, &role_sizes, &role) == IR_OK, "allocate unknown slot-role fixture"))
+        {
+            role.result_type = IR_I64;
+            role.block_offsets[1] = 5;
+            role.constants[0].low = 7;
+            role.slots[0] = (IrSlot){
+                .size = 8,
+                .alignment = 8,
+                .type = IR_I64,
+                .flags = BUSTER_IR_SLOT_TEMPORARY << 1,
+            };
+            ir_test_instruction(&role, 0, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&role, 1, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&role, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
+            ir_test_instruction(&role, 3, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&role, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            for (uint32_t v = 0; v < 2; v += 1)
+            {
+                IrFunction result = sentinel;
+                const IrCheck check = v == 0 ? ssa_ir_promote(&role, &output, &scratch, &result) : ssa_ir_promote_scalar(&role, &output, &scratch, &result);
+                ssa_ir_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "a slot flag outside IR's set is refused transactionally");
+            }
+            role.slots[0].flags = 0;
+            IrFunction control = {0};
+            IrFunction control_twin = {0};
+            if (ssa_ir_test_promote(tally, &role, &output, &twin_output, &scratch, &control, &control_twin))
+            {
+                ssa_ir_test_expect(tally, control.slot_count == 0 && control_twin.slot_count == 0, "the same slot without the unknown flag promotes");
+            }
+            arena_pop_to(&output, output_mark);
+            arena_pop_to(&twin_output, 0);
+        }
         IrFunction empty = {0};
         IrFunction promoted = {0};
         IrFunction twin = {0};

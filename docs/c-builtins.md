@@ -1,5 +1,9 @@
 # C builtin integer actions
 
+The [typed checking and runtime integration guide](c-builtins-integration.md)
+describes the additional typed-action and executable-stream interfaces. The
+action-level measurements below retain their original scope and revision.
+
 `c_builtin.c` is the dependency-independent integer-action part of
 [#148](https://github.com/buster14a/buster/issues/148). It recognizes 21 names
 and folds independent constant calls with AVX-512 and exact scalar paths:
@@ -43,9 +47,10 @@ Overflow rows use `a_type`, `b_type`, and `result_type`: a bit width from 1 to
 64, plus `BUSTER_CBUILTIN_SIGNED` for signed values. Signed one-bit types are
 invalid. Upper bits outside each width are ignored. A descriptor represents an
 integer's arithmetic shape, not a `TypeId`; the checker must validate actual C
-types. For example, it must reject a boolean or enum destination even if its
-width resembles an accepted integer, and can describe a boolean input as
-unsigned one-bit. Wider integers need another action and are not silently
+types. Clang accepts non-const boolean and enum destinations for its generic
+overflow builtins, unlike GCC's documented restriction; the typed adapter
+retains their actual integer shape. A boolean is unsigned one-bit. Wider
+integers need another action and are not silently
 truncated into this API.
 
 Every output row has:
@@ -101,18 +106,20 @@ generated-code ISA. An AVX-512 host fold grants no ISA feature to emitted code;
 baseline x86-64 bit operations need baseline sequences where `lzcnt`, `tzcnt`,
 or `popcnt` are unavailable. Execution fixtures must cover both selectors.
 
-`__has_builtin` is not wired to this list. The current preprocessing-only
-command retains its Clang-oracle feature table from #117/#154. Recognition or
-constant folding alone is insufficient evidence for advertising source support.
-When the C compile path exists, #148 still needs a capability inventory that
-reports only builtins with checking and both required lowering paths, plus tests
-of that inventory. Do not substitute this module's 21 recognized names for it.
+The normal `__has_builtin` mode consults the shared capability inventory in
+`c_builtin_catalog.c`; its integer entries currently advertise folding only.
+The separate Clang-oracle feature table from #117/#154 remains available for
+preprocessor comparisons. Recognition or constant folding alone is insufficient
+evidence for advertising source support. Source capabilities require checking
+and both required lowering paths. Do not substitute this module's 21 recognized
+names for that acceptance evidence.
 
-The other #148 families remain unimplemented here: varargs (using #137's ABI
+The other #148 families are outside this fold kernel: varargs (using #137's ABI
 plans), `offsetof`, hints/traps, compile-time queries, floating point, memory and
 strings, atomics, and frame/return addresses. Wider overflow operand types also
-remain. Their actions should consume the actual typed stream and selector
-interfaces as those become available.
+remain outside its supported contract. Companion typed actions and runtime
+expansion are described in [the integration guide](c-builtins-integration.md);
+their validation is separate from full source and two-tier acceptance.
 
 ## Validation and measurements
 
@@ -258,3 +265,31 @@ are GCC's [bit operation builtins](https://gcc.gnu.org/onlinedocs/gcc/Bit-Operat
 and [integer overflow builtins](https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html),
 checked against Clang itself. No implementation or generated table from those
 projects was imported. The builtin spellings are the identifiers named in #148.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The module boundary](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_builtin.c#L4)
+is descriptor lookup → `cbuiltin_fold`/`cbuiltin_fold_scalar` → folded value,
+overflow and status columns. At this pin, tests/benchmarks supply the inputs;
+ordinary checker calls do not establish full builtin source integration.
+
+Inputs are counted u32 IDs/type descriptors and u64 integer operands; outputs
+are u64 value and u32 overflow/status. Natural alignment suffices, no padding
+is required, and input/output columns do not overlap. Zero count permits null
+columns. Eight-lane kernels write status for every logical item, including
+undefined, unsupported and invalid types. Each independent constant call is
+ready only after the source checker has validated and converted its arguments.
+The overflow store and evaluation ordering belong to the eventual consumer;
+a folded boolean alone is not its complete behavior.
+
+Retain builtin ID at binding instead of repeating spelling lookup in later
+passes. This is an integration obligation, not evidence that the current
+source binder does so. Compare producer argument packing and result/store
+materialization together; a packed fold benchmark cannot prove this useful
+for sparse source calls. Disposition: retain the bounded module, with guarded
+and external-Clang checks in `test-builtins`. [#148](https://github.com/buster14a/buster/issues/148) owns binding/checking,
+selector/feature-table agreement and actual-source throughput, memory and
+fallback qualification. Do not advertise an unsupported builtin solely because
+its isolated fold kernel exists.

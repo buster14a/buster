@@ -519,18 +519,23 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         {
             ir_inline_threshold(result->costs + first, end - first, options.maximum_cost, options.scalar, fits);
         }
+        // Appended constant and address rows are bounded like instructions: a call that would carry the caller's
+        // side tables past the representation limit stays a call, rather than failing the whole unit.
         uint64_t growth = 0;
+        uint64_t constants = unit->functions[function].constant_count;
+        uint64_t addresses = unit->functions[function].address_count;
         for (uint32_t call = first; call < end; call += 1)
         {
             if (result->decisions[call] == IR_INLINE_SELECTED)
             {
                 const uint32_t size = result->expanded_sizes[call];
                 const uint32_t extra = size > 1 ? size - 1 : 0;
+                const IrFunction* callee = &result->functions[result->callees[call]];
                 if (!fits[call - first])
                 {
                     result->decisions[call] = IR_INLINE_COST;
                 }
-                else if (growth + extra > options.maximum_function_growth || (uint64_t)unit->functions[function].instruction_count + growth + extra > BUSTER_IR_INLINE_MAX_ITEMS || *charged + extra > options.maximum_unit_instructions)
+                else if (growth + extra > options.maximum_function_growth || (uint64_t)unit->functions[function].instruction_count + growth + extra > BUSTER_IR_INLINE_MAX_ITEMS || *charged + extra > options.maximum_unit_instructions || constants + callee->constant_count > BUSTER_IR_INLINE_MAX_ITEMS || addresses + callee->address_count > BUSTER_IR_INLINE_MAX_ITEMS)
                 {
                     result->decisions[call] = IR_INLINE_GROWTH;
                 }
@@ -538,6 +543,8 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                 {
                     growth += extra;
                     *charged += extra;
+                    constants += callee->constant_count;
+                    addresses += callee->address_count;
                     result->inlined_calls += 1;
                 }
             }

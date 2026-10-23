@@ -1,0 +1,3 @@
+command taskset -c 2 /home/david/buster-fast-bench/codex-header111/experiment-soa guard 
+guarded replay locations: ok=1 checks=8580
+guarded replay read columns: ok=1 checks=131

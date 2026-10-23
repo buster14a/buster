@@ -1,0 +1,62 @@
+--- a/src/buster/compiler/c_lexer.c
++++ b/src/buster/compiler/c_lexer.c
+@@ -2753,0 +2754,17 @@
++// Conservatively marks source-relative 64-byte regions that may contain a backslash. The caller clears the bitmap
++// once; overlapping vector attempts and scalar restarts only add bits, so an abandoned prefix cannot lose evidence.
++BUSTER_INLINE void c_tokenize_mark_regions(uint64_t* regions, uint64_t begin, uint64_t end)
++{
++    if (regions != 0 && begin < end)
++    {
++        const uint64_t first = begin / 64;
++        const uint64_t last = (end - 1) / 64;
++        for (uint64_t word = first / 64; word <= last / 64; word += 1)
++        {
++            const uint32_t low = word == first / 64 ? first % 64 : 0;
++            const uint32_t high = word == last / 64 ? last % 64 : 63;
++            regions[word] |= _bzhi_u64(~0ull, high + 1) & ~_bzhi_u64(~0ull, low);
++        }
++    }
++}
++
+@@ -2756 +2773 @@
+-                               uint64_t* scalar_until)
++                               uint64_t* scalar_until, uint64_t* backslash_regions)
+@@ -2761,0 +2779 @@
++    const uint64_t original_begin = begin;
+@@ -2762,0 +2781 @@
++    c_tokenize_mark_regions(backslash_regions, original_begin, begin);
+@@ -2886,0 +2906,7 @@
++        if (backslash_regions != 0 && !is_zero(backslash))
++        {
++            const uint64_t region_begin = chunk_position < (int64_t)begin ? begin : (uint64_t)chunk_position;
++            const uint64_t region_end = chunk_position + BUSTER_LEX_CHUNK_BYTES < (int64_t)length
++                                          ? (uint64_t)(chunk_position + BUSTER_LEX_CHUNK_BYTES) : length;
++            c_tokenize_mark_regions(backslash_regions, region_begin, region_end);
++        }
+@@ -3458 +3484 @@
+-    return tokenize_chunks(false, true, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(false, true, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3464 +3490 @@
+-    return tokenize_chunks(false, false, true, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(false, false, true, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3470 +3496 @@
+-    return tokenize_chunks(false, true, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(false, true, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3477 +3503 @@
+-    return tokenize_chunks(false, false, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(false, false, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3483 +3509 @@
+-    return tokenize_chunks(true, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(true, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3489 +3515 @@
+-    return tokenize_chunks(false, true, true, false, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(false, true, true, false, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3495 +3521 @@
+-    return tokenize_chunks(true, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(true, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3501 +3527 @@
+-    return tokenize_chunks(false, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(false, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);
+@@ -3507 +3533 @@
+-    return tokenize_chunks(false, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
++    return tokenize_chunks(false, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until, 0);

@@ -1,0 +1,51 @@
+--- a/src/buster/compiler/c_intern.c
++++ b/src/buster/compiler/c_intern.c
+@@ -444 +443,0 @@
+-    uint32_t length;
+@@ -446,0 +446,7 @@
++// Records are consecutive, including their NULs. The extra span at count holds the end offset; unsigned subtraction
++// also handles an end of exactly 2^32 bytes. No live spelling spans more than the u32 record-offset domain.
++BUSTER_INLINE uint32_t intern_span_length(const InternSpan* spans, IdentId id)
++{
++    return spans[id + 1].offset - spans[id].offset - 1;
++}
++
+@@ -649 +655 @@
+-    return buckets * BUSTER_INTERN_BUCKET_BYTES + (uint64_t)*capacity * sizeof(InternSpan);
++    return buckets * BUSTER_INTERN_BUCKET_BYTES + ((uint64_t)*capacity + 1) * sizeof(InternSpan);
+@@ -660 +666 @@
+-    InternSpan* spans = arena_push_array(arena, capacity, sizeof(InternSpan), BUSTER_INTERN_BUCKET_BYTES);
++    InternSpan* spans = arena_push_array(arena, (uint64_t)capacity + 1, sizeof(InternSpan), BUSTER_INTERN_BUCKET_BYTES);
+@@ -713 +719 @@
+-        memcpy(grown.spans, table->spans, (uint64_t)table->count * sizeof(InternSpan));
++        memcpy(grown.spans, table->spans, ((uint64_t)table->count + 1) * sizeof(InternSpan));
+@@ -717 +723 @@
+-            const uint32_t length = table->spans[id].length;
++            const uint32_t length = intern_span_length(table->spans, id);
+@@ -749 +755,2 @@
+-        table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records), .length = length };
++        table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records) };
++        table->spans[result + 1] = (InternSpan){ .offset = table->spans[result].offset + length + 1 };
+@@ -772 +779 @@
+-                (table->spans[id].length == length && memcmp(table->records + table->spans[id].offset, bytes, length) == 0))
++                (intern_span_length(table->spans, id) == length && memcmp(table->records + table->spans[id].offset, bytes, length) == 0))
+@@ -848 +855,2 @@
+-        table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records), .length = length };
++        table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records) };
++        table->spans[result + 1] = (InternSpan){ .offset = table->spans[result].offset + length + 1 };
+@@ -870 +878 @@
+-    return table->spans[id].length;
++    return intern_span_length(table->spans, id);
+@@ -901,0 +910 @@
++        table->spans[1] = (InternSpan){ .offset = 1 };
+@@ -926,0 +936 @@
++    table->spans[1] = (InternSpan){ .offset = 1 };
+@@ -1044 +1054,2 @@
+-            intern_place_shared(table, intern_slot(intern_first_bytes(bytes, span.length), id), intern_hash_bytes(bytes, span.length));
++            const uint32_t length = intern_span_length(bulk->old_spans, id);
++            intern_place_shared(table, intern_slot(intern_first_bytes(bytes, length), id), intern_hash_bytes(bytes, length));
+@@ -1056 +1067 @@
+-    table->spans[id] = (InternSpan){ .offset = offset, .length = length };
++    table->spans[id] = (InternSpan){ .offset = offset };
+@@ -1063,0 +1075 @@
++    table->spans[table->count] = (InternSpan){ .offset = (uint32_t)(bulk->records + bulk->bytes) };

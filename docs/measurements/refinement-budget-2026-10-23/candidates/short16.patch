@@ -1,0 +1,79 @@
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -274,0 +275 @@
++    const uint64_t* backslash_chunks;
+@@ -512,2 +513,3 @@
+-// intern_bucket_matches', from a compare without its mask. No branch depends on the outcome: without a match, the id
+-// read (the first slot's first dword, tzcnt's 32 masked to 0) is discarded.
++// intern_bucket_matches', from a compare without its mask. Compress the matching id dwords from the already loaded
++// bucket: the lowest lane is the first match's id, or zero when no prefix matches. This needs no dependent scalar
++// load, outcome branch or sentinel read on a miss.
+@@ -516,6 +518,4 @@
+-    const uint32_t matches = (_mm512_cmpeq_epi32_mask(_mm512_load_si512(bucket), intern_bucket_key(key)) + 0x1111) & 0x8888;
+-    IdentId id = intern_slot_id(bucket, _tzcnt_u32(matches) & 15);
+-    // A select after the load, not a branch around it, which Clang makes of a plain `?:` (with the matches' zero as the
+-    // result): a branch on the outcome would mispredict for every new spelling.
+-    __asm__("" : "+r"(id));
+-    return id & (uint32_t)-(int32_t)(matches != 0);
++    const __m512i slots = _mm512_load_si512(bucket);
++    const uint32_t matches = (_mm512_cmpeq_epi32_mask(slots, intern_bucket_key(key)) + 0x1111) & 0x8888;
++    const __m512i ids = _mm512_maskz_compress_epi32((__mmask16)matches, slots);
++    return (IdentId)_mm_cvtsi128_si32(_mm512_castsi512_si128(ids));
+@@ -644 +643,0 @@
+-    bool special;
+@@ -661,2 +659,0 @@
+-    __m512i backslashes = _mm512_set1_epi8(-1);
+-    __m512i questions = _mm512_set1_epi8(-1);
+@@ -667 +664 @@
+-        __m256i bytes[4];
++        __m128i bytes[4];
+@@ -670,8 +667 @@
+-            bytes[k] = _mm256_maskz_loadu_epi8(_bzhi_u32(~0u, lengths[j + k]), source + starts[j + k]);
+-        }
+-        const __m512i ab = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[0]), bytes[1], 1);
+-        const __m512i cd = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[2]), bytes[3], 1);
+-        backslashes = _mm512_min_epu8(backslashes, _mm512_min_epu8(_mm512_xor_si512(ab, _mm512_set1_epi8('\\')), _mm512_xor_si512(cd, _mm512_set1_epi8('\\'))));
+-        if (trigraphs)
+-        {
+-            questions = _mm512_min_epu8(questions, _mm512_min_epu8(_mm512_xor_si512(ab, _mm512_set1_epi8('?')), _mm512_xor_si512(cd, _mm512_set1_epi8('?'))));
++            bytes[k] = _mm_maskz_loadu_epi8((__mmask16)_bzhi_u32(0xFFFF, lengths[j + k]), source + starts[j + k]);
+@@ -678,0 +669,2 @@
++        const __m512i ab = _mm512_inserti32x4(_mm512_zextsi128_si512(bytes[0]), bytes[1], 2);
++        const __m512i cd = _mm512_inserti32x4(_mm512_zextsi128_si512(bytes[2]), bytes[3], 2);
+@@ -696 +688 @@
+-    uint64_t longer_than_32 = 0;
++    uint64_t longer_than_16 = 0;
+@@ -700 +692 @@
+-        longer_than_32 |= (uint64_t)_mm512_mask_cmpgt_epu32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, lengths + group), _mm512_set1_epi32(32)) << group;
++        longer_than_16 |= (uint64_t)_mm512_mask_cmpgt_epu32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, lengths + group), _mm512_set1_epi32(16)) << group;
+@@ -702 +694 @@
+-    for (; longer_than_32 != 0; longer_than_32 &= longer_than_32 - 1)
++    for (; longer_than_16 != 0; longer_than_16 &= longer_than_16 - 1)
+@@ -704 +696 @@
+-        const uint32_t i = (uint32_t)__builtin_ctzll(longer_than_32);
++        const uint32_t i = (uint32_t)__builtin_ctzll(longer_than_16);
+@@ -706,5 +697,0 @@
+-        backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes, _mm512_set1_epi8('\\')));
+-        if (trigraphs)
+-        {
+-            questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes, _mm512_set1_epi8('?')));
+-        }
+@@ -719,5 +705,0 @@
+-        backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes, _mm512_set1_epi8('\\')));
+-        if (trigraphs)
+-        {
+-            questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes, _mm512_set1_epi8('?')));
+-        }
+@@ -729,5 +710,0 @@
+-    uint64_t special = _mm512_testn_epi8_mask(backslashes, backslashes);
+-    if (trigraphs)
+-    {
+-        special |= _mm512_testn_epi8_mask(questions, questions);
+-    }
+@@ -735 +711,0 @@
+-    hashes->special = special != 0;
+@@ -808 +784 @@
+-        if (BUSTER_UNLIKELY(current->special))
++        if (BUSTER_UNLIKELY(refine_chunks_have_backslash(identifiers->backslash_chunks, starts[0], (uint64_t)starts[count - 1] + lengths[count - 1])))
+@@ -911,0 +888 @@
++    identifiers.backslash_chunks = backslash_chunks;

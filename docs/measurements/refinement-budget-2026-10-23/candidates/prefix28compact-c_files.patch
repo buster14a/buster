@@ -1,0 +1,5 @@
+--- a/src/buster/compiler/c_files.c
++++ b/src/buster/compiler/c_files.c
+@@ -602 +602 @@
+-                _mm_prefetch((const char*)(shared->buckets + (mine->spellings[id].hash & shared->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_ET0);
++                _mm_prefetch((const char*)(shared->buckets + intern_bucket_for_hash(mine->spellings[id].hash, shared->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_ET0);

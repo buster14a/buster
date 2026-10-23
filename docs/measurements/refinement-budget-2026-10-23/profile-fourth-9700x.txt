@@ -1,0 +1,76 @@
+Profile: ahead2
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   12.641 ms   43.09 cycles/input token   75.78 cycles/output token  133.39 instructions/input token  IPC 3.10
+               read 5.4%  lex 20.8%  refine 14.3%  directives 2.4%  main loop 57.0%
+               read 0.687 ms  lex 2.628 ms  refine 1.810 ms  directives 0.304 ms  main loop 7.199 ms
+             then the release 0.468 ms
+             -E -P with printing 17.586 ms (printing 4.934 ms): 586 MB/s of input (10312758 bytes), 40.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 27K of event 'cycles:u'
+# Event count (approx.): 550060000
+#
+# Overhead  Symbol                            IPC   [IPC Coverage]
+# ........  ................................  ....................
+#
+    33.93%  [.] run_preprocessor_benchmark    -      -
+    16.84%  [.] tokenize_c_raw_no_separators  -      -
+    11.75%  [.] pp_run_file                   -      -
+     7.96%  [.] refine_pass_b_64_plain        -      -
+     6.20%  [.] pp_expand_current             -      -
+     3.43%  [.] pp_continue_invocation        -      -
+     3.34%  [.] pp_substitute                 -      -
+     2.59%  [.] refine_tokens_64_plain        -      -
+     1.68%  [.] pp_append_tokens              -      -
+     1.25%  [.] pp_directive_table            -      -
+     1.20%  [.] pp_line_of                    -      -
+
+
+#
+# (Tip: System-wide collection from all CPUs: perf record -a)
+#
+Profile: chunks64
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   12.571 ms   43.69 cycles/input token   76.84 cycles/output token  134.56 instructions/input token  IPC 3.08
+               read 5.3%  lex 21.0%  refine 13.8%  directives 2.5%  main loop 57.4%
+               read 0.667 ms  lex 2.641 ms  refine 1.730 ms  directives 0.317 ms  main loop 7.217 ms
+             then the release 0.430 ms
+             -E -P with printing 17.594 ms (printing 5.045 ms): 586 MB/s of input (10312758 bytes), 40.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 27K of event 'cycles:u'
+# Event count (approx.): 549500000
+#
+# Overhead  Symbol                            IPC   [IPC Coverage]
+# ........  ................................  ....................
+#
+    34.30%  [.] run_preprocessor_benchmark    -      -
+    14.94%  [.] tokenize_c_raw_no_separators  -      -
+    11.35%  [.] pp_run_file                   -      -
+     9.39%  [.] refine_pass_b_64_plain        -      -
+     6.20%  [.] pp_expand_current             -      -
+     3.69%  [.] pp_continue_invocation        -      -
+     3.53%  [.] pp_substitute                 -      -
+     2.00%  [.] pp_prepare_into               -      -
+     1.59%  [.] pp_append_tokens              -      -
+     1.38%  [.] pp_directive_table            -      -
+     1.27%  [.] pp_line_of                    -      -
+
+
+#
+# (Tip: System-wide collection from all CPUs: perf record -a)
+#

@@ -1,0 +1,29 @@
+--- a/c_refine_test.c
++++ b/c_refine_test.c
+@@ -1369 +1369 @@
+-        const uint32_t prefix[4] = {
++        const uint32_t prefix[8] = {
+@@ -1372,0 +1373,4 @@
++            0x706f6e6d,
++            0x74737271,
++            0x78777675,
++            0x42417a79,
+@@ -1375 +1379 @@
+-        const __m128i key = _mm_loadu_si128((const __m128i*)prefix);
++        const __m256i key = _mm256_loadu_si256((const __m256i*)prefix);
+@@ -1378 +1382 @@
+-            for (uint32_t pattern = 0; pattern < 4096; pattern += 1)
++            for (uint32_t pattern = 0; pattern < 16384; pattern += 1)
+@@ -1383,2 +1387,2 @@
+-                    const uint32_t matches = (pattern >> (3 * slot)) & 7;
+-                    for (uint32_t word = 0; word < 3; word += 1)
++                    const uint32_t matches = (pattern >> (7 * slot)) & 127;
++                    for (uint32_t word = 0; word < 7; word += 1)
+@@ -1386 +1390 @@
+-                        bucket[4 * slot + word] = prefix[word] ^ (uint32_t)(((matches >> word) & 1) == 0);
++                        bucket[8 * slot + word] = prefix[word] ^ (uint32_t)(((matches >> word) & 1) == 0);
+@@ -1389,2 +1393,2 @@
+-                    bucket[4 * slot + 3] = id;
+-                    if (expected == 0 && matches == 7)
++                    bucket[8 * slot + 7] = id;
++                    if (expected == 0 && matches == 127)
