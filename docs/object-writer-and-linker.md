@@ -3305,8 +3305,8 @@ are the later parts.
   carries the number of decisions its lane had taken, and a decision counts
   only the failures from before it, which the sync before it shows every
   lane; a failure in the next phase, of a lane that has gone on, waits for
-  the next decision. A group that `lane_run` couldn't start fails as
-  `FOREIGN_ERROR_LANES`.
+  the next decision. A group that `lane_run` couldn't start, or an operation
+  its command-owned team couldn't accept, fails as `FOREIGN_ERROR_LANES`.
 
 The members loaded and each name's winner are GNU ld's, except where GNU ld's
 result depends on the order of the archives on the command line; there they
@@ -3369,7 +3369,10 @@ are 2.07 ms opening, 4.82 loading and 9.16 resolving.
 Phase by phase, for the synth-size links by the vector path, on one lane and
 on 8 (`--lanes 1,8 --cpus 2,0,1,3,4,5,6,7`: lane 0 on CPU 2, the others on
 the cores that run `powersave`), in ms; the whole is `foreign_run`'s call to
-its return, which starts the lanes:
+its return. These measurements predate command-owned teams and include
+starting and joining the lanes on every call. The current `benchmark-foreign`
+starts its team once; its whole samples include dispatch and completion on
+those existing threads, excluding that one-time startup and shutdown:
 
 | Phase | dynamic, 1 lane | 8 lanes | static, 1 lane | 8 lanes | members, 1 lane | 8 lanes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -3468,25 +3471,56 @@ static Range64 range_part_by_cost(const uint64_t* cost_prefix, uint64_t count, u
 static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
 // The next number this lane takes from its group's counter: 0, 1, 2, ... across the lanes, then parts or more.
 static uint64_t lane_take(uint64_t parts);
-// Runs entry(argument) on a group of count lanes, the calling thread being lane 0, and returns once they all have.
+// Starts a command's fixed team, with the calling thread as lane 0; team starts zero-initialized.
+static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* cpus);
+// Joins the team's workers. Also safe after a failed start or with a zero-initialized team.
+static void lane_team_stop(LaneTeam* team);
+// Runs entry(argument) on count lanes of the current team, the caller being lane 0, and waits for all to finish.
+// Without a command-owned team, starts and joins a temporary group, as the cold-start tests and benchmark require.
 static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
 ```
+
+**The command owns the threads.** After validating its options, a parallel
+command starts one `LaneTeam` with its chosen capacity and CPU assignment,
+uses it for its whole operations, then stops it once during cleanup. Every
+phase within an operation remains a direct function call made by all its
+lanes. The team is fixed: a run can use an active prefix, such as 1, 8, 2 and
+8 lanes, and the same workers return at the same indices. The other workers
+sleep on futexes. A one-lane team starts no worker threads.
+
+Startup must create and pin every requested worker before the team is
+installed; a failure joins every worker it did create. An operation with too
+many lanes, a different CPU assignment or a nested `lane_run` fails without
+calling its entry or starting replacement threads. `lane_alone` does not
+permit nesting. The entry's shared writes are visible when `lane_run` returns;
+each worker releases its scratch arenas after the operation, while the
+calling thread keeps its scratch and gets its prior lane context, counter and
+CPU affinity back. Dispatch/completion synchronization is separate from the
+barriers inside an operation.
+
+`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
+output modes of `benchmark-executable` own teams. Each handler starts and
+stops its team in the translation unit that runs the operations: the split
+build's copies of `lane.c` have separate thread-local contexts. The ordinary
+preprocess/parse command still runs on one lane; the broader frontend work is
+tracked in [#149](https://github.com/buster14a/buster/issues/149).
 
 The lane lives in a thread-local context with the thread's scratch arenas, as
 `TCTX` holds the RAD Debugger's `LaneCtx`. A thread that has to run a phase
 alone, while the others do something else, makes itself a group of one (index
 0, count 1, no barrier) with `lane_alone` and restores its group afterwards.
 The barrier is a counter and a generation word: it spins briefly, waits in
-`mwaitx`, then sleeps on a futex. Its atomics, and the counter `lane_take` adds
-to, are the only ones the linker has: one atomic add per part, and none with one
-lane.
+`mwaitx`, then sleeps on a futex. Within an operation, its atomics and the
+counter `lane_take` adds to provide the lane coordination: one atomic add per
+part, and none with one lane. The command's team also synchronizes dispatch
+and completion between whole operations.
 
 Three things differ from the RAD Debugger, each measured below:
 
 - **The calling thread is lane 0.** radbin's main thread waits for its lanes;
-  here it is one of them, so a group of one starts no thread. A program starts
-  its group once, with all of its phases in the entry point, since starting
-  threads costs as much as 180 to 220 syncs.
+  here it is one of them, so a group of one starts no thread. A command starts
+  its team once and reuses it for its operations, with each operation's phases
+  in its entry point, since starting threads costs as much as 180 to 220 syncs.
 - **A broadcast is one barrier.** `lane_sync_u64` copies the value in, waits,
   copies it out and waits again. Here the source offers its value on the
   barrier's arrival line, which it writes anyway as it arrives; the last lane to
@@ -3610,8 +3644,9 @@ runs, each of them the median of 21 passes:
   "How long to wait before sleeping", took 10–15 µs to wake on the cores with
   the powersave governor, and 1.4–2.4 µs on CPU 2, whose governor is
   performance (see the appendix).
-- **Starting:** `lane_run` of an entry point that returns at once, without
-  pinning, from the call until it returns. That is what 180 to 220 syncs cost,
+- **Starting:** `lane_run` outside a command-owned team, of an entry point
+  that returns at once, without pinning, from the call until it returns. This
+  remains a cold create/join measurement. That is what 180 to 220 syncs cost,
   hence one group per program. It costs 0.5 to 3 µs more than with the barrier
   before `mwaitx`: its passes now follow the ones in which the lanes sleep for
   3 ms.

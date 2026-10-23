@@ -1285,10 +1285,9 @@ the others, its measurements are informational.
 
 ## Lane tests
 
-`./build/compiler test-lanes` (about 0.2 s) checks the lane base layer. The
-arena checks run on the calling thread, and every other check runs on groups of
-1, 2, 3 and 8 lanes and compares what the lanes produce with a sequential
-reference:
+`./build/compiler test-lanes` checks the lane base layer. The arena checks run
+on the calling thread, and the collective checks run on groups of 1, 2, 3 and
+8 lanes and compare what the lanes produce with a sequential reference:
 
 - arenas: pushes at every power-of-two alignment up to 2 MB, invalid
   alignments, a push one byte past the capacity (it fails and leaves the arena
@@ -1304,6 +1303,10 @@ reference:
   so late that they wait in `mwaitx`, then as many broadcasts back to back,
   and narrow tasks spread by `lane_from_task_index`;
 - a lane that makes itself a group of one and rejoins, and the scratch arenas;
+- command-owned teams: stable worker identities across repeated operations
+  and changing active counts, exact participation, shared-write visibility,
+  per-operation worker scratch cleanup, caller context restoration, one-lane
+  operation, invalid/nested dispatch and startup failure cleanup;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
@@ -1316,6 +1319,13 @@ reference:
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
 rounds and the random inputs.
+
+The command deliberately starts without a team so it can test both cold
+`lane_run` and explicit `lane_team_start`/`lane_team_stop` lifetimes. Do not
+wrap the main command dispatcher in a team: included copies of `lane.c` have
+separate thread-local contexts. Parallel command handlers own their team in
+the translation unit that runs their operations. An operation's phases stay
+direct calls within its whole-operation lane entry.
 
 ## Deterministic output tests
 
@@ -1352,7 +1362,9 @@ allowed CPUs in order: 0 to 7 on the 9700X, one per core) and reports
 21-pass medians of a sync and a broadcast when every lane arrives at once, of
 `pthread_barrier_wait` (the RAD Debugger's barrier on Linux) in the same loop,
 of waking lanes that wait in `mwaitx` and that sleep on the futex, and of
-starting a group. Then, on the largest group, how much slower lanes run after
+starting a group. Its `start` measure remains a cold `lane_run` outside a
+command-owned team, including thread creation and joining. Then, on the
+largest group, how much slower lanes run after
 waiting 0.2 to 5 ms for a lane that works alone, and how well rule 1's parts
 and the static ranges balance three phases, with every lane at full speed and
 with half of them at half speed. Then what an arena's reservation and first
