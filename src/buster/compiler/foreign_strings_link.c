@@ -88,21 +88,19 @@ static ForeignStringsError foreign_strings_apply(Link* link, const ForeignString
         values[symbol] = link->symbols.value[symbol];
         if (input != 0)
         {
-            uint32_t mapped = 0;
             const uint64_t value = values[symbol];
             const uint64_t size = link->symbols.size[symbol];
-            const bool valid = foreign_strings_offset(strings, input - 1, value, &mapped);
             uint32_t entry = 0;
+            const bool valid = foreign_strings_entry(strings, input - 1, value, &entry);
             // A named object may not span independently merged entries, including wide-code-unit terminators.
-            const bool single = valid && foreign_strings_entry(strings, input - 1, value, &entry) &&
-                                size <= (uint64_t)strings->input_offset[entry] + strings->lengths[entry] - value;
+            const bool single = valid && size <= (uint64_t)strings->input_offset[entry] + strings->lengths[entry] - value;
             if (!single)
             {
                 error = FOREIGN_STRINGS_ERROR_UNSUPPORTED;
             }
             else
             {
-                values[symbol] = mapped;
+                values[symbol] = strings->output_offset[entry] + value - strings->input_offset[entry];
             }
         }
     }
@@ -123,14 +121,18 @@ static ForeignStringsError foreign_strings_apply(Link* link, const ForeignString
         {
             const int64_t value = (int64_t)link->symbols.value[symbol];
             const int64_t addend = link_fixup_addend(link, fixup);
-            const bool bounded = addend >= -value && addend < (int64_t)link->atoms.size[atom] - value;
-            const uint64_t target = bounded ? (uint64_t)(value + addend) : 0;
             uint32_t source_entry = 0;
-            uint32_t target_entry = 0;
             // A named absolute or data-PC64 expression crossing a terminator depends on original adjacency.
-            // Keeping its addend after pooling would silently change that address, even if each entry is valid.
-            if (!bounded || !foreign_strings_entry(strings, atom_inputs[atom] - 1, (uint64_t)value, &source_entry) ||
-                !foreign_strings_entry(strings, atom_inputs[atom] - 1, target, &target_entry) || source_entry != target_entry)
+            // The symbol pass already proved S's entry. A zero addend needs no lookup; for others, compare the
+            // signed addend with that entry's relative bounds without adding it to S or searching for S+A again.
+            bool same = addend == 0;
+            if (!same && foreign_strings_entry(strings, atom_inputs[atom] - 1, (uint64_t)value, &source_entry))
+            {
+                const int64_t begin = (int64_t)strings->input_offset[source_entry];
+                const int64_t end = begin + strings->lengths[source_entry];
+                same = addend >= begin - value && addend < end - value;
+            }
+            if (!same)
             {
                 error = FOREIGN_STRINGS_ERROR_UNSUPPORTED;
             }
