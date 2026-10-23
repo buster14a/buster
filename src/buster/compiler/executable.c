@@ -3799,6 +3799,9 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             {
                 const SymbolId target = fixups->target[group + (FixupId)__builtin_ctzll(left)];
                 tlsgd_marks[target / 64] |= 1ull << (target % 64);
+                // A hidden undefined weak TLS symbol has neither an image module nor a dynamic lookup. Giving it
+                // this image's module pair would turn an absent definition into an unrelated TLS address.
+                refused += link->symbols.atom[target] == 0 && !executable_bit(shared->dynamic_bits, target) ? 1 : 0;
             }
             tlsld_accesses += (uint64_t)__builtin_popcountll(ld);
             pie_direct &= ~(gd | ld);
@@ -4289,8 +4292,10 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
     const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL && !dynamic_tls;
     const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
     const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
+    const bool missing_tls_pair = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_TLSGD &&
+                                  link->symbols.atom[target] == 0 && class != BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
     return (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) || (relative && executable_is_absolute_zero(link, target, scope)) ||
-           (absolute && executable_refuses_absolute(kind)) || (scope == BUSTER_EXECUTABLE_SCOPE_SHARED &&
+           (absolute && executable_refuses_absolute(kind)) || missing_tls_pair || (scope == BUSTER_EXECUTABLE_SCOPE_SHARED &&
                                                                (executable_shared_refuses(kind) || (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0)));
 }
 

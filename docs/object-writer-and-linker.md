@@ -2389,6 +2389,11 @@ by zero, with DTPOFF32 fields holding the definition's module offset.
 Undefined DTPOFF32 targets are refused before publication. An imported-only
 TLS library does not acquire an empty PT_TLS segment, and general/local
 dynamic accesses do not set DF_STATIC_TLS.
+An undefined hidden weak TLSGD target is also refused: it has neither a
+defining module nor a dynamic lookup. In an original standalone reference
+probe on the 9700X, GNU ld 2.47 and lld 23.1.1 both emitted DTPMOD64 against
+symbol zero without PT_TLS; the loaded address was `0x2`, not a valid TLS
+definition. The writer does not manufacture a current-module address for it.
 
 Each lane marks general-dynamic targets in its own bitset. A reduction owns
 complete symbol words, then mask expansion assigns pairs after ordinary GOT

@@ -3606,6 +3606,17 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
         .pic = "-fPIC",
         .refused = true,
     },
+    {
+        // No definition and no dynamic lookup: a current-module TLS pair would manufacture an unrelated address.
+        // The reference loader check doesn't call the absent definition's probe; the writer must reject it.
+        .name = "general-dynamic-hidden-weak",
+        .source = "extern __thread int buster_absent __attribute__((weak, visibility(\"hidden\")));\n"
+                  "int* buster_lookup(void) { return &buster_absent; }\n"
+                  "int buster_check(int (*helper)(void), int* data) { return helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+        .refused = true,
+    },
 };
 
 // The program that loads a compiled library: it defines buster_helper and buster_data, which -rdynamic exports, so
