@@ -742,12 +742,14 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     {
         check.error = IR_ERROR_STRUCTURE;
     }
-    // An incoming variadic frame (its pointer compared, never read) and a local
+    // An incoming variadic frame (its pointer compared, never read), a local
     // flag other than ADDRESS_TAKEN (BUSTER_TYPED_LOCAL_ADDRESS_ONLY's anchors
-    // and va_list objects, or a later role) are frame state this adapter
-    // doesn't model: lowering a role as an ordinary slot would size and place
-    // it wrongly, so both are refused before the stream is validated or
-    // anything is allocated.
+    // and va_list objects, or a later role) and an object (a local with a
+    // size in local_sizes: an array, a struct or a union, of class VOID) are
+    // frame state this adapter doesn't model: lowering a role or an object as
+    // an ordinary slot would size and place it wrongly (an object's slot would
+    // take VOID's bytes and overlap its neighbours), so they are refused
+    // before the stream is validated or anything is allocated.
     if (check.error == IR_OK && input->incoming_variadic != 0)
     {
         check.error = IR_ERROR_METADATA;
@@ -756,7 +758,7 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     }
     for (uint32_t l = 0; check.error == IR_OK && l < input->local_count; l += 1)
     {
-        if ((input->local_flags[l] & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0)
+        if ((input->local_flags[l] & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 || (input->local_sizes != 0 && input->local_sizes[l] != 0))
         {
             check.error = IR_ERROR_METADATA;
             check.instruction = BUSTER_IR_NONE;
@@ -786,6 +788,13 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
         else if (kind == BUSTER_TYPED_CALL && (input->call_targets[value] == 0 || input->call_targets[value] >= symbol_count))
         {
             check.error = IR_ERROR_OPERAND;
+            check.instruction = i;
+        }
+        else if (kind > BUSTER_TYPED_RETURN)
+        {
+            // A kind this adapter doesn't lower (COPY, and those after it),
+            // which the plan and the emitter would take for a binary operation.
+            check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
     }

@@ -207,7 +207,14 @@ variadic frames: a non-null `incoming_variadic` (compared, never read) and a
 local flag other than `ADDRESS_TAKEN` (`BUSTER_TYPED_LOCAL_ADDRESS_ONLY`'s
 anchors and `va_list` objects) are refused with `IR_ERROR_METADATA`, the local
 in `detail` (`BUSTER_IR_NONE` for the frame), after the count and column checks
-and before validation or allocation, rather than lowered as ordinary slots.
+and before validation or allocation, rather than lowered as ordinary slots. So
+are #136's frame objects (a local with a size in `local_sizes`: an array, a
+struct or a union, of class VOID), whose ordinary slot would take VOID's bytes
+and overlap its neighbours. A kind past `RETURN` (#136's `COPY`, and those after
+it) is refused with `IR_ERROR_OPCODE` at its entry, after validation and before
+allocation: the plan and the emitter would take it for a binary operation.
+Lowering objects (an `IrSlot` has their size and alignment) and copies remains
+open.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then

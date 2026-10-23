@@ -17,6 +17,7 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - `tier0_compile_scalar`, its twin and oracle.
 - **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
 - **Indirect calls,** through `r11`.
+- **Block copies** (`COPY`) of up to 256 bytes, a struct's assignment.
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -72,7 +73,9 @@ vectorized across the unit that way, and Tier 0 needs no type table.
 - binary: `ADD` to `SHR`, `PTR_ADD` (with the element's size), and the compares `EQ` to `GE`;
 - stores: `STORE` and `SET` (through a pointer, with and without a value), `STORE_LOCAL` and `SET_LOCAL`,
   `STORE_GLOBAL` and `SET_GLOBAL`;
-- `CALL` and `DISCARD`.
+- `CALL` and `DISCARD`;
+- `COPY`: `value` bytes, 1 to 256, from the address on top to the one under it, the ranges the same or apart (a
+  struct's assignment). A front end copies more through `memcpy`, as clang -O0 does past 16 stores of 16 bytes.
 
 **The checker makes explicit** what C leaves implicit:
 
@@ -257,6 +260,14 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   left are cycles, each of n moves taking n − 1 `xchg`s. With rax first in the depth table and rdi first in the ABI's
   order, a call makes cycles of two alone; a test of the resolver's own covers every length.
 - Division and shifts by a register at depths where rax, rdx or rcx hold other values (through two fixed frame slots).
+- Copies, through their stacks' first free register (an XMM one from 16 bytes, a general one below), which selection
+  counts as reached, so that no local takes it as its home:
+  - from 16 bytes, a load and a store with `movups` per 16, the last 16 ending at the end;
+  - below, two of a general register's 8, 4, 2 or 1 bytes, the second ending at the end (one when that is all).
+
+  Overlapping pieces copy what they would apart, the ranges being the same or apart. `rep movsb` would copy any size
+  in a few records, but `x86_semantics.c` has no row for it, and `unwind_tier0.c` refuses a function with an
+  instruction of unknown effects.
 - The immediates: every record with an immediate takes the shortest form that keeps its value and the flags its
   template reads (`x86_choose_forms`): imm8, the accumulator's form, `xor` for zero, `test r, r` for `cmp r, 0`, `inc`
   and `dec`.
@@ -351,10 +362,15 @@ Before the programs, checks of their own:
   - `tier0_validate` must refuse each break of an object's rules at its locals: a class, no `ADDRESS_TAKEN`, a
     parameter, aligned to 32, sizes without alignments, a `LOCAL` of it, and past `BUSTER_TIER0_MAX_OBJECT_BYTES`.
     It must take exactly the limit.
-  - 2,000 random frames, each of up to 24 locals: objects of 1 to 300 bytes at every alignment to 16, and 8-byte
-    values, some address-taken. Both paths compile them, and must agree. Each local's place, from its
-    `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment, inside the frame and apart from every other local's
-    bytes. Under an object aligned to 16, rsp must be a multiple of 16.
+  - 2,000 random frames, each of up to 24 locals: objects of 1 to 300 bytes at every alignment to 16, 8-byte values,
+    some address-taken, and `VA_LIST`s of 24 bytes. Both paths compile them, and must agree. Each local's place, from
+    its `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment (8 but for objects), inside the frame and apart
+    from every other local's bytes. Under an object aligned to 16, rsp must be a multiple of 16.
+- **copies:**
+  - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
+  - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
+    Both selections must count its scratch register among the frame's clobbers, or refuse the function as too deep
+    where its stack has none left, and both paths must compile it alike.
 - **variadic calls** (#363's review): two callers call a probe through a pointer, variadically, with six integers and
   three doubles past a named first one. The probe, records of the test's own, stores what it sees: the argument
   registers, rax, r11 and the vector registers. Its al must be 3, r11 its own address and the arguments the call's:
@@ -379,7 +395,13 @@ Before the programs, checks of their own:
   - local arrays of 2 to 16 elements and structs of 2 to 5 members laid out as C lays them out, some `_Alignas(16)`;
   - elements and members read, written (an element also by `+=`) and pointed into;
   - each object's address modulo its alignment as a value (`(unsigned long)&v & 15`), 0 wherever the object is placed
-    right.
+    right;
+  - twins (an object of the layout of the one before) and copies between them, of all their bytes or a prefix, as
+    statements and before call arguments (a `COPY` above the arguments before it). C leaves the order of a call's
+    arguments unspecified, and another argument may read the copy's destination, so a call with a copy is written in
+    C as a block that evaluates its arguments into temporaries in order, the copy a statement at its place;
+  - at each function's end, every element's and member's bits XORed into a global (padding left out), so that a
+    byte any store or copy puts wrong shows in the globals.
 
   A program without objects is the one the same seed gave before they existed;
 - with the `indirect` option (the shapes with calls), a third of the calls indirect: through locals that hold an
@@ -395,11 +417,13 @@ Everything in them is defined behavior, and nothing recurses: expressions are bu
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
 
 **The cross-check** (`--cross-check`, 60 programs of the larger shape) writes Tier 0's code as an ELF object through the
-link representation and the object writer. clang -O0 compiles the same program as C, and a generated harness links
-both, runs them on the same inputs and compares the results and every global. These programs keep to what C defines:
-clang folds an out-of-range floating conversion of a constant its own way, so a floating value converts to an integer
-only from a short's value. A floating global's elements compare as their bytes, but any two NaNs are the same: C leaves
-a NaN's sign and payload to the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN.
+link representation and the object writer. clang -O0 compiles the same program as C, and a generated harness links both,
+runs them on the same inputs and compares the results and every global. clang compiles them in this repository's own
+dialect, `-fwrapv` (signed arithmetic wraps, as Tier 0's does) and `-fno-strict-aliasing` (the objects' checksums read
+floating parts' bits through integer pointers). These programs keep to what that defines: clang folds an out-of-range
+floating conversion of a constant its own way, so a floating value converts to an integer only from a short's value. A
+floating global's elements compare as their bytes, but any two NaNs are the same: C leaves a NaN's sign and payload to
+the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN.
 
 **Robustness:**
 
@@ -426,6 +450,15 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
     - objects overlapping: the objects test, and runs that crash, loop until the alarm, or differ;
     - the vector path giving objects slots too, or the scalar path: 1,951 and 599 (the paths disagree);
     - each rule of the validator's for objects left out: its break taken;
+    - a `VA_LIST`'s 24 bytes (#356's frames) taken as a value's 8 by either path or by both: 1,184 of the objects
+      test's checks each;
+  - and on copies:
+    - the last 16-byte piece not pulled back to end at the copy's end, so that it copies past it: 17 programs' runs,
+      once their objects' bits are folded into a global, and none before;
+    - the second piece of a copy below 16 bytes left out: 101; the vector path's count without the last 16 bytes' load
+      and store: 69;
+    - the scratch left out of selection, general or XMM, on either path: 952 and 714 of the copies check;
+    - the validator's size limits left out: their breaks taken.
   - and on indirect calls:
     - the callee's register one depth off: the paths disagree and runs crash;
     - its move left out of the vector path's count: 767; the call's depths, the emitter's: 767;
@@ -484,10 +517,14 @@ path's 11.1.
   - the immediates' choice (`x86_choose_forms`) and applying it 11%;
   - the homes, the frame, the prologue and the per-function setup 15%.
 
-**Generated code against clang -O0** (60 cross-checked programs on the 9700X):
+**Generated code against clang -O0** (the cross-check's 60 programs for each of seeds 1, 2, 3, 5, 7 and 11, on the
+9700X, each run alone under its lock and pinned to CPU 2):
 
-- **Run time:** 0.79 of clang's (0.70 to 0.78 on the 7940HS, over 1,310 programs of six seeds).
-- **Code size:** 1.11 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
+- **Run time:** 0.93 to 0.95 of clang's (0.86 to 0.92 on the 7940HS). The programs have had objects, indirect calls
+  and copies since #362 to #364, and every object's bytes are read into a global as each function ends. An object
+  lives in memory for both compilers, so Tier 0's register homes gain less on such code: before them, its run time
+  was 0.79 of clang's (0.70 to 0.78 on the 7940HS).
+- **Code size:** 1.10 to 1.11 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
   through a general register (up to 15 bytes) where clang loads them from `.rodata` (not counted in its `.text`).
   They are also full of constant arithmetic, which #133 will fold before Tier 0 sees it.
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
@@ -498,7 +535,7 @@ path's 11.1.
   them to the scalar path, with frame slots.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - conversions between U64 and floating values;
-  - aggregate values: struct copies, and aggregates passed and returned by value (the objects they live in are done);
+  - aggregates passed and returned by value (the objects they live in and copies of up to 256 bytes are done);
   - objects aligned past 16, which need a frame pointer;
   - bit-fields;
   - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;

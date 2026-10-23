@@ -52,9 +52,13 @@ struct Tier1PipelineFixture
     uint64_t values[BUSTER_TIER1_PIPELINE_ENTRIES];
     uint8_t local_classes[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint8_t local_flags[BUSTER_TIER0_GENERATE_MAX_LOCALS];
+    // Tier0Program's objects' columns, all 0: the fixture's locals are values.
+    uint32_t local_sizes[BUSTER_TIER0_GENERATE_MAX_LOCALS];
+    uint8_t local_alignments[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint32_t call_callees[1];
     uint32_t call_first[1];
     uint32_t call_argument_counts[1];
+    uint8_t call_indirect[1];
     uint8_t argument_classes[3];
 };
 
@@ -121,11 +125,14 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         .entry_capacity = BUSTER_TIER1_PIPELINE_ENTRIES,
         .local_classes = fixture->local_classes,
         .local_flags = fixture->local_flags,
+        .local_sizes = fixture->local_sizes,
+        .local_alignments = fixture->local_alignments,
         .local_count = 4,
         .local_capacity = BUSTER_TIER0_GENERATE_MAX_LOCALS,
         .call_callees = fixture->call_callees,
         .call_first = fixture->call_first,
         .call_argument_counts = fixture->call_argument_counts,
+        .call_indirect = fixture->call_indirect,
         .call_capacity = 1,
         .argument_classes = fixture->argument_classes,
         .argument_capacity = BUSTER_ARRAY_LENGTH(fixture->argument_classes),
