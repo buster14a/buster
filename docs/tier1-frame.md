@@ -149,7 +149,7 @@ needs RBP for restoration and uses RSP to address objects.
 
 The variadic prologue plans all six general argument-register saves and eight
 sixteen-byte vector saves; the latter are conditional on entry AL being
-nonzero. The eventual emitter must preserve that entry AL value until these
+nonzero. The emitter must preserve that entry AL value until these
 conditional saves are decided. Prologue stores explicitly name RSP as their
 base, including the original R13 save before R13 becomes a base pointer.
 
@@ -164,9 +164,53 @@ allocations require their own protected lowering and are not prologue steps.
 
 The plan has bounded step arrays and no instruction positions. Omitting a
 frame pointer in actual emitted code still requires the PC-anchored unwind
-description from [#88](https://github.com/buster14a/buster/issues/88). That
-native consumer, spill loads/stores and real prologue/epilogue emission remain
-unimplemented by this module.
+description from [#88](https://github.com/buster14a/buster/issues/88). The
+planner itself emits no instructions; the separate companion below realizes
+its frame steps. Spill loads/stores belong to the instruction consumer.
+
+## Native frame companion
+
+[`tier1_frame_emit.c`](../src/buster/compiler/tier1_frame_emit.c) consumes the
+same `Tier1Frame` plan after instruction allocation. Its entry point is
+`tier1_frame_emit(const Tier1Frame*, bool epilogue, Tier1EmitBuffer*)`, returning
+`TIER1_FRAME_EMIT_OK`, `TIER1_FRAME_EMIT_INVALID`, or
+`TIER1_FRAME_EMIT_CAPACITY`. The shared buffer has `records`, `count`,
+`capacity`, `branches`, `targets`, `branch_count`, and `branch_capacity` fields.
+Instruction records use the existing `X86Instruction` representation. Both
+branch columns use absolute record indices, including when a frame sequence
+is appended after an existing prefix. The complete function then goes through
+the existing branch-sizing and encoding stages.
+
+The caller appends the prologue once and the epilogue at each return. Appends
+are transactional: a malformed step or insufficient capacity leaves all
+destination bytes and counts unchanged. Conservative bounds per call are
+`BUSTER_TIER1_FRAME_EMIT_RECORDS` (384) and
+`BUSTER_TIER1_FRAME_EMIT_BRANCHES` (64), independent of frame byte size.
+The helper expands the bounded control protocol directly; it adds no IR,
+allocation columns, or retained per-object representation.
+
+Reserve R11 (`BUSTER_TIER1_FRAME_EMIT_SCRATCH`) before register allocation,
+in addition to the planner's requirements mask. Probe loops use only R11,
+RSP, and flags; they preserve the six incoming general argument registers,
+XMM arguments, and the original entry AL. Consecutive vector-save steps
+share one test of AL and one conditional branch around their `movaps` stores.
+All emitted forms belong to baseline x86-64. Epilogues preserve return-value
+registers. A dynamic realigned frame stores original R13 before establishing
+the aligned base, and restores it after all other accesses through that base.
+
+Protected allocation descends by 4096 bytes with a byte read/write at each
+step, then touches any final partial step. Protected realignment also touches
+the final aligned address. Large alignment gaps use a bounded loop rather
+than a record per page; the loop never steps past its final target. Ordinary
+alignment or allocation without `PROBE_STACK` emits the corresponding single
+arithmetic instruction. The helper does not lower dynamic body allocations or
+dynamic outgoing call areas; the instruction consumer must reserve, align,
+and, when required, probe those at the call or allocation site.
+
+The companion publishes records and branch targets, not PC-anchored unwind
+rows. Native execution coverage below therefore does not complete #88 or
+establish debugger/unwinder acceptance. Full ABI cross-linking and corpus
+requirements remain open as listed below.
 
 ## Checking and measurement
 
@@ -187,6 +231,24 @@ checks passed. These are local correctness diagnostics, not 9700X or
 emitted-code acceptance evidence. A local benchmark smoke exercised all four
 phases and both paths at 65 objects; assembly inspection confirmed bounded
 masked vector loads/stores and the pressure-scan vector additions.
+
+`test-tier1-frame-execution` executes the native companion in an isolated
+child on controlled stacks. It covers all 32 frame-policy combinations,
+small and page-spanning objects, alignment through 8192 bytes, two entry
+residues, deliberate changes to every allocated callee-save register, dynamic
+RSP movement, AL values 0/1/8, and all 176 variadic save-area bytes. Its
+generated caller independently checks callee-save sentinels and restoration
+of its original stack. Real nested calls check fixed and dynamic outgoing
+areas, 16-/64-byte call alignment, stack arguments, and preservation of locals.
+
+Guard-page tests compare a probing function with an otherwise identical
+unprotected control: only the probing function faults on an intermediate
+allocation page, a 65536-byte alignment gap, or the final partial allocation
+step. Additional cases check malformed steps, exact output capacities,
+unchanged destination bytes on refusal, and the maximum 384-record/64-branch
+append. Local optimized and ASan/UBSan runs each passed 14,619 checks. These
+are native helper correctness diagnostics; they do not substitute for the
+source-to-program ABI/corpus qualification or controlled 9700X measurements.
 
 `benchmark-tier1-frame [--only scalar|vector] [--phase prepare|color|layout|total]
 [--count N] [--seed N] [--after-scalar MS]` uses original generated lifetime
@@ -221,5 +283,5 @@ No 9700X timing or speedup is claimed here. Issue #177 remains open for
 [#137](https://github.com/buster14a/buster/issues/137) Tier 1 cross-linking
 including variadic and over-aligned functions, frame-size comparisons against
 `clang -O2` on the corpora, and controlled `speedtest1`/corpus runtime evidence
-for slot sharing and frame-pointer omission. Prologue-plan simulation does
-not satisfy those requirements.
+for slot sharing and frame-pointer omission. Prologue-plan simulation and
+bounded native-helper execution do not satisfy those full-program requirements.

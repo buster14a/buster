@@ -300,6 +300,7 @@ jobs:
           ./build/compiler test-tier0 --cross-check
           == Test Tier 1 frame planning and slot coloring
           ./build/compiler test-tier1-frame
+          ./build/compiler test-tier1-frame-execution
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables
