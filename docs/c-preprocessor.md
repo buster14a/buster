@@ -1191,7 +1191,7 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 | Options | Macros |
 | --- | --- |
 | `-O0` to `-O3` (higher is 3), `-O`, `-Og`, `-Os`, `-Oz`, `-Ofast`; `-fno-inline`, `-finline`, `-f[no-]inline-functions`, `-finline-hint-functions` | `__OPTIMIZE__`, `__OPTIMIZE_SIZE__`, `__NO_INLINE__` (at -O0, or when only always-inline functions inline) |
-| The floating-point options, through clang's state machine (`RenderFloatingPointOptions`): `-f[no-]fast-math`, `-ffp-model=`, `-f[no-]finite-math-only`, `-f[no-]math-errno`, `-f[no-]honor-infinities`, `-f[no-]honor-nans`, `-f[no-]signed-zeros`, `-f[no-]associative-math`, `-f[no-]reciprocal-math`, `-f[no-]approx-func`, `-f[no-]trapping-math`, `-ffp-exception-behavior=`, `-f[no-]rounding-math`, `-f[no-]unsafe-math-optimizations`, `-Ofast` (when it is the last `-O`) | `__FAST_MATH__`, `__FINITE_MATH_ONLY__`, `__NO_MATH_ERRNO__` |
+| The floating-point options, through clang's state machine (`RenderFloatingPointOptions`): `-f[no-]fast-math`, `-ffp-model=`, `-f[no-]finite-math-only`, `-f[no-]math-errno`, `-f[no-]honor-infinities`, `-f[no-]honor-nans`, `-f[no-]signed-zeros`, `-f[no-]associative-math`, `-f[no-]reciprocal-math`, `-f[no-]approx-func`, `-f[no-]trapping-math`, `-ffp-exception-behavior=`, `-f[no-]rounding-math`, `-f[no-]unsafe-math-optimizations`, `-Ofast` (when it is the last `-O`, which ignores every `-ffp-model=` but `aggressive` without checking its value) | `__FAST_MATH__`, `__FINITE_MATH_ONLY__`, `__NO_MATH_ERRNO__` |
 | `-ffp-eval-method=` | `__FLT_EVAL_METHOD__`'s value |
 | `-f[no-]signed-char`, `-f[no-]unsigned-char` | `__CHAR_UNSIGNED__` |
 | `-f[no-]short-wchar` | the `wchar_t` macros |
