@@ -586,6 +586,216 @@ static void tier1_liveness_test_guards(Tier1LivenessTest* test)
     }
 }
 
+static void tier1_liveness_test_calls(Tier1LivenessTest* test)
+{
+    const uint8_t result_types[] =
+    {
+        IR_VOID,
+        IR_I32,
+        IR_I64,
+        IR_PTR,
+    };
+    const uint8_t parameter_types[] =
+    {
+        IR_I32,
+        IR_I64,
+        IR_PTR,
+        IR_I32,
+        IR_I64,
+        IR_PTR,
+    };
+    const uint32_t arguments[] =
+    {
+        5,
+        0,
+        1,
+        1,
+        4,
+        2,
+    };
+    for (uint32_t type = 0; type < sizeof(result_types); type += 1)
+    {
+        for (uint32_t count = 0; count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS; count += 1)
+        {
+            arena_pop_to(&test->input, 0);
+            const IrSizes sizes =
+            {
+                .instruction_count = 11,
+                .block_count = 3,
+                .extra_count = count,
+                .call_count = 1,
+                .call_type_count = count,
+                .parameter_count = 6,
+            };
+            IrFunction function;
+            bool valid = ir_create(&test->input, &sizes, &function) == IR_OK;
+            if (valid)
+            {
+                function.result_type = result_types[type];
+                function.symbol_count = 2;
+                function.block_offsets[1] = 7;
+                function.block_offsets[2] = 9;
+                function.block_offsets[3] = 11;
+                memcpy(function.parameter_types, parameter_types, sizeof(parameter_types));
+                for (uint32_t p = 0; p < 6; p += 1)
+                {
+                    tier1_liveness_test_node(&function, p, IR_PARAM, parameter_types[p], p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                }
+                for (uint32_t p = 0; p < count; p += 1)
+                {
+                    function.extra[p] = arguments[p];
+                    function.call_types[p] = parameter_types[arguments[p]];
+                }
+                function.calls[0] = (IrCall)
+                {
+                    .argument_count = count,
+                    .parameter_count = count,
+                    .result_type = result_types[type],
+                };
+                tier1_liveness_test_node(&function, 6, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_liveness_test_node(&function, 7, IR_CALL, result_types[type], 1, 0, BUSTER_IR_NONE);
+                tier1_liveness_test_node(&function, 8, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_liveness_test_node(&function, 9, IR_COPY, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_liveness_test_node(&function, 10, IR_RET, IR_VOID, result_types[type] == IR_VOID ? BUSTER_IR_NONE : 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                Tier1SelectPlan plan;
+                IrCfg cfg;
+                valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
+                if (valid)
+                {
+                    Tier1Liveness scalar;
+                    Tier1Liveness vector;
+                    valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+                    if (valid)
+                    {
+                        tier1_liveness_test_expect(test, vector.allocation.count == 7 + (result_types[type] != IR_VOID) && vector.allocation.use_count == count + 1 + (result_types[type] != IR_VOID), "call result and every duplicate argument have exact interval/use counts");
+                        bool have_result = false;
+                        bool have_live_across = false;
+                        for (uint32_t interval = 0; interval < vector.allocation.count; interval += 1)
+                        {
+                            const uint32_t value = vector.allocation.values[interval];
+                            if (value == 7)
+                            {
+                                have_result = vector.allocation.starts[interval] == 15 && vector.allocation.ends[interval] == 21 && vector.allocation.use_positions[vector.allocation.use_offsets[interval]] == 20;
+                            }
+                            if (value == 1)
+                            {
+                                have_live_across = vector.allocation.starts[interval] == 0 && vector.allocation.ends[interval] == 19;
+                                if (count >= 4)
+                                {
+                                    const uint32_t first = vector.allocation.use_offsets[interval];
+                                    tier1_liveness_test_expect(test, vector.allocation.use_offsets[interval + 1] - first == 3 && vector.allocation.use_positions[first] == 14 && vector.allocation.use_positions[first + 1] == 14 && vector.allocation.use_positions[first + 2] == 18, "duplicate argument positions precede the same value's live-across use");
+                                }
+                            }
+                        }
+                        tier1_liveness_test_expect(test, have_live_across && have_result == (result_types[type] != IR_VOID), "call definition and caller value spanning the call retain their machine positions");
+                    }
+                    if (count == 6 && result_types[type] == IR_I64)
+                    {
+                        for (uint32_t mutation = 0; mutation < 5; mutation += 1)
+                        {
+                            const uint32_t first = plan.effective_use_offsets[7];
+                            const uint32_t saved_use = plan.effective_use_values[first];
+                            const uint32_t saved_end = plan.effective_use_offsets[8];
+                            const Tier1SelectPattern saved_pattern = plan.patterns[7];
+                            if (mutation == 0)
+                            {
+                                plan.effective_use_values[first] = 0;
+                            }
+                            else if (mutation == 1)
+                            {
+                                plan.effective_use_offsets[8] -= 1;
+                            }
+                            else if (mutation == 2)
+                            {
+                                plan.patterns[7].immediate = 0;
+                            }
+                            else if (mutation == 3)
+                            {
+                                plan.patterns[7].rule = TIER1_RULE_LEAF;
+                            }
+                            else
+                            {
+                                plan.patterns[7].values[0] = 0;
+                            }
+                            for (uint32_t path = 0; path < 2; path += 1)
+                            {
+                                Tier1Liveness rejected;
+                                memset(&rejected, 0xa5, sizeof(rejected));
+                                const Tier1Liveness before = rejected;
+                                const uint64_t mark = test->left.length;
+                                const uint64_t scratch_mark = test->scratch.length;
+                                const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, path != 0, &rejected);
+                                tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&rejected, &before, sizeof(rejected)) == 0, "malformed call pattern/use handoff is rejected transactionally");
+                            }
+                            plan.effective_use_values[first] = saved_use;
+                            plan.effective_use_offsets[8] = saved_end;
+                            plan.patterns[7] = saved_pattern;
+                        }
+                    }
+                }
+            }
+            tier1_liveness_test_expect(test, valid, "real direct-call selected-use fixture completed");
+        }
+    }
+}
+
+static void tier1_liveness_test_call_fold(Tier1LivenessTest* test)
+{
+    arena_pop_to(&test->input, 0);
+    const IrSizes sizes =
+    {
+        .instruction_count = 8,
+        .block_count = 1,
+        .constant_count = 1,
+        .call_count = 1,
+        .parameter_count = 2,
+    };
+    IrFunction function;
+    bool valid = ir_create(&test->input, &sizes, &function) == IR_OK;
+    if (valid)
+    {
+        function.result_type = IR_I64;
+        function.symbol_count = 2;
+        function.block_offsets[1] = 8;
+        function.parameter_types[0] = IR_I64;
+        function.parameter_types[1] = IR_I64;
+        function.constants[0].low = 3;
+        tier1_liveness_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 2, IR_NOT, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 3, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 4, IR_SHL, IR_I64, 2, 3, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 5, IR_CALL, IR_VOID, 1, 0, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 6, IR_ADD, IR_I64, 0, 4, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        Tier1SelectPlan plan;
+        IrCfg cfg;
+        valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
+        if (valid)
+        {
+            Tier1Liveness scalar;
+            Tier1Liveness vector;
+            valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+            if (valid)
+            {
+                bool extended = false;
+                for (uint32_t interval = 0; interval < vector.allocation.count; interval += 1)
+                {
+                    const uint32_t value = vector.allocation.values[interval];
+                    tier1_liveness_test_expect(test, value != 4, "folded pre-call shift has no physical definition");
+                    if (value == 2)
+                    {
+                        const uint32_t first = vector.allocation.use_offsets[interval];
+                        extended = vector.allocation.starts[interval] == 5 && vector.allocation.ends[interval] == 13 && vector.allocation.use_offsets[interval + 1] - first == 1 && vector.allocation.use_positions[first] == 12;
+                    }
+                }
+                tier1_liveness_test_expect(test, extended && plan.covered[4] != 0 && plan.patterns[6].rule == TIER1_RULE_LEA_SHIFT, "selected-use handoff extends folded source across call for native preservation");
+            }
+        }
+    }
+    tier1_liveness_test_expect(test, valid, "folded source spanning direct call fixture completed");
+}
+
 static int run_tier1_liveness_tests(int argc, char** argv)
 {
     Tier1LivenessTest test = { .seed = 143 };
@@ -635,6 +845,8 @@ static int run_tier1_liveness_tests(int argc, char** argv)
             tier1_liveness_test_many_values(&test, boundaries[i]);
         }
         tier1_liveness_test_guards(&test);
+        tier1_liveness_test_calls(&test);
+        tier1_liveness_test_call_fold(&test);
     }
     else
     {

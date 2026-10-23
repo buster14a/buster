@@ -20,6 +20,7 @@
 #define BUSTER_TIER1_SELECT_LANES 16
 #define BUSTER_TIER1_SELECT_SCRATCH X86_REGISTER_R11
 #define BUSTER_TIER1_SELECT_RECORDS_PER_NODE 6
+#define BUSTER_TIER1_SELECT_CALL_ARGUMENTS 6
 
 typedef enum Tier1SelectError
 {
@@ -58,6 +59,7 @@ typedef enum Tier1SelectRule
     TIER1_RULE_SELECT,
     TIER1_RULE_JUMP,
     TIER1_RULE_RETURN,
+    TIER1_RULE_CALL,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -411,7 +413,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 
 // Cold per-node emission metadata. The hot rule-choice pass uses contiguous 16-lane cost arrays; the emitter consumes
 // all fields of one selected pattern. `values` preserve operand roles, including absent slots, while the effective-use
-// CSR is the compact, directly consumable liveness handoff. The original function remains immutable through emission.
+// CSR is the compact, directly consumable liveness handoff. CALL uses none of the three ordinary value slots: its
+// ordered argument slice, including duplicates, is in the effective-use CSR, immediate is its symbol ID, and width
+// is the result width (zero for void). The original function remains immutable through emission.
 typedef struct Tier1SelectPattern Tier1SelectPattern;
 struct Tier1SelectPattern
 {
@@ -478,6 +482,25 @@ struct Tier1SelectForest
 static uint32_t tier1_select_width(uint32_t type)
 {
     return type == IR_I32 || type == IR_I1 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
+}
+
+// This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers, floating-point
+// and aggregates. The shared verifier checks descriptor bounds and actual argument types before this helper runs.
+static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
+{
+    bool supported = node < function->instruction_count && function->op[node] == IR_CALL;
+    if (supported)
+    {
+        const IrCall call = function->calls[function->b[node]];
+        const uint32_t type = function->type[node];
+        supported = !call.variadic && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS && call.parameter_count == call.argument_count && (type == IR_VOID || type == IR_I32 || type == IR_I64 || type == IR_PTR);
+        for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
+        {
+            const uint32_t argument_type = function->call_types[call.type_first + argument];
+            supported = argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR;
+        }
+    }
+    return supported;
 }
 
 static X86Operation tier1_select_operation(uint32_t op)
@@ -840,6 +863,14 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
+    else if (op == IR_CALL && tier1_select_call_supported(function, node))
+    {
+        base.rule = TIER1_RULE_CALL;
+        base.immediate = a;
+        // Structural lowering estimate: call plus possible argument/result copies; preservation is emitter-owned.
+        base.intrinsic_cost = (uint8_t)(1 + function->calls[b].argument_count + (type != IR_VOID));
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (op == IR_RET && (a == BUSTER_IR_NONE || tier1_select_width(function->type[a]) != 0))
     {
         base.rule = TIER1_RULE_RETURN;
@@ -947,13 +978,13 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         plan.covered = ir_allocate(output, count, 1, &ok);
         plan.costs = ir_allocate(output, count, 4, &ok);
         plan.effective_use_offsets = ir_allocate(output, (uint64_t)count + 1, 4, &ok);
-        plan.effective_use_values = ir_allocate(output, (uint64_t)count * 3, 4, &ok);
         if (!ok)
         {
             error = TIER1_SELECT_ERROR_MEMORY;
         }
     }
     uint32_t maximum_depth = 0;
+    uint64_t effective_capacity = 0;
     bool parameter_prefix = true;
     for (uint32_t block = 0; error == TIER1_SELECT_OK && block < function->block_count; block += 1)
     {
@@ -965,7 +996,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_PHI || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_SWITCH)
+        if (op == IR_PHI || op == IR_CALL_INDIRECT || op == IR_SWITCH || (op == IR_CALL && !tier1_select_call_supported(function, node)))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -974,6 +1005,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
         parameter_prefix &= op == IR_PARAM;
+        effective_capacity += op == IR_CALL && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count : 3;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
         for (uint32_t p = 0; error == TIER1_SELECT_OK && p < operand_count; p += 1)
         {
@@ -994,6 +1026,19 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         if (error != TIER1_SELECT_OK)
         {
             failed_node = node;
+        }
+    }
+    if (error == TIER1_SELECT_OK)
+    {
+        bool ok = effective_capacity <= UINT32_MAX;
+        if (!ok)
+        {
+            error = TIER1_SELECT_ERROR_LIMIT;
+        }
+        else
+        {
+            plan.effective_use_values = ir_allocate(output, effective_capacity, 4, &ok);
+            error = ok ? TIER1_SELECT_OK : TIER1_SELECT_ERROR_MEMORY;
         }
     }
     if (error == TIER1_SELECT_OK)
@@ -1089,11 +1134,22 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             {
                 const Tier1SelectPattern* pattern = &plan.patterns[node];
                 plan.estimated_cost += pattern->intrinsic_cost;
-                for (uint32_t operand = 0; operand < 3; operand += 1)
+                if (pattern->rule == TIER1_RULE_CALL)
                 {
-                    if (pattern->values[operand] != BUSTER_IR_NONE)
+                    const IrCall call = function->calls[function->b[node]];
+                    for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
                     {
-                        plan.effective_use_values[plan.effective_use_count++] = pattern->values[operand];
+                        plan.effective_use_values[plan.effective_use_count++] = function->extra[call.argument_first + argument];
+                    }
+                }
+                else
+                {
+                    for (uint32_t operand = 0; operand < 3; operand += 1)
+                    {
+                        if (pattern->values[operand] != BUSTER_IR_NONE)
+                        {
+                            plan.effective_use_values[plan.effective_use_count++] = pattern->values[operand];
+                        }
                     }
                 }
             }
@@ -1198,6 +1254,16 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     if (arguments && count > BUSTER_TIER1_SELECT_MAX_INSTRUCTIONS)
     {
         error = TIER1_SELECT_ERROR_LIMIT;
+    }
+    // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups.
+    // Reject the complete call plan before allocating records, even if earlier value locations are spilled.
+    for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
+    {
+        if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL)
+        {
+            error = TIER1_SELECT_ERROR_UNSUPPORTED;
+            failed_node = node;
+        }
     }
     if (error == TIER1_SELECT_OK)
     {

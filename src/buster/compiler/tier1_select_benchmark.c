@@ -31,6 +31,7 @@ struct String8
 #pragma clang diagnostic ignored "-Wunused-function"
 #include "buster/compiler/x86_64_encoder.c"
 #include "buster/compiler/lane.c"
+#include "buster/compiler/link.c"
 #include "buster/compiler/x86_semantics.c"
 #include "buster/compiler/x86_target.c"
 #include "buster/compiler/x86_target_forms.c"

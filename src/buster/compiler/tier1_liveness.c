@@ -7,7 +7,9 @@
 // their defining block have local ranges; only cross-block values enter aligned bitsets. The existing scalar and
 // AVX-512 fixpoints solve those rows, and live block boundaries expand conservative hole-free physical-order ranges.
 // Uses are at 2*node, definitions at 2*node+1. Parameters start at zero in their incoming SysV register, because
-// the leaf emitter emits no parameter move. Phi/call/floating-point plans remain unsupported; no fake edge moves.
+// the emitter emits no parameter move. Bounded direct-call arguments retain their exact ordered uses, including
+// duplicates; call results are ordinary definitions. Call-clobber preservation belongs to the native consumer.
+// Phi/indirect-call/floating-point plans remain unsupported; no fake edge moves.
 // The result retains interval columns and sorted per-interval use CSR only. CFG, dense IDs and bitsets are scratch.
 // Both arenas are transactional; input storage is immutable and disjoint from their unused capacity. See
 // docs/tier1-liveness.md for limits, grouping, tail rules and the source/corpus acceptance still outstanding.
@@ -104,9 +106,36 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         {
             error = TIER1_LIVENESS_INVALID;
         }
-        else if (op == IR_PHI || op == IR_CALL || op == IR_CALL_INDIRECT || (type != IR_VOID && tier1_select_width(type) == 0))
+        else if (op == IR_PHI || op == IR_CALL_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)) || (type != IR_VOID && tier1_select_width(type) == 0))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;
+        }
+        else if (op == IR_CALL)
+        {
+            const IrCall call = function->calls[function->b[node]];
+            const Tier1SelectPattern* pattern = &plan->patterns[node];
+            if (plan->covered[node] || pattern->rule != TIER1_RULE_CALL || pattern->immediate != function->a[node] || pattern->width != tier1_select_width(type) || pattern->fold_count != 0 || end - first != call.argument_count)
+            {
+                error = TIER1_LIVENESS_INVALID;
+            }
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
+            {
+                if (pattern->values[operand] != BUSTER_IR_NONE)
+                {
+                    error = TIER1_LIVENESS_INVALID;
+                }
+            }
+            for (uint32_t argument = 0; error == TIER1_LIVENESS_OK && argument < call.argument_count; argument += 1)
+            {
+                if (plan->effective_use_values[first + argument] != function->extra[call.argument_first + argument])
+                {
+                    error = TIER1_LIVENESS_INVALID;
+                }
+            }
+        }
+        else if (plan->patterns[node].rule == TIER1_RULE_CALL)
+        {
+            error = TIER1_LIVENESS_INVALID;
         }
         else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0))
         {
