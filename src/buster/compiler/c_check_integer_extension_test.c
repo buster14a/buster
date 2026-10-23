@@ -177,7 +177,7 @@ static void check_test_integer_source_warnings(CheckTest* test, const char* clan
     arena_release(&diagnostics);
 }
 
-static void check_test_integer_extensions(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_integer_extensions(CheckTest* test, const char* clang)
 {
     const CheckIntegerExtensionFixture fixtures[] = {
         { CHECK_OP_NEGATIVE, 0x80000000, 0, 0x80000000, CHECK_FAULT_SIGNED_OVERFLOW, "-(-2147483647-1)==(-2147483647-1)" },

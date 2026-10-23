@@ -346,7 +346,7 @@ static void check_test_builtin_graph_oracle(CheckTest* test, const char* clang)
     rmdir(directory);
 }
 
-static void check_test_builtin_graph(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_builtin_graph(CheckTest* test, TypeTable* table, const char* clang)
 {
     Arena storage = arena_reserve(UINT64_C(1) << 20);
     Arena output = arena_reserve(UINT64_C(1) << 20);

@@ -1298,7 +1298,7 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
     check_data_test_close(&fixture);
 }
 
-static void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
+static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
 {
     check_data_test_objects(test, types, clang);
     check_data_test_aggregate_transaction(test, types);

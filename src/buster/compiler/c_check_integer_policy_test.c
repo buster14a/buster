@@ -276,7 +276,7 @@ static void check_test_integer_warning_contexts(CheckTest* test, TypeTable* tabl
     rmdir(directory);
 }
 
-static void check_test_integer_policy(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_integer_policy(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_integer_policy_actions(test, table);
     check_test_integer_policy_graph(test, table);

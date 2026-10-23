@@ -243,7 +243,7 @@ static void check_test_data_source(CheckTest* test, const CheckDataSourceFixture
     intern_release(&identifiers);
 }
 
-static void check_test_data_sources(CheckTest* test)
+static __attribute__((noinline)) void check_test_data_sources(CheckTest* test)
 {
     const CheckDataSourceSymbol scalars[] = {
         {

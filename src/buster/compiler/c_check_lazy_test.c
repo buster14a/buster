@@ -243,7 +243,7 @@ static void check_test_lazy_frontier(CheckTest* test)
     arena_release(outputs);
 }
 
-static void check_test_lazy(CheckTest* test)
+static __attribute__((noinline)) void check_test_lazy(CheckTest* test)
 {
     static const CheckLazyFixture fixtures[] =
     {

@@ -75,7 +75,7 @@ static void check_test_vla_metadata(CheckTest* test)
     }
 }
 
-static void check_test_vla_sources(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_vla_sources(CheckTest* test, const char* clang)
 {
     char repeated_size[8192];
     uint32_t length = (uint32_t)snprintf(repeated_size, sizeof(repeated_size), "unsigned long f(int n) { typedef char A");

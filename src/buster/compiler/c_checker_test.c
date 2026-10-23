@@ -45,13 +45,13 @@ static bool check_test_types_open(CheckTestTypes* types)
     return type_initialize(&types->table, &types->arena, &types->index, capacity);
 }
 
-static void check_test_types_close(CheckTestTypes* types)
+static __attribute__((noinline)) void check_test_types_close(CheckTestTypes* types)
 {
     arena_release(&types->index);
     arena_release(&types->arena);
 }
 
-static void check_test_expect(CheckTest* test, bool condition, const char* description)
+static __attribute__((noinline)) void check_test_expect(CheckTest* test, bool condition, const char* description)
 {
     test->checks += 1;
     if (!condition)
@@ -158,7 +158,7 @@ static void check_test_binary_integer(CheckTest* test, TypeTable* table, const c
     }
 }
 
-static void check_test_action_fixtures(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_action_fixtures(CheckTest* test, TypeTable* table)
 {
     const unsigned __int128 high128 = (unsigned __int128)1 << 127;
     const unsigned __int128 mask128 = ~(unsigned __int128)0;
@@ -337,7 +337,7 @@ static void check_test_action_fixtures(CheckTest* test, TypeTable* table)
                            (result.conversions[0].flags & BUSTER_CHECK_CONVERT_ARRAY) != 0, "pointer arithmetic explicitly decays an array");
 }
 
-static void check_test_action_constraints(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_action_constraints(CheckTest* test, TypeTable* table)
 {
     const TypeId pointer = type_pointer(table, BUSTER_TYPE_INT);
     const TypeId const_pointer = type_pointer(table, BUSTER_TYPE_INT | BUSTER_TYPE_CONST);
@@ -620,7 +620,7 @@ static void check_test_action_constraints(CheckTest* test, TypeTable* table)
                       "absolute pointers do not invent same-object provenance");
 }
 
-static void check_test_integer_float_rounding(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_integer_float_rounding(CheckTest* test, TypeTable* table)
 {
     for (uint32_t format = 0; format < 2; format += 1)
     {
@@ -672,7 +672,7 @@ static void check_test_integer_float_rounding(CheckTest* test, TypeTable* table)
     }
 }
 
-static void check_test_action_regressions(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_action_regressions(CheckTest* test, TypeTable* table)
 {
     const CheckValue zero = check_test_integer(BUSTER_TYPE_INT, (unsigned __int128)1 << 32);
     CheckAction action = {
@@ -778,7 +778,7 @@ static void check_test_action_regressions(CheckTest* test, TypeTable* table)
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == BUSTER_TYPE_VOID, "a void return needs no object completeness");
 }
 
-static void check_test_update_actions(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_update_actions(CheckTest* test, TypeTable* table)
 {
     const CheckOp compound[] = {
         CHECK_OP_ADD_ASSIGN,
@@ -940,7 +940,7 @@ static void check_test_update_actions(CheckTest* test, TypeTable* table)
     check_test_expect(test, result.diagnostic == CHECK_DIAG_INTEGER_REQUIRED, "pointer compound subtraction requires an integer RHS");
 }
 
-static void check_test_literals(CheckTest* test, Arena* scratch)
+static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena* scratch)
 {
     const struct
     {
@@ -1067,7 +1067,7 @@ static void check_test_literals(CheckTest* test, Arena* scratch)
                       "a hexadecimal float literal retains its source-format value and releases scratch");
 }
 
-static void check_test_action_oracles(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_action_oracles(CheckTest* test, const char* clang)
 {
     // These language rules need record syntax or GNU folded floating assertions that the source adapter does not
     // yet implement. Clang checks original source independently of the direct action and literal fixtures above.
@@ -1157,7 +1157,7 @@ static void check_test_action_oracles(CheckTest* test, const char* clang)
     rmdir(directory);
 }
 
-static void check_test_actions_batch(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_actions_batch(CheckTest* test, TypeTable* table)
 {
     CheckAction actions[BUSTER_CHECK_TEST_BATCH];
     CheckActionResult expected[BUSTER_CHECK_TEST_BATCH];
@@ -1356,7 +1356,7 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     arena_pop_to(output, mark);
 }
 
-static void check_test_graph_fixtures(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     const uint64_t mark = storage->length;
     CheckGraph graph;
@@ -1428,7 +1428,7 @@ static void check_test_graph_fixtures(CheckTest* test, TypeTable* table, Arena* 
     arena_pop_to(storage, mark);
 }
 
-static void check_test_graph_random(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+static __attribute__((noinline)) void check_test_graph_random(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     const uint64_t mark = storage->length;
     CheckGraph graph;
@@ -1468,7 +1468,7 @@ static void check_test_graph_random(CheckTest* test, TypeTable* table, Arena* st
     arena_pop_to(storage, mark);
 }
 
-static void check_test_graph_limits(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     const uint64_t mark = storage->length;
     CheckGraph graph;
@@ -1525,7 +1525,7 @@ static void check_test_graph_limits(CheckTest* test, TypeTable* table, Arena* st
     arena_pop_to(storage, mark);
 }
 
-static void check_test_graph_type_order(CheckTest* test, Arena* storage, Arena* output, Arena* scratch)
+static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* test, Arena* storage, Arena* output, Arena* scratch)
 {
     CheckTestTypes types[2] = { 0 };
     const bool initialized = check_test_types_open(&types[0]) && check_test_types_open(&types[1]);
@@ -1585,7 +1585,7 @@ static void check_test_graph_type_order(CheckTest* test, Arena* storage, Arena* 
     check_test_types_close(&types[0]);
 }
 
-static void check_test_graph_arguments(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+static __attribute__((noinline)) void check_test_graph_arguments(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     const uint64_t mark = storage->length;
     CheckGraph graph;
@@ -1656,7 +1656,7 @@ static void check_test_graph_arguments(CheckTest* test, TypeTable* table, Arena*
     arena_pop_to(storage, mark);
 }
 
-static void check_test_graph_guarded(CheckTest* test, TypeTable* table, Arena* output, Arena* scratch)
+static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, TypeTable* table, Arena* output, Arena* scratch)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t widths[] = {
@@ -1900,7 +1900,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     intern_release(&identifiers);
 }
 
-static void check_test_sources(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_sources(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] = {
         {
@@ -2327,7 +2327,7 @@ static void check_test_sources(CheckTest* test, const char* clang)
     }
 }
 
-static void check_test_type_capacity(CheckTest* test)
+static __attribute__((noinline)) void check_test_type_capacity(CheckTest* test)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -2404,7 +2404,7 @@ static void check_test_type_capacity(CheckTest* test)
     arena_release(&type_storage);
 }
 
-static void check_test_target_options(CheckTest* test)
+static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 {
     PPOptions options = { 0 };
     check_test_expect(test, check_input_target_supported(&options), "default semantic target is supported");

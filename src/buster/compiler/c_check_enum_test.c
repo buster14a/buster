@@ -109,7 +109,7 @@ static void check_test_enum_metadata(CheckTest* test)
     }
 }
 
-static void check_test_enum_sources(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_enum_sources(CheckTest* test, const char* clang)
 {
     char nested_records[8192];
     uint32_t length = (uint32_t)snprintf(nested_records, sizeof(nested_records), "enum { N0=sizeof(struct {");

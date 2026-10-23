@@ -1164,7 +1164,7 @@ static void check_init_test_vectors(CheckTest* test, const char* clang)
     }
 }
 
-static void check_test_initializers(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_initializers(CheckTest* test, const char* clang)
 {
     check_init_test_overload_constraints(test, clang);
     static const char overloads[] =

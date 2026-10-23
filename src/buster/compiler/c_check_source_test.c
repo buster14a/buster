@@ -286,7 +286,7 @@ static void check_test_source_intrinsic_range(CheckTest* test)
     intern_release(&identifiers);
 }
 
-static void check_test_source_extensions(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_source_extensions(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] =
     {

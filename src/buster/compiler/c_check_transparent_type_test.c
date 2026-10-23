@@ -33,7 +33,7 @@ static void check_test_transparent_relation(CheckTest* test, TypeTable* table, T
     }
 }
 
-static void check_test_transparent_types(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_transparent_types(CheckTest* test, const char* clang)
 {
     TypeTestTable storage;
     const bool ready = type_test_table_open(&storage, 8192);

@@ -411,7 +411,7 @@ static void check_test_environment_counts(CheckTest* test)
     }
 }
 
-static void check_test_environments(CheckTest* test)
+static __attribute__((noinline)) void check_test_environments(CheckTest* test)
 {
     const CheckEnvironmentFixture fixtures[] =
     {

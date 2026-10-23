@@ -414,7 +414,7 @@ static void check_test_repair_report_boundaries(CheckTest* test)
     check_test_expect(test, !check_repair_graph_report(&repair, &graph, &report), "repair excludes every synthetic graph report token");
 }
 
-static void check_test_repairs(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_repairs(CheckTest* test, const char* clang)
 {
     const CheckRepairFixture fixtures[] =
     {
