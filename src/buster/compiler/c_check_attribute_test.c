@@ -320,7 +320,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
     }
 }
 
-static void check_test_attributes(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_attributes(CheckTest* test, const char* clang)
 {
     check_test_attribute_storage(test);
     check_test_attribute_abis(test);
@@ -1001,7 +1001,7 @@ static void check_test_attributes(CheckTest* test, const char* clang)
     }
 }
 
-static void check_test_attribute_sources(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_attribute_sources(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] =
     {

@@ -4,7 +4,7 @@
 #ifndef BUSTER_C_CHECK_VECTOR_GRAPH_TEST_INCLUDED
 #define BUSTER_C_CHECK_VECTOR_GRAPH_TEST_INCLUDED
 
-static void check_test_vector_graph(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_vector_graph(CheckTest* test, TypeTable* table)
 {
     Arena storage = arena_reserve(65536);
     Arena output = arena_reserve(131072);

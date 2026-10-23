@@ -64,7 +64,7 @@ static void check_test_builtin_vector_oracles(CheckTest* test, const char* clang
     rmdir(directory);
 }
 
-static void check_test_builtin_vector_graph(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_builtin_vector_graph(CheckTest* test, TypeTable* table, const char* clang)
 {
     const TypeId vi = type_vector(table, BUSTER_TYPE_INT, 4, true);
     const TypeId vu = type_vector(table, BUSTER_TYPE_UINT, 4, true);

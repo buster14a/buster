@@ -304,7 +304,7 @@ static void check_test_overload_address_capacity(CheckTest* test, TypeTable* tab
     arena_release(&scratch);
 }
 
-static void check_test_overload_addresses(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_overload_addresses(CheckTest* test, const char* clang)
 {
     TypeTestTable storage;
     const bool ready = type_test_table_open(&storage, 8192);

@@ -4,7 +4,7 @@
 #ifndef BUSTER_C_CHECK_TRANSPARENT_TEST_INCLUDED
 #define BUSTER_C_CHECK_TRANSPARENT_TEST_INCLUDED
 
-static void check_test_transparent_calls(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_transparent_calls(CheckTest* test, TypeTable* table, const char* clang)
 {
     const TypeId pointer = type_pointer(table, BUSTER_TYPE_INT);
     const TypeId generic = type_pointer(table, BUSTER_TYPE_VOID);

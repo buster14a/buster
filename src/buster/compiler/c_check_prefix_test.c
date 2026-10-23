@@ -356,7 +356,7 @@ static void check_test_prefix_lost_body(CheckTest* test)
     intern_release(&identifiers);
 }
 
-static void check_test_prefixes(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_prefixes(CheckTest* test, const char* clang)
 {
     const CheckPrefixFixture fixtures[] =
     {

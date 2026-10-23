@@ -384,7 +384,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
 
-static void check_test_programs(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);

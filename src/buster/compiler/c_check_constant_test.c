@@ -3,7 +3,7 @@
 // Original declaration-time expression fixtures, checked by both parser/checker paths and installed Clang.
 // The FILE-sized arithmetic is authored from the target sizes; no system header or external fixture is copied.
 
-static void check_test_constant_sources(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_constant_sources(CheckTest* test, const char* clang)
 {
     // Clang 23 tests only the low 64 bits of this GNU condition; GCC and the full-width C integer truth rule
     // select 7. Keep the original counterexample as a direct checker regression and an explicit oracle probe.

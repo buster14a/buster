@@ -277,7 +277,7 @@ static void check_test_function_name_semantics(CheckTest* test, const char* clan
     }
 }
 
-static void check_test_function_names(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_function_names(CheckTest* test, const char* clang)
 {
     check_test_function_name_semantics(test, clang);
     char deep_source[512];

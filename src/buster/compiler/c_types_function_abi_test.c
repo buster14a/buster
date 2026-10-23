@@ -242,7 +242,7 @@ static void check_test_function_abi_batches(CheckTest* test)
     type_test_table_close(&scalar);
 }
 
-static void check_test_function_abis(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_function_abis(CheckTest* test, const char* clang)
 {
     TypeTestTable storage;
     const bool ready = type_test_table_open(&storage, 8192);

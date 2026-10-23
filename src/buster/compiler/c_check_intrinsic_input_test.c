@@ -310,7 +310,7 @@ static void check_test_intrinsic_input_fixture(CheckTest* test, const CheckIntri
     check_test_expect(test, signatures[0] != 0 && signatures[0] == signatures[1], "scalar/vector parser paths retain identical intrinsic metadata and operand intervals");
 }
 
-static void check_test_intrinsic_inputs(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* test, const char* clang)
 {
     const CheckIntrinsicInputFixture fixtures[] =
     {

@@ -7,7 +7,7 @@
 #ifndef BUSTER_C_CHECK_SOURCE_BENCHMARK_TEST_INCLUDED
 #define BUSTER_C_CHECK_SOURCE_BENCHMARK_TEST_INCLUDED
 
-static void check_test_source_benchmark(CheckTest* test)
+static __attribute__((noinline)) void check_test_source_benchmark(CheckTest* test)
 {
     static const char source[] =
         "int before(void) { return ({ 9; 11; 13; }); }\n"

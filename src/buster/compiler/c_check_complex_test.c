@@ -273,7 +273,7 @@ static void check_test_complex_oracles(CheckTest* test, const char* clang)
     rmdir(directory);
 }
 
-static void check_test_complex(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_complex(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_complex_literals(test);
     check_test_complex_integer_actions(test, table);

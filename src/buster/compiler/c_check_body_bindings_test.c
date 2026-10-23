@@ -85,7 +85,7 @@ static void check_test_body_binding_failures(CheckTest* test, const CheckEnviron
     arena_release(&output);
 }
 
-static void check_test_body_binding_exit_points(CheckTest* test)
+static __attribute__((noinline)) void check_test_body_binding_exit_points(CheckTest* test)
 {
     Arena storage = arena_reserve(1u << 20);
     Arena scratch = arena_reserve(1u << 20);
@@ -176,7 +176,7 @@ static void check_test_body_binding_exit_points(CheckTest* test)
     arena_release(&storage);
 }
 
-static void check_test_body_binding_guards(CheckTest* test)
+static __attribute__((noinline)) void check_test_body_binding_guards(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* mapping = mmap(0, page * 16, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

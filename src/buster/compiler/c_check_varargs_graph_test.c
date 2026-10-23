@@ -112,7 +112,7 @@ static void check_test_varargs_graph_guards(CheckTest* test, TypeTable* table, T
     arena_pop_to(storage, storage_mark);
 }
 
-static void check_test_varargs_graph(CheckTest* test, TypeTable* table)
+static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, TypeTable* table)
 {
     Arena storage = arena_reserve(UINT64_C(1) << 20);
     Arena output = arena_reserve(UINT64_C(1) << 20);

@@ -262,7 +262,7 @@ static void check_test_pragma_history(CheckTest* test, const Parser* parser, Pre
     arena_release(&arena);
 }
 
-static void check_test_pragmas(CheckTest* test, const char* clang)
+static __attribute__((noinline)) void check_test_pragmas(CheckTest* test, const char* clang)
 {
     const CheckPragmaFixture fixtures[] =
     {

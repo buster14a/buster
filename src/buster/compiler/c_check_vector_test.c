@@ -411,7 +411,7 @@ static void check_test_vector_oracles(CheckTest* test, const char* clang)
     rmdir(directory);
 }
 
-static void check_test_vectors(CheckTest* test, TypeTable* table, const char* clang)
+static __attribute__((noinline)) void check_test_vectors(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_vector_actions(test, table);
     check_test_vector_members(test, table);
