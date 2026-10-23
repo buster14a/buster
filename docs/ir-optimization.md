@@ -135,8 +135,9 @@ oracle for these fixtures, not the complete interpreter tracked by #176.
 complete public calls on frozen small/large arithmetic DAGs, a phi diamond,
 a loop and a jump chain. It includes input validation, CFG/use/dominator
 construction, analysis, allocation, compaction and final SSA verification.
-It checks exact output agreement before timing. Each calibrated sample covers
-at least 2 ms; default samples alternate which path runs first. `--only`
+It checks exact output agreement before timing. Repetitions are calibrated
+once per path to target 2 ms; later samples can be shorter as execution
+conditions change. Default samples alternate which path runs first. `--only`
 isolates one path, and `--after-scalar` runs lighter scalar work before every
 vector sample. The benchmark shares the original test fixture builders and
 is included after `ir_optimize_test.c`.
