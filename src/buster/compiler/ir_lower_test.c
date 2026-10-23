@@ -1092,6 +1092,120 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
     arena_release(&scratch);
 }
 
+// #136's entries this adapter doesn't lower: an object (a local with a size in local_sizes) refused like a frame role,
+// as each local in turn and only where its size isn't 0, and COPY, refused at its entry once the stream validates, all
+// without allocating, by both paths.
+static void ir_lower_test_tier0_entries(IrLowerTestTally* tally)
+{
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    const uint8_t kinds[] =
+    {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_COPY,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN
+    };
+    const uint8_t classes[] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64
+    };
+    const uint64_t values[] =
+    {
+        0,
+        1,
+        8,
+        7,
+        0
+    };
+    uint8_t local_classes[3] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64
+    };
+    const uint8_t local_flags[3] =
+    {
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN
+    };
+    uint32_t local_sizes[3] =
+    {
+        0
+    };
+    uint8_t local_alignments[3] =
+    {
+        0
+    };
+    // Without the copy first: the constant returned.
+    Tier0Function source =
+    {
+        .kinds = kinds + 3,
+        .classes = classes + 3,
+        .values = values + 3,
+        .count = 2,
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 3,
+        .local_sizes = local_sizes,
+        .local_alignments = local_alignments,
+    };
+    const IrFunction preserved =
+    {
+        .instruction_count = 123,
+        .block_count = 17,
+    };
+    // Nonzero marks, so that a rollback to zero would show.
+    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    ir_lower_test_expect(tally, ready, "Tier 0 entry arenas", 0, 0);
+    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    {
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        IrFunction result = preserved;
+        IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, check.error == IR_OK, "objects' columns without objects lower", 0, vector);
+        arena_pop_to(&output, output_mark);
+        for (uint32_t local = 0; local < 3; local += 1)
+        {
+            const uint8_t class = local_classes[local];
+            local_classes[local] = BUSTER_TYPED_CLASS_VOID;
+            local_sizes[local] = 16;
+            local_alignments[local] = 3;
+            result = preserved;
+            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == local && output.length == output_mark && scratch.length == scratch_mark &&
+                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                                 "an object refused without allocation", local, vector);
+            local_classes[local] = class;
+            local_sizes[local] = 0;
+            local_alignments[local] = 0;
+        }
+        // The copy between the two address-taken locals, which validates.
+        source.kinds = kinds;
+        source.classes = classes;
+        source.values = values;
+        source.count = 5;
+        result = preserved;
+        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == 2 && output.length == output_mark &&
+                                        scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                             "a copy refused at its entry without allocation", 0, vector);
+        source.kinds = kinds + 3;
+        source.classes = classes + 3;
+        source.values = values + 3;
+        source.count = 2;
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static void ir_lower_test_guarded(IrLowerTestTally* tally)
 {
     const uint64_t page = 4096;
@@ -1189,6 +1303,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_fixtures(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);
+        ir_lower_test_tier0_entries(&tally);
         ir_lower_test_guarded(&tally);
         ir_lower_test_programs(&tally, seed, count);
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
