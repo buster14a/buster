@@ -160,6 +160,13 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `tier1_frame.c` provides interval slot coloring and explicit frame plans for
+  #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
+  [The frame guide](docs/tier1-frame.md) records reservations before allocation
+  and pending native emission/corpus evidence. Take the shared 9700X lock per
+  build/test/measurement and pin timing to CPU 2.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
