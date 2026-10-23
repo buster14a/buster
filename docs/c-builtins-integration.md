@@ -158,6 +158,54 @@ converted offset. Frame levels require an integer constant expression.
 Nonzero levels and unsupported wide/complex cases remain explicit metadata,
 not fabricated frame addresses or successful generated code.
 
+`c_builtin_misc_lower.c` consumes the already evaluated locals. It expands
+`memcpy`, `memmove`, `memset`, `memcmp` and `strlen` as existing typed byte
+loops, with absolute enclosing-stream branch targets and live-stack
+preservation. Zero-length operations perform no memory accesses. `memmove`
+selects a backward loop for overlapping higher destinations; `memcmp` compares
+unsigned bytes and returns their signed difference. Hints and baseline x86
+return-address extraction use the documented identity/no-op behavior.
+Dynamic stack allocation and genuine frame addresses remain explicit refusals
+in this adapter. Terminal helpers require a separate terminal source-graph
+path. Byte loops are the scalar memory fallback allowed by the issue; this
+adapter makes no memory-throughput claim.
+
+## Unevaluated queries
+
+`c_check_builtin_query.c` always returns a clean integer constant and an empty
+runtime evaluated-operand mask. Speculative operand faults and volatile reads
+do not become query effects. Source constraints still diagnose. For
+`constant_p`, explicit `string_literal_start` and
+`absolute_address_constant` witnesses retain source provenance that a generic
+pointer-to-integer conversion can otherwise discard. They certify the actual
+final expression, not an object-ID convention or an unknown value's default
+fields. Interior string pointers have no first-character witness.
+
+For `object_size`, the producer supplies four independent known-bound flags
+and values: whole-object maximum, subobject maximum, whole-object minimum and
+subobject minimum. This action does not infer object bounds from pointee size.
+Unknown modes 0/1 return `ULONG_MAX`; unknown modes 2/3 return zero. A known
+zero retains its known flag. Mode conversion to `int` precedes the 0..3 range
+check, while original integer-constant-expression provenance remains required.
+
+## Floating checking
+
+`c_check_builtin_float.c` retains the declared real format and constructs
+infinities and quiet NaNs exactly for float, double and target x87 long double.
+NaN payload metadata is the entire decoded narrow string literal after
+parentheses/casts, excluding only the final terminator. Embedded zero bytes
+remain part of that slice and prevent constant folding. Unknown or invalid
+payloads remain typed runtime calls; no source pointer is dereferenced.
+Unsupported real formats are never approximated through host long double.
+
+`fpclassify` retains all five selector expressions and an explicit evaluation
+mode. Successful source constant evaluation visits the FP argument and only
+its selected selector. Otherwise its runtime schedule visits FP operand 5,
+ZERO selector 4, NAN selector 0 when nonzero, INF selector 1 when non-NaN, and
+both NORMAL/SUBNORMAL selectors 2/3 when finite and nonzero. A possible-operand
+mask must never be flattened into eager evaluation. The definite mask and
+fault provenance follow that schedule.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -169,6 +217,9 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-check-varargs
 ./build/compiler test-builtin-varargs
 ./build/compiler test-check-builtins-misc
+./build/compiler test-check-builtins-query
+./build/compiler test-check-builtins-float
+./build/compiler test-builtin-misc-lowering
 ```
 
 The tests distinguish typed constraints and fold metadata from native execution

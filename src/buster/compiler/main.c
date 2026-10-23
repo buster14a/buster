@@ -242,6 +242,8 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin.c"
 #include "buster/compiler/c_check_varargs.c"
 #include "buster/compiler/c_check_builtin_misc.c"
+#include "buster/compiler/c_check_builtin_query.c"
+#include "buster/compiler/c_check_builtin_float.c"
 #include "buster/compiler/c_checker.c"
 #include "buster/compiler/c_check_literals.c"
 #include "buster/compiler/c_check_data.c"
@@ -252,6 +254,8 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_test.c"
 #include "buster/compiler/c_check_varargs_test.c"
 #include "buster/compiler/c_check_builtin_misc_test.c"
+#include "buster/compiler/c_check_builtin_query_test.c"
+#include "buster/compiler/c_check_builtin_float_test.c"
 int run_checker_benchmark(int argc, char** argv);
 int run_builtin_benchmark(int argc, char** argv);
 
@@ -276,6 +280,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/tier0_test.c"
 #include "buster/compiler/c_builtin_lower.c"
 #include "buster/compiler/c_builtin_lower_test.c"
+#include "buster/compiler/c_builtin_misc_lower.c"
+#include "buster/compiler/c_builtin_misc_lower_test.c"
 #include "buster/compiler/c_builtin_varargs_lower.c"
 #include "buster/compiler/c_builtin_varargs_lower_test.c"
 #include "buster/compiler/c_builtin_lower_benchmark.c"
@@ -601,6 +607,14 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_builtin_misc_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-float") == 0)
+    {
+        result = run_check_builtin_float_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-query") == 0)
+    {
+        result = run_check_builtin_query_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-builtins") == 0)
     {
         result = run_builtin_benchmark(argc - 1, argv + 1);
@@ -640,6 +654,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-varargs") == 0)
     {
         result = run_builtin_varargs_lower_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-misc-lowering") == 0)
+    {
+        result = run_builtin_misc_lower_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-builtin-lowering") == 0)
     {
