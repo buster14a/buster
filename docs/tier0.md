@@ -147,7 +147,10 @@ the typed-to-IR consumer must reject these roles until it supports their layout.
 variadic callees with GP/FP exhaustion, named stack arguments, real va_start /
 va_copy / va_arg recipes, intervening calls and full vector saves. It compares
 both Tier 0 paths and both encoders, guarded output edges, 24-byte list storage
-and independent ordinary-function byte fixtures. Run builds and tests only on
+and independent ordinary-function byte fixtures. Every fixture also holds an
+object aligned to 16 (#362), whose bytes must survive the lists, the save area
+and the call, at a multiple of 16, apart from the lists, the canaries and the
+save area and below the overflow area. Run builds and tests only on
 the approved 9700X, each through its own shared lock. This description records
 the test contract; qualification results are reported with the exact revision.
 
@@ -210,12 +213,16 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
    reached, nor a template's fixed registers, nor anything if the function calls.
 3. Then they take the callee-saved registers, for a local referenced at least twice (a push and a pop).
 4. Floating locals take free XMM registers.
-5. Address-taken locals and the rest get 8-byte frame slots, rsp-relative (no frame pointer). A stack parameter keeps
-   its incoming slot, unless it took a register, which the prologue loads from that slot. No home is a register a
-   parameter arrives in, so the prologue's moves and loads never overwrite one another's sources.
+5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (no frame
+   pointer), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
+   register, which the prologue loads from that slot. No home is a register a parameter arrives in, so the prologue's
+   moves and loads never overwrite one another's sources.
 6. Objects come after the slots, in the locals' order:
    - each at a multiple of its alignment, taking its size rounded up to 8;
    - with an object aligned to 16, the frame keeps rsp a multiple of 16, as a function that calls does.
+
+   The stack parameters' places and the overflow area's anchor count from the frame's final size, objects included,
+   and every displacement is checked in 64 bits before it narrows to a disp32.
 
    The vector path finds the objects 16 locals at a time as a mask of nonzero sizes, as it finds the slots.
 
@@ -390,7 +397,9 @@ Before the programs, checks of their own:
   - four functions in ten take an earlier function's type, so that a type has several functions;
   - statements give a pointer one function of its type or another by a condition (`p = c ? f : g`), so that a call
     through it reaches whichever it holds when it runs;
-  - the interpreter calls the function an address names, and a call's work budget is its costliest candidate's.
+  - the interpreter calls the function an address names, once its tag and its type are checked against the call's (its
+    result's class and each parameter's, apart from the generator's choice of candidates), and a call's work budget is
+    its costliest candidate's.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -442,7 +451,10 @@ the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` m
     - the callee's register one depth off: the paths disagree and runs crash;
     - its move left out of the vector path's count: 767; the call's depths, the emitter's: 767;
     - the callee left out of the effects: 713; or of the validator: 764 (valid streams refused);
-    - the interpreter calling the generator's own choice, not the function the pointer holds: 29 programs' runs.
+    - the interpreter calling the generator's own choice, not the function the pointer holds: 29 programs' runs;
+    - the generator's candidates of one arity but other parameters' or result's classes: 3 and 6 programs, whose
+      calls the interpreter refuses. Checking the arity alone, as it did, the first passed and the second crashed
+      the test.
 
     Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
     changes no value.
