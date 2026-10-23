@@ -160,6 +160,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_gnu.c` retains bounded GNU attribute groups/arguments
+  and declarator asm labels when `ParseOptions.extension_metadata` is enabled.
+  `test-gnu --clang` checks exact records, scalar/vector agreement and guarded
+  capacities; `benchmark-gnu [-E's options] file.c` measures collection,
+  allocation and the parser handoff. `test-types` also checks GNU machine-mode
+  type actions. [The GNU extension guide](docs/c-gnu-extensions.md) records
+  the source-checker/lowering work still required before #147 can close.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
