@@ -175,13 +175,16 @@ for the printer's. A comparison that couldn't be made, as when its tokens
 don't fit its arena, also counted as compared. It now leaves the case
 without a result, which fails the run.
 
-#### Expanded pragma token ends
+#### Independent pragma token ends
 
 `tools/preprocessor_pragma_oracle.cpp` is an optional external oracle. It uses
 Clang 23's C++ frontend API, which is required for this adapter, to run the
 original source under the same `-E -P -undef -nostdinc -std=...` configuration.
-A pragma handler observes `omp` operands through Clang's live macro state;
-it does not rewrite the source or infer a boundary from Buster's output.
+Pragma handlers observe expanded `omp` operands through Clang's live macro
+state and unknown pragmas (including unknown `GCC` and `clang` pragmas)
+without macro expansion, as Clang's printer does. They retain the first
+unknown token too, even when `_Pragma` makes it a malformed literal. The
+adapter does not rewrite the source or infer a boundary from Buster's output.
 The expansion rule was checked against
 [Clang 23.1.3's printer](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/lib/Frontend/PrintPreprocessedOutput.cpp).
 No Clang implementation or headers are copied into this project.
@@ -209,11 +212,11 @@ with the oracle present, and remain unverified when no oracle can confirm it.
 Harness reader controls cover tagged versus ordinary records, trailing bytes,
 and mismatched release versions.
 
-This is a partial prototype at the October 23 handoff. Seed 201's cases
-20983, 30319 and 89431 still count as unverified in both modes with the
-adapter present: their ordinary/unknown `_Pragma` operands also need
-independent token evidence. The adapter currently observes `omp` operands.
-The preserved inputs, replay receipts and next steps are in
+Seed 201's cases 20983, 30319 and 89431 exposed unknown `_Pragma` token
+boundaries omitted by the initial OpenMP-only adapter. The extended adapter
+independently confirms all three in C17 and C23. Minimized executable
+regressions cover these forms, both unknown namespaces, and their shortened
+spellings. The original inputs and failed qualification receipts remain in
 [the handoff](measurements/preprocessor-fuzz-109-handoff-2026-10-23/README.md).
 The final ten-million-per-mode qualification on either host remains pending.
 
@@ -313,13 +316,13 @@ compares the emulation's fixtures with clang in each mode
 the emulation once printed wrong, and those probing around them found, which
 test-preprocessor's cases can't pin, since they compare tokens and line
 markers, not the `-P` text. Then the two probes of #263's second review:
-five sources whose output has a token that clang's text runs on past
+fourteen sources whose output has a token that clang's text runs on past
 (`pp_fuzz_ends_cases`), each of which must agree with clang, confirmed by
-clang's tokens (or unverified, on a `#pragma omp`'s line), and must differ
+clang's tokens (or unverified on a pragma's line without the adapter), and must differ
 with its first such token one byte shorter, the first source by clang's
-tokens alone (`pp_fuzz_check_ends_cases`). The pragma source also runs through
-the actual comparison-accounting path and must count as unverified, with
-zero verified comparisons; and a
+tokens alone (`pp_fuzz_check_ends_cases`). The pragma sources also run through
+the actual comparison-accounting path and must count as verified with the
+adapter, or unverified with zero verified comparisons without it; and a
 comparison whose tokens don't fit its arena, which must leave its case
 without a result (`pp_fuzz_check_failed_comparison`). The harness's own tests
 (`test-preprocessor-fuzz`) check the reader of clang's token dump on lines

@@ -494,8 +494,6 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
     bool line_start = true;
     bool valid = candidates == 0 || ranges != 0;
     uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
-    uint32_t pragma_token = 0;
-    bool expanded_pragma = false;
     uint32_t current_line = BUSTER_PP_NONE;
     uint32_t silent = 0;
     uint32_t at = 0;
@@ -505,15 +503,6 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
         const uint8_t kind = out->kinds[i];
         const bool written = pp_spelled_as_written(pragma, kind);
         pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
-        if (pragma == BUSTER_PP_PRAGMA_NAME)
-        {
-            pragma_token = 0;
-            expanded_pragma = false;
-        }
-        else if (pragma != BUSTER_PP_PRAGMA_OUTSIDE)
-        {
-            pragma_token += 1;
-        }
         uint32_t silent_place = BUSTER_PP_NONE;
         for (; silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i; silent += 1)
         {
@@ -584,10 +573,6 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
                                : buffer != 0 ? pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling)
                                              : 0;
             valid = spelling != 0;
-            if (pragma != BUSTER_PP_PRAGMA_OUTSIDE && pragma_token == 2)
-            {
-                expanded_pragma = valid && n == 3 && memcmp(spelling, "omp", 3) == 0;
-            }
             const bool breaks = valid && pp_fuzz_breaks(kind, spelling, n);
             const long start = breaks ? ftell(stream) : 0;
             fwrite(spelling != 0 ? spelling : (const uint8_t*)"", 1, n, stream);
@@ -600,7 +585,6 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
                     .end = (uint32_t)end,
                     .kind = kind,
                     .pragma = pragma != BUSTER_PP_PRAGMA_OUTSIDE,
-                    .expanded_pragma = expanded_pragma && pragma != BUSTER_PP_PRAGMA_OUTSIDE,
                 };
                 range_count += 1;
             }
@@ -710,13 +694,13 @@ static PreprocessorFuzzDifference pp_fuzz_compare(Arena* scratch, PreprocessorFu
 }
 
 // Compare independently observed Clang tokens with all of our whole tokens in the selected stream: ordinary output,
-// or the expanded operands of #pragma omp. Match kinds and full spellings in order, including trailing literal bytes.
+// or preserved pragma tokens. Match kinds and full spellings in order, including trailing literal bytes.
 static PreprocessorFuzzDifference pp_fuzz_confirm_ends(PreprocessorFuzzOutput ours, const PreprocessorFuzzClangTokens* theirs, bool pragmas)
 {
     uint64_t expected = 0;
     for (uint64_t w = 0; w < ours.whole_count; w += 1)
     {
-        expected += pragmas ? ours.whole[w].expanded_pragma : !ours.whole[w].pragma;
+        expected += ours.whole[w].pragma == pragmas;
     }
     uint64_t w = 0;
     uint64_t matched = 0;
@@ -728,7 +712,7 @@ static PreprocessorFuzzDifference pp_fuzz_confirm_ends(PreprocessorFuzzOutput ou
                              pp_fuzz_runs_on((const uint8_t*)token->spelling.pointer, token->spelling.length);
         const bool string = token->kind.length == 14 && memcmp(token->kind.pointer, "string_literal", 14) == 0 &&
                             pp_fuzz_broken_string((const uint8_t*)token->spelling.pointer, (uint32_t)token->spelling.length);
-        while (w < ours.whole_count && !(pragmas ? ours.whole[w].expanded_pragma : !ours.whole[w].pragma))
+        while (w < ours.whole_count && ours.whole[w].pragma != pragmas)
         {
             w += 1;
         }
@@ -758,7 +742,7 @@ static PreprocessorFuzzDifference pp_fuzz_confirm_ends(PreprocessorFuzzOutput ou
 // and broken strings (pp_fuzz_broken_string), in order, must be those tokens of ours, of their kinds and spellings. A
 // pragma's tokens are among neither. Returns the difference (BUSTER_PPF_EQUAL if there is none, or no such token of
 // ours), or BUSTER_PPF_INVALID if requested token evidence can't be had. The optional external pragma oracle confirms
-// expanded omp operands. Sets *checked when there were tokens to confirm, and *unverified when a continuing pragma
+// preserved pragma tokens. Sets *checked when there were tokens to confirm, and *unverified when a continuing pragma
 // token's end still has no independent evidence.
 static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char* clang_path, bool c23, const PreprocessorFuzzCase* test_case, PreprocessorFuzzOutput ours, bool* checked,
                                                      bool* unverified)
@@ -790,7 +774,7 @@ static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char*
         *checked = true;
         for (uint64_t p = 0; result == BUSTER_PPF_EQUAL && p < ours.whole_count; p += 1)
         {
-            unconfirmed -= ours.whole[p].expanded_pragma && preprocessor_fuzz_whole_runs_on(ours.text, &ours.whole[p]);
+            unconfirmed -= ours.whole[p].pragma && preprocessor_fuzz_whole_runs_on(ours.text, &ours.whole[p]);
         }
     }
     *unverified = result == BUSTER_PPF_EQUAL && unconfirmed != 0;
@@ -1527,6 +1511,30 @@ static const PPFuzzEndsCase pp_fuzz_ends_cases[] = {
     },
     {
         "#define Q 'q  \n_Pragma(\"omp Q x\")\n",
+        true,
+    },
+    {
+        "#define P(x) _Pragma(#x)\nP(## '' 0X2A)\n",
+        true,
+    },
+    {
+        "#define P(x) _Pragma(#x)\nP(0x1p3(a, '' b)\"\\n\")\n",
+        true,
+    },
+    {
+        "#define P(x) _Pragma(#x)\nP(['']9223372036854775807 ())\n",
+        true,
+    },
+    {
+        "#define Q 'q\n_Pragma(\"ppf_unknown '' Q\")\n",
+        true,
+    },
+    {
+        "#define Q 'q\n_Pragma(\"GCC ppf_unknown '' Q\")\n",
+        true,
+    },
+    {
+        "#define Q 'q\n_Pragma(\"clang ppf_unknown '' Q\")\n",
         true,
     },
 };

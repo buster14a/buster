@@ -56,7 +56,6 @@ struct PreprocessorFuzzWhole
     uint32_t end;
     uint8_t kind;
     bool pragma;
-    bool expanded_pragma;
 };
 
 typedef struct PreprocessorFuzzOutput PreprocessorFuzzOutput;

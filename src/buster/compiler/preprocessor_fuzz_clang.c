@@ -805,7 +805,7 @@ static bool preprocessor_fuzz_clang_dump(Arena* arena, String8 dump, Preprocesso
     return preprocessor_fuzz_clang_dump_read(arena, dump, false, result);
 }
 
-// Optional Clang C++ API adapter: its tagged token dump includes expanded #pragma omp operands, which Clang's
+// Optional Clang C++ API adapter: its tagged token dump includes preserved pragma tokens, which Clang's
 // ordinary dump action omits. Refuse a failed process, a different Clang version, malformed dumps or missing markers.
 static bool preprocessor_fuzz_clang_same_version(String8 clang, String8 oracle)
 {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// External test oracle for the expanded operands of #pragma omp. Clang's ordinary -dump-tokens action omits
+// External test oracle for preserved pragma tokens. Clang's ordinary -dump-tokens action omits
 // pragmas. This external adapter requires Clang's C++ frontend API.
 // This adapter uses the installed Clang API, not copied Clang implementation. See docs/preprocessor-fuzz.md.
 #include <clang/Basic/Version.h>
@@ -45,13 +45,36 @@ public:
     }
 };
 
+class UnknownPragmaTokens : public clang::PragmaHandler
+{
+public:
+    void HandlePragma(clang::Preprocessor& pp, clang::PragmaIntroducer, clang::Token& token) override
+    {
+        // Clang's -E printer preserves unknown pragmas without macro replacement. The first token is already read;
+        // keep it too, since _Pragma may produce a malformed literal as the directive's first token.
+        while (!token.isOneOf(clang::tok::eod, clang::tok::eof))
+        {
+            llvm::errs() << "BUSTER_PPF_PRAGMA ";
+            pp.DumpToken(token, true);
+            llvm::errs() << '\n';
+            pp.LexUnexpandedToken(token);
+        }
+    }
+};
+
 class PragmaTokenAction : public clang::PreprocessorFrontendAction
 {
     void ExecuteAction() override
     {
         clang::Preprocessor& pp = getCompilerInstance().getPreprocessor();
         OmpPragmaTokens handler;
+        UnknownPragmaTokens unknown;
+        UnknownPragmaTokens gcc;
+        UnknownPragmaTokens clang;
         pp.AddPragmaHandler(&handler);
+        pp.AddPragmaHandler(&unknown);
+        pp.AddPragmaHandler("GCC", &gcc);
+        pp.AddPragmaHandler("clang", &clang);
         pp.EnterMainSourceFile();
         clang::Token token;
         do
@@ -62,6 +85,9 @@ class PragmaTokenAction : public clang::PreprocessorFrontendAction
         }
         while (!token.is(clang::tok::eof));
         pp.RemovePragmaHandler(&handler);
+        pp.RemovePragmaHandler(&unknown);
+        pp.RemovePragmaHandler("GCC", &gcc);
+        pp.RemovePragmaHandler("clang", &clang);
     }
 };
 
