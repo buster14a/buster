@@ -900,6 +900,61 @@ typedef enum RawCase
     RAW_CASE_UTF,
 } RawCase;
 
+// The diagnostic query reads UNKNOWN tokens, including an unfinished prefix exactly against a protected page.
+// Expected positions are physical bytes; only the prefix is cleaned, never the delimiter.
+static bool check_raw_errors(void)
+{
+    static const struct
+    {
+        const char* text;
+        CRawStringError error;
+        uint32_t offset;
+        bool utf;
+    } cases[] = {
+        { "R\"bad space\"", C_RAW_STRING_DELIMITER_CHARACTER, 5, false },
+        { "R\"a\"b c\n", C_RAW_STRING_DELIMITER_CHARACTER, 5, false },
+        { "LR\"bad)\"", C_RAW_STRING_DELIMITER_CHARACTER, 6, false },
+        { "R\"x\n\"", C_RAW_STRING_DELIMITER_NEWLINE, 3, false },
+        { "R\"abcdefghijklmnopq\"", C_RAW_STRING_DELIMITER_LENGTH, 18, false },
+        { "R\"abcdefghijklmnop(", C_RAW_STRING_UNTERMINATED, 0, false },
+        { "R\"(body", C_RAW_STRING_UNTERMINATED, 0, false },
+        { "R\"", C_RAW_STRING_DELIMITER_CHARACTER, 2, false },
+        { "L\\\nR\"bad space\"", C_RAW_STRING_DELIMITER_CHARACTER, 8, false },
+        { "uR\"bad space\"", C_RAW_STRING_DELIMITER_CHARACTER, 6, true },
+        { "UR\"bad)\"", C_RAW_STRING_DELIMITER_CHARACTER, 6, true },
+        { "u8R\"x\n\"", C_RAW_STRING_DELIMITER_NEWLINE, 5, true },
+    };
+    static const uint32_t modes[] = { 0, C_TOKENIZER_RAW_STRINGS, C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_UTF_RAW_STRINGS, C_TOKENIZER_CPLUSPLUS };
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool result = mapping != MAP_FAILED && mprotect(mapping, page, PROT_READ | PROT_WRITE) == 0;
+    uint32_t checked = 0;
+    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const size_t length = strlen(cases[c].text);
+        for (size_t n = 0; result && n <= length; n += 1)
+        {
+            uint8_t* bytes = mapping + page - n;
+            memcpy(bytes, cases[c].text, n);
+            for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+            {
+                uint64_t offset;
+                const CRawStringError error = c_raw_string_error(bytes, n, modes[m], &offset);
+                const bool on = (modes[m] & C_TOKENIZER_CPLUSPLUS) != 0 ||
+                                ((modes[m] & C_TOKENIZER_RAW_STRINGS) != 0 && (!cases[c].utf || (modes[m] & C_TOKENIZER_UTF_RAW_STRINGS) != 0));
+                result = offset <= n && (n != length || (error == (on ? cases[c].error : C_RAW_STRING_OK) && offset == (on ? cases[c].offset : 0)));
+                checked += 1;
+            }
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+    printf("raw diagnostic boundaries: %s (%u checks)\n", result ? "pass" : "FAIL", checked);
+    return result;
+}
+
 // Each case of check_raw_strings starts at the last few bytes before 64-byte and 512-byte boundaries and the first ones
 // after (from the 64-byte-aligned buffer the source starts in, where the chunks start too), and at the source's start.
 static const uint32_t raw_string_starts[] = {56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 500, 504, 505, 506, 507, 508, 509, 510, 511, 512, 513};
@@ -1072,7 +1127,7 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         // The page edge inputs continue the random sequence, so that the random check's inputs stay upstream's.
         const CheckCounts page_edges = check_page_edges(&random, &vectorized, &scalar, flags);
         const bool comments = check_comments(&vectorized, &scalar, flags);
-        const bool raw_strings = check_raw_strings(&vectorized, &scalar, flags);
+        const bool raw_strings = check_raw_strings(&vectorized, &scalar, flags) && check_raw_errors();
         const bool separators = check_separators(&vectorized, &scalar, flags) && check_separator_fixtures(&vectorized, &scalar, flags);
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
