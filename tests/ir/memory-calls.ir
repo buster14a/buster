@@ -1,0 +1,19 @@
+function (ptr, i64) -> i64 {
+  slot $0 size=8 align=8 type=i64 flags=0x03
+  slot $1 size=32 align=16 type=void flags=0x04
+b0:
+  %0 = param.ptr 0
+  %1 = param.i64 1
+  %2 = stack_addr.ptr $0
+  %3 = symbol_addr.ptr @3
+  %4 = address.ptr %0 + %1 * 8 offset=-9223372036854775808
+  %5 = address.ptr %2 offset=9223372036854775807
+  %6 = store.void %2, %1 align=8 volatile
+  %7 = load.i64 %2 align=8 volatile
+  %8 = call.i64 @1(%7) fixed=(i64) variadic=0
+  %9 = call_indirect.i64 %3(%8, %1) fixed=(i64) variadic=1
+  %10 = call.void @2() fixed=() variadic=0
+  %11 = load.i8 %0 align=1
+  %12 = store.void %0, %11 align=1
+  %13 = ret.void %9
+}

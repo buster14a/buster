@@ -17,6 +17,14 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The text IR parser (`ir_parse.c`), interpreter family (`interpreter*.c`,
+`ir_interpreter*.c`), their test fixtures under `tests/ir/`, and
+`docs/ir-tools.md` are original project material under the default terms.
+They reuse this repository's IR, typed-stream, arena, Link and ABI contracts.
+The SysV native-call bridge is original assembly written from the calling
+convention; libc and host native test functions run externally. No external
+implementation, generated data or corpus fixtures are incorporated.
+
 Paths below are relative to the repository root. "Default" means
 `Apache-2.0 WITH LLVM-exception` for original material.
 
