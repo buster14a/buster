@@ -160,6 +160,12 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `ExecutableOptions.symbols` provides optional regular symbol output without
+  DWARF. `test-executable` covers the attachment and unchanged-destination
+  refusal; `test-debug --cross-check` covers the debug-only consumers. The
+  [symbol-output contract](docs/executable-symbols.md) records producer
+  ownership, supported definitions and pending parallel/performance gates.
+
 - `src/buster/compiler/c_gnu.c` retains bounded GNU attribute groups/arguments
   and declarator asm labels when `ParseOptions.extension_metadata` is enabled.
   `test-gnu --clang` checks exact records, scalar/vector agreement and guarded
@@ -499,6 +505,16 @@ designs and the compilers already built this way.
   `foreign_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-foreign` runs them) and `foreign_benchmark.c`
   provides `benchmark-foreign`.
+- `ImportObject.executable_stack_section` preserves the first exact
+  `.note.GNU-stack` section requesting `SHF_EXECINSTR` in the existing scalar
+  and vector section passes. Foreign conversion refuses a selected requesting
+  object before the NX-only executable writer is reached; unextracted archive
+  members do not contribute. `test-import` covers metadata and retry parity;
+  `foreign_stack_test.c`, included by `test-foreign`, covers original
+  direct/archive/COMDAT selection and diagnostics at 1/2/3/8 lanes. The linker
+  guide's "Explicit executable-stack requests in foreign objects" records
+  the conservative grouped/excluded-marker policy and the boundaries of these
+  producer tests.
 - `src/buster/compiler/foreign_strings.c` builds a deterministic pool and
   original-offset map for one-, two- and four-byte `SHF_MERGE | SHF_STRINGS`
   entries. Its bounded vector scans and hashes have exact scalar twins.
@@ -2952,6 +2968,8 @@ interning (`RefineVariant`), with `refine_tokens_scalar` and with an oracle of
 its own (splices and UCNs removed in plain passes, and a different table): every
 identifier must get the same id and every token the same leading-space bit, on:
 
+- 8,192 guarded bucket patterns covering every prefix dword match combination,
+  misses and multiple candidates, with low and near-limit IDs;
 - the hash's four forms on spellings of 0 to 200 bytes (the one that hashes
   four spellings at once, up to 32 bytes, with their first lanes);
 - 88,064 structured spellings that must all hash differently: repeated and
@@ -2959,11 +2977,15 @@ identifier must get the same id and every token the same leading-space bit, on:
   identifiers with paired changes in two lanes;
 - about 14,800 spellings where the same bit flipped in two lanes must change
   the hash;
+- four fixed paired keys that cancelled in the old hash's low half, requiring
+  separation after final mixing and distinct stable IDs;
 - the predefined names, every name's keyword answer in each of the ten modes
   from `c89` to `gnu23` and in five of them with `-fgnu-keywords` or
   `-fno-gnu-keywords` (#281), and 24 spellings chosen apart from the predefined
   names with clang's answer (17 keywords, 7 not);
 - 300,000 random spellings that grow the table three times;
+- growth after 1, 4, 15, 16, 31, 32, 63 or 64 new names, with preceding-batch
+  repeats and long common-prefix names, then the same input again;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
   misalignments from a cache line;

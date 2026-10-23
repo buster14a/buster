@@ -1,0 +1,8 @@
+--- a/src/buster/compiler/c_intern.c
++++ b/src/buster/compiler/c_intern.c
+@@ -424 +424 @@
+-#define BUSTER_INTERN_LOAD_NUMERATOR 5
++#define BUSTER_INTERN_LOAD_NUMERATOR 6
+@@ -430 +430 @@
+-#define BUSTER_INTERN_INITIAL_BUCKETS 16384
++#define BUSTER_INTERN_INITIAL_BUCKETS 8192

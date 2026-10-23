@@ -525,11 +525,56 @@ struct CFragmentReaderResult
     uint32_t nodes;
     uint32_t stack_peak;
     bool valid;
+    bool overflow;
 };
 
-static bool c_fragment_reader_event(const CFragmentReaderSource* source, CFragmentReaderEvent* events, uint32_t capacity, CFragmentReaderResult* result, uint8_t phase, uint32_t token, uint32_t child, uint32_t ordinal, uint32_t boundary)
+typedef enum CFragmentReaderStatus
 {
-    bool valid = result->count < capacity && token < source->count;
+    C_FRAGMENT_READER_ERROR,
+    C_FRAGMENT_READER_EVENT,
+    C_FRAGMENT_READER_END,
+} CFragmentReaderStatus;
+
+typedef enum CFragmentReaderStep
+{
+    C_FRAGMENT_READER_FAILED,
+    C_FRAGMENT_READER_INPUT,
+    C_FRAGMENT_READER_TYPE,
+    C_FRAGMENT_READER_EXIT,
+    C_FRAGMENT_READER_PARENT,
+    C_FRAGMENT_READER_PUBLICATION,
+    C_FRAGMENT_READER_FINISHED,
+} CFragmentReaderStep;
+
+typedef struct CFragmentReaderCursor CFragmentReaderCursor;
+struct CFragmentReaderCursor
+{
+    CFragmentDirectReader* reader;
+    const CFragmentReaderSource* source;
+    const uint8_t* flat_kinds;
+    const uint32_t* flat_tokens;
+    CFragmentReaderVisits* visits;
+    CFragmentReaderFrame* stack;
+    uint32_t stack_capacity;
+    uint32_t positions;
+    uint32_t consumed;
+    uint32_t depth;
+    uint32_t claim_depth;
+    uint32_t root;
+    uint32_t boundary;
+    uint32_t child;
+    uint32_t window_count;
+    uint32_t window_at;
+    uint8_t kinds[64];
+    uint32_t tokens[64];
+    CFragmentReaderResult result;
+    CFragmentReaderStep step;
+    bool flat;
+};
+
+static bool c_fragment_reader_event(const CFragmentReaderSource* source, CFragmentReaderEvent* event, uint8_t phase, uint32_t token, uint32_t child, uint32_t ordinal, uint32_t boundary)
+{
+    bool valid = token < source->count;
     if (valid)
     {
         const CFragmentSyntax* syntax = &source->syntax[token];
@@ -537,7 +582,7 @@ static bool c_fragment_reader_event(const CFragmentReaderSource* source, CFragme
                 (syntax->type_root == BUSTER_C_FRAGMENT_NONE || syntax->type_root < source->count);
         if (valid)
         {
-            events[result->count++] = (CFragmentReaderEvent)
+            *event = (CFragmentReaderEvent)
             {
                 .token = token,
                 .child = child,
@@ -556,120 +601,276 @@ static bool c_fragment_reader_event(const CFragmentReaderSource* source, CFragme
     return valid;
 }
 
-// Literal-mode wrappers force inline specialization; no function-pointer reader/action callbacks. Fixed arity
-// and END delimit framing only: END produces no semantic token event. REFERENCE is a request, not a recursive
-// visit. The complete tagged semantic continuation driver and C query/alias policy remain checker-owned work.
-// Flat input locations for leaf slots are ignored; context must carry a fresh (or explicitly resumed) leaf cursor.
-// On failure output and visit state are partial and unusable. Inspect result.valid before consuming any event.
+// Source/store/flat input remain immutable and outlive the cursor. The caller owns the reader, visit ledger and
+// bounded frame slice, exclusively while this cursor is active; nested roots use different readers/frame slices
+// and share the ledger. A cursor can move by value, but copying it does not duplicate ownership of those slices.
+// next preserves its decoded window across every event, including source leaves prefetched by direct decoding.
+// It allocates nothing. REFERENCE requests caller-owned work; the outer cursor resumes only after the nested
+// claim is complete. This syntax stack is not the future unified tagged semantic/checker continuation stack.
+static CFragmentReaderCursor c_fragment_reader_cursor(CFragmentDirectReader* reader, const uint8_t* flat_kinds, const uint32_t* flat_tokens, uint32_t positions,
+                                                      CFragmentReaderVisits* visits, CFragmentReaderFrame* stack, uint32_t stack_capacity, bool flat)
+{
+    CFragmentReaderCursor cursor =
+    {
+        .reader = reader,
+        .source = reader != 0 ? reader->leaves.source : 0,
+        .flat_kinds = flat_kinds,
+        .flat_tokens = flat_tokens,
+        .visits = visits,
+        .stack = stack,
+        .stack_capacity = stack_capacity,
+        .positions = positions,
+        .root = BUSTER_C_FRAGMENT_NONE,
+        .boundary = BUSTER_C_FRAGMENT_NONE,
+        .child = BUSTER_C_FRAGMENT_NONE,
+        .flat = flat,
+    };
+    const CFragmentReaderSource* source = cursor.source;
+    bool valid = reader != 0 && reader->valid && reader->leaves.valid && positions != 0 && positions == reader->remaining && stack != 0 && stack_capacity != 0 && visits != 0;
+    valid = valid && source != 0 && source->valid && source->parser != 0 && source->parser->tokens.count == source->count && source->parser->tokens.sources != 0 && source->syntax != 0 &&
+            source->kinds != 0 && source->owners != 0 && source->next != 0 && source->boundaries != 0 && reader->leaves.root < source->count &&
+            (flat ? flat_kinds != 0 && flat_tokens != 0 : reader->store != 0);
+    valid = valid && visits->count == source->count && visits->nodes != 0 && visits->states != 0 && visits->roots != 0 && visits->depth != 0 && visits->depth <= visits->capacity &&
+            visits->roots[visits->depth - 1] == reader->leaves.root && visits->states[reader->leaves.root] == C_FRAGMENT_READER_ACTIVE;
+    if (valid)
+    {
+        cursor.root = reader->leaves.root;
+        cursor.boundary = source->boundaries[cursor.root];
+        cursor.claim_depth = visits->depth;
+        valid = cursor.boundary < source->count && source->owners[cursor.boundary] == cursor.root;
+    }
+    cursor.step = valid ? C_FRAGMENT_READER_INPUT : C_FRAGMENT_READER_FAILED;
+    cursor.result.valid = valid;
+    return cursor;
+}
+
+// Literal-mode next wrappers specialize both refill and input selection without callbacks. Each successful call
+// yields exactly one event. END framing can consume one input position before REDUCE; it never becomes an event.
+// ERROR is sticky until reinitialization and leaves partial traversal state unusable. END is sticky even after
+// the caller completes/releases the root claim. Both statuses clear every output byte; only EVENT carries data.
+BUSTER_INLINE CFragmentReaderStatus c_fragment_reader_next(CFragmentReaderCursor* cursor, CFragmentReaderEvent* event, bool flat, bool vector)
+{
+    CFragmentReaderStatus status = C_FRAGMENT_READER_ERROR;
+    if (event != 0)
+    {
+        memset(event, 0, sizeof(*event));
+    }
+    bool valid = cursor != 0 && event != 0;
+    if (valid && cursor->step == C_FRAGMENT_READER_FINISHED)
+    {
+        status = C_FRAGMENT_READER_END;
+    }
+    else if (valid && cursor->step != C_FRAGMENT_READER_FAILED)
+    {
+        CFragmentDirectReader* reader = cursor->reader;
+        const CFragmentReaderSource* source = cursor->source;
+        CFragmentReaderVisits* visits = cursor->visits;
+        valid = cursor->result.valid && cursor->flat == flat && reader->valid && reader->leaves.valid && source->valid && reader->leaves.source == source && reader->leaves.root == cursor->root &&
+                visits->count == source->count && visits->nodes != 0 && visits->states != 0 && visits->roots != 0 && visits->depth == cursor->claim_depth && visits->depth != 0 && visits->depth <= visits->capacity &&
+                cursor->root < source->count && visits->roots[visits->depth - 1] == cursor->root && visits->states[cursor->root] == C_FRAGMENT_READER_ACTIVE &&
+                cursor->depth <= cursor->stack_capacity && cursor->result.count != UINT32_MAX;
+        if (valid && cursor->depth != 0)
+        {
+            const uint32_t token = cursor->stack[cursor->depth - 1].token;
+            valid = token < source->count && source->owners[token] == cursor->root && visits->nodes[token] == C_FRAGMENT_READER_ACTIVE;
+        }
+        uint8_t phase = UINT8_MAX;
+        uint32_t token = BUSTER_C_FRAGMENT_NONE;
+        uint32_t child = BUSTER_C_FRAGMENT_NONE;
+        uint32_t ordinal = 0;
+        if (valid && cursor->step == C_FRAGMENT_READER_TYPE)
+        {
+            valid = cursor->depth != 0;
+            if (valid)
+            {
+                token = cursor->stack[cursor->depth - 1].token;
+                valid = source->syntax[token].type_root != BUSTER_C_FRAGMENT_NONE;
+                phase = C_FRAGMENT_READER_REFERENCE;
+                cursor->step = C_FRAGMENT_READER_INPUT;
+            }
+        }
+        else if (valid && cursor->step == C_FRAGMENT_READER_EXIT)
+        {
+            valid = cursor->depth != 0 && cursor->stack[cursor->depth - 1].remaining == 0;
+            if (valid)
+            {
+                token = cursor->stack[cursor->depth - 1].token;
+                phase = C_FRAGMENT_READER_LEAVE;
+                visits->nodes[token] = C_FRAGMENT_READER_DONE;
+                cursor->depth -= 1;
+                cursor->child = token;
+                cursor->step = cursor->depth != 0 ? C_FRAGMENT_READER_PARENT : C_FRAGMENT_READER_PUBLICATION;
+            }
+        }
+        else if (valid && cursor->step == C_FRAGMENT_READER_PARENT)
+        {
+            valid = cursor->depth != 0 && cursor->child < source->count && visits->nodes[cursor->child] == C_FRAGMENT_READER_DONE;
+            if (valid)
+            {
+                CFragmentReaderFrame* parent = &cursor->stack[cursor->depth - 1];
+                valid = parent->remaining != 0 && parent->completed < cursor->positions;
+                token = parent->token;
+                child = cursor->child;
+                ordinal = parent->completed;
+                phase = C_FRAGMENT_READER_CHILD;
+                parent->completed += 1;
+                parent->remaining -= parent->remaining != UINT32_MAX;
+                cursor->step = C_FRAGMENT_READER_INPUT;
+            }
+        }
+        else if (valid && cursor->step == C_FRAGMENT_READER_PUBLICATION)
+        {
+            valid = cursor->depth == 0 && cursor->consumed == cursor->positions && cursor->child == cursor->root && reader->leaves.next == BUSTER_C_FRAGMENT_NONE &&
+                    visits->nodes[cursor->root] == C_FRAGMENT_READER_DONE && (flat || (reader->remaining == 0 && cursor->window_at == cursor->window_count));
+            token = cursor->root;
+            phase = C_FRAGMENT_READER_ATTACH;
+            cursor->step = C_FRAGMENT_READER_FINISHED;
+        }
+        else if (valid)
+        {
+            valid = cursor->step == C_FRAGMENT_READER_INPUT;
+            // At most two iterations: consume a node and emit ENTER, or consume END then emit REDUCE.
+            for (uint32_t advance = 0; valid && phase == UINT8_MAX && advance < 2; advance += 1)
+            {
+                if (cursor->depth != 0 && cursor->stack[cursor->depth - 1].remaining == 0)
+                {
+                    token = cursor->stack[cursor->depth - 1].token;
+                    phase = C_FRAGMENT_READER_REDUCE;
+                    cursor->step = C_FRAGMENT_READER_EXIT;
+                }
+                else
+                {
+                    uint8_t kind = C_FRAGMENT_KIND_COUNT;
+                    valid = cursor->consumed < cursor->positions;
+                    if (valid && flat)
+                    {
+                        kind = cursor->flat_kinds[cursor->consumed];
+                        if (kind < C_FRAGMENT_KIND_COUNT && kind != C_FRAGMENT_END && c_fragment_arities[kind] == 0)
+                        {
+                            uint8_t leaf = C_FRAGMENT_KIND_COUNT;
+                            valid = c_fragment_leaf_next(&reader->leaves, &leaf, &token) && leaf == kind;
+                        }
+                        else
+                        {
+                            token = cursor->flat_tokens[cursor->consumed];
+                        }
+                    }
+                    else if (valid)
+                    {
+                        valid = cursor->window_at <= cursor->window_count && cursor->window_count <= 64;
+                        if (valid && cursor->window_at == cursor->window_count)
+                        {
+                            valid = c_fragment_direct_window(reader, cursor->kinds, cursor->tokens, &cursor->window_count, vector) && cursor->window_count != 0;
+                            cursor->window_at = 0;
+                        }
+                        if (valid)
+                        {
+                            kind = cursor->kinds[cursor->window_at];
+                            token = cursor->tokens[cursor->window_at++];
+                        }
+                    }
+                    cursor->consumed += valid;
+                    valid = valid && kind < C_FRAGMENT_KIND_COUNT;
+                    if (valid && kind == C_FRAGMENT_END)
+                    {
+                        valid = token == BUSTER_C_FRAGMENT_NONE && cursor->depth != 0 && cursor->stack[cursor->depth - 1].remaining == UINT32_MAX;
+                        if (valid)
+                        {
+                            cursor->stack[cursor->depth - 1].remaining = 0;
+                        }
+                    }
+                    else if (valid)
+                    {
+                        valid = token < source->count && source->kinds[token] == kind && source->owners[token] == cursor->root && visits->nodes[token] == C_FRAGMENT_READER_UNSEEN &&
+                                cursor->depth < cursor->stack_capacity && (cursor->depth != 0 || (cursor->result.nodes == 0 && token == cursor->root));
+                        if (valid)
+                        {
+                            visits->nodes[token] = C_FRAGMENT_READER_ACTIVE;
+                            const uint32_t arity = c_fragment_arities[kind];
+                            cursor->stack[cursor->depth++] = (CFragmentReaderFrame)
+                            {
+                                .token = token,
+                                .remaining = arity == BUSTER_C_FRAGMENT_LIST_ARITY ? UINT32_MAX : arity,
+                            };
+                            cursor->result.stack_peak = cursor->depth > cursor->result.stack_peak ? cursor->depth : cursor->result.stack_peak;
+                            cursor->result.nodes += 1;
+                            phase = C_FRAGMENT_READER_ENTER;
+                            cursor->step = source->syntax[token].type_root != BUSTER_C_FRAGMENT_NONE ? C_FRAGMENT_READER_TYPE : C_FRAGMENT_READER_INPUT;
+                        }
+                    }
+                }
+            }
+        }
+        valid = valid && phase <= C_FRAGMENT_READER_ATTACH && c_fragment_reader_event(source, event, phase, token, child, ordinal, cursor->boundary);
+        if (valid)
+        {
+            cursor->result.count += 1;
+            status = C_FRAGMENT_READER_EVENT;
+        }
+    }
+    if (status == C_FRAGMENT_READER_ERROR)
+    {
+        if (cursor != 0)
+        {
+            cursor->step = C_FRAGMENT_READER_FAILED;
+            cursor->result.valid = false;
+        }
+        if (event != 0)
+        {
+            memset(event, 0, sizeof(*event));
+        }
+    }
+    return status;
+}
+
+static CFragmentReaderStatus c_fragment_reader_next_flat(CFragmentReaderCursor* cursor, CFragmentReaderEvent* event)
+{
+    return c_fragment_reader_next(cursor, event, true, false);
+}
+
+static CFragmentReaderStatus c_fragment_reader_next_direct_scalar(CFragmentReaderCursor* cursor, CFragmentReaderEvent* event)
+{
+    return c_fragment_reader_next(cursor, event, false, false);
+}
+
+static CFragmentReaderStatus c_fragment_reader_next_direct_vector(CFragmentReaderCursor* cursor, CFragmentReaderEvent* event)
+{
+    return c_fragment_reader_next(cursor, event, false, true);
+}
+
+// Compatibility collector. Output exhaustion is distinct from malformed input; both leave partial state unusable.
 BUSTER_INLINE CFragmentReaderResult c_fragment_reader_schedule(CFragmentDirectReader* reader, const uint8_t* flat_kinds, const uint32_t* flat_tokens, uint32_t positions,
                                                                CFragmentReaderVisits* visits, CFragmentReaderFrame* stack, uint32_t stack_capacity, CFragmentReaderEvent* events, uint32_t event_capacity, bool flat, bool vector)
 {
-    CFragmentReaderResult result = { .valid = reader->valid && reader->leaves.valid && positions != 0 && positions == reader->remaining && stack != 0 && events != 0 };
-    const CFragmentReaderSource* source = reader->leaves.source;
-    result.valid = result.valid && source != 0 && source->valid && reader->leaves.root < source->count && (!flat || (flat_kinds != 0 && flat_tokens != 0));
-    result.valid = result.valid && visits->count == source->count && visits->nodes != 0 && visits->states != 0 && visits->roots != 0 && visits->depth != 0 && visits->depth <= visits->capacity && visits->roots[visits->depth - 1] == reader->leaves.root &&
-                   visits->states[reader->leaves.root] == C_FRAGMENT_READER_ACTIVE;
-    const uint32_t boundary = result.valid ? source->boundaries[reader->leaves.root] : BUSTER_C_FRAGMENT_NONE;
-    uint32_t depth = 0;
-    uint32_t consumed = 0;
-    uint32_t root = BUSTER_C_FRAGMENT_NONE;
-    uint8_t kinds[64];
-    uint32_t tokens[64];
-    uint32_t window_count = 0;
-    uint32_t window_at = 0;
-    while (result.valid && (consumed < positions || depth != 0))
+    CFragmentReaderCursor cursor = c_fragment_reader_cursor(reader, flat_kinds, flat_tokens, positions, visits, stack, stack_capacity, flat);
+    uint32_t written = 0;
+    bool finished = false;
+    cursor.result.valid = cursor.result.valid && events != 0;
+    while (cursor.result.valid && !finished)
     {
-        if (depth != 0 && stack[depth - 1].remaining == 0)
+        CFragmentReaderEvent event;
+        const CFragmentReaderStatus status = c_fragment_reader_next(&cursor, &event, flat, vector);
+        if (status == C_FRAGMENT_READER_EVENT)
         {
-            const uint32_t token = stack[depth - 1].token;
-            result.valid = visits->nodes[token] == C_FRAGMENT_READER_ACTIVE && c_fragment_reader_event(source, events, event_capacity, &result, C_FRAGMENT_READER_REDUCE, token, BUSTER_C_FRAGMENT_NONE, 0, boundary) &&
-                           c_fragment_reader_event(source, events, event_capacity, &result, C_FRAGMENT_READER_LEAVE, token, BUSTER_C_FRAGMENT_NONE, 0, boundary);
-            visits->nodes[token] = C_FRAGMENT_READER_DONE;
-            depth -= 1;
-            if (result.valid && depth != 0)
+            if (written < event_capacity)
             {
-                CFragmentReaderFrame* parent = &stack[depth - 1];
-                result.valid = parent->remaining != 0 && parent->completed < positions &&
-                               c_fragment_reader_event(source, events, event_capacity, &result, C_FRAGMENT_READER_CHILD, parent->token, token, parent->completed, boundary);
-                parent->completed += 1;
-                parent->remaining -= parent->remaining != UINT32_MAX;
+                events[written++] = event;
+            }
+            else
+            {
+                cursor.result.valid = false;
+                cursor.result.overflow = true;
+                cursor.step = C_FRAGMENT_READER_FAILED;
             }
         }
         else
         {
-            uint8_t kind = C_FRAGMENT_KIND_COUNT;
-            uint32_t token = BUSTER_C_FRAGMENT_NONE;
-            result.valid = consumed < positions;
-            if (result.valid && flat)
-            {
-                kind = flat_kinds[consumed];
-                if (kind < C_FRAGMENT_KIND_COUNT && kind != C_FRAGMENT_END && c_fragment_arities[kind] == 0)
-                {
-                    uint8_t leaf = C_FRAGMENT_KIND_COUNT;
-                    result.valid = c_fragment_leaf_next(&reader->leaves, &leaf, &token) && leaf == kind;
-                }
-                else
-                {
-                    token = flat_tokens[consumed];
-                }
-            }
-            else if (result.valid)
-            {
-                if (window_at == window_count)
-                {
-                    result.valid = c_fragment_direct_window(reader, kinds, tokens, &window_count, vector) && window_count != 0;
-                    window_at = 0;
-                }
-                if (result.valid)
-                {
-                    kind = kinds[window_at];
-                    token = tokens[window_at++];
-                }
-            }
-            consumed += result.valid;
-            result.valid = result.valid && kind < C_FRAGMENT_KIND_COUNT;
-            if (result.valid && kind == C_FRAGMENT_END)
-            {
-                result.valid = token == BUSTER_C_FRAGMENT_NONE && depth != 0 && stack[depth - 1].remaining == UINT32_MAX;
-                if (result.valid)
-                {
-                    stack[depth - 1].remaining = 0;
-                }
-            }
-            else if (result.valid)
-            {
-                result.valid = token < source->count && source->kinds[token] == kind && source->owners[token] == reader->leaves.root && visits->nodes[token] == C_FRAGMENT_READER_UNSEEN &&
-                               depth < stack_capacity && (depth != 0 || root == BUSTER_C_FRAGMENT_NONE);
-                if (result.valid)
-                {
-                    visits->nodes[token] = C_FRAGMENT_READER_ACTIVE;
-                    if (depth == 0)
-                    {
-                        root = token;
-                    }
-                    const uint32_t arity = c_fragment_arities[kind];
-                    stack[depth++] = (CFragmentReaderFrame)
-                    {
-                        .token = token,
-                        .remaining = arity == BUSTER_C_FRAGMENT_LIST_ARITY ? UINT32_MAX : arity,
-                    };
-                    result.stack_peak = depth > result.stack_peak ? depth : result.stack_peak;
-                    result.nodes += 1;
-                    result.valid = c_fragment_reader_event(source, events, event_capacity, &result, C_FRAGMENT_READER_ENTER, token, BUSTER_C_FRAGMENT_NONE, 0, boundary);
-                    if (result.valid && source->syntax[token].type_root != BUSTER_C_FRAGMENT_NONE)
-                    {
-                        result.valid = c_fragment_reader_event(source, events, event_capacity, &result, C_FRAGMENT_READER_REFERENCE, token, BUSTER_C_FRAGMENT_NONE, 0, boundary);
-                    }
-                }
-            }
+            finished = status == C_FRAGMENT_READER_END;
         }
     }
-    result.valid = result.valid && consumed == positions && root == reader->leaves.root && reader->leaves.next == BUSTER_C_FRAGMENT_NONE &&
-                   (flat || (reader->remaining == 0 && window_at == window_count));
-    if (result.valid)
-    {
-        result.valid = c_fragment_reader_event(source, events, event_capacity, &result, C_FRAGMENT_READER_ATTACH, root, BUSTER_C_FRAGMENT_NONE, 0, boundary);
-    }
+    CFragmentReaderResult result = cursor.result;
+    result.count = written;
+    result.valid = result.valid && finished;
     return result;
 }
 

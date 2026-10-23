@@ -355,6 +355,7 @@ jobs:
           ./build/compiler test-builtin-intrinsic-inventory
           ./build/compiler test-check-builtins
           ./build/compiler test-check-varargs
+          ./build/compiler test-tier0-variadic-frame
           ./build/compiler test-check-builtins-misc
           ./build/compiler test-check-builtins-query
           ./build/compiler test-check-builtins-bit-cast
