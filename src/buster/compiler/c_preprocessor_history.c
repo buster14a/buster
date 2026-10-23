@@ -152,7 +152,8 @@ static void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, 
     }
 }
 
-// Copy history alongside a completed token copy, or compress it directly into the output run table.
+// Copy history alongside a completed token copy, or compress it directly into the output run table. Each temporary
+// buffer owns its origin column, so only a copy within the same PPTokens can overlap.
 static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, const PPTokens* source, uint32_t begin, uint32_t end)
 {
     if (!pp->options.no_history && begin < end && !pp->fatal && (target == &pp->output || pp_history_origin_room(pp, target, at + end - begin)))
@@ -161,7 +162,24 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
         {
             const uint32_t slot = target == &pp->arguments ? 0 : target == &pp->captures ? 1 : 2;
             pp->origin_peak[slot] = pp->origin_peak[slot] < at + end - begin ? at + end - begin : pp->origin_peak[slot];
-            memmove(target->origins + at, source->origins + begin, (uint64_t)(end - begin) * sizeof(uint32_t));
+            if (pp->vectorized)
+            {
+                memmove(target->origins + at, source->origins + begin, (uint64_t)(end - begin) * sizeof(uint32_t));
+            }
+            else if (target == source && at > begin && at < end)
+            {
+                for (uint32_t i = end - begin; i > 0; i -= 1)
+                {
+                    target->origins[at + i - 1] = source->origins[begin + i - 1];
+                }
+            }
+            else
+            {
+                for (uint32_t i = 0; i < end - begin; i += 1)
+                {
+                    target->origins[at + i] = source->origins[begin + i];
+                }
+            }
         }
         else if (pp->vectorized)
         {
