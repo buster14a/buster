@@ -154,6 +154,49 @@ static bool interpreter_native_flags(const InterpreterNativeRequest* request)
     return result;
 }
 
+typedef struct InterpreterNativeRange InterpreterNativeRange;
+struct InterpreterNativeRange
+{
+    InterpreterMemory* memory;
+    uint64_t offset;
+};
+
+// Object-representation transfers check bounds and permissions without consuming values or changing definedness.
+// Unknown ranges are allowed only when memory checking is disabled. A range that touches a known allocation still
+// has to fit a registered allocation, even in that mode; an unchecked tail cannot escape a known object's bounds.
+static bool interpreter_native_range(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write, InterpreterNativeRange* range)
+{
+    range->memory = 0;
+    range->offset = 0;
+    bool result = bytes == 0;
+    if (bytes != 0 && address != 0 && bytes <= UINT64_MAX - address)
+    {
+        bool known = false;
+        bool found = false;
+        const uint64_t end = address + bytes;
+        for (uint32_t i = 0; i < runtime->memory_count && !found; i += 1)
+        {
+            InterpreterMemory* memory = &runtime->memories[i];
+            const uint64_t base = (uint64_t)(uintptr_t)memory->bytes;
+            const uint64_t offset = address - base;
+            const uint64_t memory_end = base + memory->size;
+            known |= (address >= base && offset <= memory->size) || (address < memory_end && base < end);
+            if (address >= base && offset <= memory->size && bytes <= memory->size - offset)
+            {
+                range->memory = memory;
+                range->offset = offset;
+                found = true;
+                result = !write || memory->writable;
+            }
+        }
+        if (!found)
+        {
+            result = !known && !runtime->check_memory;
+        }
+    }
+    return result;
+}
+
 static bool interpreter_native_memory_prepare(const InterpreterNativeRequest* request)
 {
     InterpreterRuntime* runtime = request->runtime;
@@ -164,13 +207,14 @@ static bool interpreter_native_memory_prepare(const InterpreterNativeRequest* re
         if (flags == BUSTER_INTERPRETER_NATIVE_COPY || flags == BUSTER_INTERPRETER_NATIVE_SET)
         {
             const uint64_t size = request->arguments[2].low;
+            InterpreterNativeRange range;
             if (flags == BUSTER_INTERPRETER_NATIVE_COPY)
             {
-                result = interpreter_memory_access(runtime, request->arguments[1].low, size, false) == INTERPRETER_OK;
+                result = interpreter_native_range(runtime, request->arguments[1].low, size, false, &range);
             }
             if (result)
             {
-                result = interpreter_memory_access(runtime, request->arguments[0].low, size, true) == INTERPRETER_OK;
+                result = interpreter_native_range(runtime, request->arguments[0].low, size, true, &range);
             }
         }
         else if (flags == BUSTER_INTERPRETER_NATIVE_FREE || flags == BUSTER_INTERPRETER_NATIVE_REALLOCATE)
@@ -229,7 +273,34 @@ static bool interpreter_native_memory_finish(const InterpreterNativeRequest* req
     bool result = true;
     if (runtime != 0)
     {
-        if (flags == BUSTER_INTERPRETER_NATIVE_FREE)
+        if (flags == BUSTER_INTERPRETER_NATIVE_COPY || flags == BUSTER_INTERPRETER_NATIVE_SET)
+        {
+            const uint64_t size = request->arguments[2].low;
+            InterpreterNativeRange destination;
+            result = interpreter_native_range(runtime, request->arguments[0].low, size, true, &destination);
+            if (result && size != 0 && destination.memory != 0 && destination.memory->defined != 0)
+            {
+                uint8_t* destination_defined = destination.memory->defined + destination.offset;
+                InterpreterNativeRange source = {
+                    0
+                };
+                if (flags == BUSTER_INTERPRETER_NATIVE_COPY)
+                {
+                    result = interpreter_native_range(runtime, request->arguments[1].low, size, false, &source);
+                }
+                if (result && source.memory != 0 && source.memory->defined != 0)
+                {
+                    // Move the metadata with memmove even for memcpy bindings: this also preserves source bits when
+                    // a valid memmove's ranges overlap. Diagnostics happen on later typed reads, not byte transfers.
+                    memmove(destination_defined, source.memory->defined + source.offset, (size_t)size);
+                }
+                else if (result)
+                {
+                    memset(destination_defined, 1, (size_t)size);
+                }
+            }
+        }
+        else if (flags == BUSTER_INTERPRETER_NATIVE_FREE)
         {
             for (uint32_t i = 0; i < runtime->memory_count; i += 1)
             {

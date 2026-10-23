@@ -148,6 +148,12 @@ allocation, whose ownership remains with the caller. Memory bindings remain
 caller-owned. The generated-program comparison disables undefined-byte checks
 to match that generator's established zero-initialization convention; the
 handwritten undefined-memory cases use the enabled checks.
+Flagged `memcpy`/`memmove` calls transport byte-definedness alongside the copied
+representation, including overlapping moves, without consuming a scalar value.
+Later typed reads retain undefined-byte diagnostics; `memset` defines its written
+bytes. This is the oracle's checking policy, with the language-level questions
+about indeterminate values and padding discussed separately in
+[WG14 DR451](https://open-std.org/jtc1/sc22/wg14/www/docs/dr_451.htm).
 
 Inline assembly, threads and signals are outside this oracle's scope. Program
 callbacks from libc into interpreted functions and setjmp/longjmp are not an

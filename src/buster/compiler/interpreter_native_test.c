@@ -484,6 +484,120 @@ static void interpreter_native_test_allocations(InterpreterNativeTestTally* tall
     interpreter_native_test_expect(tally, !ok && untouched.low == 123 && untouched.high == 456, "full registry rejects allocation before invoking host");
 }
 
+static void interpreter_native_test_copy_definedness(InterpreterNativeTestTally* tally)
+{
+    uint8_t source[8] = {
+        11,
+        22,
+        33,
+        44,
+        55,
+        66,
+        77,
+        88,
+    };
+    uint8_t source_defined[8] = {
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+    };
+    uint8_t destination[8] = {
+        0
+    };
+    uint8_t destination_defined[8];
+    memset(destination_defined, 1, sizeof(destination_defined));
+    InterpreterMemory memories[2];
+    InterpreterRuntime runtime = {
+        .memories = memories,
+        .memory_capacity = 2,
+        .check_memory = true,
+        .check_undefined = true,
+    };
+    bool ok = interpreter_memory_add(&runtime, source, sizeof(source), source_defined, true, 0);
+    ok = ok && interpreter_memory_add(&runtime, destination, sizeof(destination), destination_defined, true, 0);
+    const uint16_t types[3] = {
+        IR_PTR,
+        IR_PTR,
+        IR_I64,
+    };
+    InterpreterValue arguments[3] = {
+        { .low = (uint64_t)(uintptr_t)destination },
+        { .low = (uint64_t)(uintptr_t)source },
+        { .low = sizeof(source) },
+    };
+    InterpreterValue result = {
+        0
+    };
+    ok = ok && interpreter_native_test_call((void*)memcpy, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, ok && memcmp(destination, source, sizeof(source)) == 0 && memcmp(destination_defined, source_defined, sizeof(source_defined)) == 0, "memcpy transports mixed byte definedness without consuming values");
+    interpreter_native_test_expect(tally, interpreter_memory_access(&runtime, (uint64_t)(uintptr_t)destination, 1, false) == INTERPRETER_OK && interpreter_memory_access(&runtime, (uint64_t)(uintptr_t)destination, 8, false) == INTERPRETER_UNDEFINED, "later value reads diagnose copied undefined bytes");
+    uint8_t expected[8];
+    uint8_t expected_defined[8];
+    memcpy(expected, source, sizeof(source));
+    memcpy(expected_defined, source_defined, sizeof(source_defined));
+    memmove(expected + 2, expected, 6);
+    memmove(expected_defined + 2, expected_defined, 6);
+    arguments[0].low = (uint64_t)(uintptr_t)(source + 2);
+    arguments[1].low = (uint64_t)(uintptr_t)source;
+    arguments[2].low = 6;
+    ok = interpreter_native_test_call((void*)memmove, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, ok && memcmp(source, expected, sizeof(source)) == 0 && memcmp(source_defined, expected_defined, sizeof(source_defined)) == 0, "forward overlapping memmove preserves original source definedness");
+    memmove(expected, expected + 1, 7);
+    memmove(expected_defined, expected_defined + 1, 7);
+    arguments[0].low = (uint64_t)(uintptr_t)source;
+    arguments[1].low = (uint64_t)(uintptr_t)(source + 1);
+    arguments[2].low = 7;
+    ok = interpreter_native_test_call((void*)memmove, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, ok && memcmp(source, expected, sizeof(source)) == 0 && memcmp(source_defined, expected_defined, sizeof(source_defined)) == 0 && interpreter_memory_access(&runtime, (uint64_t)(uintptr_t)source, 1, false) == INTERPRETER_UNDEFINED, "backward overlapping memmove retains undefined value diagnostics");
+    uint8_t before_destination[8];
+    uint8_t before_defined[8];
+    memcpy(before_destination, destination, sizeof(destination));
+    memcpy(before_defined, destination_defined, sizeof(destination_defined));
+    runtime.check_memory = false;
+    runtime.memories[1].writable = false;
+    arguments[0].low = (uint64_t)(uintptr_t)destination;
+    arguments[1].low = (uint64_t)(uintptr_t)source;
+    arguments[2].low = sizeof(source);
+    ok = interpreter_native_test_call((void*)memcpy, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, !ok && memcmp(destination, before_destination, sizeof(destination)) == 0 && memcmp(destination_defined, before_defined, sizeof(destination_defined)) == 0 && memcmp(source_defined, expected_defined, sizeof(source_defined)) == 0, "unchecked native copies still reject known readonly destinations without map mutation");
+    runtime.memories[1].writable = true;
+    arguments[1].low = (uint64_t)(uintptr_t)(source + 7);
+    arguments[2].low = 2;
+    ok = interpreter_native_test_call((void*)memcpy, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, !ok && memcmp(destination_defined, before_defined, sizeof(destination_defined)) == 0 && memcmp(source_defined, expected_defined, sizeof(source_defined)) == 0, "unchecked native copies still reject known source bounds violations");
+    arguments[0].low = (uint64_t)(uintptr_t)(destination + 7);
+    arguments[1].low = (uint64_t)(uintptr_t)source;
+    ok = interpreter_native_test_call((void*)memcpy, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, !ok && memcmp(destination_defined, before_defined, sizeof(destination_defined)) == 0 && memcmp(source_defined, expected_defined, sizeof(source_defined)) == 0, "unchecked native copies still reject known destination bounds violations");
+    runtime.check_memory = true;
+    arguments[0].low = 0;
+    arguments[1].low = 0;
+    arguments[2].low = 0;
+    ok = interpreter_native_test_call((void*)memmove, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, ok && result.low == 0 && memcmp(destination_defined, before_defined, sizeof(destination_defined)) == 0, "zero byte native copy accepts null pointers and leaves metadata unchanged");
+    runtime.memories[0].defined = 0;
+    arguments[0].low = (uint64_t)(uintptr_t)destination;
+    arguments[1].low = (uint64_t)(uintptr_t)source;
+    arguments[2].low = sizeof(source);
+    ok = interpreter_native_test_call((void*)memcpy, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    bool all_defined = true;
+    for (uint32_t i = 0; i < sizeof(destination_defined); i += 1)
+    {
+        all_defined = all_defined && destination_defined[i] == 1;
+    }
+    interpreter_native_test_expect(tally, ok && all_defined, "copy from memory without a byte map marks destination bytes defined");
+    runtime.memories[0].defined = source_defined;
+    runtime.memories[1].defined = 0;
+    memcpy(before_defined, destination_defined, sizeof(destination_defined));
+    ok = interpreter_native_test_call((void*)memcpy, BUSTER_INTERPRETER_NATIVE_COPY, types, arguments, 3, 3, IR_PTR, &runtime, &result);
+    interpreter_native_test_expect(tally, ok && memcmp(destination_defined, before_defined, sizeof(destination_defined)) == 0, "copy into memory without a byte map preserves unrelated metadata");
+}
+
 static void interpreter_native_test_rejections(InterpreterNativeTestTally* tally)
 {
     const InterpreterNativeBinding binding = {
@@ -555,6 +669,7 @@ static __attribute__((unused)) int run_interpreter_native_tests(int argc, char**
     interpreter_native_test_wide(&tally);
     interpreter_native_test_varargs(&tally);
     interpreter_native_test_allocations(&tally);
+    interpreter_native_test_copy_definedness(&tally);
     interpreter_native_test_rejections(&tally);
     printf("interpreter-native: %" PRIu64 " checks, %" PRIu64 " failures\n", tally.checks, tally.failures);
     return tally.failures != 0;
