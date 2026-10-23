@@ -326,6 +326,23 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "union U { unsigned x,\n :3; };\n", "", 0 },
     { "typedef unsigned T; struct S { T :2,\n :3,x:1; };\n", "", 0 },
     { "struct S { unsigned :1,\n :1 ? 2 : 3,x:4; };\n", "", 0 },
+    // GNU's reserved spellings remain keywords in strict C; plain asm and (before C23) typeof do not.
+    { "__extension__ typedef __signed__ __int128 Wide;\n__inline __const int *aliases(__const__ int *__restrict p, __volatile__ int *__restrict__ q) { return p; }\n__inline__ int widths(void) { return __alignof__(Wide) + __alignof(__signed int); }\n", "", "c17" },
+    { "int asm, typeof; int f(void) { asm = typeof + 1; return asm; }\n", "", "c17" },
+    { "int x; __typeof(x) y; __typeof__(const int) z; __typeof__(int (*)(int)) fp;\nint f(void) { __typeof__(&x) p = &x; __typeof__(*p) value = *p; return value; }\n", "", "c17" },
+    { "int a[3]; typeof(a) b; typeof(int (*)(int)) f;\nint g(int x) { typeof((x + 1)) y = x; return y; }\n", "", 0 },
+    { "const int x = 1; typeof(x) y = 2; typeof_unqual(x) z;\nint f(void) { typeof(int) n = 3; return n + y; }\n", "", "c23" },
+    // A typeof operand follows the visible binding; nested statement expressions and __extension__ keep their scope.
+    { "typedef int T; int f(void) { int T = 3; __typeof__(T) x = T; { typedef char T; __typeof__(T) y = 1; x += y; } return x; }\n", "", 0 },
+    { "int f(int x) { __auto_type y = ({ __auto_type z = x + 1; z; }); return ({ __typeof__(y) z = y; z + 1; }); }\n", "", 0 },
+    { "__extension__ typedef __int128 Wide;\nint f(int x) { __extension__ Wide y = x; return __extension__ ({ int z = (int)y; __extension__ (z ?: 1); }); }\n", "", "c17" },
+    { "const char *f(void) { const char *names[] = { __func__, __FUNCTION__, __PRETTY_FUNCTION__ }; return names[0]; }\n", "", "c17" },
+    { "struct S { int empty[0]; int value; }; int a[4] = { [0 ... 3] = 2 };\nint f(int x) { switch (x) { case -2 ... 2: return a[x + 2]; default: return x ?: 4; } }\n", "", 0 },
+    { "__typeof__ int x;\n", "1:12: expected '(' after '__typeof__'", 0 },
+    { "__typeof__() x;\n", "1:12: expected expression", 0 },
+    { "__typeof__(int, char) x;\n", "1:15: expected ')'", 0 },
+    { "__typeof__(int x;\n", "1:16: expected ')'", 0 },
+    { "__typeof__(({ int x = 1; x; })) y;\n", "1:12: statement expression not allowed at file scope", 0 },
     // Invalid code, with clang 23's first error.
     { "struct S { unsigned :1,\n :; };\n", "2:3: expected expression", 0 },
     { "int x,\n:1;\n", "1:6: expected ';' at end of declaration", 0 },
@@ -595,6 +612,29 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "#define C :\n[[gnu:C unused]] int x;\n", "2:6: expected ','", "c23" },
     { "#define C ::\n[[gnu C unused]] int x;\n", "", "c23" },
     { "#define C :\n[[gnu C: unused]] int x;\n", "2:6: expected ','", "c23" },
+    // GNU label attributes need no empty statement before the next statement, declaration, block or closing brace.
+    { "void f(void) { L: __attribute__((unused)) return; }\n", "", 0 },
+    { "void f(void) { L: __attribute__((unused)) f(); }\n", "", 0 },
+    { "void f(void) { L: __attribute__((cold)) __attribute__((unused)) { return; } }\n", "", 0 },
+    { "void f(void) { L: __attribute__((unused)) }\n", "", 0 },
+    { "void f(void) { L: __attribute__((unused)) int x; }\n", "", 0 },
+    // Statement attributes have the same continuation at a block-item boundary and after a control head.
+    { "void f(void) { __attribute__((noinline)) f(); }\n", "", 0 },
+    { "void f(void) { __attribute__((always_inline)) f(); }\n", "", 0 },
+    { "void f(void) { __attribute__((__noinline__)) f(); }\n", "", 0 },
+    { "void f(void) { if (1) __attribute__((noinline)) f(); }\n", "", 0 },
+    { "void f(void) { if (1) __attribute__((noinline)) { f(); } }\n", "", 0 },
+    { "void f(void) { if (1) __attribute__((unused)) int x; }\n", "1:47: expected expression", 0 },
+    { "void f(void) { if (1) __attribute__((noinline)) }\n", "1:49: expected statement", 0 },
+    { "void f(void) { __attribute__((noinline)) }\n", "1:42: expected statement", 0 },
+    { "void f(int x) { switch (x) { case 0: __attribute__((always_inline)) } }\n", "1:69: expected statement", 0 },
+    { "void f(int x) { switch (x) { default: __attribute__((__noinline__)) } }\n", "1:69: expected statement", 0 },
+    { "void f(void) { __attribute__((__always_inline__, noinline)) }\n", "1:61: expected statement", 0 },
+    { "void f(void) { __attribute__((unknown)) x; }\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "void f(void) { __attribute__((unused)) __extension__ int x; }\n", "1:40: expected identifier or '('", 0 },
+    { "void f(void) { L: __attribute__((unused)) __extension__ int x; }\n", "1:57: expected expression", 0 },
+    // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.
+    { "void f(void) { __attribute__((unused)); }\n", "", 0, true },
 };
 
 // Writes `text` to `path`. Returns false if it can't.
@@ -2531,6 +2571,8 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_LARGE, 0, 0, 1, "fatal error: can't read '%s': File too large\n", false },
     { PARSE_TEST_DRIVER_NOTHING, 0, 0, 1, "usage: compiler [-fsyntax-only] ", true },
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--bogus", 1, "unknown argument: --bogus\nusage: compiler [-fsyntax-only] ", true },
+    { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-gnu-keywords", 0, "", false },
+    { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
 };
 
 // Whether a run of case `c` did what it must.

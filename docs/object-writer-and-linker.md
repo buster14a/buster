@@ -1440,9 +1440,13 @@ These are four `PT_LOAD`s, as lld writes for hello world, with `PT_PHDR`,
 `PT_INTERP`, `PT_DYNAMIC`, `PT_GNU_RELRO`, `PT_GNU_EH_FRAME`, `PT_GNU_STACK`
 (not executable), `PT_NOTE` and `PT_TLS` when there is TLS.
 
-File offsets are contiguous. Each segment's address continues at the next page
-plus its offset within a page, so there is no file padding, and segments stay
-4 KB-congruent.
+Each loaded segment's file offset equals its virtual address relative to the
+image base. Its address continues at the next page plus its offset within a
+page, preserving 4 KB congruence. The current four-segment layout adds at most
+12 KiB of zero-filled file gaps, which the writer includes in the build ID.
+This keeps the mapping base used by perf/libdw consistent across segments;
+compact file offsets previously made native DWARF unwinding fail with
+overlapping modules. See [the debug consumer checks](debug.md#checks).
 
 The TLS segment then needn't start on a multiple of its alignment: `.tdata`
 starts at its own alignment, which can be less than `.tbss`'s. The TLS block

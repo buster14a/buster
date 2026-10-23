@@ -292,6 +292,15 @@ static const ParseBindingFixture parse_binding_fixtures[] =
         .check_kinds = true,
     },
     {
+        // The GNU17 trace must retain the spelling table that distinguishes statement attributes from declarations.
+        .source = "void target(void); void f(void) { __attribute__((noinline)) target(); __attribute__((__always_inline__)) target(); }\n",
+        .name = "target",
+        .count = 3,
+        .declarations = { 1, 1, 1 },
+        .kinds = { C_BINDING_FUNCTION, C_BINDING_FUNCTION, C_BINDING_FUNCTION },
+        .check_kinds = true,
+    },
+    {
         .source = "void f(int callback(void)) { callback(); }\n",
         .name = "callback",
         .count = 2,

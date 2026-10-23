@@ -1,0 +1,27 @@
+command /home/david/buster-fast-bench/codex-header111/measure-run env PROBE_PASSES=8 PROBE_CONDITION_MS=0 PROBE_FILES_MANIFEST=/home/david/buster-fast-bench/codex-header111/logs/lua-experiment-parse0-after0-round1.files taskset -c 2 /home/david/buster-fast-bench/codex-header111/experiment benchmark -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX -- lapi.c lauxlib.c lbaselib.c lcode.c lcorolib.c lctype.c ldblib.c ldebug.c ldo.c ldump.c lfunc.c lgc.c linit.c liolib.c llex.c lmathlib.c lmem.c loadlib.c lobject.c lopcodes.c loslib.c lparser.c lstate.c lstring.c lstrlib.c ltable.c ltablib.c ltm.c lua.c luac.c lundump.c lutf8lib.c lvm.c lzio.c 
+pass 0 units 34 total_ns 29948202 prelude_ticks 4248324 main_ticks 85392449 header_ticks 65607608 headers 316 output 588066 main_ns 22515268 parse_ns 0 parse_failures 0
+replay 0 transcripts 0 hits 0 misses 0 checks 0 reads 0 writes 0 rejected 0 bytes 0
+rejections location 0 generated 0 variants 0 diagnostics 0
+pass 1 units 34 total_ns 31858867 prelude_ticks 4079148 main_ticks 92639275 header_ticks 48321066 headers 191 output 588066 main_ns 24425636 parse_ns 0 parse_failures 0
+replay 1 transcripts 165 hits 1520 misses 569 checks 43336 reads 11368 writes 6460 rejected 404 bytes 4428298
+rejections location 0 generated 21 variants 0 diagnostics 0
+pass 2 units 34 total_ns 27362205 prelude_ticks 4012876 main_ticks 73119360 header_ticks 57047044 headers 316 output 588066 main_ns 19279179 parse_ns 0 parse_failures 0
+replay 0 transcripts 0 hits 0 misses 0 checks 0 reads 0 writes 0 rejected 0 bytes 0
+rejections location 0 generated 0 variants 0 diagnostics 0
+pass 3 units 34 total_ns 31439820 prelude_ticks 4015384 main_ticks 89100222 header_ticks 45758612 headers 191 output 588066 main_ns 23492668 parse_ns 0 parse_failures 0
+replay 1 transcripts 165 hits 1520 misses 569 checks 43336 reads 11368 writes 6460 rejected 404 bytes 4428298
+rejections location 0 generated 21 variants 0 diagnostics 0
+pass 4 units 34 total_ns 26819212 prelude_ticks 3977080 main_ticks 73083833 header_ticks 57006156 headers 316 output 588066 main_ns 19269893 parse_ns 0 parse_failures 0
+replay 0 transcripts 0 hits 0 misses 0 checks 0 reads 0 writes 0 rejected 0 bytes 0
+rejections location 0 generated 0 variants 0 diagnostics 0
+pass 5 units 34 total_ns 30778583 prelude_ticks 3995320 main_ticks 88919269 header_ticks 46607456 headers 191 output 588066 main_ns 23444910 parse_ns 0 parse_failures 0
+replay 1 transcripts 165 hits 1520 misses 569 checks 43336 reads 11368 writes 6460 rejected 404 bytes 4428298
+rejections location 0 generated 21 variants 0 diagnostics 0
+pass 6 units 34 total_ns 26968642 prelude_ticks 3932354 main_ticks 75136178 header_ticks 58994810 headers 316 output 588066 main_ns 19811147 parse_ns 0 parse_failures 0
+replay 0 transcripts 0 hits 0 misses 0 checks 0 reads 0 writes 0 rejected 0 bytes 0
+rejections location 0 generated 0 variants 0 diagnostics 0
+pass 7 units 34 total_ns 31345623 prelude_ticks 4752812 main_ticks 90232319 header_ticks 45987828 headers 191 output 588066 main_ns 23791008 parse_ns 0 parse_failures 0
+replay 1 transcripts 165 hits 1520 misses 569 checks 43336 reads 11368 writes 6460 rejected 404 bytes 4428298
+rejections location 0 generated 21 variants 0 diagnostics 0
+builtin 14 count 1904
+process elapsed_ns=251738688 user_us=160510 system_us=85058 maxrss_kb=46348 minor_faults=43769 major_faults=0 result=0

@@ -2441,6 +2441,7 @@ static void check_test_target_options(CheckTest* test)
 #include "c_check_varargs_graph_test.c"
 #include "c_check_special_graph_test.c"
 #include "c_check_binding_test.c"
+#include "c_check_body_bindings_test.c"
 #include "c_check_environment_test.c"
 #include "c_check_source_test.c"
 #include "c_check_constant_test.c"
@@ -2532,6 +2533,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_varargs_graph(&test, &types.table);
             check_test_special_graph(&test, &types.table, clang);
             check_test_environments(&test);
+            check_test_body_binding_guards(&test);
+            check_test_body_binding_exit_points(&test);
             check_test_data(&test, &types.table, clang);
             check_test_actions_extra(&test, &types.table, clang);
             check_test_complex(&test, &types.table, clang);

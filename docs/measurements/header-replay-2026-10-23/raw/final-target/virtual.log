@@ -1,0 +1,4 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T13:58:36+00:00 codex-126-lowering: taskset -c 2 ./build/compiler benchmark-lowering --only vector --before-vector 100
+  title: PR325 lowering vector-warm process 3
+  link: https://github.com/buster14a/buster/pull/325
+virtual source identities: ok=1 cases=12 hits=0

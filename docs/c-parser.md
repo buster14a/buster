@@ -9,6 +9,10 @@ didn't have, which lets the vector path take only code the scalar parser would
 accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
+The test-only [expression-fragment experiment](c-parser-fragments.md) records
+the alternative representation's contracts and the semantic-consumer work
+required before the complete comparison in #107 can select a representation.
+
 On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.54 ms,
 27.6 cycles a token, 2.37 times as fast as the scalar parser (65.4), and the
 libc corpus at 21.5 cycles a token, 2.37 times as fast (50.6); with the
@@ -44,6 +48,11 @@ The output, in `Parser`:
   diagnostic says it (out of memory, or past the parser's token limit).
 - **Statistics**: the share of top-level declarations and tokens the vector
   path left to the scalar parser.
+- **Optional GNU metadata**: `ParseOptions.extension_metadata` fills `Parser.gnu`
+  with source-ordered attribute groups, each group's contiguous names/argument
+  ranges, and declarator asm labels. This works with `tree_only` too; ordinary
+  syntax-only parsing leaves it off. [The GNU extension guide](c-gnu-extensions.md)
+  defines the ownership, batching, failure and semantic integration boundaries.
 
 What the tree guarantees, which the later passes may rely on:
 
@@ -149,6 +158,14 @@ declarator only string literals. A C23 attribute list's items are a name,
 perhaps in a scope (`gnu::unused`) and with an argument clause, a balanced run
 of tokens, separated by commas; its items and a GNU attribute list's may be
 empty, the last one too.
+
+GNU attributes at a block boundary now retain the choice between declaration
+and statement syntax until their following token is known. Attributes after a
+named label or a control head permit the following statement; at an ordinary
+block boundary, Clang's recognized statement-attribute names decide the
+declaration/expression ambiguity. The scalar state machine handles these
+prefixes, and the vector validator defers them to it. Applicability and effects
+remain the checker's responsibility.
 
 Each frame keeps the index of the frame its declarators' names belong to and
 what a comma at its top level is, so that no token costs more for what is open

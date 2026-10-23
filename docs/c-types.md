@@ -97,6 +97,22 @@ bits rounded up to a power of two, and its size that too, and the table refuses
 vectors wider than 2^31 bits, where clang's 32-bit alignment arithmetic
 overflows.
 
+### GNU machine modes
+
+`type_machine_mode(table, base, mode)` implements the target type action for
+`__attribute__((mode(...)))`. It accepts bounded plain or paired-underscore
+spellings, selects the supported scalar/complex target types and uses the
+existing vector constructor for vector modes. It replaces the declaration's
+type, stripping existing qualifiers and aligned typedef wrappers as Clang does;
+later declaration qualifiers remain the checker's responsibility. Enum typedef
+transformation leaves the original tag unchanged.
+
+Unknown modes, incompatible bases, unsupported representations and oversized
+vectors have explicit `TypeError` results. `test-types` checks types, canonical
+spellings and surrounding record layouts against Clang, plus guarded names,
+rejected cases and capacity failure. [The GNU extension guide](c-gnu-extensions.md)
+records the supported modes and the still-missing source integration.
+
 ## Hash-consing
 
 A derived type's key is its kind, its key flags (variadic, prototype,

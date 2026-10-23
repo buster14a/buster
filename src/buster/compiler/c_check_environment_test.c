@@ -18,6 +18,7 @@ struct CheckEnvironmentFixture
     bool graph_rejected;
     bool history_types;
     bool completion;
+    bool body_fallback;
 };
 
 static void check_test_environment_queries(CheckTest* test, const CheckEnvironmentFixture* fixture, const Parser* parser,
@@ -326,6 +327,7 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
                                            parsers[path].tokens.names[streams[path].reports[0].token] == C_NAME_SIZEOF,
                                       "source-time incomplete sizeof lost its exact typed diagnostic after scratch reuse");
                 }
+                check_test_body_bindings(test, &inputs[path], &parsers[path], fixture->body_fallback);
                 check_test_environment_replay(test, &inputs[path], &scratch[path]);
                 if (fixture->name[0] != 0)
                 {
@@ -460,6 +462,28 @@ static void check_test_environments(CheckTest* test)
             .history_types = true,
         },
         {
+            .source = "int f(int f) { return f; } int g(int x) { int y=x; { int x=y+1; y=x; } return y; }\n",
+            .name = "f",
+            .declarations =
+            {
+                0,
+                0,
+                0,
+            },
+            .body_count = 2,
+        },
+        {
+            .source = "int target(); int f(void) { { int target(int); target(1); } return target(); } int target(int); int g(void) { return target(1); }\n",
+            .name = "target",
+            .declarations =
+            {
+                0,
+                4,
+                4,
+            },
+            .body_count = 2,
+        },
+        {
             .source = "struct S; int before(void) { struct S { long y; }; return 0; } struct S { int x; }; int after(void) { return 0; }\n",
             .name = "S",
             .space = C_BINDING_TAG,
@@ -515,6 +539,39 @@ static void check_test_environments(CheckTest* test)
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
     {
         check_test_environment_source(test, fixtures + fixture, fixture == 0);
+    }
+    char source[8192];
+    int written = snprintf(source, sizeof(source), "int seed; int f(int x) {");
+    bool generated = written > 0 && (uint32_t)written < sizeof(source);
+    uint32_t length = generated ? (uint32_t)written : 0;
+    for (uint32_t scope = 0; generated && scope < 32; scope += 1)
+    {
+        written = snprintf(source + length, sizeof(source) - length, "{ int x=%u; x=x+1; }", scope);
+        generated = written > 0 && (uint32_t)written < sizeof(source) - length;
+        length += generated ? (uint32_t)written : 0;
+    }
+    if (generated)
+    {
+        written = snprintf(source + length, sizeof(source) - length, "return x+seed; } int g(void) { return seed; }\n");
+        generated = written > 0 && (uint32_t)written < sizeof(source) - length;
+    }
+    check_test_expect(test, generated, "body fallback source generation");
+    if (generated)
+    {
+        const CheckEnvironmentFixture fixture =
+        {
+            .source = source,
+            .name = "seed",
+            .declarations =
+            {
+                0,
+                0,
+                0,
+            },
+            .body_count = 2,
+            .body_fallback = true,
+        };
+        check_test_environment_source(test, &fixture, false);
     }
     check_test_environment_counts(test);
 }
