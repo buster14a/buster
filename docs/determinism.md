@@ -167,3 +167,50 @@ independent dependencies each add their own integration check:
 The others' integration checks belong in each stage's test command as it lands.
 Passing the current tests is not proof of those future pipelines, and #153
 must retain that distinction when its overall completion is assessed.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Shared side consumers include
+[diagnostics](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/diagnostic.c#L1),
+[per-file publication](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_files.c#L4)
+and [ordered output tests](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/link_order_test.c#L1).
+They are actual constraints on every attempted regrouping, not a final sort
+that can repair arbitrary semantic reordering.
+
+Per-file preparation publishes global intern IDs in file/first-occurrence
+order after count/place/fill and remap. PP history preserves distinct expanded
+occurrences even when spellings/locations are reused. Parser source indices and
+checker report sorting preserve diagnostic order through grouping. Native output
+preserves source/input identity, symbol/atom order and required init/fini order
+while lanes complete at different times. File-cache and output tests vary
+1/2/3/8 lanes and delayed completion; a new handoff must carry its identity and
+ownership metadata through any permutation.
+
+The diagnostic module's actual edges are rendered groups → `diagnostic_append`
+→ lane buffers → `diagnostic_merge` → `diagnostic_write`. Append copies the
+primary and notes together into a lane-owned text arena. Records retain two
+u64 keys packing four u32 fields (unit, source location, job, sequence), a text
+slice and severity; counts/capacities are explicit. The caller joins all jobs
+before merge sorts bounded order records using separate scratch: insertion sort through 256
+records, otherwise 16-key radix work with initialized local tails. It retains
+the prefix through the first fatal group. Any append/merge failure rejects the
+whole result before printing. A source job has exactly one writer.
+
+PP/cache/spelling storage must survive rendering; after append copies rendered
+text, that diagnostic no longer borrows those tables. Lane text, merged records
+and their order array survive through `diagnostic_write`. Code/data bytes
+remain alive through patch/hash/write. Borrowed data
+cannot be reclaimed merely because its producing lane returned. Publication
+requires all participating lanes to agree on success. Per-lane scratch and
+output ranges are disjoint; barrier state is not permission for two lanes to
+mutate the same append-only table. Count/overflow/failure handling stays part of
+the producing stage's contract.
+
+Disposition: retain explicit identity and publication rules. `test-diagnostics`
+checks this standalone buffer/merge API; it is not a connected multi-unit source
+driver at the pin. No new global sorting/batching layer is proposed. [#151](https://github.com/buster14a/buster/issues/151)/[#152](https://github.com/buster14a/buster/issues/152)/[#153](https://github.com/buster14a/buster/issues/153) retain the complete
+per-function/multi-unit source driver, ordered diagnostics and final binary
+comparison. Existing generated-link/per-file schedule tests establish their
+own paths only; they do not measure absent source compilation, nor justify
+charging synchronization or output reordering outside a future benchmark.

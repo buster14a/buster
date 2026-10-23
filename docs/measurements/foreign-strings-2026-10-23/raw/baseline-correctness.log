@@ -1,0 +1,43 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:36:22+00:00 CI job of buster14a/buster (run 39970399295, worker 3228948)
+  title: 9700X test / test: Merge PR #343: resolve body names independently
+  link: https://github.com/buster14a/buster/actions/runs/39970399295/attempts/1
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:42:58+00:00 CI job of buster14a/buster (run 39971923665, worker 3287470)
+  title: 9700X test / test: #328: Add transactional pooling for eligible foreign string sections
+  link: https://github.com/buster14a/buster/actions/runs/39971923665/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/328
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:46:05+00:00 CI job of buster14a/buster (run 39972060857, worker 3324573)
+  title: 9700X test / test: Merge PR #345: derive optional native fixed-frame CFI
+  link: https://github.com/buster14a/buster/actions/runs/39972060857/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:52:41+00:00 CI job of buster14a/buster (run 39972395991, worker 3382627)
+  title: 9700X test / test: #347: Add checking for Clang builtin descriptors and target features
+  link: https://github.com/buster14a/buster/actions/runs/39972395991/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/347
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:55:33+00:00 codex-116: /home/david/buster-fast-bench/codex-116/fifth-prefix28tight --only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c
+  title: Issue 116 fifth screen
+  link: https://github.com/buster14a/buster/pull/334
+  programs: the defaults, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: many units, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: without absolute addresses, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: --functions workers, without sizes, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: calling libc, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: calling libc, many units, without sizes, an archive before the first unit: GNU ld differs, as documented (1 differences)
+programs: 35876 checks, 0 failures
+  compiled: GNU ld's common rule: lld differs, as documented (3 differences)
+  compiled: back references: GNU ld differs, as documented (1 differences)
+  compiled: shared: archive, object, library: GNU ld differs, as documented (3 differences)
+  compiled: COMDAT groups, members loaded later first: GNU ld differs, as documented (4 differences)
+  compiled: COMDAT groups, members loaded later first: lld differs, as documented (4 differences)
+  compiled: an as-needed library nothing needs: lld differs, as documented (1 differences)
+  compiled: a thin archive of another archive's member: lld differs, as documented (1 differences)
+compiled: 752 checks, 0 failures
+malformed: 126 checks, 0 failures
+page edges: 2726 prefixes, 4608 changed bytes
+page edges: 7335 checks, 0 failures
+extended sections: 23 checks, 0 failures
+foreign generated output: 54 checks, 0 failures
+foreign executable handoff: 1444 checks, 0 failures
+foreign dynamic output: 548 checks, 0 failures
+string merging: 4283 checks, 0 failed (independent model, every-byte maps, collision groups, alignment, read-only guards and rollback)
+foreign string executable handoff: 553 checks, 0 failures
+test-foreign: kept /tmp/buster-foreign-ATQSXf

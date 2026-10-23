@@ -1,0 +1,201 @@
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -66,0 +67 @@
++#define BUSTER_REFINE_PREFETCH_BATCHES 2
+@@ -446,18 +447 @@
+-        // The next block's step in the token columns, and BUSTER_REFINE_PREFETCH_SOURCE bytes of the source past what the
+-        // scan has read: fetched from memory while this block's pass B runs, so that the next block finds them in the
+-        // caches (the columns were written a whole file before, and the lexer's pass over the source evicted them).
+-        const uint64_t ahead = step + BUSTER_REFINE_BLOCK_TOKENS;
+-        if (ahead < count)
+-        {
+-            _mm_prefetch((const char*)(kinds + ahead), _MM_HINT_T0);
+-            for (uint32_t line = 0; line < BUSTER_REFINE_STEP_TOKENS * sizeof(uint32_t); line += 64)
+-            {
+-                _mm_prefetch((const char*)starts + ahead * sizeof(uint32_t) + line, _MM_HINT_T0);
+-                _mm_prefetch((const char*)ends + ahead * sizeof(uint32_t) + line, _MM_HINT_T0);
+-            }
+-        }
+-        const uint64_t source_ahead = scanned_bytes + (step - begin) / BUSTER_REFINE_STEP_TOKENS * BUSTER_REFINE_PREFETCH_SOURCE;
+-        for (uint64_t line = 0; line < BUSTER_REFINE_PREFETCH_SOURCE && source_ahead + line < length; line += 64)
+-        {
+-            _mm_prefetch((const char*)(source + source_ahead + line), _MM_HINT_T0);
+-        }
++        // The source window's columns were just produced by the lexer. Leave the first-level cache to the table.
+@@ -505 +489 @@
+-BUSTER_INLINE __m128i refine_key(__m128i first)
++BUSTER_INLINE __m256i refine_key(__m256i first)
+@@ -507 +491 @@
+-    return _mm_or_si128(first, _mm_setr_epi32(0, 0, 0, -1));
++    return _mm256_or_si256(first, _mm256_setr_epi32(0, 0, 0, 0, 0, 0, 0, -1));
+@@ -512,10 +496,10 @@
+-// intern_bucket_matches', from a compare without its mask. No branch depends on the outcome: without a match, the id
+-// read (the first slot's first dword, tzcnt's 32 masked to 0) is discarded.
+-BUSTER_INLINE IdentId refine_probe(const uint8_t* bucket, __m128i key)
+-{
+-    const uint32_t matches = (_mm512_cmpeq_epi32_mask(_mm512_load_si512(bucket), intern_bucket_key(key)) + 0x1111) & 0x8888;
+-    IdentId id = intern_slot_id(bucket, _tzcnt_u32(matches) & 15);
+-    // A select after the load, not a branch around it, which Clang makes of a plain `?:` (with the matches' zero as the
+-    // result): a branch on the outcome would mispredict for every new spelling.
+-    __asm__("" : "+r"(id));
+-    return id & (uint32_t)-(int32_t)(matches != 0);
++// intern_bucket_matches', from a compare without its mask. Compress the matching id dwords from the already loaded
++// bucket: the lowest lane is the first match's id, or zero when no prefix matches. This needs no dependent scalar
++// load, outcome branch or sentinel read on a miss.
++BUSTER_INLINE IdentId refine_probe(const uint8_t* bucket, __m256i key)
++{
++    const __m512i slots = _mm512_load_si512(bucket);
++    const __mmask16 equal = _mm512_cmpeq_epi32_mask(slots, intern_bucket_key(key));
++    const __mmask16 matches = _kand_mask16(_kadd_mask16(equal, 0x0101), 0x8080);
++    const __m512i ids = _mm512_maskz_compress_epi32(matches, slots);
++    return (IdentId)_mm_cvtsi128_si32(_mm512_castsi512_si128(ids));
+@@ -553 +536,0 @@
+-    const uint64_t offset_mask = bucket_mask * BUSTER_INTERN_BUCKET_BYTES;
+@@ -574 +557 @@
+-        const uint64_t offset = (intern_hash_vector(bytes, identifier_length) * BUSTER_INTERN_BUCKET_BYTES) & offset_mask;
++        const uint64_t offset = intern_bucket_for_hash(intern_hash_vector(bytes, identifier_length), bucket_mask) * BUSTER_INTERN_BUCKET_BYTES;
+@@ -576 +559 @@
+-        ids[j] = refine_probe(buckets + offset, refine_key(_mm512_castsi512_si128(bytes)));
++        ids[j] = refine_probe(buckets + offset, refine_key(_mm512_castsi512_si256(bytes)));
+@@ -642 +625 @@
+-    __m128i keys[64] __attribute__((aligned(64)));
++    __m256i keys[64] __attribute__((aligned(64)));
+@@ -656 +638,0 @@
+-    const uint64_t offset_mask = table->bucket_mask * BUSTER_INTERN_BUCKET_BYTES;
+@@ -658 +640 @@
+-    __m128i* const keys = hashes->keys;
++    __m256i* const keys = hashes->keys;
+@@ -684,2 +666,5 @@
+-        _mm512_store_si512(keys + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
+-        const __m512i group_offsets = _mm512_and_si512(_mm512_slli_epi64(group_hashes, 6), _mm512_set1_epi64((long long)offset_mask));
++        const __m512i id_words = _mm512_setr_epi32(0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, -1);
++        _mm512_store_si512(keys + j, _mm512_or_si512(ab, id_words));
++        _mm512_store_si512(keys + j + 2, _mm512_or_si512(cd, id_words));
++        const __m512i group_buckets = _mm512_srli_epi64(_mm512_mul_epu32(group_hashes, _mm512_set1_epi64((long long)(table->bucket_mask + 1))), 32);
++        const __m512i group_offsets = _mm512_slli_epi64(group_buckets, 6);
+@@ -711 +696 @@
+-        const uint64_t offset = (intern_hash_vector(bytes, lengths[i]) * BUSTER_INTERN_BUCKET_BYTES) & offset_mask;
++        const uint64_t offset = intern_bucket_for_hash(intern_hash_vector(bytes, lengths[i]), table->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES;
+@@ -724 +709 @@
+-        const uint64_t offset = (intern_hash_vector(bytes, identifier_length) * BUSTER_INTERN_BUCKET_BYTES) & offset_mask;
++        const uint64_t offset = intern_bucket_for_hash(intern_hash_vector(bytes, identifier_length), table->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES;
+@@ -726 +711 @@
+-        keys[j] = refine_key(_mm512_castsi512_si128(bytes));
++        keys[j] = refine_key(_mm512_castsi512_si256(bytes));
+@@ -755 +740 @@
+-    RefineHashes hashes[2];
++    RefineHashes hashes[BUSTER_REFINE_PREFETCH_BATCHES + 1];
+@@ -758 +743 @@
+-    if (total != 0)
++    for (uint32_t primed = 0; primed < BUSTER_REFINE_PREFETCH_BATCHES && primed * batch < total; primed += 1)
+@@ -760 +745,2 @@
+-        refine_hash_batch(table, source, identifiers->starts, identifiers->lengths, total < batch ? total : batch, &hashes[0], trigraphs);
++        const uint32_t at = primed * batch;
++        refine_hash_batch(table, source, identifiers->starts + at, identifiers->lengths + at, total - at < batch ? total - at : batch, &hashes[primed], trigraphs);
+@@ -778 +764 @@
+-        const __m128i* const keys = current->keys;
++        const __m256i* const keys = current->keys;
+@@ -823 +809,2 @@
+-        const uint32_t next = first + count;
++        const uint32_t ahead = BUSTER_REFINE_PREFETCH_BATCHES * batch;
++        const uint32_t next = first + ahead;
+@@ -826 +813,2 @@
+-            refine_hash_batch(table, source, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1], trigraphs);
++            const uint32_t next_slot = parity == 0 ? BUSTER_REFINE_PREFETCH_BATCHES : parity - 1;
++            refine_hash_batch(table, source, starts + ahead, lengths + ahead, total - next < batch ? total - next : batch, &hashes[next_slot], trigraphs);
+@@ -857 +845 @@
+-        parity ^= 1;
++        parity = parity == BUSTER_REFINE_PREFETCH_BATCHES ? 0 : parity + 1;
+@@ -903,4 +891,15 @@
+-// The vectorized path: an instantiation per trigraph setting, batch size and form of pass B. Each block's source bytes
+-// are scanned for backslashes just before its passes.
+-BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
+-                                      uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, const bool trigraphs, const uint32_t batch, const bool fused)
++// State carried across completed blocks. The previous ends survive the in-place values, and scanned source chunks
++// stay available for the first gap of the next block. Calls end on block boundaries except for the file's final call.
++typedef struct RefineProgress RefineProgress;
++struct RefineProgress
++{
++    __m512i previous_ends;
++    uint64_t* backslash_chunks;
++    uint64_t scanned;
++};
++
++// The vectorized path for tokens [begin, end), with `count` available tokens for bounded prefetches. Each block's
++// source bytes are scanned just before its passes. `begin` is a multiple of BUSTER_REFINE_BLOCK_TOKENS.
++BUSTER_INLINE bool refine_range_with(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
++                                     uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, const bool trigraphs, const uint32_t batch, const bool fused,
++                                     uint64_t begin, uint64_t end, RefineProgress* progress)
+@@ -909,4 +908,3 @@
+-    __m512i previous_ends = _mm512_setzero_si512();
+-    Scratch scratch = scratch_begin(0);
+-    uint64_t* backslash_chunks = arena_push_array(scratch.arena, (length + 4095) / 4096 + 1, sizeof(uint64_t), 64);
+-    uint64_t scanned = 0;
++    __m512i previous_ends = progress->previous_ends;
++    uint64_t* backslash_chunks = progress->backslash_chunks;
++    uint64_t scanned = progress->scanned;
+@@ -914 +912 @@
+-    for (uint64_t block = 0; result && block < count; block += BUSTER_REFINE_BLOCK_TOKENS)
++    for (uint64_t block = begin; result && block < end; block += BUSTER_REFINE_BLOCK_TOKENS)
+@@ -916 +914 @@
+-        const uint64_t block_end = count - block < BUSTER_REFINE_BLOCK_TOKENS ? count : block + BUSTER_REFINE_BLOCK_TOKENS;
++        const uint64_t block_end = end - block < BUSTER_REFINE_BLOCK_TOKENS ? end : block + BUSTER_REFINE_BLOCK_TOKENS;
+@@ -953,0 +952,15 @@
++    progress->previous_ends = previous_ends;
++    progress->scanned = scanned;
++    return result;
++}
++
++// A complete file, with the same range kernel that can consume blocks while lexing continues.
++BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
++                                      uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, const bool trigraphs, const uint32_t batch, const bool fused)
++{
++    Scratch scratch = scratch_begin(0);
++    RefineProgress progress = {
++        .previous_ends = _mm512_setzero_si512(),
++        .backslash_chunks = arena_push_array(scratch.arena, (length + 4095) / 4096 + 1, sizeof(uint64_t), 64),
++    };
++    const bool result = refine_range_with(table, source, length, kinds, starts, ends, count, values, space, flags, trigraphs, batch, fused, 0, count, &progress);
+@@ -957,0 +971,8 @@
++static __attribute__((unused)) bool refine_blocks(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
++                                                uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, uint64_t begin, uint64_t end, RefineProgress* progress)
++{
++    const bool trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0;
++    return trigraphs ? refine_range_with(table, source, length, kinds, starts, ends, count, values, space, flags, true, 64, false, begin, end, progress)
++                     : refine_range_with(table, source, length, kinds, starts, ends, count, values, space, flags, false, 64, false, begin, end, progress);
++}
++
+@@ -1016,0 +1038,33 @@
++}
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++// Existing lexer range kernels retain absolute offsets. `begin` starts a logical line; scalar-only modes use the
++// caller's complete-file fallback. Like c_tokenize, a vector decline restarts the preceding line with the scalar lexer.
++static __attribute__((unused)) int64_t refine_lex_prefix(const uint8_t* source, uint64_t end, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
++{
++    if (begin == 0 && end >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF)
++    {
++        begin = 3;
++    }
++    uint64_t count = 0;
++    int64_t result = begin == end ? 0 : -1;
++    while (result < 0)
++    {
++        uint64_t written;
++        uint64_t restart;
++        uint64_t scalar_until;
++        const int64_t vectorized = tokenize_with_flags(flags, source, end, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until);
++        if (vectorized >= 0)
++        {
++            result = (int64_t)count + vectorized;
++        }
++        else
++        {
++            count = c_tokenize_scalar_range(source, end, restart, true, scalar_until, kinds, starts, ends, count + written, flags, &begin);
++            if (begin >= end)
++            {
++                result = (int64_t)count;
++            }
++        }
++    }
++    return result;

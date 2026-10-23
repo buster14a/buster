@@ -1,0 +1,27 @@
+1 workers, bound against the shared library's runtime and written as a shared library: 95 atoms, 119 fixups, 823 bytes of code, 14 dynamic symbols, 16 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 3 stubs, a 7304-byte file in 1 chunks, 1 lane:
+  replace          7.9 us ( 0.92 GB/s): count 1.0 layout 0.8 symbols 0.5 dynamic 0.3 open 1.5 chunks 2.1 finish 1.7
+  new file         7.4 us ( 0.99 GB/s): count 1.0 layout 0.8 symbols 0.5 dynamic 0.3 open 1.6 chunks 2.0 finish 1.1
+  general-dynamic TLS: 1 callable probes and distinct symbols, 1 backing objects, vector path, all results checked
+  in place         0.6 us (11.39 GB/s): the floor, one pwrite
+  new file         1.7 us ( 4.24 GB/s): the floor, one pwrite
+64 workers, bound against the shared library's runtime and written as a shared library: 284 atoms, 1064 fixups, 13858 bytes of code, 172 dynamic symbols, 235 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 43 stubs, a 39928-byte file in 1 chunks, 1 lane:
+  replace         19.3 us ( 2.07 GB/s): count 3.4 layout 1.4 symbols 1.0 dynamic 1.5 open 1.5 chunks 7.9 finish 2.5
+  new file        18.1 us ( 2.21 GB/s): count 3.4 layout 1.4 symbols 1.0 dynamic 1.5 open 1.6 chunks 7.9 finish 1.1
+  general-dynamic TLS: 64 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place         1.3 us (30.67 GB/s): the floor, one pwrite
+  new file         3.1 us (12.69 GB/s): the floor, one pwrite
+2000 workers, bound against the shared library's runtime and written as a shared library: 4176 atoms, 30105 fixups, 416079 bytes of code, 5012 dynamic symbols, 6746 relocations in .rela.dyn (0 relative) and 45 in 14 words of .relr.dyn, 1274 stubs, a 1031872-byte file in 4 chunks, 1 lane:
+  replace        343.9 us ( 3.00 GB/s): count 74.2 layout 13.4 symbols 16.5 dynamic 35.7 open 2.2 chunks 179.0 finish 22.7
+  new file       314.5 us ( 3.28 GB/s): count 73.6 layout 13.2 symbols 16.3 dynamic 34.6 open 2.4 chunks 172.5 finish 1.7
+  general-dynamic TLS: 2000 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place        26.3 us (39.16 GB/s): the floor, one pwrite
+  new file        62.4 us (16.54 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 365516 atoms, 2702790 fixups, 37410098 bytes of code, 450012 dynamic symbols, 605636 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113885 stubs, a 93509416-byte file in 357 chunks, 1 lane:
+  replace      42673.7 us ( 2.19 GB/s): count 7528.4 layout 1721.2 symbols 1778.7 dynamic 6280.8 open 78.3 chunks 22798.0 finish 2494.8
+  new file     40424.8 us ( 2.31 GB/s): count 7524.1 layout 1709.9 symbols 1763.4 dynamic 6437.6 open 79.5 chunks 22852.3 finish 14.2
+  general-dynamic TLS: 180000 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place      6993.9 us (13.37 GB/s): the floor, one pwrite
+  new file     12467.9 us ( 7.50 GB/s): the floor, one pwrite
+peak_rss_kib 375092
+user_seconds 0.866697
+system_seconds 0.660728

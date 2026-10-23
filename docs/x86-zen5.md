@@ -193,3 +193,32 @@ research, not a source of table values. The hardware counter identifier is an
 architectural interface; Linux perf and Clang are external tools. This follows
 #181's option to generate observations on the owner's hardware without
 choosing terms for a third-party timing-data import.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). The
+[model](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_zen5.c#L1)
+produces operand-sensitive case IDs and cost columns consumed by
+[tier1 scheduling](tier1-scheduling.md#boundary-audit-298), its verifier,
+measurement harness and tests. Form identity alone is insufficient when the
+operand/address case changes. Missing columns/cases retain the explicit unknown
+sentinel; they must not become a zero-latency readiness edge.
+
+`x86_zen5_id` classifies one validated physical record into a u8 case ID.
+`x86_zen5_lookup` consumes a counted u8 ID column and a valid `X86CostColumn`,
+writing disjoint u16 results: 32 lookups through two ZMM table registers, with
+masked tails and no caller padding requirement. Natural alignment suffices.
+Cycle costs use units of 1/256 cycle; `UINT16_MAX` means unknown, including
+unsupported IDs. Startup initializes the 64-entry columns before workers;
+they remain immutable while readers run. Caller ID/output storage must survive
+the lookup and subsequent cost consumers respectively.
+
+The scheduler retains case IDs and reports unknown/missing columns rather than
+repeatedly querying names or inventing a port model. Its physical-record
+producer is a fixture at this pin, not integrated source Tier 1 selection.
+Disposition: retain measured case identity and conservative unknown handling.
+`test-x86-zen5` checks every tail and guarded slices, and the generated harness
+executes its loops. [#181](https://github.com/buster14a/buster/issues/181)/[#172](https://github.com/buster14a/buster/issues/172) own broader observations and actual producer +
+lookup + scheduler + generated-program measurements; a lookup benchmark or
+microbenchmark latency is not proof of whole-block or compiler improvement.

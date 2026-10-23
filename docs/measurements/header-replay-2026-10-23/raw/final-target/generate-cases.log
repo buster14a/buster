@@ -1,0 +1,1 @@
+command taskset -c 2 /home/david/buster-fast-bench/codex-header111/experiment-soa generate /home/david/buster-fast-bench/codex-header111/generated 

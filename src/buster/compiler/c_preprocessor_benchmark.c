@@ -15,9 +15,14 @@
 // compile of one translation unit does. After a warm-up pass come BUSTER_PP_BENCHMARK_PASSES passes; it reports the
 // medians of wall time and of user-space cycles and instructions (perf_event_open; zero when unavailable), per input
 // token (the tokens of every file the runs prepared) and per output token, each phase's share of the time and its median
-// time (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), -E -P's
+// time (PPPhase: reading, lexing, refining and directive tables; the rest includes initialization and the main loop), -E -P's
 // throughput with its printing (to /dev/null, timed after each run: input bytes and output tokens per second), and what
-// a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines and
+// a run did (PPStatistics). Include resolution and embed lookup get separate inclusive medians: these overlap the
+// phases above, so they are never added to or subtracted from them. Include resolution includes its file-cache lookup
+// and first byte acquisition, but ends before preparation/execution; embed lookup only constructs paths and stats them.
+// Direct file-probe open/fstat attempts are counted apart from embed stat and directory-setup stat attempts, including
+// failures; these exclude directory enumeration's libc-internal calls and the benchmark harness's I/O, not process-wide
+// syscall totals. With --clang it also times `clang -E -P` with the same options (but --predefines and
 // --location-limit, which are ours; --buster-headers becomes ours' search) writing to /dev/null, a process per file, the median of as many runs, for scale.
 // --history-cost and --guard-cost replace the scalar twins with the vectorized kernels without recording macro
 // expansion history, or without skipping the inclusions of guarded files (#120), whose output must be the same. --only
@@ -27,6 +32,9 @@
 // median time of releasing a run's memory (pp_release and intern_release), which the run's time leaves out: the files'
 // mappings among it. --embed measures the text printed for an embed resource (pp_benchmark_embed). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or
 // a run fails.
+// The final-output copy shares count file/buffer runs and direct object-like copies only when their target is the
+// final stream, excluding intermediate captures. Their denominator is output tokens, including pragma records and
+// the one record per #embed, as above. The remaining output is emitted individually or lifted from captured pragmas.
 //
 // With --tables, the arguments are paths, and it times the directive tables alone (#118): every .c and .h file under
 // them is read and prepared once, then each pass builds every file's table (pp_directive_table) by each kernel, whose
@@ -68,6 +76,7 @@ typedef struct PPBenchmarkSample PPBenchmarkSample;
 struct PPBenchmarkSample
 {
     PPStatistics statistics;
+    FileCacheCounts probes;
     uint64_t nanoseconds;
     uint64_t cycles;
     uint64_t instructions;
@@ -164,6 +173,10 @@ static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, char** 
         sample->instructions += pp_benchmark_read_counter(instructions_fd) - instructions;
         sample->cycles += pp_benchmark_read_counter(cycles_fd) - cycles;
         sample->nanoseconds += pp_benchmark_nanoseconds() - nanoseconds;
+        sample->probes.opens += pp.probes.opens;
+        sample->probes.fstats += pp.probes.fstats;
+        sample->probes.maps += pp.probes.maps;
+        sample->probes.reads += pp.probes.reads;
         for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
         {
             sample->ticks[phase] += pp.ticks[phase];
@@ -633,7 +646,8 @@ static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_
         now = pp_benchmark_read_counter(cycles_fd);
         sample->compile_cycles += now - before;
         before = now;
-        // As the main loop's runs test them: the identifiers of 64 kinds at a time from one compare, then each one's bit.
+        // Both rows classify 64 kinds at a time; the lookups use the selected main-loop kernel's macro-name bitset
+        // (vectorized) or direct macro table (scalar reference).
         uint64_t found = 0;
         uint64_t lookups = 0;
         for (uint32_t t = 0; t < data->token_count; t += 64)
@@ -991,7 +1005,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else
         {
             static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar" };
-            static const char* const phase_names[PP_PHASE_COUNT + 1] = { "read", "lex", "refine", "directives", "main loop" };
+            static const char* const phase_names[PP_PHASE_COUNT + 1] = { "read", "lex", "refine", "directives", "main loop/setup" };
             printf("%d files, %lu input tokens, %lu output tokens; %d passes, medians:\n", file_count, (unsigned long)input_tokens, (unsigned long)output_tokens,
                    BUSTER_PP_BENCHMARK_PASSES);
             for (uint32_t variant = 0; variant < variant_count; variant += 1)
@@ -1008,6 +1022,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 uint64_t with_printing[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t printing[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t releases[BUSTER_PP_BENCHMARK_PASSES];
+                uint64_t include_ticks[BUSTER_PP_BENCHMARK_PASSES];
+                uint64_t embed_ticks[BUSTER_PP_BENCHMARK_PASSES];
                 uint64_t phases[PP_PHASE_COUNT + 1][BUSTER_PP_BENCHMARK_PASSES];
                 for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
                 {
@@ -1018,6 +1034,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     with_printing[pass] = sample->nanoseconds + sample->print_nanoseconds;
                     printing[pass] = sample->print_nanoseconds;
                     releases[pass] = sample->release_nanoseconds;
+                    include_ticks[pass] = sample->statistics.include_ticks;
+                    embed_ticks[pass] = sample->statistics.embed_ticks;
                     uint64_t phase_sum = 0;
                     for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
                     {
@@ -1030,6 +1048,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 pp_benchmark_sort(cycles, BUSTER_PP_BENCHMARK_PASSES);
                 pp_benchmark_sort(instructions, BUSTER_PP_BENCHMARK_PASSES);
                 pp_benchmark_sort(releases, BUSTER_PP_BENCHMARK_PASSES);
+                pp_benchmark_sort(include_ticks, BUSTER_PP_BENCHMARK_PASSES);
+                pp_benchmark_sort(embed_ticks, BUSTER_PP_BENCHMARK_PASSES);
                 const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const char* name = history_cost ? (implementation == 0 ? "history" : "no-history")
@@ -1071,6 +1091,24 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 }
                 printf("\n             then the release %.3f ms\n", (double)releases[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6);
                 const PPBenchmarkSample* memory = &samples[implementation][limit][0];
+                const PPStatistics* lookups = &memory->statistics;
+                printf("             inclusive lookup medians (overlap phases above): includes %.3f ms (read + main loop), embeds %.3f ms (main loop)\n",
+                       (double)include_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick,
+                       (double)embed_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick);
+                printf("             direct file calls/pass: %lu open, %lu fstat; stat: %lu embed, %lu directory setup (not process-wide syscall totals)\n",
+                       (unsigned long)memory->probes.opens, (unsigned long)memory->probes.fstats, (unsigned long)lookups->embed_stats,
+                       (unsigned long)lookups->directory_stats);
+                printf("             includes/pass: %lu searches, %lu found, %lu open, %lu fstat (subset of direct file calls); embeds: %lu searches, %lu found\n",
+                       (unsigned long)lookups->include_searches, (unsigned long)lookups->include_found, (unsigned long)lookups->include_opens,
+                       (unsigned long)lookups->include_fstats, (unsigned long)lookups->embed_searches, (unsigned long)lookups->embed_found);
+                const uint64_t run_tokens = lookups->final_file_run_tokens + lookups->final_buffer_run_tokens;
+                const uint64_t copied_tokens = run_tokens + lookups->final_direct_object_tokens;
+                printf("             final output: %lu file-run + %lu buffer-run tokens (%.1f%%), %lu direct object tokens (%.1f%%); %.1f%% fast copies\n",
+                       (unsigned long)lookups->final_file_run_tokens, (unsigned long)lookups->final_buffer_run_tokens,
+                       output_tokens != 0 ? 100.0 * (double)run_tokens / (double)output_tokens : 0.0,
+                       (unsigned long)lookups->final_direct_object_tokens,
+                       output_tokens != 0 ? 100.0 * (double)lookups->final_direct_object_tokens / (double)output_tokens : 0.0,
+                       output_tokens != 0 ? 100.0 * (double)copied_tokens / (double)output_tokens : 0.0);
                 pp_benchmark_sort(with_printing, BUSTER_PP_BENCHMARK_PASSES);
                 pp_benchmark_sort(printing, BUSTER_PP_BENCHMARK_PASSES);
                 const double whole = (double)with_printing[BUSTER_PP_BENCHMARK_PASSES / 2];

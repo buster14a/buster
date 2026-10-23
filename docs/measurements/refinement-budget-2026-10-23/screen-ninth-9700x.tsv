@@ -1,0 +1,7 @@
+tree	input	rounds	refine_min_ms	refine_median_ms	refine_max_ms	lex_min_ms	lex_median_ms	lex_max_ms	directives_median_ms	whole_min_ms	whole_median_ms	whole_max_ms
+/home/david/buster-fast-bench/codex-116/seventh-window128	sqlite3.c	3	1.532	1.537	1.539	2.408	2.409	2.419	0.305	11.559	11.566	11.591
+/home/david/buster-fast-bench/codex-116/ninth-lexgap	sqlite3.c	3	1.507	1.510	1.511	2.437	2.442	2.445	0.304	11.600	11.617	11.631
+/home/david/buster-fast-bench/codex-116/seventh-window128	sqlite-new.c	3	1.534	1.534	1.547	2.410	2.412	2.427	0.305	11.543	11.595	11.598
+/home/david/buster-fast-bench/codex-116/ninth-lexgap	sqlite-new.c	3	1.502	1.504	1.515	2.430	2.440	2.449	0.304	11.552	11.553	11.582
+/home/david/buster-fast-bench/codex-116/seventh-window128	main.c	3	3.429	3.440	3.504	3.706	3.725	3.735	0.298	36.519	36.591	36.645
+/home/david/buster-fast-bench/codex-116/ninth-lexgap	main.c	3	3.419	3.439	3.443	3.722	3.723	3.744	0.299	36.431	36.704	36.807

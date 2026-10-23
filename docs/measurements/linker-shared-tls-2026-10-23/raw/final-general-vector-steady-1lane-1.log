@@ -1,0 +1,28 @@
+exclusive.sh: waiting for the 9700X, held by: 
+1 workers, bound against the shared library's runtime and written as a shared library: 95 atoms, 119 fixups, 823 bytes of code, 14 dynamic symbols, 16 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 3 stubs, a 7304-byte file in 1 chunks, 1 lane:
+  replace          8.9 us ( 0.82 GB/s): count 1.0 layout 0.8 symbols 0.5 dynamic 0.3 open 1.9 chunks 2.1 finish 2.1
+  new file         7.4 us ( 0.99 GB/s): count 1.0 layout 0.8 symbols 0.5 dynamic 0.3 open 1.6 chunks 2.1 finish 1.1
+  general-dynamic TLS: 1 callable probes and distinct symbols, 1 backing objects, vector path, all results checked
+  in place         0.7 us (11.22 GB/s): the floor, one pwrite
+  new file         1.7 us ( 4.42 GB/s): the floor, one pwrite
+64 workers, bound against the shared library's runtime and written as a shared library: 284 atoms, 1064 fixups, 13858 bytes of code, 172 dynamic symbols, 235 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 43 stubs, a 39928-byte file in 1 chunks, 1 lane:
+  replace         20.3 us ( 1.97 GB/s): count 3.4 layout 1.5 symbols 1.0 dynamic 1.5 open 1.9 chunks 7.9 finish 2.9
+  new file        18.1 us ( 2.21 GB/s): count 3.4 layout 1.5 symbols 1.0 dynamic 1.5 open 1.5 chunks 8.0 finish 1.1
+  general-dynamic TLS: 64 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place         1.3 us (30.64 GB/s): the floor, one pwrite
+  new file         3.2 us (12.61 GB/s): the floor, one pwrite
+2000 workers, bound against the shared library's runtime and written as a shared library: 4176 atoms, 30105 fixups, 416079 bytes of code, 5012 dynamic symbols, 6746 relocations in .rela.dyn (0 relative) and 45 in 14 words of .relr.dyn, 1274 stubs, a 1031872-byte file in 4 chunks, 1 lane:
+  replace        344.8 us ( 2.99 GB/s): count 73.8 layout 13.3 symbols 16.5 dynamic 35.3 open 2.9 chunks 177.8 finish 23.3
+  new file       316.7 us ( 3.26 GB/s): count 73.7 layout 13.2 symbols 16.2 dynamic 35.1 open 2.4 chunks 174.1 finish 1.7
+  general-dynamic TLS: 2000 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place        26.9 us (38.42 GB/s): the floor, one pwrite
+  new file        63.8 us (16.18 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 365516 atoms, 2702790 fixups, 37410098 bytes of code, 450012 dynamic symbols, 605636 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113885 stubs, a 93509416-byte file in 357 chunks, 1 lane:
+  replace      42549.6 us ( 2.20 GB/s): count 7537.4 layout 1717.8 symbols 1779.7 dynamic 6364.4 open 83.5 chunks 22731.3 finish 2443.6
+  new file     40721.8 us ( 2.30 GB/s): count 7541.5 layout 1601.0 symbols 1804.2 dynamic 6450.4 open 77.6 chunks 22912.2 finish 14.4
+  general-dynamic TLS: 180000 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place      7091.5 us (13.19 GB/s): the floor, one pwrite
+  new file     12358.9 us ( 7.57 GB/s): the floor, one pwrite
+peak_rss_kib 375020
+user_seconds 0.871581
+system_seconds 0.656341

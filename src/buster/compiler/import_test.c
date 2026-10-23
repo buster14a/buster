@@ -217,7 +217,8 @@ static bool import_test_same_tables(const Link* a, const Link* b)
 // signature by its bytes.
 static bool import_test_same_object(const ImportObject* a, const ImportObject* b)
 {
-    bool result = a->section_count == b->section_count && a->symbol_count == b->symbol_count && a->group_count == b->group_count;
+    bool result = a->section_count == b->section_count && a->symbol_count == b->symbol_count && a->group_count == b->group_count &&
+                  a->executable_stack_section == b->executable_stack_section;
     result = result && (a->section_count == 0 || memcmp(a->section_atoms, b->section_atoms, (uint64_t)a->section_count * sizeof(AtomId)) == 0);
     result = result && (a->symbol_count == 0 || memcmp(a->symbols, b->symbols, (uint64_t)a->symbol_count * sizeof(SymbolId)) == 0);
     uint64_t members = 0;
@@ -1759,6 +1760,92 @@ static bool import_test_objects(Arena* arena)
                            link.atoms.class[object.section_atoms[3]] == BUSTER_LINK_CLASS_FINI && link.atoms.size[object.section_atoms[2]] == sizeof(epilogue);
     import_test_expect(&tally, fragments && link.symbols.count == 1 && link.fixups.count == 1 && object.symbol_count == 0, "an object without a symbol table", 0);
     arena_pop_to(arena, position);
+    return import_test_report(&tally);
+}
+
+// An input's stack request is independent of its atom map. These original ELF records need no external assembler:
+// move exact names across every section lane and tail, retain the first request, and leave lookalikes unchanged.
+static bool import_test_stack(Arena* arena)
+{
+    ImportTestTally tally = {
+        .check = "executable stack metadata",
+    };
+    for (uint32_t tail = 0; tail < BUSTER_IMPORT_BATCH; tail += 1)
+    {
+        const uint32_t count = BUSTER_IMPORT_BATCH + 2 + tail;
+        for (uint32_t note = 1; note < count; note += 1)
+        {
+            for (uint32_t variant = 0; variant < 6; variant += 1)
+            {
+                const uint64_t position = arena->length;
+                ImportTestSection sections[BUSTER_IMPORT_BATCH * 2 + 2] = { 0 };
+                for (uint32_t section = 1; section < count; section += 1)
+                {
+                    sections[section] = import_test_section(".comment", SHT_PROGBITS, 0, 1, 0, 0, 0, 0, 0);
+                }
+                const char* name = variant == 3 ? ".note.GNU-stack.extra" : variant == 4 ? ".note.GNU-stac" : ".note.GNU-stack";
+                const uint64_t flags = variant == 0 || variant == 5 ? 0 : SHF_EXECINSTR | (variant == 2 ? SHF_EXCLUDE : 0);
+                sections[note] = import_test_section(name, variant == 2 ? SHT_NOTE : SHT_PROGBITS, flags, 1, 0, 0, 0, 0, 0);
+                uint32_t expected = variant == 1 || variant == 2 ? note : 0;
+                if ((expected != 0 || variant == 5) && note + 1 < count)
+                {
+                    sections[count - 1] = import_test_section(".note.GNU-stack", SHT_PROGBITS, SHF_EXECINSTR, 1, 0, 0, 0, 0, 0);
+                    expected = variant == 5 ? count - 1 : expected;
+                }
+                ImportTestFile file;
+                const bool made = import_test_elf(&file, ET_REL, sections, count, arena);
+                const uint64_t index = (uint64_t)tail * 1000 + note * 10 + variant;
+                import_test_expect(&tally, made, "original stack-note records", index);
+                if (made)
+                {
+                    const String8 bytes = import_test_bytes(&file);
+                    import_test_paths(&tally, bytes, IMPORT_TEST_VECTOR, "stack-note exact/vector metadata and tails", index, arena);
+                    Link link;
+                    ImportObject object = {
+                        .executable_stack_section = UINT32_MAX,
+                    };
+                    const bool linked = import_test_link(&link, bytes, arena);
+                    const ImportResult imported = linked ? import_object(&link, bytes, BUSTER_IMPORT_TEST_UNIT, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, arena, &object) :
+                                                          import_test_result(IMPORT_ERROR_MEMORY, 0, 0, 0, 0, 0);
+                    const bool kept = imported.error == IMPORT_ERROR_NONE && object.executable_stack_section == expected && object.section_atoms[note] == 0 && link.atoms.count == 1;
+                    import_test_expect(&tally, kept, "first explicit request without an atom", index);
+                }
+                arena_pop_to(arena, position);
+            }
+        }
+    }
+    // The vector section pass captures this batch's marker before validating a rare array priority. Scalar stops
+    // at the bad priority first. Retrying must restore the metadata too, not only atom and fixup counts.
+    for (uint32_t first = 0; first < 2; first += 1)
+    {
+        const uint64_t position = arena->length;
+        ImportTestSection sections[4] = { 0 };
+        const uint32_t invalid = first == 0 ? 1 : 2;
+        const uint32_t note = first == 0 ? 2 : 1;
+        sections[invalid] = import_test_section(".init_array.65536", SHT_INIT_ARRAY, SHF_ALLOC | SHF_WRITE, 8, 8, 0, 0, 0, 0);
+        sections[note] = import_test_section(".note.GNU-stack", SHT_PROGBITS, SHF_EXECINSTR, 1, 0, 0, 0, 0, 0);
+        sections[3] = import_test_section(".comment", SHT_PROGBITS, 0, 1, 0, 0, 0, 0, 0);
+        ImportTestFile file;
+        const bool made = import_test_elf(&file, ET_REL, sections, BUSTER_ARRAY_LENGTH(sections), arena);
+        import_test_expect(&tally, made, "fallback stack-note records", first);
+        if (made)
+        {
+            const String8 bytes = import_test_bytes(&file);
+            import_test_paths(&tally, bytes, IMPORT_TEST_EXACT, "stack-note metadata on scalar retry", first, arena);
+            Link link;
+            ImportObject object = {
+                .executable_stack_section = UINT32_MAX,
+            };
+            const bool linked = import_test_link(&link, bytes, arena);
+            const ImportResult imported = linked ? import_object(&link, bytes, BUSTER_IMPORT_TEST_UNIT, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, arena, &object) :
+                                                  import_test_result(IMPORT_ERROR_MEMORY, 0, 0, 0, 0, 0);
+            const uint32_t expected = first == 0 ? 0 : note;
+            import_test_expect(&tally, imported.error == IMPORT_ERROR_UNSUPPORTED && imported.section == invalid && imported.offset == file.headers[invalid] &&
+                                          imported.type == SHT_INIT_ARRAY && object.executable_stack_section == expected,
+                               "scalar retry keeps only earlier validated metadata", first);
+        }
+        arena_pop_to(arena, position);
+    }
     return import_test_report(&tally);
 }
 
@@ -3880,6 +3967,7 @@ static int run_import_tests(int argc, char** argv)
         bool passed = arena.base != 0;
         passed = import_test_round_trips(seed, &arena) && passed;
         passed = import_test_objects(&arena) && passed;
+        passed = import_test_stack(&arena) && passed;
         passed = import_test_archives(&arena) && passed;
         passed = import_test_libraries(&arena) && passed;
         passed = import_test_scripts(&arena) && passed;

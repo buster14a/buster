@@ -1440,9 +1440,13 @@ These are four `PT_LOAD`s, as lld writes for hello world, with `PT_PHDR`,
 `PT_INTERP`, `PT_DYNAMIC`, `PT_GNU_RELRO`, `PT_GNU_EH_FRAME`, `PT_GNU_STACK`
 (not executable), `PT_NOTE` and `PT_TLS` when there is TLS.
 
-File offsets are contiguous. Each segment's address continues at the next page
-plus its offset within a page, so there is no file padding, and segments stay
-4 KB-congruent.
+Each loaded segment's file offset equals its virtual address relative to the
+image base. Its address continues at the next page plus its offset within a
+page, preserving 4 KB congruence. The current four-segment layout adds at most
+12 KiB of zero-filled file gaps, which the writer includes in the build ID.
+This keeps the mapping base used by perf/libdw consistent across segments;
+compact file offsets previously made native DWARF unwinding fail with
+overlapping modules. See [the debug consumer checks](debug.md#checks).
 
 The TLS segment then needn't start on a multiple of its alignment: `.tdata`
 starts at its own alignment, which can be less than `.tbss`'s. The TLS block
@@ -2419,10 +2423,32 @@ read-only image.
 R_X86_64_TPOFF64 against that dynamic symbol. The library's own non-preemptible
 TLS uses a TPOFF64 slot against symbol zero, with its offset within PT_TLS as
 the addend. Either initial-exec form sets DF_STATIC_TLS. Local-exec TPOFF32 is
-refused, as lld refuses it in a shared library. General- and local-dynamic
-TLSGD/TLSLD/DTPOFF32 accesses are also refused for now; the next part of #85
-must retain `__tls_get_addr` calls and emit DTPMOD64/DTPOFF64 GOT pairs instead
-of applying an executable's local-exec relaxation.
+refused, as lld refuses it in a shared library.
+
+General-dynamic TLS keeps `__tls_get_addr` calls and allocates a two-word GOT
+pair per referenced symbol, separately from initial-exec slots so both models
+can use the same symbol. Preemptible definitions and imports use DTPMOD64 and
+DTPOFF64 relocations against the dynamic symbol. A local definition uses
+DTPMOD64 against symbol zero and a statically filled offset within PT_TLS.
+Local-dynamic accesses share one pair: DTPMOD64 against symbol zero followed
+by zero, with DTPOFF32 fields holding the definition's module offset.
+Undefined DTPOFF32 targets are refused before publication. An imported-only
+TLS library does not acquire an empty PT_TLS segment, and general/local
+dynamic accesses do not set DF_STATIC_TLS.
+An undefined hidden weak TLSGD target is also refused: it has neither a
+defining module nor a dynamic lookup. In an original standalone reference
+probe on the 9700X, GNU ld 2.47 and lld 23.1.1 both emitted DTPMOD64 against
+symbol zero without PT_TLS; the loaded address was `0x2`, not a valid TLS
+definition. The writer does not manufacture a current-module address for it.
+
+Each lane marks general-dynamic targets in its own bitset. A reduction owns
+complete symbol words, then mask expansion assigns pairs after ordinary GOT
+slots in stable symbol order; an exact scalar twin assigns the same slots.
+The local-dynamic pair follows all general-dynamic pairs. No symbol or fixup
+is reordered. Additional temporary storage is
+`8 * lanes * (symbols / 64 + 1) + 4 * symbols` bytes plus counts; the borrowed
+columns remain live through the write, and vector tails use logical counts.
+The snapshot format is unchanged.
 
 **Exports across lanes.** Each lane hashes and counts its exports; layout
 prefixes the bucket counts in bucket order and then lane order; the dynamic
@@ -2456,11 +2482,24 @@ generated `dlopen` harness. Compiled fixtures check executable definitions
 preempting library calls, addresses, data and tables. The lld cross-check links
 the same objects with `-shared` and accounts for the lazy/non-lazy slot
 difference. Refusal cases cover local-exec TLS, text relocations and a direct
-address of a preemptible function; general-dynamic compiled TLS is an explicit
-current refusal. `benchmark-executable --only shared` measures the writer by
+address of a preemptible function and undefined DTPOFF32 module offsets.
+Compiled TLS fixtures cover general/local dynamic access, hidden and
+preemptible definitions, zero fill, 73 TLS symbols, mixed general-/initial-exec
+references to one symbol, GOT-indirect `__tls_get_addr`, imported libc TLS,
+and a thread created before `dlopen`. `benchmark-executable --only shared`
+measures the writer by
 phase; `benchmark-link --kinds shared` includes runtime opening and binding,
 compares GNU ld, lld, mold and wild, and runs every resulting library through
-the harness.
+the harness. `benchmark-executable --only shared --tls general|local`
+adds one distinct TLS symbol and a callable ABI probe per generated worker;
+the benchmark loads the resulting library and executes those probes outside
+the timed region. The distinct symbols cycle over at most 64 backing TLS
+objects, keeping the existing initial-exec workload within `dlopen`'s static
+TLS reserve. This measures GOT-pair and fixup scaling, not initialization of
+a large TLS storage block. The output records both counts.
+`--exact` selects the scalar writer twin and
+`--after-scalar MS` conditions each lane with a bounded scalar kind-column
+scan before the timed write.
 
 At source `8002d88`, on the locked 9700X with Clang 23.1.1, the complete
 `test-executable`, `test-dynamic --cross-check` and `test-static --cross-check`
@@ -3231,6 +3270,104 @@ from the mapped files. Each step is a lane phase (see "Lanes"):
 
 Steps 1–3 and 7 are where most of the foreign path's work is, and where the
 vector kernels go. Steps 4–6 are graph walks bound by memory latency.
+
+#### Explicit executable-stack requests in foreign objects
+
+The executable writer emits a non-executable `PT_GNU_STACK`. Foreign
+conversion therefore refuses a selected ET_REL object whose exact
+`.note.GNU-stack` section has `SHF_EXECINSTR`; it does not silently discard
+the request or enable an executable stack for the whole output.
+
+The existing scalar and vector section-import passes preserve the first
+requesting section index in `ImportObject.executable_stack_section`, including
+non-ALLOC notes whose bytes do not become atoms. Conversion checks that
+metadata before importing the object's local symbols. The refusal is
+`FOREIGN_LINK_ERROR_IMPORT` with `IMPORT_ERROR_UNSUPPORTED`, identifying the
+original object, section, section-header offset and type. Scalar retry clears
+the metadata before rebuilding it.
+
+Selection is at the object boundary. Direct inputs and extracted regular or
+thin archive members contribute; a member that was never extracted does not.
+Forced and whole-archive extraction still selects the requesting object.
+Discarding its code, including all of its COMDAT code, does not erase its
+stack request. This bounded policy also conservatively refuses an executable
+marker that itself has `SHF_EXCLUDE` or belongs to a losing COMDAT group;
+that policy is not a claim of identical GNU/lld/mold behavior for unusual
+markers. Missing notes and notes without `SHF_EXECINSTR` retain the existing
+behavior. DSO `PT_GNU_STACK`, automatic executable-stack support and other
+importer consumers are outside this change.
+
+`test-import` checks exact names, flags, positions across vector batches and
+tails, first-request selection, reused output objects and failed-vector scalar
+retry. `test-foreign` assembles original direct/archive/COMDAT cases and checks
+selection and the original diagnostics through the exact/vector paths at
+1/2/3/8 lanes, including the dynamic conversion entrypoint. These are producer
+and section-import checks; they do not claim an executable runtime, GC
+composition or external-linker oracle for the refusal policy.
+
+#### Foreign COMDAT unwind pruning
+
+`foreign_unwind.c` filters an object's `.eh_frame` while the original
+section ownership is still available. A unique `R_X86_64_PC32` relocation
+at the FDE's initial-address field identifies its original code section.
+The selected section-to-atom map decides whether that FDE survives. A
+canonical symbol with the same name in a winning COMDAT group cannot keep
+the losing group's FDE alive. The pass also drops CIEs no retained FDE uses;
+deduplicating compatible live CIEs is a separate pass.
+
+The supported input is DWARF32 CIE version 1 or 3 with `zR`/`zPLR` augmentation
+and the optional signal-frame marker, and PC-relative signed four-byte FDE
+addresses. Personalities and LSDAs can use fixed absolute four/eight-byte
+or PC-relative four-byte pointers, including indirect pointers. Their
+relocations follow the owning record; they do not decide code liveness.
+Unsupported encodings, missing or ambiguous ownership, overlapping fields
+and malformed records are refused before the executable is written.
+
+The producer returns fresh compact bytes, relocation records and an
+original-to-compact interval map. It rewrites CIE backlinks and relocation
+offsets, preserves retained CFI and augmentation bytes, and leaves the input
+unchanged. A failed prune restores the output arena and leaves the result
+untouched. An all-discarded section stays empty; the pass does not invent a
+terminator. The original section endpoint has an explicit mapping.
+
+`foreign_unwind_link.c` applies this only to selected objects with discarded
+COMDAT sections, before canonical names and relocation requirements are
+finished. It remaps retained symbols and their extents. A section symbol at
+zero names the compact section even if its first original record was dropped.
+References with nonzero addends into a changed unwind fragment are currently
+refused because their address-expression bias is not retained. Local labels
+in discarded records become inert slots; any surviving use is rejected.
+The ordinary relocation importer consumes the compact records through
+`import_relocation_entries`; its existing section-table wrappers retain their
+contract. Mapped foreign inputs and the conversion arena outlive writing.
+
+`test-foreign --cross-check` exercises original records, malformed fields,
+relocation tails, rollback, symbol endpoints and COMDAT ownership through the
+exact and vector paths. Its C++ fixture compiles two original translation
+units with a duplicated throwing template. The losing object retains another
+function; throwing through that function must run both cleanup destructors
+and reach the caller's catch. GNU ld and lld link and run the same inputs.
+The explicit runtime line includes `-lstdc++ -lm`, as the observed system C++
+driver does. Finding libraries named only in another DSO's `DT_NEEDED` is
+outside this unwind test's contract.
+
+`benchmark-foreign-unwind [--runs N] [--fdes N] [--profile mixed|all|none]`
+measures the complete prune call on original synthetic `zR`/`zPLR` records.
+Defaults are 21 paired samples after two warm-up pairs, 33/4,097/65,537
+FDEs, and mixed/all/no retained-code profiles. An independent compact byte,
+relocation and interval-map oracle validates both paths before timing; every
+sample is checked afterward and the frozen input must remain identical.
+Both paths share variable-record parsing and ownership lookup. The vector
+path batches relocation classification and transposes retained output records.
+
+Each measurement process runs under the shared 9700X lock on CPU 2. Timing
+includes validation, sorting, scratch/output allocation, copying and relocation
+transposition. Arena resets, verification and statistics are outside the clock;
+the reusable arenas retain committed pages. Reported arena lengths are logical
+bytes, and the labelled temporary-payload estimate excludes alignment, VM
+reservations and RSS. These are synthetic phase measurements, not complete
+foreign-link throughput, corpus acceptance or evidence that the wider linker
+performance target has been reached.
 
 #### Steps 1 to 5, as built
 
@@ -4162,9 +4299,9 @@ and with this document updated with what was measured:
    PIE"), and a shared library's runtime (`runtime_import_shared`,
    `runtime_open_shared`) and binding (`bind_shared_exports`: "Shared
    libraries, as built so far"). The writer is now implemented for preemption,
-   exported definitions and initial-exec TLS, with generated and compiled
+   exported definitions and initial-, general- and local-dynamic TLS, with generated and compiled
    libraries checked against lld and run through `dlopen` ("The shared
-   library"). General- and local-dynamic TLS in libraries remain the next part.
+   library"). Local-exec accesses in shared libraries remain invalid by the ABI.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
    and the exchange. Done when the differential tests against lld and mold
    pass on a corpus.
@@ -4459,3 +4596,105 @@ The 64-bit variants:
 The `Elf64_Rela` writers fill 24-byte records from four 32-bit columns
 (offset, symbol, type, addend): scalar, or three `vpermt2q` and three masked
 `vpermq` per eight records.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Pinned sources:
+[Link](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/link.c#L4),
+[object writer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/object_writer.c#L4),
+[import](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/import.c#L4),
+[foreign resolution](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/foreign.c#L4),
+[foreign handoff](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/foreign_link.c#L4),
+[snapshot](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/snapshot.c#L4),
+[dynamic inputs](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/dynamic.c#L4),
+[executable](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/executable.c#L4).
+
+| Producer → consumer | Implemented handoff and other readers |
+| --- | --- |
+| Tier 0/assembler/test records → encoding/fixup ends → `link_add_code_fixups` | Code atom bytes plus symbolic references become offset-sorted, nonoverlapping fixups. Marked-instruction order, field kind and source addend survive. Object and direct writers both consume them. |
+| Checked scalar definitions → `check_data_input`/`check_data_emit` → Link | Canonical object-to-symbol IDs, atom bytes and address fixups; current supported scalar subset only. Tests write objects and execute linked fixtures; the checker CLI dumps this output. |
+| Frontend/import/generator names → Link names → binding/object/string tables | Counted spelling, NUL for ELF, length and retained u64 `link_hash`. Names are not automatically interned; the producer supplies one ID per spelling where required. |
+| ELF bytes → `import_object`/archive/library/script readers → Runtime or Foreign | Checked section/symbol/relocation columns and input-index mappings. Eight-record vector paths decline to exact readers; archive indices support lazy member loading. |
+| File search/import → `runtime_import*` → snapshot → `runtime_open*` → binding | Counted runtime pieces, global-name index/filter, archive refs/COMDAT and library versions. Mapped snapshot pointers/deltas avoid rebuilding columns; directory validation precedes use, piece hashes are checked when consumed. |
+| `foreign_run` parse → exchange/resolve → archive frontier → winners/COMDAT | Stable input/member positions, hashed name partitions and selected definitions. Count/place/fill phases have collective proceed decisions; a round ends only when no new member/library reference loads. |
+| Foreign winners → `foreign_link_build*` → canonical Link/dynamic inputs | Reuses resolved names and selected members; input-local symbol maps and original input order preserve references and initialization order. No second name resolution. |
+| Program Link + runtime pieces → binding → `dynamic_*_inputs` → `executable_write` | Canonical symbol bindings, imports/exports, library/version arrays, TLS/runtime metadata. Bind before selection is the intended source integration; current generators/foreign inputs exercise consumers. |
+| Link → `object_prepare`/`object_map_symbols` → `object_build`/`object_write_units` | Group units/classes, count/place exact ELF ranges, fill once. One lane owns an entire object, with its own symbol-map/scratch. Other linkers and `import_object` are output readers. |
+| Link + options → executable symbol classes/count/place → resolve | Class/alignment buckets and prefix offsets, dynamic symbol/GOT/relocation metadata, atom addresses and symbol references. Ordered init/fini/unwind classes preserve required order. |
+| Final layout/references → chunk patch/hash/write → loader/debug readers | Disjoint chunk work and collective barriers; patched bytes, build ID and published file. Native debug/source-event producers and actual compilation overlap remain [#88](https://github.com/buster14a/buster/issues/88). |
+
+### Memory, ownership and ordering
+
+Link uses u32 IDs (zero absent) and counted SoA tables. Atom sizes/addresses and
+name hashes are wide; fixups use u32 offset/target/addend and a byte kind
+(13 logical bytes per fixup). Wide addends are indexed in a side table and
+accessed through `link_fixup_addend`; a consumer must not interpret the index
+as the addend. Every atom's fixups form one contiguous sorted range; fields
+cannot overlap or extend outside its bytes. A capacity failure is sticky and
+an add returns zero. `link_check` validates whole-representation invariants
+including local-unit and TLS/reference-kind constraints.
+
+Tables/name arenas and atom bytes have different owners. Object writing reads
+atom bytes. Executable patching **writes them in place**, as well as its owned
+address/reference/GOT/dynamic-index columns. Source-generated bytes and private
+foreign mappings must remain writable and alive until writing finishes.
+`foreign_link_build` borrows `Foreign` mappings; its failure may leave partial
+caller-owned output. Restore/rebuild pristine inputs before comparing a second
+writer variant. It is not the static-data emitter's transactional contract.
+Do not run object writing concurrently with executable mutation of the same
+bytes or reuse scratch as retained atoms.
+
+Import reads untrusted counted bytes with checked offset arithmetic and
+`memcpy` field loads; no input alignment/padding is assumed. Snapshot regions
+are 64-byte aligned and layout/version/executable-identity checked; that format
+is not a blanket permission for a new consumer to vector-read outside a region.
+Record kernels use bounded masks/tails or their explicit internal allocations;
+encoder output slack must not be counted as atom bytes. A serialized object is
+one exactly sized buffer. Zero-fill atoms have no byte payload, and empty units
+still have object-output semantics.
+
+`ExecutableDynamic` borrows counted library/version arrays. Library indices are
+u32, version indices are unique 2..0x7fff and grouped by library; required
+unversioned libraries are not inferred only from version use. Preserve selected
+input order. Binding/resolve completion precedes final layout and relocation
+patching. Archive rounds, COMDAT choice, init/fini priorities and version
+numbering are semantic boundaries; arbitrary reordering for batch fullness is
+invalid. Lanes reserve once, fill disjoint ranges, synchronize and make the same
+failure decision. Independent complete objects/functions can be distributed;
+one ELF record's 8/16/64-lane kernel width is not the whole-link batch size.
+
+### Waste, alternatives and disposition
+
+The encoded-to-Link boundary already retains field kinds, addends and targets;
+re-disassembly would lose useful producer knowledge. Reusing canonical foreign
+winners already removes repeated global resolution. Snapshot loading already
+avoids reparsing unchanged runtime objects. Exact ET_REL construction already
+avoids per-symbol allocations and buffer growth. These are retained designs,
+not new optimizations in the audit.
+
+Remaining observable passes include unit/class grouping for ET_REL, executable
+class/relocation counting and patch/hash/write, input-index remaps, and cold
+snapshot/file checks. Each serves a different consumer or publication boundary;
+removing it requires proving its data unused or available earlier. Compare
+producer-supplied counts/order with current count/place/fill, or bounded streamed
+publication with materialization, charging metadata maintenance, synchronization,
+bytes, file layout and every reader. Existing measurements rejected an isolated
+ELF relocation transpose; stores and the full object path matter.
+
+Disposition: retain the current shared Link and writer protocols. `test-link`,
+object/import/bind/snapshot tests, native dynamic/static/foreign tests and
+lane/determinism tests exercise scalar/exact/vector, poisoned output, invalid
+metadata, capacities, guarded inputs, schedule changes and external ELF/runtime
+oracles. Existing `benchmark-link` includes runtime opening, binding and writing
+for generated programs; it excludes real C production. Object/foreign kernel
+results and separate phase rows are not full compiler measurements.
+
+The active linker owner retains [#80](https://github.com/buster14a/buster/issues/80)/[#85](https://github.com/buster14a/buster/issues/85)/[#86](https://github.com/buster14a/buster/issues/86)/[#87](https://github.com/buster14a/buster/issues/87)/[#88](https://github.com/buster14a/buster/issues/88) and [#145](https://github.com/buster14a/buster/issues/145)'s output boundary.
+Pending [#316](https://github.com/buster14a/buster/pull/316)/[#328](https://github.com/buster14a/buster/pull/328)/[#329](https://github.com/buster14a/buster/pull/329)/[#332](https://github.com/buster14a/buster/pull/332) and the owner's GC/symbol/unwind/streaming work are
+not silently included at this pin. Missing source-generated symbols/CFI, general
+foreign qualification, shared dynamic TLS and true compilation/output overlap
+remain linked acceptance work. Completion requires matched small/large actual
+inputs and complete producer + conversion + writer costs, bytes/s and ns/cycles,
+live/scratch memory, allocations, bytes moved, fallback and lane occupancy,
+plus identical output/execution and debugger/profiler consumers where relevant.
