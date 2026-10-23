@@ -17,8 +17,9 @@
 // broadcast is one barrier rather than two (see LaneGroup); and the barrier spins and then waits in mwaitx before it
 // sleeps on a futex, where the RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait.
 //
-// main.c includes this file, and lane_benchmark.c includes its own copy. Each part declares its interface first, then
-// defines it. In this order:
+// Each command's translation unit includes this file and owns its thread context and any command-long team. A team
+// must therefore be started in the command's unit, not in a dispatcher in another unit. Each part declares its interface
+// first, then defines it. In this order:
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
 //     arena_pop_to. An arena reserves its address space up front, and the kernel commits each page when it is first
 //     touched. A push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated.
@@ -27,9 +28,10 @@
 //   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
 //     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, lane_take, lane_alone
 //     and lane_restore.
-//   - Starting lanes: lane_run, which runs one entry point on a group of lanes and returns once they all have.
+//   - Starting lanes: lane_team_start and lane_team_stop own a command's fixed threads; lane_run dispatches a whole
+//     operation to them. Without a team, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
 //
-// The barrier and lane_take are the only code with atomics. lane_take adds one to its group's counter, and the last
+// The barrier, dispatch/completion and lane_take use atomics. lane_take adds one to its group's counter, and the last
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
 // in, and the last one advances the group's generation word with lane_publish while the others wait for it in
 // lane_wait. A waiting lane spins for BUSTER_LANE_SPINS pauses, waits in mwaitx for the word's line to be written for up
@@ -186,6 +188,7 @@ static void arena_pop_to(Arena* arena, uint64_t length)
 #define BUSTER_SCRATCH_ARENA_CAPACITY (64ull << 30)
 
 typedef struct LaneGroup LaneGroup;
+typedef struct LaneTeam LaneTeam;
 
 // A thread's place in its group: its index and the group's size. A thread outside any group, or one that has made
 // itself a group of one with lane_alone, is lane 0 of 1, without a group.
@@ -201,6 +204,9 @@ typedef struct ThreadContext ThreadContext;
 struct ThreadContext
 {
     Lane lane;
+    // A command's fixed team, or 0 for standalone calls. running also guards calls made after lane_alone.
+    LaneTeam* team;
+    bool running;
     Arena scratch[BUSTER_SCRATCH_ARENA_COUNT];
     // How many times the thread has slept on a futex, waiting for its group: for the tests and the benchmark.
     uint64_t sleeps;
@@ -252,7 +258,7 @@ static void scratch_end(Scratch scratch)
     arena_pop_to(scratch.arena, scratch.length);
 }
 
-// Releases the calling thread's scratch arenas, when a lane's thread ends.
+// Releases a worker's scratch arenas after its whole operation, including when its thread is kept for the next one.
 static void scratch_release(void)
 {
     for (uint32_t i = 0; i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
@@ -661,16 +667,60 @@ static void lane_restore(Lane lane)
 // The values of LaneGroup.gate: lane_run's threads wait while it is 0.
 #define BUSTER_LANE_GATE_RUN 2u
 #define BUSTER_LANE_GATE_CANCEL 4u
+// A team's initial request, published as completed once a worker has attempted its pin. Later requests advance by 2.
+#define BUSTER_LANE_TEAM_READY 2u
 // sched_setaffinity's masks: 1,024 CPUs, as glibc's cpu_set_t.
 #define BUSTER_LANE_CPU_MASK_WORDS 16
 
-// Runs entry(argument) on a group of `count` lanes, from 1 to BUSTER_LANE_MAX_COUNT, and returns once every lane has
-// returned from it. The calling thread is lane 0, and count - 1 new threads are the others. A program starts its group
-// once, with all of its phases in the entry point, rather than a group per phase: starting threads costs far more than
-// a sync (benchmark-lanes measures both). entry is the lanes' only callback. With `cpus`, lane i runs on CPU cpus[i],
-// and the calling thread's affinity is restored afterwards. Returns false if a thread couldn't be created, in which
-// case no lane runs entry, or if a lane couldn't be pinned, in which case it ran unpinned.
+// Runs one whole operation on `count` lanes, with the calling thread as lane 0. Its phases call one another directly
+// inside entry; this is the runtime's only work callback. With a command team, count selects a prefix of its fixed
+// threads and cpus must match that prefix of the team's CPU list (including whether it has one). The call waits for
+// all active lanes, then restores the caller's lane, single-lane counter and affinity. A nested, oversized or otherwise
+// invalid team dispatch runs nothing and returns false; it never starts extra threads. A team inherited across fork
+// also refuses dispatch, since its worker threads do not exist in the child.
+//
+// Without a team, starts count - 1 threads and joins them before returning, preserving the standalone and cold-start
+// path. A failed thread creation runs no entry; a pinning failure on this path runs unpinned and returns false.
 static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
+
+typedef struct LaneTeamWorker LaneTeamWorker;
+struct LaneTeamWorker
+{
+    // Only this worker is woken for a dispatch which includes it. Unused workers remain asleep.
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint32_t request;
+    LaneTeam* team;
+    pthread_t thread;
+    uint32_t index;
+    // The last request issued by the owner, without lane_wait's sleeper bit.
+    uint32_t issued;
+    bool pinned;
+    // A separate line: the worker publishes completion after it has stopped using the operation's shared data.
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint32_t completed;
+};
+
+struct LaneTeam
+{
+    // The operation's barrier, broadcast and part counter, distinct from dispatch and completion.
+    LaneGroup group;
+    LaneTeamWorker workers[BUSTER_LANE_MAX_COUNT];
+    uint32_t cpus[BUSTER_LANE_MAX_COUNT];
+    uint32_t capacity;
+    uint32_t count;
+    pthread_t owner;
+    pid_t process;
+    bool has_cpus;
+    bool stopping;
+};
+
+// A zero-initialized handle is closed. Start creates capacity - 1 workers once, validates every requested pin, and
+// selects the team on its calling thread only after all workers are ready. Failure joins any partial group and leaves
+// the handle closed. It neither changes the caller's lane nor leaves it pinned. Another team, or an operation in
+// progress even under lane_alone, refuses a start. Keep the handle alive until stop and use it only on its owner.
+static __attribute__((unused)) bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* cpus);
+// Joins the fixed workers and closes the handle. A closed, non-current or running team's stop is a no-op. In a forked
+// child, forgets the inherited handle without joining vanished workers. Stopping twice is safe; a closed handle may
+// be started again. The caller's own scratch arenas keep their existing lifetime.
+static __attribute__((unused)) void lane_team_stop(LaneTeam* team);
 
 typedef struct LaneStart LaneStart;
 struct LaneStart
@@ -697,6 +747,200 @@ static bool lane_pin(uint32_t cpu)
     return result;
 }
 
+// Between whole operations there is no useful work to spin for. Park directly, with the same sleeper-bit protocol as
+// lane_wait, so a publish either sees and wakes this waiter or prevents it from sleeping on an obsolete value.
+static uint32_t lane_team_wait(uint32_t* word, uint32_t value)
+{
+    uint32_t current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    while ((current & ~1u) == value)
+    {
+        if ((current & 1u) == 0)
+        {
+            if (__atomic_compare_exchange_n(word, &current, current | 1u, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+            {
+                current |= 1u;
+            }
+        }
+        else
+        {
+            syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, current, 0, 0, 0);
+            thread_context.sleeps += 1;
+            current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        }
+    }
+    return current & ~1u;
+}
+
+static void* lane_team_thread_main(void* parameter)
+{
+    LaneTeamWorker* worker = parameter;
+    LaneTeam* team = worker->team;
+    thread_context.team = team;
+    worker->pinned = !team->has_cpus || lane_pin(team->cpus[worker->index]);
+    // Request 2 is the initial parked state; publishing completion 2 reports that this worker has attempted its pin.
+    uint32_t request = BUSTER_LANE_TEAM_READY;
+    lane_publish(&worker->completed, request);
+    bool stopping = false;
+    while (!stopping)
+    {
+        request = lane_team_wait(&worker->request, request);
+        stopping = team->stopping;
+        if (!stopping)
+        {
+            thread_context.lane = (Lane){
+                .index = worker->index,
+                .count = team->count,
+                .group = &team->group,
+            };
+            thread_context.taken = 0;
+            thread_context.running = true;
+            team->group.entry(team->group.argument);
+            scratch_release();
+            thread_context.running = false;
+            thread_context.lane = (Lane){ .count = 1 };
+            // Everything the operation wrote, including scratch cleanup, precedes the owner's completion wait.
+            lane_publish(&worker->completed, request);
+        }
+    }
+    thread_context.team = 0;
+    return 0;
+}
+
+// The owner alone calls this, after all dispatched callbacks have returned. Startup uses it for a partial group too.
+static void lane_team_join(LaneTeam* team, uint32_t created)
+{
+    team->stopping = true;
+    for (uint32_t i = 1; i < created; i += 1)
+    {
+        LaneTeamWorker* worker = &team->workers[i];
+        worker->issued += 2;
+        lane_publish(&worker->request, worker->issued);
+    }
+    for (uint32_t i = 1; i < created; i += 1)
+    {
+        pthread_join(team->workers[i].thread, 0);
+    }
+    *team = (LaneTeam){ 0 };
+}
+
+static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* cpus)
+{
+    bool result = team != 0 && capacity >= 1 && capacity <= BUSTER_LANE_MAX_COUNT && thread_context.team == 0 && !thread_context.running;
+    result = result && team->capacity == 0;
+    if (result)
+    {
+        *team = (LaneTeam){
+            .capacity = capacity,
+            .owner = pthread_self(),
+            .process = getpid(),
+            .has_cpus = cpus != 0,
+        };
+        if (cpus != 0)
+        {
+            memcpy(team->cpus, cpus, capacity * sizeof(*cpus));
+            uint64_t affinity[BUSTER_LANE_CPU_MASK_WORDS];
+            const bool saved = syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) > 0;
+            result = saved && lane_pin(cpus[0]);
+            if (saved)
+            {
+                result = syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity) == 0 && result;
+            }
+        }
+        uint32_t created = 1;
+        for (uint32_t i = 1; result && i < capacity; i += 1)
+        {
+            LaneTeamWorker* worker = &team->workers[i];
+            worker->team = team;
+            worker->index = i;
+            worker->request = BUSTER_LANE_TEAM_READY;
+            worker->issued = BUSTER_LANE_TEAM_READY;
+            result = pthread_create(&worker->thread, 0, lane_team_thread_main, worker) == 0;
+            created += result ? 1 : 0;
+        }
+        for (uint32_t i = 1; i < created; i += 1)
+        {
+            lane_wait(&team->workers[i].completed, 0);
+            result = team->workers[i].pinned && result;
+        }
+        if (result)
+        {
+            thread_context.team = team;
+        }
+        else
+        {
+            lane_team_join(team, created);
+        }
+    }
+    return result;
+}
+
+static void lane_team_stop(LaneTeam* team)
+{
+    if (team != 0 && thread_context.team == team && !thread_context.running)
+    {
+        if (team->process != getpid())
+        {
+            // fork copied the memory but not the other threads. There is no live group to signal or join here.
+            thread_context.team = 0;
+            *team = (LaneTeam){ 0 };
+        }
+        else if (pthread_equal(team->owner, pthread_self()))
+        {
+            thread_context.team = 0;
+            lane_team_join(team, team->capacity);
+        }
+    }
+}
+
+static bool lane_team_run(LaneTeam* team, uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
+{
+    bool result = !thread_context.running && team->process == getpid() && pthread_equal(team->owner, pthread_self()) &&
+                  count >= 1 && count <= team->capacity && entry != 0 && team->has_cpus == (cpus != 0);
+    for (uint32_t i = 0; result && cpus != 0 && i < count; i += 1)
+    {
+        result = cpus[i] == team->cpus[i];
+    }
+    uint64_t affinity[BUSTER_LANE_CPU_MASK_WORDS];
+    const bool saved = result && cpus != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) > 0;
+    result = result && (cpus == 0 || (saved && lane_pin(cpus[0])));
+    if (result)
+    {
+        team->group = (LaneGroup){
+            .entry = entry,
+            .argument = argument,
+        };
+        team->count = count;
+        const Lane previous = thread_context.lane;
+        const uint64_t taken = thread_context.taken;
+        thread_context.lane = (Lane){
+            .count = count,
+            .group = &team->group,
+        };
+        thread_context.taken = 0;
+        thread_context.running = true;
+        for (uint32_t i = 1; i < count; i += 1)
+        {
+            LaneTeamWorker* worker = &team->workers[i];
+            worker->issued += 2;
+            lane_publish(&worker->request, worker->issued);
+        }
+        entry(argument);
+        for (uint32_t i = 1; i < count; i += 1)
+        {
+            LaneTeamWorker* worker = &team->workers[i];
+            lane_wait(&worker->completed, worker->issued - 2);
+        }
+        thread_context.running = false;
+        thread_context.taken = taken;
+        thread_context.lane = previous;
+    }
+    if (saved)
+    {
+        result = syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity) == 0 && result;
+    }
+    return result;
+}
+
 // The entry point of lane_run's threads.
 static void* lane_thread_main(void* parameter)
 {
@@ -709,13 +953,14 @@ static void* lane_thread_main(void* parameter)
             .count = start->count,
             .group = start->group,
         };
+        thread_context.running = true;
         start->group->entry(start->group->argument);
     }
     scratch_release();
     return 0;
 }
 
-static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
+static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
 {
     LaneGroup group = {
         .entry = entry,
@@ -723,7 +968,7 @@ static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argume
     };
     LaneStart starts[BUSTER_LANE_MAX_COUNT];
     pthread_t threads[BUSTER_LANE_MAX_COUNT];
-    const bool valid = count >= 1 && count <= BUSTER_LANE_MAX_COUNT;
+    const bool valid = count >= 1 && count <= BUSTER_LANE_MAX_COUNT && entry != 0;
     uint32_t created = 1;
     for (uint32_t i = 1; valid && i < count && created == i; i += 1)
     {
@@ -745,16 +990,22 @@ static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argume
         const bool saved = cpus != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) > 0;
         pinned = cpus == 0 || (saved && lane_pin(cpus[0]));
         const Lane previous = thread_context.lane;
+        const uint64_t taken = thread_context.taken;
+        const bool running = thread_context.running;
         thread_context.lane = (Lane){
             .index = 0,
             .count = count,
             .group = &group,
         };
+        thread_context.taken = 0;
+        thread_context.running = true;
         entry(argument);
+        thread_context.running = running;
+        thread_context.taken = taken;
         thread_context.lane = previous;
         if (saved)
         {
-            syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity);
+            pinned = syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity) == 0 && pinned;
         }
     }
     for (uint32_t i = 1; i < created; i += 1)
@@ -763,4 +1014,9 @@ static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argume
         pinned = pinned && starts[i].pinned;
     }
     return started && pinned;
+}
+
+static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
+{
+    return thread_context.team != 0 ? lane_team_run(thread_context.team, count, entry, argument, cpus) : lane_run_cold(count, entry, argument, cpus);
 }
