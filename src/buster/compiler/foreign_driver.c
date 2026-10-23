@@ -9,6 +9,9 @@
 // Foreign and all arenas remain live through writing. Entry lookup uses Foreign's canonical names again after GC's
 // remapping. No source/unwind offsets are consumed after literal merging; its offset map remains live until writing.
 // Unsupported literal expressions retain the unchanged input. Other failures stop before the writer is invoked.
+// Named semantic symbols are selected from the final Link, after all maps. Each lane counts and then compacts its
+// ID range into one checked arena allocation; the ordered prefixes preserve IDs across lanes. The exact twin runs
+// on lane zero. All name loads are logically bounded, and the descriptor lives through writing. -s skips selection.
 
 typedef struct ForeignDriver ForeignDriver;
 struct ForeignDriver
@@ -23,6 +26,7 @@ struct ForeignDriver
     bool gc;
     bool merge_strings;
     bool dedup_unwind;
+    bool strip_all;
     bool help;
 };
 
@@ -30,8 +34,15 @@ typedef struct ForeignDriverWrite ForeignDriverWrite;
 struct ForeignDriverWrite
 {
     Link* link;
+    Arena* arena;
     ExecutableOptions options;
+    ExecutableSymbols symbols;
+    SymbolId* selected;
+    uint32_t counts[BUSTER_LANE_MAX_COUNT];
+    uint32_t offsets[BUSTER_LANE_MAX_COUNT];
     ExecutableResult result;
+    bool strip_all;
+    bool symbols_ready;
     bool succeeded;
 };
 
@@ -40,12 +51,13 @@ static void foreign_driver_usage(void)
     fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static|-pie] [--dynamic-linker PATH]\n"
                     "                    [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
                     "                    [--dedup-unwind|--no-dedup-unwind]\n"
-                    "                    [--scalar] [--lanes N] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
+                    "                    [-s|--strip-all] [--scalar] [--lanes N] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
                     "Defaults: static executable, a.out, entry _start, one lane; GC, string merging and unwind deduplication off.\n"
                     "Supply startup objects and runtime libraries explicitly, in link order.\n"
                     "Use -pie for C runtime startup; static output currently supports no-libc inputs.\n"
                     "Shared-library and static-PIE outputs are not supported by this command yet.\n"
                     "Static output searches archives by default; PIE output prefers shared libraries.\n"
+                    "Named regular symbols are emitted by default; -s/--strip-all omits them, preserving dynamic symbols.\n"
                     "Archive groups, --whole-archive, --as-needed, -Bstatic and -Bdynamic retain input order.\n");
 }
 
@@ -156,6 +168,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         {
             driver->path = FOREIGN_PATH_EXACT;
         }
+        else if (strcmp(argument, "-s") == 0 || strcmp(argument, "--strip-all") == 0)
+        {
+            driver->strip_all = true;
+        }
         else if (strcmp(argument, "--help") == 0 || strcmp(argument, "-h") == 0)
         {
             driver->help = true;
@@ -243,10 +259,99 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
     }
 }
 
+// Conversion has already checked the Link. Nonzero NameIds denote nonempty names; original STT_FILE rows and
+// unnamed STT_SECTION bookkeeping are not present in this selection. Count/fill read only the final name column.
+static uint32_t foreign_driver_symbols_exact(const NameId* names, Range64 range, SymbolId* ids)
+{
+    uint32_t count = 0;
+    #pragma clang loop vectorize(disable) interleave(disable)
+    for (uint64_t i = range.begin; i < range.end; i += 1)
+    {
+        if (names[i] != 0)
+        {
+            if (ids != 0)
+            {
+                ids[count] = (SymbolId)i;
+            }
+            count += 1;
+        }
+    }
+    return count;
+}
+
+static uint32_t foreign_driver_symbols_vector(const NameId* names, Range64 range, SymbolId* ids)
+{
+    uint32_t count = 0;
+    const __m512i sequence = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint64_t first = range.begin; first < range.end; first += 16)
+    {
+        const uint32_t length = range.end - first < 16 ? (uint32_t)(range.end - first) : 16;
+        const __mmask16 active = (__mmask16)((1u << length) - 1);
+        const __m512i named = _mm512_maskz_loadu_epi32(active, names + first);
+        const __mmask16 selected = _mm512_cmpneq_epi32_mask(named, _mm512_setzero_si512());
+        const uint32_t added = (uint32_t)__builtin_popcount((uint32_t)selected);
+        if (ids != 0)
+        {
+            const __m512i values = _mm512_add_epi32(sequence, _mm512_set1_epi32((int)first));
+            const __m512i packed = _mm512_maskz_compress_epi32(selected, values);
+            _mm512_mask_storeu_epi32(ids + count, (__mmask16)((1u << added) - 1), packed);
+        }
+        count += added;
+    }
+    return count;
+}
+
+static void foreign_driver_symbols(ForeignDriverWrite* write)
+{
+    const uint32_t lane = lane_index();
+    // A converted, checked Link always includes symbol zero, even when no named symbol survives.
+    const uint32_t count = write->link->symbols.count - 1;
+    const Range64 part = lane_range(count);
+    const Range64 range = write->options.exact ? (Range64){ .begin = lane == 0 ? 1 : (uint64_t)count + 1, .end = (uint64_t)count + 1 } :
+                                               (Range64){ .begin = part.begin + 1, .end = part.end + 1 };
+    const NameId* names = write->link->symbols.name;
+    write->counts[lane] = write->options.exact ? foreign_driver_symbols_exact(names, range, 0) : foreign_driver_symbols_vector(names, range, 0);
+    lane_sync();
+    if (lane == 0)
+    {
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < lane_count(); i += 1)
+        {
+            write->offsets[i] = (uint32_t)total;
+            total += write->counts[i];
+        }
+        // Every selected ID belongs to one disjoint subrange of the checked 32-bit symbol column.
+        const bool bounded = total <= count;
+        write->selected = bounded && total != 0 ? BUSTER_ARENA_PUSH_ARRAY(write->arena, SymbolId, total) : 0;
+        write->symbols_ready = bounded && (total == 0 || write->selected != 0);
+        write->symbols = (ExecutableSymbols){ .ids = write->selected, .count = (uint32_t)total };
+        write->options.symbols = &write->symbols;
+        write->result.error = write->symbols_ready ? EXECUTABLE_ERROR_NONE : EXECUTABLE_ERROR_MEMORY;
+    }
+    lane_sync();
+    if (write->symbols_ready && write->counts[lane] != 0)
+    {
+        SymbolId* ids = write->selected + write->offsets[lane];
+        if (write->options.exact)
+        {
+            foreign_driver_symbols_exact(names, range, ids);
+        }
+        else
+        {
+            foreign_driver_symbols_vector(names, range, ids);
+        }
+    }
+    lane_sync();
+}
+
 static void foreign_driver_write_lane(void* argument)
 {
     ForeignDriverWrite* write = argument;
-    const bool succeeded = executable_write(write->link, &write->options, &write->result);
+    if (!write->strip_all)
+    {
+        foreign_driver_symbols(write);
+    }
+    const bool succeeded = write->symbols_ready && executable_write(write->link, &write->options, &write->result);
     if (lane_index() == 0)
     {
         write->succeeded = succeeded;
@@ -357,12 +462,15 @@ static int run_foreign_link(int argc, char** argv)
     {
         ForeignDriverWrite write = {
             .link = &converted.link,
+            .arena = &arena,
             .options = {
                 .path = driver.output,
                 .entry = foreign_driver_entry(&driver, &foreign, &converted),
                 .dynamic = driver.kind == RUNTIME_KIND_DYNAMIC ? &converted.dynamic : 0,
                 .exact = driver.path == FOREIGN_PATH_EXACT,
             },
+            .strip_all = driver.strip_all,
+            .symbols_ready = true,
         };
         succeeded = lane_run(driver.lanes, foreign_driver_write_lane, &write, 0) && write.succeeded;
         if (!succeeded)

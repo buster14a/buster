@@ -186,6 +186,7 @@ static ForeignDriverPipelineImage foreign_driver_pipeline_image(ForeignTestTally
         // The four original functions are exactly mov imm32,%eax; ret. Distinct immediates identify each owner
         // without asking the converter for its maps; the losing COMDAT's 99 is never an allowed owner.
         static const uint32_t expected[] = { 23, 11, 8, 101 };
+        uint64_t owner_addresses[BUSTER_ARRAY_LENGTH(expected)] = { 0 };
         uint32_t owners = 0;
         bool functions = records && text->sh_size >= 6;
         for (uint64_t i = 0; functions && i < fde_count; i += 1)
@@ -201,6 +202,10 @@ static ForeignDriverPipelineImage foreign_driver_pipeline_image(ForeignTestTally
                 for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(expected); e += 1)
                 {
                     matched |= immediate == expected[e] ? 1u << e : 0;
+                    if (immediate == expected[e])
+                    {
+                        owner_addresses[e] = (uint64_t)fdes[i].initial;
+                    }
                 }
                 functions = code[0] == 0xb8 && code[5] == 0xc3 && matched != 0 && (owners & matched) == 0;
                 owners |= matched;
@@ -257,7 +262,22 @@ static ForeignDriverPipelineImage foreign_driver_pipeline_image(ForeignTestTally
         }
         addresses = addresses && (strings ? pointers[0] == pointers[1] : pointers[0] != pointers[1]) && rodata->sh_size == sizeof(literal) * (strings ? 1u : 2u);
         foreign_test_expect(tally, addresses, "ABS64 references preserve exact literal bytes and fold only when enabled", name);
-        result.valid = records && functions && indexed && addresses;
+        const ForeignDriverSymbolsTable symbols = foreign_driver_symbols_table(bytes);
+        Elf64_Sym a = { 0 };
+        Elf64_Sym b = { 0 };
+        Elf64_Sym dead = { 0 };
+        Elf64_Sym shared = { 0 };
+        Elf64_Shdr text_section = { 0 };
+        const uint32_t text_index = foreign_driver_symbols_section(&symbols.image, ".text", &text_section);
+        const uint32_t dead_count = foreign_driver_symbols_find(&symbols, "fpipeline_dead", &dead);
+        const bool named = foreign_driver_symbols_find(&symbols, "fpipeline_string_a", &a) == 1 && foreign_driver_symbols_find(&symbols, "fpipeline_string_b", &b) == 1 &&
+                           a.st_value == pointers[0] && b.st_value == pointers[1] && a.st_size == sizeof(literal) && b.st_size == sizeof(literal) &&
+                           a.st_shndx == b.st_shndx && a.st_shndx != SHN_UNDEF && a.st_info == ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT) && a.st_info == b.st_info &&
+                           dead_count == (gc ? 0u : 1u) && (gc || (dead.st_size == 6 && dead.st_shndx == text_index && dead.st_value == owner_addresses[3])) &&
+                           foreign_driver_symbols_find(&symbols, "fpipeline_shared", &shared) == 1 && shared.st_size == 6 && shared.st_info == ELF64_ST_INFO(STB_WEAK, STT_FUNC) &&
+                           functions && text_index != 0 && text_index != UINT32_MAX && shared.st_shndx == text_index && shared.st_value == owner_addresses[0];
+        foreign_test_expect(tally, named, "regular symbols use final pooled addresses and omit GC/COMDAT losers", name);
+        result.valid = records && functions && indexed && addresses && named;
     }
     return result;
 }

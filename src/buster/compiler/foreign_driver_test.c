@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Raw link-foreign command tests. foreign_test.c includes this after the dynamic test helpers. Every link starts a
-// fresh /proc/self/exe; no converter or driver implementation is called by the tests. Original assembly supplies
+// fresh /proc/self/exe; only the guarded selection-kernel checks call driver internals. Original assembly supplies
 // its own entry and syscall exit, except the main-only fixture that checks explicitly supplied system CRT inputs.
 // The output starts as a sentinel, so both successful replacement and failure preservation are observable. Archive
 // winners, scoped input options, GC, string pooling and dynamic dependencies are checked in the resulting programs.
@@ -116,6 +116,8 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
         .name = "fdriver_option_names",
         .text = ".section .text.option_a,\"ax\",@progbits\n.globl \"--gc-sections\"\n.type \"--gc-sections\",@function\n\"--gc-sections\":\nmov $0x13ab47e1,%eax\nret\n"
                 ".section .text.option_b,\"ax\",@progbits\n.globl \"--scalar\"\n.type \"--scalar\",@function\n\"--scalar\":\nmov $0x35cd68f2,%eax\nret\n"
+                ".section .text.option_c,\"ax\",@progbits\n.globl \"-s\"\n.type \"-s\",@function\n\"-s\":\nmov $11,%eax\nret\n"
+                ".section .text.option_d,\"ax\",@progbits\n.globl \"--strip-all\"\n.type \"--strip-all\",@function\n\"--strip-all\":\nmov $13,%eax\nret\n"
                 ".section .note.GNU-stack,\"\",@progbits\n",
     },
     [FOREIGN_DRIVER_TEST_ABSOLUTE] = {
@@ -350,6 +352,8 @@ static void foreign_driver_test_structure(ForeignTestTally* tally, String8 bytes
     foreign_test_expect(tally, interpreters == (interpreter.length != 0 ? 1u : 0u), "driver emits expected interpreter count", name);
 }
 
+#include "buster/compiler/foreign_driver_symbols_test.c"
+
 static void foreign_driver_test_paths(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, String8 interpreter)
 {
     uint64_t baseline_text_size = UINT64_MAX;
@@ -400,6 +404,11 @@ static void foreign_driver_test_paths(ForeignTestTally* tally, const char* direc
                     const ExecutableTestImage image = executable_test_image(bytes);
                     const Elf64_Shdr* text = executable_test_section(&image, ".text");
                     foreign_test_expect(tally, text != 0 && text->sh_size == baseline_text_size, "GC output has only the baseline entry's code", name);
+                    const ForeignDriverSymbolsTable table = foreign_driver_symbols_table(bytes);
+                    Elf64_Sym symbol;
+                    foreign_test_expect(tally, table.valid && foreign_driver_symbols_find(&table, "driver_dead", &symbol) == 0 &&
+                                              foreign_driver_symbols_find(&table, "driver_missing", &symbol) == 0,
+                                        "GC dead definitions and references are omitted, never fake undefined rows", name);
                 }
                 else if (fixture == 0 && path == 0 && l == 0)
                 {
@@ -557,6 +566,42 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
             },
             .success = true,
             .status = 42,
+        },
+        {
+            .name = "strip_option_named_symbols",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_START],
+                (char*)"--gc-sections",
+                (char*)"-u",
+                (char*)"-s",
+                (char*)"--undefined",
+                (char*)"--strip-all",
+                files->options,
+            },
+            .success = true,
+            .status = 42,
+        },
+        {
+            .name = "strip_reject_value",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_START],
+                (char*)"--strip-all=false",
+            },
+        },
+        {
+            .name = "strip_reject_joined",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_START],
+                (char*)"-sfoo",
+            },
+        },
+        {
+            .name = "stripped_undefined",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_START],
+                (char*)"-s",
+                files->objects[FOREIGN_DRIVER_TEST_DEAD],
+            },
         },
         {
             .name = "default_static_search",
@@ -792,6 +837,15 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
             }
             foreign_test_expect(tally, found_first && found_second, "both option-looking forced roots retain their distinct code through GC", test->name);
         }
+        else if (strcmp(test->name, "strip_option_named_symbols") == 0)
+        {
+            const ForeignDriverSymbolsTable table = foreign_driver_symbols_table(bytes);
+            Elf64_Sym short_name = { 0 };
+            Elf64_Sym long_name = { 0 };
+            foreign_test_expect(tally, foreign_driver_symbols_find(&table, "-s", &short_name) == 1 && foreign_driver_symbols_find(&table, "--strip-all", &long_name) == 1 &&
+                                      short_name.st_shndx != SHN_UNDEF && long_name.st_shndx != SHN_UNDEF,
+                                "strip-looking undefined values remain named GC roots without stripping", test->name);
+        }
     }
     ForeignTestPath missing;
     snprintf(missing, sizeof(missing), "%s/fdriver_missing.o", directory);
@@ -807,8 +861,8 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
     foreign_driver_test_invoke(tally, directory, "joined_output", "--output=FILE", joined, BUSTER_ARRAY_LENGTH(joined), true, 42, arena);
 }
 
-// The production writer currently emits no regular symbol table. The original fixtures put two relocated
-// addresses in their only DATA atom and read them at runtime, so pooling/fallback is observable in the artifact.
+// The original fixtures put two relocated addresses in their only DATA atom and read them at runtime. This oracle
+// inspects those addresses independently of the regular symbol table, so it cannot pass from metadata alone.
 static bool foreign_driver_test_string_values(String8 bytes, uint64_t* first, uint64_t* second)
 {
     const ExecutableTestImage image = executable_test_image(bytes);
@@ -1045,6 +1099,7 @@ static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_
     if (found && foreign_driver_test_compile(&tally, directory, &files, arena))
     {
         foreign_driver_test_paths(&tally, directory, &files, arena, runtime.loader_path);
+        foreign_driver_symbols_test(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_test_cases(&tally, directory, &files, arena);
         foreign_driver_test_strings(&tally, directory, &files, arena);
         foreign_driver_test_dynamic(&tally, directory, &files, arena, system, runtime.loader_path);
