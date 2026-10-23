@@ -323,6 +323,8 @@ jobs:
           ./build/compiler test-link
           == Test dataflow bitsets
           ./build/compiler test-dataflow
+          == Test dominators, frontiers and natural loops
+          ./build/compiler test-dominators
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS

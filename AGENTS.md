@@ -160,6 +160,13 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `dominators.c` analyzes borrowed CFG columns into dominance intervals,
+  optional frontier bitsets and natural loops. `test-dominators` checks both
+  paths against independent graph definitions; `benchmark-dominators` includes
+  analysis and synthetic producer/consumer measurements. [The dominator
+  guide](docs/dominators.md) records memory limits and pending corpus evidence.
+  Take the shared 9700X lock per build/test/measurement and pin timing to CPU 2.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
