@@ -117,6 +117,27 @@ numbers cannot establish whole `-g` compilation performance or a benefit from
 streaming during compilation. Run each build, test and measurement under the
 9700X's shared lock, with measurements pinned to CPU 2.
 
+On October 23, 2026, three separate processes on the approved 9700X, each
+locked and pinned to CPU 2, measured frozen head
+`7966b9f3fa87b4d3a71e0cc96262ef009c1a23ee`. The ranges below are the three
+process medians, each based on 21 passes:
+
+| Functions × rows | Output bytes | Scalar ns/row | Vector ns/row |
+| --- | ---: | ---: | ---: |
+| 16 × 4 | 1,232 | 6.753–6.806 | 5.689–5.714 |
+| 4,096 × 64 | 1,523,425 | 4.070–4.095 | 2.143–2.148 |
+| 65,536 × 64 | 24,583,906 | 4.174–4.192 | 2.207–2.226 |
+
+The default vector runs used 11.879–11.907 user cycles per row, versus
+22.551–22.671 for scalar. Separate scalar-only processes measured
+4.072–4.124 ns/row; vector-only processes measured 2.141–2.152 ns/row.
+Vector measurements after 100 ms of scalar emission were 2.146–2.157 ns/row.
+The larger case uses 32 MiB of row input plus roughly 23.4 MiB of output,
+exceeding the processor's 32 MiB L3. These are complete emitter measurements
+with reused buffers, not cold-cache or whole-compilation claims. The built
+compiler's SHA-256 was
+`2277f30a1d90d71f6a53782dcc57179e9566f81d01d7765e75754d9108798966`.
+
 ## Checks
 
 `test-debug` compares the scalar and vector bytes, independently decodes every
@@ -138,6 +159,23 @@ single sampled leaf-to-outer-to-start call chain with its source line. External
 command failure, missing samples or missing consumer tools fail the check.
 This validates the new debug bytes and native writer attachment with real
 consumers; GNU as remains the fixture's unwind-information producer.
+
+The [required 9700X run for PR #329](https://github.com/buster14a/buster/actions/runs/39937746848)
+passed on October 23, 2026. It tested merge result
+`b053b9a7a429a5f26f8b9f3c940b491e942f161e`, combining submitted head
+`7966b9f3fa87b4d3a71e0cc96262ef009c1a23ee` with main
+`6d79b50760b1e93f74d0abd8f2f20b4d6f2b081a`. All 47 test commands passed,
+including 103 native debug checks, GDB and perf for both GNU ld and native
+output, and 48 loaded-segment mapping checks. The executable, dynamic, static,
+foreign and no-recursion checks also passed. This is merge-result correctness
+evidence; the workflow's single emitter timing is not repeated CPU-2 performance
+acceptance or a whole-compilation measurement.
+
+A separate build of the exact submitted head, from a 149-file source manifest,
+also passed `test-debug --cross-check --keep` under the shared lock on CPU 2.
+It passed the emitter and protected-tail checks, all 103 native attachment
+checks, and the GDB/perf checks for both GNU ld and Buster output. This is
+standalone-head consumer evidence, separate from the hosted merge result.
 
 ## Remaining integration for #88
 
