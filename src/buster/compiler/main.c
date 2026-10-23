@@ -261,6 +261,15 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 
+// Verified Tier 1 optimization passes and independent before/after semantic tests.
+#include "buster/compiler/ir_optimize.c"
+#include "buster/compiler/ir_optimize_test.c"
+#include "buster/compiler/ir_optimize_benchmark.c"
+#include "buster/compiler/ir_optimize_gvn.c"
+#include "buster/compiler/ir_optimize_gvn_test.c"
+#include "buster/compiler/ir_optimize_licm.c"
+#include "buster/compiler/ir_optimize_licm_test.c"
+
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
 #include "buster/compiler/call_graph.c"
@@ -592,6 +601,22 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-lowering") == 0)
     {
         result = run_ir_lower_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-optimize") == 0)
+    {
+        result = run_ir_optimize_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-gvn") == 0)
+    {
+        result = run_ir_gvn_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-licm") == 0)
+    {
+        result = run_ir_licm_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize") == 0)
+    {
+        result = run_ir_optimize_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {
