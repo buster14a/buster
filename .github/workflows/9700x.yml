@@ -306,6 +306,13 @@ jobs:
           ./build/compiler test-ir-gvn
           ./build/compiler test-ir-licm
           ./build/compiler test-ir-sroa
+          == Test differential harness accounting, subprocesses and failure preservation
+          ./build/compiler test-differential-harness
+          == Test Tier 1 allocation, reload splitting and rematerialization
+          ./build/compiler test-tier1-allocation
+          == Test Tier 1 frame planning and slot coloring
+          ./build/compiler test-tier1-frame
+          ./build/compiler test-tier1-frame-execution
           == Test experimental Tier 1 scheduling and model coverage
           ./build/compiler test-tier1-schedule
           # This bounded smoke also executes original and reordered machine code against its independent reference.
@@ -329,6 +336,8 @@ jobs:
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins
+          == Test typed postorder checking and source fixtures
+          ./build/compiler test-checker --seed 133
           == Test the per-file jobs on the repository's sources, flat
           ./build/compiler test-files --flat src
           == Test the link representation
@@ -654,6 +663,12 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-calling-convention
+
+      - name: Benchmark typed postorder checking on synthetic graphs
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-checker --shape wide
+          taskset -c "$cpu" ./build/compiler benchmark-checker --shape chain --nodes 4096
 
       - name: Benchmark the backend (Tier 0, branch sizing and encoding)
         run: |
