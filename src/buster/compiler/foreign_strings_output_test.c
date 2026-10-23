@@ -86,7 +86,9 @@ static const ForeignStringsOutputFixture foreign_strings_output_fixtures[] = {
     },
     {
         .name = "fs_fallback",
-        .reference = "lea .rodata.str1.1+9(%rip),%rax\n",
+        // PC32 stores expression minus the instruction's four-byte bias. Keep its raw section addend at entry 9,
+        // then undo the CPU's bias explicitly; addend 5 would name the previous entry before GNU/lld merging.
+        .reference = "lea .rodata.str1.1+13(%rip),%rax\nsub $4,%rax\n",
         .section_pc = true,
     },
     {
