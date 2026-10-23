@@ -11,13 +11,20 @@ test corpus is imported.
 The current producers are `ir_lower_typed` / `ir_lower_typed_scalar`, the
 handwritten IR fixtures and the synthetic benchmark. Consumers are the two
 verifiers, CFG and use-list builders, printer, and the lowering tests' independent
-executor. The source driver still preprocesses and parses; this change does not
-claim that it produces typed streams for arbitrary C functions.
+executor. The default `compiler file.c` driver remains the parser's driver.
+The merged `check` command produces checked expression graphs and supported
+scalar static data, but it does not yet produce executable per-function streams.
+This IR currently consumes the generated or explicitly constructed
+`Tier0Function` contract.
 
 The remaining acceptance of #131 is explicit:
 
-- #133 must supply complete source-function streams, including C control flow
-  and prototype information, before every corpus function can be lowered here.
+- Complete the executable source-function handoff from #129/#133 to this IR.
+  The merged checker retains checked expression graphs, explicit conversions,
+  declaration/object identities and function prototypes. Per-function body
+  membership, ordered parameters and locals, executable control-flow targets,
+  and backend call descriptors still require integration. Lowering every corpus
+  function, including SQLite, also needs the required frontend language coverage.
 - #134 and #138 must use the verifier/printer after SSA construction and Tier 1
   passes. They can consume the columns below without an instruction-list adapter.
 - #174 must provide dominator-tree intervals for complete cross-block SSA
@@ -216,9 +223,11 @@ return for nonvoid fallthrough, whose value the existing stream leaves unspecifi
 The caller must diagnose source-language constraints before lowering. The adapter
 handles all currently defined typed kinds and classes; it does not invent missing
 i128/f80, indirect-call, volatile, aggregate or prototype information. In particular,
-the stream provides argument classes and a variadic bit but no named-parameter
-count: the compatibility adapter checks all supplied classes as fixed parameters.
-A complete #133 producer must provide the actual C prototype boundary.
+the legacy stream provides argument classes and a variadic bit but no
+named-parameter count: this compatibility adapter checks all supplied classes as
+fixed parameters. A source producer must preserve the effective call-site
+prototype and conversions already retained by the checker when constructing
+`IrCall` descriptors.
 
 The returned IR is verified before publication. All count, allocation and invalid
 input failures preserve the caller's result and reclaim temporary memory. Scalar
