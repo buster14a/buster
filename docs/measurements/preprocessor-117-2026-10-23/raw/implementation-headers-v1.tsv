@@ -1,0 +1,12 @@
+status	path	tokens	reason
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/calling_convention_test.c	69664	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main.c	2476656	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_assembler.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_backend.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_dynamic.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_executable.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_frontend.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_link.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_types.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/main_unit_x86.c	2476497	
+identical	/home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/src/buster/compiler/parallel.c	20188	

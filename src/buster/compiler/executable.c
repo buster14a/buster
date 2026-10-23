@@ -30,8 +30,8 @@
 // _GLOBAL_OFFSET_TABLE_ for all four, and _DYNAMIC for the PIEs.
 //
 // The image, at BUSTER_EXECUTABLE_BASE (or a PIE's at 0, which the loader places), is lld's: four PT_LOAD segments in
-// lld's order, each from the next page at its file offset's place in a page (4 KB-congruent, with contiguous file
-// offsets and no file padding):
+// lld's order, each from the next page at its file offset's place in a page. File offsets equal virtual offsets from
+// the image base (4 KB-congruent), with zero-filled gaps between loads so consumers recover one mapping base:
 //   - R: the ELF header and program headers (which a program finds through AT_PHDR), a PIE's .interp, .note.ABI-tag
 //     (with the C runtime), .note.gnu.build-id, a PIE's .dynsym, .gnu.version, .gnu.version_r, .gnu.hash, .dynstr,
 //     .rela.dyn and .relr.dyn, a static executable's .rela.iplt (with the C runtime), .rodata (RODATA atoms, then
@@ -232,8 +232,32 @@ typedef enum ExecutableSection
     EXECUTABLE_SECTION_GOT,
     EXECUTABLE_SECTION_DATA,
     EXECUTABLE_SECTION_BSS,
+    EXECUTABLE_SECTION_DEBUG_INFO,
+    EXECUTABLE_SECTION_DEBUG_ABBREV,
+    EXECUTABLE_SECTION_DEBUG_LINE,
+    EXECUTABLE_SECTION_DEBUG_ADDR,
+    EXECUTABLE_SECTION_DEBUG_RNGLISTS,
+    EXECUTABLE_SECTION_SYMTAB,
+    EXECUTABLE_SECTION_STRTAB,
     EXECUTABLE_SECTION_COUNT,
 } ExecutableSection;
+
+#define BUSTER_EXECUTABLE_DEBUG_SECTIONS 5
+
+// One DWARF 5 contribution emitted by debug.c (info, abbrev, line, addr, rnglists in that order). The caller keeps all
+// slices alive and unchanged for executable_write; no padding is required. The writer copies the bytes, then patches
+// function addresses into .debug_addr[8 + 8*i] and .debug_line[line_addresses[i]]. Function ids describe ordinary TEXT
+// definitions, not imports, IFUNCs or stubs. These addresses describe the definitions even if ELF interposition changes
+// references to them. The producer must match the emitted function order and sizes to these definitions. Different
+// contributions require section-offset rebasing before they can share this descriptor.
+typedef struct ExecutableDebug ExecutableDebug;
+struct ExecutableDebug
+{
+    String8 sections[BUSTER_EXECUTABLE_DEBUG_SECTIONS];
+    const SymbolId* functions;
+    const uint32_t* line_addresses;
+    uint32_t function_count;
+};
 
 typedef enum ExecutableError
 {
@@ -389,6 +413,8 @@ struct ExecutableOptions
     // For the static runtime, what it has besides: a static executable's that links the C runtime, or with `dynamic`
     // a static PIE's (dynamic.c's dynamic_static_pie_inputs fills both); 0 for one without, and for a dynamic PIE.
     const ExecutableRuntime* runtime;
+    // Optional caller-produced DWARF bytes, finalized with this layout and written outside the loaded segments.
+    const ExecutableDebug* debug;
     // For the tests: a dynamic PIE's passes by their exact twins, scalar, which must write the same file.
     bool exact;
     // For the tests, or null: room for `boundary_capacity` of the chunks' boundaries, which lane 0 copies there (as many
@@ -1258,6 +1284,13 @@ static const char* const executable_section_names[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_GOT] = ".got",
     [EXECUTABLE_SECTION_DATA] = ".data",
     [EXECUTABLE_SECTION_BSS] = ".bss",
+    [EXECUTABLE_SECTION_DEBUG_INFO] = ".debug_info",
+    [EXECUTABLE_SECTION_DEBUG_ABBREV] = ".debug_abbrev",
+    [EXECUTABLE_SECTION_DEBUG_LINE] = ".debug_line",
+    [EXECUTABLE_SECTION_DEBUG_ADDR] = ".debug_addr",
+    [EXECUTABLE_SECTION_DEBUG_RNGLISTS] = ".debug_rnglists",
+    [EXECUTABLE_SECTION_SYMTAB] = ".symtab",
+    [EXECUTABLE_SECTION_STRTAB] = ".strtab",
 };
 
 static const uint32_t executable_section_types[EXECUTABLE_SECTION_COUNT] = {
@@ -1288,6 +1321,13 @@ static const uint32_t executable_section_types[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_GOT] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_DATA] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_BSS] = SHT_NOBITS,
+    [EXECUTABLE_SECTION_DEBUG_INFO] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_ABBREV] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_LINE] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_ADDR] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_RNGLISTS] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_SYMTAB] = SHT_SYMTAB,
+    [EXECUTABLE_SECTION_STRTAB] = SHT_STRTAB,
 };
 
 static const uint64_t executable_section_flags[EXECUTABLE_SECTION_COUNT] = {
@@ -1351,6 +1391,7 @@ static const uint64_t executable_section_entry_bytes[EXECUTABLE_SECTION_COUNT] =
     [EXECUTABLE_SECTION_FINI_ARRAY] = 8,
     [EXECUTABLE_SECTION_DYNAMIC] = sizeof(Elf64_Dyn),
     [EXECUTABLE_SECTION_GOT] = 8,
+    [EXECUTABLE_SECTION_SYMTAB] = sizeof(Elf64_Sym),
 };
 
 static const uint8_t executable_section_links[EXECUTABLE_SECTION_COUNT] = {
@@ -1360,6 +1401,7 @@ static const uint8_t executable_section_links[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_GNU_HASH] = EXECUTABLE_SECTION_DYNSYM,
     [EXECUTABLE_SECTION_RELA_DYN] = EXECUTABLE_SECTION_DYNSYM,
     [EXECUTABLE_SECTION_DYNAMIC] = EXECUTABLE_SECTION_DYNSTR,
+    [EXECUTABLE_SECTION_SYMTAB] = EXECUTABLE_SECTION_STRTAB,
 };
 
 static const uint8_t executable_linker_before[EXECUTABLE_SECTION_COUNT] = {
@@ -1669,7 +1711,7 @@ struct ExecutableSegmentLayout
 #define BUSTER_EXECUTABLE_MAX_PROGRAM_HEADERS 12
 // Section headers: the null one, the sections with bytes or memory, and .shstrtab.
 #define BUSTER_EXECUTABLE_MAX_SECTION_HEADERS (EXECUTABLE_SECTION_COUNT + 2)
-#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 272
+#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 368
 
 // What every lane computes alike from the counts: where the sections, the segments and each bucket go.
 typedef struct ExecutableLayout ExecutableLayout;
@@ -1713,6 +1755,7 @@ struct ExecutableLayout
     uint64_t shstrtab_size;
     uint64_t section_headers_offset;
     uint32_t section_header_count;
+    uint32_t debug_local_count;
     uint64_t piece_count;
     uint64_t image_size;
     uint64_t file_size;
@@ -1855,7 +1898,7 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     uint64_t address = layout->header_bytes;
     uint32_t segment = EXECUTABLE_SEGMENT_R;
     layout->segments[EXECUTABLE_SEGMENT_R] = (ExecutableSegmentLayout){ 0 };
-    for (uint32_t section = 0; section < EXECUTABLE_SECTION_COUNT; section += 1)
+    for (uint32_t section = 0; section < EXECUTABLE_SECTION_DEBUG_INFO; section += 1)
     {
         if (segment + 1 < EXECUTABLE_SEGMENTS && section == first_sections[segment + 1])
         {
@@ -1864,6 +1907,10 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
             previous->memory_size = address - previous->address;
             segment += 1;
             address = executable_align(address, BUSTER_EXECUTABLE_PAGE_BYTES) + (offset & (BUSTER_EXECUTABLE_PAGE_BYTES - 1));
+            // Keep one mapping base for every loaded segment. perf/libdw identifies a module by map.start-pgoff;
+            // compact file offsets with distinct virtual pages make it report overlapping modules while unwinding.
+            // The gaps are page multiples, so virtual addresses and their page congruence stay unchanged.
+            offset = layout->has_segment[segment] ? address : offset;
             layout->segments[segment].address = executable_align(address, section_alignment[section]);
             layout->segments[segment].offset = executable_align(offset, section_alignment[section]);
         }
@@ -1941,6 +1988,18 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
         }
     }
     layout->got_slots = got_slots;
+    // Debug bytes are ordinary pieces after every loaded segment. Their section addresses and flags remain zero;
+    // they do not extend the image, the TLS block, _edata or any program header.
+    for (uint32_t section = EXECUTABLE_SECTION_DEBUG_INFO; section < EXECUTABLE_SECTION_COUNT; section += 1)
+    {
+        ExecutableSectionLayout* placed = &layout->sections[section];
+        placed->alignment = section == EXECUTABLE_SECTION_SYMTAB ? 8 : 1;
+        placed->offset = executable_align(offset, placed->alignment);
+        placed->size = section_bytes[section];
+        layout->section_piece[section] = placed->size != 0 ? piece : 0;
+        piece += placed->size != 0 ? 1 : 0;
+        offset = placed->size != 0 ? placed->offset + placed->size : offset;
+    }
     // .shstrtab: a NUL, then the names of the sections with a size and its own, each with its NUL.
     layout->shstrtab_size = 1 + sizeof(".shstrtab");
     layout->section_header_count = 2;
@@ -2119,13 +2178,14 @@ static void executable_write_headers(ExecutableHeaders* headers, const Executabl
                 .sh_name = name,
                 .sh_type = executable_section_types[section],
                 .sh_flags = executable_section_flags[section],
-                .sh_addr = layout->base + placed->address,
+                .sh_addr = (executable_section_flags[section] & SHF_ALLOC) != 0 ? layout->base + placed->address : 0,
                 .sh_offset = placed->offset,
                 .sh_size = placed->size,
                 .sh_link = linked != 0 ? layout->section_index[linked] : 0,
                 // .dynsym's first global symbol (only the null symbol is local), .gnu.version_r's entries (one per
                 // library with a needed version, which readelf -V reads it for) and .rela.iplt's section.
                 .sh_info = section == EXECUTABLE_SECTION_DYNSYM        ? 1
+                           : section == EXECUTABLE_SECTION_SYMTAB      ? 1 + layout->debug_local_count
                            : section == EXECUTABLE_SECTION_VERNEED     ? verneed_records
                            : section == EXECUTABLE_SECTION_RELA_IPLT ? layout->section_index[EXECUTABLE_SECTION_GOT]
                                                                        : 0,
@@ -2923,7 +2983,7 @@ static void executable_linker_values(const ExecutableLayout* layout, uint64_t* v
     for (uint32_t section = 0; section < EXECUTABLE_SECTION_COUNT; section += 1)
     {
         const ExecutableSectionLayout* placed = &layout->sections[section];
-        const bool bytes = placed->size != 0 && executable_section_types[section] != SHT_NOBITS;
+        const bool bytes = placed->size != 0 && executable_section_types[section] != SHT_NOBITS && (executable_section_flags[section] & SHF_ALLOC) != 0;
         data_end = bytes && placed->address + placed->size > data_end ? placed->address + placed->size : data_end;
     }
     const uint64_t text_end = layout->has_segment[EXECUTABLE_SEGMENT_RX] ? text->address + text->memory_size : layout->header_bytes;
@@ -5623,7 +5683,7 @@ static bool executable_prepare(Arena* arena, ExecutableShared* shared, const Exe
     for (uint32_t section = 0; result && section < EXECUTABLE_SECTION_COUNT; section += 1)
     {
         const bool own = section != EXECUTABLE_SECTION_BUILD_ID && section != EXECUTABLE_SECTION_GOT && executable_linker_before[section] != BUSTER_LINK_CLASS_COUNT &&
-                         (layout->crt || section == EXECUTABLE_SECTION_EH_FRAME_HDR);
+                         (layout->crt || section == EXECUTABLE_SECTION_EH_FRAME_HDR || section >= EXECUTABLE_SECTION_DEBUG_INFO);
         const uint64_t size = layout->sections[section].size;
         shared->section_bytes[section] = own && size != 0 ? arena_push_array(arena, size, 1, 8) : 0;
         result = !own || size == 0 || shared->section_bytes[section] != 0;
@@ -5912,6 +5972,96 @@ static bool executable_dynamic_valid(const ExecutableDynamic* dynamic)
     return valid;
 }
 
+// Descriptor bounds before allocating or copying debug bytes. Format interpretation belongs to debug.c; the writer
+// checks its address slots and symbol definitions, so a malformed descriptor cannot patch headers or escape a slice.
+static bool executable_debug_valid(const Link* link, const ExecutableDebug* debug)
+{
+    bool valid = true;
+    if (debug != 0)
+    {
+        for (uint32_t section = 0; section < BUSTER_EXECUTABLE_DEBUG_SECTIONS; section += 1)
+        {
+            valid &= debug->sections[section].pointer != 0 && debug->sections[section].length != 0 && debug->sections[section].length < 0xfffffff0u;
+        }
+        valid &= debug->sections[3].length == 8 + 8ull * debug->function_count &&
+                 (debug->function_count == 0 || (debug->functions != 0 && debug->line_addresses != 0));
+        uint64_t previous_end = 0;
+        uint64_t names = 1;
+        for (uint32_t function = 0; valid && function < debug->function_count; function += 1)
+        {
+            const SymbolId symbol = debug->functions[function];
+            const uint64_t offset = debug->line_addresses[function];
+            const String8 line = debug->sections[2];
+            valid = symbol != 0 && symbol < link->symbols.count && offset >= 3 && offset >= previous_end && offset + 8 <= line.length;
+            if (valid)
+            {
+                const AtomId atom = link->symbols.atom[symbol];
+                valid = atom != 0 && atom < link->atoms.count && link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT &&
+                        (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION &&
+                        link->symbols.value[symbol] < link->atoms.size[atom] && link->symbols.size[symbol] <= link->atoms.size[atom] - link->symbols.value[symbol] &&
+                        line.pointer[offset - 3] == 0 && line.pointer[offset - 2] == 9 && line.pointer[offset - 1] == 2;
+                const NameId name = link->symbols.name[symbol];
+                valid = valid && name < link->names.count && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_BINDING;
+                if (valid)
+                {
+                    const uint32_t length = link->names.length[name];
+                    valid = length == 0 || (link->names.bytes[name] != 0 && memchr(link->names.bytes[name], 0, length) == 0);
+                    names += (uint64_t)length + 1;
+                    valid &= names <= UINT32_MAX;
+                }
+            }
+            previous_end = offset + 8;
+        }
+    }
+    return valid;
+}
+
+// Lane 0 after placement: copy caller bytes before patching, preserving them for another output or another layout.
+// .debug_addr and line sequence addresses are the only final-address operands in this bounded contribution.
+static void executable_debug_sections(const Link* link, const ExecutableLayout* layout, ExecutableShared* shared, const ExecutableDebug* debug)
+{
+    for (uint32_t section = 0; section < BUSTER_EXECUTABLE_DEBUG_SECTIONS; section += 1)
+    {
+        memcpy(shared->section_bytes[EXECUTABLE_SECTION_DEBUG_INFO + section], debug->sections[section].pointer, debug->sections[section].length);
+    }
+    uint8_t* addr = shared->section_bytes[EXECUTABLE_SECTION_DEBUG_ADDR];
+    uint8_t* line = shared->section_bytes[EXECUTABLE_SECTION_DEBUG_LINE];
+    Elf64_Sym* symbols = (Elf64_Sym*)shared->section_bytes[EXECUTABLE_SECTION_SYMTAB];
+    uint8_t* strings = shared->section_bytes[EXECUTABLE_SECTION_STRTAB];
+    memset(symbols, 0, sizeof(*symbols));
+    strings[0] = 0;
+    uint32_t name_offset = 1;
+    uint32_t local = 1;
+    uint32_t global = 1 + layout->debug_local_count;
+    for (uint32_t function = 0; function < debug->function_count; function += 1)
+    {
+        const SymbolId symbol = debug->functions[function];
+        const uint64_t address = layout->base + link->atoms.address[link->symbols.atom[symbol]] + link->symbols.value[symbol];
+        memcpy(addr + 8 + 8ull * function, &address, 8);
+        memcpy(line + debug->line_addresses[function], &address, 8);
+        const NameId name = link->symbols.name[symbol];
+        const uint32_t length = link->names.length[name];
+        if (length != 0)
+        {
+            memcpy(strings + name_offset, link->names.bytes[name], length);
+        }
+        strings[name_offset + length] = 0;
+        const bool is_local = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+        const uint32_t index = is_local ? local : global;
+        local += is_local ? 1 : 0;
+        global += is_local ? 0 : 1;
+        symbols[index] = (Elf64_Sym){
+            .st_name = name_offset,
+            .st_info = link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_INFO,
+            .st_other = link->symbols.flags[symbol] >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
+            .st_shndx = layout->section_index[EXECUTABLE_SECTION_TEXT],
+            .st_value = address,
+            .st_size = link->symbols.size[symbol],
+        };
+        name_offset += length + 1;
+    }
+}
+
 static bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result)
 {
     const uint32_t lane = lane_index();
@@ -5974,6 +6124,10 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0,
                              shared->dynamic_counts[lane].unknown_version, 0);
+    }
+    if (ok && lane == 0 && !executable_debug_valid(link, options->debug))
+    {
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
     }
     ExecutableFrames frames = { 0 };
     if (ok)
@@ -6070,11 +6224,30 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         unwind = unwind || shared->counts[other].bytes[executable_bucket(BUSTER_LINK_CLASS_EH_FRAME, 0)] != 0;
     }
     totals.linker_bytes[EXECUTABLE_SECTION_EH_FRAME_HDR] = unwind ? BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES + 8 * fdes : 0;
+    for (uint32_t section = 0; ok && options->debug != 0 && section < BUSTER_EXECUTABLE_DEBUG_SECTIONS; section += 1)
+    {
+        totals.linker_bytes[EXECUTABLE_SECTION_DEBUG_INFO + section] = options->debug->sections[section].length;
+    }
+    if (ok && options->debug != 0)
+    {
+        totals.linker_bytes[EXECUTABLE_SECTION_SYMTAB] = (1 + (uint64_t)options->debug->function_count) * sizeof(Elf64_Sym);
+        totals.linker_bytes[EXECUTABLE_SECTION_STRTAB] = 1;
+        for (uint32_t function = 0; function < options->debug->function_count; function += 1)
+        {
+            const SymbolId symbol = options->debug->functions[function];
+            totals.linker_bytes[EXECUTABLE_SECTION_STRTAB] += 1ull + link->names.length[link->symbols.name[symbol]];
+        }
+    }
     const bool laid_out =
         ok && executable_lay_out(layout, shared->counts, lanes, got_slots + (runtime ? totals.stubs : 0), dynamic, dynamic || runtime, runtime, totals.linker_bytes);
     if (laid_out)
     {
         layout->stub_slot = runtime ? got_slots + 1 : 0;
+        for (uint32_t function = 0; options->debug != 0 && function < options->debug->function_count; function += 1)
+        {
+            const SymbolId symbol = options->debug->functions[function];
+            layout->debug_local_count += (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL ? 1 : 0;
+        }
     }
     if (ok && !laid_out)
     {
@@ -6153,7 +6326,11 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         memcpy(shared->section_bytes[EXECUTABLE_SECTION_ABI_NOTE], options->runtime->note.pointer, options->runtime->note.length);
     }
-    if (dynamic || indexed || runtime)
+    if (ok && options->debug != 0 && lane == 0)
+    {
+        executable_debug_sections(link, layout, shared, options->debug);
+    }
+    if (dynamic || indexed || runtime || options->debug != 0)
     {
         lane_sync();
     }

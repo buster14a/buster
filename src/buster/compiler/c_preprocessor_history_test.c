@@ -225,6 +225,62 @@ static bool pp_test_history_runs(void)
     return result;
 }
 
+// Temporary origins must copy individually in the scalar reference, including overlaps in either direction. Every
+// copied origin is distinct, and untouched cells are checked too, for empty copies and lengths around 16 and 64.
+static bool pp_test_history_copies(void)
+{
+    uint32_t source_origins[96];
+    uint32_t copied[2][96];
+    const PPTokens source =
+    {
+        .origins = source_origins,
+    };
+    static Preprocessor runs[2];
+    runs[0] = (Preprocessor){ .vectorized = true };
+    runs[1] = (Preprocessor){ 0 };
+    bool result = true;
+    for (uint32_t length = 0; result && length <= 65; length += 1)
+    {
+        // Separate buffers, same range, left overlap and right overlap, respectively.
+        for (uint32_t kind = 0; result && kind < 4; kind += 1)
+        {
+            const uint32_t begin = 17;
+            const uint32_t at = kind == 0 ? 19 : kind == 1 ? 17 : kind == 2 ? 16 : 18;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(source_origins); i += 1)
+            {
+                source_origins[i] = 1 + 37 * i;
+                copied[0][i] = 2 + 71 * i;
+                copied[1][i] = 2 + 71 * i;
+            }
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                Preprocessor* pp = &runs[k];
+                pp->captures = (PPTokens)
+                {
+                    .origins = copied[k],
+                    .origin_capacity = BUSTER_ARRAY_LENGTH(copied[k]),
+                };
+                pp->origin_peak[1] = 0;
+                pp_history_copy(pp, &pp->captures, at, kind == 0 ? &source : &pp->captures, begin, begin + length);
+                result = result && !pp->fatal && pp->origin_peak[1] == (length != 0 ? at + length : 0);
+            }
+            for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(source_origins); i += 1)
+            {
+                const bool changed = i >= at && i < at + length;
+                const uint32_t from = changed ? begin + i - at : i;
+                const uint32_t expected = !changed ? 2 + 71 * i : kind == 0 ? 1 + 37 * from : 2 + 71 * from;
+                result = copied[0][i] == expected && copied[1][i] == expected && source_origins[i] == 1 + 37 * i;
+            }
+            if (!result)
+            {
+                printf("history copies: length %u kind %u differs\n", length, kind);
+            }
+        }
+    }
+    printf("history copies: %s (66 lengths, distinct buffers and same-buffer overlaps, scalar/vector)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
 static bool pp_test_history_lifetimes(const char* directory)
 {
     char path[4096];
@@ -536,7 +592,8 @@ static bool pp_test_history(const char* directory, bool with_clang)
     }
     printf("history diagnostics: %u of %lu fail%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(cases), with_clang ? " (Clang oracle)" : "");
     const bool runs = pp_test_history_runs();
+    const bool copies = pp_test_history_copies();
     const bool lifetimes = pp_test_history_lifetimes(directory);
     const bool growth = pp_test_history_growth(directory, with_clang);
-    return runs && lifetimes && growth && failures == 0;
+    return runs && copies && lifetimes && growth && failures == 0;
 }
