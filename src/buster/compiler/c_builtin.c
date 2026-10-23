@@ -18,55 +18,10 @@
 #include <stdbool.h>
 #include <string.h>
 #include <immintrin.h>
+#include "c_builtin_catalog.c"
 
 #define BUSTER_CBUILTIN_SIGNED 128u
 #define BUSTER_CBUILTIN_LANES 8u
-#define BUSTER_CBUILTIN_NAMES(X) \
-    X(BSWAP16, "__builtin_bswap16") \
-    X(BSWAP32, "__builtin_bswap32") \
-    X(BSWAP64, "__builtin_bswap64") \
-    X(CLZ, "__builtin_clz") \
-    X(CLZL, "__builtin_clzl") \
-    X(CLZLL, "__builtin_clzll") \
-    X(CTZ, "__builtin_ctz") \
-    X(CTZL, "__builtin_ctzl") \
-    X(CTZLL, "__builtin_ctzll") \
-    X(POPCOUNT, "__builtin_popcount") \
-    X(POPCOUNTL, "__builtin_popcountl") \
-    X(POPCOUNTLL, "__builtin_popcountll") \
-    X(PARITY, "__builtin_parity") \
-    X(PARITYL, "__builtin_parityl") \
-    X(PARITYLL, "__builtin_parityll") \
-    X(FFS, "__builtin_ffs") \
-    X(FFSL, "__builtin_ffsl") \
-    X(FFSLL, "__builtin_ffsll") \
-    X(ADD_OVERFLOW, "__builtin_add_overflow") \
-    X(SUB_OVERFLOW, "__builtin_sub_overflow") \
-    X(MUL_OVERFLOW, "__builtin_mul_overflow")
-
-typedef enum CBuiltinId
-{
-    CBUILTIN_NONE,
-#define BUSTER_CBUILTIN_ENUM(id, name) CBUILTIN_##id,
-    BUSTER_CBUILTIN_NAMES(BUSTER_CBUILTIN_ENUM)
-#undef BUSTER_CBUILTIN_ENUM
-    CBUILTIN_COUNT,
-} CBuiltinId;
-
-typedef struct CBuiltinName CBuiltinName;
-struct CBuiltinName
-{
-    char bytes[32];
-    uint32_t length;
-};
-
-static const CBuiltinName cbuiltin_names[CBUILTIN_COUNT] =
-{
-    { "", 0 },
-#define BUSTER_CBUILTIN_NAME(id, name) { name, sizeof(name) - 1 },
-    BUSTER_CBUILTIN_NAMES(BUSTER_CBUILTIN_NAME)
-#undef BUSTER_CBUILTIN_NAME
-};
 
 typedef enum CBuiltinFoldStatus
 {

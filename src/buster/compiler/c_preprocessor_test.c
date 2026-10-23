@@ -2329,6 +2329,418 @@ static bool pp_test_embed_lookups(const char* directory, bool with_clang)
     return result && back && failures == 0;
 }
 
+// Each fresh candidate's expected open/fstat/read counts, independently of the counters themselves. Repeat hits and
+// misses first in one unit, then through a second unit's empty path table sharing the first unit's cache. The alias
+// has the same identity as value.h: it still needs open/fstat, but no second read. A directory needs fstat too; the
+// symlink loop's failed open does not. None of these searches prepares or executes a file.
+static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_root)
+{
+    static const struct
+    {
+        const char* name;
+        bool found;
+        uint32_t opens;
+        uint32_t fstats;
+        uint32_t reads;
+    } cases[] = {
+        { "absent.h", false, 2, 0, 0 },
+        { "absent.h", false, 0, 0, 0 },
+        { "value.h", true, 2, 1, 1 },
+        { "value.h", true, 0, 0, 0 },
+        { "alias.h", true, 2, 1, 0 },
+        { "folder.h", false, 2, 1, 0 },
+        { "folder.h", false, 0, 0, 0 },
+        { "loop.h", false, 2, 0, 0 },
+        { "loop.h", false, 0, 0, 0 },
+    };
+    static InternTable table;
+    static Preprocessor units[2];
+    units[0] = (Preprocessor){ 0 };
+    units[1] = (Preprocessor){ 0 };
+    bool result = intern_initialize(&table);
+    for (uint32_t u = 0; result && u < 2; u += 1)
+    {
+        PPOptions options = *base;
+        options.files = u == 0 ? 0 : units[0].cache;
+        Preprocessor* pp = &units[u];
+        result = pp_initialize(pp, &options, &table);
+        uint64_t expected_opens = 0;
+        uint64_t expected_fstats = 0;
+        uint64_t expected_reads = 0;
+        uint64_t expected_found = 0;
+        for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+        {
+            uint32_t found_in = BUSTER_PP_NONE;
+            const uint32_t file = pp_find_include(pp, (const uint8_t*)cases[c].name, (uint32_t)strlen(cases[c].name), true, false, BUSTER_PP_NONE,
+                                                   BUSTER_PP_NONE, &found_in, BUSTER_PP_NONE);
+            expected_opens += u == 0 ? cases[c].opens : 0;
+            expected_fstats += u == 0 ? cases[c].fstats : 0;
+            expected_reads += u == 0 ? cases[c].reads : 0;
+            expected_found += cases[c].found;
+            result = (file != BUSTER_PP_NONE) == cases[c].found && found_in == (cases[c].found ? 1u : BUSTER_PP_NONE) &&
+                     pp->probes.opens == expected_opens && pp->probes.fstats == expected_fstats && pp->probes.reads == expected_reads && pp->probes.maps == 0 &&
+                     pp->statistics.include_searches == c + 1 && pp->statistics.include_found == expected_found &&
+                     pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
+            if (!result)
+            {
+                printf("lookup accounting: unit %u case %u (%s): opens %lu/%lu, fstats %lu/%lu, reads %lu/%lu, found %u\n", u, c, cases[c].name,
+                       (unsigned long)pp->probes.opens, (unsigned long)expected_opens, (unsigned long)pp->probes.fstats, (unsigned long)expected_fstats,
+                       (unsigned long)pp->probes.reads, (unsigned long)expected_reads, file != BUSTER_PP_NONE);
+            }
+        }
+        if (result)
+        {
+            // Too long for any candidate: no system call, even though the search itself is counted.
+            uint8_t long_name[PATH_MAX];
+            memset(long_name, 'a', sizeof(long_name));
+            uint32_t found_in = BUSTER_PP_NONE;
+            const uint32_t long_file = pp_find_include(pp, long_name, sizeof(long_name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in, BUSTER_PP_NONE);
+            result = long_file == BUSTER_PP_NONE && pp->probes.opens == expected_opens && pp->probes.fstats == expected_fstats &&
+                     pp->statistics.include_searches == BUSTER_ARRAY_LENGTH(cases) + 1 && pp->statistics.include_ticks != 0 && pp->input_tokens == 0 &&
+                     pp->cache->prepared_records == 0 && pp->ticks[PP_PHASE_LEX] == 0 && pp->ticks[PP_PHASE_REFINE] == 0 && pp->ticks[PP_PHASE_DIRECTIVES] == 0;
+            // A missing main-file path keeps ENOENT and has no fstat, whether first probed or cached by the other unit.
+            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_USER_FILE);
+            result = result && root != BUSTER_PP_NONE && pp->files[root].data == BUSTER_PP_NONE && pp->files[root].error == ENOENT &&
+                     pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats &&
+                     pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
+            // The cached ELOOP is fatal for a reported search (#include or __has_include), without new I/O. The
+            // unreported searches above deliberately treated it as unavailable.
+            const uint32_t loop = pp_find_include(pp, (const uint8_t*)"loop.h", 6, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in, 0);
+            result = result && loop == BUSTER_PP_NONE && pp->fatal && pp->errors == 1 &&
+                     pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats;
+        }
+    }
+    pp_release(&units[1]);
+    pp_release(&units[0]);
+    intern_release(&table);
+    return result;
+}
+
+// Real directive/query dispatch must produce the same tokens, locations, history and tables with vector/scalar
+// kernels and with timing disabled. The independent fixture counts include failed and repeated cached searches,
+// stat calls for every embed query (there is no embed path cache), and setup stats for duplicate/missing directories.
+static bool pp_test_lookup_accounting(const char* directory)
+{
+    char first[4200];
+    char second[4200];
+    char missing[4200];
+    char path[4200];
+    char header[4300];
+    char alias[4300];
+    char folder[4300];
+    char loop[4300];
+    char bytes[4300];
+    char missing_root[4300];
+    snprintf(first, sizeof(first), "%s/account-first", directory);
+    snprintf(second, sizeof(second), "%s/account-second", directory);
+    snprintf(missing, sizeof(missing), "%s/account-missing", directory);
+    snprintf(path, sizeof(path), "%s/account.c", directory);
+    snprintf(header, sizeof(header), "%s/value.h", second);
+    snprintf(alias, sizeof(alias), "%s/alias.h", second);
+    snprintf(folder, sizeof(folder), "%s/folder.h", first);
+    snprintf(loop, sizeof(loop), "%s/loop.h", first);
+    snprintf(bytes, sizeof(bytes), "%s/data.bin", second);
+    snprintf(missing_root, sizeof(missing_root), "%s/root.c", missing);
+    const char* const directories[] = { first, second, first, missing };
+    PPOptions options = {
+        .language = {
+            .standard = 2023,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
+        .embed_directories = directories,
+        .embed_directory_count = 2,
+        .timing = true,
+        .expansion_starts = true,
+        .quiet = true,
+    };
+    static const char source[] =
+        "#if __has_include(<absent.h>) || __has_include(<absent.h>)\n#error unexpected header\n#endif\n"
+        "#if __has_include(<value.h>)\n#include <value.h>\n#include <value.h>\n#endif\n"
+        "#if __has_include(<folder.h>) || __has_include(<other-absent.h>)\n#error unexpected header\n#endif\n"
+        "#if __has_embed(<absent.bin>) || __has_embed(<absent.bin>)\n#error unexpected resource\n#endif\n"
+        "#if __has_embed(<data.bin>) != 1 || __has_embed(<data.bin>) != 1\n#error missing resource\n#endif\n"
+        "#embed <data.bin>\n";
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(folder, 0700) == 0 && symlink("loop.h", loop) == 0 &&
+                  pp_test_write_file(path, source) && pp_test_write_file(header, "#ifndef ACCOUNTED_H\n#define ACCOUNTED_H\n#define ACCOUNTED 7\nint accounted = ACCOUNTED;\n#endif\n") &&
+                  link(header, alias) == 0 && pp_test_write_file(bytes, "AB");
+    result = result && pp_test_lookup_probes(&options, missing_root);
+    // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
+    // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
+    options.quiet = false;
+    static InternTable tables[3];
+    static Preprocessor runs[3];
+    for (uint32_t k = 0; result && k < 3; k += 1)
+    {
+        options.scalar = k == 1;
+        options.timing = k != 2;
+        Preprocessor* pp = &runs[k];
+        result = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]) && pp_run(pp, path);
+        const PPStatistics* stats = &pp->statistics;
+        // Ten file open attempts: the unit, eight include candidates, and the embed's bytes. Four reach fstat: the
+        // unit, header, directory and resource. The three files' nonempty bytes are read once each.
+        result = result && pp->probes.opens == 10 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0;
+        if (options.timing)
+        {
+            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
+                     stats->include_fstats == 2 && stats->include_ticks != 0 && stats->embed_searches == 5 && stats->embed_found == 3 && stats->embed_stats == 10 &&
+                     stats->embed_ticks != 0;
+        }
+        else
+        {
+            result = result && stats->directory_stats == 0 && stats->include_searches == 0 && stats->include_found == 0 && stats->include_opens == 0 &&
+                     stats->include_fstats == 0 && stats->include_ticks == 0 && stats->embed_searches == 0 && stats->embed_found == 0 && stats->embed_stats == 0 &&
+                     stats->embed_ticks == 0;
+            for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
+            {
+                result = result && pp->ticks[phase] == 0;
+            }
+        }
+        if (!result)
+        {
+            printf("lookup accounting: run %u: file open/fstat/read %lu/%lu/%lu, include search/found/open/fstat %lu/%lu/%lu/%lu, "
+                   "embed search/found/stat %lu/%lu/%lu, setup stat %lu, errors %u\n", k,
+                   (unsigned long)pp->probes.opens, (unsigned long)pp->probes.fstats, (unsigned long)pp->probes.reads,
+                   (unsigned long)stats->include_searches, (unsigned long)stats->include_found, (unsigned long)stats->include_opens,
+                   (unsigned long)stats->include_fstats, (unsigned long)stats->embed_searches, (unsigned long)stats->embed_found,
+                   (unsigned long)stats->embed_stats, (unsigned long)stats->directory_stats, pp->errors);
+        }
+        if (result && k != 0)
+        {
+            result = pp_same_streams(&runs[0], pp, "lookup accounting") && pp_same_directive_tables(&runs[0], pp, "lookup accounting");
+        }
+    }
+    if (result)
+    {
+        static const char expected[] = "int accounted = 7; 65, 66";
+        PPSpellings ours = { 0 };
+        PPSpellings wanted = { 0 };
+        result = pp_stream_spellings(&runs[0], &ours) &&
+                 pp_text_spellings((const uint8_t*)expected, sizeof(expected) - 1, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &wanted) &&
+                 pp_compare_spellings(&runs[0], &ours, &wanted, "lookup accounting", "wanted");
+        arena_release(&ours.arena);
+        arena_release(&wanted.arena);
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        pp_release(&runs[k]);
+        intern_release(&tables[k]);
+    }
+    unlink(path);
+    unlink(header);
+    unlink(alias);
+    unlink(loop);
+    unlink(bytes);
+    rmdir(folder);
+    rmdir(first);
+    rmdir(second);
+    printf("lookup accounting: %s (file and metadata attempts, unit/shared caches, scalar/vector and timing off)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// Prescanning ID's argument and expanding #if's operand copy O's body into captures, never into the final output.
+// Of the nine final tokens, plain/ok are file runs, standalone O is a direct object copy, ID(O) is a buffer run, and
+// __LINE__ is the one individually emitted token. O expands directly three times, but only its standalone use copies
+// to the final output. The second source has one direct expansion into a capture and no output at all.
+// In both sources, pp_start_condition copies O == 3 to the arguments buffer and pp_start_capture runs that buffer.
+// After O expands, pp_step_buffer copies the two remaining tokens (== and 3) into the condition capture, which
+// pp_finish_condition discards. Thus aggregate buffer work must exceed final buffer copies by at least two tokens.
+static bool pp_test_final_copy_accounting(void)
+{
+    static const char* const sources[] = {
+        "plain\n#define O 1 + 2\nO\n#define ID(x) x\nID(O)\n#if O == 3\nok\n#endif\n__LINE__\n",
+        "#define O 1 + 2\n#if O == 3\n#endif\n",
+    };
+    static InternTable tables[3];
+    static Preprocessor runs[3];
+    bool result = true;
+    for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        for (uint32_t k = 0; result && k < 3; k += 1)
+        {
+            const PPOptions options = {
+                .language = {
+                    .standard = 2017,
+                    .gnu = true,
+                },
+                .scalar = k == 1,
+                .no_standard_includes = true,
+                .timing = k != 2,
+                .expansion_starts = true,
+                .quiet = true,
+            };
+            Preprocessor* pp = &runs[k];
+            result = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]) &&
+                     pp_run_source(pp, "copy-accounting.c", (const uint8_t*)sources[s], (uint32_t)strlen(sources[s]));
+            const PPStatistics* stats = &pp->statistics;
+            const bool counted = s == 0 && options.timing;
+            const uint64_t direct_expansions = options.timing ? (s == 0 ? 3u : 1u) : 0;
+            const bool buffer_work = options.timing ? stats->buffer_run_tokens >= stats->final_buffer_run_tokens + 2 : stats->buffer_run_tokens == 0;
+            const uint64_t copied = stats->final_file_run_tokens + stats->final_buffer_run_tokens + stats->final_direct_object_tokens;
+            result = result && pp->output.count == (s == 0 ? 9u : 0u) && stats->final_file_run_tokens == (counted ? 2u : 0u) &&
+                     stats->final_buffer_run_tokens == (counted ? 3u : 0u) && stats->final_direct_object_tokens == (counted ? 3u : 0u) &&
+                     copied <= pp->output.count && stats->direct_expansions == direct_expansions && buffer_work &&
+                     (!counted || pp->output.count - copied == 1);
+            if (!result)
+            {
+                printf("final copy accounting: source %u run %u: output %u, file/buffer/object copies %lu/%lu/%lu, direct expansions %lu/%lu, buffer work %lu\n", s, k, pp->output.count,
+                       (unsigned long)stats->final_file_run_tokens, (unsigned long)stats->final_buffer_run_tokens,
+                       (unsigned long)stats->final_direct_object_tokens, (unsigned long)stats->direct_expansions, (unsigned long)direct_expansions,
+                       (unsigned long)stats->buffer_run_tokens);
+            }
+            if (result && k != 0)
+            {
+                result = pp_same_streams(&runs[0], pp, "final copy accounting") && pp_same_directive_tables(&runs[0], pp, "final copy accounting");
+            }
+        }
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            pp_release(&runs[k]);
+            intern_release(&tables[k]);
+        }
+    }
+    printf("final copy accounting: %s (captures excluded, direct objects, empty output, scalar/vector and timing off)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
+// macros, then make every known name's bit disagree with macro_of before each use file. Repeating this after undef
+// and redefine prevents their normal bit updates from hiding a lookup through the cache. The third run selects the
+// scalar kernel directly, as the benchmarks do, without changing PPOptions.scalar.
+static bool pp_test_scalar_reference(const char* directory)
+{
+    static const char* const names[] =
+    {
+        "scalar-definitions.c",
+        "scalar-use.c",
+        "scalar-changed.c",
+    };
+    static const char* const sources[] =
+    {
+        "#define A 7\n#define ALIAS A\n#define ID(x) x\n#define SELF SELF\n#define F(x) x + F(x)\n"
+        "#define PLAIN ordinary\n#define ATTR noreturn\n#define CHANGE 1\n#define GONE 2\n#define EMPTY\n"
+        "#define POISONED bad\n#pragma GCC poison bad\n",
+        "ordinary A ALIAS ID(A) ID(SELF) F(A) PLAIN\n__COUNTER__ __LINE__\n"
+        "#if defined(A) && !defined(ordinary) && __has_attribute(ATTR)\ncondition\n#endif\nPOISONED\n"
+        "#undef GONE\n#undef CHANGE\n#define CHANGE 3\n#define NEW 4\nGONE CHANGE NEW\n"
+        "#embed <scalar-reference.bin> limit(1) prefix(A,) suffix(,ID(CHANGE))\n",
+        "A ALIAS ID(CHANGE) GONE NEW SELF __COUNTER__\n#if !defined(GONE) && defined(CHANGE)\nchanged\n#endif\n"
+        "#pragma GCC poison later\n__has_c_attribute(x EMPTY)\nbad later\n",
+    };
+    static const char expected[] =
+        "ordinary 7 7 7 SELF 7 + F(7) ordinary 0 2 condition bad GONE 3 4 7, 65, 3\n"
+        "7 7 3 GONE 4 SELF 1 changed 0 bad later\n";
+    char bytes[4096];
+    snprintf(bytes, sizeof(bytes), "%s/scalar-reference.bin", directory);
+    const char* directories[] =
+    {
+        directory,
+    };
+    static InternTable tables[3];
+    static Preprocessor runs[3];
+    char* diagnostics[3] = { 0 };
+    bool result = pp_test_write_file(bytes, "AB");
+    for (uint32_t k = 0; result && k < 3; k += 1)
+    {
+        size_t length = 0;
+        FILE* stream = open_memstream(&diagnostics[k], &length);
+        const PPOptions options =
+        {
+            .language =
+            {
+                .standard = 2023,
+                .gnu = true,
+            },
+            .scalar = k == 1,
+            .no_standard_includes = true,
+            .clang_features = true,
+            .embed_directories = directories,
+            .embed_directory_count = BUSTER_ARRAY_LENGTH(directories),
+            .expansion_starts = true,
+            .diagnostics = stream,
+        };
+        Preprocessor* pp = &runs[k];
+        result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+        uint32_t files[BUSTER_ARRAY_LENGTH(sources)];
+        if (result)
+        {
+            pp->vectorized = k == 0;
+        }
+        for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+        {
+            files[s] = pp_virtual_file(pp, names[s], sources[s], (uint32_t)strlen(sources[s]), BUSTER_PP_USER_FILE);
+            result = files[s] != BUSTER_PP_NONE && pp_prepare_data(pp, &pp->datas[pp->files[files[s]].data], names[s]);
+        }
+        result = result && pp_run_prelude(pp);
+        if (result)
+        {
+            pp_run_file(pp, files[0]);
+            result = pp->errors == 0 && pp->warnings == 0 && !pp->fatal;
+        }
+        for (uint32_t s = 1; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+        {
+            if (!pp->vectorized)
+            {
+                for (IdentId id = 0; id < pp->table->count; id += 1)
+                {
+                    const uint64_t bit = 1ull << (id % 64);
+                    if (pp->macro_of[id] != 0)
+                    {
+                        pp->is_macro[id / 64] &= ~bit;
+                    }
+                    else
+                    {
+                        pp->is_macro[id / 64] |= bit;
+                    }
+                }
+            }
+            const bool ran = pp_run_main(pp, files[s]);
+            // EMPTY must remain unexpanded after the scoped query's first name, making its operand invalid. The
+            // preexisting poisoned sentinel `bad` and newly poisoned `later` each diagnose one use on the last line.
+            result = ran == (s == 1) && pp->errors == (s == 1 ? 0u : 3u) && pp->warnings == 0 && !pp->fatal;
+            if (!result)
+            {
+                printf("scalar reference: run %u file %u: ran %u, errors %u, warnings %u, fatal %u\n", k, s, ran, pp->errors, pp->warnings, pp->fatal);
+            }
+        }
+        if (stream != 0)
+        {
+            fclose(stream);
+        }
+        result = result && diagnostics[k] != 0 && strstr(diagnostics[k], "builtin feature check macro requires a parenthesized identifier") != 0 &&
+                 strstr(diagnostics[k], "attempt to use a poisoned identifier") != 0;
+        if (result && k != 0)
+        {
+            result = pp_same_streams(&runs[0], pp, "scalar reference") && pp_same_directive_tables(&runs[0], pp, "scalar reference") &&
+                     strcmp(diagnostics[0], diagnostics[k]) == 0;
+        }
+    }
+    if (result)
+    {
+        PPSpellings ours = { 0 };
+        PPSpellings wanted = { 0 };
+        result = pp_stream_spellings(&runs[0], &ours) &&
+                 pp_text_spellings((const uint8_t*)expected, sizeof(expected) - 1, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &wanted) &&
+                 pp_compare_spellings(&runs[0], &ours, &wanted, "scalar reference", "wanted");
+        arena_release(&ours.arena);
+        arena_release(&wanted.arena);
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        if (!result && diagnostics[k] != 0)
+        {
+            printf("scalar reference run %u diagnostics:\n%s", k, diagnostics[k]);
+        }
+        free(diagnostics[k]);
+        pp_release(&runs[k]);
+        intern_release(&tables[k]);
+    }
+    unlink(bytes);
+    printf("scalar reference: %s (inverted macro-name bits, definitions, captures, builtins, poison and kernel override)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
 // c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
 static void predefines_test_drop_versions(char* text);
 
@@ -2648,7 +3060,7 @@ static bool pp_test_replace(char** text, size_t* length, const char* from, size_
 static bool pp_test_resource_names(char** text, size_t* length, const char* links)
 {
     char resource[PATH_MAX];
-    const bool found = pp_clang_resource_directory(resource, sizeof(resource));
+    const bool found = pp_clang_resource_directory(resource, sizeof(resource), 0);
     const size_t links_length = strlen(links);
     const size_t resource_length = found ? strlen(resource) : 0;
     char* names = found && links_length != 0 ? malloc(4 * (links_length + resource_length)) : 0;
@@ -4425,7 +4837,7 @@ static bool pp_test_header_beside(void)
         char resource[PATH_MAX];
         char includer_path[PATH_MAX];
         result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) &&
-                 pp_clang_resource_directory(resource, sizeof(resource)) && (size_t)snprintf(includer_path, sizeof(includer_path), "%s/immintrin.h", resource) < sizeof(includer_path);
+                 pp_clang_resource_directory(resource, sizeof(resource), 0) && (size_t)snprintf(includer_path, sizeof(includer_path), "%s/immintrin.h", resource) < sizeof(includer_path);
         // The search directory clang's headers are in: the fallback, or the resource directory.
         uint32_t search = BUSTER_PP_NONE;
         for (uint32_t i = 0; result && i < pp.directory_count; i += 1)
@@ -4475,7 +4887,7 @@ static uint32_t pp_test_header_duplicates(const char* directory, uint32_t* count
     char unit[4200];
     snprintf(link, sizeof(link), "%s/resource-link", directory);
     snprintf(unit, sizeof(unit), "%s/header-duplicates.c", directory);
-    const bool found = pp_clang_resource_directory(resource, sizeof(resource)) && pp_buster_headers_directory(ours, sizeof(ours));
+    const bool found = pp_clang_resource_directory(resource, sizeof(resource), 0) && pp_buster_headers_directory(ours, sizeof(ours), 0);
     const char* last = found ? strrchr(resource, '/') : 0;
     const bool written = last != 0 && symlink(resource, link) == 0 &&
                          pp_test_write_file(unit, "#include <stdint.h>\n#include <stdatomic.h>\n#if __STDC_HOSTED__\n#include <inttypes.h>\n#endif\n"
@@ -4689,7 +5101,7 @@ static bool pp_test_headers(const char* directory)
 {
     static const char* const modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
     char ours[PATH_MAX];
-    bool result = pp_buster_headers_directory(ours, sizeof(ours));
+    bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
     {
         printf("headers: no src/buster/include beside the executable's build directory\n");
@@ -4878,55 +5290,337 @@ static bool pp_test_number(const char* text, uint64_t* value)
     return result;
 }
 
-// Outside the oracle's mode, the feature queries answer what buster implements (pp_implemented_*): of builtins only the
-// preprocessor's __is_target_*, and no attribute, feature, extension or constexpr builtin; __has_warning answers as
-// clang does in both modes, and so do the queries that aren't about the compiler (__has_include, __is_identifier,
-// __is_target_*). With --clang-features, the same lines give clang's answers. Neither expands __has_constexpr_builtin's
-// name, a macro's or not.
+// The default capability inventory requires source checking and both required consumers; action folding alone
+// remains private to its action API. Clang's oracle mode retains its independent frozen tables and raw operands.
 static bool pp_test_implemented_features(const char* directory)
 {
     static const char source[] =
         "A __has_builtin(__builtin_expect) __has_constexpr_builtin(__builtin_clz) __has_feature(c_static_assert) __has_extension(c_atomic) "
         "__has_attribute(packed) __has_attribute(__packed__) __has_c_attribute(gnu::packed) __has_warning(\"-Wreserved-identifier\") "
         "__is_identifier(int) __is_target_arch(x86_64)\n"
-        "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n";
-    static const char* const expected[2] = { "A 0 0 0 0 0 0 0 1 0 1 B 0 0\n", "A 1 1 1 1 1 1 1 1 0 1 B 0 1\n" };
+        "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n"
+        "#define OWN_BUILTIN __is_target_arch\nC __has_builtin(OWN_BUILTIN) __has_builtin(__is_target_arch)\n"
+        "#define __builtin_expect 0\nD __has_builtin(__builtin_expect) __has_builtin(__builtin_expect_typo)\n";
+    static const char* const expected[2] =
+    {
+        "A 0 0 0 0 0 0 0 1 0 1 B 0 0 C 0 1 D 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0\n",
+    };
+    static const uint32_t standards[] =
+    {
+        2017,
+        2023,
+    };
     char path[4200];
     snprintf(path, sizeof(path), "%s/case.c", directory);
     pp_test_write_file(path, source);
     bool result = true;
-    for (uint32_t clang = 0; clang < 2; clang += 1)
+    for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
     {
-        char* arguments[2] = { path, 0 };
-        Arena arena = arena_reserve(1ull << 20);
-        PPOptions options;
-        const char* input;
-        const char* output;
-        bool markers;
-        bool passed = pp_parse_options(1, arguments, &options, &arena, &input, &output, &markers);
-        options.clang_features = clang == 1;
-        static InternTable table;
-        static Preprocessor pp;
-        PPSpellings ours = { 0 };
-        PPSpellings wanted = { 0 };
-        passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
-                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, pp_test_lex_flags(&pp), &wanted) &&
-                 pp_compare_spellings(&pp, &ours, &wanted, clang == 1 ? "clang's feature answers" : "implemented feature answers", "wanted");
-        pp_release(&pp);
-        intern_release(&table);
-        arena_release(&ours.arena);
-        arena_release(&wanted.arena);
-        arena_release(&arena);
-        result &= passed;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            for (uint32_t clang = 0; clang < 2; clang += 1)
+            {
+                char* arguments[2] = { path, 0 };
+                Arena arena = arena_reserve(1ull << 20);
+                PPOptions options;
+                const char* input;
+                const char* output;
+                bool markers;
+                bool passed = pp_parse_options(1, arguments, &options, &arena, &input, &output, &markers);
+                options.language.standard = standards[mode];
+                options.scalar = scalar != 0;
+                options.clang_features = clang != 0;
+                static InternTable table;
+                static Preprocessor pp;
+                PPSpellings ours = { 0 };
+                PPSpellings wanted = { 0 };
+                passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
+                         pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, pp_test_lex_flags(&pp), &wanted) &&
+                         pp_compare_spellings(&pp, &ours, &wanted, clang != 0 ? "clang's feature answers" : "implemented feature answers", "wanted");
+                pp_release(&pp);
+                intern_release(&table);
+                arena_release(&ours.arena);
+                arena_release(&wanted.arena);
+                arena_release(&arena);
+                result &= passed;
+            }
+        }
     }
-    // The preprocessor's own builtins are what __has_builtin answers 1 for by default.
-    static const char* const own[] = { "__is_target_arch", "__is_target_vendor", "__is_target_os", "__is_target_environment" };
+    // This explicit acceptance inventory is independent of the catalog's generation macros. Recognized special
+    // identities have no source capability; only the existing integer actions have standalone folding capability.
+    static const struct
+    {
+        CBuiltinId id;
+        const char* name;
+        bool fold;
+    } inventory[] =
+    {
+        { CBUILTIN_BSWAP16, "__builtin_bswap16", true },
+        { CBUILTIN_BSWAP32, "__builtin_bswap32", true },
+        { CBUILTIN_BSWAP64, "__builtin_bswap64", true },
+        { CBUILTIN_CLZ, "__builtin_clz", true },
+        { CBUILTIN_CLZL, "__builtin_clzl", true },
+        { CBUILTIN_CLZLL, "__builtin_clzll", true },
+        { CBUILTIN_CTZ, "__builtin_ctz", true },
+        { CBUILTIN_CTZL, "__builtin_ctzl", true },
+        { CBUILTIN_CTZLL, "__builtin_ctzll", true },
+        { CBUILTIN_POPCOUNT, "__builtin_popcount", true },
+        { CBUILTIN_POPCOUNTL, "__builtin_popcountl", true },
+        { CBUILTIN_POPCOUNTLL, "__builtin_popcountll", true },
+        { CBUILTIN_PARITY, "__builtin_parity", true },
+        { CBUILTIN_PARITYL, "__builtin_parityl", true },
+        { CBUILTIN_PARITYLL, "__builtin_parityll", true },
+        { CBUILTIN_FFS, "__builtin_ffs", true },
+        { CBUILTIN_FFSL, "__builtin_ffsl", true },
+        { CBUILTIN_FFSLL, "__builtin_ffsll", true },
+        { CBUILTIN_ADD_OVERFLOW, "__builtin_add_overflow", true },
+        { CBUILTIN_SUB_OVERFLOW, "__builtin_sub_overflow", true },
+        { CBUILTIN_MUL_OVERFLOW, "__builtin_mul_overflow", true },
+        { CBUILTIN_VA_START, "__builtin_va_start", false },
+        { CBUILTIN_C23_VA_START, "__builtin_c23_va_start", false },
+        { CBUILTIN_VA_ARG, "__builtin_va_arg", false },
+        { CBUILTIN_VA_COPY, "__builtin_va_copy", false },
+        { CBUILTIN_VA_END, "__builtin_va_end", false },
+        { CBUILTIN_OFFSETOF, "__builtin_offsetof", false },
+        { CBUILTIN_EXPECT, "__builtin_expect", false },
+        { CBUILTIN_UNREACHABLE, "__builtin_unreachable", false },
+        { CBUILTIN_TRAP, "__builtin_trap", false },
+        { CBUILTIN_ASSUME_ALIGNED, "__builtin_assume_aligned", false },
+        { CBUILTIN_PREFETCH, "__builtin_prefetch", false },
+        { CBUILTIN_CONSTANT_P, "__builtin_constant_p", false },
+        { CBUILTIN_TYPES_COMPATIBLE_P, "__builtin_types_compatible_p", false },
+        { CBUILTIN_CHOOSE_EXPR, "__builtin_choose_expr", false },
+        { CBUILTIN_OBJECT_SIZE, "__builtin_object_size", false },
+        { CBUILTIN_HUGE_VAL, "__builtin_huge_val", false },
+        { CBUILTIN_HUGE_VALF, "__builtin_huge_valf", false },
+        { CBUILTIN_HUGE_VALL, "__builtin_huge_vall", false },
+        { CBUILTIN_INF, "__builtin_inf", false },
+        { CBUILTIN_INFF, "__builtin_inff", false },
+        { CBUILTIN_INFL, "__builtin_infl", false },
+        { CBUILTIN_NAN, "__builtin_nan", false },
+        { CBUILTIN_NANF, "__builtin_nanf", false },
+        { CBUILTIN_NANL, "__builtin_nanl", false },
+        { CBUILTIN_ISNAN, "__builtin_isnan", false },
+        { CBUILTIN_ISINF, "__builtin_isinf", false },
+        { CBUILTIN_ISFINITE, "__builtin_isfinite", false },
+        { CBUILTIN_SIGNBIT, "__builtin_signbit", false },
+        { CBUILTIN_FPCLASSIFY, "__builtin_fpclassify", false },
+        { CBUILTIN_ISINF_SIGN, "__builtin_isinf_sign", false },
+        { CBUILTIN_FABS, "__builtin_fabs", false },
+        { CBUILTIN_FABSF, "__builtin_fabsf", false },
+        { CBUILTIN_FABSL, "__builtin_fabsl", false },
+        { CBUILTIN_FLT_ROUNDS, "__builtin_flt_rounds", false },
+        { CBUILTIN_CREAL, "__builtin_creal", false },
+        { CBUILTIN_CREALF, "__builtin_crealf", false },
+        { CBUILTIN_CREALL, "__builtin_creall", false },
+        { CBUILTIN_CIMAG, "__builtin_cimag", false },
+        { CBUILTIN_CIMAGF, "__builtin_cimagf", false },
+        { CBUILTIN_CIMAGL, "__builtin_cimagl", false },
+        { CBUILTIN_SQRT, "__builtin_sqrt", false },
+        { CBUILTIN_SQRTF, "__builtin_sqrtf", false },
+        { CBUILTIN_COPYSIGN, "__builtin_copysign", false },
+        { CBUILTIN_COPYSIGNF, "__builtin_copysignf", false },
+        { CBUILTIN_CEIL, "__builtin_ceil", false },
+        { CBUILTIN_CEILF, "__builtin_ceilf", false },
+        { CBUILTIN_FLOOR, "__builtin_floor", false },
+        { CBUILTIN_FLOORF, "__builtin_floorf", false },
+        { CBUILTIN_TRUNC, "__builtin_trunc", false },
+        { CBUILTIN_TRUNCF, "__builtin_truncf", false },
+        { CBUILTIN_NEARBYINT, "__builtin_nearbyint", false },
+        { CBUILTIN_NEARBYINTF, "__builtin_nearbyintf", false },
+        { CBUILTIN_RINT, "__builtin_rint", false },
+        { CBUILTIN_RINTF, "__builtin_rintf", false },
+        { CBUILTIN_MEMCPY, "__builtin_memcpy", false },
+        { CBUILTIN_MEMSET, "__builtin_memset", false },
+        { CBUILTIN_MEMMOVE, "__builtin_memmove", false },
+        { CBUILTIN_MEMCMP, "__builtin_memcmp", false },
+        { CBUILTIN_STRLEN, "__builtin_strlen", false },
+        { CBUILTIN_ALLOCA, "__builtin_alloca", false },
+        { CBUILTIN_UMULL_OVERFLOW, "__builtin_umull_overflow", false },
+        { CBUILTIN_ATOMIC_LOAD, "__atomic_load", false },
+        { CBUILTIN_ATOMIC_LOAD_N, "__atomic_load_n", false },
+        { CBUILTIN_ATOMIC_STORE, "__atomic_store", false },
+        { CBUILTIN_ATOMIC_STORE_N, "__atomic_store_n", false },
+        { CBUILTIN_ATOMIC_EXCHANGE, "__atomic_exchange", false },
+        { CBUILTIN_ATOMIC_EXCHANGE_N, "__atomic_exchange_n", false },
+        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE, "__atomic_compare_exchange", false },
+        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, "__atomic_compare_exchange_n", false },
+        { CBUILTIN_ATOMIC_FETCH_ADD, "__atomic_fetch_add", false },
+        { CBUILTIN_ATOMIC_FETCH_SUB, "__atomic_fetch_sub", false },
+        { CBUILTIN_ATOMIC_FETCH_AND, "__atomic_fetch_and", false },
+        { CBUILTIN_ATOMIC_FETCH_XOR, "__atomic_fetch_xor", false },
+        { CBUILTIN_ATOMIC_FETCH_OR, "__atomic_fetch_or", false },
+        { CBUILTIN_ATOMIC_FETCH_NAND, "__atomic_fetch_nand", false },
+        { CBUILTIN_ATOMIC_ADD_FETCH, "__atomic_add_fetch", false },
+        { CBUILTIN_ATOMIC_SUB_FETCH, "__atomic_sub_fetch", false },
+        { CBUILTIN_ATOMIC_AND_FETCH, "__atomic_and_fetch", false },
+        { CBUILTIN_ATOMIC_XOR_FETCH, "__atomic_xor_fetch", false },
+        { CBUILTIN_ATOMIC_OR_FETCH, "__atomic_or_fetch", false },
+        { CBUILTIN_ATOMIC_NAND_FETCH, "__atomic_nand_fetch", false },
+        { CBUILTIN_ATOMIC_TEST_AND_SET, "__atomic_test_and_set", false },
+        { CBUILTIN_ATOMIC_CLEAR, "__atomic_clear", false },
+        { CBUILTIN_ATOMIC_THREAD_FENCE, "__atomic_thread_fence", false },
+        { CBUILTIN_ATOMIC_SIGNAL_FENCE, "__atomic_signal_fence", false },
+        { CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE, "__atomic_always_lock_free", false },
+        { CBUILTIN_ATOMIC_IS_LOCK_FREE, "__atomic_is_lock_free", false },
+        { CBUILTIN_SYNC_FETCH_AND_ADD, "__sync_fetch_and_add", false },
+        { CBUILTIN_SYNC_FETCH_AND_SUB, "__sync_fetch_and_sub", false },
+        { CBUILTIN_SYNC_FETCH_AND_OR, "__sync_fetch_and_or", false },
+        { CBUILTIN_SYNC_FETCH_AND_AND, "__sync_fetch_and_and", false },
+        { CBUILTIN_SYNC_FETCH_AND_XOR, "__sync_fetch_and_xor", false },
+        { CBUILTIN_SYNC_FETCH_AND_NAND, "__sync_fetch_and_nand", false },
+        { CBUILTIN_SYNC_ADD_AND_FETCH, "__sync_add_and_fetch", false },
+        { CBUILTIN_SYNC_SUB_AND_FETCH, "__sync_sub_and_fetch", false },
+        { CBUILTIN_SYNC_OR_AND_FETCH, "__sync_or_and_fetch", false },
+        { CBUILTIN_SYNC_AND_AND_FETCH, "__sync_and_and_fetch", false },
+        { CBUILTIN_SYNC_XOR_AND_FETCH, "__sync_xor_and_fetch", false },
+        { CBUILTIN_SYNC_NAND_AND_FETCH, "__sync_nand_and_fetch", false },
+        { CBUILTIN_SYNC_BOOL_COMPARE_AND_SWAP, "__sync_bool_compare_and_swap", false },
+        { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, "__sync_val_compare_and_swap", false },
+        { CBUILTIN_SYNC_SYNCHRONIZE, "__sync_synchronize", false },
+        { CBUILTIN_SYNC_LOCK_TEST_AND_SET, "__sync_lock_test_and_set", false },
+        { CBUILTIN_SYNC_LOCK_RELEASE, "__sync_lock_release", false },
+        { CBUILTIN_FRAME_ADDRESS, "__builtin_frame_address", false },
+        { CBUILTIN_RETURN_ADDRESS, "__builtin_return_address", false },
+        { CBUILTIN_EXTRACT_RETURN_ADDR, "__builtin_extract_return_addr", false },
+        { CBUILTIN_FROB_RETURN_ADDR, "__builtin_frob_return_addr", false },
+        { CBUILTIN_ELEMENTWISE_ABS, "__builtin_elementwise_abs", false },
+        { CBUILTIN_ELEMENTWISE_ADD_SAT, "__builtin_elementwise_add_sat", false },
+        { CBUILTIN_ELEMENTWISE_BITREVERSE, "__builtin_elementwise_bitreverse", false },
+        { CBUILTIN_ELEMENTWISE_CLZG, "__builtin_elementwise_clzg", false },
+        { CBUILTIN_ELEMENTWISE_FMA, "__builtin_elementwise_fma", false },
+        { CBUILTIN_ELEMENTWISE_FSHL, "__builtin_elementwise_fshl", false },
+        { CBUILTIN_ELEMENTWISE_FSHR, "__builtin_elementwise_fshr", false },
+        { CBUILTIN_ELEMENTWISE_MAX, "__builtin_elementwise_max", false },
+        { CBUILTIN_ELEMENTWISE_MIN, "__builtin_elementwise_min", false },
+        { CBUILTIN_ELEMENTWISE_POPCOUNT, "__builtin_elementwise_popcount", false },
+        { CBUILTIN_ELEMENTWISE_SQRT, "__builtin_elementwise_sqrt", false },
+        { CBUILTIN_ELEMENTWISE_SUB_SAT, "__builtin_elementwise_sub_sat", false },
+        { CBUILTIN_REDUCE_ADD, "__builtin_reduce_add", false },
+        { CBUILTIN_REDUCE_AND, "__builtin_reduce_and", false },
+        { CBUILTIN_REDUCE_MAX, "__builtin_reduce_max", false },
+        { CBUILTIN_REDUCE_MIN, "__builtin_reduce_min", false },
+        { CBUILTIN_REDUCE_MUL, "__builtin_reduce_mul", false },
+        { CBUILTIN_REDUCE_OR, "__builtin_reduce_or", false },
+        { CBUILTIN_SHUFFLEVECTOR, "__builtin_shufflevector", false },
+        { CBUILTIN_CONVERTVECTOR, "__builtin_convertvector", false },
+        { CBUILTIN_NONDETERMINISTIC_VALUE, "__builtin_nondeterministic_value", false },
+        { CBUILTIN_NONTEMPORAL_LOAD, "__builtin_nontemporal_load", false },
+        { CBUILTIN_NONTEMPORAL_STORE, "__builtin_nontemporal_store", false },
+    };
+    result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
+    const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |
+                                          BUSTER_CBUILTIN_CAP_CHECKER | BUSTER_CBUILTIN_CAP_TIER0 | BUSTER_CBUILTIN_CAP_TIER1;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cbuiltin_catalog); i += 1)
+    {
+        result &= (cbuiltin_catalog[i].capabilities & compile_capabilities) == 0;
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inventory); i += 1)
+    {
+        const char* name = inventory[i].name;
+        const uint32_t length = (uint32_t)strlen(name);
+        result &= cbuiltin_resolve(name, length) == inventory[i].id;
+        result &= cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, compile_capabilities);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_FOLD | BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, 0);
+        result &= !cbuiltin_has_capability((const uint8_t*)name, length, 0x80);
+        for (uint32_t previous = 0; previous < i; previous += 1)
+        {
+            result &= inventory[previous].id != inventory[i].id && strcmp(inventory[previous].name, name) != 0;
+        }
+        for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
+        {
+            const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == 0;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == 0;
+        }
+    }
+    static const char* const own[] =
+    {
+        "__is_target_arch",
+        "__is_target_vendor",
+        "__is_target_os",
+        "__is_target_environment",
+    };
     const PPOptions defaults = { .language = { .standard = 2017, .gnu = true } };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(own); i += 1)
     {
-        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], (uint32_t)strlen(own[i])) == 1;
+        const uint32_t length = (uint32_t)strlen(own[i]);
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], length) == 1;
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)own[i], length) == 0;
+        result &= cbuiltin_resolve(own[i], length) == CBUILTIN_NONE;
     }
-    printf("feature answers: %s (what buster implements by default, clang's with --clang-features)\n", result ? "as expected" : "WRONG");
+    static const char* const unknown[] =
+    {
+        "",
+        "__builtin_",
+        "__builtin_cl",
+        "__builtin_clz_",
+        "__builtin_clzllx",
+        "_builtin_clz",
+        "__BUILTIN_clz",
+        "__builtin_va_start ",
+        "__builtin_c23_va_startx",
+        "__atomic_load_nn",
+        "__sync_synchroniz",
+        "__is_target_arch_",
+        "__is_target_osx",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unknown); i += 1)
+    {
+        const uint32_t length = (uint32_t)strlen(unknown[i]);
+        result &= cbuiltin_resolve(unknown[i], length) == CBUILTIN_NONE;
+        result &= !cbuiltin_has_capability((const uint8_t*)unknown[i], length, BUSTER_CBUILTIN_CAP_FOLD);
+        result &= !cbuiltin_has_capability((const uint8_t*)unknown[i], length, BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= !cbuiltin_has_capability((const uint8_t*)unknown[i], length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)unknown[i], length) == 0;
+        result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)unknown[i], length) == 0;
+    }
+    // Every name ends immediately before an unreadable page, with no terminator or padding. Zero/oversized
+    // lengths at the unreadable boundary must return without inspecting it.
+    const long page_size = sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = page_size > 0 ? mmap(0, (size_t)page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    if (mapping == MAP_FAILED)
+    {
+        result = false;
+    }
+    else
+    {
+        uint8_t* end = mapping + page_size;
+        const bool guarded = mprotect(end, (size_t)page_size, PROT_NONE) == 0;
+        result &= guarded;
+        if (guarded)
+        {
+            result &= cbuiltin_resolve((const char*)end, 0) == CBUILTIN_NONE;
+            result &= cbuiltin_resolve((const char*)end, UINT32_MAX) == CBUILTIN_NONE;
+            result &= cbuiltin_resolve(0, 1) == CBUILTIN_NONE;
+            result &= !cbuiltin_has_capability(end, 0, BUSTER_CBUILTIN_CAP_FOLD);
+            result &= !cbuiltin_has_capability(end, UINT32_MAX, BUSTER_CBUILTIN_CAP_FOLD);
+            result &= !cbuiltin_has_capability(0, 1, BUSTER_CBUILTIN_CAP_SOURCE);
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inventory); i += 1)
+            {
+                const uint32_t length = (uint32_t)strlen(inventory[i].name);
+                uint8_t* name = end - length;
+                memcpy(name, inventory[i].name, length);
+                result &= cbuiltin_resolve((const char*)name, length) == inventory[i].id;
+                result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
+                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE);
+                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == 0;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == 0;
+                name[0] = '!';
+                result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;
+                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD);
+            }
+        }
+        munmap(mapping, (size_t)page_size * 2);
+    }
+    printf("feature answers and %zu catalog names: %s (source acceptance by default, clang's independent oracle mode)\n",
+           BUSTER_ARRAY_LENGTH(inventory), result ? "as expected" : "WRONG");
     return result;
 }
 
@@ -5090,6 +5784,9 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);
+        passed_all &= pp_test_lookup_accounting(directory);
+        passed_all &= pp_test_final_copy_accounting();
+        passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);

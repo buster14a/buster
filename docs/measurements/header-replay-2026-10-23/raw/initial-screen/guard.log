@@ -1,0 +1,2 @@
+command taskset -c 2 /home/david/buster-fast-bench/codex-header111/experiment guard 
+guarded replay locations: ok=1 checks=8580

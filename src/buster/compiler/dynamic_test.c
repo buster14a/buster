@@ -802,10 +802,16 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
     const uint64_t count = rela_section != 0 ? rela_section->sh_size / sizeof(Elf64_Rela) : 0;
     const LinkAtoms* atoms = &link->atoms;
     const LinkFixups* fixups = &link->fixups;
-    uint64_t capacity = link->symbols.count + fixups->count;
+    uint64_t capacity = link->symbols.count + 2 * (uint64_t)fixups->count;
     DynamicTestRelocation* expected = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestRelocation, capacity);
     DynamicTestRelocation* actual = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestRelocation, count + fixups->count + 1);
     uint64_t* relr_addresses = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, fixups->count + 1);
+    const uint64_t slots = got_section != 0 ? got_section->sh_size / 8 : 0;
+    uint8_t* tls_pairs = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + 1);
+    if (tls_pairs != 0)
+    {
+        memset(tls_pairs, 0, slots + 1);
+    }
     dynamic_test_expect(tally, expected != 0 && actual != 0 && relr_addresses != 0, "room for the relocations", index);
     uint64_t wanted = 0;
     for (SymbolId symbol = 1; expected != 0 && symbol < link->symbols.count; symbol += 1)
@@ -848,6 +854,59 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
         const bool written = class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_INIT_ARRAY || class == BUSTER_LINK_CLASS_FINI_ARRAY ||
                              class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_DATA;
         const FixupId begin = atoms->fixup_begin[atom];
+        for (FixupId fixup = begin; library && tls_pairs != 0 && fixup < begin + atoms->fixup_count[atom]; fixup += 1)
+        {
+            const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            const bool gd = kind == BUSTER_LINK_FIXUP_TLSGD;
+            const bool ld = kind == BUSTER_LINK_FIXUP_TLSLD;
+            if (gd || ld || kind == BUSTER_LINK_FIXUP_DTPOFF32)
+            {
+                const SymbolId target = fixups->target[fixup];
+                const uint64_t place = atoms->address[atom] + fixups->offset[fixup];
+                const uint64_t field = dynamic_test_file_offset(image, place);
+                const bool readable = field != UINT64_MAX && field + 4 <= image->file.length;
+                int32_t displacement = 0;
+                if (readable)
+                {
+                    memcpy(&displacement, image->file.pointer + field, sizeof(displacement));
+                }
+                if (gd || ld)
+                {
+                    const uint64_t address = place + (uint64_t)(int64_t)displacement - (uint64_t)link_fixup_addend(link, fixup);
+                    const bool inside = readable && got != 0 && got_section->sh_size >= 16 && address >= got_section->sh_addr && address - got_section->sh_addr <= got_section->sh_size - 16 &&
+                                        (address - got_section->sh_addr) % 8 == 0;
+                    dynamic_test_expect(tally, inside, "a dynamic TLS access reaches a complete GOT pair", fixup);
+                    const uint64_t slot = inside ? (address - got_section->sh_addr) / 8 : slots;
+                    if (inside && tls_pairs[slot] == 0)
+                    {
+                        tls_pairs[slot] = 1;
+                        const bool symbolic = gd && dynamic_test_is_dynamic(link, target, true);
+                        expected[wanted++] = (DynamicTestRelocation){
+                            .offset = address,
+                            .type = R_X86_64_DTPMOD64,
+                            .symbol = symbolic ? target : 0,
+                        };
+                        if (symbolic)
+                        {
+                            expected[wanted++] = (DynamicTestRelocation){
+                                .offset = address + 8,
+                                .type = R_X86_64_DTPOFF64,
+                                .symbol = target,
+                            };
+                        }
+                        uint64_t pair[2];
+                        memcpy(pair, got + 8 * slot, sizeof(pair));
+                        const uint64_t offset = gd && !symbolic && tls_segment != 0 ? dynamic_test_address(link, target) - tls_segment->p_vaddr : 0;
+                        dynamic_test_expect(tally, pair[0] == 0 && pair[1] == offset, "a dynamic TLS pair's initial module and offset", fixup);
+                    }
+                }
+                else
+                {
+                    const int64_t offset = tls_segment != 0 ? (int64_t)(dynamic_test_address(link, target) - tls_segment->p_vaddr) + link_fixup_addend(link, fixup) : INT64_MAX;
+                    dynamic_test_expect(tally, readable && displacement == offset, "a local-dynamic offset starts at the TLS segment", fixup);
+                }
+            }
+        }
         for (FixupId fixup = begin; written && fixup < begin + atoms->fixup_count[atom]; fixup += 1)
         {
             const SymbolId target = fixups->target[fixup];
@@ -889,7 +948,7 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
         };
         // Without a symbol: the RELATIVE ones, and a shared library's TPOFF64 ones of its own TLS symbols.
         ordered = ordered && (type == R_X86_64_RELATIVE) == (i < relative_count) &&
-                  (dynamic_index == 0) == (type == R_X86_64_RELATIVE || (library && type == R_X86_64_TPOFF64 && symbol == 0));
+                  (dynamic_index == 0) == (type == R_X86_64_RELATIVE || (library && (type == R_X86_64_TPOFF64 || type == R_X86_64_DTPMOD64) && symbol == 0));
     }
     dynamic_test_expect(tally, ordered, "RELATIVE relocations first, as many as DT_RELACOUNT", index);
     // .relr.dyn's, in increasing order, each with its field's bytes as its addend.
@@ -976,6 +1035,7 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
     uint8_t* targets = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, link->symbols.count);
     dynamic_test_expect(tally, targets != 0, "room for the GOT's targets", index);
     uint64_t relaxed = 0;
+    bool tlsld = false;
     uint64_t mismatched = 0;
     FixupId first = 0;
     if (targets != 0)
@@ -995,6 +1055,8 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
             const bool relaxes = executable_test_relaxes(link, fixup) && !(library && dynamic);
             const bool stub = kind == BUSTER_LINK_FIXUP_CALL && dynamic;
             targets[target] |= (reads && !relaxes) || stub ? 1 : 0;
+            targets[target] |= library && kind == BUSTER_LINK_FIXUP_TLSGD ? 2 : 0;
+            tlsld = tlsld || (library && kind == BUSTER_LINK_FIXUP_TLSLD);
             const uint64_t offset = fixups->offset[fixup];
             const bool readable = atom_offset != UINT64_MAX && atom_offset + offset + 4 <= image->file.length;
             const uint8_t* bytes = readable ? (const uint8_t*)image->file.pointer + atom_offset : 0;
@@ -1012,10 +1074,12 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
     const uint8_t* got = dynamic_test_bytes(image, got_section);
     uint32_t next = 1;
     SymbolId wrong = 0;
+    uint64_t pairs = tlsld ? 1 : 0;
     for (SymbolId symbol = 1; targets != 0 && symbol < link->symbols.count; symbol += 1)
     {
         const uint32_t slot = link->symbols.got_slot[symbol];
-        const bool right = (slot != 0) == (targets[symbol] != 0) && (slot == 0 || slot == next);
+        const bool right = (slot != 0) == ((targets[symbol] & 1) != 0) && (slot == 0 || slot == next);
+        pairs += (targets[symbol] & 2) != 0 ? 1 : 0;
         wrong = !right && wrong == 0 ? symbol : wrong;
         next += slot != 0 ? 1 : 0;
     }
@@ -1024,7 +1088,7 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
     {
         memcpy(&zero, got, sizeof(zero));
     }
-    const bool sized = got_section == 0 ? next == 1 : got_section->sh_size == 8 * (uint64_t)next && zero == 0;
+    const bool sized = got_section == 0 ? next == 1 && pairs == 0 : got_section->sh_size == 8 * ((uint64_t)next + 2 * pairs) && zero == 0;
     dynamic_test_expect(tally, targets != 0 && wrong == 0 && sized, "a GOT slot for each symbol an unrelaxed GOT kind or a dynamic call reaches, in symbol order", wrong);
     arena_pop_to(arena, length);
     return relaxed;
@@ -1982,7 +2046,8 @@ static uint64_t dynamic_test_read_references(const DynamicTestImage* image, Dyna
             const bool in_got = (got != 0 && offset >= got->sh_addr && offset < got->sh_addr + got->sh_size) ||
                                 (got_plt != 0 && offset >= got_plt->sh_addr && offset < got_plt->sh_addr + got_plt->sh_size);
             *pointers += type == R_X86_64_RELATIVE && !in_got ? 1 : 0;
-            const bool slot = type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT || type == R_X86_64_TPOFF64;
+            const bool tls_pair = type == R_X86_64_DTPMOD64 || type == R_X86_64_DTPOFF64;
+            const bool slot = type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT || type == R_X86_64_TPOFF64 || tls_pair;
             if ((slot || type == R_X86_64_64) && symbol < symbols && dynsym[symbol].st_name < dynstr_section->sh_size)
             {
                 result = result < capacity ? result : UINT64_MAX;
@@ -1990,7 +2055,7 @@ static uint64_t dynamic_test_read_references(const DynamicTestImage* image, Dyna
                 {
                     references[result] = (DynamicTestImportReference){
                         .name = dynstr + dynsym[symbol].st_name,
-                        .kind = slot ? 0 : 1,
+                        .kind = tls_pair ? type : slot ? 0 : 1,
                         .addend = slot ? 0 : rela[i].r_addend,
                     };
                     result += 1;
@@ -3346,6 +3411,8 @@ struct DynamicTestSharedSource
     const char* source;
     const char* pic;
     const char* option;
+    // A generated TLS table to cross fixup-vector and symbol-bitset boundaries; 0 for only source.
+    uint32_t tls_variables;
     bool refused;
     bool lld_refuses;
 };
@@ -3361,7 +3428,7 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
                   "static __thread int buster_own_thread = 6;\n"
                   "extern int buster_nowhere(void) __attribute__((weak));\n"
                   "int (*const buster_table[])(void) = { buster_helper, buster_hidden, buster_protected };\n"
-                  "static int buster_count;\n"
+                  "static __thread int buster_count;\n"
                   "int buster_check(int (*helper)(void), int* data)\n"
                   "{\n"
                   "    int failures = 0;\n"
@@ -3437,10 +3504,115 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
         .lld_refuses = true,
     },
     {
-        // A general-dynamic access (TLSGD and its call of __tls_get_addr), whose GOT pair comes in the next part.
+        // General-dynamic accesses to an exported definition, a hidden one, zero-fill and an imported thread-local.
         .name = "general-dynamic",
         .source = "__thread int buster_thread = 4;\n"
-                  "int buster_check(int (*helper)(void), int* data) { return buster_thread != 4 || helper() != 2 || *data != 9; }\n",
+                  "__attribute__((visibility(\"hidden\"))) __thread int buster_hidden = 7;\n"
+                  "static __thread int buster_zero;\n"
+                  "extern __thread int buster_imported;\n"
+                  "__thread int buster_preempted = 9;\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    int bad = buster_thread != 4 || buster_hidden != 7 || buster_zero != 0 || buster_imported != 13 || buster_preempted != 23;\n"
+                  "    buster_thread++; buster_hidden++; buster_zero++; buster_imported++;\n"
+                  "    return bad || buster_thread != 5 || buster_hidden != 8 || buster_zero != 1 || buster_imported != 14 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+    },
+    {
+        .name = "local-dynamic",
+        .source = "static __thread int buster_thread = 4;\n"
+                  "static __thread int buster_zero[32];\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    int bad = buster_thread != 4 || buster_zero[31] != 0;\n"
+                  "    buster_thread++; buster_zero[31]++;\n"
+                  "    return bad || buster_thread != 5 || buster_zero[31] != 1 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+        .option = "-ftls-model=local-dynamic",
+    },
+    {
+        .name = "mixed-tls",
+        .source = "__thread volatile int buster_thread = 4;\n"
+                  "extern __thread volatile int buster_ie __asm__(\"buster_thread\") __attribute__((tls_model(\"initial-exec\")));\n"
+                  "static __thread int buster_local __attribute__((tls_model(\"local-dynamic\"))) = 7;\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    int bad = buster_thread != 4 || buster_ie != 4 || buster_local != 7;\n"
+                  "    buster_ie++; buster_local++;\n"
+                  "    return bad || buster_thread != 5 || buster_ie != 5 || buster_local != 8 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+    },
+    {
+        .name = "many-general-dynamic",
+        .source = "",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+        .tls_variables = 73,
+    },
+    {
+        .name = "general-dynamic-got-call",
+        .source = "__thread int buster_thread = 4;\n"
+                  "int buster_check(int (*helper)(void), int* data) { return buster_thread++ != 4 || helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .option = "-fno-plt",
+    },
+    {
+        .name = "local-dynamic-global",
+        .source = "__thread int buster_thread = 4;\n"
+                  "int buster_check(int (*helper)(void), int* data) { return buster_thread++ != 4 || helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .option = "-ftls-model=local-dynamic",
+    },
+    {
+        .name = "general-dynamic-import-only",
+        .source = "extern __thread int buster_imported;\n"
+                  "int buster_check(int (*helper)(void), int* data) { return buster_imported++ != 13 || helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+    },
+    {
+        .name = "general-dynamic-runtime",
+        .source = "extern __thread int errno;\n"
+                  "extern int* __errno_location(void);\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    errno = 42;\n"
+                  "    int bad = &errno != __errno_location() || *__errno_location() != 42;\n"
+                  "    errno = 0;\n"
+                  "    return bad || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+    },
+    {
+        .name = "local-dynamic-got-call",
+        .source = "static __thread int buster_thread __attribute__((tls_model(\"local-dynamic\"), aligned(256)));\n"
+                  "int buster_check(int (*helper)(void), int* data) { return buster_thread++ != 0 || helper() != 2 || *data != 9; }\n",
+        .pic = "-fPIC",
+        .option = "-fno-plt",
+    },
+    {
+        // A module-relative offset cannot address another module's thread-local definition. lld accepts the
+        // unresolved offset, so this probe discards it: our writer deliberately refuses that incomplete access.
+        .name = "local-dynamic-import",
+        .source = "__asm__(\".text\\n.globl buster_check\\n.type buster_check,@function\\n\"\n"
+                  "        \".type buster_imported,@tls_object\\nbuster_check:\\n\"\n"
+                  "        \"leaq buster_imported@dtpoff(%rax),%rax\\nxorl %eax,%eax\\nret\\n.size buster_check,.-buster_check\\n\");\n",
+        .pic = "-fPIC",
+        .refused = true,
+    },
+    {
+        // No definition and no dynamic lookup: a current-module TLS pair would manufacture an unrelated address.
+        // The reference loader check doesn't call the absent definition's probe; the writer must reject it.
+        .name = "general-dynamic-hidden-weak",
+        .source = "extern __thread int buster_absent __attribute__((weak, visibility(\"hidden\")));\n"
+                  "int* buster_lookup(void) { return &buster_absent; }\n"
+                  "int buster_check(int (*helper)(void), int* data) { return helper() != 2 || *data != 9; }\n",
         .pic = "-fPIC",
         .option = "-mtls-dialect=gnu",
         .refused = true,
@@ -3451,17 +3623,36 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
 // that they preempt the library's, and returns the count of the library's failed checks, or 99 if it can't load it.
 static const char dynamic_test_shared_program[] = "#include <dlfcn.h>\n"
                                                   "#include <stdio.h>\n"
+                                                  "#include <pthread.h>\n"
                                                   "int buster_helper(void) { return 2; }\n"
                                                   "int buster_data = 9;\n"
+                                                  "__thread int buster_imported = 13;\n"
+                                                  "__thread int buster_preempted = 23;\n"
+                                                  "static int (*buster_check)(int (*)(void), int*);\n"
+                                                  "static pthread_barrier_t buster_barrier;\n"
+                                                  "static void* buster_worker(void* unused)\n"
+                                                  "{\n"
+                                                  "    (void)unused;\n"
+                                                  "    pthread_barrier_wait(&buster_barrier);\n"
+                                                  "    return (void*)(long)(buster_check != 0 ? buster_check(buster_helper, &buster_data) : 99);\n"
+                                                  "}\n"
                                                   "int main(int argc, char** argv)\n"
                                                   "{\n"
+                                                  "    pthread_t thread;\n"
+                                                  "    void* result = 0;\n"
+                                                  "    if (pthread_barrier_init(&buster_barrier, 0, 2) != 0) return 98;\n"
+                                                  "    if (pthread_create(&thread, 0, buster_worker, 0) != 0) return 98;\n"
                                                   "    void* library = argc >= 2 ? dlopen(argv[1], RTLD_NOW) : 0;\n"
                                                   "    int (*check)(int (*)(void), int*) = library != 0 ? (int (*)(int (*)(void), int*))dlsym(library, \"buster_check\") : 0;\n"
                                                   "    if (check == 0)\n"
                                                   "    {\n"
                                                   "        fprintf(stderr, \"%s\\n\", dlerror());\n"
                                                   "    }\n"
-                                                  "    return check != 0 ? check(buster_helper, &buster_data) : 99;\n"
+                                                  "    buster_check = check;\n"
+                                                  "    pthread_barrier_wait(&buster_barrier);\n"
+                                                  "    if (pthread_join(thread, &result) != 0 || result != 0) return 97;\n"
+                                                  "    pthread_barrier_destroy(&buster_barrier);\n"
+                                                  "    return check(buster_helper, &buster_data);\n"
                                                   "}\n";
 
 // Whether the program at `program` loads the library at `library` and exits with status 0: every check held.
@@ -3516,12 +3707,26 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
         snprintf(lld_path, sizeof(lld_path), "%s/shared-%s-lld.so", directory->path, library->name);
         snprintf(name, sizeof(name), "shared-%s.so", library->name);
         FILE* file = fopen(source_path, "w");
-        const bool written = file != 0 && fputs(library->source, file) >= 0;
+        bool written = file != 0 && fputs(library->source, file) >= 0;
+        for (uint32_t v = 0; written && v < library->tls_variables; v += 1)
+        {
+            written = fprintf(file, "%s __thread int buster_tls_%u __attribute__((aligned(64))) = %u;\n",
+                              v % 3 == 0 ? "__attribute__((visibility(\"hidden\")))" : "", v, v % 2 != 0 ? v : 0) >= 0;
+        }
+        if (written && library->tls_variables != 0)
+        {
+            written = fputs("int buster_check(int (*helper)(void), int* data)\n{\n    int bad = 0;\n", file) >= 0;
+            for (uint32_t v = 0; written && v < library->tls_variables; v += 1)
+            {
+                written = fprintf(file, "    bad |= buster_tls_%u++ != %u;\n", v, v % 2 != 0 ? v : 0) >= 0;
+            }
+            written = written && fputs("    return bad || helper() != 2 || *data != 9;\n}\n", file) >= 0;
+        }
         if (file != 0)
         {
             fclose(file);
         }
-        char* compile[] = { "cc", "-O2", (char*)library->pic, "-c", "-o", object_path, source_path, (char*)library->option, 0 };
+        char* compile[] = { "cc", "-O2", "-mtls-dialect=gnu", (char*)library->pic, "-c", "-o", object_path, source_path, (char*)library->option, 0 };
         const bool compiled = written && object_test_run(compile, out, err) == 0;
         dynamic_test_expect(&tally, compiled, library->name, s);
         const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };

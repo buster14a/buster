@@ -1,0 +1,26 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T13:55:51+00:00 codex-126-lowering: taskset -c 2 ./build/compiler benchmark-lowering --only vector --after-scalar 100
+  title: PR325 lowering after-scalar process 2
+  link: https://github.com/buster14a/buster/pull/325
+1 workers, bound against the shared library's runtime and written as a shared library: 93 atoms, 117 fixups, 795 bytes of code, 12 dynamic symbols, 14 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 2 stubs, a 7016-byte file in 1 chunks, 1 lane:
+  replace          7.9 us ( 0.88 GB/s): count 1.0 layout 0.7 symbols 0.5 dynamic 0.3 open 1.6 chunks 2.1 finish 1.8
+  new file         7.4 us ( 0.95 GB/s): count 1.0 layout 0.7 symbols 0.5 dynamic 0.3 open 1.7 chunks 2.0 finish 1.1
+  in place         0.6 us (10.93 GB/s): the floor, one pwrite
+  new file         1.5 us ( 4.61 GB/s): the floor, one pwrite
+64 workers, bound against the shared library's runtime and written as a shared library: 156 atoms, 936 fixups, 12066 bytes of code, 75 dynamic symbols, 138 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 42 stubs, a 28872-byte file in 1 chunks, 1 lane:
+  replace         12.9 us ( 2.24 GB/s): count 2.0 layout 0.9 symbols 0.7 dynamic 0.9 open 1.4 chunks 4.6 finish 2.3
+  new file        11.8 us ( 2.44 GB/s): count 2.0 layout 0.9 symbols 0.7 dynamic 0.9 open 1.6 chunks 4.6 finish 1.1
+  in place         1.1 us (26.44 GB/s): the floor, one pwrite
+  new file         2.7 us (10.67 GB/s): the floor, one pwrite
+2000 workers, bound against the shared library's runtime and written as a shared library: 2112 atoms, 26105 fixups, 360079 bytes of code, 2011 dynamic symbols, 3745 relocations in .rela.dyn (0 relative) and 45 in 14 words of .relr.dyn, 1273 stubs, a 701776-byte file in 3 chunks, 1 lane:
+  replace        180.3 us ( 3.89 GB/s): count 41.0 layout 6.1 symbols 5.5 dynamic 18.2 open 2.1 chunks 90.4 finish 16.6
+  new file       164.9 us ( 4.26 GB/s): count 41.1 layout 6.2 symbols 5.6 dynamic 18.2 open 2.2 chunks 90.0 finish 1.6
+  in place        18.0 us (38.98 GB/s): the floor, one pwrite
+  new file        42.3 us (16.60 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 185452 atoms, 2342790 fixups, 32370098 bytes of code, 180011 dynamic symbols, 335635 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113884 stubs, a 63181112-byte file in 242 chunks, 1 lane:
+  replace      21676.6 us ( 2.91 GB/s): count 4256.0 layout 723.6 symbols 643.1 dynamic 2206.2 open 68.1 chunks 12076.0 finish 1694.1
+  new file     19755.4 us ( 3.20 GB/s): count 4258.2 layout 719.2 symbols 645.0 dynamic 2173.0 open 69.5 chunks 11730.5 finish 12.8
+  in place      4503.0 us (14.03 GB/s): the floor, one pwrite
+  new file      8054.0 us ( 7.84 GB/s): the floor, one pwrite
+peak_rss_kib 253312
+user_seconds 0.417324
+system_seconds 0.423616
