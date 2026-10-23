@@ -402,6 +402,18 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_sroa_test.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
 
+// Selected effective uses feed liveness, allocation and the bounded native function consumer.
+#include "buster/compiler/tier1_select.c"
+#include "buster/compiler/tier1_select_test.c"
+#include "buster/compiler/tier1_liveness.c"
+#include "buster/compiler/tier1_liveness_test.c"
+#include "buster/compiler/tier1_emit.c"
+#include "buster/compiler/tier1_emit_test.c"
+#include "buster/compiler/tier1_pipeline_test.c"
+int run_tier1_select_benchmark(int argc, char** argv);
+int run_tier1_model_measure(int argc, char** argv);
+int run_tier1_model_measure_tests(int argc, char** argv);
+
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
 #include "buster/compiler/call_graph.c"
@@ -996,6 +1008,34 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-sroa") == 0)
     {
         result = run_ir_sroa_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-select") == 0)
+    {
+        result = run_tier1_select_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-liveness") == 0)
+    {
+        result = run_tier1_liveness_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-emit") == 0)
+    {
+        result = run_tier1_emit_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-pipeline") == 0)
+    {
+        result = run_tier1_pipeline_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select") == 0)
+    {
+        result = run_tier1_select_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-model") == 0)
+    {
+        result = run_tier1_model_measure_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "measure-tier1-model") == 0)
+    {
+        result = run_tier1_model_measure(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize-passes") == 0)
     {

@@ -160,6 +160,15 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
+  consumer connects required locations, allocation, frames and spill/remat
+  records. Run `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`
+  and `test-tier1-pipeline --cross-check` for bounded typed-stream/native
+  validation. `test-tier1-model` checks the emitted-case measurement reader;
+  `measure-tier1-model --manifest PATH --verify` constructs its eligible
+  experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)
+  for supported inputs and the complete C-source acceptance still pending.
+
 - The shared IR optimizers provide SCCP, dead-code/CFG cleanup, value numbering
   and conservative loop-invariant motion, private-field replacement and bounded
   translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
