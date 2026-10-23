@@ -686,7 +686,7 @@ static const PPDirectiveTestStructure pp_directive_test_raw_errors[] = {
     { "discarded macro argument", "#define DROP(x) kept\nDROP(R\"bad space\")\n", 0, "gnu17" },
     { "condition after expansion", "#define DROP(x) 1\n#if DROP(R\"bad space\")\nkept\n#endif\n", 0, "gnu17" },
     { "skipped body", "#if 0\nR\"bad space\"\n#endif\n", 0, "gnu17" },
-    { "skipped elif", "#if 1\nkept\n#elif R\"bad space\"\n#endif\n", 0, "gnu17" },
+    { "untaken elif is still lexed", "#if 1\nkept\n#elif R\"bad space\"\n#endif\n", 0, "gnu17" },
     { "opaque diagnostic", "#warning R\"bad space\"\n", 0, "gnu17" },
     { "opaque query", "#define HI __has_include\n#if HI(<R\"bad\"x>)\n#endif\n", 0, "gnu17" },
     { "included file", "#include \"structure.h\"\n#include \"structure.h\"\n", "R\"bad space\"\n", "gnu17" },

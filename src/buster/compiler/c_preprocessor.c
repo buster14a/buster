@@ -10535,8 +10535,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
     {
         pp_read_directive_comment(pp, context, d);
         const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
-        const bool skipped_elif = kind == PP_DIRECTIVE_ELIF && group != 0 && group->taken;
-        if (!text && !skipped_elif)
+        if (!text)
         {
             pp_read_raw_errors(pp, context, hash, end);
         }

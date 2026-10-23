@@ -1113,6 +1113,7 @@ static const PPTestCase pp_test_cases[] = {
     { .name = "unused invalid raw macro argument diagnoses", .source = "#define DROP(x) kept\nDROP(R\"bad space\")\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
     { .name = "invalid raw in a condition diagnoses after expansion", .source = "#define DROP(x) 1\n#if DROP(R\"bad space\")\nkept\n#endif\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
     { .name = "skipped invalid raw literals suppress diagnostics", .source = "#if 0\nR\"bad space\"\n#define BAD LR\"bad)\"\n#endif\nkept\n", .standard = "gnu17", .expected = "kept\n" },
+    { .name = "an untaken elif still diagnoses invalid raw literals", .source = "#if 1\nkept\n#elif R\"bad space\"\n#endif\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
     { .name = "invalid raw syntax is ordinary text with raw disabled", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-fno-raw-string-literals", .expected = "R \"bad space\"\n" },
     { .name = "invalid raw syntax with forced C89 raw literals", .source = "R\"bad space\"\n", .standard = "c89", .options = "-fraw-string-literals", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
     { .name = "invalid raw syntax in assembly", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-x assembler-with-cpp", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
