@@ -873,7 +873,7 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
                 if (gd || ld)
                 {
                     const uint64_t address = place + (uint64_t)(int64_t)displacement - (uint64_t)link_fixup_addend(link, fixup);
-                    const bool inside = readable && got != 0 && address >= got_section->sh_addr && address + 16 <= got_section->sh_addr + got_section->sh_size &&
+                    const bool inside = readable && got != 0 && got_section->sh_size >= 16 && address >= got_section->sh_addr && address - got_section->sh_addr <= got_section->sh_size - 16 &&
                                         (address - got_section->sh_addr) % 8 == 0;
                     dynamic_test_expect(tally, inside, "a dynamic TLS access reaches a complete GOT pair", fixup);
                     const uint64_t slot = inside ? (address - got_section->sh_addr) / 8 : slots;
@@ -3597,14 +3597,14 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
         .option = "-fno-plt",
     },
     {
-        // A module-relative offset cannot address another module's thread-local definition.
+        // A module-relative offset cannot address another module's thread-local definition. lld accepts the
+        // unresolved offset, so this probe discards it: our writer deliberately refuses that incomplete access.
         .name = "local-dynamic-import",
         .source = "__asm__(\".text\\n.globl buster_check\\n.type buster_check,@function\\n\"\n"
                   "        \".type buster_imported,@tls_object\\nbuster_check:\\n\"\n"
-                  "        \"leaq buster_imported@dtpoff(%rax),%rax\\nret\\n.size buster_check,.-buster_check\\n\");\n",
+                  "        \"leaq buster_imported@dtpoff(%rax),%rax\\nxorl %eax,%eax\\nret\\n.size buster_check,.-buster_check\\n\");\n",
         .pic = "-fPIC",
         .refused = true,
-        .lld_refuses = true,
     },
 };
 

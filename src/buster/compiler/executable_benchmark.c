@@ -7,7 +7,7 @@
 //
 // Usage: build/compiler benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N]
 //                                            [--only kernels|hash|links|dynamic|static|static-pie|shared]
-//                                            [--tls general|local (with --only shared)] [--exact]
+//                                            [--tls general|local (with --only shared)] [--exact] [--after-scalar MS]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...), or with --lanes N to N CPUs, one per core
 // (taskset -c 0-7 for 8), since the lanes' threads keep the affinity they start with. Each figure is a median:
@@ -608,11 +608,34 @@ struct ExecutableBenchmarkWrite
     // How many writes to time after a warm-up, and whether each goes over the last one's file or makes a new one.
     uint32_t runs;
     bool in_place;
+    // Before each timed write, classify this lane's fixup kinds with a scalar scan for this many nanoseconds.
+    uint64_t after_scalar;
     ExecutableResult result;
     uint64_t totals[BUSTER_EXECUTABLE_BENCHMARK_MAX_RUNS];
     uint64_t phases[EXECUTABLE_PHASES][BUSTER_EXECUTABLE_BENCHMARK_MAX_RUNS];
     bool succeeded;
 };
+
+// The scalar twin of fixup-kind classification is representative lighter work before the complete writer. Keep
+// every lane busy over its own bounded input slice; the scan is outside the timed interval and doesn't change it.
+__attribute__((noinline)) static void executable_benchmark_after_scalar(const Link* link, uint64_t nanoseconds)
+{
+    const uint64_t count = link->fixups.count - 1;
+    const FixupId begin = 1 + (FixupId)(count * lane_index() / lane_count());
+    const FixupId end = 1 + (FixupId)(count * (lane_index() + 1) / lane_count());
+    const uint64_t until = executable_now() + nanoseconds;
+    while (executable_now() < until)
+    {
+        uint64_t found = 0;
+        #pragma clang loop vectorize(disable) interleave(disable)
+        for (FixupId i = begin; i < end; i += 1)
+        {
+            const uint8_t kind = link->fixups.kinds[i];
+            found += kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD;
+        }
+        __asm__ volatile("" : : "r"(found) : "memory");
+    }
+}
 
 // The lanes' entry point: the warm-up and the timed writes, all in one group, as a compiler runs its phases. Lane 0
 // removes the output before a new file's write, outside the time, and times each write from its start to its return.
@@ -626,6 +649,10 @@ static void executable_benchmark_lane_main(void* argument)
         if (first && !write->in_place)
         {
             unlink(write->path);
+        }
+        if (run > 0 && write->after_scalar != 0)
+        {
+            executable_benchmark_after_scalar(write->link, write->after_scalar);
         }
         lane_sync();
         const uint64_t begin = executable_now();
@@ -717,10 +744,69 @@ static SymbolId executable_benchmark_tls_symbols(LinkProgram* program, uint32_t 
 static bool executable_benchmark_tls_atoms(LinkProgram* program, SymbolId first, uint32_t count, bool local)
 {
     // sub rsp,8; TLSGD lea and prefixed PLT call, or TLSLD lea/call and DTPOFF32 lea; load; add rsp,8; ret.
-    static const uint8_t gd[] = { 0x48, 0x83, 0xec, 8, 0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8,
-                                  0, 0, 0, 0, 0x48, 0x8b, 0, 0x48, 0x83, 0xc4, 8, 0xc3 };
-    static const uint8_t ld[] = { 0x48, 0x83, 0xec, 8, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x48, 0x8d, 0x80,
-                                  0, 0, 0, 0, 0x48, 0x8b, 0, 0x48, 0x83, 0xc4, 8, 0xc3 };
+    static const uint8_t gd[] = {
+        0x48,
+        0x83,
+        0xec,
+        8,
+        0x66,
+        0x48,
+        0x8d,
+        0x3d,
+        0,
+        0,
+        0,
+        0,
+        0x66,
+        0x66,
+        0x48,
+        0xe8,
+        0,
+        0,
+        0,
+        0,
+        0x48,
+        0x8b,
+        0,
+        0x48,
+        0x83,
+        0xc4,
+        8,
+        0xc3,
+    };
+    static const uint8_t ld[] = {
+        0x48,
+        0x83,
+        0xec,
+        8,
+        0x48,
+        0x8d,
+        0x3d,
+        0,
+        0,
+        0,
+        0,
+        0xe8,
+        0,
+        0,
+        0,
+        0,
+        0x48,
+        0x8d,
+        0x80,
+        0,
+        0,
+        0,
+        0,
+        0x48,
+        0x8b,
+        0,
+        0x48,
+        0x83,
+        0xc4,
+        8,
+        0xc3,
+    };
     const uint64_t size = local ? sizeof(ld) : sizeof(gd);
     Link* link = &program->link;
     bool result = first != 0;
@@ -771,9 +857,9 @@ static bool executable_benchmark_tls_runs(const char* path, uint32_t count)
 // shared library (runtime_import_shared's, the program generated as one), its inputs from dynamic.c; otherwise it is
 // written as a static executable without libc. A shared library replaces an existing file by rename, rather than
 // rewriting its inode. The programs that call libc
-// have no general- or local-dynamic TLS accesses, whose relaxation rewrites the atoms' bytes so that a write over them
-// again would fail.
-static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime, const char* tls, bool exact)
+// have no general- or local-dynamic TLS accesses in executables, whose relaxation rewrites the atoms' bytes so that
+// a write over them again would fail. Shared libraries preserve those accesses and may add them with --tls.
+static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime, const char* tls, bool exact, uint64_t after_scalar)
 {
     const bool static_runtime = runtime != 0 && runtime_kind_is_static(runtime->kind);
     const bool pie = runtime != 0 && runtime->kind == RUNTIME_KIND_STATIC_PIE;
@@ -850,6 +936,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
             .runtime = static_runtime ? &static_inputs : 0,
         },
         .path = path,
+        .after_scalar = after_scalar * 1000000ull,
     };
     // A first write, which also fills the layout columns for the kernel's run on the program.
     result = result && executable_benchmark_write(&write, lanes, 0, false);
@@ -979,6 +1066,7 @@ int run_executable_benchmark(int argc, char** argv)
     memcpy(functions, executable_benchmark_functions, sizeof(executable_benchmark_functions));
     uint64_t lanes = 1;
     uint64_t seed = 1;
+    uint64_t after_scalar = 0;
     const char* only = 0;
     const char* tls = 0;
     bool exact = false;
@@ -1034,6 +1122,11 @@ int run_executable_benchmark(int argc, char** argv)
         {
             exact = true;
         }
+        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
+        {
+            valid = valid && executable_benchmark_parse_u64(argv[i + 1], &after_scalar) && after_scalar <= 1000;
+            i += 1;
+        }
         else
         {
             valid = false;
@@ -1044,11 +1137,15 @@ int run_executable_benchmark(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only "
-                        "kernels|hash|links|dynamic|static|static-pie|shared] [--tls general|local (with --only shared)] [--exact]\n");
+                        "kernels|hash|links|dynamic|static|static-pie|shared] [--tls general|local (with --only shared)] [--exact] [--after-scalar MS]\n");
     }
     else
     {
         bool passed = true;
+        if (after_scalar != 0)
+        {
+            printf("Each complete writer sample after %llu ms of scalar fixup classification.\n", (unsigned long long)after_scalar);
+        }
         uint64_t state = seed;
         if (only == 0 || strcmp(only, "kernels") == 0)
         {
@@ -1064,7 +1161,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; (only == 0 || strcmp(only, "links") == 0) && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0, 0, exact) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0, 0, exact, after_scalar) && passed;
         }
         // The same sizes as dynamic PIEs, against the system's runtime.
         Runtime runtime;
@@ -1077,7 +1174,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; dynamic && imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime, 0, exact) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime, 0, exact, after_scalar) && passed;
         }
         if (dynamic)
         {
@@ -1098,7 +1195,7 @@ int run_executable_benchmark(int argc, char** argv)
             }
             for (uint32_t i = 0; statics && static_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
             {
-                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &static_runtime, 0, exact) && passed;
+                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &static_runtime, 0, exact, after_scalar) && passed;
             }
             if (statics)
             {
@@ -1116,7 +1213,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; libraries && shared_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &shared_runtime, tls, exact) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &shared_runtime, tls, exact, after_scalar) && passed;
         }
         if (libraries)
         {
