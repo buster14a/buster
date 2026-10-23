@@ -298,6 +298,17 @@ jobs:
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C.
           ./build/compiler test-tier0 --cross-check
+          == Test differential harness accounting, subprocesses and failure preservation
+          ./build/compiler test-differential-harness
+          == Test Tier 1 allocation, reload splitting and rematerialization
+          ./build/compiler test-tier1-allocation
+          == Test Tier 1 frame planning and slot coloring
+          ./build/compiler test-tier1-frame
+          ./build/compiler test-tier1-frame-execution
+          == Test experimental Tier 1 scheduling and model coverage
+          ./build/compiler test-tier1-schedule
+          # This bounded smoke also executes original and reordered machine code against its independent reference.
+          ./build/compiler benchmark-tier1-schedule --blocks 4 --records 64
           == Test the lanes
           ./build/compiler test-lanes
           == Test the direct path's executables
@@ -317,12 +328,16 @@ jobs:
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins
+          == Test typed postorder checking and source fixtures
+          ./build/compiler test-checker --seed 133
           == Test the per-file jobs on the repository's sources, flat
           ./build/compiler test-files --flat src
           == Test the link representation
           ./build/compiler test-link
           == Test dataflow bitsets
           ./build/compiler test-dataflow
+          == Test dominators, frontiers and natural loops
+          ./build/compiler test-dominators
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
@@ -629,6 +644,12 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-calling-convention
+
+      - name: Benchmark typed postorder checking on synthetic graphs
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-checker --shape wide
+          taskset -c "$cpu" ./build/compiler benchmark-checker --shape chain --nodes 4096
 
       - name: Benchmark the backend (Tier 0, branch sizing and encoding)
         run: |
