@@ -326,6 +326,8 @@ jobs:
           ./build/compiler test-link
           == Test dataflow bitsets
           ./build/compiler test-dataflow
+          == Test dominators, frontiers and natural loops
+          ./build/compiler test-dominators
           == Test local SSA construction and its memory interpreter
           ./build/compiler test-ssa
           == Test shared IR local promotion and typed-stream semantics

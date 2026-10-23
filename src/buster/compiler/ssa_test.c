@@ -737,6 +737,118 @@ static void ssa_test_invalid(SsaTestTally* tally, SsaTestSpace* space)
     ssa_test_reject(tally, space, &fixture.input);
 }
 
+static void ssa_test_dominance_handoff(SsaTestTally* tally, SsaTestSpace* space)
+{
+    // Reserving a frontier and solving vector dominance simultaneously needs
+    // (2*B+1) padded rows. These two chain sizes straddle the 16 MiB budget.
+    const uint32_t sizes[] = {
+        8191,
+        8192,
+    };
+    const uint8_t kinds[] = {
+        BUSTER_SSA_VALUE,
+        BUSTER_SSA_WRITE,
+        BUSTER_SSA_READ,
+    };
+    const uint8_t types[] = {
+        BUSTER_SSA_TYPE_I64,
+        BUSTER_SSA_TYPE_I64,
+        BUSTER_SSA_TYPE_I64,
+    };
+    const uint32_t locals[] = {
+        BUSTER_SSA_NONE,
+        0,
+        0,
+    };
+    const uint32_t operands[] = {
+        BUSTER_SSA_NONE,
+        0,
+        BUSTER_SSA_NONE,
+    };
+    const uint8_t local_type = BUSTER_SSA_TYPE_I64;
+    const uint8_t local_flags = 0;
+    const uint64_t scratch_capacity = space->scratch.capacity;
+    for (uint32_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s += 1)
+    {
+        const uint32_t blocks = sizes[s];
+        tally->name = "shared dominance memory boundary";
+        tally->blocks = blocks;
+        tally->locals = 1;
+        arena_pop_to(&space->input, 0);
+        uint32_t* block_offsets = BUSTER_ARENA_PUSH_ARRAY(&space->input, uint32_t, (uint64_t)blocks + 1);
+        uint32_t* successor_offsets = BUSTER_ARENA_PUSH_ARRAY(&space->input, uint32_t, (uint64_t)blocks + 1);
+        uint32_t* successors = BUSTER_ARENA_PUSH_ARRAY(&space->input, uint32_t, blocks - 1);
+        bool ready = ssa_test_expect(tally, block_offsets != 0 && successor_offsets != 0 && successors != 0, "allocate sparse boundary CFG");
+        if (ready)
+        {
+            for (uint32_t block = 0; block < blocks; block += 1)
+            {
+                block_offsets[block] = block == 0 ? 0 : 2;
+                successor_offsets[block] = block;
+                if (block + 1 < blocks)
+                {
+                    successors[block] = block + 1;
+                }
+            }
+            block_offsets[blocks] = 3;
+            successor_offsets[blocks] = blocks - 1;
+            const SsaInput input = {
+                .block_count = blocks,
+                .instruction_count = 3,
+                .local_count = 1,
+                .edge_count = blocks - 1,
+                .block_offsets = block_offsets,
+                .successor_offsets = successor_offsets,
+                .successors = successors,
+                .kinds = kinds,
+                .types = types,
+                .locals = locals,
+                .operands = operands,
+                .local_types = &local_type,
+                .local_flags = &local_flags,
+            };
+            const uint64_t hash = ssa_test_input_hash(&input);
+            ssa_test_expect(tally, ssa_vector_fits(blocks) == (s == 0), "combined matrix budget selects the expected path at both sides");
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                arena_pop_to(&space->output, 0);
+                arena_pop_to(&space->scratch, 0);
+                space->output.length = 37;
+                space->scratch.length = 29;
+                memset(space->output.base, 0xab, 37);
+                memset(space->scratch.base, 0xcd, 29);
+                // The fallback must fit without either quadratic matrix. Prefix
+                // offsets also force the child arenas to account for alignment.
+                space->scratch.capacity = s == 1 ? 8ull << 20 : scratch_capacity;
+                SsaResult result = { 0 };
+                const SsaError error = path == 0 ? ssa_build(&input, &space->output, &space->scratch, &result) :
+                                                 ssa_build_scalar(&input, &space->output, &space->scratch, &result);
+                const bool built = ssa_test_expect(tally, error == SSA_OK, "large sparse construction fits its selected memory budget");
+                if (built)
+                {
+                    ssa_test_expect(tally, result.phi_count == 0 && result.replacements[2] == 0 && result.reachable_edge_count == blocks - 1, "long-chain read preserves its entry definition and exact edges");
+                    const SsaCheck check = ssa_verify(&input, &result, &space->scratch);
+                    ssa_test_expect(tally, check.error == SSA_OK, "tree-only verification fits the same limited scratch arena");
+                }
+                bool prefixes = space->scratch.length == 29;
+                for (uint32_t i = 0; i < 37; i += 1)
+                {
+                    prefixes &= space->output.base[i] == 0xab;
+                }
+                for (uint32_t i = 0; i < 29; i += 1)
+                {
+                    prefixes &= space->scratch.base[i] == 0xcd;
+                }
+                ssa_test_expect(tally, prefixes, "shared analysis preserves nonzero output and scratch prefixes");
+                ssa_test_expect(tally, hash == ssa_test_input_hash(&input), "shared analysis leaves the borrowed CFG and accesses immutable");
+                space->scratch.capacity = scratch_capacity;
+                arena_pop_to(&space->scratch, 0);
+            }
+        }
+    }
+    arena_pop_to(&space->output, 0);
+}
+
 static void ssa_test_capacity(SsaTestTally* tally, SsaTestSpace* space)
 {
     SsaTestFixture fixture;
@@ -872,6 +984,7 @@ static int run_ssa_tests(int argc, char** argv)
         {
             ssa_test_fixtures(&tally, &space);
             ssa_test_generated(&tally, &space, count);
+            ssa_test_dominance_handoff(&tally, &space);
             ssa_test_guards(&tally, &space);
             ssa_test_invalid(&tally, &space);
             ssa_test_capacity(&tally, &space);

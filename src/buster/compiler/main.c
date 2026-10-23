@@ -88,6 +88,11 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
 
+// Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
+#include "buster/compiler/dominators.c"
+#include "buster/compiler/dominators_test.c"
+int run_dominator_benchmark(int argc, char** argv);
+
 // Local promotion over a completed CFG: vector SSA construction, its nonrecursive scalar twin and semantic tests.
 #include "buster/compiler/ssa.c"
 #include "buster/compiler/ssa_program.c"
@@ -406,6 +411,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-dominators") == 0)
+    {
+        result = run_dominator_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-dominators") == 0)
+    {
+        result = run_dominator_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
     {
