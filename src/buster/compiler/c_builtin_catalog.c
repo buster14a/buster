@@ -75,12 +75,24 @@
     X(ISFINITE, 0x14bu, "__builtin_isfinite") \
     X(SIGNBIT, 0x14cu, "__builtin_signbit") \
     X(FPCLASSIFY, 0x14du, "__builtin_fpclassify") \
+    X(ISINF_SIGN, 0x14eu, "__builtin_isinf_sign") \
+    X(FABS, 0x14fu, "__builtin_fabs") \
+    X(FABSF, 0x150u, "__builtin_fabsf") \
+    X(FABSL, 0x151u, "__builtin_fabsl") \
+    X(FLT_ROUNDS, 0x152u, "__builtin_flt_rounds") \
+    X(CREAL, 0x153u, "__builtin_creal") \
+    X(CREALF, 0x154u, "__builtin_crealf") \
+    X(CREALL, 0x155u, "__builtin_creall") \
+    X(CIMAG, 0x156u, "__builtin_cimag") \
+    X(CIMAGF, 0x157u, "__builtin_cimagf") \
+    X(CIMAGL, 0x158u, "__builtin_cimagl") \
     X(MEMCPY, 0x160u, "__builtin_memcpy") \
     X(MEMSET, 0x161u, "__builtin_memset") \
     X(MEMMOVE, 0x162u, "__builtin_memmove") \
     X(MEMCMP, 0x163u, "__builtin_memcmp") \
     X(STRLEN, 0x164u, "__builtin_strlen") \
     X(ALLOCA, 0x165u, "__builtin_alloca") \
+    X(UMULL_OVERFLOW, 0x170u, "__builtin_umull_overflow") \
     X(ATOMIC_LOAD, 0x180u, "__atomic_load") \
     X(ATOMIC_LOAD_N, 0x181u, "__atomic_load_n") \
     X(ATOMIC_STORE, 0x182u, "__atomic_store") \
