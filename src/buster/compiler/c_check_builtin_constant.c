@@ -27,14 +27,15 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
                               source->fault == CHECK_FAULT_NONE && (source->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_BIT_FIELD)) == 0 &&
                               (type_qualifiers(type_strip_aligned(reader->types, source->type)) & BUSTER_TYPE_VOLATILE) == 0 &&
                               check_action_is_integer(reader->types, source->type);
-        const bool ice = constant && (source->flags & BUSTER_CHECK_ICE) != 0 && check_action_is_integer(reader->types, destination_type) &&
-                         type_kind(reader->types, type_strip_aligned(reader->types, destination_type)) != BUSTER_TYPE_KIND_ATOMIC;
+        // Clang never takes __builtin_bit_cast as a C integer constant expression: a strict context (an aligned
+        // attribute's operand, choose_expr's condition) rejects it, while enum values and _Static_assert fold it
+        // as a GNU extension. The source therefore certifies a constant, never an ICE.
         const CheckBuiltinBitCastAction action =
         {
             .id = builtin, .destination_type = destination_type, .arguments = arguments, .argument_count = count, .node = closing,
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1,
-            .source_proof = ice ? CHECK_BUILTIN_BIT_CAST_PROOF_ICE : constant ? CHECK_BUILTIN_BIT_CAST_PROOF_CONSTANT : CHECK_BUILTIN_BIT_CAST_PROOF_NONE,
+            .source_proof = constant ? CHECK_BUILTIN_BIT_CAST_PROOF_CONSTANT : CHECK_BUILTIN_BIT_CAST_PROOF_NONE,
         };
         CheckBuiltinBitCastResult checked;
         check_builtin_bit_cast(reader->types, &action, &checked, 1);

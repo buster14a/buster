@@ -134,6 +134,35 @@ static bool check_region_walk(TypeTable* types, const CheckGraph* graph, const C
                 check_action_inherit(&result->effects, &value);
                 result->constant &= value.fault == CHECK_FAULT_NONE && (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
                                     (value.constant_kind != CHECK_CONSTANT_NONE || check_action_kind(types, value.type) == BUSTER_TYPE_KIND_VOID);
+                if (step->op == CHECK_REGION_EVAL)
+                {
+                    // A discarded statement's conversion to void doesn't make what it discards constant. Clang
+                    // answers __builtin_constant_p(({n;2;})) and ({(void)n;2;}) false, but ({(void)1;2;}) true,
+                    // unlike the comma operator, whose ignored operand may be any expression without effects.
+                    uint32_t inner = step->node;
+                    while ((graph->ops[inner] == CHECK_OP_CAST || graph->ops[inner] == CHECK_OP_CONVERT) && graph->operand0[inner] != BUSTER_CHECK_NONE &&
+                           check_action_kind(types, check_region_value(values, inner).type) == BUSTER_TYPE_KIND_VOID)
+                    {
+                        inner = graph->operand0[inner];
+                    }
+                    if (inner != step->node)
+                    {
+                        const uint32_t index = values->indices != NULL ? values->indices[inner] : inner;
+                        if (index == BUSTER_CHECK_NONE)
+                        {
+                            result->constant = false;
+                        }
+                        else
+                        {
+                            CheckDiagnostic ignored = CHECK_DIAG_NONE;
+                            const CheckValue discarded = check_region_operand(types, graph, values, inner, runtime, &ignored);
+                            const bool valid = values->valid == NULL || *(const bool*)((const uint8_t*)values->valid + (size_t)index * values->stride);
+                            result->constant &= valid && discarded.fault == CHECK_FAULT_NONE && (discarded.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                                                (discarded.constant_kind != CHECK_CONSTANT_NONE ||
+                                                 check_action_kind(types, discarded.type) == BUSTER_TYPE_KIND_VOID);
+                        }
+                    }
+                }
                 if (step->op == CHECK_REGION_BRANCH || step->op == CHECK_REGION_CASE)
                 {
                     bool truth = false;
