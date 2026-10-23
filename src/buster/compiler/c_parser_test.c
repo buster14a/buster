@@ -419,8 +419,9 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int (q)(int x) { return x; }\nint *(r)(void) { return 0; }\n", "", 0 },
     { "int (*p)(int) { return 0; }\n", "1:14: expected ';' after top level declarator", 0 },
     // A function's typedef declaration cannot carry a body, even though the declarator is a function's.
-    { "typedef int f(int x) { return x; }\n", "1:22: function definition declared 'typedef'", 0 },
-    { "typedef int f(int x) { return x; }\nint g(void) { return f(1); }\n", "1:22: function definition declared 'typedef'", 0 },
+    { "typedef int f(int x) { return x; }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "typedef int f(int x) { return x; }\nint g(void) { return f(1); }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "int typedef f(void) { return 0; }\n", "1:5: function definition declared 'typedef'", 0 },
     { "int f(int a), g(int b) { return b; }\n", "1:23: expected ';' after top level declarator", 0 },
     { "int (*f(void)) x\n", "1:16: expected function body after function declarator", 0 },
     // The end of an identifier is where its spelling ends: a UCN and a line splice make it longer than its bytes.
