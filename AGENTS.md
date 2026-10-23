@@ -3803,7 +3803,10 @@ of chosen forms against the scalar path's on random records, that both paths
 refuse unsupported entries and expressions past the depths alike, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects and values whose places both paths must give alike, aligned,
-inside the frame and apart. Every function must pass `tier0_validate`,
+inside the frame and apart; and variadic calls through a pointer, run natively:
+a probe must see `al` 3, `r11` its own address and the call's arguments, after
+moves that are cycles and that run through `r11`, with values saved around the
+call. Every function must pass `tier0_validate`,
 both paths must compile it to the same records, branch columns and references,
 and the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into
