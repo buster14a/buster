@@ -363,8 +363,20 @@ int run_backend_benchmark(int argc, char** argv);
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
 #include "buster/compiler/ir_lower.c"
+#include "buster/compiler/ir_validate.c"
+#include "buster/compiler/interpreter.c"
+#include "buster/compiler/interpreter_native.c"
+#include "buster/compiler/interpreter_link.c"
+#include "buster/compiler/ir_parse.c"
+#include "buster/compiler/ir_interpreter.c"
 #include "buster/compiler/ir_test.c"
 #include "buster/compiler/ir_lower_test.c"
+#include "buster/compiler/ir_parse_test.c"
+#include "buster/compiler/interpreter_test.c"
+#include "buster/compiler/interpreter_native_test.c"
+#include "buster/compiler/interpreter_link_test.c"
+#include "buster/compiler/ir_interpreter_test.c"
+#include "buster/compiler/interpreter_driver.c"
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 
@@ -898,6 +910,30 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-lowering") == 0)
     {
         result = run_ir_lower_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-parse") == 0)
+    {
+        result = run_ir_parse_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-interpreter") == 0)
+    {
+        result = run_interpreter_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-interpreter-native") == 0)
+    {
+        result = run_interpreter_native_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-interpreter-link") == 0)
+    {
+        result = run_interpreter_link_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-interpreter") == 0)
+    {
+        result = run_ir_interpreter_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "interpret-ir") == 0)
+    {
+        result = run_ir_interpreter(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir") == 0)
     {

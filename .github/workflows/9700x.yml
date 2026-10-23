@@ -212,6 +212,11 @@ jobs:
           == Test the IR and typed-stream lowering
           ./build/compiler test-ir
           ./build/compiler test-ir-lowering
+          ./build/compiler test-ir-parse
+          ./build/compiler test-interpreter
+          ./build/compiler test-interpreter-native
+          ./build/compiler test-interpreter-link
+          ./build/compiler test-ir-interpreter
           == Test the preprocessor's cases against clang
           # --clang also preprocesses each case with clang -E and compares the tokens.
           ./build/compiler test-preprocessor --clang

@@ -1,0 +1,33 @@
+function (i1, i128) -> i128 {
+b0:
+  %0 = param.i1 0
+  %1 = param.i128 1
+  %2 = cbr.void %0, b1, b2
+b1:
+  %3 = const.i128 0x00000000000000010000000000000000
+  %4 = br.void b3
+b2:
+  %5 = const.i128 0xffffffffffffffffffffffffffffffff
+  %6 = br.void b3
+b3:
+  %7 = phi.i128 [%3, b1], [%5, b2]
+  %8 = switch.void %1, default b4, [0x00000000000000010000000000000000, b4], [0xffffffffffffffffffffffffffffffff, b5]
+b4:
+  %9 = ret.void %7
+b5:
+  %10 = unreachable.void
+}
+function (i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = br.void b1
+b1:
+  %2 = phi.i64 [%0, b0], [%4, b2]
+  %3 = br.void b2
+b2:
+  %4 = add.i64 %2, %0
+  %5 = icmp.i1 %4, %0 ne
+  %6 = cbr.void %5, b1, b3
+b3:
+  %7 = ret.void %4
+}

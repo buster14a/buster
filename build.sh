@@ -72,7 +72,7 @@ build_compiler()
     for i in "${!sources[@]}"; do
         cat "$object_directory/$i.json"
     done > build/compile_commands.json
-    clang "${linker_flags[@]}" "${linked[@]}" "$@" -o build/compiler
+    clang "${linker_flags[@]}" "${linked[@]}" "$@" -lm -ldl -o build/compiler
 }
 # Choose the linker for build/compiler only; compilation and IR capture keep their existing flags.
 select_linker()
