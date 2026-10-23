@@ -415,10 +415,15 @@ designs and the compilers already built this way.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
+  General-dynamic TLS uses a separate two-word GOT pair per symbol and
+  local-dynamic TLS one module pair, preserving `__tls_get_addr` calls;
+  DTPMOD64/DTPOFF64 relocations and module offsets are emitted as appropriate.
   Regular shared-library outputs use a new file and rename, preserving any
   old inode that a process still maps.
-  Local-exec and general/local-dynamic TLS accesses in shared libraries are
-  refused; their implementations remain a later part of #85.
+  Local-exec accesses and undefined DTPOFF32 module offsets in shared
+  libraries are refused. Distinct general-/initial-exec slot columns allow
+  both models to reference the same symbol. TLSGD target bitsets are reduced
+  by whole symbol words, then expanded into slots with an exact scalar twin.
   `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
