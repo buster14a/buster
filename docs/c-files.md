@@ -526,3 +526,47 @@ lanes. `--read-limit N` sets the largest file the lanes read rather than map
 - **Translation units on lanes** (#152): after the walk, a unit still prepares
   the files the walk couldn't reach (computed includes, its predefines) and
   interns its pastes into the shared table, one unit at a time.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). The
+[file-job and merge map](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_files.c#L4)
+and [cached record](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor.c#L390)
+cover more than the preparation kernel:
+
+| Producer → consumer | Storage, batch and ordering |
+| --- | --- |
+| `file_cache_probe` → `pp_prepare_into` | Owned mapped/read bytes and per-file columns; checked size and mode configuration. Cache identity is device/inode, with separate path/search context. |
+| `pp_prepare_into` → `files_read_requests` and unit `pp_copy_prepared` | `PPFileData` token/directive/guard columns are shared; inclusion-specific once/line/location state belongs to the unit. Cache storage outlives borrowing units. |
+| Lane-local intern tables → `files_find_new`/exchange/`intern_bulk_begin`/`files_take_ids` → `files_remap` | Candidates retain 16 prefix bytes, a u64 hash and packed first-occurrence key. Count/place/fill and barriers assign disjoint ranges. IDs follow file then first-token order, not completion order. |
+| Directive include spans → `files_run_ahead` → later PP lookup | Frontier rounds over literal includes, search candidates in legal directory order. Computed includes remain with ordered PP. Speculative reads emit no diagnostic or macro effect. |
+
+Shared output is published only after every participating lane agrees a phase
+succeeded. One lane reserves table ranges; each lane fills its own segment;
+readers do not race a shared intern-table growth. Candidate bit fields are
+bounded by compile-time file/lane/ID limits, with runtime arena/count failures.
+Per-file token capacities and tails are the lexer/refinement contracts, not
+inferred from mapping size. Intern remap touches identifier values only.
+
+A round chooses working lanes from bytes (currently one per 4 MiB, limited by
+the group); small rounds use lane 0 and avoid merge entirely. Counter parts
+keep each lane's files in order, not costliest-first, because local IDs must
+preserve first occurrence. Internal 16/32/64-item vector work does not change
+round completion or search dependencies. Empty rounds terminate; inactive
+lanes still participate in the required synchronization decisions.
+
+Observed extra work includes speculative files never entered, per-lane new-name
+exchange and token-ID remapping. Those costs buy ready shared files and
+deterministic identities. Compare shared-ID/direct single-lane preparation,
+working-lane thresholds and bounded run-ahead using total unit preprocessing,
+cache preparation/release, allocations and unused bytes. The rejected [#290](https://github.com/buster14a/buster/issues/290)
+read experiment is not a retained optimization. [#262](https://github.com/buster14a/buster/issues/262) retains walk/scaling
+acceptance; [#111](https://github.com/buster14a/buster/issues/111) owns inclusion replay; [#152](https://github.com/buster14a/buster/issues/152) owns a real multi-unit driver.
+
+Disposition: retain the measured cache/merge design and its exact single-lane
+reference. `test-files`, PP comparisons and determinism tests cover aliases,
+read modes, guard skips, delayed lanes, failure decisions and identical output.
+The results above measure preparation/walk workloads; they do not establish a
+whole multi-unit compiler speedup or justify moving ordered macro state into
+speculative jobs.
