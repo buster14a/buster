@@ -10,8 +10,8 @@
 // foreign_link_build borrows contents from Foreign's private mappings. ForeignArgument.bytes supplied by a caller
 // must likewise be writable while executable_write patches them. Keep Foreign and both output arenas alive until
 // the executable has been written; rebuild Foreign before writing a second variant. The caller owns the arenas,
-// including partial output on failure. This initial interface produces
-// static inputs; needed shared libraries are refused until their versions and DT_NEEDED have an output handoff.
+// including partial output on failure. foreign_link_build produces static inputs; foreign_link_build_dynamic also
+// publishes the resolver's selected shared libraries, globally numbered versions and required executable exports.
 //
 // Layout: API; checked capacities/order; section and local-symbol import; canonical globals; relocation handoff;
 // foreign_link_build. main.c includes this after foreign.c and executable.c.
@@ -46,9 +46,13 @@ struct ForeignLink
     // Canonical symbol by ForeignNames index, and input-index maps by ForeignObject index.
     SymbolId* names;
     ImportObject* objects;
+    ExecutableDynamic dynamic;
+    // Original library version index -> output version index, one table per ForeignLibrary; null for dropped DSOs.
+    uint16_t** library_versions;
 };
 
 static __attribute__((unused)) ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena);
+static __attribute__((unused)) ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter);
 
 static bool foreign_link_add_capacity(LinkCapacity* total, LinkCapacity added)
 {
@@ -280,7 +284,7 @@ static ImportResult foreign_link_locals(ForeignLink* output, const ForeignObject
 // A symbol table alone cannot tell whether an undefined reference survived COMDAT selection. Only the surviving
 // sections' relocations require a definition, together with explicit -u roots. The extra scan is needed only when
 // resolution left an ordinary strong name undefined; successful ordinary links avoid it entirely.
-static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign* foreign, Arena* arena)
+static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign* foreign, RuntimeKind kind, Arena* arena)
 {
     uint8_t* required = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, foreign->names.count);
     bool unresolved = false;
@@ -288,7 +292,7 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
     {
         required[name] = 0;
         unresolved = unresolved || (foreign->names.resolution[name] == FOREIGN_RESOLUTION_UNDEFINED &&
-                                    !runtime_linker_name(RUNTIME_KIND_STATIC, foreign->names.bytes[name], foreign->names.length[name]));
+                                    !runtime_linker_name(kind, foreign->names.bytes[name], foreign->names.length[name]));
     }
     for (uint32_t id = 0; required != 0 && unresolved && id < foreign->object_count; id += 1)
     {
@@ -347,7 +351,7 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
     return required;
 }
 
-static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* foreign, const uint8_t* required)
+static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* foreign, const uint8_t* required, RuntimeKind kind)
 {
     ForeignLinkResult result = { 0 };
     Link* link = &output->link;
@@ -362,6 +366,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         AtomId atom = 0;
         uint64_t value = 0;
         uint64_t size = 0;
+        uint16_t version = 0;
         if (names->definitions[name] > 1)
         {
             result.error = FOREIGN_LINK_ERROR_DUPLICATE;
@@ -412,9 +417,30 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         }
         else if (resolution == FOREIGN_RESOLUTION_SHARED)
         {
-            result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
+            const ForeignLibrary* library = &foreign->libraries[names->library[name]];
+            const ImportExports* exports = &library->library.exports;
+            const uint32_t index = names->symbol[name];
+            const bool strong = (names->flags[name] & BUSTER_FOREIGN_NAME_REFERENCED) != 0;
+            flags = (uint8_t)((strong ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_WEAK) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
+            size = exports->size[index];
+            if (kind == RUNTIME_KIND_STATIC)
+            {
+                result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
+            }
+            else if (library->needed)
+            {
+                source = BUSTER_LINK_SOURCE_FOREIGN_SHARED;
+                const uint16_t original = exports->version[index];
+                version = original > VER_NDX_GLOBAL ? output->library_versions[names->library[name]][original] : 0;
+                result.error = original > VER_NDX_GLOBAL && version == 0 ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_NONE;
+            }
+            else if (strong)
+            {
+                result.error = FOREIGN_LINK_ERROR_UNDEFINED;
+            }
+            // A weak reference to an unneeded --as-needed DSO remains unversioned and undefined, retaining its type.
         }
-        else if (runtime_linker_name(RUNTIME_KIND_STATIC, names->bytes[name], names->length[name]))
+        else if (runtime_linker_name(kind, names->bytes[name], names->length[name]))
         {
             source = BUSTER_LINK_SOURCE_LINKER;
         }
@@ -433,6 +459,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             const NameId named = link_add_name_hashed(link, names->bytes[name], names->length[name], names->hash[name]);
             output->names[name] = named != 0 ? link_add_symbol(link, named, atom, value, size, flags, source) : 0;
             result.error = output->names[name] == 0 ? FOREIGN_LINK_ERROR_LINK : FOREIGN_LINK_ERROR_NONE;
+            link->symbols.version[output->names[name]] = version;
         }
         if (result.error != FOREIGN_LINK_ERROR_NONE)
         {
@@ -462,18 +489,178 @@ static ImportResult foreign_link_relocations(ForeignLink* output, const ForeignO
     return result;
 }
 
-static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena)
+// Preserve the resolver's needed-library choices, including an unversioned as-needed DSO. Original ELF version
+// indices are local to each library; the writer needs one global index space and version rows grouped by library.
+static ForeignLinkError foreign_link_libraries(ForeignLink* output, const Foreign* foreign, Arena* arena, String8 interpreter)
+{
+    uint64_t version_count = 0;
+    uint32_t library_count = 0;
+    for (uint32_t l = 0; l < foreign->library_count; l += 1)
+    {
+        const ForeignLibrary* library = &foreign->libraries[l];
+        library_count += library->needed ? 1 : 0;
+        for (uint32_t v = 0; library->needed && v < library->library.version_count; v += 1)
+        {
+            version_count += !library->library.versions[v].base && library->library.versions[v].index > VER_NDX_GLOBAL ? 1 : 0;
+        }
+    }
+    ForeignLinkError result = version_count > 0x7ffe ? FOREIGN_LINK_ERROR_CAPACITY : FOREIGN_LINK_ERROR_NONE;
+    ExecutableLibrary* libraries = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableLibrary, library_count);
+    ExecutableVersion* versions = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableVersion, version_count);
+    output->library_versions = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t*, foreign->library_count);
+    if (result == FOREIGN_LINK_ERROR_NONE && (libraries == 0 || versions == 0 || output->library_versions == 0))
+    {
+        result = FOREIGN_LINK_ERROR_MEMORY;
+    }
+    uint32_t next_library = 0;
+    uint32_t next_version = 0;
+    for (uint32_t l = 0; result == FOREIGN_LINK_ERROR_NONE && l < foreign->library_count; l += 1)
+    {
+        const ForeignLibrary* library = &foreign->libraries[l];
+        output->library_versions[l] = 0;
+        if (library->needed)
+        {
+            const String8 name = library->library.soname.length != 0 ? library->library.soname : foreign->inputs[library->input].path;
+            libraries[next_library] = (ExecutableLibrary){
+                .name = name,
+                .required = true,
+            };
+            uint32_t limit = VER_NDX_GLOBAL + 1;
+            for (uint32_t v = 0; v < library->library.version_count; v += 1)
+            {
+                const uint32_t index = library->library.versions[v].index;
+                limit = index + 1 > limit ? index + 1 : limit;
+            }
+            uint16_t* map = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, limit);
+            output->library_versions[l] = map;
+            result = map == 0 ? FOREIGN_LINK_ERROR_MEMORY : FOREIGN_LINK_ERROR_NONE;
+            if (map != 0)
+            {
+                memset(map, 0, (uint64_t)limit * sizeof(uint16_t));
+                for (uint32_t v = 0; v < library->library.version_count; v += 1)
+                {
+                    const ImportVersion* version = &library->library.versions[v];
+                    if (!version->base && version->index > VER_NDX_GLOBAL)
+                    {
+                        const uint16_t index = (uint16_t)(next_version + 2);
+                        versions[next_version] = (ExecutableVersion){
+                            .name = version->name,
+                            .hash = version->hash,
+                            .index = index,
+                            .library = next_library,
+                        };
+                        map[version->index] = index;
+                        next_version += 1;
+                    }
+                }
+            }
+            next_library += 1;
+        }
+    }
+    if (result == FOREIGN_LINK_ERROR_NONE)
+    {
+        output->dynamic = (ExecutableDynamic){
+            .interpreter = interpreter,
+            .libraries = libraries,
+            .library_count = library_count,
+            .versions = versions,
+            .version_count = next_version,
+        };
+    }
+    return result;
+}
+
+static SymbolId foreign_link_named(const ForeignLink* output, const Foreign* foreign, const char* text)
+{
+    const uint32_t length = (uint32_t)strlen(text);
+    const uint32_t name = foreign_find_name(foreign, (const uint8_t*)text, length, link_hash((const uint8_t*)text, length));
+    const SymbolId symbol = name != 0 ? output->names[name - 1] : 0;
+    const AtomId atom = output->link.symbols.atom[symbol];
+    const uint8_t class = output->link.atoms.class[atom];
+    // DT_INIT/DT_FINI name callbacks in this image. An undefined weak name or a DSO's definition is not one.
+    const bool code = atom != 0 && (class == BUSTER_LINK_CLASS_TEXT || class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI);
+    return code ? symbol : 0;
+}
+
+// A needed library may refer back to the executable, or define a name the executable interposes. Export those
+// visible definitions once in canonical name order. Borrowed version strings and note bytes live with Foreign.
+static ForeignLinkError foreign_link_dynamic_finish(ForeignLink* output, const Foreign* foreign, Arena* arena)
+{
+    uint8_t* marked = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, foreign->names.count);
+    SymbolId* exports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, foreign->names.count);
+    ForeignLinkError result = marked == 0 || exports == 0 ? FOREIGN_LINK_ERROR_MEMORY : FOREIGN_LINK_ERROR_NONE;
+    if (result == FOREIGN_LINK_ERROR_NONE)
+    {
+        memset(marked, 0, foreign->names.count);
+        for (uint32_t l = 0; l < foreign->library_count; l += 1)
+        {
+            const ForeignLibrary* library = &foreign->libraries[l];
+            if (library->needed)
+            {
+                const ImportExports* definitions = &library->library.exports;
+                const ImportReferences* references = &library->library.references;
+                for (uint32_t d = 0; d < definitions->count; d += 1)
+                {
+                    const uint32_t name = foreign_find_name(foreign, definitions->name[d], definitions->length[d], definitions->hash[d]);
+                    if (name != 0)
+                    {
+                        marked[name - 1] = 1;
+                    }
+                }
+                for (uint32_t r = 0; r < references->count; r += 1)
+                {
+                    const uint32_t name = foreign_find_name(foreign, references->name[r], references->length[r], references->hash[r]);
+                    if (name != 0)
+                    {
+                        marked[name - 1] = 1;
+                    }
+                }
+            }
+        }
+        const LinkSymbols* symbols = &output->link.symbols;
+        uint32_t count = 0;
+        for (uint32_t n = 0; n < foreign->names.count; n += 1)
+        {
+            const SymbolId symbol = output->names[n];
+            const bool defined = symbol != 0 && (symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE);
+            const uint8_t visibility = symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY;
+            if (marked[n] != 0 && defined && (visibility == BUSTER_LINK_SYMBOL_DEFAULT || visibility == BUSTER_LINK_SYMBOL_PROTECTED))
+            {
+                exports[count] = symbol;
+                count += 1;
+            }
+        }
+        output->dynamic.exports = exports;
+        output->dynamic.export_count = count;
+        output->dynamic.init = foreign_link_named(output, foreign, "_init");
+        output->dynamic.fini = foreign_link_named(output, foreign, "_fini");
+        for (uint32_t id = 1; id < foreign->object_count && output->dynamic.note.length == 0; id += 1)
+        {
+            if (foreign->objects[id].library == 0)
+            {
+                output->dynamic.note = runtime_section(foreign->objects[id].bytes, ".note.ABI-tag");
+            }
+        }
+    }
+    return result;
+}
+
+static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter)
 {
     *output = (ForeignLink){ 0 };
     ForeignLinkResult result = { 0 };
     LinkCapacity capacity = { 0 };
-    if (!foreign->started || foreign->failure.error != FOREIGN_ERROR_NONE)
+    if (!foreign->started || foreign->failure.error != FOREIGN_ERROR_NONE || (kind == RUNTIME_KIND_DYNAMIC && (interpreter.pointer == 0 || interpreter.length == 0)))
     {
         result.error = FOREIGN_LINK_ERROR_INPUT;
     }
-    for (uint32_t library = 0; result.error == FOREIGN_LINK_ERROR_NONE && library < foreign->library_count; library += 1)
+    for (uint32_t library = 0; result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_STATIC && library < foreign->library_count; library += 1)
     {
         result.error = foreign->libraries[library].needed ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_NONE;
+    }
+    if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
+    {
+        result.error = foreign_link_libraries(output, foreign, arena, interpreter);
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE && !foreign_link_capacity(foreign, &capacity))
     {
@@ -510,10 +697,10 @@ static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* 
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
-        const uint8_t* required = foreign_link_undefined(output, foreign, scratch.arena);
+        const uint8_t* required = foreign_link_undefined(output, foreign, kind, scratch.arena);
         if (required != 0)
         {
-            result = foreign_link_names(output, foreign, required);
+            result = foreign_link_names(output, foreign, required, kind);
         }
         else
         {
@@ -549,6 +736,20 @@ static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* 
     {
         result.error = FOREIGN_LINK_ERROR_LINK;
     }
+    if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
+    {
+        result.error = foreign_link_dynamic_finish(output, foreign, arena);
+    }
     scratch_end(scratch);
     return result;
+}
+
+static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena)
+{
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_STATIC, (String8){ 0 });
+}
+
+static ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter)
+{
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_DYNAMIC, interpreter);
 }
