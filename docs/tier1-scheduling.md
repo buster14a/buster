@@ -156,3 +156,40 @@ missing measurements are not evidence that scheduling does not pay.
 The implementation, tests, generator and benchmark helpers are original C
 project contributions. No third-party scheduling implementation or timing
 dataset is imported.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The implemented scheduler](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/tier1_schedule.c#L4)
+consumes physical-register `X86Instruction` records and caller pins. Effects
+from `x86_instructions_effects` and operand-sensitive Zen 5 cost rows feed
+hazard edges and weighted priorities; `tier1_schedule_block` produces a u16
+`order[new] = old` permutation; the test/benchmark applies it and encodes/executes
+records. `tier1_schedule_verify` is an independent scalar consumer. A general
+C/IR emitter invoking this opt-in path is missing at the pin.
+
+Retain the contract above: complete blocks of at most 256 records, disjoint
+natural-aligned counted input/output and reusable 33,024-byte scratch, no
+readable input padding, inactive graph bits zero. Rejection preserves outputs
+and statistics and requires the caller to retain original order; do not split
+an oversized block into arbitrary independent fragments. Internal eight-record
+comparisons and height reductions are not scheduling independence boundaries.
+Memory/fault/unknown/flags/call barriers and adjacent compare/branch constraints
+preserve semantic order; missing latency is not zero cost.
+
+Producer obligations are block boundaries, label/source pins and physical
+operands after allocation. After the permutation, carry every attribution,
+reference and target side table through the mapping **before** branch sizing
+or encoding. A scheduler cannot reorder already resolved branch displacements
+without updating them. Preallocation scheduling needs virtual-register pressure
+and allocator feedback and is a separate missing edge, not this same API moved
+earlier.
+
+Disposition: keep opt-in conservative scheduling. Rebuilding effects and
+hazards may be avoidable if an emitter retains them, but invalidation after form
+choice/spills must be measured with construction/remapping/scheduling/encoding.
+`test-tier1-schedule` and its native loop verify the current crossing. [#172](https://github.com/buster14a/buster/issues/172)/[#181](https://github.com/buster14a/buster/issues/181)
+retain integrated source-corpus compile cost, runtime, unknown coverage and
+code-size acceptance; synthetic weighted priorities are not cycle predictions
+or proof that source programs improve.

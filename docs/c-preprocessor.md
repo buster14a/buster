@@ -2248,3 +2248,66 @@ taskset -c 2 ./build/compiler benchmark-preprocessor --tables path/to/libc
 On the 9700X, run each one under `EXCLUSIVE_OWNER=<name>
 ~/buster-fast-bench/exclusive.sh`. `benchmark-preprocessor --only vectorized`
 runs one implementation, for `perf record`.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). The
+[entry-point map](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor.c#L4),
+[token/file contracts](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor.c#L317)
+and [history implementation](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor_history.c#L4)
+identify these real edges, including the output's other consumers.
+
+| Producer → consumer | Representation and readiness |
+| --- | --- |
+| `pp_prepare_into` → `pp_directive_table` → `pp_run_file` / include run-ahead | Per-file kind/start/value columns and space bits; directive u32 hash/end/next columns, byte kind, guard and skipped-diagnostic notes. Conditional pairing is prepared once, but macro state is consulted per inclusion. |
+| Macro definition reader → compiled replacement items → `pp_expand_object` / function substitution | Definition/parameter ranges, parameter references and paste/stringify/VA_OPT operations reuse retained file tokens. Redefinition, disabled-macro and painted-occurrence semantics remain ordered. |
+| Argument capture → pre-expansion/substitution → `pp_run_contexts` | Counted `PPTokens` buffers plus temporary origins and explicit context stack. Raw arguments remain available for paste/stringification; final-token lifetime extends through rescan. |
+| File/buffer no-macro runs → `pp_copy_file_run_vector` / `pp_copy_buffer_run_vector` → output | Bulk kind/flag/value/location stores, stopping at an exceptional macro/directive/state boundary. Scalar twins preserve exact token order. |
+| `#if`/`#elif`, includes, `_Pragma`, `#embed` → ordered unit state/output | Conditional evaluation and header search cannot be reordered across effects. Embed output retains a bounded data descriptor; pragma events keep output order. |
+| Final output → `pp_resolve_keywords` → parser conversion | Mode-dependent keyword kinds, assigned only after macro expansion. Parser then derives grammar kinds, names, source indices, pragma positions and split colons. |
+| Final output → `pp_print` / token oracle / assembly preprocessing | Exact spellings, leading-space and line/location metadata; the printer may insert necessary separation and line markers. This consumer still needs the original token representation. |
+| Expansion/substitution/generated-origin producers → `pp_history_at` / `pp_history_lookup` / `pp_diagnose_output` | Tagged handles and append-only tables; final output uses sorted maximal `(token, origin)` runs, temporary buffers use origin columns. Diagnostics retain expansion occurrences, not merely spelling locations. |
+
+`PPTokens` is four SoA columns: u8 kind, u8 flags, u32 value and u32 spelling
+location (10 logical bytes/token), with count/capacity separate. Identifier
+values are intern IDs; other values are end locations or the documented
+special-token payload. Column arenas, origin storage, location ranges and
+scratch spelling bytes remain alive until their consumers finish. The final
+stream has no per-token origin column. The retained history tables/columns have
+checked handle limits; growth preserves handles, and exhaustion is fatal.
+An allocation error never licenses a truncated successful stream.
+
+Internal reserve helpers provide their documented writable slack; consumers
+must use logical counts or an explicit initialized-padding contract. The parser
+conversion uses masked input loads and creates its own sentinel padding.
+No source mapping, output count or arena reservation independently authorizes
+wide reads. Shared per-file data is borrowed, whereas output, inclusion ranges,
+macro state, generated spellings and history are unit-owned. Releasing the
+cache/intern table first would invalidate spelling and diagnostic readers.
+
+Batch boundaries are semantic runs/context transitions and source files, not
+merely a vector width. A partial run flushes before directives, expansions,
+pragma events and end of context; no batch can cross a macro-state dependency.
+History compaction follows copied origins outside the token-copy loop.
+Stringification/pasting and rare spellings need exact scalar work. Existing
+batch/ordering tests vary legal run boundaries and compare full output/history,
+not just tokens with whitespace stripped.
+
+Observed potential duplication: final keyword resolution followed by parser
+kind conversion/materialization, and raw/expanded argument storage where both
+are semantically needed. The former is scoped in
+[#335](https://github.com/buster14a/buster/issues/335); compare an opt-in parser
+sink or bounded conversion with the current output, including `-E`, diagnostics
+and assembly consumers. The latter is not removable without preserving raw
+argument semantics. Include replay ([#111](https://github.com/buster14a/buster/issues/111)) must account for changed macro state,
+locations and diagnostic history, not replay bytes alone.
+
+Disposition: retain the current representations and the deliberate compressed
+history. [#117](https://github.com/buster14a/buster/issues/117)/[#118](https://github.com/buster14a/buster/issues/118)–[#124](https://github.com/buster14a/buster/issues/124) own remaining PP budgets/accounting; active [#323](https://github.com/buster14a/buster/pull/323)'s
+lookup and scalar-reference changes are outside the pin. `test-preprocessor`,
+its batch/directive/history/order tests and the independent oracle/fuzzer
+validate the implemented subset. Current end-to-end PP tests are not complete
+source compilation. Existing benchmark phase counters omit some cross-stage
+memory/occupancy costs; [#117](https://github.com/buster14a/buster/issues/117)/[#335](https://github.com/buster14a/buster/issues/335) require current frozen small/header-heavy/
+SQLite totals, after-lighter-work controls and honest remaining budget results.

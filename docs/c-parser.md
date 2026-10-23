@@ -593,3 +593,52 @@ isolate the parser change over the same frozen source as the kernel runs.
 - `test-parser` builds a fresh intern table, preprocessor and parser for every
   unit it parses, and its generated inputs' units cost it about 2 million page
   faults, most of its time.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Source:
+[input columns/conversion](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_parser.c#L430),
+[vector orchestration](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_parser.c#L11109),
+[unit publication](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_parser.c#L11390).
+
+| Producer → consumer | Actual representation and completion |
+| --- | --- |
+| PP output → `parse_tokens_from_output` → all parser paths | u8 grammar kinds/flags, u32 names and PP source indices; pragma source/position columns. Keywords merge, pragma lines leave as events, `::` becomes two tokens sharing a PP identity. |
+| K1 brackets → K3 typedef candidates → K2 roles → secondary K1 | Bracket matches/depths, candidate type-name information, roles and secondary matches are separate dependencies. K3 at this pin is not the later [#320](https://github.com/buster14a/buster/pull/320) scoped-binding producer. |
+| Roles/depths → K4 nearest-smaller parents → K5 statements | Contiguous token columns and block summaries, including cross-block search state. A subtree is a source-contiguous range; source order and statement attachments are semantic. |
+| Kernel checks → top-level fallback → final tree | Flagged top-level declarations are reparsed by the scalar parser. Parent/role/depth output and diagnostics become usable only after fallback/completion; counts report actual deferred work. |
+| Tree → `parse_postorder_sorted` → `check_input` | u32 postorder token permutation and subtree sizes on an error-free full parse. Checker requires both and retains the tree, tokens and PP identities. |
+| Tree/diagnostics → `run_parse_command` / `parse_print_diagnostics` | `tree_only` deliberately omits postorder/sizes; diagnostics resolve PP source indices and macro history. Tests/benchmarks are additional tree/postorder consumers. |
+
+Parser token columns allocate for up to twice the PP token count before
+conversion, plus **128 initialized entries before and after** the logical
+range. Kinds use END sentinels and other padding is zero. Token, parent and key
+limits are bounded by `BUSTER_PARSE_MAX_TOKENS` (1 << 30). Do not extend this
+padding guarantee to every unrelated scratch/side array. Parser-owned arenas
+outlive checker adaptation; PP/intern/cache storage outlives spelling and
+error rendering. A parse with diagnostics/fatal status is not valid semantic
+input even if some tree columns were filled.
+
+The logical unit and top-level declaration fallback boundaries are independent
+of 64-token/16-lane kernels. Cross-block brackets, typedef state, statement
+ownership and nearest-smaller searches prevent treating arbitrary chunks as
+independent parses. Postorder is published only after the complete parent tree;
+changing partitions must preserve parents, roles, depths, ordering and source
+mapping. Pragmas remain events, not removable noise for future checking.
+
+Observed costs include PP-to-parser copying/remapping and full-tree postorder
+construction. [#335](https://github.com/buster14a/buster/issues/335) compares the first with an optional producer-aware path;
+#104–#107/#315 own the fragment alternatives to the second. Neither may change
+checker semantics, source identity or move uncounted reconstruction downstream.
+Parser-derived bindings proposed in [#320](https://github.com/buster14a/buster/pull/320) and environment/extension branches
+#319/#324 are **not** main-branch outputs at this pin; #336 tracks shared checker
+consumption after integration.
+
+Disposition: keep full postorder for actual checking, retain the already
+measured elimination for the diagnostics-only driver. The driver comparison
+above is complete fresh-process syntax checking; parser-kernel results are not
+that measurement. `test-parser --clang` checks kernel twins, independent
+postorder, alignments/depth/recovery and tree-only equivalence. [#126](https://github.com/buster14a/buster/issues/126)/[#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)
+retain corpus and source-checker acceptance, including memory and fallback
+costs over real units, rather than assuming a fast kernel satisfies the handoff.

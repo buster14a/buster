@@ -628,3 +628,47 @@ the 360 files it lists for `main.c` with the compiler's options.
   the order of first occurrences, so that they don't depend on the lanes.
 - **Named UCNs:** intern them by their code point, which needs Unicode's name
   table, or diagnose them (#116's open question).
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[Refinement's implementation map](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_refine.c#L4)
+and [publication in `pp_prepare_into`](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor.c#L2381)
+identify the following implemented edges.
+
+| Edge | Contract and retained information |
+| --- | --- |
+| Raw kinds/starts/ends → `refine_scan_chunks`, `refine_pass_a` | A file's source-order columns; 1,024-token logical blocks, 64-token classification and 16-lane u32 work. Backslash/trigraph chunk bits gate exact splice handling. |
+| Pass A → `refine_pass_b`/`refine_hash_batch`/`refine_probe` | Dense identifier spans and per-64-token masks; internal dense arrays have 16 entries of explicit store slack. Production interning batches are 64 identifiers, not 64 source tokens. |
+| Hash/probe → ordered deferred interning → `refine_pass_c` | Hashes/prefixes and found IDs are reused. Misses, long/special spellings and additional probes take exact handling in token order, preserving first-seen IDs. Final partial batches flush within the block. |
+| Refined values/space → `pp_directive_table`, expansion and spelling readers | Kinds/starts stay, values replace ends in place: an identifier ID or nonidentifier end. Leading space is a bitset, not an extra byte per token. |
+| Intern records → PP macro/keyword tables, parser, checker and per-file merge | Dense u32 IDs, zero absent; predefined IDs stable. Spelling storage belongs to the intern table; private lane IDs require the file-cache remap before publication. |
+
+The per-file representation is 9 bytes per token plus space bits, excluding
+capacity/slack and intern records. `pp_prepare_into` keeps lexer slack and
+allocates `count / 64 + 2` u64 space words for downstream shifted reads.
+The general refinement implementation and its masked tails do not give other
+callers permission to read uninitialized slack. The deliberate alias is
+`values == ends`; distinct kinds/starts/source and internal temporary arrays
+must remain valid throughout. Intern keys normalize splices/UCNs only for the
+spellings that need it; lengths and all table/arena limits remain checked.
+A failed refinement/preparation is not a partially usable file.
+
+The intern table's bucket prefixes retain useful information from hashing;
+confirming a long match still reads its stored spelling. This is required
+identity checking, not avoidable by accepting hash equality. Diagnostic
+identifier-end recovery re-lexes only requested spellings because ends were
+reused; retaining every identifier end would add a full column. A per-literal
+normalized-string table similarly charges all literals for infrequent users.
+These are deliberate current tradeoffs, not claims of a proved optimal layout.
+
+Disposition: retain in-place values and bounded dense batches. [#116](https://github.com/buster14a/buster/issues/116) owns
+probe/hash/batch alternatives and the actual SQLite-plus-headers budget; its
+active [#334](https://github.com/buster14a/buster/pull/334) is not part of this pin. Its comparison must include lexing,
+normalization, insertion, directive construction and downstream locality, not
+only successful bucket probes. `test-refinement` exercises independent keys,
+scalar IDs/space, guarded tails, chunk/block/batch boundaries and adversarial
+hashes; `test-files` verifies the shared-table consumer at multiple lane counts.
+Existing results above and [#116](https://github.com/buster14a/buster/issues/116) record measurements; full current producer /
+consumer memory and conditioned totals remain that issue's acceptance.
