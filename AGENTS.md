@@ -495,6 +495,14 @@ designs and the compilers already built this way.
   `foreign_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-foreign` runs them) and `foreign_benchmark.c`
   provides `benchmark-foreign`.
+- `src/buster/compiler/foreign_strings.c` builds a deterministic pool and
+  original-offset map for one-, two- and four-byte `SHF_MERGE | SHF_STRINGS`
+  entries. Its bounded vector scans and hashes have exact scalar twins.
+  `foreign_strings_link.c` groups compatible foreign sections and remaps
+  symbols and supported address expressions before layout, transactionally;
+  unsupported expressions retain the original unmerged Link. The kernel,
+  consumer and executable cross-checks run under `test-foreign`. See
+  [foreign string merging](docs/foreign-string-merging.md) for the contract.
 - `src/buster/compiler/foreign_unwind.c` and `foreign_unwind_link.c` prune
   losing COMDAT FDEs and unused CIEs before canonical foreign symbols hide
   their original ownership. They retain matching CFI/personality/LSDA

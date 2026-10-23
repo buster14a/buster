@@ -1217,7 +1217,8 @@ static bool link_check_fixups(const Link* link, AtomId atom, uint64_t* owned)
 }
 
 // Whether a fixup of `kind` in `atom` can refer to `target`: a TLS kind to a TLS symbol and no other kind to one (but
-// a size of either), a local symbol only from its own unit (or an absolute one, which has none), and a shared library's
+// a size of either), a local symbol only from its own unit (or an absolute one or an interned STRINGS pool at unit
+// zero, which are shared across units), and a shared library's
 // symbol only through the GOT, by its absolute address (which the executable relocates when it loads), or for a function
 // by a call (through a stub).
 static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, SymbolId target)
@@ -1235,7 +1236,8 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     const bool call = kind == BUSTER_LINK_FIXUP_CALL && (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
     const bool reaches_shared = through_got || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_ABS64 || call;
     const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
-    return (size_kind || tls_kind == tls_target) && (!local || absolute || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) &&
+    const bool pooled = target_atom != 0 && link->atoms.class[target_atom] == BUSTER_LINK_CLASS_STRINGS && link->atoms.unit[target_atom] == 0;
+    return (size_kind || tls_kind == tls_target) && (!local || absolute || pooled || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) &&
            (!shared || reaches_shared);
 }
 
