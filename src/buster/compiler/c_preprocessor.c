@@ -137,9 +137,6 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 #define BUSTER_PP_MAX_STACK_TOKENS (1u << 26)
 #define BUSTER_PP_MAX_CONTEXTS (1u << 20)
 #define BUSTER_PP_MAX_INCLUDE_DEPTH 200
-// Confirmed opaque spans can require private lexical views; bound full-file repairs per inclusion.
-#define BUSTER_PP_MAX_QUERY_REPAIRS 8
-#define BUSTER_PP_MAX_DIRECT_REPAIRS 64
 #define BUSTER_PP_MAX_PARAMETERS 4096
 // Token arrays get whole-vector stores past their last token.
 #define BUSTER_PP_TOKEN_SLACK 64
@@ -159,16 +156,21 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 
 typedef uint32_t PPMacroId;
 
-// The phases PPOptions.timing measures (in TSC ticks), for benchmark-preprocessor: reading files, lexing, refining,
-// making directive tables; the rest of a run is the main loop with its directives.
-// What a run did, counted when PPOptions.timing is set (benchmark-preprocessor prints it).
+// What a run did, counted when PPOptions.timing is set (benchmark-preprocessor prints it). Include and embed lookup
+// ticks are inclusive intervals, separate from PPPhase: include lookup overlaps reading and the main loop, and embed
+// lookup overlaps the main loop. Neither lookup enters/prepares a file, executes it, or invokes the other lookup.
 typedef struct PPStatistics PPStatistics;
 struct PPStatistics
 {
-    uint64_t file_run_tokens; // Tokens files' runs copied to the output,
+    uint64_t file_run_tokens; // Tokens files' runs copied to the current target (including temporary captures),
     uint64_t file_runs; // in this many runs.
     uint64_t buffer_run_tokens; // Tokens buffers' runs copied,
     uint64_t buffer_runs; // in this many runs.
+    // Disjoint parts of the final output, counted only when the copy's target is Preprocessor.output. Pragma records
+    // and an #embed's single output token count as in PPTokens.count; pp_emit and lifted pragma lines are the remainder.
+    uint64_t final_file_run_tokens;
+    uint64_t final_buffer_run_tokens;
+    uint64_t final_direct_object_tokens;
     uint64_t direct_expansions; // Object-like macros copied straight out,
     uint64_t buffered_expansions; // and the ones pushed as a buffer.
     uint64_t invocations; // Function-like macros invoked,
@@ -183,8 +185,20 @@ struct PPStatistics
     uint64_t directives;
     uint64_t skipped_guards; // #include of a file whose guard is defined (clang's "multi-include optimization"),
     uint64_t skipped_once; // and of one #pragma once or #import read.
+    uint64_t include_searches; // pp_find_include calls, including __has_include and __has_include_next,
+    uint64_t include_found; // and those that found a file.
+    uint64_t include_opens; // File-probe open and fstat attempts inside those calls (a subset of Preprocessor.probes).
+    uint64_t include_fstats;
+    uint64_t include_ticks;
+    uint64_t embed_searches; // pp_find_embed calls, including __has_embed,
+    uint64_t embed_found; // and those that found a file (a device too).
+    uint64_t embed_stats; // Actual stat attempts, including failed ones; embed lookup has no path cache.
+    uint64_t embed_ticks;
+    uint64_t directory_stats; // stat attempts discovering/deduplicating the search directories during initialization.
 };
 
+// The disjoint phases PPOptions.timing measures (in TSC ticks): path-cache lookup/byte acquisition, lexing, refining,
+// making directive tables; the rest of a run includes initialization and the main loop with its directives.
 typedef enum PPPhase
 {
     PP_PHASE_READ,
@@ -267,7 +281,7 @@ struct PPOptions
     uint32_t embed_directory_count;
     // A file of #define lines that replaces the built-in predefines (test-preprocessor gives clang's own).
     const char* predefines_path;
-    // Measure the phases (PPPhase) in Preprocessor.ticks.
+    // Measure the phases (PPPhase) in Preprocessor.ticks and lookup intervals/counters in Preprocessor.statistics.
     bool timing;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
@@ -388,6 +402,14 @@ typedef enum PPDirectiveKind
 // the file: `once`, the line cursor, and `prepared`, which says the unit has copied the record's prepared fields (a
 // copy's other fields are the record's).
 typedef struct PPFileData PPFileData;
+typedef struct PPRawError PPRawError;
+struct PPRawError
+{
+    uint32_t token;
+    uint32_t offset;
+    CRawStringError kind;
+};
+
 struct PPFileData
 {
     uint64_t device;
@@ -396,7 +418,8 @@ struct PPFileData
     int64_t modified;
     bool has_modified;
     const uint8_t* bytes;
-    // Only a private contextual view: preparation bytes with confirmed opaque spans masked.
+    // Only a private contextual view: this inclusion's masking buffer, shared by its successive snapshots. Only the
+    // current file context probes it; macro snapshots read original bytes and immutable token/directive columns.
     const uint8_t* lexical_bytes;
     uint32_t length;
     // The bytes are a mapping of the file, which the record's cache unmaps (file_cache_release), not arena memory.
@@ -405,6 +428,9 @@ struct PPFileData
     // predefines, the command line), which isn't in the cache.
     uint32_t record;
     uint32_t token_count;
+    // Sorted exceptional UNKNOWN tokens; emission waits until their source context is known.
+    PPRawError* raw_errors;
+    uint32_t raw_error_count;
     // The lexer's kinds and starts, refinement's values (in place of the ends) and leading-space bits.
     uint8_t* kinds;
     uint32_t* starts;
@@ -477,12 +503,14 @@ struct PPFile
 // lanes prepare different records at once, each into arenas of its own (FileCacheArenas) and with an intern table only
 // it writes (c_files.c).
 
-// The system calls lookups made, counted for whoever made them: the opens (one per path probed, whether or not a file
-// is there), and the files mapped and the files read.
+// The system calls lookups made, counted for whoever made them: open attempts (one per uncached path, whether or not a
+// file is there), fstat attempts (one per successful open, even for a non-regular file or a failed fstat), and files
+// mapped/read (the latter counts file-read operations, not individual pread attempts). Each unit/lane owns its counts.
 typedef struct FileCacheCounts FileCacheCounts;
 struct FileCacheCounts
 {
     uint64_t opens;
+    uint64_t fstats;
     uint64_t maps;
     uint64_t reads;
 };
@@ -747,6 +775,14 @@ struct PPItem
 #define BUSTER_PP_CONTEXT_BUFFER 1
 
 typedef struct PPContext PPContext;
+typedef struct PPOpaqueSpan PPOpaqueSpan;
+struct PPOpaqueSpan
+{
+    PPOpaqueSpan* next;
+    uint32_t begin;
+    uint32_t end;
+};
+
 struct PPContext
 {
     uint8_t kind;
@@ -772,8 +808,8 @@ struct PPContext
     uint32_t relex_file;
     // This inclusion has read the file's trailing unterminated comment, actively or while skipping a group.
     bool comment_read;
-    uint8_t opaque_query_repairs;
-    uint8_t opaque_direct_repairs;
+    // Confirmed header names containing an invalid raw-looking token that didn't need a full lexical repair.
+    PPOpaqueSpan* opaque_spans;
     // A file's comment-gap search advances with source header names; a new private view restarts that token cursor.
     uint32_t header_gap_data;
     uint32_t header_gap_token;
@@ -2375,6 +2411,58 @@ typedef enum PPPrepareStatus
     PP_PREPARE_NO_MEMORY,
 } PPPrepareStatus;
 
+// Keep only exceptional raw errors, never a per-token diagnostic column. Ordinary files allocate nothing. Both
+// preparation kernels use the same independent scalar delimiter check on the UNKNOWN candidates they produced.
+static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileData* data)
+{
+    uint32_t unknowns = 0;
+    data->raw_error_count = 0;
+    data->raw_errors = 0;
+    const bool raw = (prepare->refine_flags & (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_CPLUSPLUS)) != 0;
+    for (uint32_t t = 0; raw && t < data->token_count; t += 64)
+    {
+        const uint32_t count = data->token_count - t < 64 ? data->token_count - t : 64;
+        if (prepare->vectorized)
+        {
+            const __mmask64 valid = _bzhi_u64(~0ull, count);
+            const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, data->kinds + t), _mm512_set1_epi8(0x7F));
+            unknowns += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)));
+        }
+        else
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                unknowns += (data->kinds[t + i] & 0x7F) == C_TOKEN_UNKNOWN;
+            }
+        }
+    }
+    const uint64_t mark = arena->length;
+    data->raw_errors = unknowns != 0 ? arena_push_array(arena, unknowns, sizeof(PPRawError), _Alignof(PPRawError)) : 0;
+    const bool result = unknowns == 0 || data->raw_errors != 0;
+    for (uint32_t t = 0; result && unknowns != 0 && t < data->token_count; t += 1)
+    {
+        if ((data->kinds[t] & 0x7F) == C_TOKEN_UNKNOWN)
+        {
+            uint64_t offset;
+            const CRawStringError error = c_raw_string_error(data->bytes + data->starts[t], data->length - data->starts[t], prepare->refine_flags, &offset);
+            if (error != C_RAW_STRING_OK)
+            {
+                data->raw_errors[data->raw_error_count] = (PPRawError){ .token = t, .offset = data->starts[t] + (uint32_t)offset, .kind = error };
+                data->raw_error_count += 1;
+            }
+        }
+    }
+    if (result && unknowns != 0)
+    {
+        // Unknown punctuation (notably assembly '$') isn't a raw error. Keep only the records actually written,
+        // before any other allocation in this arena; unused capacity hasn't been touched.
+        const uint64_t keep = data->raw_error_count != 0 ? (uint64_t)((uint8_t*)data->raw_errors - arena->base) + (uint64_t)data->raw_error_count * sizeof(PPRawError) : mark;
+        arena_pop_to(arena, keep);
+        data->raw_errors = data->raw_error_count != 0 ? data->raw_errors : 0;
+    }
+    return result;
+}
+
 // Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
 // leading-space bits, directive table and guard, in `columns` (kinds, starts and values, an arena each) and `arena` (the
 // directive table). Adds each phase's TSC ticks to `ticks` (by PPPhase) unless it is null.
@@ -2427,7 +2515,7 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
         data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
-        bool refined = data->space != 0;
+        bool refined = data->space != 0 && pp_prepare_raw_errors(prepare, arena, data);
         if (refined && prepare->vectorized)
         {
             refined = refine_tokens(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values, data->space,
@@ -2787,6 +2875,7 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     struct stat stats;
     const bool stated = fd >= 0 && fstat(fd, &stats) == 0;
     error = fd >= 0 && !stated ? errno : error;
+    counts->fstats += fd >= 0;
     error = stated && !S_ISREG(stats.st_mode) ? (S_ISDIR(stats.st_mode) ? EISDIR : -1) : error;
     error = stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK ? EFBIG : error;
     if (stated && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
@@ -3004,6 +3093,8 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
     data->starts = record->starts;
     data->values = record->values;
     data->space = record->space;
+    data->raw_errors = record->raw_errors;
+    data->raw_error_count = record->raw_error_count;
     data->directive_count = record->directive_count;
     data->directive_hash = record->directive_hash;
     data->directive_end = record->directive_end;
@@ -3272,9 +3363,15 @@ static bool pp_include_error_absent(int error)
 // With --buster-headers, clang's resource directory after buster's (pp->fallback_directory) doesn't supply a name
 // buster's directory has (pp_buster_supplies), neither as a search directory nor as the directory of an includer of
 // clang's: a #include_next in buster's header goes on past clang's header of the same name, to the C library's.
+// The optional timing spans this whole search, including candidate construction, cached hits/misses, file probing
+// and first byte acquisition, but not header-name expansion or the later preparation/execution of the found file.
+// It overlaps PP_PHASE_READ and the main-loop remainder; it is not another additive phase. No search nests in it.
 static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, uint32_t includer, uint32_t includer_search,
                                 uint32_t* found_in, uint32_t report)
 {
+    const uint64_t opens = pp->options.timing ? pp->probes.opens : 0;
+    const uint64_t fstats = pp->options.timing ? pp->probes.fstats : 0;
+    const uint64_t start = pp->options.timing ? __rdtsc() : 0;
     char path[PATH_MAX];
     const PPFile* from = includer != BUSTER_PP_NONE ? &pp->files[includer] : 0;
     PPIncluder source = { 0 };
@@ -3318,6 +3415,14 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
             pp_diagnose(pp, PP_SEVERITY_FATAL, report, "cannot open file '%.*s%s%.*s': %s", (int)prefix_length, prefix, absolute ? "" : "/", (int)length,
                         (const char*)name, strerror(error));
         }
+    }
+    if (pp->options.timing)
+    {
+        pp->statistics.include_ticks += __rdtsc() - start;
+        pp->statistics.include_searches += 1;
+        pp->statistics.include_found += result != BUSTER_PP_NONE;
+        pp->statistics.include_opens += pp->probes.opens - opens;
+        pp->statistics.include_fstats += pp->probes.fstats - fstats;
     }
     return result;
 }
@@ -3439,9 +3544,16 @@ static PPHeaderForm pp_literal_header_name(const PPFileData* data, uint32_t d, u
 // ---------------------------------------------------------------------------------------------------------------------
 // Macros
 
-BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
+BUSTER_INLINE bool pp_is_macro_vector(const Preprocessor* pp, IdentId id)
 {
     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
+}
+
+// The scalar reference reads the macro table itself, independently of the cached name bits. Poisoned names and
+// `defined` also have records: both must stop a run, although pp_is_defined does not consider them definitions.
+BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
+{
+    return pp->vectorized ? pp_is_macro_vector(pp, id) : pp->macro_of[id] != 0;
 }
 
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
@@ -4623,6 +4735,81 @@ static void pp_end_regions(Preprocessor* pp, bool main_file)
 }
 
 static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
+
+// Read only the exceptional errors in this consumed file-token range. Macro definitions diagnose once when read,
+// never each time expanded. Excluded group bodies never call this; directive lines still do. Header queries defer
+// it until their opaque spans are known.
+static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    uint32_t low = 0;
+    uint32_t high = data->raw_error_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = data->raw_errors[middle].token < begin;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    for (uint32_t i = low; i < data->raw_error_count && data->raw_errors[i].token < end; i += 1)
+    {
+        const PPRawError error = data->raw_errors[i];
+        const uint32_t start = data->starts[error.token];
+        bool opaque = false;
+        for (const PPOpaqueSpan* span = context->opaque_spans; !opaque && span != 0; span = span->next)
+        {
+            opaque = start >= span->begin && start < span->end;
+        }
+        if (!opaque)
+        {
+            const uint32_t location = pp->ranges[context->range].base + error.offset;
+            switch (error.kind)
+            {
+                case C_RAW_STRING_DELIMITER_LENGTH:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "raw string delimiter longer than 16 characters; use PREFIX( )PREFIX to delimit raw string");
+                    break;
+                case C_RAW_STRING_DELIMITER_NEWLINE:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid newline character in raw string delimiter; use PREFIX( )PREFIX to delimit raw string");
+                    break;
+                case C_RAW_STRING_DELIMITER_CHARACTER:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid character '%c' in raw string delimiter; use PREFIX( )PREFIX to delimit raw string", error.offset < data->length ? data->bytes[error.offset] : 0);
+                    break;
+                case C_RAW_STRING_UNTERMINATED:
+                {
+                    const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+                    uint64_t position = start;
+                    int32_t c = 0;
+                    while (c != '"' && position < data->length)
+                    {
+                        uint64_t size;
+                        uint64_t at;
+                        c = get_char(&lexer, position, &size, &at);
+                        position += size;
+                    }
+                    uint32_t length = 0;
+                    while (length < 16 && position + length < data->length && data->bytes[position + length] != '(')
+                    {
+                        length += 1;
+                    }
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "raw string missing terminating delimiter )%.*s\"", (int)length, data->bytes + position);
+                    pp->unterminated += 1;
+                    break;
+                }
+                case C_RAW_STRING_OK:
+                    break;
+            }
+        }
+    }
+}
+
+BUSTER_INLINE void pp_read_raw_errors(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
+{
+    if (pp->datas[context->data].raw_error_count != 0)
+    {
+        pp_read_raw_errors_slow(pp, context, begin, end);
+    }
+}
+
 // A file's trailing unterminated comment has been reached. Clang's raw lexer suppresses its diagnostic in a skipped
 // group's body, but reads a recognized directive's own line actively. Each inclusion reads it independently.
 static void pp_read_file_comment(Preprocessor* pp, PPContext* context, bool directive)
@@ -4809,7 +4996,7 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
         for (uint64_t bits = identifiers; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
-            if (pp_is_macro(pp, data->values[p + lane]))
+            if (pp_is_macro_vector(pp, data->values[p + lane]))
             {
                 take = lane;
                 stopped = true;
@@ -4823,7 +5010,7 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
     return p;
 }
 
-// The same, a token at a time.
+// The same, a token at a time, testing the macro table without the vector path's cached name bits.
 static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit)
 {
     PPTokens* target = pp_target(pp);
@@ -4832,7 +5019,7 @@ static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data
     while (!stopped && p < limit && pp_room(pp, target, 1))
     {
         const PPToken token = pp_file_token(data, base, p);
-        stopped = token.kind == C_TOKEN_RAW_IDENTIFIER && pp_is_macro(pp, token.value);
+        stopped = token.kind == C_TOKEN_RAW_IDENTIFIER && pp->macro_of[token.value] != 0;
         if (!stopped)
         {
             pp_tokens_set(target, target->count, token.kind, token.flags, token.value, token.location);
@@ -4865,7 +5052,7 @@ static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* toke
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
             const IdentId id = tokens->values[p + lane];
-            if (pp_is_macro(pp, id))
+            if (pp_is_macro_vector(pp, id))
             {
                 if (pp->macros[pp->macro_of[id]].disabled != 0)
                 {
@@ -4902,7 +5089,7 @@ static uint32_t pp_copy_buffer_run_scalar(Preprocessor* pp, const PPTokens* toke
     while (!stopped && p < end && pp_room(pp, target, 1))
     {
         uint8_t flags = tokens->flags[p];
-        const bool candidate = tokens->kinds[p] == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp_is_macro(pp, tokens->values[p]);
+        const bool candidate = tokens->kinds[p] == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp->macro_of[tokens->values[p]] != 0;
         if (candidate && pp->macros[pp->macro_of[tokens->values[p]]].disabled == 0)
         {
             stopped = true;
@@ -4973,6 +5160,7 @@ static bool pp_read_token(Preprocessor* pp, PPToken* token, uint32_t* expansion_
             const PPFileData* data = &pp->datas[context->data];
             if (context->position < pp_run_limit(data, context))
             {
+                pp_read_raw_errors(pp, context, context->position, context->position + 1);
                 *token = pp_file_token(data, pp->ranges[context->range].base, context->position);
                 *expansion_end = token->location;
                 context->position += 1;
@@ -6234,6 +6422,7 @@ static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, boo
         if (file)
         {
             const uint32_t base = pp->ranges[context->range].base;
+            pp_read_raw_errors(pp, context, open + 1, close);
             pp_append_file_tokens(pp, &pp->arguments, data, base, open + 1, close, false);
             invocation->expansion_end = base + data->starts[close];
             if (pp->poison_count != 0)
@@ -6489,30 +6678,33 @@ static bool pp_query_raw_overlap(const Preprocessor* pp, const PPFileData* data,
 // private view for this inclusion with only that span masked. Original source bytes/offsets, old macro data indexes,
 // other inclusions and shared cache records stay unchanged. Previous masks are retained. Callers invoke this only
 // for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
-// Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
-// storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
-static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop, bool query)
+// Every call must mask new bytes: source length bounds progress, with no arbitrary per-inclusion repair count.
+// Immutable token/directive snapshots remain alive for old macro definitions. One masking buffer is reused per
+// inclusion: O(N + sum of prepared columns) storage for N bytes. Preparation remains O(R * N) for R exceptional
+// repairs; ordinary inputs allocate no private view. Real arena/index exhaustion is fatal.
+static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t begin, uint32_t stop)
 {
     PPContext* file = &pp->contexts[file_context];
     const PPFileData* data = &pp->datas[file->data];
-    uint8_t* repairs = query ? &file->opaque_query_repairs : &file->opaque_direct_repairs;
-    const uint32_t capacity = query ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
     bool result = true;
-    if (*repairs >= capacity)
+    if (begin >= stop || stop > data->length)
     {
-        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "%s recovery capacity exceeded (%u repairs per inclusion)",
-                    query ? "header query" : "opaque directive", capacity);
+        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "invalid opaque directive span");
         result = false;
     }
     else
     {
-        uint8_t* lexical = pp->data_count < BUSTER_PP_MAX_FILES ? arena_push(&pp->arena, data->length, 1) : 0;
+        uint8_t* lexical = pp->data_count >= BUSTER_PP_MAX_FILES ? 0 : data->lexical_bytes != 0 ? (uint8_t*)data->lexical_bytes : arena_push(&pp->arena, data->length, 1);
         result = lexical != 0;
         if (result)
         {
-            memcpy(lexical, data->lexical_bytes != 0 ? data->lexical_bytes : data->bytes, data->length);
+            if (data->lexical_bytes == 0)
+            {
+                memcpy(lexical, data->bytes, data->length);
+            }
             const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
             uint64_t p = begin;
+            bool changed = false;
             while (p < stop)
             {
                 uint64_t size;
@@ -6520,6 +6712,10 @@ static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint
                 get_char(&lexer, p, &size, &at);
                 // Leave physical splices before `at` intact, preserving logical lines and original source offsets.
                 const uint64_t end = p + size < stop ? p + size : stop;
+                for (uint64_t i = at; i < end; i += 1)
+                {
+                    changed |= lexical[i] != ' ';
+                }
                 memset(lexical + at, ' ', at < end ? end - at : 0);
                 p += size != 0 ? size : 1;
             }
@@ -6531,21 +6727,24 @@ static bool pp_recover_opaque_span(Preprocessor* pp, uint32_t file_context, uint
             recovered.unterminated_comment = 0;
             recovered.unterminated_comment_starts_line = false;
             const PPPrepare prepare = pp_prepare_config(pp);
-            result = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &recovered, 0) == PP_PREPARE_DONE;
+            if (!changed)
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "opaque directive recovery made no progress");
+            }
+            result = changed && pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &recovered, 0) == PP_PREPARE_DONE;
             if (result)
             {
                 recovered.bytes = data->bytes;
                 pp->datas[pp->data_count] = recovered;
                 file->data = pp->data_count;
                 pp->data_count += 1;
-                *repairs += 1;
                 file->end = recovered.token_count;
                 file->position = recovered.directive_end[directive];
                 file->next_directive = directive + 1;
                 file->comment_read = false;
             }
         }
-        if (!result)
+        if (!result && !pp->fatal)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + begin, "out of memory recovering an opaque directive span");
         }
@@ -6560,7 +6759,7 @@ static bool pp_recover_query_raw(Preprocessor* pp, uint32_t file_context, uint32
     const PPContext* file = &pp->contexts[file_context];
     const PPFileData* data = &pp->datas[file->data];
     const bool overlap = (pp->refine_flags & C_TOKENIZER_RAW_STRINGS) && pp_query_raw_overlap(pp, data, first, stop);
-    return !overlap || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, true);
+    return !overlap || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1);
 }
 
 // Only an executing direct header directive owns this source span. An excluded directive never reaches this hook,
@@ -6580,7 +6779,7 @@ static bool pp_recover_direct_raw(Preprocessor* pp, PPContext* context, uint32_t
         const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole);
         if (stop != 0 && pp_query_raw_overlap(pp, data, data->starts[first], stop))
         {
-            result = pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first] + 1, stop - 1, false);
+            result = pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first] + 1, stop - 1);
         }
     }
     return result;
@@ -6588,10 +6787,32 @@ static bool pp_recover_direct_raw(Preprocessor* pp, PPContext* context, uint32_t
 
 // A source header's literal spelling is confirmed before the ordinary lexer's comment is corrected. The private view
 // restores file tokens and directive links after it, while old macro definitions and other inclusions keep their data.
-static bool pp_recover_header_comment(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop, bool query)
+static bool pp_recover_header_comment(Preprocessor* pp, uint32_t file_context, uint32_t directive, uint32_t first, uint32_t stop)
 {
     PPContext* file = &pp->contexts[file_context];
-    return !pp_header_comment_overlap(pp, file, first, stop) || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1, query);
+    bool result = !pp_header_comment_overlap(pp, file, first, stop) || pp_recover_opaque_span(pp, file_context, directive, first + 1, stop - 1);
+    const PPFileData* data = &pp->datas[file->data];
+    bool invalid_raw = false;
+    for (uint32_t i = 0; !invalid_raw && i < data->raw_error_count; i += 1)
+    {
+        const uint32_t start = data->starts[data->raw_errors[i].token];
+        invalid_raw = start > first && start < stop;
+    }
+    if (result && invalid_raw)
+    {
+        PPOpaqueSpan* span = arena_push(&pp->arena, sizeof(PPOpaqueSpan), _Alignof(PPOpaqueSpan));
+        result = span != 0;
+        if (result)
+        {
+            *span = (PPOpaqueSpan){ .next = file->opaque_spans, .begin = first, .end = stop };
+            file->opaque_spans = span;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[file->range].base + first, "out of memory remembering an opaque header name");
+        }
+    }
+    return result;
 }
 
 // Only an executing direct header directive confirms this opaque source span. Excluded directives keep ordinary
@@ -6611,7 +6832,7 @@ static bool pp_recover_direct_header_comment(Preprocessor* pp, PPContext* contex
         const uint32_t stop = pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole);
         if (stop != 0)
         {
-            result = pp_recover_header_comment(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first], stop, false);
+            result = pp_recover_header_comment(pp, (uint32_t)(context - pp->contexts), directive, data->starts[first], stop);
         }
     }
     return result;
@@ -6647,7 +6868,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         bool whole;
         const uint32_t stop = c == '<' ? pp_scan_header_bytes(pp->refine_flags, data, first, data->length, 0, 0, &length, &whole) : 0;
         if (stop != 0 && line != 0 && pp_recover_query_raw(pp, context->relex_file, line->directive, first, stop) &&
-            pp_recover_header_comment(pp, context->relex_file, line->directive, first, stop, true))
+            pp_recover_header_comment(pp, context->relex_file, line->directive, first, stop))
         {
             const PPToken token = { .kind = C_TOKEN_LESS, .value = base + stop, .location = base + first };
             context->relex_position = stop;
@@ -6668,7 +6889,7 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
         bool whole;
         const uint32_t stop = first < end && base + data->starts[first] == token.location ? pp_scan_header_name(pp->refine_flags, data, first, end, 0, 0, &length, &whole) : 0;
         if (stop != 0 && pp_recover_query_raw(pp, line->context, line->directive, data->starts[first], stop) &&
-            pp_recover_header_comment(pp, line->context, line->directive, data->starts[first], stop, true))
+            pp_recover_header_comment(pp, line->context, line->directive, data->starts[first], stop))
         {
             uint32_t relex;
             const uint32_t after = pp_header_name_tail(pp, data, first, end, stop, &relex);
@@ -6706,6 +6927,7 @@ static void pp_collect_step(Preprocessor* pp)
         {
             while (collected == PP_COLLECTED_MORE && context->position < limit)
             {
+                pp_read_raw_errors(pp, context, context->position, context->position + 1);
                 const PPToken token = pp_file_token(data, base, context->position);
                 context->position += 1;
                 if (token.kind == C_TOKEN_RAW_IDENTIFIER)
@@ -6889,6 +7111,7 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
     {
         pp->statistics.direct_expansions += direct;
         pp->statistics.buffered_expansions += !direct;
+        pp->statistics.final_direct_object_tokens += direct && tokens == &pp->output ? tokens->count - begin : 0;
     }
     pp->history_current = saved_history;
 }
@@ -8119,6 +8342,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
         const uint32_t base = pp->ranges[context->range].base;
         const uint32_t run_end = pp_step_limit(pp, context->position, limit);
         const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, run_end) : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
+        pp_read_raw_errors(pp, context, context->position, stop);
         if (pp->capture_count != 0)
         {
             pp_history_fill(pp, &pp->captures, pp->captures.count - (stop - context->position), pp->captures.count, 0);
@@ -8128,6 +8352,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
         {
             pp->statistics.file_runs += 1;
             pp->statistics.file_run_tokens += stop - context->position;
+            pp->statistics.final_file_run_tokens += pp_target(pp) == &pp->output ? stop - context->position : 0;
         }
         context->position = stop;
         if (stop < run_end && !pp->fatal)
@@ -8157,6 +8382,7 @@ static void pp_step_buffer(Preprocessor* pp, PPContext* context)
     {
         pp->statistics.buffer_runs += 1;
         pp->statistics.buffer_run_tokens += stop - context->position;
+        pp->statistics.final_buffer_run_tokens += target == &pp->output ? stop - context->position : 0;
     }
     context->position = stop;
     if (stop < run_end && !pp->fatal)
@@ -8507,13 +8733,6 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
     }
 }
 
-// The executing directive or expanded query has proved [begin, stop) opaque to ordinary C lexing. Prepare a
-// private view for this inclusion with only that span masked. Original source bytes/offsets, old macro data indexes,
-// other inclusions and shared cache records stay unchanged. Previous masks are retained. Callers invoke this only
-// for an exceptional lexical overlap, and reload their data afterward: position moves to the rebuilt directive end.
-// Separate per-inclusion budgets of 64 direct repairs and 8 queries bound full-file copy/preparation work and retained
-// storage by O((64 + 8) * N). Capacity/allocation exhaustion is fatal, never a successful truncated stream.
-
 // Only active diagnostic directives read their message opaquely. Detect a token or comment that ordinary lexing
 // carried past its logical newline, or an unterminated comment on it, then restore the following source. A token's
 // interior is skipped here, so a comment marker inside a quoted message doesn't consume the rare-repair budget.
@@ -8554,7 +8773,7 @@ static bool pp_recover_diagnostic_line(Preprocessor* pp, PPContext* context, uin
             }
         }
     }
-    return !overlap || pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, begin, stop, false);
+    return !overlap || pp_recover_opaque_span(pp, (uint32_t)(context - pp->contexts), directive, begin, stop);
 }
 
 // #error and #warning read text, not tokens: retain comments, quote characters and trailing blanks, removing only
@@ -8783,6 +9002,9 @@ static void pp_finish_condition(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     pp_read_directive_comment(pp, &pp->contexts[capture.context], capture.directive);
+    const PPContext* file = &pp->contexts[capture.context];
+    const PPFileData* data = &pp->datas[file->data];
+    pp_read_raw_errors(pp, file, data->directive_hash[capture.directive], data->directive_end[capture.directive]);
     const bool taken = pp_evaluate(pp, &pp->captures, capture.begin, pp->captures.count, capture.location);
     if (pp->options.timing)
     {
@@ -10357,6 +10579,11 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
     if (!condition)
     {
         pp_read_directive_comment(pp, context, d);
+        const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
+        if (!text)
+        {
+            pp_read_raw_errors(pp, context, hash, end);
+        }
     }
     context->position = end;
     context->next_directive = d + 1;
@@ -11642,9 +11869,12 @@ static bool pp_embed_parameters(Preprocessor* pp, const PPTokens* tokens, uint32
 // device, which #embed refuses and __has_embed finds empty. The file is only looked at, never read: #embed reads it
 // (pp_lookup_path), and __has_embed answers from its size, as clang's EvaluateHasEmbed does (LookupEmbedFile without
 // opening it), so that a file too big or unreadable for #embed is there for it.
-static bool pp_find_embed(const Preprocessor* pp, const PPContext* context, const uint8_t* name, uint32_t length, bool angled, char* path, uint32_t* path_length,
+// Optional timing covers only this search and its stat attempts, not parameter expansion or the later resource read.
+// It is within the main-loop remainder, separate from include lookup, and is not an additive PPPhase.
+static bool pp_find_embed(Preprocessor* pp, const PPContext* context, const uint8_t* name, uint32_t length, bool angled, char* path, uint32_t* path_length,
                           uint64_t* size, bool* regular)
 {
+    const uint64_t start = pp->options.timing ? __rdtsc() : 0;
     const PPFile* from = context != 0 ? &pp->files[context->file] : 0;
     const bool absolute = length != 0 && name[0] == '/';
     const uint32_t count = absolute ? 1 : 2 + pp->options.embed_directory_count;
@@ -11673,10 +11903,21 @@ static bool pp_find_embed(const Preprocessor* pp, const PPContext* context, cons
             written = snprintf(path, PATH_MAX, "%s%s%.*s", directory, directory[0] != 0 ? "/" : "", (int)length, (const char*)name);
         }
         struct stat stats;
-        found = written > 0 && written < PATH_MAX && stat(path, &stats) == 0 && !S_ISDIR(stats.st_mode);
+        const bool fits = written > 0 && written < PATH_MAX;
+        if (pp->options.timing)
+        {
+            pp->statistics.embed_stats += fits;
+        }
+        found = fits && stat(path, &stats) == 0 && !S_ISDIR(stats.st_mode);
         *path_length = found ? (uint32_t)written : 0;
         *regular = found && S_ISREG(stats.st_mode);
         *size = *regular ? (uint64_t)stats.st_size : 0;
+    }
+    if (pp->options.timing)
+    {
+        pp->statistics.embed_ticks += __rdtsc() - start;
+        pp->statistics.embed_searches += 1;
+        pp->statistics.embed_found += found;
     }
     return found;
 }
@@ -13033,8 +13274,8 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
 }
 
 // buster's own headers' directory: src/buster/include in the tree whose build/ holds the executable (as clang finds its
-// resource directory from its executable). Returns whether it exists.
-static bool pp_buster_headers_directory(char* path, uint32_t capacity)
+// resource directory from its executable). Returns whether it exists; optionally counts its stat attempt.
+static bool pp_buster_headers_directory(char* path, uint32_t capacity, uint64_t* stat_count)
 {
     char executable[PATH_MAX];
     const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
@@ -13054,13 +13295,18 @@ static bool pp_buster_headers_directory(char* path, uint32_t capacity)
         }
         result = result && (uint32_t)snprintf(path, capacity, "%s/src/buster/include", executable) < capacity;
         struct stat stats;
+        if (stat_count != 0)
+        {
+            *stat_count += result;
+        }
         result = result && stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
     }
     return result;
 }
 
 // The highest version's directory of clang's own headers (clang searches its resource directory first), if any.
-static bool pp_clang_resource_directory(char* path, uint32_t capacity)
+// Optionally counts its explicit stat attempt, not the directory enumeration's libc-internal system calls.
+static bool pp_clang_resource_directory(char* path, uint32_t capacity, uint64_t* stat_count)
 {
     bool result = false;
     DIR* directory = opendir("/usr/lib/clang");
@@ -13081,6 +13327,10 @@ static bool pp_clang_resource_directory(char* path, uint32_t capacity)
         {
             snprintf(path, capacity, "/usr/lib/clang/%u/include", best);
             struct stat stats;
+            if (stat_count != 0)
+            {
+                *stat_count += 1;
+            }
             result = stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
         }
     }
@@ -13123,6 +13373,10 @@ static void pp_dedupe_directories(Preprocessor* pp)
         for (uint32_t i = 0; i < count; i += 1)
         {
             struct stat stats;
+            if (pp->options.timing)
+            {
+                pp->statistics.directory_stats += 1;
+            }
             kept[i] = stat(pp->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
             devices[i] = kept[i] ? (uint64_t)stats.st_dev : 0;
             inodes[i] = kept[i] ? (uint64_t)stats.st_ino : 0;
@@ -13298,7 +13552,8 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
             char buster[PATH_MAX];
             char resource[PATH_MAX];
             bool buster_added = false;
-            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster)))
+            uint64_t* stat_count = options->timing ? &pp->statistics.directory_stats : 0;
+            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster), stat_count))
             {
                 pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
             }
@@ -13309,7 +13564,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
                 pp->buster_directory = result ? pp->directories[pp->directory_count - 1] : 0;
                 pp->buster_directory_length = result ? pp->directory_lengths[pp->directory_count - 1] : 0;
             }
-            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource)))
+            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource), stat_count))
             {
                 pp->fallback_directory = buster_added ? pp->directory_count : BUSTER_PP_NONE;
                 result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
@@ -15347,7 +15602,7 @@ static void pp_clang_remove_links(const char* links)
 static bool pp_clang_fallback_links(const char* ours, char* links)
 {
     char resource[PATH_MAX];
-    const bool made = pp_clang_resource_directory(resource, sizeof(resource)) && mkdtemp(links) != 0;
+    const bool made = pp_clang_resource_directory(resource, sizeof(resource), 0) && mkdtemp(links) != 0;
     DIR* directory = made ? opendir(resource) : 0;
     bool result = directory != 0;
     for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
@@ -15408,7 +15663,7 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
     static Preprocessor pp;
     PPOptions quiet = *options;
     quiet.quiet = true;
-    const bool found = search && pp_buster_headers_directory(ours, PATH_MAX);
+    const bool found = search && pp_buster_headers_directory(ours, PATH_MAX, 0);
     const bool interned = found && intern_initialize(&table);
     const bool initialized = interned && pp_initialize(&pp, &quiet, &table) && !pp.fatal;
     const uint32_t directories = initialized ? pp.directory_count : 0;

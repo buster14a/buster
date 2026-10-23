@@ -1,0 +1,896 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Included by c_checker_test.c after its CheckTest helpers. object_writer_test.c supplies the existing independent
+// ELF reader and bounded external-tool runner. Fixtures below are original; Clang is an external byte/relocation
+// oracle, not an imported implementation. No generated-program/backend support is implied by a valid data object.
+#ifndef BUSTER_C_CHECK_DATA_TEST_INCLUDED
+#define BUSTER_C_CHECK_DATA_TEST_INCLUDED
+
+typedef struct CheckDataTestLink CheckDataTestLink;
+struct CheckDataTestLink
+{
+    Link link;
+    Arena tables;
+    Arena names;
+    Arena bytes;
+    Arena scratch;
+};
+
+static bool check_data_test_open(CheckDataTestLink* test_link, uint32_t count)
+{
+    *test_link = (CheckDataTestLink){ 0 };
+    const LinkCapacity capacity = {
+        .names = count,
+        .atoms = count,
+        .symbols = count,
+        .fixups = count,
+        .wide_addends = count,
+    };
+    test_link->tables = arena_reserve(link_capacity_bytes(capacity));
+    test_link->names = arena_reserve(16384);
+    test_link->bytes = arena_reserve(16384);
+    test_link->scratch = arena_reserve(65536);
+    return link_initialize(&test_link->link, &test_link->tables, &test_link->names, capacity);
+}
+
+static void check_data_test_close(CheckDataTestLink* test_link)
+{
+    arena_release(&test_link->scratch);
+    arena_release(&test_link->bytes);
+    arena_release(&test_link->names);
+    arena_release(&test_link->tables);
+}
+
+static SymbolId check_data_test_symbol(Link* link, const char* name, uint8_t flags)
+{
+    const NameId id = link_add_name(link, (const uint8_t*)name, (uint32_t)strlen(name));
+    return id != 0 ? link_add_symbol(link, id, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) : 0;
+}
+
+static uint64_t check_data_test_find_symbol(const ObjectView* view, const char* name)
+{
+    uint64_t result = 0;
+    for (uint64_t i = 1; result == 0 && i < view->symbol_count; i += 1)
+    {
+        const char* candidate = object_view_symbol_name(view, i);
+        if (candidate != 0 && strcmp(candidate, name) == 0)
+        {
+            result = i;
+        }
+    }
+    return result;
+}
+
+static bool check_data_test_symbol_bytes(const ObjectView* view, uint64_t symbol, const uint8_t* expected, uint64_t size, uint8_t class)
+{
+    bool matches = symbol != 0 && symbol < view->symbol_count;
+    if (matches)
+    {
+        const Elf64_Sym* entry = &view->symbols[symbol];
+        const uint64_t section_id = object_view_symbol_section(view, symbol);
+        matches = entry->st_size == size && section_id != 0 && section_id < view->section_count;
+        if (matches)
+        {
+            const Elf64_Shdr* section = &view->sections[section_id];
+            const bool bss = class == BUSTER_LINK_CLASS_BSS;
+            const bool writable = (section->sh_flags & SHF_WRITE) != 0;
+            const char* section_name = object_view_section_name(view, section_id);
+            const bool relro = section_name != 0 && strncmp(section_name, ".data.rel.ro", 12) == 0;
+            matches = entry->st_value <= section->sh_size && size <= section->sh_size - entry->st_value &&
+                      (section->sh_type == SHT_NOBITS) == bss && writable == (class != BUSTER_LINK_CLASS_RODATA) &&
+                      relro == (class == BUSTER_LINK_CLASS_DATA_RELRO);
+            if (matches && !bss)
+            {
+                matches = memcmp(view->file + section->sh_offset + entry->st_value, expected, size) == 0;
+            }
+        }
+    }
+    return matches;
+}
+
+static bool check_data_test_relocation(const ObjectView* view, const char* from, const char* target, int64_t addend)
+{
+    const uint64_t symbol = check_data_test_find_symbol(view, from);
+    const uint64_t target_symbol = check_data_test_find_symbol(view, target);
+    const uint64_t section = symbol != 0 ? object_view_symbol_section(view, symbol) : 0;
+    const uint64_t offset = symbol != 0 ? view->symbols[symbol].st_value : 0;
+    uint32_t matches = 0;
+    for (uint64_t i = 1; symbol != 0 && target_symbol != 0 && i < view->section_count; i += 1)
+    {
+        const Elf64_Shdr* relocations = &view->sections[i];
+        if (relocations->sh_type == SHT_RELA && relocations->sh_info == section)
+        {
+            const Elf64_Rela* entries = (const Elf64_Rela*)(view->file + relocations->sh_offset);
+            const uint64_t count = relocations->sh_size / sizeof(*entries);
+            for (uint64_t j = 0; j < count; j += 1)
+            {
+                matches += entries[j].r_offset == offset && ELF64_R_TYPE(entries[j].r_info) == R_X86_64_64 &&
+                           ELF64_R_SYM(entries[j].r_info) == target_symbol && entries[j].r_addend == addend;
+            }
+        }
+    }
+    return matches == 1;
+}
+
+typedef struct CheckDataTestFixture CheckDataTestFixture;
+struct CheckDataTestFixture
+{
+    const char* name;
+    TypeId type;
+    CheckValue value;
+    uint8_t bytes[16];
+    uint8_t class;
+    bool implicit_zero;
+};
+
+static void check_data_test_objects(CheckTest* test, TypeTable* types, const char* clang)
+{
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    const TypeId byte_pointer = type_pointer(types, BUSTER_TYPE_UCHAR);
+    const TypeId bit9 = type_bit_int(types, 9, false);
+    const TypeId bit65 = type_bit_int(types, 65, true);
+    CheckDataTestFixture fixtures[] = {
+        {
+            .name = "data_i8",
+            .type = BUSTER_TYPE_SCHAR,
+            .value = check_test_integer(BUSTER_TYPE_SCHAR, 249),
+            .bytes = { 0xf9 },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_u16",
+            .type = BUSTER_TYPE_USHORT,
+            .value = check_test_integer(BUSTER_TYPE_USHORT, 0xa1b2),
+            .bytes = {
+                0xb2,
+                0xa1,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_i32",
+            .type = BUSTER_TYPE_INT,
+            .value = check_test_integer(BUSTER_TYPE_INT, UINT32_C(0xfffffffd)),
+            .bytes = {
+                0xfd,
+                0xff,
+                0xff,
+                0xff,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_u64",
+            .type = BUSTER_TYPE_ULONG,
+            .value = check_test_integer(BUSTER_TYPE_ULONG, UINT64_C(0xfedcba9876543210)),
+            .bytes = {
+                0x10,
+                0x32,
+                0x54,
+                0x76,
+                0x98,
+                0xba,
+                0xdc,
+                0xfe,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_u128",
+            .type = BUSTER_TYPE_UINT128,
+            .value = check_test_integer(BUSTER_TYPE_UINT128, ((unsigned __int128)UINT64_C(0xffeeddccbbaa9988) << 64) | UINT64_C(0x7766554433221100)),
+            .bytes = {
+                0x00,
+                0x11,
+                0x22,
+                0x33,
+                0x44,
+                0x55,
+                0x66,
+                0x77,
+                0x88,
+                0x99,
+                0xaa,
+                0xbb,
+                0xcc,
+                0xdd,
+                0xee,
+                0xff,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_f32",
+            .type = BUSTER_TYPE_FLOAT,
+            .value = check_test_float(BUSTER_TYPE_FLOAT, -0.0L),
+            .bytes = { [3] = 0x80 },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_f64",
+            .type = BUSTER_TYPE_DOUBLE,
+            .value = check_test_float(BUSTER_TYPE_DOUBLE, 6.0L),
+            .bytes = {
+                [6] = 0x18,
+                [7] = 0x40,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_f80",
+            .type = BUSTER_TYPE_LONG_DOUBLE,
+            .value = check_test_float(BUSTER_TYPE_LONG_DOUBLE, -1.5L),
+            .bytes = {
+                [7] = 0xc0,
+                [8] = 0xff,
+                [9] = 0xbf,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_zero",
+            .type = BUSTER_TYPE_INT,
+            .class = BUSTER_LINK_CLASS_BSS,
+            .implicit_zero = true,
+        },
+        {
+            .name = "data_const_zero",
+            .type = BUSTER_TYPE_INT | BUSTER_TYPE_CONST,
+            .class = BUSTER_LINK_CLASS_RODATA,
+            .implicit_zero = true,
+        },
+        {
+            .name = "data_target",
+            .type = BUSTER_TYPE_INT,
+            .value = check_test_integer(BUSTER_TYPE_INT, 42),
+            .bytes = { 42 },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_pointer",
+            .type = pointer,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_const_pointer",
+            .type = pointer | BUSTER_TYPE_CONST,
+            .class = BUSTER_LINK_CLASS_DATA_RELRO,
+        },
+        {
+            .name = "data_wide",
+            .type = byte_pointer,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_absolute",
+            .type = pointer,
+            .bytes = {
+                [1] = 0x10,
+                [5] = 0x80,
+                [6] = 0xff,
+                [7] = 0xff,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_null",
+            .type = pointer,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "data_volatile",
+            .type = BUSTER_TYPE_INT | BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE,
+            .value = check_test_integer(BUSTER_TYPE_INT, 17),
+            .bytes = { 17 },
+            .class = BUSTER_LINK_CLASS_RODATA,
+        },
+        {
+            .name = "data_aligned",
+            .type = type_aligned(types, BUSTER_TYPE_INT, 5),
+            .value = check_test_integer(BUSTER_TYPE_INT, 11),
+            .bytes = { 11 },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_tiny",
+            .type = BUSTER_TYPE_LONG_DOUBLE,
+            .value = check_test_float(BUSTER_TYPE_LONG_DOUBLE, 0x1p-16445L),
+            .bytes = { 1 },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_large",
+            .type = BUSTER_TYPE_LONG_DOUBLE,
+            .value = check_test_float(BUSTER_TYPE_LONG_DOUBLE, 0x1.fffffffffffffffep16383L),
+            .bytes = {
+                0xff,
+                0xff,
+                0xff,
+                0xff,
+                0xff,
+                0xff,
+                0xff,
+                0xff,
+                0xfe,
+                0x7f,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_bool",
+            .type = BUSTER_TYPE_BOOL,
+            .value = check_test_integer(BUSTER_TYPE_BOOL, 1),
+            .bytes = { 1 },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_bit9",
+            .type = bit9,
+            .value = check_test_integer(bit9, 511),
+            .bytes = {
+                0xff,
+                0xff,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "data_bit65",
+            .type = bit65,
+            .value = check_test_integer(bit65, ((unsigned __int128)1 << 64) | 3),
+            .bytes = {
+                [0] = 3,
+                [8] = 1,
+            },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    enum
+    {
+        COUNT = BUSTER_ARRAY_LENGTH(fixtures),
+        MAP_COUNT = COUNT * 2 + 5,
+        EXTERNAL_OBJECT = MAP_COUNT - 1,
+    };
+    CheckDataTestLink test_link;
+    const bool initialized = check_data_test_open(&test_link, COUNT + 4);
+    check_test_expect(test, initialized, "static-data Link allocation");
+    SymbolId map[MAP_COUNT] = { 0 };
+    CheckDataObject objects[COUNT];
+    CheckValue values[COUNT];
+    CheckDiagnostic diagnostics[COUNT] = { 0 };
+    CheckStream stream = {
+        .values = values,
+        .diagnostics = diagnostics,
+        .count = COUNT,
+    };
+    bool ready = initialized;
+    if (ready)
+    {
+        memset(test_link.bytes.base, 0xa5, test_link.bytes.capacity);
+        memset(test_link.scratch.base, 0x5a, test_link.scratch.capacity);
+        map[EXTERNAL_OBJECT] = check_data_test_symbol(&test_link.link, "data_external", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        ready = map[EXTERNAL_OBJECT] != 0;
+    }
+    for (uint32_t i = 0; ready && i < COUNT; i += 1)
+    {
+        const uint32_t object = i * 2 + 1;
+        map[object] = check_data_test_symbol(&test_link.link, fixtures[i].name, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        ready = map[object] != 0;
+        objects[i] = (CheckDataObject){
+            .type = fixtures[i].type,
+            .object = object,
+            .initializer = fixtures[i].implicit_zero ? BUSTER_CHECK_NONE : i,
+            .token = i + 100,
+        };
+        values[i] = fixtures[i].value;
+    }
+    for (uint32_t i = 11; i <= 15; i += 1)
+    {
+        values[i] = (CheckValue){
+            .type = i == 13 ? byte_pointer : pointer,
+            .category = CHECK_RVALUE,
+            .flags = BUSTER_CHECK_STATIC_OBJECT,
+            .constant_kind = CHECK_CONSTANT_ADDRESS,
+            .object = i <= 12 ? 21 : (i == 13 ? EXTERNAL_OBJECT : 0),
+            .offset = i == 11 ? 4 : (i == 13 ? INT64_C(4294967296) : (i == 14 ? (int64_t)UINT64_C(0xffff800000001000) : 0)),
+        };
+    }
+    CheckDataResult result;
+    const bool emitted = ready && check_data_emit(types, &stream, objects, COUNT, map, MAP_COUNT, &test_link.link, 0, &test_link.bytes, &test_link.scratch, &result);
+    check_test_expect(test, emitted, "static-data scalar fixture emission");
+    if (emitted)
+    {
+        check_test_expect(test, result.atom_count == COUNT && result.fixup_count == 3 && result.wide_addend_count == 1 &&
+                               test_link.scratch.length == 0 && test_link.bytes.length == result.byte_count, "static-data exact publication counts");
+        for (uint32_t i = 0; i < COUNT; i += 1)
+        {
+            const AtomId atom = test_link.link.symbols.atom[map[objects[i].object]];
+            const uint64_t size = type_size(types, fixtures[i].type);
+            const uint8_t* bytes = test_link.link.atoms.bytes[atom];
+            check_test_expect(test, atom == result.atom_begin + i && test_link.link.atoms.class[atom] == fixtures[i].class &&
+                                   test_link.link.atoms.size[atom] == size && test_link.link.atoms.alignment_log2[atom] == type_alignment_log2(types, fixtures[i].type),
+                              "static-data size, alignment, class and symbol identity");
+            check_test_expect(test, fixtures[i].class == BUSTER_LINK_CLASS_BSS ? bytes == 0 : bytes != 0 && memcmp(bytes, fixtures[i].bytes, size) == 0,
+                              "static-data independently stated target bytes");
+        }
+        const FixupId wide = test_link.link.atoms.fixup_begin[test_link.link.symbols.atom[map[27]]];
+        check_test_expect(test, wide != 0 && test_link.link.fixups.target[wide] == map[EXTERNAL_OBJECT] &&
+                               link_fixup_addend(&test_link.link, wide) == INT64_C(4294967296), "static-data preserves wide symbolic addend");
+        check_test_expect(test, link_check(&test_link.link) == LINK_ERROR_NONE, "static-data actual link_check");
+    }
+    Arena object_arena = arena_reserve(1u << 20);
+    ObjectUnits units;
+    ObjectSymbols symbols;
+    Object object = { 0 };
+    ObjectView view;
+    char error[512] = "";
+    const ObjectOptions options = { 0 };
+    bool built = emitted && object_prepare(&units, &test_link.link, 1, &object_arena) && object_map_symbols(&symbols, &test_link.link, &object_arena);
+    if (built)
+    {
+        object = object_build(&test_link.link, &units, &symbols, 0, options, BUSTER_S8("static-data.c"), &object_arena);
+        built = object.error == OBJECT_ERROR_NONE && object_view_open(&view, object.bytes, object.size, false, error, sizeof(error));
+    }
+    check_test_expect(test, built, "static-data actual object writer and independent ELF reader");
+    if (built)
+    {
+        for (uint32_t i = 0; i < COUNT; i += 1)
+        {
+            const uint64_t symbol = check_data_test_find_symbol(&view, fixtures[i].name);
+            check_test_expect(test, check_data_test_symbol_bytes(&view, symbol, fixtures[i].bytes, type_size(types, fixtures[i].type), fixtures[i].class),
+                              "static-data object symbol has expected target bytes");
+        }
+        check_test_expect(test, check_data_test_relocation(&view, "data_pointer", "data_target", 4) &&
+                               check_data_test_relocation(&view, "data_const_pointer", "data_target", 0) &&
+                               check_data_test_relocation(&view, "data_wide", "data_external", INT64_C(4294967296)), "static-data ELF ABS64 target/addend oracle");
+    }
+    // Clang independently emits these same original C definitions. Compare bytes by symbol, not section layout,
+    // because padding between objects is an object-writer choice. x87's own six padding bytes must be zero in ours.
+    static const char source[] =
+        "signed char data_i8 = -7; unsigned short data_u16 = 0xa1b2; int data_i32 = -3;\n"
+        "unsigned long data_u64 = 0xfedcba9876543210ul;\n"
+        "unsigned __int128 data_u128 = ((unsigned __int128)0xffeeddccbbaa9988ull << 64) | 0x7766554433221100ull;\n"
+        "float data_f32 = -0.0f; double data_f64 = 6.0; long double data_f80 = -1.5L;\n"
+        "int data_zero; const int data_const_zero; int data_target = 42;\n"
+        "int *data_pointer = &data_target + 1; int * const data_const_pointer = &data_target;\n"
+        "extern unsigned char data_external[]; unsigned char *data_wide = data_external + 4294967296ull;\n"
+        "int *data_absolute = (int *)0xffff800000001000ull; int *data_null = 0;\n"
+        "const volatile int data_volatile = 17; int data_aligned __attribute__((aligned(32))) = 11;\n"
+        "long double data_tiny = 0x1p-16445L; long double data_large = 0x1.fffffffffffffffep16383L;\n"
+        "_Bool data_bool = 1; _BitInt(9) data_bit9 = -1; unsigned _BitInt(65) data_bit65 = ((unsigned _BitInt(65))1 << 64) | 3;\n";
+    char directory[] = "/tmp/buster-checker-data-XXXXXX";
+    const bool directory_ready = mkdtemp(directory) != 0;
+    char source_path[160];
+    char object_path[160];
+    char output_path[160];
+    char error_path[160];
+    snprintf(source_path, sizeof(source_path), "%s/oracle.c", directory);
+    snprintf(object_path, sizeof(object_path), "%s/oracle.o", directory);
+    snprintf(output_path, sizeof(output_path), "%s/out", directory);
+    snprintf(error_path, sizeof(error_path), "%s/err", directory);
+    char* arguments[] = {
+        (char*)clang,
+        "-std=gnu17",
+        "-fno-common",
+        "-c",
+        source_path,
+        "-o",
+        object_path,
+        0,
+    };
+    bool oracle = built && directory_ready && parse_test_write(source_path, source, sizeof(source) - 1) && object_test_run(arguments, output_path, error_path) == 0;
+    String8 oracle_file = { 0 };
+    ObjectView theirs;
+    if (oracle)
+    {
+        oracle_file = object_test_read_file(&object_arena, object_path);
+        oracle = oracle_file.pointer != 0 && object_view_open(&theirs, (const uint8_t*)oracle_file.pointer, oracle_file.length, true, error, sizeof(error));
+    }
+    check_test_expect(test, oracle, "static-data independent Clang object oracle ran");
+    for (uint32_t i = 0; oracle && i < COUNT; i += 1)
+    {
+        const uint64_t symbol = check_data_test_find_symbol(&theirs, fixtures[i].name);
+        char description[160];
+        snprintf(description, sizeof(description), "static-data bytes match independent Clang static object %s", fixtures[i].name);
+        check_test_expect(test, check_data_test_symbol_bytes(&theirs, symbol, fixtures[i].bytes, type_size(types, fixtures[i].type), fixtures[i].class),
+                          description);
+    }
+    if (oracle)
+    {
+        check_test_expect(test, check_data_test_relocation(&theirs, "data_pointer", "data_target", 4) &&
+                               check_data_test_relocation(&theirs, "data_const_pointer", "data_target", 0) &&
+                               check_data_test_relocation(&theirs, "data_wide", "data_external", INT64_C(4294967296)), "static-data Clang ABS64 target/addend oracle");
+    }
+    if (directory_ready)
+    {
+        unlink(source_path);
+        unlink(object_path);
+        unlink(output_path);
+        unlink(error_path);
+        rmdir(directory);
+    }
+    arena_release(&object_arena);
+    check_data_test_close(&test_link);
+}
+
+static void check_data_test_limits(CheckTest* test, TypeTable* types)
+{
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    for (uint32_t failure = 0; failure < 18; failure += 1)
+    {
+        CheckDataTestLink test_link;
+        const bool initialized = check_data_test_open(&test_link, 4);
+        check_test_expect(test, initialized, "static-data rejection fixture Link allocation");
+        if (initialized)
+        {
+            SymbolId map[4] = { 0 };
+            map[1] = check_data_test_symbol(&test_link.link, "first", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            map[2] = check_data_test_symbol(&test_link.link, "second", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            map[3] = check_data_test_symbol(&test_link.link, "external", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            CheckValue values[2] = {
+                check_test_integer(BUSTER_TYPE_INT, 71),
+                {
+                    .type = pointer,
+                    .category = CHECK_RVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = 3,
+                    .offset = INT64_C(4294967296),
+                },
+            };
+            CheckDiagnostic diagnostics[2] = { 0 };
+            CheckStream stream = {
+                .values = values,
+                .diagnostics = diagnostics,
+                .count = 2,
+            };
+            CheckDataObject objects[2] = {
+                {
+                    .type = BUSTER_TYPE_INT,
+                    .object = 1,
+                    .initializer = 0,
+                    .token = 101,
+                },
+                {
+                    .type = pointer,
+                    .object = 2,
+                    .initializer = 1,
+                    .token = 202,
+                },
+            };
+            CheckDataStatus expected = CHECK_DATA_RESOURCE;
+            switch (failure)
+            {
+                case 0:
+                    test_link.link.atoms.capacity = test_link.link.atoms.count + 1;
+                    break;
+                case 1:
+                    test_link.link.fixups.capacity = test_link.link.fixups.count;
+                    break;
+                case 2:
+                    test_link.link.fixups.wide_capacity = test_link.link.fixups.wide_count;
+                    break;
+                case 3:
+                    test_link.bytes.capacity = 11;
+                    break;
+                case 4:
+                    test_link.scratch.capacity = 1;
+                    break;
+                case 5:
+                    objects[1].object = 1;
+                    expected = CHECK_DATA_SYMBOL;
+                    break;
+                case 6:
+                    values[1].object = 4;
+                    expected = CHECK_DATA_SYMBOL;
+                    break;
+                case 7:
+                    values[1].flags = 0;
+                    expected = CHECK_DATA_NON_CONSTANT;
+                    break;
+                case 8:
+                    values[1].fault = CHECK_FAULT_SIGNED_OVERFLOW;
+                    expected = CHECK_DATA_NON_CONSTANT;
+                    break;
+                case 9:
+                    objects[1].type = type_array(types, BUSTER_TYPE_INT, 2);
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+                case 10:
+                    test_link.link.symbols.flags[map[2]] = BUSTER_LINK_SYMBOL_TLS | BUSTER_LINK_SYMBOL_GLOBAL;
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+                case 11:
+                    test_link.link.symbols.flags[map[3]] = BUSTER_LINK_SYMBOL_TLS | BUSTER_LINK_SYMBOL_GLOBAL;
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+                case 12:
+                    test_link.link.symbols.flags[map[3]] = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL;
+                    expected = CHECK_DATA_SYMBOL;
+                    break;
+                case 13:
+                    values[1].type = BUSTER_TYPE_LONG;
+                    expected = CHECK_DATA_INVALID;
+                    break;
+                case 14:
+                    objects[1].initializer = 2;
+                    expected = CHECK_DATA_INVALID;
+                    break;
+                case 15:
+                    stream.report_count = 1;
+                    expected = CHECK_DATA_CHECK_FAILED;
+                    break;
+                case 16:
+                    objects[1].type = type_atomic(types, BUSTER_TYPE_INT);
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+                case 17:
+                    objects[1].type = BUSTER_TYPE_FLOAT128;
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+            }
+            uint8_t table_copy[4096];
+            const bool fits = test_link.tables.length <= sizeof(table_copy);
+            check_test_expect(test, fits, "static-data table snapshot capacity");
+            if (fits)
+            {
+                memcpy(table_copy, test_link.tables.base, test_link.tables.length);
+                const Link before = test_link.link;
+                CheckDataResult result;
+                const bool accepted = check_data_emit(types, &stream, objects, 2, map, 4, &test_link.link, 0, &test_link.bytes, &test_link.scratch, &result);
+                check_test_expect(test, !accepted && result.status == expected, "static-data semantic/capacity failure is explicit");
+                check_test_expect(test, before.error == test_link.link.error && before.atoms.count == test_link.link.atoms.count &&
+                                       before.symbols.count == test_link.link.symbols.count && before.fixups.count == test_link.link.fixups.count &&
+                                       before.fixups.wide_count == test_link.link.fixups.wide_count && before.names.count == test_link.link.names.count &&
+                                       memcmp(table_copy, test_link.tables.base, test_link.tables.length) == 0 && test_link.bytes.length == 0 && test_link.scratch.length == 0,
+                                  "static-data failed batch publishes no Link record or bytes");
+                if (failure <= 3)
+                {
+                    check_test_expect(test, result.atom_count == 2 && result.fixup_count == 1 && result.wide_addend_count == 1 && result.byte_count == 12,
+                                      "static-data capacity failure retains exact required counts");
+                }
+                if (failure >= 5 && failure != 15)
+                {
+                    check_test_expect(test, result.failed_record == 1 && result.failed_token == 202, "static-data failure preserves declaration location");
+                }
+            }
+        }
+        // Restore backing capacities before releasing the mappings changed by the deliberate limit fixtures.
+        test_link.bytes.capacity = 16384;
+        test_link.scratch.capacity = 65536;
+        check_data_test_close(&test_link);
+    }
+}
+
+static void check_data_test_floating(CheckTest* test)
+{
+    const long double values[] = {
+        0.0L,
+        -0.0L,
+        0x1p-16445L,
+        0x1p-16382L,
+        1.0L,
+        -1.5L,
+        0x1.fffffffffffffffep16383L,
+        INFINITY,
+        -INFINITY,
+        NAN,
+    };
+    const uint64_t significands[] = {
+        0,
+        0,
+        1,
+        UINT64_C(0x8000000000000000),
+        UINT64_C(0x8000000000000000),
+        UINT64_C(0xc000000000000000),
+        UINT64_MAX,
+        UINT64_C(0x8000000000000000),
+        UINT64_C(0x8000000000000000),
+        UINT64_C(0xc000000000000000),
+    };
+    const uint16_t exponents[] = {
+        0,
+        0x8000,
+        0,
+        1,
+        0x3fff,
+        0xbfff,
+        0x7ffe,
+        0x7fff,
+        0xffff,
+        0x7fff,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
+    {
+        uint8_t bytes[16] = { 0 };
+        check_data_float_bytes(bytes, BUSTER_TYPE_LONG_DOUBLE, values[i]);
+        uint64_t significand = 0;
+        for (uint32_t b = 0; b < 8; b += 1)
+        {
+            significand |= (uint64_t)bytes[b] << (8 * b);
+        }
+        const uint16_t exponent = (uint16_t)((uint16_t)bytes[8] | ((uint16_t)bytes[9] << 8));
+        check_test_expect(test, significand == significands[i] && exponent == exponents[i], "static-data independent x87 fields including subnormals/specials");
+        for (uint32_t b = 10; b < 16; b += 1)
+        {
+            check_test_expect(test, bytes[b] == 0, "static-data x87 padding has no host bytes");
+        }
+    }
+}
+
+static void check_data_test_composite(CheckTest* test, TypeTable* types)
+{
+    const TypeId old_function = type_function(types, BUSTER_TYPE_INT, 0, 0, 0);
+    const TypeId new_function = type_function(types, BUSTER_TYPE_INT, 0, 0, BUSTER_TYPE_FLAG_PROTOTYPE);
+    const TypeId old_array = type_incomplete_array(types, BUSTER_TYPE_INT);
+    const TypeId new_array = type_array(types, BUSTER_TYPE_INT, 3);
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    const TypeId old_types[] = {
+        type_pointer(types, old_function),
+        type_pointer(types, old_array),
+        pointer,
+    };
+    const TypeId new_types[] = {
+        type_pointer(types, new_function),
+        type_pointer(types, new_array),
+        pointer,
+    };
+    CheckDataTestLink test_link;
+    const bool initialized = check_data_test_open(&test_link, 8);
+    check_test_expect(test, initialized, "static-data composite pointer Link allocation");
+    if (initialized)
+    {
+        SymbolId map[7] = { 0 };
+        map[1] = check_data_test_symbol(&test_link.link, "function_pointer", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        map[2] = check_data_test_symbol(&test_link.link, "array_pointer", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        map[3] = check_data_test_symbol(&test_link.link, "local_pointer", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL);
+        map[4] = check_data_test_symbol(&test_link.link, "local_target", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL);
+        map[5] = check_data_test_symbol(&test_link.link, "external_function", BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL);
+        map[6] = check_data_test_symbol(&test_link.link, "external_array", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        CheckValue values[3];
+        CheckDiagnostic diagnostics[3] = { 0 };
+        CheckDataObject objects[4];
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            values[i] = (CheckValue){
+                .type = old_types[i],
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = i == 2 ? 4 : i + 5,
+                .offset = i == 2 ? -17 : 0,
+            };
+            objects[i] = (CheckDataObject){
+                .type = new_types[i],
+                .object = i + 1,
+                .initializer = i,
+                .token = i + 10,
+            };
+        }
+        objects[3] = (CheckDataObject){
+            .type = BUSTER_TYPE_INT,
+            .object = 4,
+            .initializer = BUSTER_CHECK_NONE,
+            .token = 13,
+        };
+        const CheckStream stream = {
+            .values = values,
+            .diagnostics = diagnostics,
+            .count = 3,
+        };
+        CheckDataResult result;
+        const bool emitted = check_data_emit(types, &stream, objects, 4, map, 7, &test_link.link, 7, &test_link.bytes, &test_link.scratch, &result);
+        check_test_expect(test, emitted && result.fixup_count == 3, "static-data compatible function/array pointer completion");
+        check_test_expect(test, emitted && link_check(&test_link.link) == LINK_ERROR_NONE, "static-data local forward reference validates");
+        if (emitted)
+        {
+            const AtomId atom = test_link.link.symbols.atom[map[3]];
+            const FixupId fixup = test_link.link.atoms.fixup_begin[atom];
+            check_test_expect(test, test_link.link.fixups.target[fixup] == map[4] && link_fixup_addend(&test_link.link, fixup) == -17,
+                              "static-data negative addend and local identity survive");
+        }
+    }
+    check_data_test_close(&test_link);
+}
+
+static void check_data_test_partitions(CheckTest* test, TypeTable* types)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t widths[] = {
+        sizeof(CheckDataObject),
+        sizeof(CheckValue),
+        sizeof(CheckDiagnostic),
+        sizeof(SymbolId),
+    };
+    uint8_t* mappings[BUSTER_ARRAY_LENGTH(widths)];
+    uint64_t readable[BUSTER_ARRAY_LENGTH(widths)];
+    bool ready = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths); i += 1)
+    {
+        readable[i] = (widths[i] * 34 + page - 1) / page * page;
+        mappings[i] = mmap(0, readable[i] + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready = ready && mappings[i] != MAP_FAILED;
+        if (mappings[i] != MAP_FAILED)
+        {
+            ready = mprotect(mappings[i] + readable[i], page, PROT_NONE) == 0 && ready;
+        }
+    }
+    check_test_expect(test, ready, "static-data protected input tails allocation");
+    for (uint32_t count = 0; ready && count <= 33; count += 1)
+    {
+        CheckDataObject* objects = (CheckDataObject*)(mappings[0] + readable[0] - count * widths[0]);
+        CheckValue* values = (CheckValue*)(mappings[1] + readable[1] - count * widths[1]);
+        CheckDiagnostic* diagnostics = (CheckDiagnostic*)(mappings[2] + readable[2] - count * widths[2]);
+        SymbolId* map = (SymbolId*)(mappings[3] + readable[3] - (count + 1) * widths[3]);
+        map[0] = 0;
+        CheckDataTestLink whole;
+        CheckDataTestLink partitioned;
+        const bool opened_whole = check_data_test_open(&whole, count + 1);
+        const bool opened_partitioned = check_data_test_open(&partitioned, count + 1);
+        bool valid = opened_whole && opened_partitioned;
+        check_test_expect(test, valid, "static-data partition Link allocation");
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            char name[32];
+            snprintf(name, sizeof(name), "object_%u", i);
+            map[i + 1] = check_data_test_symbol(&whole.link, name, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            const SymbolId other = check_data_test_symbol(&partitioned.link, name, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            valid = map[i + 1] != 0 && map[i + 1] == other;
+            objects[i] = (CheckDataObject){
+                .type = BUSTER_TYPE_INT | (i % 2 == 0 ? BUSTER_TYPE_CONST : 0),
+                .object = i + 1,
+                .initializer = i % 3 == 0 ? BUSTER_CHECK_NONE : i,
+                .token = i + 100,
+            };
+            values[i] = check_test_integer(BUSTER_TYPE_INT, i * 137 + 3);
+            diagnostics[i] = CHECK_DIAG_NONE;
+        }
+        const CheckStream stream = {
+            .values = values,
+            .diagnostics = diagnostics,
+            .count = count,
+        };
+        CheckDataResult result;
+        valid = valid && check_data_emit(types, &stream, objects, count, map, count + 1, &whole.link, 0, &whole.bytes, &whole.scratch, &result);
+        check_test_expect(test, valid, "static-data protected logical tail emission");
+        for (uint32_t start = 0; valid && start < count;)
+        {
+            const uint32_t desired = (start % 7) + 1;
+            const uint32_t batch = desired < count - start ? desired : count - start;
+            valid = check_data_emit(types, &stream, objects + start, batch, map, count + 1, &partitioned.link, 0, &partitioned.bytes, &partitioned.scratch, &result);
+            start += batch;
+        }
+        check_test_expect(test, valid && whole.link.atoms.count == partitioned.link.atoms.count && whole.bytes.length == partitioned.bytes.length,
+                          "static-data legal batch partitions preserve counts");
+        for (uint32_t atom = 1; valid && atom < whole.link.atoms.count; atom += 1)
+        {
+            const bool bss = whole.link.atoms.class[atom] == BUSTER_LINK_CLASS_BSS;
+            const bool same_bytes = bss ? partitioned.link.atoms.bytes[atom] == 0 :
+                                    memcmp(whole.link.atoms.bytes[atom], partitioned.link.atoms.bytes[atom], whole.link.atoms.size[atom]) == 0;
+            check_test_expect(test, whole.link.atoms.class[atom] == partitioned.link.atoms.class[atom] &&
+                                   whole.link.atoms.size[atom] == partitioned.link.atoms.size[atom] &&
+                                   whole.link.symbols.atom[atom] == partitioned.link.symbols.atom[atom] && same_bytes,
+                              "static-data legal batch partitions preserve identities and bytes");
+        }
+        check_data_test_close(&partitioned);
+        check_data_test_close(&whole);
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths); i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], readable[i] + page);
+        }
+    }
+}
+
+static void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
+{
+    check_data_test_objects(test, types, clang);
+    check_data_test_limits(test, types);
+    check_data_test_floating(test);
+    check_data_test_composite(test, types);
+    check_data_test_partitions(test, types);
+}
+
+#endif

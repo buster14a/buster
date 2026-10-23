@@ -250,6 +250,12 @@ typedef enum TypeError
     TYPE_ERROR_BIT_FIELD,
     // An enumeration's underlying type isn't a (non-_BitInt) integer type.
     TYPE_ERROR_UNDERLYING,
+    // An unknown GNU machine mode, including a malformed vector-mode count.
+    TYPE_ERROR_MODE,
+    // A machine mode and the declaration's base type have incompatible categories.
+    TYPE_ERROR_MODE_BASE,
+    // A recognized mode has no target type, or requires a type this table cannot represent.
+    TYPE_ERROR_MODE_UNSUPPORTED,
 } TypeError;
 
 // Per type, by index. What base, index and extent hold depends on the kind:
@@ -472,6 +478,12 @@ static __attribute__((unused)) TypeId type_function(TypeTable* table, TypeId res
 // the latter's size in bytes).
 static __attribute__((unused)) TypeId type_vector(TypeTable* table, TypeId element, uint32_t count, bool ext);
 static __attribute__((unused)) TypeId type_vector_size(TypeTable* table, TypeId element, uint64_t bytes);
+// GNU mode replaces a declaration's type, including its existing qualifiers and aligned typedef wrappers, as
+// clang does. This is NOT a qualifier-preserving derivation; the checker owns any later declaration qualifiers.
+// An enum typedef becomes an integer without changing its tag. For a mode on an enum tag itself, the caller passes
+// its underlying type (int before completion) and supplies the result to type_enum_complete. mode is a bounded,
+// non-NUL-terminated identifier, with either plain or paired-underscore spelling. No source diagnostics are printed.
+static __attribute__((unused)) TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode);
 static __attribute__((unused)) TypeId type_atomic(TypeTable* table, TypeId value);
 static __attribute__((unused)) TypeId type_aligned(TypeTable* table, TypeId base, uint32_t alignment_log2);
 static __attribute__((unused)) TypeId type_bit_int(TypeTable* table, uint32_t width, bool is_unsigned);
@@ -1638,6 +1650,367 @@ static TypeId type_bit_int(TypeTable* table, uint32_t width, bool is_unsigned)
 static TypeId type_complex(TypeTable* table, TypeId element)
 {
     return type_derive(table, BUSTER_TYPE_KIND_COMPLEX, 0, element, 0);
+}
+
+// mode's scalar names are a small, cold declaration table. The rules were checked against clang 23.1.1 and its
+// SemaDeclAttr.cpp; the implementation and fixtures here are original. Integer rows name the signed builtin, whose
+// following code is its unsigned twin. Floating rows name a real type; C suffixes make its complex type. Zero is
+// a recognized width with no x86-64 type. HC's complex __fp16 and complex/zero-element vectors are deliberately
+// refused: clang can construct them through mode, but the existing type table cannot represent them.
+typedef struct TypeMachineMode TypeMachineMode;
+struct TypeMachineMode
+{
+    String8 name;
+    uint8_t code;
+    bool integer;
+    bool complex;
+};
+
+static const TypeMachineMode type_machine_modes[] =
+{
+    {
+        .name = {
+            .pointer = "QI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_SCHAR,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "HI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_SHORT,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "SI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_INT,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "DI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "TI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_INT128,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "XI",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "byte",
+            .length = 4,
+        },
+        .code = BUSTER_TYPE_CODE_SCHAR,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "word",
+            .length = 4,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "pointer",
+            .length = 7,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "unwind_word",
+            .length = 11,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "QF",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "HF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_HALF,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "SF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "DF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_DOUBLE,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "XF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_LONG_DOUBLE,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "TF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "KF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "IF",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "QC",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "HC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_HALF,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "SC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "DC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_DOUBLE,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "XC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_LONG_DOUBLE,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "TC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "KC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "IC",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = true,
+    },
+};
+
+static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
+{
+    TypeId result = 0;
+    const bool operand = type_is_valid(table, base);
+    bool valid = mode.pointer != 0;
+    if (valid && mode.length >= 4 && mode.pointer[0] == '_' && mode.pointer[1] == '_' &&
+        mode.pointer[mode.length - 2] == '_' && mode.pointer[mode.length - 1] == '_')
+    {
+        mode.pointer += 2;
+        mode.length -= 4;
+    }
+    uint64_t vector_count = 0;
+    bool count_overflow = false;
+    const bool vector_mode = valid && mode.length >= 4 && mode.pointer[0] == 'V';
+    if (vector_mode)
+    {
+        uint64_t first = 1;
+        while (first < mode.length && mode.pointer[first] >= '0' && mode.pointer[first] <= '9')
+        {
+            const uint32_t digit = (uint32_t)(mode.pointer[first] - '0');
+            count_overflow |= vector_count > (UINT64_MAX - digit) / 10;
+            if (!count_overflow)
+            {
+                vector_count = vector_count * 10 + digit;
+            }
+            first += 1;
+        }
+        valid = !count_overflow && vector_count != 0 && (vector_count & (vector_count - 1)) == 0;
+        mode.pointer += first;
+        mode.length -= first;
+    }
+    const TypeMachineMode* selected = 0;
+    for (uint32_t i = 0; valid && selected == 0 && i < sizeof(type_machine_modes) / sizeof(type_machine_modes[0]); i += 1)
+    {
+        const TypeMachineMode* candidate = &type_machine_modes[i];
+        if (candidate->name.length == mode.length && memcmp(candidate->name.pointer, mode.pointer, mode.length) == 0)
+        {
+            selected = candidate;
+        }
+    }
+    if (!operand)
+    {
+        table->last_error = TYPE_ERROR_OPERAND;
+    }
+    else if (count_overflow)
+    {
+        table->last_error = TYPE_ERROR_TOO_LARGE;
+    }
+    else if (selected == 0)
+    {
+        table->last_error = TYPE_ERROR_MODE;
+    }
+    else
+    {
+        const TypeId stripped = type_strip_aligned(table, base);
+        const uint8_t kind = type_kind(table, stripped);
+        const bool vector_base = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        const TypeId element = vector_base ? type_strip_aligned(table, type_element(table, stripped)) : stripped;
+        const uint8_t element_kind = type_kind(table, element);
+        const bool enumeration = element_kind == BUSTER_TYPE_KIND_ENUM;
+        const bool integer = element_kind == BUSTER_TYPE_KIND_INTEGER || enumeration;
+        const bool complex = element_kind == BUSTER_TYPE_KIND_COMPLEX && type_kind(table, type_element(table, element)) == BUSTER_TYPE_KIND_FLOATING;
+        const bool floating = element_kind == BUSTER_TYPE_KIND_FLOATING || complex;
+        if ((vector_mode && enumeration) || (selected->integer ? !integer : selected->complex ? !complex : !floating))
+        {
+            table->last_error = TYPE_ERROR_MODE_BASE;
+        }
+        else if (selected->code == 0 || (selected->complex && (selected->code == BUSTER_TYPE_CODE_HALF || vector_base || vector_mode)))
+        {
+            table->last_error = TYPE_ERROR_MODE_UNSUPPORTED;
+        }
+        else
+        {
+            const uint8_t old_code = type_arithmetic_code(table, element);
+            const bool is_signed = old_code == BUSTER_TYPE_CODE_CHAR || (old_code >= BUSTER_TYPE_CODE_SCHAR && old_code <= BUSTER_TYPE_CODE_INT128 && (old_code & 1) == 0);
+            const uint8_t code = selected->code + (selected->integer ? !is_signed : selected->complex ? BUSTER_TYPE_CODE_COMPLEX : 0);
+            result = BUSTER_TYPE_BUILTIN(code);
+            if (vector_base && !vector_mode)
+            {
+                // Count the original elements' actual bytes, not the vector's rounded storage size.
+                vector_count = type_size(table, element) * table->types.extent[type_index(stripped)] / type_size(table, result);
+            }
+            if (vector_mode || vector_base)
+            {
+                if (vector_count == 0)
+                {
+                    result = 0;
+                    table->last_error = TYPE_ERROR_MODE_UNSUPPORTED;
+                }
+                else if (vector_count > UINT32_MAX)
+                {
+                    result = 0;
+                    table->last_error = TYPE_ERROR_TOO_LARGE;
+                }
+                else
+                {
+                    // clang's mode produces a GNU vector even when the old type was an ext_vector_type.
+                    result = type_vector(table, result, (uint32_t)vector_count, false);
+                }
+            }
+            if (result != 0)
+            {
+                table->last_error = TYPE_ERROR_NONE;
+            }
+        }
+    }
+    return result;
 }
 
 // Parameters are stored unqualified: a qualified one is copied without its qualifiers into scratch memory first.
