@@ -2313,3 +2313,29 @@ validate the implemented subset. Current end-to-end PP tests are not complete
 source compilation. Existing benchmark phase counters omit some cross-stage
 memory/occupancy costs; [#117](https://github.com/buster14a/buster/issues/117)/[#335](https://github.com/buster14a/buster/issues/335) require current frozen small/header-heavy/
 SQLite totals, after-lighter-work controls and honest remaining budget results.
+
+## Header inclusion transcript experiment (#111)
+
+The isolated [#111 experiment](measurements/header-replay-2026-10-23/README.md)
+compares the existing preprocessor with a macro-read-set validated inclusion
+transcript. Its serial batch consumer shares the file cache and intern table
+across translation units, while charging the construction and destruction of a
+fresh transcript cache to each candidate batch. It preserves token locations,
+complete expansion history and macro effects, and falls back for unsupported
+state. The general compiler driver in #152 is still a separate integration gap.
+
+The initial three-process-round 9700X screen found **no gain**. On 1,315 musl
+static-libc C units, original process medians were 382.443–384.119 ms per batch;
+fresh transcript caches took 388.716–391.637 ms (1.60–1.96% slower). Lua's
+34-unit batch was 17.96–20.37% slower. Musl peak process memory rose from
+36.8 to 127.0 MiB. These sampled totals include transcript construction and
+destruction with a warm file cache; their exact boundary and observed spread
+are recorded in the linked experiment.
+
+Headers accounted for about 95.6% of musl's main preprocessing interval, which
+itself was only about 154–156 ms of the 382–384 ms total. Replacing header
+execution alone did not repay the complete transcript's validation, recording
+and copying costs. The candidate does not earn retention from these results.
+Wider target equivalence checks, per-header accounting and additional timing
+boundaries remain pending; #111 remains open until the final evidence and
+decision are complete. No production transcript cache is enabled.
