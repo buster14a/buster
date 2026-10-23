@@ -884,8 +884,10 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
         }
         // A keyword's type arguments and offsetof's designator stay postorder subtrees, explicitly named as leaves.
         // They are recognized when the complete subtree meets its list boundary, not by rescanning a finished tree.
-        const bool keyword_context = node->context_role == PARSE_ROLE_OPEN_KEYWORD && parent < sink->token_count &&
-                                     node->context == sink->syntax[parent].context && sink->syntax[parent].expression;
+        // A closer was recognized in its own group; its opener records the surrounding argument's frame instead.
+        const CFragmentSyntax* context = node->group < sink->token_count ? &sink->syntax[node->group] : node;
+        const bool keyword_context = context->context_role == PARSE_ROLE_OPEN_KEYWORD && parent < sink->token_count &&
+                                     context->context == sink->syntax[parent].context && sink->syntax[parent].expression;
         const bool keyword_boundary = parent < sink->token_count && (sink->syntax[parent].role == PARSE_ROLE_SEPARATOR ||
                                       sink->syntax[parent].role == PARSE_ROLE_ASSOCIATION || sink->syntax[parent].role == PARSE_ROLE_CLOSE_KEYWORD);
         if (kind == C_FRAGMENT_KIND_COUNT && !node->transparent && keyword_context && keyword_boundary &&

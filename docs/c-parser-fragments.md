@@ -92,14 +92,15 @@ not process resident memory.
 
 ## Running the correctness experiment
 
-Build with `./build.sh` on the approved host. The commands below each take the
-shared host lock separately, with tests pinned to CPU 2:
+Run these commands on the approved Ryzen 7 9700X host. Each build or test takes
+the shared host lock separately, with tests pinned to CPU 2:
 
 ```sh
-./build/compiler test-fragment-interleave
-./build/compiler test-fragments
-./build/compiler test-fragments --no-fixtures /path/to/sqlite3.c
-./build/compiler test-fragments --no-fixtures --files-from /path/to/libc.txt
+EXCLUSIVE_OWNER=fragment-experiment ~/buster-fast-bench/exclusive.sh ./build.sh
+EXCLUSIVE_OWNER=fragment-experiment ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler test-fragment-interleave
+EXCLUSIVE_OWNER=fragment-experiment ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler test-fragments
+EXCLUSIVE_OWNER=fragment-experiment ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler test-fragments --no-fixtures /path/to/sqlite3.c
+EXCLUSIVE_OWNER=fragment-experiment ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler test-fragments --no-fixtures --files-from /path/to/libc.txt
 ```
 
 The default fragment command includes storage invariants, source fixtures,

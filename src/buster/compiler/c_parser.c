@@ -3938,7 +3938,7 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
         const bool initializer_item = (frame->role == PARSE_ROLE_OPEN_INITIALIZER || frame->role == PARSE_ROLE_OPEN_COMPOUND_BODY) &&
                                       (kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE);
         const bool unspecified_array = (frame->flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) && kind == PARSE_KIND_STAR && parser->kinds[i + 1] == PARSE_KIND_R_SQUARE;
-        const bool declaration_comma = kind == PARSE_KIND_COMMA && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) && !keyword_boundary;
+        const bool declaration_comma = kind == PARSE_KIND_COMMA && ((frame->flags & BUSTER_PARSE_FRAME_DECLARATION) || frame->role == PARSE_ROLE_OPEN_ENUM) && !keyword_boundary;
         const bool assertion_comma = kind == PARSE_KIND_COMMA && frame->role == PARSE_ROLE_OPEN_KEYWORD && frame->keyword == PARSE_KIND_STATIC_ASSERT;
         step.expression = (expression_mode || keyword_expression || keyword_boundary || initializer_item) &&
                           (frame->flags & (BUSTER_PARSE_FRAME_ATTRIBUTE | BUSTER_PARSE_FRAME_ASM)) == 0 && !unspecified_array && !declaration_comma && !assertion_comma;

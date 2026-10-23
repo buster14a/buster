@@ -299,12 +299,46 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
                 parent = parser->tree.parents[parent];
             }
             parent = parent < count && sink->syntax[parent].transparent ? normalized_parents[parent] : parent;
-            parent = parent < count && sink->syntax[parent].emitted ? parent : count;
+            if (parent < count && sink->syntax[parent].emitted)
+            {
+                // An opaque zero-arity reference keeps its full raw subtree for the consumer. Expressions inside
+                // that type/designator/block publish separately; they are not children of the reference leaf.
+                const bool opaque = sink->syntax[parent].type_root != BUSTER_C_FRAGMENT_NONE && c_fragment_arities[sink->kinds[parent]] == 0;
+                parent = opaque ? count : parent;
+            }
+            else
+            {
+                parent = count;
+            }
             for (uint32_t k = 0; k < depth; k += 1)
             {
                 normalized_parents[(uint32_t)work[k]] = parent;
             }
             normalized_parents[token] = parent;
+        }
+        // Opaque references split the ordinary tree into expression roots. An expression inside a reference can
+        // finish before an earlier child of the enclosing expression, so publication order is not raw postorder.
+        // Reuse the completed source-check scratch to identify those roots and compare each original decoded
+        // sequence with its ordinary-tree postorder. No decoded node or sibling sequence is sorted or rewritten.
+        uint32_t* normalized_roots = actual;
+        uint32_t* decoded_positions = expected;
+        uint32_t* previous_positions = sorted;
+        memset(normalized_roots, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(decoded_positions, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(previous_positions, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        for (uint32_t k = 0; k < tree.postorder_count; k += 1)
+        {
+            decoded_positions[tree.postorder[k]] = k;
+        }
+        for (uint32_t k = count; result && k != 0; k -= 1)
+        {
+            const uint32_t token = parser->postorder[k - 1];
+            if (sink->syntax[token].emitted)
+            {
+                const uint32_t parent = normalized_parents[token];
+                normalized_roots[token] = parent < count ? normalized_roots[parent] : token;
+                result = normalized_roots[token] != BUSTER_C_FRAGMENT_NONE;
+            }
         }
         uint32_t order = 0;
         for (uint32_t k = 0; result && k < count; k += 1)
@@ -315,11 +349,16 @@ static bool c_fragment_test_oracle(const Parser* parser, const CFragmentSink* si
             if (result && emitted)
             {
                 const uint32_t parent = normalized_parents[token] < count ? normalized_parents[token] : BUSTER_C_FRAGMENT_NONE;
-                result = tree.parents[token] == parent && order < tree.postorder_count && tree.postorder[order] == token;
+                const uint32_t root = normalized_roots[token];
+                const uint32_t position = decoded_positions[token];
+                const uint32_t previous = previous_positions[root];
+                result = tree.parents[token] == parent && position != BUSTER_C_FRAGMENT_NONE && (previous == BUSTER_C_FRAGMENT_NONE || previous < position);
+                previous_positions[root] = position;
                 order += 1;
                 if (!result)
                 {
-                    fprintf(stderr, "fragment structure: token %u expected parent %u actual %u, postorder slot %u\n", token, parent, tree.parents[token], order - 1);
+                    fprintf(stderr, "fragment structure: token %u expected parent %u actual %u, root %u postorder position %u previous %u\n",
+                            token, parent, tree.parents[token], root, position, previous);
                 }
             }
         }
@@ -517,6 +556,8 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
         "int f(int a) { int x[3]; return sizeof(a)+_Alignof(int)+_Countof(x)+__real__ a+__imag__ a; }\n",
         "int f(int a) { return __builtin_types_compatible_p(typeof(a),int); }\n",
         "struct S { int a[2]; }; int f(void) { return __builtin_offsetof(struct S,a[1]); }\n",
+        "enum E { A=1, B, C=2 };\n",
+        "void f(int n,int a[static const n]) { (void)a; }\n",
     };
     static const char* const invalid[] = {
         "int f(void) { return +; }\n",

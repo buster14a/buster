@@ -12,6 +12,7 @@ typedef enum CFragmentCoverageContext
 {
     C_FRAGMENT_COVER_ITEM,
     C_FRAGMENT_COVER_DECLARATION,
+    C_FRAGMENT_COVER_ARRAY_BOUND,
     C_FRAGMENT_COVER_EXPRESSION,
     C_FRAGMENT_COVER_KEYWORD,
     C_FRAGMENT_COVER_DESIGNATOR,
@@ -209,6 +210,20 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
             {
                 context = C_FRAGMENT_COVER_EXCLUDED;
             }
+            if (context == C_FRAGMENT_COVER_ARRAY_BOUND)
+            {
+                // An array parameter's static/qualifier chain owns its bound in the ordinary tree. Excluding
+                // those words must not turn the bound below them into a declarator name. [const *] still names
+                // an unspecified bound: this '*' has no arithmetic operand and is explicitly excluded.
+                if (input == PARSE_KIND_STAR && token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_R_SQUARE)
+                {
+                    context = C_FRAGMENT_COVER_EXCLUDED;
+                }
+                else if (role != PARSE_ROLE_SPECIFIER)
+                {
+                    context = C_FRAGMENT_COVER_EXPRESSION;
+                }
+            }
             if (context == C_FRAGMENT_COVER_KEYWORD && role != PARSE_ROLE_SEPARATOR && role != PARSE_ROLE_ASSOCIATION)
             {
                 if (c_fragment_coverage_type(role))
@@ -274,8 +289,16 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
             }
             else if (role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_TAG)
             {
-                result = context != C_FRAGMENT_COVER_EXPRESSION;
-                left = middle = right = C_FRAGMENT_COVER_DECLARATION;
+                if (context == C_FRAGMENT_COVER_ARRAY_BOUND)
+                {
+                    result = role == PARSE_ROLE_SPECIFIER && (input == PARSE_KIND_STORAGE || input == PARSE_KIND_QUALIFIER);
+                    left = middle = right = C_FRAGMENT_COVER_ARRAY_BOUND;
+                }
+                else
+                {
+                    result = context != C_FRAGMENT_COVER_EXPRESSION;
+                    left = middle = right = C_FRAGMENT_COVER_DECLARATION;
+                }
             }
             else if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_FUNCTION)
             {
@@ -361,7 +384,7 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
             }
             else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT && (context == C_FRAGMENT_COVER_DECLARATION || context == C_FRAGMENT_COVER_DESIGNATOR))
             {
-                middle = C_FRAGMENT_COVER_ITEM;
+                middle = context == C_FRAGMENT_COVER_DECLARATION ? C_FRAGMENT_COVER_ARRAY_BOUND : C_FRAGMENT_COVER_ITEM;
             }
             else if (context == C_FRAGMENT_COVER_DECLARATION || context == C_FRAGMENT_COVER_DESIGNATOR)
             {
@@ -453,11 +476,6 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
                 {
                     child_context = C_FRAGMENT_COVER_EXCLUDED;
                 }
-                if (role == PARSE_ROLE_CLOSE_SUBSCRIPT && context == C_FRAGMENT_COVER_DECLARATION && child > opener && child < token &&
-                    ((parser->tokens.kinds[child] == PARSE_KIND_STAR && child + 1 == token) || child_role == PARSE_ROLE_SPECIFIER))
-                {
-                    child_context = C_FRAGMENT_COVER_DECLARATION;
-                }
                 result = nodes[child].context == C_FRAGMENT_COVER_UNSET;
                 nodes[child].context = child_context;
                 nodes[child].keyword = keyword;
@@ -539,7 +557,7 @@ struct CFragmentCoverageFixtureNode
 #define BUSTER_FRAGMENT_EXPECT_TERNARY(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, token }
 
 // These are hand-specified token positions in the literal fixtures in c_fragments_test.c, relative to the return
-// operand except fixtures 14 and 21 (whole file). They do not query parser roles to decide what should be emitted.
+// operand except fixtures 14, 21 and 23 (whole file). They do not query parser roles to decide what should be emitted.
 // Full required-node counts exclude declarations and parentheses, so extra output cannot compensate for omissions.
 static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_0[] = {
     BUSTER_FRAGMENT_EXPECT(0, IDENTIFIER),
@@ -719,6 +737,11 @@ static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_21[] = {
     BUSTER_FRAGMENT_EXPECT_TYPE(26, DESIGNATOR, 26, 26),
     BUSTER_FRAGMENT_EXPECT_GROUP(27, BUILTIN, 18),
 };
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_23[] = {
+    BUSTER_FRAGMENT_EXPECT(11, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_TYPE(17, CAST, 15, 16),
+    BUSTER_FRAGMENT_EXPECT(18, IDENTIFIER),
+};
 
 #undef BUSTER_FRAGMENT_EXPECT
 #undef BUSTER_FRAGMENT_EXPECT_GROUP
@@ -781,12 +804,14 @@ static bool c_fragment_test_coverage_fixture(const Parser* parser, const CFragme
         { 0, 0 },
         BUSTER_FRAGMENT_FIXTURE(20),
         BUSTER_FRAGMENT_FIXTURE(21),
+        { 0, 0 },
+        BUSTER_FRAGMENT_FIXTURE(23),
 #undef BUSTER_FRAGMENT_FIXTURE
     };
     bool result = true;
     if (fixture >= 0 && (uint32_t)fixture < sizeof(fixtures) / sizeof(fixtures[0]) && fixtures[fixture].count != 0)
     {
-        const bool whole_file = fixture == 14 || fixture == 21;
+        const bool whole_file = fixture == 14 || fixture == 21 || fixture == 23;
         uint32_t base = whole_file ? 0 : BUSTER_C_FRAGMENT_NONE;
         for (uint32_t k = 0; !whole_file && k < parser->tokens.count; k += 1)
         {

@@ -203,7 +203,7 @@ designs and the compilers already built this way.
   with exit status 0 for a unit without errors and 1 otherwise. Nothing is
   written yet. With no file it prints its usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as eight translation units: `main.c` itself, the driver's unit, and each
+  it as nine translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
