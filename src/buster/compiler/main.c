@@ -272,6 +272,7 @@ int run_backend_benchmark(int argc, char** argv);
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
 #include "buster/compiler/ir_lower.c"
+#include "buster/compiler/ir_validate.c"
 #include "buster/compiler/interpreter.c"
 #include "buster/compiler/interpreter_native.c"
 #include "buster/compiler/interpreter_link.c"

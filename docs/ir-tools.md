@@ -20,6 +20,7 @@ external implementation or test corpus is incorporated.
 ./build/compiler test-ir-interpreter
 ./build/compiler interpret-ir --print tests/ir/arithmetic.ir
 ./build/compiler interpret-ir --result tests/ir/arithmetic.ir 5 7
+./build/compiler interpret-ir --bind 100=printf tests/ir/hello.ir
 ```
 
 Every build and test runs on the approved 9700X through the shared per-run lock.
@@ -92,9 +93,16 @@ publication uses the same exact-size `ir_create` constructor as lowering.
 Source, output and scratch must be disjoint; each points to its declared logical
 extent and requires no padding. Failure preserves the output view and arena
 length. Scratch is restored on every return. The constructed function is checked
-with the shared verifier before publication. Its existing optional dominance
-contract applies: without supplied dominator intervals, cross-block dominance
-has not been certified.
+with the shared verifier before publication. `ir_validate.c` then builds CFG and
+tree-only intervals through the shared dominator analysis. It reuses the core
+verifier's scalar/vector use kernel to check reachable SSA uses, including phi
+uses at predecessor ends. A live use of a dead definition is rejected. Dead use
+blocks retain shape, type, phi-coverage and same-block ordering checks without
+an execution-relevant cross-block dominance requirement. This preserves the
+lowering producer's unreachable diagnostic regions without inventing intervals.
+Two aligned, disjoint views over unused scratch hold derived columns and
+temporary work; the original arena prefix/length is preserved. Matrix work is
+bounded by available scratch and 16 MiB, with the existing scalar fallback.
 
 Printing a canonical fixture after parsing reproduces its text. Structural
 roundtrips preserve instruction/block/slot order, operand meanings, constant

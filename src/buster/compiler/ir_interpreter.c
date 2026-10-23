@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Scalar shared-IR execution oracle. Include after ir.c, interpreter.c and interpreter_native.c. Values preserve
+// Scalar shared-IR execution oracle. Include after ir_validate.c, interpreter.c and interpreter_native.c. Values preserve
 // exact two-word payloads; frames, slots, phi snapshots and arguments live in the caller's arena. Calls never use
 // the host call stack. All phis read the predecessor state before any destination phi is written. Native calls are
 // the explicit host boundary. No execution-speed claim is made for this deliberately scalar reference consumer.
-// Producers supply valid SSA, including cross-block dominance; execution validates the existing structural contract
-// and diagnoses undefined dynamic uses. Checked memory honors promised alignment; volatile transfers are ordered
+// Execution verifies whole-function structure and reachable SSA dominance, then diagnoses undefined dynamic uses.
+// Unreachable uses impose no cross-block dominance requirement. Checked memory honors promised alignment; volatile transfers are ordered
 // byte accesses, including exactly ten bytes for f80. Input/program views and native extension slices outlive execution.
 // Layout: integer/float payload helpers; symbol lookup; frame preparation; scalar operations; ir_interpret.
 
@@ -239,7 +239,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     IrCheck verified = { .error = IR_ERROR_STRUCTURE };
     if (function != 0)
     {
-        verified = ir_verify_scalar(function, arena, 0);
+        verified = ir_verify_complete(function, arena, false);
     }
     if (verified.error == IR_ERROR_MEMORY)
     {
@@ -820,7 +820,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         IrCheck target_check = { .error = IR_ERROR_STRUCTURE };
                         if (target != 0)
                         {
-                            target_check = ir_verify_scalar(target, arena, 0);
+                            target_check = ir_verify_complete(target, arena, false);
                         }
                         if (target_check.error == IR_ERROR_MEMORY)
                         {

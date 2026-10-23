@@ -122,6 +122,7 @@ static IrParseResult ir_parse_test_pair(IrParseTest* test, String8 source, Arena
     ir_parse_test_expect(test, vector.consumed <= source.length && vector.offset <= source.length, "parser location extends beyond its source slice");
     if (vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK)
     {
+        ir_parse_test_expect(test, vector.check.dominance_checked && scalar.check.dominance_checked, "published function lacks complete dominance verification");
         ir_parse_test_expect(test, vector.consumed != 0, "successful parse did not consume a function");
         ir_parse_test_expect(test, ir_parse_test_equal(function, &twin), "parser twins disagree on IR columns or metadata");
         ir_parse_test_expect(test, function->arena_bytes == output->length - output_mark && twin.arena_bytes == twin_output->length - twin_mark,
@@ -252,6 +253,7 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = cbr.void %0, b1, b1\nb1:\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = switch.void %0, default b1, [0x1, b1], [0x1, b1]\nb1:\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = br.void b1\nb1:\n%2 = phi.i64 [%0, b0], [%0, b0]\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function (i1) -> i64 {\nb0:\n%0 = param.i1 0\n%1 = cbr.void %0, b1, b2\nb1:\n%2 = const.i64 0x7\n%3 = br.void b3\nb2:\n%4 = br.void b3\nb3:\n%5 = ret.void %2\n}\n", IR_PARSE_VERIFY },
     };
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {
@@ -287,6 +289,46 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         IrFunction function;
         const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
         ir_parse_test_expect(test, parsed.error == IR_PARSE_LIMIT || parsed.error == IR_PARSE_SYNTAX, "numeric overflow was accepted or escaped lexical validation");
+    }
+}
+
+static void ir_parse_test_reachable(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+{
+    static const IrParseTestCase cases[] = {
+        {
+            "function () -> i64 {\nslot $0 size=8 align=8 type=i64 flags=0x00\nb0:\n%0 = stack_addr.ptr $0\n%1 = const.i64 0x1\n%2 = ret.void %1\nb1:\n%3 = load.i64 %0 align=8\n%4 = ret.void %3\n}\n",
+            IR_PARSE_OK,
+        },
+        {
+            "function (i1) -> i64 {\nb0:\n%0 = param.i1 0\n%1 = cbr.void %0, b1, b2\nb1:\n%2 = const.i64 0x7\n%3 = br.void b3\nb2:\n%4 = br.void b3\nb3:\n%5 = ret.void %2\n}\n",
+            IR_PARSE_VERIFY,
+        },
+        {
+            "function () -> i64 {\nb0:\n%0 = br.void b2\nb1:\n%1 = const.i64 0x7\n%2 = br.void b2\nb2:\n%3 = ret.void %1\n}\n",
+            IR_PARSE_VERIFY,
+        },
+        {
+            "function () -> i64 {\nb0:\n%0 = const.i64 0x1\n%1 = br.void b2\nb1:\n%2 = const.i64 0x2\n%3 = br.void b2\nb2:\n%4 = phi.i64 [%0, b0], [%2, b1]\n%5 = ret.void %4\n}\n",
+            IR_PARSE_OK,
+        },
+    };
+    for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
+    {
+        const uint64_t output_mark = output->length;
+        const uint64_t twin_mark = twin_output->length;
+        const String8 source = {
+            .pointer = (char*)cases[i].text,
+            .length = strlen(cases[i].text),
+        };
+        IrFunction function;
+        const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        ir_parse_test_expect(test, parsed.error == cases[i].error, "reachable-use dominance policy returned the wrong outcome");
+        if (cases[i].error == IR_PARSE_VERIFY)
+        {
+            ir_parse_test_expect(test, parsed.check.error == IR_ERROR_DOMINANCE, "reachable non-dominating use lost its dominance diagnostic");
+        }
+        arena_pop_to(output, output_mark);
+        arena_pop_to(twin_output, twin_mark);
     }
 }
 
@@ -610,6 +652,8 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/control.ir",
                 "tests/ir/memory-calls.ir",
                 "tests/ir/empty.ir",
+                "tests/ir/tier0-add.ir",
+                "tests/ir/hello.ir",
             };
             for (uint32_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i += 1)
             {
@@ -624,6 +668,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 ir_parse_test_expect(&test, test.types[type], "canonical fixture coverage omitted a type");
             }
             ir_parse_test_invalid(&test, &output, &twin_output, &scratch);
+            ir_parse_test_reachable(&test, &output, &twin_output, &scratch);
             ir_parse_test_comments(&test, &output, &twin_output, &scratch);
             ir_parse_test_locations(&test, &output, &twin_output, &scratch);
             ir_parse_test_normalization(&test, &output, &twin_output, &scratch);

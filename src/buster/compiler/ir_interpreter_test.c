@@ -267,6 +267,43 @@ static void ir_interpreter_test_control(IrInterpreterTestTally* tally, Arena* me
     arena_pop_to(memory, mark);
 }
 
+static void ir_interpreter_test_dominance(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    IrFunction function = { 0 };
+    const IrSizes sizes = {
+        .instruction_count = 7,
+        .block_count = 4,
+        .constant_count = 2,
+    };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_interpreter_test_expect(tally, created, "cross-block dominance fixture allocation");
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.constants[0].low = 1;
+        function.constants[1].low = 7;
+        const uint32_t offsets[] = { 0, 2, 4, 6, 7 };
+        memcpy(function.block_offsets, offsets, sizeof(offsets));
+        ir_interpreter_test_instruction(&function, 0, IR_CONST, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 1, IR_CBR, IR_VOID, 0, 1, 2);
+        ir_interpreter_test_instruction(&function, 2, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 3, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 4, IR_COPY, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 6, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const IrInterpreterFunction code = { .symbol = 71, .function = &function };
+        const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
+        // The constant predicate selects the defining arm dynamically, but the CFG still admits the other arm.
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_INVALID, (InterpreterValue){ 0 }, "non-dominating definition rejected before a favorable dynamic path executes");
+        ir_interpreter_test_instruction(&function, 1, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 7 }, "unreachable cross-block use does not invalidate reachable SSA");
+        ir_interpreter_test_instruction(&function, 1, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_INVALID, (InterpreterValue){ 0 }, "unreachable definition cannot satisfy a reachable use");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void ir_interpreter_test_calls(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const uint64_t mark = memory->length;
@@ -682,6 +719,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
         {
             ir_interpreter_test_numbers(&tally, &memory, &execution);
             ir_interpreter_test_control(&tally, &memory, &execution);
+            ir_interpreter_test_dominance(&tally, &memory, &execution);
             ir_interpreter_test_calls(&tally, &memory, &execution);
             ir_interpreter_test_memory(&tally, &memory, &execution);
             ir_interpreter_test_generated(&tally, seed, count);

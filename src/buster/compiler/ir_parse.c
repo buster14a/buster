@@ -647,7 +647,7 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
             function.b[id] = rows[id].b;
             function.c[id] = rows[id].c;
         }
-        state->result.check = vector ? ir_verify(&function, state->scratch, 0) : ir_verify_scalar(&function, state->scratch, 0);
+        state->result.check = ir_verify_complete(&function, state->scratch, vector);
         if (state->result.check.error == IR_OK)
         {
             *result = function;

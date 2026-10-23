@@ -17,7 +17,7 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
-The text IR parser (`ir_parse.c`), interpreter family (`interpreter*.c`,
+The text IR parser and validation consumer (`ir_parse.c`, `ir_validate.c`), interpreter family (`interpreter*.c`,
 `ir_interpreter*.c`), their test fixtures under `tests/ir/`, and
 `docs/ir-tools.md` are original project material under the default terms.
 They reuse this repository's IR, typed-stream, arena, Link and ABI contracts.
