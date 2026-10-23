@@ -71,7 +71,25 @@ build_compiler()
     for i in "${!sources[@]}"; do
         cat "$object_directory/$i.json"
     done > build/compile_commands.json
-    clang "${linked[@]}" "$@" -o build/compiler
+    clang "${linker_flags[@]}" "${linked[@]}" "$@" -o build/compiler
+}
+# Choose the linker for build/compiler only; compilation and IR capture keep their existing flags.
+select_linker()
+{
+    local linker="${BUSTER_LINKER-auto}"
+    linker_flags=()
+    case "$linker" in
+        auto) linker="$(command -v wild || command -v mold || true)" ;;
+        system) linker="" ;;
+        lld|bfd) linker="ld.$linker" ;;
+        wild|mold|/*) ;;
+        *) echo "build.sh: BUSTER_LINKER must be auto, system, wild, mold, lld, bfd or an absolute path" >&2; return 1 ;;
+    esac
+    if [ -n "$linker" ]; then
+        linker="$(command -v "$linker")" && [ -f "$linker" ] && [ -x "$linker" ] || { echo "build.sh: requested linker is not an executable file on PATH or at the specified path" >&2; return 1; }
+        linker_flags=("--ld-path=$linker")
+    fi
+    echo "build.sh: stage 1 linker: ${linker:-system default}" >&2
 }
 defines=()
 if [ "$1" = check-call-graph ]; then
@@ -101,6 +119,7 @@ elif [ "$1" = lexer-variant-assembly ]; then
 elif [ "$1" = lexer-variant ]; then
     shift
     [ $# -ne 0 ] || { echo "usage: ./build.sh lexer-variant NAME=SOURCE..." >&2; exit 1; }
+    select_linker
     rm -rf build || true
     mkdir -p build
     variants=""
@@ -134,6 +153,7 @@ elif [ "$1" = lexer-variant ]; then
         rm -rf "$(dirname "$object")"
     done
 else
+    select_linker
     rm -rf build || true
     mkdir -p build
     build_compiler
