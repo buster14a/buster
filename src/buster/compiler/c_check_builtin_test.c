@@ -169,6 +169,40 @@ static void check_builtin_test_fixtures(CheckBuiltinTest* test, TypeTable* table
     check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.integer == 1 && result.store_value.type == enumeration &&
                               result.store_value.integer == 0 && result.action.conversions[0].type == enumeration,
                               "generic enum operands and destination retain their actual type");
+    uint32_t completions[8] = { 0 };
+    const uint32_t tag = table->types.index[type_index(enumeration)];
+    if (tag < BUSTER_ARRAY_LENGTH(completions))
+    {
+        completions[tag] = 100;
+        action.tag_completions = completions;
+        action.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
+        action.source_position = 99;
+        result = check_builtin_test_action(test, table, action);
+        check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE && !result.store,
+                                  "later enum completion cannot validate an earlier overflow operand");
+        action.operands[0] = check_test_integer(BUSTER_TYPE_UINT, UINT32_MAX);
+        result = check_builtin_test_action(test, table, action);
+        check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE && result.action.diagnostic_operand == 2 && !result.store,
+                                  "later enum completion cannot validate an earlier overflow destination");
+        action.source_position = 100;
+        result = check_builtin_test_action(test, table, action);
+        check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.store,
+                                  "enum is usable at the retained completion cutoff");
+        action.id = CBUILTIN_POPCOUNT;
+        action.argument_count = 1;
+        action.operands[0] = check_test_integer(enumeration, 3);
+        action.source_position = 99;
+        result = check_builtin_test_action(test, table, action);
+        check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE,
+                                  "later enum completion cannot validate an earlier unary conversion");
+        action.id = CBUILTIN_ADD_OVERFLOW;
+        action.argument_count = 3;
+        action.tag_completions = NULL;
+    }
+    else
+    {
+        check_builtin_test_expect(test, false, "source-history fixture tag capacity");
+    }
     const TypeId qualified = type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_VOLATILE);
     action.operands[0] = check_test_integer(BUSTER_TYPE_INT, 1);
     action.operands[1] = check_test_integer(BUSTER_TYPE_INT, 2);

@@ -22,6 +22,12 @@ struct CheckBuiltinAction
     CheckValue operands[3];
     uint32_t argument_count;
     uint32_t node;
+    // Optional immutable tag-completion token positions; null uses the current table for direct action callers.
+    // source_position is the exclusive expression end, independently of the diagnostic node identity.
+    const uint32_t* tag_completions;
+    uint32_t tag_completion_count;
+    uint32_t source_position;
+    uint32_t extensions;
 };
 
 typedef struct CheckBuiltinResult CheckBuiltinResult;
@@ -80,7 +86,27 @@ static TypeId check_builtin_parameter(CBuiltinId id)
     return result;
 }
 
-static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, CheckActionResult* result, uint32_t operand)
+static bool check_builtin_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinAction* action)
+{
+    bool complete = type_is_complete(table, type);
+    if (complete && action->tag_completions != NULL)
+    {
+        TypeId base = type_strip_aligned(table, type);
+        while (type_kind_is_array(type_kind(table, base)))
+        {
+            base = type_strip_aligned(table, type_element(table, base));
+        }
+        const uint8_t kind = type_kind(table, base);
+        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
+        {
+            const uint32_t tag = table->types.index[type_index(base)];
+            complete = tag < action->tag_completion_count && action->tag_completions[tag] <= action->source_position;
+        }
+    }
+    return complete;
+}
+
+static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, const CheckBuiltinAction* action, CheckActionResult* result, uint32_t operand)
 {
     uint32_t descriptor = 0;
     uint32_t width = 0;
@@ -89,7 +115,7 @@ static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, Ch
     {
         check_action_diagnose(result, CHECK_DIAG_INTEGER_REQUIRED, operand);
     }
-    else if (!type_is_complete(table, type))
+    else if (!check_builtin_source_complete(table, type, action))
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, operand);
     }
@@ -146,7 +172,11 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
         if (!overflow)
         {
             const uint8_t kind = check_action_kind(table, values[0].type);
-            if (!check_action_is_arithmetic(table, values[0].type))
+            if (kind == BUSTER_TYPE_KIND_ENUM && !check_builtin_source_complete(table, values[0].type, input))
+            {
+                check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
+            }
+            else if (!check_action_is_arithmetic(table, values[0].type))
             {
                 check_action_diagnose(result, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
             }
@@ -176,8 +206,8 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
         else
         {
             result->value.flags |= BUSTER_CHECK_SIDE_EFFECT;
-            batch->a_types[lane] = check_builtin_descriptor(table, values[0].type, result, 0);
-            batch->b_types[lane] = check_builtin_descriptor(table, values[1].type, result, 1);
+            batch->a_types[lane] = check_builtin_descriptor(table, values[0].type, input, result, 0);
+            batch->b_types[lane] = check_builtin_descriptor(table, values[1].type, input, result, 1);
             if (check_action_kind(table, values[2].type) != BUSTER_TYPE_KIND_POINTER)
             {
                 check_action_diagnose(result, CHECK_DIAG_POINTER_REQUIRED, 2);
@@ -189,7 +219,7 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
                 {
                     check_action_diagnose(result, CHECK_DIAG_MODIFIABLE_REQUIRED, 2);
                 }
-                batch->result_types[lane] = check_builtin_descriptor(table, destination, result, 2);
+                batch->result_types[lane] = check_builtin_descriptor(table, destination, input, result, 2);
                 output->store_value.type = type_unqualified(destination);
                 output->store_value.category = CHECK_RVALUE;
                 output->store_destination = values[2];
