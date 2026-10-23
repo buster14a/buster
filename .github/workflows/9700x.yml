@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: e7217fa16fa080bf8f849985c73575fda59836c2
-          fetch-depth: 2
+          fetch-depth: 3
       - name: Validate simplified build script using the prior regression harness
         shell: bash
         run: |
