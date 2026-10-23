@@ -161,8 +161,9 @@ designs and the compilers already built this way.
 ## Current repository and exact smoke commands
 
 - The shared IR optimizers provide SCCP, dead-code/CFG cleanup, value numbering
-  and conservative loop-invariant motion. `test-ir-optimize`, `test-ir-gvn`,
-  `test-ir-licm` and `test-ir-sroa` verify transformations against independent
+  and conservative loop-invariant motion, private-field replacement and bounded
+  translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
+  `test-ir-sroa` and `test-ir-inline` verify transformations against independent
   semantic fixtures and the upstream SSA promoter. `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
   [The optimization guide](docs/ir-optimization.md) records supported inputs

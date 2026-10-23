@@ -1216,8 +1216,8 @@ static IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* funct
 {
     work->function = function;
     IrCheck check = scalar ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
-    // The shared verifier permits entry phis, but their value on initial invocation has no IR semantic contract.
-    // In particular, pruning their dead predecessors cannot invent an undef value or emit a zero-input phi.
+    // Entry phis are forbidden by the shared IR contract: initial invocation has no predecessor value.
+    // Pruning their dead predecessors cannot invent an undef value or emit a zero-input phi.
     if (check.error == IR_OK && function->block_count != 0 && function->op[0] == IR_PHI)
     {
         check = ir_check(IR_ERROR_PHI, 0, 0);

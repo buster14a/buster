@@ -306,6 +306,7 @@ jobs:
           ./build/compiler test-ir-gvn
           ./build/compiler test-ir-licm
           ./build/compiler test-ir-sroa
+          ./build/compiler test-ir-inline
           == Test differential harness accounting, subprocesses and failure preservation
           ./build/compiler test-differential-harness
           == Test Tier 1 allocation, reload splitting and rematerialization
