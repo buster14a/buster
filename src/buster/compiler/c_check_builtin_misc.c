@@ -102,6 +102,10 @@ static CheckValue check_builtin_misc_argument(TypeTable* table, const CheckBuilt
         const CheckAction action = {
             .operands = { value },
             .node = input->node,
+            .tag_completions = input->tag_completions,
+            .tag_completion_count = input->tag_completion_count,
+            .source_position = input->source_position,
+            .extensions = input->extensions,
         };
         value = check_action_operand(table, &action, &converted, 0);
         if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -115,6 +119,13 @@ static CheckValue check_builtin_misc_argument(TypeTable* table, const CheckBuilt
 
 static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value, uint32_t index, TypeId destination)
 {
+    const CheckAction context = {
+        .node = input->node,
+        .tag_completions = input->tag_completions,
+        .tag_completion_count = input->tag_completion_count,
+        .source_position = input->source_position,
+        .extensions = input->extensions,
+    };
     bool accepted = destination != 0 && output->action.diagnostic == CHECK_DIAG_NONE;
     if (destination == 0)
     {
@@ -164,7 +175,7 @@ static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscA
             accepted = false;
         }
     }
-    else if (accepted && !check_action_assignable(table, destination, value, &output->action))
+    else if (accepted && !check_action_assignable(table, destination, value, &context, &output->action))
     {
         check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, index);
         accepted = false;

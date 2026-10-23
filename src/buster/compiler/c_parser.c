@@ -1295,6 +1295,8 @@ struct ParseFrame
     // current enumerator's name, which is bound once the enumerator ends.
     uint32_t name;
     uint32_t name_frame;
+    // A missing type is diagnosed only after its declarator's syntax has been read. Zero, or the name token + 1.
+    uint32_t typeless_name;
     // The frame a declarator's name in this frame belongs to: this one, or for a group, its parent's.
     uint32_t declaration;
     uint8_t name_meaning;
@@ -1430,6 +1432,8 @@ struct ParseScalar
     // A K&R definition's parameter declarations' scope, which its body's `{` ends, and the first token of the current one.
     uint32_t body_scope;
     uint32_t kr_declaration;
+    // A typeless K&R function waits until its parameter declarations have been parsed, before the body begins.
+    uint32_t typeless_function;
     ParseStatement* statements;
     uint32_t statement_count;
     // Recovery's stack of open brackets.
@@ -1612,6 +1616,19 @@ BUSTER_INLINE bool parse_frame_is_block(const ParseFrame* frame)
 static void parse_scalar_complete_declarator(ParseScalar* parser, ParseFrame* frame, bool definition)
 {
     const bool kr = (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) != 0;
+    if (frame->typeless_name != 0)
+    {
+        if (definition && (frame->flags & BUSTER_PARSE_FRAME_KR) != 0)
+        {
+            parser->typeless_function = frame->typeless_name;
+        }
+        else
+        {
+            const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
+            parse_scalar_note(parser, frame->typeless_name - 1, message, BUSTER_PARSE_NONE, true);
+        }
+        frame->typeless_name = 0;
+    }
     if (frame->name != BUSTER_PARSE_NONE && kr)
     {
         const uint8_t meaning = parser->meanings[parser->names[frame->name]];
@@ -2076,11 +2093,11 @@ static bool parse_scalar_not_expression_start(const ParseScalar* parser, uint32_
 }
 
 // Whether token `i` may start a declarator, as clang's MightBeDeclarator asks after a declaration's comma.
-static bool parse_scalar_might_be_declarator(const ParseScalar* parser, uint32_t i)
+static bool parse_scalar_might_be_declarator(const ParseScalar* parser, uint32_t i, bool member)
 {
     const uint8_t kind = parser->kinds[i];
     return kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_STAR || kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_CALLING_CONVENTION ||
-           kind == PARSE_KIND_QUALIFIER || parse_scalar_standard_attribute(parser, i);
+           kind == PARSE_KIND_QUALIFIER || (member && kind == PARSE_KIND_COLON) || parse_scalar_standard_attribute(parser, i);
 }
 
 // The error for token `i`, which can't continue what the frame holds: clang's "expected" of the item or the group, after
@@ -3249,9 +3266,9 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
         ParseFrame* declaration = parse_scalar_declaration_frame(parser, parser->frame_count - 1);
         if (declaration->flags & BUSTER_PARSE_FRAME_TYPELESS)
         {
-            // clang reports the implicit int at the declarator's name (in its groups too), which C23 has none of.
-            const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
-            parse_scalar_note(parser, i, message, BUSTER_PARSE_NONE, true);
+            // Syntax within a function declarator can fail before its missing type is diagnosed. Keep the original
+            // name location until the complete declarator, including names nested inside groups.
+            declaration->typeless_name = i + 1;
             declaration->flags &= ~BUSTER_PARSE_FRAME_TYPELESS;
         }
         declaration->name = parse_scalar_binds(parser) ? i : BUSTER_PARSE_NONE;
@@ -3282,6 +3299,12 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
 // began, which it ends): the parameters its declarator kept are bound again in it, as the body is their scope.
 static void parse_scalar_open_body(ParseScalar* parser, uint32_t i, uint32_t scope, ParseStep* step)
 {
+    if (parser->typeless_function != 0)
+    {
+        const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
+        parse_scalar_note(parser, parser->typeless_function - 1, message, BUSTER_PARSE_NONE, true);
+        parser->typeless_function = 0;
+    }
     if (parser->binding_trace != 0 && parser->body_scope != BUSTER_PARSE_NONE)
     {
         // K&R's typed parameter declarations replace the identifier-list declarations. Save the current heads
@@ -3368,6 +3391,12 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         parse_scalar_complete_declarator(parser, declaration, false);
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AFTER_PREVIOUS);
     }
+    else if (kind == PARSE_KIND_EQUAL && group == PARSE_ROLE_OPEN_STRUCT)
+    {
+        // A member has no initializer in C. Diagnose the missing declaration-list terminator here rather than
+        // consuming an initializer and reporting a later delimiter; vector validation already defers this case.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST, BUSTER_PARSE_AFTER_PREVIOUS);
+    }
     else if (kind == PARSE_KIND_EQUAL && !abstract)
     {
         // The name is in scope in its initializer.
@@ -3376,7 +3405,7 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         frame->mode = PARSE_MODE_INITIALIZER;
     }
     else if (kind == PARSE_KIND_COMMA && parse_frame_comma_role(parser) == PARSE_ROLE_COMMA && (parser->flags[i + 1] & BUSTER_PP_START_OF_LINE) &&
-             !parse_scalar_might_be_declarator(parser, i + 1) && !kr)
+             !parse_scalar_might_be_declarator(parser, i + 1, group == PARSE_ROLE_OPEN_STRUCT) && !kr)
     {
         // A comma, then a line break and what can't start a declarator: clang takes the comma for a `;`.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AT_TOKEN);
@@ -3911,7 +3940,7 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
                                     group != PARSE_ROLE_OPEN_ATTRIBUTE_LEFT && group != PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT;
         // A declaration's comma, then a line break and what can't start a declarator: clang takes the comma for a `;`.
         const bool declaration_comma = (flags & BUSTER_PARSE_FRAME_DECLARATION) && step->role == PARSE_ROLE_COMMA && (parser->flags[i + 1] & BUSTER_PP_START_OF_LINE) &&
-                                       !parse_scalar_might_be_declarator(parser, i + 1);
+                                       !parse_scalar_might_be_declarator(parser, i + 1, group == PARSE_ROLE_OPEN_STRUCT);
         if (operator_comma && parse_scalar_not_expression_start(parser, i + 1))
         {
             parse_scalar_unexpected(parser, i, frame);
@@ -4664,6 +4693,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->waiting_count = 1;
     parser->body_scope = BUSTER_PARSE_NONE;
     parser->kr_declaration = BUSTER_PARSE_NONE;
+    parser->typeless_function = 0;
     parser->kept_count = 0;
     parser->error_token = BUSTER_PARSE_NONE;
 }
@@ -11975,17 +12005,121 @@ static uint32_t parse_token_end(const Parser* parser, const Preprocessor* pp, ui
 }
 
 // Where a diagnostic points: the location of its token, or of the end of the token before it.
+static uint32_t parse_primary_location(const Preprocessor* pp, uint32_t source)
+{
+    uint32_t location = source < pp->output.count ? pp->output.locations[source] : 0;
+    uint32_t origin = pp_history_at(pp, source);
+    const uint64_t maximum = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; origin != 0 && step < maximum; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT && index < pp->substitution_count)
+        {
+            origin = pp->substitutions[index].source;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED && index < pp->generated_count)
+        {
+            location = pp->generated[index].anchor;
+            origin = pp->generated[index].expansion;
+        }
+        else if (kind == 0 && index < pp->history_count)
+        {
+            location = pp->history[index].begin;
+            origin = pp->history[index].parent;
+        }
+        else
+        {
+            origin = 0;
+        }
+    }
+    return location;
+}
+
+// A missing separator after an expanded token belongs after the invocation, including its closing parenthesis.
+// The spelling helper stays separate: diagnostic arguments still quote the token's actual source bytes.
+static uint32_t parse_expansion_context(const Preprocessor* pp, uint32_t source)
+{
+    uint32_t result = 0;
+    uint32_t origin = pp_history_at(pp, source);
+    const uint64_t maximum = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; origin != 0 && step < maximum; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT && index < pp->substitution_count)
+        {
+            origin = pp->substitutions[index].expansion;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED && index < pp->generated_count)
+        {
+            origin = pp->generated[index].expansion;
+        }
+        else if (kind == 0 && index < pp->history_count)
+        {
+            result = index + 1;
+            origin = pp->history[index].parent;
+        }
+        else
+        {
+            origin = 0;
+        }
+    }
+    return result;
+}
+
+static uint32_t parse_primary_end(const Parser* parser, const Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = parser->tokens.sources[token];
+    uint32_t result = parse_token_end(parser, pp, token);
+    uint32_t origin = pp_history_at(pp, source);
+    uint32_t location = BUSTER_PP_NONE;
+    const uint64_t maximum = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; origin != 0 && step < maximum; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT && index < pp->substitution_count)
+        {
+            origin = pp->substitutions[index].expansion;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED && index < pp->generated_count)
+        {
+            origin = pp->generated[index].expansion;
+        }
+        else if (kind == 0 && index < pp->history_count)
+        {
+            location = pp->history[index].end;
+            origin = pp->history[index].end_origin;
+        }
+        else
+        {
+            origin = 0;
+        }
+    }
+    const uint32_t range = location != BUSTER_PP_NONE ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    if (range != BUSTER_PP_NONE)
+    {
+        const PPRange* bytes = &pp->ranges[range];
+        const uint32_t offset = location - bytes->base;
+        result = bytes->bytes[offset] == ')' ? location + 1 : bytes->base + pp_identifier_end(pp, bytes->bytes, bytes->length, offset);
+    }
+    return result;
+}
+
 static uint32_t parse_diagnostic_location(const Parser* parser, const Preprocessor* pp, const ParseDiagnostic* diagnostic)
 {
     const uint32_t t = diagnostic->token;
     uint32_t result;
     if (diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && t > 0 && t - 1 < parser->tokens.count)
     {
-        result = parse_token_end(parser, pp, t - 1);
+        const uint32_t previous = parse_expansion_context(pp, parser->tokens.sources[t - 1]);
+        const bool inside = previous != 0 && t < parser->tokens.count && previous == parse_expansion_context(pp, parser->tokens.sources[t]);
+        result = inside ? parse_primary_location(pp, parser->tokens.sources[t]) : parse_primary_end(parser, pp, t - 1);
     }
     else if (t < parser->tokens.count)
     {
-        result = pp->output.locations[parser->tokens.sources[t]];
+        result = parse_primary_location(pp, parser->tokens.sources[t]);
     }
     else
     {
@@ -12019,7 +12153,14 @@ static void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
         const ParseDiagnostic* diagnostic = &parser->diagnostics[d];
         char text[256];
         parse_diagnostic_message(parser, pp, diagnostic, text, sizeof(text));
-        pp_diagnose(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic), "%s", text);
+        if (diagnostic->place == BUSTER_PARSE_AT_TOKEN && diagnostic->token < parser->tokens.count)
+        {
+            pp_diagnose_output(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parser->tokens.sources[diagnostic->token], "%s", text);
+        }
+        else
+        {
+            pp_diagnose(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic), "%s", text);
+        }
     }
     if (parser->fatal != PARSE_MESSAGE_NONE)
     {

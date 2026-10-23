@@ -195,7 +195,7 @@ contract. Deferred constantness testing requires an actual compiler consumer;
 it is an explicit unsupported requirement, never a fabricated CPU test.
 
 The context-independent `constant_p` path retains explicit `string_literal_start` and
-`absolute_address_constant` witnesses retain source provenance that a generic
+`absolute_address_constant` witnesses for source provenance that a generic
 pointer-to-integer conversion can otherwise discard. They certify the actual
 final expression, not an object-ID convention or an unknown value's default
 fields. Interior string pointers have no first-character witness.

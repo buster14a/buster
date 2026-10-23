@@ -141,6 +141,10 @@ static void check_varargs_list(TypeTable* table, const CheckVarargsAction* input
 {
     CheckAction action = {
         .node = input->node,
+        .tag_completions = input->tag_completions,
+        .tag_completion_count = input->tag_completion_count,
+        .source_position = input->source_position,
+        .extensions = input->extensions,
     };
     action.operands[index] = input->operands[index];
     CheckActionResult* result = &output->action;
@@ -174,7 +178,11 @@ static void check_varargs_list(TypeTable* table, const CheckVarargsAction* input
         }
         else
         {
-            bool compatible = check_action_assignable(table, expected, &value, result);
+            bool compatible = check_action_assignable(table, expected, &value, &action, result);
+            if ((result->warnings & CHECK_WARNING_DISCARDED_QUALIFIERS) != 0)
+            {
+                output->warnings |= BUSTER_CHECK_VARARGS_WARN_QUALIFIERS;
+            }
             if (!compatible && check_action_kind(table, source) == BUSTER_TYPE_KIND_POINTER)
             {
                 const TypeId from = type_strip_aligned(table, type_element(table, source));
