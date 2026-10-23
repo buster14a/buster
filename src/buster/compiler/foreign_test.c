@@ -2837,6 +2837,7 @@ static bool foreign_test_extended(const char* directory, Arena* arena)
 }
 
 #include "buster/compiler/foreign_link_test.c"
+#include "buster/compiler/foreign_dynamic_test.c"
 #include "buster/compiler/foreign_strings_test.c"
 #include "buster/compiler/foreign_strings_output_test.c"
 #include "buster/compiler/foreign_strings_benchmark.c"
@@ -2913,6 +2914,7 @@ static int run_foreign_tests(int argc, char** argv)
         passed = foreign_test_edges(directory, seed, &arena) && passed;
         passed = foreign_test_extended(directory, &arena) && passed;
         passed = foreign_link_test(directory, &arena, cross_check) && passed;
+        passed = foreign_dynamic_test(directory, &arena, cross_check, &system) && passed;
         passed = foreign_strings_test(seed) && passed;
         passed = foreign_strings_output_test(directory, &arena, cross_check) && passed;
         if (!keep)

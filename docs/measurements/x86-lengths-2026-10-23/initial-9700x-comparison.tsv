@@ -1,0 +1,12 @@
+row	pool_match	size_cycles_before	size_cycles_after	size_change_percent	vector_lengths_cycles_per_branch_before	vector_lengths_cycles_per_branch_after	vector_lengths_change_percent	size_encode_ns_per_record_absolute	encode_control_cycles_change_percent
+tier0-40	true	8.730	9.094	4.170	47.66	47.68	0.042	2.405	-1.568
+tier0-250	true	5.869	5.653	-3.680	31.54	30.23	-4.153	1.594	0.123
+tier0-2000	true	5.182	4.963	-4.226	27.96	26.42	-5.508	1.469	2.038
+tier0-10000	true	5.413	5.185	-4.212	28.48	26.22	-7.935	1.527	2.095
+tier0-mix	true	7.712	7.559	-1.984	42.22	39.37	-6.750	2.046	1.091
+optimized-40	true	9.378	9.709	3.530	36.82	36.77	-0.136	2.510	-0.639
+optimized-250	true	6.390	6.114	-4.319	24.54	23.41	-4.605	1.685	-0.154
+optimized-2000	true	5.644	5.439	-3.632	21.88	20.74	-5.210	1.552	1.587
+optimized-10000	true	5.930	5.744	-3.137	21.91	20.38	-6.983	1.628	1.743
+chain-forward	true	13.899	13.580	-2.295	48.25	43.34	-10.176	3.031	3.801
+chain-backward	true	13.980	13.653	-2.339	48.23	43.35	-10.118	3.043	3.604

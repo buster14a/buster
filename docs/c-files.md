@@ -118,6 +118,20 @@ fortified headers. musl's units enter every header the walk reaches.
 
 ### Per-file jobs on lanes
 
+`benchmark-files` and `test-files` start one command-owned `LaneTeam` before
+their walks and stop it once at command cleanup. Its capacity is the largest
+requested lane count (also covering the built-in tests' two- and three-lane
+cases). Successive walks use an active prefix of those same workers; changing
+the lane count does not create a new group. Worker scratch is released after
+each walk, so this reuses threads without retaining the walk's temporary
+memory. The ordinary preprocess/parse command remains single-lane; integrating
+the frontend is separate work under #149.
+
+The measurements above predate thread reuse. Their timed region starts inside
+the lane entry after the warm-up sync, so both the historical and current
+`benchmark-files` times exclude thread startup and shutdown. The benchmark
+prints its current command-owned lifecycle alongside the timings.
+
 A round of files is prepared by `files_prepare`, which every lane of the group
 calls. The files are in the walk's order (the order one lane prepares them
 in), and rule 1's costs are their bytes. The lanes that work on a round are

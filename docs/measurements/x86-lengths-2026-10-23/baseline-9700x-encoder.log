@@ -1,0 +1,21 @@
+2026-10-23T07:35:45.0324965Z ##[group]Run cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+2026-10-23T07:35:45.0325273Z cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+2026-10-23T07:35:45.0325516Z taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
+2026-10-23T07:35:45.0328818Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-23T07:35:45.0328970Z ##[endgroup]
+2026-10-23T07:35:47.0391717Z 16384 mixed instructions, 65072 bytes (3.97 per instruction), in calls of 16384; 21 interleaved passes of 256 runs, medians (cycles also min-max):
+2026-10-23T07:35:47.0392511Z   scalar                            12.696 ns      78.8 M/s    0.31 GB/s   69.58 cycles [69.45-69.71]  256.63 instructions  IPC 3.69  throttle  0.00
+2026-10-23T07:35:47.0393229Z   x86_encode_4                       1.207 ns     828.5 M/s    3.29 GB/s    6.66 cycles [6.65-6.70]   29.51 instructions  IPC 4.43  throttle  0.23
+2026-10-23T07:35:47.0393867Z   x86_encode_8                       0.928 ns    1077.6 M/s    4.28 GB/s    5.09 cycles [5.08-5.11]   17.88 instructions  IPC 3.51  throttle  0.91
+2026-10-23T07:35:47.0394493Z   x86_encode_16                      0.551 ns    1813.4 M/s    7.20 GB/s    3.02 cycles [3.00-3.03]   12.63 instructions  IPC 4.18  throttle  3.89
+2026-10-23T07:35:47.0395115Z   x86_encode_32                      0.586 ns    1707.5 M/s    6.78 GB/s    3.19 cycles [3.18-3.19]   14.07 instructions  IPC 4.41  throttle  3.24
+2026-10-23T07:35:47.0395738Z   x86_encode_64                      0.547 ns    1826.9 M/s    7.26 GB/s    2.96 cycles [2.96-2.97]   13.91 instructions  IPC 4.69  throttle  2.73
+2026-10-23T07:35:47.0396442Z   x86_encode_16_forms_from_records   0.654 ns    1529.1 M/s    6.07 GB/s    3.53 cycles [3.49-3.58]   13.76 instructions  IPC 3.89  throttle  0.02
+2026-10-23T07:35:47.0397143Z   x86_encode_16_masked_loads         0.723 ns    1383.0 M/s    5.49 GB/s    3.92 cycles [3.91-3.92]   13.32 instructions  IPC 3.40  throttle  0.09
+2026-10-23T07:35:47.0397822Z   x86_encode_16_masked_stores        0.569 ns    1758.3 M/s    6.98 GB/s    3.08 cycles [3.07-3.10]   13.13 instructions  IPC 4.26  throttle  0.48
+2026-10-23T07:35:47.0398509Z   x86_encode_16_compress_stores      0.734 ns    1361.7 M/s    5.41 GB/s    3.97 cycles [3.96-3.97]   15.19 instructions  IPC 3.83  throttle  2.00
+2026-10-23T07:35:47.0399223Z   x86_encode_64_fixup_compress_stores   0.544 ns    1837.5 M/s    7.30 GB/s    2.94 cycles [2.93-2.94]   13.91 instructions  IPC 4.73  throttle  0.95
+2026-10-23T07:35:47.0399938Z   x86_encode_64_offsets_then_pick    0.589 ns    1698.0 M/s    6.74 GB/s    3.17 cycles [3.17-3.17]   15.09 instructions  IPC 4.76  throttle  1.26
+2026-10-23T07:35:47.0400617Z   x86_encode_64_apx                  0.665 ns    1504.8 M/s    5.98 GB/s    3.57 cycles [3.56-3.57]   16.54 instructions  IPC 4.64  throttle  2.19
+2026-10-23T07:35:47.0401259Z   x86_encode_16_apx                  0.647 ns    1546.1 M/s    6.14 GB/s    3.47 cycles [3.46-3.47]   14.51 instructions  IPC 4.18  throttle  0.16
+2026-10-23T07:35:47.0401980Z   (per encoded instruction; GB/s of machine code; throttle: PMCx1A0 umask 0x08, read as the dispatch slots the power cap takes)

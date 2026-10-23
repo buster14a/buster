@@ -218,38 +218,55 @@ static void c_binding_test_deep(CBindingTest* test)
 static void c_binding_test_sort_edges(CBindingTest* test)
 {
     const long page = sysconf(_SC_PAGESIZE);
-    uint8_t* mapping = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    const bool mapped = mapping != MAP_FAILED && mprotect(mapping + page, (size_t)page, PROT_NONE) == 0;
+    uint8_t* mapping = mmap(0, (size_t)page * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool mapped = mapping != MAP_FAILED && mprotect(mapping + page, (size_t)page, PROT_NONE) == 0 &&
+                        mprotect(mapping + page * 3, (size_t)page, PROT_NONE) == 0;
     c_binding_test_check(test, mapped, "guard page allocation");
     if (mapped)
     {
         uint64_t twin[128];
-        uint64_t temporary[128];
         uint64_t twin_temporary[128];
         for (uint32_t length = 0; length <= 96; length += 1)
         {
             uint64_t* keys = (uint64_t*)(mapping + page) - length;
-            for (uint32_t shape = 0; shape < 4; shape += 1)
+            uint64_t* temporary = (uint64_t*)(mapping + page * 3) - length;
+            // The final sixteen shapes vary every subset of the four name bytes, including nonadjacent digits
+            // and odd pass counts. Constant bytes are nonzero, so skipping only high zeroes is insufficient.
+            for (uint32_t shape = 0; shape < 20; shape += 1)
             {
+                uint32_t varying = 0;
+                uint32_t first = 0;
                 for (uint32_t i = 0; i < length; i += 1)
                 {
-                    const uint32_t key = shape == 0 ? 0 : shape == 1 ? UINT32_MAX : shape == 2 ? i % 3 : c_binding_test_random(test);
+                    uint32_t key = shape == 0 ? 0 : shape == 1 ? UINT32_MAX : shape == 2 ? i % 3 : c_binding_test_random(test);
+                    if (shape >= 4)
+                    {
+                        key = 0;
+                        for (uint32_t byte = 0; byte < 4; byte += 1)
+                        {
+                            const uint32_t digit = ((shape - 4) & (1u << byte)) != 0 ? c_binding_test_random(test) % 8 : 0xa5 + byte;
+                            key |= digit << (byte * 8);
+                        }
+                    }
+                    first = i == 0 ? key : first;
+                    varying |= key ^ first;
                     keys[i] = ((uint64_t)key << 32) | i;
                     twin[i] = keys[i];
                 }
-                c_bindings_sort(keys, temporary, length, true);
-                c_bindings_sort(twin, twin_temporary, length, false);
-                c_binding_test_check(test, memcmp(keys, twin, (uint64_t)length * 8) == 0, "guarded sort differs from scalar twin");
+                const uint64_t* sorted = c_bindings_sort(keys, temporary, length, true, varying);
+                c_bindings_sort(twin, twin_temporary, length, false, UINT32_MAX);
+                c_binding_test_check(test, sorted == keys || sorted == temporary, "sort returned an unowned buffer");
+                c_binding_test_check(test, memcmp(sorted, twin, (uint64_t)length * 8) == 0, "guarded sort differs from scalar twin");
                 for (uint32_t i = 1; i < length; i += 1)
                 {
-                    c_binding_test_check(test, keys[i - 1] < keys[i], "guarded sort lost stable order");
+                    c_binding_test_check(test, sorted[i - 1] < sorted[i], "guarded sort lost stable order");
                 }
             }
         }
     }
     if (mapping != MAP_FAILED)
     {
-        munmap(mapping, (size_t)page * 2);
+        munmap(mapping, (size_t)page * 4);
     }
 }
 
