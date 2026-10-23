@@ -160,6 +160,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `tier1_allocate.c` and `tier1_rematerialize.c` supply bounded interval
+  allocation, required-use reload splitting, parallel moves and baseline-x86
+  rematerialization. `test-tier1-allocation` includes native execution and
+  guarded tails; `benchmark-tier1-allocation` measures full preparation and
+  allocation. [The allocation guide](docs/tier1-allocation.md) records producer
+  constraints and pending CFG/corpus emission. Use the shared 9700X lock per
+  build/test/measurement and CPU 2 for timing.
+
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
   #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
