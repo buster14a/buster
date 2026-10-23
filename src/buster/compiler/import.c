@@ -132,6 +132,10 @@ struct ImportObject
 {
     AtomId* section_atoms;
     uint32_t section_count;
+    // First exact .note.GNU-stack with SHF_EXECINSTR, by original section index; 0 for no explicit request.
+    // This is an input requirement, even for a non-ALLOC, excluded or COMDAT-discarded marker. Final consumers must
+    // honor it or refuse the input; neither dropping the marker nor collecting its object's code clears it.
+    uint32_t executable_stack_section;
     SymbolId* symbols;
     uint32_t symbol_count;
     ImportGroup* groups;
@@ -495,7 +499,7 @@ static bool import_table(const Elf64_Shdr* header, uint64_t entry_size, uint64_t
 // The bytes of a section's name the section pass compares: the longest of import_section_patterns fits.
 #define BUSTER_IMPORT_PATTERN_BYTES 16
 
-// The section names the classes depend on (import_section_class), each with how many of its bytes a name must match:
+// The section names the classes and input metadata depend on, each with how many of its bytes a name must match:
 // all of them and the NUL, or for .data.rel.ro, .ctors and .dtors, a prefix.
 typedef enum ImportPattern
 {
@@ -508,6 +512,7 @@ typedef enum ImportPattern
     IMPORT_PATTERN_FINI_ARRAY,
     IMPORT_PATTERN_CTORS,
     IMPORT_PATTERN_DTORS,
+    IMPORT_PATTERN_GNU_STACK,
     IMPORT_PATTERNS,
 } ImportPattern;
 
@@ -521,6 +526,7 @@ static const char import_section_patterns[IMPORT_PATTERNS][BUSTER_IMPORT_PATTERN
     [IMPORT_PATTERN_FINI_ARRAY] = ".fini_array",
     [IMPORT_PATTERN_CTORS] = ".ctors",
     [IMPORT_PATTERN_DTORS] = ".dtors",
+    [IMPORT_PATTERN_GNU_STACK] = ".note.GNU-stack",
 };
 
 static const uint8_t import_section_pattern_bytes[IMPORT_PATTERNS] = {
@@ -533,6 +539,7 @@ static const uint8_t import_section_pattern_bytes[IMPORT_PATTERNS] = {
     [IMPORT_PATTERN_FINI_ARRAY] = sizeof(".fini_array"),
     [IMPORT_PATTERN_CTORS] = sizeof(".ctors") - 1,
     [IMPORT_PATTERN_DTORS] = sizeof(".dtors") - 1,
+    [IMPORT_PATTERN_GNU_STACK] = sizeof(".note.GNU-stack"),
 };
 
 // A section without an init or fini array's priority.
@@ -811,6 +818,11 @@ static ImportResult import_sections(Link* link, const ImportElf* elf, uint32_t u
             }
             object->section_atoms[index] = atom;
         }
+        if (result.error == IMPORT_ERROR_NONE && object->executable_stack_section == 0 && (header.sh_flags & SHF_EXECINSTR) != 0 &&
+            import_equal(name, import_section_patterns[IMPORT_PATTERN_GNU_STACK]))
+        {
+            object->executable_stack_section = index;
+        }
     }
     return result;
 }
@@ -936,28 +948,25 @@ static uint32_t* import_sort_relocations(const String8 entries, uint32_t* order,
     return from;
 }
 
-// Imports one .rela section's entries as its atom's fixups, in offset order.
-static ImportResult import_relocations(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint32_t index, const ImportObject* object, Arena* arena)
+// Imports a bounded sequence of Elf64_Rela records as one atom's fixups, in offset order. The symbol map has
+// symbols->count entries, atom is zero or a valid id, and entries has no readable padding requirement. file_offset
+// locates a failing original record for callers importing an ELF section; transformed records can supply zero.
+// The separate entry point lets unwind filtering hand off its packed records without constructing another ELF.
+static ImportResult import_relocation_entries(Link* link, const ImportSymbols* symbols, const ImportObject* object, AtomId atom, String8 entries, uint64_t file_offset, Arena* arena)
 {
     ImportResult result = { 0 };
-    const Elf64_Shdr header = import_section_header(elf, index);
-    const uint64_t header_offset = elf->section_offset + (uint64_t)index * sizeof(Elf64_Shdr);
-    uint64_t count = 0;
-    const bool table = import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX;
-    const AtomId atom = header.sh_info != SHN_UNDEF && header.sh_info < elf->section_count ? object->section_atoms[header.sh_info] : 0;
-    if (!table || symbols->section == 0 || header.sh_link != symbols->section || header.sh_info == SHN_UNDEF || header.sh_info >= elf->section_count)
+    const uint64_t count = entries.length / sizeof(Elf64_Rela);
+    if (entries.length % sizeof(Elf64_Rela) != 0 || count > UINT32_MAX || (count != 0 && entries.pointer == 0))
     {
-        result = import_fail(IMPORT_ERROR_BOUNDS, header_offset);
-        result.section = index;
+        result = import_fail(IMPORT_ERROR_BOUNDS, file_offset);
     }
     else if (atom != 0 && count != 0)
     {
-        const String8 entries = import_section_bytes(elf, &header);
         uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
         uint32_t* spare = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
         if (order == 0 || spare == 0)
         {
-            result = import_fail(IMPORT_ERROR_MEMORY, header_offset);
+            result = import_fail(IMPORT_ERROR_MEMORY, file_offset);
         }
         else
         {
@@ -976,7 +985,7 @@ static ImportResult import_relocations(Link* link, const ImportElf* elf, const I
                 const bool within = relocation.r_offset <= link->atoms.size[atom];
                 const uint8_t kind = import_got_kind(import_fixup_kind(type), within ? link->atoms.bytes[atom] : 0, relocation.r_offset, relocation.r_addend);
                 const SymbolId target = symbol < symbols->count ? object->symbols[symbol] : 0;
-                const uint64_t entry_offset = header.sh_offset + (uint64_t)sorted[i] * sizeof(Elf64_Rela);
+                const uint64_t entry_offset = file_offset + (uint64_t)sorted[i] * sizeof(Elf64_Rela);
                 if (type == R_X86_64_NONE)
                 {
                     // Nothing to patch.
@@ -996,11 +1005,33 @@ static ImportResult import_relocations(Link* link, const ImportElf* elf, const I
                     result = import_fail(IMPORT_ERROR_LINK, entry_offset);
                     result.type = type;
                 }
-                result.section = result.error != IMPORT_ERROR_NONE ? index : 0;
                 result.relocation = result.error != IMPORT_ERROR_NONE ? sorted[i] : 0;
             }
         }
     }
+    return result;
+}
+
+// Imports one .rela section's entries as its atom's fixups, in offset order.
+static ImportResult import_relocations(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint32_t index, const ImportObject* object, Arena* arena)
+{
+    const Elf64_Shdr header = import_section_header(elf, index);
+    const uint64_t header_offset = elf->section_offset + (uint64_t)index * sizeof(Elf64_Shdr);
+    uint64_t count = 0;
+    const bool table = import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX;
+    const AtomId atom = header.sh_info != SHN_UNDEF && header.sh_info < elf->section_count ? object->section_atoms[header.sh_info] : 0;
+    ImportResult result = { 0 };
+    if (!table || symbols->section == 0 || header.sh_link != symbols->section || header.sh_info == SHN_UNDEF || header.sh_info >= elf->section_count)
+    {
+        result = import_fail(IMPORT_ERROR_BOUNDS, header_offset);
+    }
+    else
+    {
+        result = import_relocation_entries(link, symbols, object, atom, import_section_bytes(elf, &header), header.sh_offset, arena);
+        // The legacy section wrapper reports an allocation failure at the section header.
+        result.offset = result.error == IMPORT_ERROR_MEMORY ? header_offset : result.offset;
+    }
+    result.section = result.error != IMPORT_ERROR_NONE && result.error != IMPORT_ERROR_MEMORY ? index : 0;
     return result;
 }
 
@@ -1515,6 +1546,11 @@ static bool import_vector_sections(Link* link, const ImportElf* elf, uint32_t un
         result = failed == 0 && atom_count <= atoms->capacity - atoms->count;
         if (result)
         {
+            const uint32_t executable_stack = active & matches[IMPORT_PATTERN_GNU_STACK] & import_lanes_have(flags, SHF_EXECINSTR);
+            if (object->executable_stack_section == 0 && executable_stack != 0)
+            {
+                object->executable_stack_section = first + (uint32_t)__builtin_ctz(executable_stack);
+            }
             const uint32_t at = atoms->count;
             const __m512i bytes = _mm512_maskz_add_epi64((__mmask8)(classed & ~zero_fill & _mm512_test_epi64_mask(size, size)), file_base, offset);
             import_store8(atoms->class + at, _mm512_maskz_compress_epi64((__mmask8)classed, class), atom_count);
@@ -1947,18 +1983,14 @@ static const char* import_vector_sort_relocations(const char* records, uint64_t 
 // the file's order when its fields are in offset order, as a compiler's objects have them, and otherwise from a copy
 // sorted by offset (GNU as writes a relaxed branch's relocation after the section's others, and glibc's and libgcc's
 // archives have a tenth of their members so). Sorted, the fields must not overlap.
-static bool import_vector_relocations(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint32_t index, const ImportObject* object, __m512i kinds, Arena* scratch)
+static bool import_vector_relocation_entries(Link* link, const ImportSymbols* symbols, const ImportObject* object, AtomId atom, String8 entries, __m512i kinds, Arena* scratch)
 {
     LinkFixups* fixups = &link->fixups;
     LinkAtoms* atoms = &link->atoms;
-    const Elf64_Shdr header = import_section_header(elf, index);
-    uint64_t count = 0;
-    const bool table = import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX;
-    bool result = table && symbols->section != 0 && header.sh_link == symbols->section && header.sh_info != SHN_UNDEF && header.sh_info < elf->section_count;
-    const AtomId atom = result ? object->section_atoms[header.sh_info] : 0;
+    const uint64_t count = entries.length / sizeof(Elf64_Rela);
+    bool result = entries.length % sizeof(Elf64_Rela) == 0 && count <= UINT32_MAX && (count == 0 || entries.pointer != 0);
     if (result && atom != 0 && count != 0)
     {
-        const String8 entries = import_section_bytes(elf, &header);
         const FixupId begin = fixups->count;
         const uint64_t length = scratch->length;
         // Room for every entry, whether or not each becomes a fixup; the exact path decides when there isn't.
@@ -2017,6 +2049,19 @@ static bool import_vector_relocations(Link* link, const ImportElf* elf, const Im
             fixups->count = pass.next;
             fixups->wide_count = pass.wide;
         }
+    }
+    return result;
+}
+
+static bool import_vector_relocations(Link* link, const ImportElf* elf, const ImportSymbols* symbols, uint32_t index, const ImportObject* object, __m512i kinds, Arena* scratch)
+{
+    const Elf64_Shdr header = import_section_header(elf, index);
+    uint64_t count = 0;
+    const bool table = import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX;
+    bool result = table && symbols->section != 0 && header.sh_link == symbols->section && header.sh_info != SHN_UNDEF && header.sh_info < elf->section_count;
+    if (result)
+    {
+        result = import_vector_relocation_entries(link, symbols, object, object->section_atoms[header.sh_info], import_section_bytes(elf, &header), kinds, scratch);
     }
     return result;
 }

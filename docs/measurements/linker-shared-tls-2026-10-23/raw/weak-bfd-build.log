@@ -1,0 +1,29 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:18:47+00:00 CI job of buster14a/buster (run 39923733542, worker 3530336)
+  title: 9700X test / test: #310: Keep command-owned lane workers across operations
+  link: https://github.com/buster14a/buster/actions/runs/39923733542/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/310
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:24:26+00:00 CI job of buster14a/buster (run 39923866510, worker 3581704)
+  title: 9700X test / test: Merge pull request #309 from buster14a/codex/linker-library-inputs-86
+  link: https://github.com/buster14a/buster/actions/runs/39923866510/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:30:04+00:00 CI job of buster14a/buster (run 39924543984, worker 3634718)
+  title: 9700X test / test: #312: Add scalar/vector expression checker and initial source adapter (#133)
+  link: https://github.com/buster14a/buster/actions/runs/39924543984/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/312
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:32:27+00:00 CI job of buster14a/buster (run 39925148500, worker 3666332)
+  title: 9700X test / test: #313: Parser: reject typedef function definitions and accept GNU designator extensions (#296)
+  link: https://github.com/buster14a/buster/actions/runs/39925148500/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/313
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:33:44+00:00 CI job of buster14a/buster (run 39925177276, worker 3695929)
+  title: 9700X test / test: #307: perf(x86): measure SIMD lengths without encoding discarded bytes
+  link: https://github.com/buster14a/buster/actions/runs/39925177276/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/307
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:36:21+00:00 CI job of buster14a/buster (run 39925734582, worker 3728071)
+  title: 9700X test / test: #303: Tier 0: typed stream to instruction records, by templates with registers from the value stack's depths (#136)
+  link: https://github.com/buster14a/buster/actions/runs/39925734582/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/303
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:38:47+00:00 CI job of buster14a/buster (run 39925847626, worker 3761381)
+  title: 9700X test / test: #313: Parser: reject typedef function definitions and accept GNU designator extensions (#296)
+  link: https://github.com/buster14a/buster/actions/runs/39925847626/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/313
+exclusive.sh: waiting for the 9700X, held by: 

@@ -1,0 +1,5 @@
+Fri Oct 23 14:05:46 UTC 2026
+linux-api-headers 7.2-1
+/usr/include/linux/memfd.h is owned by linux-api-headers 7.2-1
+d06dd37df2ad2df29391c38239c1af6944efef8dc4040ed41833169cd4c4a3c9  /usr/include/linux/memfd.h
+The sole transitive include asm-generic/hugetlb_encode.h is already pinned and byte-identical.
