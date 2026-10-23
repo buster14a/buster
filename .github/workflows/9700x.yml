@@ -339,7 +339,9 @@ jobs:
           ./build/compiler test-builtin-float-lowering
           ./build/compiler test-builtin-terminal-helpers
           ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-builtin-atomic-rmw-helpers
           ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-atomic-rmw
           ./build/compiler test-check-builtins-typed-overflow
           ./build/compiler test-check-builtins-rounds
           ./build/compiler test-check-builtins-math
