@@ -249,7 +249,8 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    bits.
 
 The immediates' choice is one `x86_choose_forms` over every request, and each chosen form is applied from a byte per
-form (its immediate's size, and whether it takes no operands or its destination twice), without a branch.
+form (its immediate's size, and whether it takes no operands or its destination twice) to the record's two 8-byte
+halves, without a branch.
 
 **The scalar path** (`tier0_compile_scalar`) does the same an entry at a time, with each rule in plain code. Selection
 looks each entry's slot up, homes sort the locals, measuring counts a deferred entry's records by running its emitter,
@@ -273,6 +274,9 @@ Before the programs, two checks of their own:
   every destination must get its source's value, every other register keep its own, and the records be as many as
   the moves less the cycles. The general registers' sets have paths and cycles of every length, though a call makes
   cycles of two alone, and the XMM registers' only paths, as a call's floating arguments only move down.
+- **applies:** the vector path's application of the chosen forms against the scalar path's
+  (`x86_choice_instruction`), on 2,000 batches of random records, each with a candidate form of a random row or
+  `X86_FORM_NONE` (which keeps the record) and a random value.
 - **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
   places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
   stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate).
@@ -347,8 +351,10 @@ path's 11.1.
   76.5 cycles per entry back to back (196.7 to 163.4 instructions, 15.8 to 13.8 ns), from 89.3 to 78.4 in the full
   benchmark and to 78.7 after 100 ms of the scalar path, its power cap's count 2.1 per record against the head's 3.1.
   The scalar path, which shares the call emitter, went from 233.2 to 226.2 (589.0 to 559.8 instructions).
+- **The chosen forms applied on the records' halves** (the compiler had split the fields into byte loads and
+  stores): 75.6 to 74.8 cycles per entry, 163.5 to 162.0 instructions, in four rounds run in turn, each 1.0 to 1.2%.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
-  The vector path is still about 2.4 times that; the budget is not met.
+  The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
   vector path's time:
   - emission 21%, fusion and depths (P0 to P4) 16%, selection 13% (the slot gather the largest part), measuring 10%;
@@ -378,9 +384,14 @@ path's 11.1.
   - indirect calls;
   - globals of shared libraries through the GOT (a front end's visibility decision).
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
-  per entry); the call emitter, an entry at a time; a static immediate's choice (a `cmp r, 0`'s), which only depends
-  on its template and on whether its register is rax, and could be decided per template at initialization rather
-  than requested per entry; and selection's gather from a table larger than L1.
+  per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.
+- **The immediates' choice** costs about 7 cycles per entry: the application about 5 (its loads of the records more
+  than its arithmetic), `x86_choose_forms` about 2 (3.6 cycles per request, batched), the requests' columns about 1.
+  27% of the entries make a request; 6% of the requests are static (a branch on a local's `cmp home, 0`), so deciding
+  those per template at initialization would save under 1%; and choosing in emission's blocks of 8 would run the
+  chooser's candidates on 8 lanes for about 2 requests, more than the batch costs. What would remove the requests is
+  deciding each form at selection, from the constant's value class (P0 has its predicates) and whether its register
+  is rax (its depth's), with templates keyed by them.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
 - **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on

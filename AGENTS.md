@@ -3629,8 +3629,9 @@ address-taken locals); and larger. Their calls pass up to 12 arguments, past
 the argument registers, and their pointer arithmetic has element sizes for each
 of its templates, past imul's imm32 too. Before them it checks the call
 emitter's move resolver on 20,000 random sets of moves (paths and cycles of
-every length) run on a register file, and that both paths refuse unsupported
-entries and expressions past the depths alike. Every function must pass `tier0_validate`,
+every length) run on a register file, the vector path's application of chosen
+forms against the scalar path's on random records, and that both paths refuse
+unsupported entries and expressions past the depths alike. Every function must pass `tier0_validate`,
 both paths must compile it to the same records, branch columns and references,
 and the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into

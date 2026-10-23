@@ -1149,6 +1149,55 @@ static void tier0_test_moves(Tier0TestTally* tally)
     }
 }
 
+// The chosen forms' application, the vector path's (tier0_apply_choices_vector, from a byte per form) against the
+// scalar path's (tier0_apply_choice, through x86_choice_instruction): random records, each given a candidate form of a
+// random row, or X86_FORM_NONE (which keeps the record), and a random value, in batches of 1 to 64.
+static void tier0_test_applies(Tier0TestTally* tally)
+{
+    uint64_t random = 0x2545f4914f6cdd1dull;
+    X86Instruction vector[64];
+    X86Instruction scalar[64];
+    uint32_t indices[64];
+    uint16_t forms[64];
+    int64_t values[64];
+    for (uint32_t round = 0; round < 2000; round += 1)
+    {
+        const uint32_t count = 1 + tier0_generate_below(&random, 64);
+        for (uint32_t q = 0; q < count; q += 1)
+        {
+            uint64_t halves[2] = { tier0_generate_random(&random), tier0_generate_random(&random) };
+            memcpy(&vector[q], halves, sizeof(vector[q]));
+            vector[q].form = (uint16_t)(tier0_generate_below(&random, X86_FORM_COUNT) | (tier0_generate_below(&random, 2) != 0 ? BUSTER_X86_FORM_FIXUP : 0));
+            scalar[q] = vector[q];
+            const X86ChoiceRow* row = &x86_choice_rows[tier0_generate_below(&random, x86_choice_row_count)];
+            const uint32_t candidate = tier0_generate_below(&random, BUSTER_X86_CHOICE_CANDIDATES + 1);
+            forms[q] = candidate < BUSTER_X86_CHOICE_CANDIDATES ? row->forms[candidate] : X86_FORM_NONE;
+            values[q] = (int64_t)tier0_generate_random(&random) >> tier0_generate_below(&random, 64);
+            indices[q] = count - 1 - q;
+        }
+        Tier0Choices choices;
+        memset(&choices, 0, sizeof(choices));
+        choices.records = indices;
+        choices.forms = forms;
+        choices.values = values;
+        choices.count = count;
+        // Each request's record is at its index; the scalar path's applies in the same order.
+        X86Instruction placed[64];
+        for (uint32_t q = 0; q < count; q += 1)
+        {
+            placed[indices[q]] = vector[q];
+        }
+        tier0_apply_choices_vector(placed, &choices);
+        bool same = true;
+        for (uint32_t q = 0; q < count; q += 1)
+        {
+            tier0_apply_choice(&scalar[q], forms[q], values[q]);
+            same &= memcmp(&placed[indices[q]], &scalar[q], sizeof(scalar[q])) == 0;
+        }
+        tier0_test_expect(tally, same, "applies", "round %u: %u requests, a record differs", round, count);
+    }
+}
+
 // The errors both paths must report alike, on streams of the test's own: the first unsupported entry (a conversion from
 // U64 to a floating class, which the first slice leaves out) wherever it falls among 64-entry blocks and after another,
 // and an expression deeper than the integer depths.
@@ -1322,6 +1371,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_moves(&tally);
                 tier0_test_report("moves", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_applies(&tally);
+                tier0_test_report("applies", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

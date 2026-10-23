@@ -3681,18 +3681,26 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
                               Tier0Code* code, Tier0Choices* choices);
 
 // tier0_apply_choice for every request, for the vector path: each chosen form's record from its shape (one byte) rather
-// than its description, without a branch: the form with the fixup flag kept, the operands cleared or the destination
-// taken twice, and the immediate's field (and a 64-bit immediate's high half in the displacement); a request whose form
-// is X86_FORM_NONE keeps its record.
+// than its description, on the record's two 8-byte halves (the immediate and the displacement; the operands, the form,
+// vvvv and the decorations) rather than its fields, without a branch: the form with the fixup flag kept, the operands
+// cleared or the destination taken twice, and the immediate's field (and a 64-bit immediate's high half in the
+// displacement); a request whose form is X86_FORM_NONE keeps its record.
 static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choices* choices)
 {
+    _Static_assert(offsetof(X86Instruction, displacement) == 4 && offsetof(X86Instruction, reg) == 8 && offsetof(X86Instruction, form) == 12,
+                   "a record's halves: immediate and displacement; reg, rm, index, mode, form, vvvv and decorations");
     const uint32_t* indices = choices->records;
     const uint16_t* forms = choices->forms;
     const int64_t* values = choices->values;
-    for (uint32_t q = 0; q < choices->count; q += 1)
+    const uint32_t count = choices->count;
+    uint8_t* bytes_of = (uint8_t*)records;
+    for (uint32_t q = 0; q < count; q += 1)
     {
-        X86Instruction* record = &records[indices[q]];
-        const X86Instruction old = *record;
+        uint8_t* record = bytes_of + (uint64_t)indices[q] * sizeof(X86Instruction);
+        uint64_t low = 0;
+        uint64_t high = 0;
+        memcpy(&low, record, sizeof(low));
+        memcpy(&high, record + 8, sizeof(high));
         const uint32_t form = forms[q];
         const uint32_t shape = tier0_choice_shapes[form];
         const uint64_t value = (uint64_t)values[q];
@@ -3700,15 +3708,17 @@ static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choic
         const bool clear = (shape & BUSTER_TIER0_SHAPE_CLEAR) != 0;
         const bool twice = (shape & BUSTER_TIER0_SHAPE_TWICE) != 0;
         const uint32_t shift = (bytes >= 4 ? 32 : 64 - 8 * bytes) & 63;
-        X86Instruction chosen = old;
-        chosen.form = (uint16_t)(form | (old.form & BUSTER_X86_FORM_FIXUP));
-        chosen.immediate = bytes == 0 ? 0 : (int32_t)((int64_t)(value << shift) >> shift);
-        chosen.displacement = bytes == 8 ? (int32_t)(value >> 32) : clear ? 0 : old.displacement;
-        chosen.reg = clear ? 0 : twice ? old.rm : old.reg;
-        chosen.rm = clear ? 0 : old.rm;
-        chosen.index = clear ? 0 : old.index;
-        chosen.mode = clear ? 0 : old.mode;
-        *record = form == X86_FORM_NONE ? old : chosen;
+        const uint64_t immediate = bytes == 0 ? 0 : (uint32_t)((int64_t)(value << shift) >> shift);
+        const uint64_t displacement = bytes == 8 ? value >> 32 : clear ? 0 : low >> 32;
+        const uint64_t operands = high & 0xffffffffull;
+        const uint64_t chosen_operands = clear ? 0 : twice ? (operands & ~0xffull) | (operands >> 8 & 0xff) : operands;
+        const uint64_t chosen_form = form | (high >> 32 & BUSTER_X86_FORM_FIXUP);
+        const uint64_t chosen_low = immediate | displacement << 32;
+        const uint64_t chosen_high = chosen_operands | chosen_form << 32 | (high & 0xffff000000000000ull);
+        low = form == X86_FORM_NONE ? low : chosen_low;
+        high = form == X86_FORM_NONE ? high : chosen_high;
+        memcpy(record, &low, sizeof(low));
+        memcpy(record + 8, &high, sizeof(high));
     }
 }
 
