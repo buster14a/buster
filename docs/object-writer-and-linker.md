@@ -3448,8 +3448,34 @@ adds excluded conditioning. Run each independently started process under the
 shared 9700X lock on CPU 2, alternating orders and comparing process medians
 against spread before making performance claims. This single-lane static
 fixture supplies no dynamic, COMDAT, personality/LSDA, corpus or scaling
-performance evidence. Its first build, oracle run and measurements are still
-pending; source review alone is not validation.
+performance evidence.
+
+The isolated `4cb4936aaef2b980e4b2f29101cf8e86879f8336` source built and
+passed `test-foreign --cross-check` on the shared 9700X: marker 36,694 checks,
+adapter 281, C++ unwind 72, with no failures in those or the earlier groups.
+Three independently started benchmark processes used the command above,
+then reversed variant order, then blocked order. Every map/CFI/runtime/byte
+oracle passed. The table gives the range of process medians in microseconds,
+not a confidence interval or the within-process min/max:
+
+| 1,024-leaf case/path | GC off | GC on | Output bytes off → on | Retained arena bytes off → on |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed-dead, exact | 3,371–3,447 | 2,720–2,908 | 91,040 → 50,080 | 1,830,055 → 2,286,572 |
+| Mixed-dead, vector | 3,523–3,616 | 2,849–2,903 | 91,040 → 50,080 | 1,862,855 → 2,319,372 |
+| All-live, exact | 3,501–3,568 | 2,906–2,971 | 95,136 → 95,136 | 1,814,103 → 2,393,500 |
+| All-live, vector | 3,560–3,640 | 2,992–3,090 | 95,136 → 95,136 | 1,846,903 → 2,426,300 |
+
+The large fixture's reduction exceeds the between-process median spread.
+The eight-leaf cases are near 55 microseconds and do not establish a gain
+beyond observed spread. The all-live control also improves despite removing
+nothing: the adapter's copying changes byte placement and memory access, so
+these results do not isolate a reachability or SIMD speedup. Page-fault/cache
+attribution remains unmeasured. Retained arena growth is real; peak process
+memory was not measured. Default activation, corpus coverage and scaling
+remain separate decisions.
+
+Complete original build/test/benchmark logs and the frozen source manifest
+are retained in [the GC measurement directory](measurements/foreign-gc-2026-10-23/).
 
 #### Foreign terminal CIE pooling
 

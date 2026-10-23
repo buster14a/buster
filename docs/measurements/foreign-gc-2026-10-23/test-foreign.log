@@ -1,0 +1,30 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:59:13+00:00 codex-linker-debug88: /home/david/buster-fast-bench/codex-linker-tls85/tls85-measure taskset -c 2 /home/david/buster-fast-bench/linker-strings86/build3/build/compiler benchmark-foreign-strings --counts 64,4096,131072 --runs 11 --keep --directory /tmp --order nomerge-exact,merge-exact,nomerge-vector,merge-vector --after-scalar 100
+  title: String consumer 08-baseline-100ms-r1
+  link: https://github.com/buster14a/buster/issues/86
+  programs: the defaults, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: many units, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: without absolute addresses, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: --functions workers, without sizes, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: calling libc, an archive before the first unit: GNU ld differs, as documented (1 differences)
+  programs: calling libc, many units, without sizes, an archive before the first unit: GNU ld differs, as documented (1 differences)
+programs: 35876 checks, 0 failures
+  compiled: GNU ld's common rule: lld differs, as documented (3 differences)
+  compiled: back references: GNU ld differs, as documented (1 differences)
+  compiled: shared: archive, object, library: GNU ld differs, as documented (3 differences)
+  compiled: COMDAT groups, members loaded later first: GNU ld differs, as documented (4 differences)
+  compiled: COMDAT groups, members loaded later first: lld differs, as documented (4 differences)
+  compiled: an as-needed library nothing needs: lld differs, as documented (1 differences)
+  compiled: a thin archive of another archive's member: lld differs, as documented (1 differences)
+compiled: 752 checks, 0 failures
+malformed: 126 checks, 0 failures
+page edges: 2726 prefixes, 4608 changed bytes
+page edges: 7335 checks, 0 failures
+extended sections: 23 checks, 0 failures
+foreign generated output: 54 checks, 0 failures
+foreign executable handoff: 1484 checks, 0 failures
+foreign dynamic output: 627 checks, 0 failures
+foreign unwind pruning: 408 checks, 0 failures
+foreign C++ unwind runtime: 72 checks, 0 failures
+foreign gc marking: 36694 checks, 0 failures
+foreign section GC handoff: 281 checks, 0 failures
+test-foreign: kept /tmp/buster-foreign-n82h7s
