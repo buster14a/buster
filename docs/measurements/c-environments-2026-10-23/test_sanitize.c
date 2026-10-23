@@ -2,6 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original narrow sanitizer entry point; it runs the unchanged production test commands without driver/benchmark
 // dispatch. Compile on the approved 9700X under its per-run shared lock, then take that lock separately per test.
+#include <stdbool.h>
+static __attribute__((unused)) int main_command(int argc, char** argv, bool* found);
 #define BUSTER_UNIT 99
 #include "buster/compiler/main.c"
 
