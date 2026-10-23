@@ -11,6 +11,7 @@ b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189  $inputs/sqlite
 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d  $inputs/sqlite-3.53.2.c
 d9bcc9e2c979d19eea5ed611e8fa971a2af357494c9526fd27d125751e3d9f95  src/buster/compiler/c_refine.c
 CHECKSUMS
+sha256sum --check "$evidence/sqlite-system-headers.sha256"
 git rev-parse HEAD
 date -u
 uname -srvmo
@@ -57,3 +58,4 @@ sha256sum build/refine116/pp-* build/refine116/kernel-*
     -- --only refine_tokens_64 --after-scalar 100 "$inputs/sqlite-3.53.4.c" \
     -- --only refine_tokens_64 "$corpus" \
     | tee build/refine116/kernels.txt
+sha256sum --check "$evidence/sqlite-system-headers.sha256"
