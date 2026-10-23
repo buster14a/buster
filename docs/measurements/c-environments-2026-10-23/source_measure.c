@@ -124,6 +124,7 @@ static bool environment_measure_run(SourceCheck* run, Parser* parser, Preprocess
     return valid;
 }
 
+#ifndef BUSTER_ENVIRONMENT_MEASURE_HELPERS_ONLY
 int main(int argc, char** argv)
 {
     uint32_t path_index = 1;
@@ -274,3 +275,4 @@ int main(int argc, char** argv)
     arena_release(&options_arena);
     return !valid;
 }
+#endif

@@ -3394,6 +3394,12 @@ and body slots through `c_check_environment.c`; `test-checker` checks their
 scratch lifetime and scalar/vector replay. Actual deferred body/effect
 checking and corpus acceptance are still pending.
 [docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
+`c_check_body_bindings.c` supplies the next independent name-resolution
+consumer: private per-body views/replay, source-position file fallbacks and
+stable declaration identities. `test-checker` compares both kernels on
+reversed one/eight-lane body schedules and guarded columns.
+[docs/c-body-bindings.md](docs/c-body-bindings.md) records its contract and the
+semantic/type/effect/corpus integration still required for #113.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
 binding kernels: stack replay and the vector batch against an independent
