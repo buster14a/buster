@@ -1,0 +1,111 @@
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -274,0 +275 @@
++    const uint64_t* backslash_chunks;
+@@ -512,2 +513,11 @@
+-// intern_bucket_matches', from a compare without its mask. No branch depends on the outcome: without a match, the id
+-// read (the first slot's first dword, tzcnt's 32 masked to 0) is discarded.
++// intern_bucket_matches', from a compare without its mask. Compress the matching id dwords from the already loaded
++// bucket: the lowest lane is the first match's id, or zero when no prefix matches. This needs no dependent scalar
++// load, outcome branch or sentinel read on a miss.
++BUSTER_INLINE __m128i refine_probe_vector(const uint8_t* bucket, __m128i key)
++{
++    const __m512i slots = _mm512_load_si512(bucket);
++    const uint32_t matches = (_mm512_cmpeq_epi32_mask(slots, intern_bucket_key(key)) + 0x1111) & 0x8888;
++    const __m512i ids = _mm512_maskz_compress_epi32((__mmask16)matches, slots);
++    return _mm512_castsi512_si128(ids);
++}
++
+@@ -516,6 +526 @@
+-    const uint32_t matches = (_mm512_cmpeq_epi32_mask(_mm512_load_si512(bucket), intern_bucket_key(key)) + 0x1111) & 0x8888;
+-    IdentId id = intern_slot_id(bucket, _tzcnt_u32(matches) & 15);
+-    // A select after the load, not a branch around it, which Clang makes of a plain `?:` (with the matches' zero as the
+-    // result): a branch on the outcome would mispredict for every new spelling.
+-    __asm__("" : "+r"(id));
+-    return id & (uint32_t)-(int32_t)(matches != 0);
++    return (IdentId)_mm_cvtsi128_si32(refine_probe_vector(bucket, key));
+@@ -642 +646,0 @@
+-    __m128i keys[64] __attribute__((aligned(64)));
+@@ -644 +647,0 @@
+-    bool special;
+@@ -653 +656 @@
+-                                     RefineHashes* hashes, const bool trigraphs)
++                                     uint32_t* ids, RefineHashes* hashes, const bool trigraphs)
+@@ -658 +660,0 @@
+-    __m128i* const keys = hashes->keys;
+@@ -661,2 +662,0 @@
+-    __m512i backslashes = _mm512_set1_epi8(-1);
+-    __m512i questions = _mm512_set1_epi8(-1);
+@@ -674,5 +673,0 @@
+-        backslashes = _mm512_min_epu8(backslashes, _mm512_min_epu8(_mm512_xor_si512(ab, _mm512_set1_epi8('\\')), _mm512_xor_si512(cd, _mm512_set1_epi8('\\'))));
+-        if (trigraphs)
+-        {
+-            questions = _mm512_min_epu8(questions, _mm512_min_epu8(_mm512_xor_si512(ab, _mm512_set1_epi8('?')), _mm512_xor_si512(cd, _mm512_set1_epi8('?'))));
+-        }
+@@ -684 +679 @@
+-        _mm512_store_si512(keys + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
++        const __m512i keys = _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0));
+@@ -692,0 +688,5 @@
++        const __m128i a = refine_probe_vector(buckets + _mm_cvtsi128_si64(_mm512_castsi512_si128(group_offsets)), _mm512_castsi512_si128(keys));
++        const __m128i b = refine_probe_vector(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 1)), _mm512_extracti32x4_epi32(keys, 1));
++        const __m128i c = refine_probe_vector(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 2)), _mm512_extracti32x4_epi32(keys, 2));
++        const __m128i d = refine_probe_vector(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 3)), _mm512_extracti32x4_epi32(keys, 3));
++        _mm_storeu_si128((__m128i*)(ids + j), _mm_unpacklo_epi64(_mm_unpacklo_epi32(a, b), _mm_unpacklo_epi32(c, d)));
+@@ -706,5 +705,0 @@
+-        backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes, _mm512_set1_epi8('\\')));
+-        if (trigraphs)
+-        {
+-            questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes, _mm512_set1_epi8('?')));
+-        }
+@@ -713 +708 @@
+-        _mm_prefetch((const char*)(buckets + offset), _MM_HINT_T0);
++        ids[i] = refine_probe(buckets + offset, refine_key(_mm512_castsi512_si128(bytes)));
+@@ -719,5 +713,0 @@
+-        backslashes = _mm512_min_epu8(backslashes, _mm512_xor_si512(bytes, _mm512_set1_epi8('\\')));
+-        if (trigraphs)
+-        {
+-            questions = _mm512_min_epu8(questions, _mm512_xor_si512(bytes, _mm512_set1_epi8('?')));
+-        }
+@@ -726,7 +716 @@
+-        keys[j] = refine_key(_mm512_castsi512_si128(bytes));
+-        _mm_prefetch((const char*)(buckets + offset), _MM_HINT_T0);
+-    }
+-    uint64_t special = _mm512_testn_epi8_mask(backslashes, backslashes);
+-    if (trigraphs)
+-    {
+-        special |= _mm512_testn_epi8_mask(questions, questions);
++        ids[j] = refine_probe(buckets + offset, refine_key(_mm512_castsi512_si128(bytes)));
+@@ -735 +718,0 @@
+-    hashes->special = special != 0;
+@@ -760 +743 @@
+-        refine_hash_batch(table, source, identifiers->starts, identifiers->lengths, total < batch ? total : batch, &hashes[0], trigraphs);
++        refine_hash_batch(table, source, identifiers->starts, identifiers->lengths, total < batch ? total : batch, identifiers->ids, &hashes[0], trigraphs);
+@@ -772 +755 @@
+-            refine_hash_batch(table, source, starts, lengths, count, current, trigraphs);
++            refine_hash_batch(table, source, starts, lengths, count, ids, current, trigraphs);
+@@ -774 +756,0 @@
+-        const uint8_t* const buckets = table->buckets;
+@@ -778,15 +759,0 @@
+-        const __m128i* const keys = current->keys;
+-
+-        // 2. Probe each identifier's bucket for its prefix, with one compare: four per iteration, then the rest.
+-        uint32_t probed = 0;
+-        for (; probed + 4 <= count; probed += 4)
+-        {
+-            ids[probed] = refine_probe(buckets + offsets[2 * probed], keys[probed]);
+-            ids[probed + 1] = refine_probe(buckets + offsets[2 * probed + 2], keys[probed + 1]);
+-            ids[probed + 2] = refine_probe(buckets + offsets[2 * probed + 4], keys[probed + 2]);
+-            ids[probed + 3] = refine_probe(buckets + offsets[2 * probed + 6], keys[probed + 3]);
+-        }
+-        for (; probed < count; probed += 1)
+-        {
+-            ids[probed] = refine_probe(buckets + offsets[2 * probed], keys[probed]);
+-        }
+@@ -808 +775 @@
+-        if (BUSTER_UNLIKELY(current->special))
++        if (BUSTER_UNLIKELY(refine_chunks_have_backslash(identifiers->backslash_chunks, starts[0], (uint64_t)starts[count - 1] + lengths[count - 1])))
+@@ -826 +793 @@
+-            refine_hash_batch(table, source, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1], trigraphs);
++            refine_hash_batch(table, source, starts + count, lengths + count, total - next < batch ? total - next : batch, ids + count, &hashes[parity ^ 1], trigraphs);
+@@ -911,0 +879 @@
++    identifiers.backslash_chunks = backslash_chunks;

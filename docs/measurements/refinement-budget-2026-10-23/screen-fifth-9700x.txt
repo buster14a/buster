@@ -1,0 +1,274 @@
+Fri Oct 23 14:02:39 UTC 2026
+clang version 23.1.1
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin
+performance
+0
+b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189  /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c
+b6392a7a0c84ae336b35e02853aee30c4b84f8542149196781b1a282a719a0b9  /home/david/buster-fast-bench/codex-116/base/build/compiler
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-ahead2 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:02:37+00:00 codex-linker-debug88: bash -lc cd ~/buster-fast-bench/codex-linker-cfi88-01 && test ! -e unwind-profile01.data && taskset -c 2 perf record -q -e cycles:u -c 1000000 --call-graph dwarf -o unwind-profile01.data -- ./build/compiler benchmark-unwind --functions 4096 --only vector && perf report --stdio --no-children --percent-limit 0.5 --sort symbol -i unwind-profile01.data
+  title: Issue 88 frozen CFI cost attribution
+  link: https://github.com/buster14a/buster/issues/88
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.762 ms   41.22 cycles/input token   72.50 cycles/output token  131.94 instructions/input token  IPC 3.20
+               read 5.6%  lex 20.6%  refine 14.1%  directives 2.5%  main loop 57.1%
+               read 0.663 ms  lex 2.419 ms  refine 1.659 ms  directives 0.293 ms  main loop 6.698 ms
+             then the release 0.451 ms
+             -E -P with printing 16.021 ms (printing 4.253 ms): 644 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-maskprobe config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:02:43+00:00 codex-header111: /home/david/buster-fast-bench/codex-header111/measure-run env PROBE_PASSES=8 PROBE_CONDITION_MS=0 taskset -c 2 /home/david/buster-fast-bench/codex-header111/cold-columns -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX -- lapi.c lauxlib.c lbaselib.c lcode.c lcorolib.c lctype.c ldblib.c ldebug.c ldo.c ldump.c lfunc.c lgc.c linit.c liolib.c llex.c lmathlib.c lmem.c loadlib.c lobject.c lopcodes.c loslib.c lparser.c lstate.c lstring.c lstrlib.c ltable.c ltablib.c ltm.c lua.c luac.c lundump.c lutf8lib.c lvm.c lzio.c
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.717 ms   41.08 cycles/input token   72.26 cycles/output token  131.40 instructions/input token  IPC 3.20
+               read 5.7%  lex 20.7%  refine 14.0%  directives 2.5%  main loop 57.0%
+               read 0.669 ms  lex 2.425 ms  refine 1.640 ms  directives 0.292 ms  main loop 6.666 ms
+             then the release 0.456 ms
+             -E -P with printing 15.994 ms (printing 4.259 ms): 645 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-prefix16 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.962 ms   42.03 cycles/input token   73.92 cycles/output token  132.75 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.3%  refine 14.5%  directives 2.4%  main loop 57.2%
+               read 0.673 ms  lex 2.425 ms  refine 1.728 ms  directives 0.290 ms  main loop 6.831 ms
+             then the release 0.470 ms
+             -E -P with printing 16.243 ms (printing 4.280 ms): 635 MB/s of input (10312758 bytes), 43.5 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-prefix28tight config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:02:47+00:00 codex-117-acceptance: bash /home/david/buster-fast-bench/codex-117-01a16812/window-run.sh /home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/build/compiler test-preprocessor --tables /home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7 /home/david/buster-fast-bench/preprocessor-corpora-astra-01a158dd/libc
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.899 ms   41.92 cycles/input token   73.74 cycles/output token  132.91 instructions/input token  IPC 3.17
+               read 5.6%  lex 20.5%  refine 14.9%  directives 2.4%  main loop 56.6%
+               read 0.669 ms  lex 2.436 ms  refine 1.779 ms  directives 0.289 ms  main loop 6.733 ms
+             then the release 0.483 ms
+             -E -P with printing 16.138 ms (printing 4.241 ms): 639 MB/s of input (10312758 bytes), 43.8 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-prefix16chunks config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:02:51+00:00 codex-117-acceptance: bash /home/david/buster-fast-bench/codex-117-01a16812/window-run.sh taskset -c 2 /home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/build/compiler benchmark-preprocessor --tables /home/david/buster-fast-bench/preprocessor-corpora-astra-01a158dd/libc
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.757 ms   41.95 cycles/input token   73.79 cycles/output token  132.93 instructions/input token  IPC 3.17
+               read 5.6%  lex 20.3%  refine 13.9%  directives 2.6%  main loop 57.6%
+               read 0.654 ms  lex 2.389 ms  refine 1.635 ms  directives 0.306 ms  main loop 6.764 ms
+             then the release 0.426 ms
+             -E -P with printing 16.121 ms (printing 4.357 ms): 640 MB/s of input (10312758 bytes), 43.9 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-prefix28tightchunks config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:03:14+00:00 codex-117-acceptance: bash /home/david/buster-fast-bench/codex-117-01a16812/window-run.sh taskset -c 2 /home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/build/compiler benchmark-preprocessor --defines /home/david/buster-fast-bench/preprocessor-corpora-astra-01a158dd/libc
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.875 ms   42.54 cycles/input token   74.82 cycles/output token  133.10 instructions/input token  IPC 3.13
+               read 5.5%  lex 20.3%  refine 14.4%  directives 2.6%  main loop 57.2%
+               read 0.653 ms  lex 2.403 ms  refine 1.711 ms  directives 0.307 ms  main loop 6.792 ms
+             then the release 0.427 ms
+             -E -P with printing 16.191 ms (printing 4.338 ms): 637 MB/s of input (10312758 bytes), 43.7 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-maskprobe config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.687 ms   41.02 cycles/input token   72.15 cycles/output token  131.40 instructions/input token  IPC 3.20
+               read 5.7%  lex 20.8%  refine 14.0%  directives 2.5%  main loop 56.9%
+               read 0.670 ms  lex 2.431 ms  refine 1.640 ms  directives 0.294 ms  main loop 6.655 ms
+             then the release 0.451 ms
+             -E -P with printing 15.972 ms (printing 4.271 ms): 646 MB/s of input (10312758 bytes), 44.3 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-prefix16 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.782 ms   41.37 cycles/input token   72.76 cycles/output token  132.75 instructions/input token  IPC 3.21
+               read 5.7%  lex 20.5%  refine 14.5%  directives 2.5%  main loop 56.8%
+               read 0.671 ms  lex 2.421 ms  refine 1.705 ms  directives 0.292 ms  main loop 6.700 ms
+             then the release 0.459 ms
+             -E -P with printing 16.034 ms (printing 4.260 ms): 643 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-prefix28tight config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:05:08+00:00 CI job of buster14a/buster (run 39966548752, worker 2890221)
+  title: 9700X test / test: #339: Add builtin semantic actions and baseline runtime adapters
+  link: https://github.com/buster14a/buster/actions/runs/39966548752/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/339
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.918 ms   42.11 cycles/input token   74.07 cycles/output token  132.91 instructions/input token  IPC 3.16
+               read 5.7%  lex 20.1%  refine 15.0%  directives 2.4%  main loop 56.8%
+               read 0.673 ms  lex 2.399 ms  refine 1.785 ms  directives 0.289 ms  main loop 6.767 ms
+             then the release 0.498 ms
+             -E -P with printing 16.188 ms (printing 4.258 ms): 637 MB/s of input (10312758 bytes), 43.7 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-prefix16chunks config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.745 ms   41.97 cycles/input token   73.81 cycles/output token  132.93 instructions/input token  IPC 3.17
+               read 5.6%  lex 20.4%  refine 14.0%  directives 2.6%  main loop 57.3%
+               read 0.658 ms  lex 2.396 ms  refine 1.642 ms  directives 0.308 ms  main loop 6.726 ms
+             then the release 0.423 ms
+             -E -P with printing 16.120 ms (printing 4.367 ms): 640 MB/s of input (10312758 bytes), 43.9 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-prefix28tightchunks config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.762 ms   42.14 cycles/input token   74.12 cycles/output token  133.10 instructions/input token  IPC 3.16
+               read 5.5%  lex 20.3%  refine 14.5%  directives 2.6%  main loop 57.1%
+               read 0.649 ms  lex 2.390 ms  refine 1.704 ms  directives 0.306 ms  main loop 6.707 ms
+             then the release 0.418 ms
+             -E -P with printing 16.103 ms (printing 4.343 ms): 640 MB/s of input (10312758 bytes), 43.9 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-ahead2 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.830 ms   41.42 cycles/input token   72.85 cycles/output token  131.94 instructions/input token  IPC 3.19
+               read 5.6%  lex 20.4%  refine 14.1%  directives 2.4%  main loop 57.5%
+               read 0.666 ms  lex 2.402 ms  refine 1.661 ms  directives 0.288 ms  main loop 6.781 ms
+             then the release 0.490 ms
+             -E -P with printing 16.150 ms (printing 4.322 ms): 639 MB/s of input (10312758 bytes), 43.8 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-prefix16 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.876 ms   41.68 cycles/input token   73.31 cycles/output token  132.75 instructions/input token  IPC 3.18
+               read 5.7%  lex 20.4%  refine 14.5%  directives 2.4%  main loop 57.0%
+               read 0.677 ms  lex 2.422 ms  refine 1.726 ms  directives 0.288 ms  main loop 6.764 ms
+             then the release 0.494 ms
+             -E -P with printing 16.180 ms (printing 4.300 ms): 637 MB/s of input (10312758 bytes), 43.7 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-prefix28tight config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:08:50+00:00 CI job of buster14a/buster (run 39966976824, worker 2938825)
+  title: 9700X test / test: #325: Add selective function and object emission planner (#129)
+  link: https://github.com/buster14a/buster/actions/runs/39966976824/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/325
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:11:42+00:00 CI job of buster14a/buster (run 39966656690, worker 2972845)
+  title: 9700X test / test: Merge pull request #315 from buster14a/codex/parser-fragments-104-107
+  link: https://github.com/buster14a/buster/actions/runs/39966656690/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:18:02+00:00 CI job of buster14a/buster (run 39966874018, worker 3029118)
+  title: 9700X test / test: #344: Add independent prefix readers with source-token leaf cursors
+  link: https://github.com/buster14a/buster/actions/runs/39966874018/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/344
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:20:55+00:00 CI job of buster14a/buster (run 39966911570, worker 3064292)
+  title: 9700X test / test: #319: Retain source-position environments and publish checker histories (#113)
+  link: https://github.com/buster14a/buster/actions/runs/39966911570/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/319
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:24:02+00:00 CI job of buster14a/buster (run 39967186098, worker 3099894)
+  title: 9700X test / test: #345: Derive native fixed-frame CFI from Tier 0 records
+  link: https://github.com/buster14a/buster/actions/runs/39967186098/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/345
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:26:54+00:00 CI job of buster14a/buster (run 39967494385, worker 3135353)
+  title: 9700X test / test: #343: Resolve retained function-body names independently (#113)
+  link: https://github.com/buster14a/buster/actions/runs/39967494385/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/343
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:30:00+00:00 CI job of buster14a/buster (run 39969344801, worker 3171657)
+  title: 9700X test / test: Merge pull request #344 from buster14a/codex/fragment-consumer-106
+  link: https://github.com/buster14a/buster/actions/runs/39969344801/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:36:22+00:00 CI job of buster14a/buster (run 39970399295, worker 3228948)
+  title: 9700X test / test: Merge PR #343: resolve body names independently
+  link: https://github.com/buster14a/buster/actions/runs/39970399295/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:42:58+00:00 CI job of buster14a/buster (run 39971923665, worker 3287470)
+  title: 9700X test / test: #328: Add transactional pooling for eligible foreign string sections
+  link: https://github.com/buster14a/buster/actions/runs/39971923665/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/328
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:46:05+00:00 CI job of buster14a/buster (run 39972060857, worker 3324573)
+  title: 9700X test / test: Merge PR #345: derive optional native fixed-frame CFI
+  link: https://github.com/buster14a/buster/actions/runs/39972060857/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:52:41+00:00 CI job of buster14a/buster (run 39972395991, worker 3382627)
+  title: 9700X test / test: #347: Add checking for Clang builtin descriptors and target features
+  link: https://github.com/buster14a/buster/actions/runs/39972395991/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/347
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.895 ms   41.82 cycles/input token   73.55 cycles/output token  132.91 instructions/input token  IPC 3.18
+               read 5.6%  lex 20.2%  refine 14.9%  directives 2.4%  main loop 56.9%
+               read 0.667 ms  lex 2.399 ms  refine 1.766 ms  directives 0.288 ms  main loop 6.770 ms
+             then the release 0.494 ms
+             -E -P with printing 16.136 ms (printing 4.235 ms): 639 MB/s of input (10312758 bytes), 43.8 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-prefix16chunks config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:55:33+00:00 codex-builtins-148: clang -O3 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -Wno-unused-function -I./composition/src ./helper-tier1-math-148.c -pthread -ldl -o ./helper-tier1-math-148
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.733 ms   41.93 cycles/input token   73.74 cycles/output token  132.93 instructions/input token  IPC 3.17
+               read 5.6%  lex 20.4%  refine 13.9%  directives 2.6%  main loop 57.5%
+               read 0.654 ms  lex 2.388 ms  refine 1.634 ms  directives 0.307 ms  main loop 6.736 ms
+             then the release 0.419 ms
+             -E -P with printing 16.083 ms (printing 4.358 ms): 641 MB/s of input (10312758 bytes), 44.0 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-prefix28tightchunks config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.832 ms   42.44 cycles/input token   74.64 cycles/output token  133.10 instructions/input token  IPC 3.14
+               read 5.5%  lex 20.3%  refine 14.5%  directives 2.6%  main loop 57.2%
+               read 0.651 ms  lex 2.396 ms  refine 1.710 ms  directives 0.307 ms  main loop 6.755 ms
+             then the release 0.421 ms
+             -E -P with printing 16.153 ms (printing 4.323 ms): 638 MB/s of input (10312758 bytes), 43.8 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-ahead2 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:56:56+00:00 codex-117-acceptance: bash /home/david/buster-fast-bench/codex-117-01a16812/window-run.sh taskset -c 2 /home/david/buster-fast-bench/codex-117-01a16812/candidate-9b70ee7/build/compiler benchmark-preprocessor --guard-cost -target x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem /home/david/buster-fast-bench/preprocessor-corpora-astra-01a158dd/headers/usr/lib/clang/23/include -isystem /home/david/buster-fast-bench/preprocessor-corpora-astra-01a158dd/headers/usr/local/include -isystem /home/david/buster-fast-bench/preprocessor-corpora-astra-01a158dd/headers/usr/include -isystem /home/david/buster-fast-bench/codex-117-01a16812/main-headers-v1/usr/include -I /home/david/buster-fast-bench/codex-117-01a16812/base-635434f2/src -fwrapv -funsigned-char /home/david/buster-fast-bench/codex-117-01a16812/base-635434f2/src/buster/compiler/main.c
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.756 ms   41.33 cycles/input token   72.70 cycles/output token  131.94 instructions/input token  IPC 3.19
+               read 5.6%  lex 20.7%  refine 14.1%  directives 2.5%  main loop 57.2%
+               read 0.661 ms  lex 2.428 ms  refine 1.653 ms  directives 0.294 ms  main loop 6.722 ms
+             then the release 0.454 ms
+             -E -P with printing 16.024 ms (printing 4.264 ms): 644 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-maskprobe config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:57:06+00:00 codex-linker-streaming88: perf stat -e cycles,instructions -x, -o streaming-dynamic-n64-l1-new-1-counters.csv /home/david/buster-fast-bench/codex-linker-tls85/tls85-measure taskset -c 2 ./streaming-control --kind dynamic --functions 64 --lanes 1 --runs 41 --observe
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.803 ms   41.33 cycles/input token   72.69 cycles/output token  131.40 instructions/input token  IPC 3.18
+               read 5.7%  lex 20.6%  refine 13.9%  directives 2.5%  main loop 57.3%
+               read 0.669 ms  lex 2.429 ms  refine 1.638 ms  directives 0.294 ms  main loop 6.757 ms
+             then the release 0.482 ms
+             -E -P with printing 16.095 ms (printing 4.289 ms): 641 MB/s of input (10312758 bytes), 43.9 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+ab: done, 0 failed runs

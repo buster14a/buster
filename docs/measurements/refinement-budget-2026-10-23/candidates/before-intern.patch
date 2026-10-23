@@ -1,0 +1,37 @@
+--- a/src/buster/compiler/c_intern.c
++++ b/src/buster/compiler/c_intern.c
+@@ -36,4 +36,2 @@
+-// chunks don't cancel either. A final AES round mixes the complete folded state before its high qword is discarded:
+-// without it, sparse changes in two lanes can cancel in the low qword alone. The hash is the low qword of that round.
+-// intern_hash_bytes computes it 64 bytes at a time, and intern_hash_vector from a spelling of up to 64 bytes that one
+-// masked load read (zero past
++// chunks don't cancel either. The hash is the low qword of the state. intern_hash_bytes computes
++// it 64 bytes at a time, and intern_hash_vector from a spelling of up to 64 bytes that one masked load read (zero past
+@@ -502 +500 @@
+-// qword. A final AES round mixes the complete state, whose low qword is the hash.
++// qword. The hash is the low qword of the state.
+@@ -527 +525 @@
+-    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(state, _mm_setzero_si128()));
++    return (uint64_t)_mm_cvtsi128_si64(state);
+@@ -547 +545 @@
+-// The hash of a spelling of up to 64 bytes in `v`, zero past its length: one chunk, then the final mixing round.
++// The hash of a spelling of up to 64 bytes in `v`, zero past its length: one chunk.
+@@ -550 +548 @@
+-    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(intern_fold(intern_with_length(v, length)), _mm_setzero_si128()));
++    return (uint64_t)_mm_cvtsi128_si64(intern_fold(intern_with_length(v, length)));
+@@ -565,3 +563,3 @@
+-// three-way XOR, with `zero_lanes` (intern_hash_zero_lanes) for the zero lanes 2 and 3. A final AES round mixes the four
+-// folds before their low qwords are used. This replaces a fold's four shuffles and XORs per spelling, and half the
+-// per-lane rounds. `*firsts` gets the first lanes: spelling i's first 16 bytes in lane i.
++// three-way XOR, with `zero_lanes` (intern_hash_zero_lanes) for the zero lanes 2 and 3. That replaces a fold's four
++// shuffles and XORs per spelling, and half the rounds. `*firsts` gets the first lanes: spelling i's first 16 bytes in
++// lane i.
+@@ -578 +576 @@
+-    return _mm512_aesenc_epi128(_mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96), zero);
++    return _mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96);
+@@ -595 +593 @@
+-// later chunks chained, then one mixing round before keeping the low qword.
++// later chunks chained.
+@@ -604 +602 @@
+-    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(state, _mm_setzero_si128()));
++    return (uint64_t)_mm_cvtsi128_si64(state);
