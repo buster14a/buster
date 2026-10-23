@@ -167,6 +167,25 @@ designs and the compilers already built this way.
   allocation and the parser handoff. `test-types` also checks GNU machine-mode
   type actions. [The GNU extension guide](docs/c-gnu-extensions.md) records
   the source-checker/lowering work still required before #147 can close.
+- Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
+  consumer connects required locations, allocation, frames and spill/remat
+  records. Bounded direct scalar calls preserve live caller registers and
+  publish symbolic CALL references; indirect/variadic/wide-ABI calls still
+  refuse explicitly. Run `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`
+  and `test-tier1-pipeline --cross-check` for bounded typed-stream/native
+  validation. `test-tier1-model` checks the emitted-case measurement reader;
+  `measure-tier1-model --manifest PATH --verify` constructs its eligible
+  experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)
+  for supported inputs and the complete C-source acceptance still pending.
+
+- The shared IR optimizers provide SCCP, dead-code/CFG cleanup, value numbering
+  and conservative loop-invariant motion, private-field replacement and bounded
+  translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
+  `test-ir-sroa` and `test-ir-inline` verify transformations against independent
+  semantic fixtures and the upstream SSA promoter. `benchmark-ir-optimize`
+  and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
+  [The optimization guide](docs/ir-optimization.md) records supported inputs
+  and the source-corpus and target measurements still required for #139.
 
 - `test-differential-harness` validates the Csmith/YARPGen harness with original
   fixtures. `test-differential` requires explicit compiler/tier configuration
@@ -335,6 +354,16 @@ designs and the compilers already built this way.
   `dataflow_test.c` provides `test-dataflow` and `dataflow_benchmark.c`
   provides `benchmark-dataflow`.
   `docs/dataflow.md` records the contracts and 9700X measurements.
+- `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
+  shared dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
+  predecessor-reading scalar twin and redundant-phi SCC cleanup. `test-ssa`
+  checks both against an all-in-memory path interpreter and the SSA verifier;
+  `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic
+  CFGs, including analysis and allocation. `docs/ssa.md` records the view's
+  contract. `ssa_ir.c` adapts shared IR slots, rebuilds every operand form and
+  verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
+  and both promoted forms. Complete source-corpus/Tier 1 acceptance for #134
+  still needs the checker and downstream pipeline.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
   32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
@@ -589,6 +618,17 @@ designs and the compilers already built this way.
   `tier0_test.c` holds `test-tier0` and `tier0_benchmark.c` provides
   `benchmark-backend`. `docs/tier0.md` has the contract, the design and the
   9700X measurements.
+- `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
+  columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
+  (#131). `ir_lower.c` lowers the existing `Tier0Function` stream into the
+  all-in-memory form for SSA promotion. `test-ir` checks independent fixtures,
+  guarded columns, malformed inputs and allocation rollback; `test-ir-lowering`
+  also executes generated IR against the typed-stream interpreter, including
+  calls and global-memory effects. `benchmark-ir` measures verification and
+  derived-array rebuilding on synthetic functions. `benchmark-ir-lowering`
+  measures the available typed-stream producer through output verification.
+  [The IR guide](docs/ir.md) records the producer/consumer contract and the
+  source-corpus, SSA/Tier 1 and SQLite bytes/token acceptance still pending.
 - `src/buster/compiler/call_graph.c` is the call graph check, the coding
   style's rule against recursion checked mechanically: `check-call-graph`
   reads the LLVM IR of the translation units `build.sh` compiles, builds their
@@ -740,6 +780,10 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
 ./build/compiler benchmark-backend
+./build/compiler test-ir
+./build/compiler test-ir-lowering
+./build/compiler benchmark-ir
+./build/compiler benchmark-ir-lowering
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
@@ -3777,3 +3821,33 @@ one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
 each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
+
+## IR tests and benchmarks
+
+`./build/compiler test-ir [--seed N] [--count N]` checks the arena-backed
+representation, both verifier paths, compact CFG/use arrays and stable printer.
+Independent fixtures cover operand roles, conversions, phi edges and dominance;
+guard pages cover instruction columns and vector tails. Malformed metadata,
+u32 limits, allocation rollback and adversarial switch cases are rejected or
+handled without relying on twin agreement alone. The default random count is
+64; `--count 1024` expands the seeded mutation cases.
+
+`./build/compiler test-ir-lowering [--seed N] [--count N]` lowers generated
+typed programs through both paths, compares every column and verifies each
+function. A test-only executor with explicit call frames compares results and
+global-memory effects with the existing typed-stream interpreter. Targeted
+fixtures exercise conditional joins, entry-zero backedges, narrow shifts, wide
+pointer scales, guarded source tails and transactional failures. The default
+count is 32 programs. It does not supply the production interpreter of #176.
+
+`./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
+scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
+builders on small and large synthetic functions. `benchmark-ir-lowering
+[--seed N] [--passes N] [--only scalar|vector] [--after-scalar MS]` measures
+the complete available typed-stream-to-verified-IR path on generated mixed
+programs. Both require optimized builds, calibrate samples to at least 2 ms,
+rotate variant order and report 21-pass medians by default. TSC ticks are
+labeled separately from core cycles. The 9700X workflow runs the tests and
+pins each benchmark to one allowed CPU, both normally and after 200 ms of
+scalar work before each vector sample. [The guide](docs/ir.md) records
+interfaces, measurement scope and outstanding source-corpus acceptance.
