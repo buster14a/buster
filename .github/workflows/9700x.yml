@@ -5,17 +5,27 @@ permissions:
   contents: read
 jobs:
   evaluate:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Set up and record host
+      - name: Install Clang 23
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /usr/share/keyrings
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /usr/share/keyrings/llvm.asc > /dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm23.list
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-23 lld-23
+          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
+      - name: Record host and set up pinned linkers
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evaluation/tooling evaluation/results
           uname -a | tee evaluation/results/host.txt
-          lscpu >> evaluation/results/host.txt
+          lscpu | tee -a evaluation/results/host.txt
           cat /proc/meminfo | head -5 >> evaluation/results/host.txt
           clang --version | tee evaluation/results/clang.txt
           ld --version | head -1 | tee evaluation/results/system-linker.txt
@@ -26,19 +36,67 @@ jobs:
           echo '641265506a7c06cfb03181b8916ab663ec8407855db6d4db7f8450667d105283  evaluation/tooling/wild.tar.gz' | sha256sum -c -
           tar xzf evaluation/tooling/wild.tar.gz -C evaluation/tooling
           find evaluation/tooling -type f -executable
-          
       - name: Compile frozen compiler objects
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evaluation/objects
-          # Preserve exactly the objects of this frozen build for every candidate.
-          sed 's@object_directory="$(mktemp -d)"@object_directory="$PWD/evaluation/objects"@; /temporary+=("$object_directory")/d' build.sh > evaluation/build-frozen.sh
+          # Link measurements use the production ISA even if this hosted CPU cannot execute it.
+          sed 's@object_directory="$(mktemp -d)"@object_directory="$PWD/evaluation/objects"@; /temporary+=("$object_directory")/d; s/-march=native/-march=znver5 -D_GNU_SOURCE/' build.sh > evaluation/build-frozen.sh
           bash evaluation/build-frozen.sh
           find evaluation/objects -name '*.o' -print0 | sort -zV | xargs -0 sha256sum > evaluation/results/objects.sha256
-          ls -l build/compiler | tee evaluation/results/compiler-size.txt
-          build/compiler test-link
-          
+      - name: Compare external linkers
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -O2 -Wall -Wextra -Werror tools/linker_measure.c -o evaluation/measure
+          mold="$PWD/evaluation/tooling/mold-3.0.0-x86_64-linux/bin/mold"
+          wild="$PWD/evaluation/tooling/wild-linker-0.10.0-x86_64-unknown-linux-gnu/wild"
+          "$mold" --version | tee evaluation/results/versions.txt
+          "$wild" --version | tee -a evaluation/results/versions.txt
+          ld.lld --version | tee -a evaluation/results/versions.txt
+          mapfile -d '' objects < <(find evaluation/objects -name '*.o' -print0 | sort -zV)
+          echo 'label,round,ns,exit' > evaluation/results/samples.csv
+          for pass in 1 2 3 4 5; do
+              order=(system wild mold lld)
+              if [ "$((pass % 2))" = 0 ]; then order=(lld mold wild system); fi
+              for linker in "${order[@]}"; do
+                  flags=()
+                  case "$linker" in
+                      mold) flags=("--ld-path=$mold");;
+                      wild) flags=("--ld-path=$wild");;
+                      lld) flags=("--ld-path=$(command -v ld.lld)");;
+                  esac
+                  evaluation/measure time evaluation/results/samples.csv "compiler-link-$linker-p$pass" 7 0 clang "${flags[@]}" "${objects[@]}" -o "evaluation/compiler-$linker" | tee -a evaluation/results/summary.txt
+              done
+          done
+          for linker in system wild mold lld; do
+              flags=()
+              case "$linker" in
+                  mold) flags=("--ld-path=$mold");;
+                  wild) flags=("--ld-path=$wild");;
+                  lld) flags=("--ld-path=$(command -v ld.lld)");;
+              esac
+              cp "evaluation/compiler-$linker" evaluation/first
+              clang "${flags[@]}" "${objects[@]}" -o "evaluation/compiler-$linker"
+              cmp evaluation/first "evaluation/compiler-$linker"
+              stat -c "$linker %s" "evaluation/compiler-$linker" | tee -a evaluation/results/sizes.txt
+              readelf -W -l -d -n "evaluation/compiler-$linker" > "evaluation/results/elf-$linker.txt"
+              objcopy --dump-section .text="evaluation/results/text-$linker.bin" "evaluation/compiler-$linker"
+          done
+          sha256sum evaluation/results/text-*.bin | tee evaluation/results/text.sha256
+          sha256sum -c evaluation/results/objects.sha256
+          if grep -q 'avx512vbmi2' /proc/cpuinfo; then
+              for linker in system wild mold lld; do
+                  for test in test-link test-object-writer test-x86-encoder test-lexer; do
+                      "evaluation/compiler-$linker" "$test" > "evaluation/results/$test-$linker.txt"
+                  done
+                  evaluation/measure time evaluation/results/samples.csv "compiler-startup-$linker" 51 1 "evaluation/compiler-$linker" -unknown 2> /dev/null | tee -a evaluation/results/summary.txt
+                  evaluation/measure time evaluation/results/samples.csv "compiler-runtime-$linker" 11 0 "evaluation/compiler-$linker" --scalar src/buster/compiler/main.c | tee -a evaluation/results/summary.txt
+              done
+          else
+              echo 'Native compiler execution unavailable: hosted CPU lacks required AVX-512. No compiler runtime performance claim.' | tee evaluation/results/runtime-limitation.txt
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
