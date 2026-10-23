@@ -997,6 +997,8 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
         .instruction_count = 123,
         .block_count = 17,
     };
+    void* incoming = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ir_lower_test_expect(tally, incoming != MAP_FAILED, "protected incoming variadic page", 0, 0);
     // Nonzero marks, so that a rollback to zero would show.
     const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
     ir_lower_test_expect(tally, ready, "local role arenas", 0, 0);
@@ -1013,9 +1015,9 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
         // every local, and a bit past them.
         const uint8_t roles[] =
         {
-            0x02,
-            0x04,
-            0x08,
+            BUSTER_TYPED_LOCAL_VA_LIST,
+            BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA,
+            BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA,
             0x10,
             0x80
         };
@@ -1041,7 +1043,7 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
         // earlier count and pointer checks keep their precedence.
         local_flags[0] = 0;
         local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-        local_flags[2] = 0x02;
+        local_flags[2] = BUSTER_TYPED_LOCAL_VA_LIST;
         source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
         check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
         ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT, "count limit precedes local roles", 0, vector);
@@ -1056,6 +1058,35 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
         arena_pop_to(&output, output_mark);
         source.local_count = 3;
         local_flags[2] = 0;
+        // An incoming variadic frame is refused by its pointer alone: it points
+        // at a PROT_NONE page, so a read of it faults. With and without role
+        // locals, with no locals or entries, and after the count check.
+        if (incoming != MAP_FAILED)
+        {
+            source.incoming_variadic = (const AbiCall*)incoming;
+            for (uint32_t shape = 0; shape < 3; shape += 1)
+            {
+                local_flags[2] = shape == 1 ? BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA | BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+                source.count = shape == 2 ? 0 : 2;
+                source.local_count = shape == 2 ? 0 : 3;
+                result = preserved;
+                check = ir_lower_typed_path(&source, shape == 2 ? IR_VOID : IR_I64, 1, &output, &scratch, &result, vector != 0);
+                ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == BUSTER_IR_NONE && output.length == output_mark &&
+                                                scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                                     "incoming variadic frame refused without reading it", shape, vector);
+            }
+            source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
+            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT, "count limit precedes the incoming variadic frame", 0, vector);
+            source.count = 2;
+            source.local_count = 3;
+            local_flags[2] = 0;
+            source.incoming_variadic = 0;
+        }
+    }
+    if (incoming != MAP_FAILED)
+    {
+        munmap(incoming, 4096);
     }
     arena_release(&output);
     arena_release(&scratch);

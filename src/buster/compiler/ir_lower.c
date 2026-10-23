@@ -742,10 +742,18 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     {
         check.error = IR_ERROR_STRUCTURE;
     }
-    // A local flag other than ADDRESS_TAKEN is a frame role (an incoming
-    // variadic anchor or a va_list object) that this adapter doesn't model:
-    // lowering it as an ordinary slot would size and place it wrongly, so it
-    // is refused before the stream is validated or anything is allocated.
+    // An incoming variadic frame (its pointer compared, never read) and a local
+    // flag other than ADDRESS_TAKEN (BUSTER_TYPED_LOCAL_ADDRESS_ONLY's anchors
+    // and va_list objects, or a later role) are frame state this adapter
+    // doesn't model: lowering a role as an ordinary slot would size and place
+    // it wrongly, so both are refused before the stream is validated or
+    // anything is allocated.
+    if (check.error == IR_OK && input->incoming_variadic != 0)
+    {
+        check.error = IR_ERROR_METADATA;
+        check.instruction = BUSTER_IR_NONE;
+        check.detail = BUSTER_IR_NONE;
+    }
     for (uint32_t l = 0; check.error == IR_OK && l < input->local_count; l += 1)
     {
         if ((input->local_flags[l] & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0)
