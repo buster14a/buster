@@ -60,7 +60,7 @@ explicit end marker. Grouping nodes are transparent. Type-name and
 statement-expression syntax remains available through parser-subtree handles.
 The test representation retains cold syntax metadata so that stripping or
 mapping punctuation can be checked exactly. Attribute token trees remain with
-their declarations in ordinary postorder, including nested attribute arguments.
+their statements or declarations in ordinary postorder, including nested arguments.
 Implicit-int declarator grouping in C89 is declaration syntax, not an expression.
 
 Each published expression records the exact raw completed subtree immediately
@@ -128,6 +128,19 @@ state and test-event allocations separately. A root and token ledger rejects
 duplicate visits; bounded continuation helpers save and restore leaf cursors
 within retained opaque subtrees.
 
+The frozen reader at `ef9b34bbab942f5a14de0e2c127af305d67dab53` passed native and
+ASan/UBSan/LeakSanitizer tests on the locked 9700X, pinned to CPU 2, using the
+corpus identities recorded below. All three payload capacities and all four reader modes passed: SQLite
+has 53,349 expressions and libc has 24,764. Per capacity, those four modes
+perform 213,396 SQLite traversals and 99,056 libc traversals, with identical
+ordinary-tree events and expanded-token payload handles. The 275 parser
+snippets (85 accepted, 190 rejected), 41 dedicated fixtures, four 100,000-level
+stress cases, six malformed inputs and 57 reader-unit checks also passed.
+The new attributed-statement fixtures retain exact raw publication roots and
+separate C89 declaration controls. Native and sanitizer accounting rows match
+exactly, with no sanitizer diagnostics. The linked qualification report records
+binary/source identities and the complete reader allocation counters.
+
 These are syntax events. A reference retains a type or block subtree identity,
 and attachment retains the raw root envelope. The readers do not yet perform
 context-sensitive semantic entry, transparent-alias publication or the tagged
@@ -155,6 +168,11 @@ Every payload size passed with zero failures. The
 [qualification report](https://github.com/buster14a/buster/pull/315#issuecomment-6364241816)
 records input and binary hashes, options, complete counters and validation
 status. These observations are correctness and storage accounting, not timings.
+
+Producer `dfdcf0fe5e45baf3e5c4823364d73eb77b9656fe`, incorporating the later
+parser integrations and attributed-statement oracle controls, passed the same
+complete corpora in native and ASan/UBSan/LeakSanitizer builds. Its corpus
+counts and storage rows match those below; native and sanitizer rows agree.
 
 | Corpus | Operator payload | Fragments/expression | Position occupancy | Operator occupancy | Operator bytes copied/reduction | Next-field bytes written/reduction | Peak live hot bytes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
