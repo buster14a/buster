@@ -512,6 +512,20 @@ and `__VA_OPT__` with its content. Each parameter gets a bit saying whether it
 is ever substituted expanded, so arguments only `#` or `##` use are never
 expanded.
 
+The producer `pp_compile_macro` also records literal runs for the consumer
+`pp_substitute`. A `PP_ITEM_TOKEN` uses its otherwise unused 16-bit
+`parameter` field for the number of consecutive literal items after it,
+capped at 65,535; `PPItem` remains eight bytes. A backwards pass computes
+every suffix once, including suffixes that substitution can enter after a
+paste. Items must be adjacent both in the recipe and in the defining file's
+token indices. Removing a `__VA_OPT__` closing parenthesis therefore ends a
+run, and substitution additionally checks its active optional-content bound.
+The metadata is immutable after successful compilation and lives with the
+macro's recipe; a failed compilation discards its items as before. Longer
+runs become copies of at most 65,536 tokens, without a new allocation or
+changing the scalar substitution loop. Measurements include this one-time
+producer cost as well as repeated substitution.
+
 ### The main loop
 
 The main loop (`pp_run_contexts`) reads from a stack of contexts. A context is
@@ -534,7 +548,12 @@ macro's expansion, an argument being expanded, or a directive's line):
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
-  go. Otherwise the main loop collects them a token at a time
+  go. At depth zero, if no opener precedes the first closer in a block, its
+  comma and closer masks already identify the separators and end; no depth
+  prefix scan is needed. A block with no parentheses at positive depth also
+  needs no prefix scan. Blocks containing nested transitions use the existing
+  scan, and the same masked input bounds, separator limits and fallback rules
+  apply to all paths. Otherwise the main loop collects them a token at a time
   (`pp_collect_step`), from the contexts below (popping the ones they exhaust,
   which enables their macros again), and runs any directive on the way. A
   directive among a macro's arguments is undefined behavior that clang accepts
@@ -2010,6 +2029,13 @@ C/header input alone, compares every one Clang accepts and records every
 rejection's reason. Musl is also checked under its upstream build configuration.
 
 ## Where the time goes
+
+The [cloud macro-batching comparison](measurements/preprocessor-cloud-2026-10-23/README.md)
+records the flat-argument shortcut and compiled literal-run metadata, including
+their construction cost, generated assembly, differential tests and complete
+paired samples. Its EPYC/Clang 18 observations support a literal-heavy workload
+gain; Ryzen 9700X/Clang 23 qualification and a general compiler-throughput gain
+remain unestablished.
 
 The benchmark counts what a run does (`PPStatistics`). On `sqlite3.c`, four
 counts match clang's own statistics (`-Xclang -print-stats`, in #117) exactly:

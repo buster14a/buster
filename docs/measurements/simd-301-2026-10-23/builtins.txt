@@ -1,0 +1,125 @@
+## run-1-conditioned-base-final.txt
+
+bit-mixed      vector 1.438 ns/row [1.384, 1.520] count=16384 after-scalar=100 ms
+overflow-mixed vector 3.013 ns/row [2.767, 3.333] count=16384 after-scalar=100 ms
+all-mixed      vector 2.362 ns/row [2.328, 2.536] count=16384 after-scalar=100 ms
+
+## run-1-conditioned-new-final.txt
+
+bit-mixed      vector 1.066 ns/row [1.049, 1.105] count=16384 after-scalar=100 ms
+overflow-mixed vector 2.834 ns/row [2.757, 2.974] count=16384 after-scalar=100 ms
+all-mixed      vector 2.129 ns/row [2.031, 2.374] count=16384 after-scalar=100 ms
+
+## run-1-default-base-final.txt
+
+bit-mixed      scalar 2.347 ns/row [2.042, 3.935] count=16384 after-scalar=0 ms
+bit-mixed      vector 1.496 ns/row [1.384, 1.908] count=16384 after-scalar=0 ms
+overflow-mixed scalar 6.393 ns/row [6.150, 6.742] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.873 ns/row [2.765, 2.951] count=16384 after-scalar=0 ms
+all-mixed      scalar 2.748 ns/row [2.594, 2.911] count=16384 after-scalar=0 ms
+all-mixed      vector 2.440 ns/row [2.316, 2.633] count=16384 after-scalar=0 ms
+
+## run-1-default-new-final.txt
+
+bit-mixed      scalar 2.168 ns/row [2.045, 2.290] count=16384 after-scalar=0 ms
+bit-mixed      vector 1.086 ns/row [1.048, 1.170] count=16384 after-scalar=0 ms
+overflow-mixed scalar 6.374 ns/row [6.126, 6.869] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.932 ns/row [2.835, 3.104] count=16384 after-scalar=0 ms
+all-mixed      scalar 2.692 ns/row [2.564, 2.961] count=16384 after-scalar=0 ms
+all-mixed      vector 2.101 ns/row [2.046, 2.175] count=16384 after-scalar=0 ms
+
+## run-1-isolated-base-final.txt
+
+bit-mixed      vector 1.448 ns/row [1.384, 1.589] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.813 ns/row [2.755, 2.912] count=16384 after-scalar=0 ms
+all-mixed      vector 2.459 ns/row [2.322, 2.578] count=16384 after-scalar=0 ms
+
+## run-1-isolated-new-final.txt
+
+bit-mixed      vector 1.101 ns/row [1.050, 1.173] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.880 ns/row [2.767, 3.064] count=16384 after-scalar=0 ms
+all-mixed      vector 2.069 ns/row [2.018, 2.220] count=16384 after-scalar=0 ms
+
+## run-2-conditioned-base-final.txt
+
+bit-mixed      vector 1.529 ns/row [1.416, 1.855] count=16384 after-scalar=100 ms
+overflow-mixed vector 2.951 ns/row [2.769, 3.283] count=16384 after-scalar=100 ms
+all-mixed      vector 2.422 ns/row [2.325, 2.732] count=16384 after-scalar=100 ms
+
+## run-2-conditioned-new-final.txt
+
+bit-mixed      vector 1.109 ns/row [1.064, 1.234] count=16384 after-scalar=100 ms
+overflow-mixed vector 2.861 ns/row [2.770, 3.007] count=16384 after-scalar=100 ms
+all-mixed      vector 2.094 ns/row [2.025, 2.254] count=16384 after-scalar=100 ms
+
+## run-2-default-base-final.txt
+
+bit-mixed      scalar 2.138 ns/row [2.076, 2.277] count=16384 after-scalar=0 ms
+bit-mixed      vector 1.432 ns/row [1.388, 1.622] count=16384 after-scalar=0 ms
+overflow-mixed scalar 6.395 ns/row [6.236, 6.768] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.847 ns/row [2.770, 2.933] count=16384 after-scalar=0 ms
+all-mixed      scalar 2.679 ns/row [2.595, 2.817] count=16384 after-scalar=0 ms
+all-mixed      vector 2.331 ns/row [2.313, 2.560] count=16384 after-scalar=0 ms
+
+## run-2-default-new-final.txt
+
+bit-mixed      scalar 2.149 ns/row [2.020, 2.324] count=16384 after-scalar=0 ms
+bit-mixed      vector 1.096 ns/row [1.047, 1.241] count=16384 after-scalar=0 ms
+overflow-mixed scalar 6.465 ns/row [6.248, 6.891] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.856 ns/row [2.747, 3.051] count=16384 after-scalar=0 ms
+all-mixed      scalar 2.805 ns/row [2.720, 3.064] count=16384 after-scalar=0 ms
+all-mixed      vector 2.060 ns/row [2.021, 2.234] count=16384 after-scalar=0 ms
+
+## run-2-isolated-base-final.txt
+
+bit-mixed      vector 1.414 ns/row [1.379, 1.514] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.857 ns/row [2.760, 2.945] count=16384 after-scalar=0 ms
+all-mixed      vector 2.398 ns/row [2.318, 2.566] count=16384 after-scalar=0 ms
+
+## run-2-isolated-new-final.txt
+
+bit-mixed      vector 1.074 ns/row [1.046, 1.190] count=16384 after-scalar=0 ms
+overflow-mixed vector 3.100 ns/row [2.773, 3.689] count=16384 after-scalar=0 ms
+all-mixed      vector 2.155 ns/row [2.079, 2.446] count=16384 after-scalar=0 ms
+
+## run-3-conditioned-base-final.txt
+
+bit-mixed      vector 1.412 ns/row [1.377, 1.509] count=16384 after-scalar=100 ms
+overflow-mixed vector 2.773 ns/row [2.758, 2.949] count=16384 after-scalar=100 ms
+all-mixed      vector 2.363 ns/row [2.325, 2.545] count=16384 after-scalar=100 ms
+
+## run-3-conditioned-new-final.txt
+
+bit-mixed      vector 1.154 ns/row [1.069, 1.308] count=16384 after-scalar=100 ms
+overflow-mixed vector 2.774 ns/row [2.753, 2.971] count=16384 after-scalar=100 ms
+all-mixed      vector 2.049 ns/row [2.011, 2.159] count=16384 after-scalar=100 ms
+
+## run-3-default-base-final.txt
+
+bit-mixed      scalar 2.161 ns/row [2.021, 2.271] count=16384 after-scalar=0 ms
+bit-mixed      vector 1.452 ns/row [1.385, 1.558] count=16384 after-scalar=0 ms
+overflow-mixed scalar 6.527 ns/row [6.281, 7.077] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.843 ns/row [2.774, 3.032] count=16384 after-scalar=0 ms
+all-mixed      scalar 2.709 ns/row [2.634, 2.859] count=16384 after-scalar=0 ms
+all-mixed      vector 2.388 ns/row [2.303, 2.798] count=16384 after-scalar=0 ms
+
+## run-3-default-new-final.txt
+
+bit-mixed      scalar 2.167 ns/row [2.006, 2.436] count=16384 after-scalar=0 ms
+bit-mixed      vector 1.062 ns/row [1.045, 1.164] count=16384 after-scalar=0 ms
+overflow-mixed scalar 6.653 ns/row [6.387, 7.518] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.923 ns/row [2.794, 3.173] count=16384 after-scalar=0 ms
+all-mixed      scalar 2.906 ns/row [2.664, 3.209] count=16384 after-scalar=0 ms
+all-mixed      vector 2.090 ns/row [2.015, 2.260] count=16384 after-scalar=0 ms
+
+## run-3-isolated-base-final.txt
+
+bit-mixed      vector 1.412 ns/row [1.381, 1.596] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.811 ns/row [2.756, 3.207] count=16384 after-scalar=0 ms
+all-mixed      vector 2.369 ns/row [2.316, 2.702] count=16384 after-scalar=0 ms
+
+## run-3-isolated-new-final.txt
+
+bit-mixed      vector 1.050 ns/row [1.039, 1.268] count=16384 after-scalar=0 ms
+overflow-mixed vector 2.808 ns/row [2.747, 3.156] count=16384 after-scalar=0 ms
+all-mixed      vector 2.062 ns/row [2.009, 2.201] count=16384 after-scalar=0 ms

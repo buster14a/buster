@@ -1,0 +1,75 @@
+CLOCK_MONOTONIC_RAW; Linux wait4 RSS in KiB; CPU 2; warmup pairs 3; measured pairs 31
+baseline argv: ["/workspace/scratch/61c60105fb18/baseline/build/compiler"] ["-E"] ["-P"] ["--clang-features"] ["--predefines"] ["/workspace/scratch/61c60105fb18/measurement/clang18-gnu17-native-predefines.h"] ["-std=gnu17"] ["-march=native"] ["-nostdinc"] ["-isystem"] ["/usr/lib/llvm-18/lib/clang/18/include"] ["-isystem"] ["/usr/include/x86_64-linux-gnu"] ["-isystem"] ["/usr/include"] ["-I"] ["/workspace/scratch/61c60105fb18/baseline/src"] ["/workspace/scratch/61c60105fb18/baseline/src/buster/compiler/main.c"]
+candidate argv: ["/workspace/scratch/61c60105fb18/measurement/final-compiler"] ["-E"] ["-P"] ["--clang-features"] ["--predefines"] ["/workspace/scratch/61c60105fb18/measurement/clang18-gnu17-native-predefines.h"] ["-std=gnu17"] ["-march=native"] ["-nostdinc"] ["-isystem"] ["/usr/lib/llvm-18/lib/clang/18/include"] ["-isystem"] ["/usr/include/x86_64-linux-gnu"] ["-isystem"] ["/usr/include"] ["-I"] ["/workspace/scraphase,round,order,variant,wall_ns,user_us,system_us,maxrss_kib,minor_faults,major_faults,exit_code,signal
+tch/61c60105fb18/baseline/src"] ["/workspace/scratch/61c60105fb18/baseline/src/buster/compiler/main.c"]
+warmup,1,1,baseline,119436421,102336,16833,131492,3144,0,0,0
+warmup,1,2,candidate,130684248,95690,34728,131472,3136,0,0,0
+warmup,2,1,candidate,113599374,93006,20391,132868,3039,0,0,0
+warmup,2,2,baseline,113160924,97511,15504,133124,3047,0,0,0
+warmup,3,1,baseline,115419204,99069,16161,131336,3132,0,0,0
+warmup,3,2,candidate,122543214,93249,29126,131484,3141,0,0,0
+sample,1,1,candidate,114439741,99617,14621,131416,3137,0,0,0
+sample,1,2,baseline,110421782,85345,24900,133048,3038,0,0,0
+sample,2,1,baseline,117559778,84757,32630,131296,3136,0,0,0
+sample,2,2,candidate,131640076,95248,36178,131244,3132,0,0,0
+sample,3,1,candidate,117267775,100229,16600,131220,3145,0,0,0
+sample,3,2,baseline,122590334,89376,33004,133068,3038,0,0,0
+sample,4,1,baseline,116787843,96783,19840,131360,3138,0,0,0
+sample,4,2,candidate,118001233,100986,16861,131448,3137,0,0,0
+sample,5,1,candidate,111735870,83473,28118,132876,3048,0,0,0
+sample,5,2,baseline,126663806,109745,16735,131424,3138,0,0,0
+sample,6,1,baseline,115990536,99778,16049,131404,3137,0,0,0
+sample,6,2,candidate,107268425,86973,19844,133064,3040,0,0,0
+sample,7,1,candidate,109956231,101732,8062,131416,3140,0,0,0
+sample,7,2,baseline,113366409,97479,15585,133008,3038,0,0,0
+sample,8,1,baseline,108093989,76354,31584,131424,3135,0,0,0
+sample,8,2,candidate,109051329,96775,12124,131472,3137,0,0,0
+sample,9,1,candidate,107436825,87291,20005,131332,3136,0,0,0
+sample,9,2,baseline,108221988,91866,16202,131424,3142,0,0,0
+sample,10,1,baseline,106954048,90705,16089,131172,3143,0,0,0
+sample,10,2,candidate,107562040,83181,24130,133032,3040,0,0,0
+sample,11,1,candidate,118250864,93191,24891,131392,3135,0,0,0
+sample,11,2,baseline,126262516,94898,31187,131324,3140,0,0,0
+sample,12,1,baseline,121826317,108628,13047,131412,3138,0,0,0
+sample,12,2,candidate,130813885,120773,9877,131416,3139,0,0,0
+sample,13,1,candidate,125032897,110607,14235,131348,3135,0,0,0
+sample,13,2,baseline,118113735,87472,30457,131364,3140,0,0,0
+sample,14,1,baseline,118199717,97442,20477,131404,3136,0,0,0
+sample,14,2,candidate,119472055,96092,23178,131224,3148,0,0,0
+sample,15,1,candidate,136877945,113125,23600,132876,3047,0,0,0
+sample,15,2,baseline,113400109,94326,18731,131352,3135,0,0,0
+sample,16,1,baseline,119955121,98727,21120,132952,3044,0,0,0
+sample,16,2,candidate,125130607,96239,28795,131412,3139,0,0,0
+sample,17,1,candidate,107246993,83794,23337,131312,3138,0,0,0
+sample,17,2,baseline,111992421,95949,15962,131360,3141,0,0,0
+sample,18,1,baseline,121569866,112429,9048,131172,3149,0,0,0
+sample,18,2,candidate,121375737,97829,23460,131284,3134,0,0,0
+sample,19,1,candidate,115393796,95287,19977,131480,3137,0,0,0
+sample,19,2,baseline,117910038,84589,33235,131236,3137,0,0,0
+sample,20,1,baseline,117624639,100729,16805,131424,3136,0,0,0
+sample,20,2,candidate,123807925,115642,8084,133064,3041,0,0,0
+sample,21,1,candidate,117780496,90157,27539,131288,3138,0,0,0
+sample,21,2,baseline,137282835,124985,12219,131364,3139,0,0,0
+sample,22,1,baseline,121977510,102218,19657,131296,3136,0,0,0
+sample,22,2,candidate,127203331,101542,25580,131368,3134,0,0,0
+sample,23,1,candidate,115713851,94879,20691,132968,3037,0,0,0
+sample,23,2,baseline,115151126,106908,8132,131408,3137,0,0,0
+sample,24,1,baseline,123883498,96547,27048,133004,3037,0,0,0
+sample,24,2,candidate,156360605,130383,25822,131464,3139,0,0,0
+sample,25,1,candidate,130545713,102567,27894,132856,3053,0,0,0
+sample,25,2,baseline,131318178,106920,24289,131364,3138,0,0,0
+sample,26,1,baseline,129486658,102574,26808,132996,3039,0,0,0
+sample,26,2,candidate,124705456,115864,8754,131348,3137,0,0,0
+sample,27,1,candidate,115324062,96469,18735,131416,3136,0,0,0
+sample,27,2,baseline,120338779,108055,12124,131356,3139,0,0,0
+sample,28,1,baseline,115901950,99573,16240,131068,3138,0,0,0
+sample,28,2,candidate,114032217,94488,19359,131316,3138,0,0,0
+sample,29,1,candidate,121963410,101843,19973,133132,3043,0,0,0
+sample,29,2,baseline,122810165,99028,23680,131296,3139,0,0,0
+sample,30,1,baseline,118628383,94482,24067,131488,3141,0,0,0
+sample,30,2,candidate,130475780,98525,31845,131260,3136,0,0,0
+sample,31,1,candidate,129808379,106659,23064,131416,3139,0,0,0
+baseline: wall_ms median=118.199717 p10=110.421782 p90=126.663806 min=106.954048 max=137.282835 rss_kib median=131364 min=131068 max=133068
+candidate: wall_ms median=118.250864 p10=107.562040 p90=130.813885 min=107.246993 max=156.360605 rss_kib median=131416 min=131220 max=133132
+candidate/baseline: median_wall_ratio=1.000433 paired_ratio_median=1.004887 paired_ratio_p10=0.936548 paired_ratio_p90=1.099870
+sample,31,2,baseline,126089339,103530,22459,131276,3137,0,0,0

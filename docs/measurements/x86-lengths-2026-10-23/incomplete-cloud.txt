@@ -1,0 +1,22 @@
+file: incomplete-ab-3-tier0-250-size_encode-after.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+file: incomplete-pair-ab-3-tier0-250-size_encode-before.log
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0
+benchmark-branch-sizing: seed 1, medians of 21 samples [p10, p90], round limit 4, after-scalar 0 ms; reading the clock and counters costs 20 ns, 0 cycles and 0 instructions
+tier0-250: 1049 functions in 117 groups, 262250 records, 29210 branches (a branch per 8.98 records), 4.08 bytes per record; 25.9% of the branches long, 2.11 rounds per function (at most 4), 0 with the worklist (0 evaluations)
+  size_encode              0.00 cycles per branch   0.000 per record  0.00 IPC;   5.040 ns per record [4.426, 6.629]
+file: incomplete-pair-scaling-1-4-after.log
+file: incomplete-pair-scaling-1-4-before.log
+row=tier0-mix workers=4 passes=200 seed=1 warmup=5 cpu_first=1 cpu_last=4 functions_per_worker=2883 records_per_worker=262219 encoded_bytes_per_worker=1064719 wall_ns=449473121 records=209775200 records/s=466713559.052 ns/record=2.142642 checksum=f010f908e5616720 reference=29cbeeb814da6666
+file: incomplete-pair-scaling-2-2-after.log
+file: incomplete-pair-scaling-2-2-before.log
+row=tier0-mix workers=2 passes=200 seed=1 warmup=5 cpu_first=1 cpu_last=2 functions_per_worker=2883 records_per_worker=262219 encoded_bytes_per_worker=1064719 wall_ns=356158014 records=104887600 records/s=294497374.415 ns/record=3.395616 checksum=14d1e44f78039ef0 reference=29cbeeb814da6666
+file: incomplete-pair-scaling-3-4-after.log
+file: incomplete-pair-scaling-3-4-before.log
+row=tier0-mix workers=4 passes=200 seed=1 warmup=5 cpu_first=1 cpu_last=4 functions_per_worker=2883 records_per_worker=262219 encoded_bytes_per_worker=1064719 wall_ns=406161319 records=209775200 records/s=516482466.909 ns/record=1.936174 checksum=f010f908e5616720 reference=29cbeeb814da6666
+file: incomplete-pair-scaling-4-2-after.log
+file: incomplete-pair-scaling-4-2-before.log
+row=tier0-mix workers=2 passes=200 seed=1 warmup=5 cpu_first=1 cpu_last=2 functions_per_worker=2883 records_per_worker=262219 encoded_bytes_per_worker=1064719 wall_ns=339649705 records=104887600 records/s=308811102.898 ns/record=3.238226 checksum=14d1e44f78039ef0 reference=29cbeeb814da6666
+file: incomplete-pair-scaling-5-1-after.log
+row=tier0-mix workers=1 passes=200 seed=1 warmup=5 cpu_first=2 cpu_last=2 functions_per_worker=2883 records_per_worker=262219 encoded_bytes_per_worker=1064719 wall_ns=224407073 records=52443800 records/s=233699407.505 ns/record=4.279001 checksum=b19b4c1a7d568a50 reference=29cbeeb814da6666
+file: incomplete-pair-scaling-5-1-before.log

@@ -1,0 +1,118 @@
+Cloud K6 ablation, 2026-10-23
+
+Host: AMD EPYC 9V74, AVX-512; Ubuntu Clang 18.1.3.
+Baseline: 1f1e116ad358bed8d5a97824b916908d7cb44e96.
+Input: frozen baseline main.c and included sources, 2,155,660 parser tokens.
+Input SHA-256: 24bbf3dd765eb8e1d84a9d9ba23304b6d1846b902214c6e28c0f2cb85d706270
+Every timing invocation used CPU 2 under /tmp/buster-simd-bench.lock.
+Hardware counters were unavailable; zero counter fields are not measurements.
+These are exploratory cloud timings, not the 9700X acceptance measurements.
+
+Variants in the raw log:
+old:    frozen baseline, parser-k6-benchmark-old
+refine: joint class table only, parser-k6-benchmark-refine (retained)
+ends:   32-column ends table only, parser-k6-benchmark-ends (rejected)
+both:   joint class and ends tables, parser-k6-benchmark (rejected)
+The ends and both prototypes were removed from the final source. Their raw
+timings are retained here to document the ablation, not as a shipping result.
+
+Retained binaries' SHA-256:
+old:    04bd4b5ec18bdd17e9ea0f1f9e5244731d424919b9eb001bc9596aef19d8985e
+refine: a83c61bb210236f2ba539bfa42c32ef8e5fe3d805355ce84e37a266f3fe157ad
+
+Reproduce the baseline and retained variant from the repository root, with
+Clang 18 available at the recorded path. This compiles the existing benchmark
+directly and overlays only c_parser.c on the frozen baseline; other changes
+in the PR do not enter the experiment. Use fresh scratch paths if these names
+already hold unrelated files. All generated files below are outside the repo.
+
+mkdir -p ../simd-frozen-src ../k6-refine-only-src/buster/compiler
+git archive 1f1e116ad358bed8d5a97824b916908d7cb44e96:src | tar -x -C ../simd-frozen-src
+cp src/buster/compiler/c_parser.c ../k6-refine-only-src/buster/compiler/c_parser.c
+cat > ../parser-k6-benchmark.c <<'EOF'
+#include "buster/compiler/c_parser_benchmark.c"
+int main(int argc, char** argv)
+{
+    return run_parser_benchmark(argc - 1, argv + 1);
+}
+EOF
+/usr/lib/llvm-18/bin/clang -O3 -march=native -mmwaitx -I../simd-frozen-src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -Wno-bitwise-instead-of-logical ../parser-k6-benchmark.c -o ../parser-k6-benchmark-old
+/usr/lib/llvm-18/bin/clang -O3 -march=native -mmwaitx -I../k6-refine-only-src -I../simd-frozen-src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -Wno-bitwise-instead-of-logical ../parser-k6-benchmark.c -o ../parser-k6-benchmark-refine
+/usr/lib/llvm-18/bin/clang -E -P -march=native -mmwaitx -I../simd-frozen-src ../simd-frozen-src/buster/compiler/main.c -o ../parser-k6-main.i
+sha256sum ../parser-k6-main.i
+flock /tmp/buster-simd-bench.lock bash -c '
+for trial in 1 2 3; do
+    for variant in old refine; do
+        printf "trial=%s variant=%s\n" "$trial" "$variant"
+        taskset -c 2 ../parser-k6-benchmark-$variant benchmark-parser --only vector-k6 --passes 7 --repeat 8 -nostdinc ../parser-k6-main.i
+    done
+done'
+
+The recorded ablation ran the four variants in old, ends, refine, both order
+for each of the three trials, using the same invocation flags shown above.
+The measured refinement overlay still contained an unused inline ends helper
+and a stale comment; removing them for the final source changes no emitted
+benchmark code or parser behavior.
+
+Raw output follows, verbatim:
+
+trial=1 variant=old
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 55.372 ms   3.211 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=1 variant=ends
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 57.015 ms   3.306 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=1 variant=refine
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 52.599 ms   3.050 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=1 variant=both
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 56.435 ms   3.272 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=2 variant=old
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 55.664 ms   3.228 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=2 variant=ends
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 51.442 ms   2.983 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=2 variant=refine
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 52.414 ms   3.039 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=2 variant=both
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 53.711 ms   3.115 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=3 variant=old
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 65.593 ms   3.804 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=3 variant=ends
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 54.717 ms   3.173 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=3 variant=refine
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 55.223 ms   3.202 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=3 variant=both
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+7 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector-k6                 58.776 ms   3.408 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%

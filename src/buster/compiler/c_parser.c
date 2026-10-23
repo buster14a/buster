@@ -985,6 +985,7 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(EXPECTED_BRACE_OR_COMMA, "expected '}' or ','") \
     X(EXTRANEOUS_CLOSING_BRACE, "extraneous closing brace ('}')") \
     X(FUNCTION_DEFINITION_NOT_ALLOWED, "function definition is not allowed here") \
+    X(FUNCTION_DEFINITION_TYPEDEF, "function definition declared 'typedef'") \
     X(EXPECTED_PARENTHESES_AROUND_TYPE_NAME, "expected parentheses around type name in %s expression") \
     X(NAMED_JUMP, "named '%s' is only supported in C2y") \
     X(ANONYMOUS_TAG_DECLARATION, "declaration of anonymous struct must be a definition") \
@@ -1237,8 +1238,11 @@ typedef enum ParseItemKind
     PARSE_ITEM_TOP_LEVEL_ASM,
     PARSE_ITEM_STATIC_ASSERT,
     PARSE_ITEM_DO_WHILE,
-    // In an initializer list: an initializer that started with a designator, so `=` comes before its value.
+    // An initializer started by a designator: `=` must precede its value unless it consists of one array subscript.
     PARSE_ITEM_DESIGNATOR,
+    PARSE_ITEM_ARRAY_DESIGNATOR,
+    // GNU's old-style `member: value` designator, whose colon precedes its value.
+    PARSE_ITEM_OLD_STYLE_DESIGNATOR,
 } ParseItemKind;
 
 typedef struct ParseFrame ParseFrame;
@@ -2403,7 +2407,14 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
         else if (kind == PARSE_KIND_L_SQUARE)
         {
             parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_OPERATOR, false, step);
-            frame->statement = PARSE_ITEM_DESIGNATOR;
+            frame->statement = PARSE_ITEM_ARRAY_DESIGNATOR;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON)
+        {
+            // GNU's old-style field designator names a member, even if an outer scope declares a typedef of that name.
+            step->role = PARSE_ROLE_MEMBER;
+            frame->mode = PARSE_MODE_OPERATOR;
+            frame->statement = PARSE_ITEM_OLD_STYLE_DESIGNATOR;
         }
         else if (kind == PARSE_KIND_R_BRACE)
         {
@@ -3291,6 +3302,17 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         {
             parse_scalar_error(parser, i, PARSE_MESSAGE_FUNCTION_DEFINITION_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
         }
+        else if (frame->flags & BUSTER_PARSE_FRAME_TYPEDEF)
+        {
+            // Clang points at the storage-class specifier, not the body. Search only this declaration's file-scope
+            // specifiers: the keyword may follow the type, or one inside an attribute may precede the real specifier.
+            uint32_t at = parser->item_begin;
+            while (at < i && (parser->kinds[at] != PARSE_KIND_TYPEDEF || parser->depths[at] != 0))
+            {
+                at += 1;
+            }
+            parse_scalar_error(parser, at < i ? at : i, PARSE_MESSAGE_FUNCTION_DEFINITION_TYPEDEF, BUSTER_PARSE_AT_TOKEN);
+        }
         else
         {
             parse_scalar_complete_declarator(parser, frame, true);
@@ -3570,6 +3592,16 @@ BUSTER_INLINE uint8_t parse_binary_role(uint8_t kind)
     return result;
 }
 
+// The first token of an initializer expression after GNU's single array designator without an '='.
+BUSTER_INLINE bool parse_kind_starts_initializer_value(uint8_t kind)
+{
+    return kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING ||
+           kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_MINUS || kind == PARSE_KIND_PLUS ||
+           kind == PARSE_KIND_EXCLAIM || kind == PARSE_KIND_TILDE || kind == PARSE_KIND_STAR || kind == PARSE_KIND_AMP ||
+           kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS || kind == PARSE_KIND_AMPAMP || kind == PARSE_KIND_EXTENSION ||
+           kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_GENERIC;
+}
+
 // In an expression, after an operand.
 static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
@@ -3579,10 +3611,12 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     const uint32_t flags = frame->flags;
     const bool conditional = (flags & BUSTER_PARSE_FRAME_CONDITIONAL) != 0;
     const bool initializer_list = group == PARSE_ROLE_OPEN_INITIALIZER || group == PARSE_ROLE_OPEN_COMPOUND_BODY;
-    const bool designator = frame->statement == PARSE_ITEM_DESIGNATOR && initializer_list;
+    const bool array_designator = frame->statement == PARSE_ITEM_ARRAY_DESIGNATOR && initializer_list;
+    const bool designator = initializer_list && (frame->statement == PARSE_ITEM_DESIGNATOR || array_designator);
     // A designator's subscript in an initializer list, where GNU's ranges `[1 ... 3]` may be.
     const bool designator_subscript = group == PARSE_ROLE_OPEN_SUBSCRIPT && parser->frame_count >= 2 &&
-                                      parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_DESIGNATOR;
+                                      (parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_DESIGNATOR ||
+                                       parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_ARRAY_DESIGNATOR);
     frame->flags &= ~BUSTER_PARSE_FRAME_NO_POSTFIX;
     if ((flags & BUSTER_PARSE_FRAME_NO_POSTFIX) && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_ARROW ||
                                                    kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS))
@@ -3615,6 +3649,20 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     {
         // An attribute's name is followed by its arguments, the next attribute or the list's end.
         parse_scalar_unexpected(parser, i, frame);
+    }
+    else if (initializer_list && frame->statement == PARSE_ITEM_OLD_STYLE_DESIGNATOR && kind == PARSE_KIND_COLON)
+    {
+        // GNU's `member: value`: treat ':' as the designator's assignment.
+        step->role = PARSE_ROLE_ASSIGN;
+        frame->mode = PARSE_MODE_INITIALIZER;
+        frame->statement = PARSE_ITEM_EXPRESSION;
+    }
+    else if (array_designator && parse_kind_starts_initializer_value(kind))
+    {
+        // GNU omits '=' after one `[index]`. Chained `[index].member` and `[index][index]` still require it.
+        frame->mode = PARSE_MODE_INITIALIZER;
+        frame->statement = PARSE_ITEM_EXPRESSION;
+        step->again = true;
     }
     else if (designator && kind != PARSE_KIND_EQUAL && kind != PARSE_KIND_PERIOD && kind != PARSE_KIND_L_SQUARE)
     {
@@ -3664,10 +3712,12 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     }
     else if (kind == PARSE_KIND_L_SQUARE)
     {
+        frame->statement = array_designator ? PARSE_ITEM_DESIGNATOR : frame->statement;
         parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_OPERATOR, false, step);
     }
     else if (kind == PARSE_KIND_PERIOD || (kind == PARSE_KIND_ARROW && !designator))
     {
+        frame->statement = designator ? PARSE_ITEM_DESIGNATOR : frame->statement;
         step->role = PARSE_ROLE_MEMBER_OPERATOR;
         frame->mode = PARSE_MODE_MEMBER;
     }
@@ -7156,7 +7206,8 @@ static void parse_check_body(ParseKernels* kernels, uint32_t body, uint8_t* reas
         const uint32_t at = kernels->node_depths[j];
         const uint8_t role = kernels->roles[j];
         done = at < depth || (at == depth && (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BODY));
-        fails = !done && at == depth && (role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_COMMA);
+        fails = !done && at == depth && (role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_COMMA ||
+                                         (role == PARSE_ROLE_SPECIFIER && kernels->vkinds[j] == PARSE_KIND_TYPEDEF));
         done |= fails;
     }
     kernels->flags[body] |= fails;
@@ -10349,9 +10400,10 @@ struct ParseCheckVectorTables
     uint8_t ends[512] __attribute__((aligned(64)));
     uint8_t class_bits[128] __attribute__((aligned(64)));
     uint8_t mode_bits[64] __attribute__((aligned(64)));
-    // The refinements of a class by the token's virtual kind: OPERAND's, SPECIFIER's, PREFIX's, LEAF_RIGHT's,
-    // QUALIFIER_LEFT's, RETURN's and OPEN_CASE's (index 0 unused); and the typed variant of each class.
-    uint8_t refine[8][128] __attribute__((aligned(64)));
+    // A virtual kind selects an eight-byte row of the seven role refinements (index 0 unused). Kinds with the same
+    // row share it, so one joint lookup replaces seven lookups and blends. refine_index holds the byte offset.
+    uint8_t refine_index[128] __attribute__((aligned(64)));
+    uint8_t refine[256] __attribute__((aligned(64)));
     uint8_t typed[128] __attribute__((aligned(64)));
     uint8_t role_bits[128] __attribute__((aligned(64)));
     uint8_t closer_kind[128] __attribute__((aligned(64)));
@@ -10513,12 +10565,26 @@ static void parse_check_vector_init(void)
                                     (pred == PARSE_PRED_ITEM || pred == PARSE_PRED_HEAD ? BUSTER_PARSE_CHECK_ITEM_AFTER : 0) |
                                     (role == PARSE_ROLE_LEAF_RIGHT || role == PARSE_ROLE_CLOSE_SPECIFIER ? BUSTER_PARSE_CHECK_RARE : 0));
     }
-    for (uint32_t k = 1; k < 8; k += 1)
+    uint32_t refinement_rows = 0;
+    for (uint32_t vkind = 0; vkind < 128; vkind += 1)
     {
-        for (uint32_t vkind = 0; vkind < 128; vkind += 1)
+        uint8_t row[8] = { 0 };
+        for (uint32_t k = 1; k < 8; k += 1)
         {
-            v->refine[k][vkind] = vkind < BUSTER_PARSE_VKINDS ? parse_check_class(refined[k], (uint8_t)vkind, 0, false) : refined[k];
+            row[k] = vkind < BUSTER_PARSE_VKINDS ? parse_check_class(refined[k], (uint8_t)vkind, 0, false) : refined[k];
         }
+        uint32_t found = 0;
+        while (found < refinement_rows && memcmp(v->refine + found * 8, row, sizeof(row)) != 0)
+        {
+            found += 1;
+        }
+        if (found == refinement_rows)
+        {
+            assert(refinement_rows < sizeof(v->refine) / sizeof(row));
+            memcpy(v->refine + found * 8, row, sizeof(row));
+            refinement_rows += 1;
+        }
+        v->refine_index[vkind] = (uint8_t)(found * 8);
     }
     // The pseudo-groups: (group, item's place) with the same modes in each state are one.
     uint8_t rows[128][6];
@@ -10609,6 +10675,20 @@ BUSTER_INLINE __m512i parse_check_table256(const uint8_t* table, __m512i index)
     const __m512i low = parse_table8(table, index);
     const __m512i high = parse_table8(table + 128, index);
     return _mm512_mask_blend_epi8(_mm512_movepi8_mask(index), low, high);
+}
+
+// The common classes, before the sparse name-dependent refinements. The seven role refinements have 28 distinct
+// rows over virtual kinds; their table and the kind-to-row map replace a lookup and a blend for each role.
+BUSTER_INLINE __m512i parse_check_classes_avx512(__m512i role, __m512i vkind, __m512i role_bits, __mmask64 typed)
+{
+    const ParseCheckVectorTables* v = &parse_check_vector;
+    const __m512i refine = _mm512_and_si512(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_REFINE));
+    const __m512i index = _mm512_or_si512(parse_table8(v->refine_index, vkind), refine);
+    __m512i classes = _mm512_mask_mov_epi8(role, _mm512_test_epi8_mask(refine, refine), parse_check_table256(v->refine, index));
+    // `->` is the member operator that only an expression may use.
+    classes = _mm512_mask_mov_epi8(classes, parse_equal8(role, PARSE_ROLE_MEMBER_OPERATOR) & parse_equal8(vkind, PARSE_KIND_ARROW), _mm512_set1_epi8(PARSE_CLASS_ARROW));
+    classes = _mm512_mask_mov_epi8(classes, typed, parse_table8(v->typed, classes));
+    return classes;
 }
 
 // The nearest previous lane whose key is below the lane's threshold, from the windows of minima of the keys (as
@@ -10707,16 +10787,8 @@ static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* name
         const __m512i role = _mm512_loadu_si512(kernels->roles + block);
         const __m512i vkind = _mm512_loadu_si512(kernels->vkinds + block);
         const __m512i role_bits = parse_table8(v->role_bits, role);
-        const __m512i refine = _mm512_and_si512(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_REFINE));
-        __m512i c = role;
-        for (uint32_t k = 1; k < 8; k += 1)
-        {
-            c = _mm512_mask_mov_epi8(c, parse_equal8(refine, (uint8_t)k), parse_table8(v->refine[k], vkind));
-        }
-        // `->`, the one member operator the refinements above leave out.
-        c = _mm512_mask_mov_epi8(c, parse_equal8(role, PARSE_ROLE_MEMBER_OPERATOR) & parse_equal8(vkind, PARSE_KIND_ARROW), _mm512_set1_epi8(PARSE_CLASS_ARROW));
         const __mmask64 typed_lanes = _mm512_test_epi8_mask(_mm512_loadu_si512(typed + block), _mm512_set1_epi8(1));
-        c = _mm512_mask_mov_epi8(c, typed_lanes, parse_table8(v->typed, c));
+        __m512i c = parse_check_classes_avx512(role, vkind, role_bits, typed_lanes);
         ParseCheckBlock state;
         _mm512_store_si512(state.classes, c);
         // A keyword's class by its name (the builtins, _BitInt).

@@ -1,0 +1,19 @@
+{
+  "name": "pp-main",
+  "command": "SOURCE_DATE_EPOCH=1792454400 PATH=/usr/lib/llvm-18/bin:$PATH '/workspace/scratch/61c60105fb18/measurement/paired_measure' '--rounds' '31' '--warmup' '3' '--cpu' '2' '--' '/workspace/scratch/61c60105fb18/baseline/build/compiler' '-E' '-P' '--clang-features' '--predefines' '/workspace/scratch/61c60105fb18/measurement/clang18-gnu17-native-predefines.h' '-std=gnu17' '-march=native' '-nostdinc' '-isystem' '/usr/lib/llvm-18/lib/clang/18/include' '-isystem' '/usr/include/x86_64-linux-gnu' '-isystem' '/usr/include' '-I' '/workspace/scratch/61c60105fb18/baseline/src' '/workspace/scratch/61c60105fb18/baseline/src/buster/compiler/main.c' '--' '/workspace/scratch/61c60105fb18/measurement/final-compiler' '-E' '-P' '--clang-features' '--predefines' '/workspace/scratch/61c60105fb18/measurement/clang18-gnu17-native-predefines.h' '-std=gnu17' '-march=native' '-nostdinc' '-isystem' '/usr/lib/llvm-18/lib/clang/18/include' '-isystem' '/usr/include/x86_64-linux-gnu' '-isystem' '/usr/include' '-I' '/workspace/scratch/61c60105fb18/baseline/src' '/workspace/scratch/61c60105fb18/baseline/src/buster/compiler/main.c'",
+  "cwd": "/workspace/scratch/61c60105fb18/buster",
+  "exit_code": 0,
+  "measured_pairs": 31,
+  "warmup_pairs": 3,
+  "csv_rows": 68,
+  "raw_capture_bytes": 5814,
+  "csv_bytes": 4283,
+  "stderr_separate": false,
+  "header_reconstructed": true,
+  "observation": "All numeric CSV fields were captured intact; no numeric data were reconstructed.",
+  "sha256": {
+    "capture": "00c02435a5fb14706df40945ade124908e2298dc47326c93af3144b0d1f08796",
+    "csv": "b93b924c7d4a4fb5802f323fc004142a2afca4782adea07a66571f064f3f2357",
+    "metadata": "1913f3ff4db2350b110f3825e31401344ad57f638a395fa10545b3b9bf323cf3"
+  }
+}

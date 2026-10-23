@@ -1,0 +1,156 @@
+file: final-encoder-tests.log
+templates: 8352 forms (111 of 16- and 32-bit modes alone, which take no instruction), and each with FS and GS, all fit, but 232 with a segment override, which have no room for it
+templates for 32-bit addresses: all fit, but 312 with a segment override and 116 without, which have no room for a 67
+templates for APX: all fit, 1950 forms with REX2's positions, and their FS and GS copies but 56 without room for its payload, and 232 with a segment override, which have no room for it
+templates in 32-bit mode: all fit, 5130 with a position for a segment override, 9 with 16 positions
+templates in 16-bit mode: all fit, 5130 with a position for a segment override, 51 with 16 positions
+templates at a page end: every form's in each mode, 1644 of them rejected, none written past
+known encodings: 761 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known fixups: 29 fields, 0 wrong
+reference digest: 100000 instructions, 776815 bytes, 0xf0b33adc74a14fb9 (matches the one GNU as checked)
+random: x86_encode_4                        200 short streams and 300000 instructions (40190 marked), 0 differ
+random: x86_encode_8                        200 short streams and 300000 instructions (40003 marked), 0 differ
+random: x86_encode_16                       200 short streams and 300000 instructions (39910 marked), 0 differ
+random: x86_encode_32                       200 short streams and 300000 instructions (40017 marked), 0 differ
+random: x86_encode_64                       200 short streams and 300000 instructions (40282 marked), 0 differ
+random: x86_encode_16_forms_from_records    200 short streams and 300000 instructions (39727 marked), 0 differ
+random: x86_encode_16_masked_loads          200 short streams and 300000 instructions (39866 marked), 0 differ
+random: x86_encode_16_masked_stores         200 short streams and 300000 instructions (40070 marked), 0 differ
+random: x86_encode_16_compress_stores       200 short streams and 300000 instructions (39680 marked), 0 differ
+random: x86_encode_64_fixup_compress_stores 200 short streams and 300000 instructions (40014 marked), 0 differ
+page edges: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+lengths only: 136752 generated form/operand cases, 300000 random instructions, boundaries and partitions, 0 differ
+lengths-only page edges: counts 0 to 199 and 1023 to 1025, 16 alignments, 0 differ
+invalid instructions: 14367 broken (6399 in a way the encoding can represent), 0 not caught
+known encodings with 32-bit addresses: 34 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+reference digest with 32-bit addresses: 100000 instructions, 830435 bytes, 0x89d61221b2e298c7 (matches the one GNU as checked)
+random: x86_encode_64_address32             200 short streams and 300000 instructions (40031 marked), 0 differ
+random: x86_encode_16_address32             200 short streams and 300000 instructions (40033 marked), 0 differ
+page edges with 32-bit addresses: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+invalid instructions with 32-bit addresses: 13886 broken (6095 in a way the encoding can represent), 0 not caught
+known encodings with APX's registers: 153 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known invalid instructions with APX's registers: 31 instructions, 0 accepted
+reference digest with APX's registers: 100000 instructions, 723209 bytes, 0x9417f9289e033f50 (matches the one GNU as checked)
+random: x86_encode_64_apx                   200 short streams and 300000 instructions (39937 marked), 0 differ
+random: x86_encode_16_apx                   200 short streams and 300000 instructions (39884 marked), 0 differ
+page edges with APX's registers: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+invalid instructions with APX's registers: 14769 broken (5632 in a way the encoding can represent), 0 not caught
+known encodings in 32-bit mode: 159 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known fixups in 32-bit mode: 13 fields, 0 wrong
+reference digest in 32-bit mode: 100000 instructions, 724851 bytes, 0x7f789e7d53594ac3 (matches the one GNU as checked)
+random: x86_encode_64_mode32                200 short streams and 300000 instructions (40013 marked), 0 differ
+random: x86_encode_16_mode32                200 short streams and 300000 instructions (40109 marked), 0 differ
+page edges in 32-bit mode: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+instructions longer than 15 bytes in 32-bit mode: 0 with an FS form, an override in the decorations or REX's bits, 0 accepted
+invalid instructions in 32-bit mode: 12814 broken (4331 in a way the encoding can represent), 0 not caught
+known encodings in 16-bit mode: 150 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known fixups in 16-bit mode: 16 fields, 0 wrong
+reference digest in 16-bit mode: 100000 instructions, 672673 bytes, 0xc92ce60d94c512c1 (matches the one GNU as checked)
+random: x86_encode_64_mode16                200 short streams and 300000 instructions (40144 marked), 0 differ
+random: x86_encode_16_mode16                200 short streams and 300000 instructions (39661 marked), 0 differ
+page edges in 16-bit mode: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+instructions longer than 15 bytes in 16-bit mode: 12288 with an FS form, an override in the decorations or REX's bits, 0 accepted
+invalid instructions in 16-bit mode: 13365 broken (4360 in a way the encoding can represent), 0 not caught
+file: final-branch-tests.log
+forms: every form number as a branch's: 65605 checks, 0 failed
+errors: what branch_sizing_validate refuses: 1044 checks, 0 failed
+boundaries: probes at every displacement around rel8's limits: 146881 checks, 0 failed
+random functions: 1500 functions, 5157349 records, 1254712 branches, 457460 long; 505 settled in 1 round, 411 in 2, 368 in 3 and 216 in more (66 with the worklist)
+random functions: 28500 checks, 0 failed
+chains: a round per link, then the worklist: 480 checks, 0 failed
+page edges: 2304 cases
+page edges: every column ending at a PROT_NONE page: 4609 checks, 0 failed
+memory: 448 attempts
+memory: no scratch to spare, then 64 bytes more at a time: 898 checks, 0 failed
+GNU as: 404 functions, 404 compared, 404 the same, with 98920 long branches
+GNU as: its relaxation of the functions with labels: 409 checks, 0 failed
+file: candidate-encoder-sanitized.log
+templates: 8352 forms (111 of 16- and 32-bit modes alone, which take no instruction), and each with FS and GS, all fit, but 232 with a segment override, which have no room for it
+templates for 32-bit addresses: all fit, but 312 with a segment override and 116 without, which have no room for a 67
+templates for APX: all fit, 1950 forms with REX2's positions, and their FS and GS copies but 56 without room for its payload, and 232 with a segment override, which have no room for it
+templates in 32-bit mode: all fit, 5130 with a position for a segment override, 9 with 16 positions
+templates in 16-bit mode: all fit, 5130 with a position for a segment override, 51 with 16 positions
+templates at a page end: every form's in each mode, 1644 of them rejected, none written past
+known encodings: 761 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known fixups: 29 fields, 0 wrong
+reference digest: 100000 instructions, 776815 bytes, 0xf0b33adc74a14fb9 (matches the one GNU as checked)
+random: x86_encode_4                        200 short streams and 300000 instructions (40190 marked), 0 differ
+random: x86_encode_8                        200 short streams and 300000 instructions (40003 marked), 0 differ
+random: x86_encode_16                       200 short streams and 300000 instructions (39910 marked), 0 differ
+random: x86_encode_32                       200 short streams and 300000 instructions (40017 marked), 0 differ
+random: x86_encode_64                       200 short streams and 300000 instructions (40282 marked), 0 differ
+random: x86_encode_16_forms_from_records    200 short streams and 300000 instructions (39727 marked), 0 differ
+random: x86_encode_16_masked_loads          200 short streams and 300000 instructions (39866 marked), 0 differ
+random: x86_encode_16_masked_stores         200 short streams and 300000 instructions (40070 marked), 0 differ
+random: x86_encode_16_compress_stores       200 short streams and 300000 instructions (39680 marked), 0 differ
+random: x86_encode_64_fixup_compress_stores 200 short streams and 300000 instructions (40014 marked), 0 differ
+page edges: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+lengths only: 136752 generated form/operand cases, 300000 random instructions, boundaries and partitions, 0 differ
+lengths-only page edges: counts 0 to 199 and 1023 to 1025, 16 alignments, 0 differ
+invalid instructions: 14367 broken (6399 in a way the encoding can represent), 0 not caught
+known encodings with 32-bit addresses: 34 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+reference digest with 32-bit addresses: 100000 instructions, 830435 bytes, 0x89d61221b2e298c7 (matches the one GNU as checked)
+random: x86_encode_64_address32             200 short streams and 300000 instructions (40031 marked), 0 differ
+random: x86_encode_16_address32             200 short streams and 300000 instructions (40033 marked), 0 differ
+page edges with 32-bit addresses: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+invalid instructions with 32-bit addresses: 13886 broken (6095 in a way the encoding can represent), 0 not caught
+known encodings with APX's registers: 153 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known invalid instructions with APX's registers: 31 instructions, 0 accepted
+reference digest with APX's registers: 100000 instructions, 723209 bytes, 0x9417f9289e033f50 (matches the one GNU as checked)
+random: x86_encode_64_apx                   200 short streams and 300000 instructions (39937 marked), 0 differ
+random: x86_encode_16_apx                   200 short streams and 300000 instructions (39884 marked), 0 differ
+page edges with APX's registers: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+invalid instructions with APX's registers: 14769 broken (5632 in a way the encoding can represent), 0 not caught
+known encodings in 32-bit mode: 159 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known fixups in 32-bit mode: 13 fields, 0 wrong
+reference digest in 32-bit mode: 100000 instructions, 724851 bytes, 0x7f789e7d53594ac3 (matches the one GNU as checked)
+random: x86_encode_64_mode32                200 short streams and 300000 instructions (40013 marked), 0 differ
+random: x86_encode_16_mode32                200 short streams and 300000 instructions (40109 marked), 0 differ
+page edges in 32-bit mode: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+instructions longer than 15 bytes in 32-bit mode: 0 with an FS form, an override in the decorations or REX's bits, 0 accepted
+invalid instructions in 32-bit mode: 12814 broken (4331 in a way the encoding can represent), 0 not caught
+known encodings in 16-bit mode: 150 instructions, 0 wrong (scalar), 0 wrong (vectorized)
+known fixups in 16-bit mode: 16 fields, 0 wrong
+reference digest in 16-bit mode: 100000 instructions, 672673 bytes, 0xc92ce60d94c512c1 (matches the one GNU as checked)
+random: x86_encode_64_mode16                200 short streams and 300000 instructions (40144 marked), 0 differ
+random: x86_encode_16_mode16                200 short streams and 300000 instructions (39661 marked), 0 differ
+page edges in 16-bit mode: 0 to 199 instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, 0 differ
+instructions longer than 15 bytes in 16-bit mode: 12288 with an FS form, an override in the decorations or REX's bits, 0 accepted
+invalid instructions in 16-bit mode: 13365 broken (4360 in a way the encoding can represent), 0 not caught
+file: candidate-call-graph.log
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_conditional -> main_unit_frontend.ll:preprocessor_fuzz_random_group -> main_unit_frontend.ll:preprocessor_fuzz_random_statement -> main_unit_frontend.ll:preprocessor_fuzz_random_conditional
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_expression -> main_unit_frontend.ll:preprocessor_fuzz_random_expression
+allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_invocation -> main_unit_frontend.ll:preprocessor_fuzz_random_argument -> main_unit_frontend.ll:preprocessor_fuzz_random_invocation
+call graph: 30 translation units, 15343 functions, 83746 calls between them, 0 cycles, 3 allowed
+file: final-call-graph-tests.log
+test-call-graph:
+  shapes: ok
+  self-call: ok
+  two-function cycle: ok
+  shortest path: ok
+  three translation units: ok
+  aliases and an ifunc: ok
+  aliases of nothing: ok
+  weak function, strong alias: ok
+  strong alias, weak function: ok
+  strong function, weak alias: ok
+  weak alias, strong function: ok
+  two strong definitions: ok
+  two weak definitions: ok
+  replaced aliasee: ok
+  replaced aliasee, reversed: ok
+  inline body: ok
+  inline body, reversed: ok
+  forced weak body: ok
+  forced weak body, reversed: ok
+  flatten caller: ok
+  flatten caller, reversed: ok
+  section name: ok
+  replaced bodies: ok
+  allowed copies: ok
+  grown cycle: ok
+  names that repeat: ok
+  malformed: ok
+  deep chain: ok
+  long ring: ok
+test-call-graph: 29 cases, 0 failed

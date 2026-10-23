@@ -250,7 +250,14 @@ designs and the compilers already built this way.
   templates of its own; and `x86_encode_mode32` and `x86_encode_mode16` (and
   `x86_encode_scalar_32` and `x86_encode_scalar_16`), the same for 32-bit and
   16-bit modes, with their operand and address sizes, segment overrides and own
-  instructions, and templates of their own);
+  instructions, and templates of their own). `x86_measure` and
+  `x86_measure_scalar` return the offsets and total length for valid ordinary
+  64-bit-mode records without a machine-code buffer. They require initialized
+  templates and room for `count` u32 offsets, disjoint from the records, with no
+  padding, permit null pointers for zero count, and reject counts past
+  `BUSTER_X86_ENCODER_MAX_INSTRUCTIONS` before touching either array. The
+  scalar twin uses the independent scalar form rules. There are no measure
+  variants for the other modes or fixup-end output.
   `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
@@ -413,10 +420,13 @@ designs and the compilers already built this way.
   provides `benchmark-foreign`.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
-  encoded, from `x86_encode`'s offsets and rounds over the branches alone
+  encoded, from `x86_measure`'s offsets and rounds over the branches alone
   (`size_branches`, its scalar twin `size_branches_scalar`, and
   `branch_sizing_validate`, the checks the two leave to the code generator, as
-  `x86_encode` leaves `x86_validate`'s). `branch_sizing_generate.c` generates
+  `x86_encode` leaves `x86_validate`'s). The scalar path gets its initial
+  offsets from `x86_measure_scalar`; neither sizing path retains machine
+  code. The former encoded-byte scratch column, chunk-size setting and chunk
+  rebasing are removed. `branch_sizing_generate.c` generates
   functions for its tests and benchmark: shaped like clang's -O0 and -O2 code,
   and chains of branches that take a round each. `branch_sizing_test.c` holds
   its tests (`main.c` includes it after `x86_64_encoder_test.c`, whose random
@@ -1041,6 +1051,13 @@ of 64-bit mode alone, instructions past 15 bytes and segment overrides where an
 instruction takes none. `--address32`, `--apx`, `--mode32` and `--mode16` run
 only their pass, and `--count N` and `--seed N` change the random streams.
 
+The ordinary 64-bit pass also compares `x86_measure` and `x86_measure_scalar`
+with both encoders and the known encodings: total length and every start
+offset, all admitted forms with valid FS/GS overrides and fixup markings,
+random streams, vector and former chunk boundaries, and rebased partitions.
+It checks empty and excessive counts without accessible arrays, and bounds
+with guard pages and offset canaries at every dword alignment.
+
 The digests were recorded when GNU as encoded the same streams to the same
 bytes. After changing the form table, the scalar encoder or the fixup interface,
 cross-check with GNU as (binutils 2.47 for the recorded digests) for every entry
@@ -1194,30 +1211,51 @@ changes the generated functions. The 9700X job's test step runs it with
 ## Branch sizing benchmark
 
 `./build/compiler benchmark-branch-sizing [--seed N] [--rounds N] [--only ROW]
-[--measure NAME [--samples N]]` (about 3 s) sizes pools of about 262,000
+[--measure NAME] [--samples N] [--after-scalar MS]` sizes pools of about 262,000
 records of generated functions per row: functions of 40, 250, 2,000 and 10,000
 records shaped like clang's -O0 code (tier 0's) and -O2 code
 (`docs/branch-sizing.md` has the statistics they follow), a mix of the function
 sizes of sqlite3 at -O0, and chains of 1,000 links forward and backward. After
 checking that every way of sizing them gives the same records and offsets, it
-reports medians of 21 samples, in cycles per branch and per record with IPC, of
-`x86_encode` of each function (the caller's encode after sizing, the
-reference), `size_branches` and `size_branches_scalar`, and each path's phases
-as the difference between runs that stop after a phase and before it: the
-vector path, the scalar path, and the vector path with each alternative to its
-gathers measured against it (`compress` and `window`). A sample sizes the pool
+reports medians of 21 samples, in nanoseconds per record with p10/p90 and in
+cycles per branch and per record with IPC, of `x86_encode` of each function
+(the caller's encode after sizing, the reference), `size_branches`,
+`size_branches_scalar`, and `size_encode` (vector sizing followed immediately
+by final encoding in the same timed interval),
+and each path's phases as the difference between runs that stop after a phase
+and before it: the vector path, the scalar path, and the vector path with each
+alternative to its gathers measured against it (`compress` and `window`). A sample sizes the pool
 in groups of at least 2,048 records, each group's records read into cache and
 its branches' records put back outside the time (as generated, or as sized for
 the reference encode: every whole run must come to the sized functions'
-lengths), around rdpmc reads of this thread's cycles and instructions; the
-pools are larger than the branch predictor learns (a pool of 33,000 records
-sized again and again let it learn the scalar path's branches). `--rounds N`
-sizes with another round limit, `--only ROW` runs one row, and `--measure NAME`
-one measurement (an entry point's name, or a path's run through a phase, as
-`vector-setup`) for `--samples N` samples, for perf. Run it under the 9700X's
-lock with `taskset -c 2`. `docs/branch-sizing.md` has the numbers. The default
-9700X job runs it after the tests, pinned to one allowed CPU; like the others,
-its measurements are informational.
+lengths), around `CLOCK_MONOTONIC_RAW` and reads of this thread's cycles and
+instructions (rdpmc where available), with measured read overhead subtracted.
+Nanoseconds are reported even when hardware counters are unavailable; cycles
+and IPC then read as zero. The default phase table includes both nanoseconds
+and cycles per branch. Both encoding rows produce offsets without collecting
+fixup ends. The pools are larger than the branch predictor learns (a pool of
+33,000 records sized again and again let it learn the scalar path's branches).
+`--rounds N` sizes with another round limit, `--only ROW` runs one row, and `--measure NAME`
+one measurement (`x86_encode`, `size_branches`, `size_branches_scalar`,
+`size_encode`, or a path's run through a phase, as `vector-lengths` or
+`vector-setup`) for `--samples N` samples, for perf. Nonzero `--after-scalar MS`
+requires one isolated vector measurement and runs its scalar counterpart for
+at least MS milliseconds before each recorded sample, outside the timed
+interval (at most 1,000 ms; zero disables it). For `size_encode`, that is
+scalar sizing followed by scalar encoding. The scalar lengths phase now uses
+`x86_measure_scalar`; old scalar sizing timings used the vector encoder and
+are not a baseline for the vector optimization. Compare old and new vector
+paths with the same harness, and include `size_encode` for the caller's
+combined cost. Run it under the 9700X's lock with `taskset -c 2`.
+`docs/branch-sizing.md` explains the current method and labels the older
+numbers as historical;
+`docs/measurements/x86-lengths-2026-10-23/refinement.md` records the current
+Clang 23 implementation, comparison protocol and initial candidate's evidence.
+The default 9700X job runs the benchmark after the tests, pinned to one allowed
+CPU. For relevant pull requests it also runs three matched process pairs using
+the same harness, including the sizing-and-encoding pipeline on one and eight
+distinct physical cores. Its measurements are informational; correctness,
+report completeness and matching workload identities are checked.
 
 ## x86 semantics tests
 
@@ -1313,10 +1351,9 @@ the others, its measurements are informational.
 
 ## Lane tests
 
-`./build/compiler test-lanes` (about 0.2 s) checks the lane base layer. The
-arena checks run on the calling thread, and every other check runs on groups of
-1, 2, 3 and 8 lanes and compares what the lanes produce with a sequential
-reference:
+`./build/compiler test-lanes` checks the lane base layer. The arena checks run
+on the calling thread, and the collective checks run on groups of 1, 2, 3 and
+8 lanes and compare what the lanes produce with a sequential reference:
 
 - arenas: pushes at every power-of-two alignment up to 2 MB, invalid
   alignments, a push one byte past the capacity (it fails and leaves the arena
@@ -1332,6 +1369,10 @@ reference:
   so late that they wait in `mwaitx`, then as many broadcasts back to back,
   and narrow tasks spread by `lane_from_task_index`;
 - a lane that makes itself a group of one and rejoins, and the scratch arenas;
+- command-owned teams: stable worker identities across repeated operations
+  and changing active counts, exact participation, shared-write visibility,
+  per-operation worker scratch cleanup, caller context restoration, one-lane
+  operation, invalid/nested dispatch and startup failure cleanup;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
@@ -1344,6 +1385,13 @@ reference:
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
 rounds and the random inputs.
+
+The command deliberately starts without a team so it can test both cold
+`lane_run` and explicit `lane_team_start`/`lane_team_stop` lifetimes. Do not
+wrap the main command dispatcher in a team: included copies of `lane.c` have
+separate thread-local contexts. Parallel command handlers own their team in
+the translation unit that runs their operations. An operation's phases stay
+direct calls within its whole-operation lane entry.
 
 ## Deterministic output tests
 
@@ -1380,7 +1428,9 @@ allowed CPUs in order: 0 to 7 on the 9700X, one per core) and reports
 21-pass medians of a sync and a broadcast when every lane arrives at once, of
 `pthread_barrier_wait` (the RAD Debugger's barrier on Linux) in the same loop,
 of waking lanes that wait in `mwaitx` and that sleep on the futex, and of
-starting a group. Then, on the largest group, how much slower lanes run after
+starting a group. Its `start` measure remains a cold `lane_run` outside a
+command-owned team, including thread creation and joining. Then, on the
+largest group, how much slower lanes run after
 waiting 0.2 to 5 ms for a lane that works alone, and how well rule 1's parts
 and the static ranges balance three phases, with every lane at full speed and
 with half of them at half speed. Then what an arena's reservation and first

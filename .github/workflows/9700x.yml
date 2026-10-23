@@ -44,6 +44,7 @@ jobs:
       code: ${{ steps.files.outputs.code }}
       baselines: ${{ steps.files.outputs.baselines }}
       foreign: ${{ steps.files.outputs.foreign }}
+      branch_sizing: ${{ steps.files.outputs.branch_sizing }}
     steps:
       - id: files
         env:
@@ -59,6 +60,7 @@ jobs:
               code=true
               baselines=true
               foreign=true
+              branch_sizing=true
           else
               gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
                   --jq '.[] | .filename, (.previous_filename // empty)' > files
@@ -78,13 +80,22 @@ jobs:
               else
                   foreign=false
               fi
+              if grep -Ex 'src/buster/compiler/(x86_64_encoder|branch_sizing(_benchmark|_generate)?)\.c|docs/measurements/x86-lengths-2026-10-23/(benchmark-main|scaling)\.c' files > /dev/null; then
+                  branch_sizing=true
+                  # These retained C fixtures execute in qualification even though they live under docs/.
+                  code=true
+              else
+                  branch_sizing=false
+              fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "baselines=$baselines" >> "$GITHUB_OUTPUT"
           echo "foreign=$foreign" >> "$GITHUB_OUTPUT"
+          echo "branch_sizing=$branch_sizing" >> "$GITHUB_OUTPUT"
           echo "Changes code: $code"
           echo "Changes the baselines' harnesses: $baselines"
           echo "Changes the foreign inputs' benchmark: $foreign"
+          echo "Changes the branch-sizing implementation or measurement fixtures: $branch_sizing"
 
   test:
     name: Build and execute on Ryzen 7 9700X
@@ -366,9 +377,141 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-assembler
 
       - name: Benchmark branch sizing
+        timeout-minutes: 3
+        env:
+          AB_ENABLED: ${{ github.event_name == 'pull_request' && needs.changes.outputs.branch_sizing != 'false' }}
+          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          set -euo pipefail
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
+
+          if [[ "$AB_ENABLED" == true ]]; then
+              [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              ab_dir="$(mktemp -d "${RUNNER_TEMP}/branch-sizing-ab.XXXXXX")"
+              trap 'rm -rf "$ab_dir"' EXIT
+              fixture=docs/measurements/x86-lengths-2026-10-23
+
+              # The normal job lock covers this bounded qualification. Use one allowed logical CPU per physical
+              # core for scaling, and record the mapping rather than inferring SMT placement from CPU numbers.
+              allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
+              lscpu -e=CPU,SOCKET,CORE,ONLINE
+              core_cpus="$(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
+                  BEGIN {
+                      n = split(allowed, ranges, ",")
+                      for (r = 1; r <= n; r++) {
+                          m = split(ranges[r], ends, "-")
+                          last = m == 2 ? ends[2] : ends[1]
+                          for (c = ends[1]; c <= last; c++) permitted[c] = 1
+                      }
+                  }
+                  $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ { print $1 }
+              ' | paste -sd, -)"
+              test "$(tr ',' '\n' <<< "$core_cpus" | wc -l)" -ge 8
+              case ",$core_cpus," in
+                  *,2,*) cpu=2 ;;
+              esac
+              printf 'Allowed CPUs=%s; distinct-core CPUs=%s; module CPU=%s\n' "$allowed" "$core_cpus" "$cpu"
+
+              # The shallow checkout may lack the base object. Fetch only the public base commit, without tokens;
+              # read its source files, but do not execute its build scripts or change the checkout.
+              if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
+                  GIT_TERMINAL_PROMPT=0 timeout 30s git -c credential.helper= -c http.extraHeader= fetch \
+                      --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
+              fi
+              printf 'Matched base=%s checkout=%s cpu=%s\n' "$AB_BASE_SHA" "$(git rev-parse HEAD)" "$cpu"
+              clang --version
+              for side in before after; do
+                  mkdir -p "$ab_dir/$side/src/buster/compiler"
+                  for file in lane.c x86_64_encoder.c branch_sizing.c; do
+                      dest="$ab_dir/$side/src/buster/compiler/$file"
+                      if [[ "$side" == before ]]; then
+                          git show "${AB_BASE_SHA}:src/buster/compiler/$file" > "$dest"
+                      else
+                          cp "src/buster/compiler/$file" "$dest"
+                      fi
+                  done
+                  # Both modules, including the scaling fixture's include, use the same harness and generator.
+                  cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
+                      "$ab_dir/$side/src/buster/compiler/"
+              done
+              before="$ab_dir/before/src/buster/compiler"
+              new='branch_sizing_lengths(records, count, offsets, vector)'
+              old='branch_sizing_lengths(records, count, offsets, columns.encoded, vector)'
+              test "$(grep -Fo "$new" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
+              if grep -Fq "$old" "$before/branch_sizing.c"; then
+                  sed -i "s/$new/$old/" "$before/branch_sizing_benchmark.c"
+                  test "$(grep -Fo "$old" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
+                  echo 'Baseline harness adaptation: old lengths scratch argument only'
+              elif ! grep -Fq "$new" "$before/branch_sizing.c"; then
+                  echo 'Unsupported baseline branch_sizing_lengths interface' >&2
+                  exit 1
+              fi
+
+              # Same compiler and production options. Compile all four binaries before serialized timing.
+              flags=(-O3 -g -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -pthread)
+              printf 'Standalone flags: %s\n' "${flags[*]}"
+              sha256sum "$fixture/benchmark-main.c" "$fixture/scaling.c"
+              for side in before after; do
+                  tree="$ab_dir/$side/src"
+                  sha256sum "$tree"/buster/compiler/*.c
+                  timeout 60s clang "${flags[@]}" -I "$tree" "$tree/buster/compiler/branch_sizing_benchmark.c" \
+                      "$fixture/benchmark-main.c" -o "$ab_dir/$side-module"
+                  timeout 60s clang "${flags[@]}" -I "$tree" "$fixture/scaling.c" -o "$ab_dir/$side-scaling"
+              done
+              sha256sum "$ab_dir"/*-module "$ab_dir"/*-scaling
+
+              run_module()
+              {
+                  local side="$1" row="$2" measure="$3" pair="$4"
+                  local log="$ab_dir/module-$row-$measure-$pair-$side.log"
+                  printf '\nMatched module pair=%s side=%s row=%s measure=%s\n' "$pair" "$side" "$row" "$measure"
+                  timeout 20s taskset -c "$cpu" "$ab_dir/$side-module" \
+                      --seed 1 --only "$row" --measure "$measure" --samples 11 2>&1 | tee "$log"
+                  test "$(grep -c "^$row: " "$log")" -eq 1
+                  test "$(grep -c ' ns per record ' "$log")" -eq 1
+                  grep "^$row: " "$log" > "$log.identity"
+              }
+              run_scaling()
+              {
+                  local side="$1" workers="$2" pair="$3"
+                  local log="$ab_dir/scaling-$workers-$pair-$side.log"
+                  printf '\nMatched scaling pair=%s side=%s workers=%s passes=200\n' "$pair" "$side" "$workers"
+                  # The fixture pins workers within this distinct-physical-core mask, never a one-CPU taskset.
+                  timeout 30s taskset -c "$core_cpus" "$ab_dir/$side-scaling" "$workers" 200 tier0-mix 2>&1 | tee "$log"
+                  test "$(grep -c '^row=' "$log")" -eq 1
+                  grep '^row=' "$log" | tr ' ' '\n' |
+                      grep -E '^(row|workers|passes|seed|warmup|functions_per_worker|records_per_worker|encoded_bytes_per_worker|checksum|reference|coordinator_cpu|worker_cpus)=' \
+                      > "$log.identity"
+                  test "$(wc -l < "$log.identity")" -eq 12
+              }
+              for pair in 1 2 3; do
+                  order=(before after)
+                  if [[ "$pair" == 2 ]]; then
+                      order=(after before)
+                  fi
+                  for row in tier0-40 tier0-mix tier0-2000; do
+                      measures=(vector-lengths size_branches size_encode)
+                      if [[ "$row" == tier0-mix ]]; then
+                          measures+=(x86_encode)
+                      fi
+                      for measure in "${measures[@]}"; do
+                          for side in "${order[@]}"; do
+                              run_module "$side" "$row" "$measure" "$pair"
+                          done
+                          diff -u "$ab_dir/module-$row-$measure-$pair-before.log.identity" \
+                              "$ab_dir/module-$row-$measure-$pair-after.log.identity"
+                      done
+                  done
+                  for workers in 1 8; do
+                      for side in "${order[@]}"; do
+                          run_scaling "$side" "$workers" "$pair"
+                      done
+                      diff -u "$ab_dir/scaling-$workers-$pair-before.log.identity" "$ab_dir/scaling-$workers-$pair-after.log.identity"
+                  done
+              done
+              echo 'Matched branch-sizing qualification completed: 3 pairs per case'
+          fi
 
       - name: Benchmark the x86 semantics
         run: |
