@@ -160,6 +160,16 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `ir_parse.c` reads the shared printer format through bounded scalar/vector
+  paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics.
+  `interpreter.c` and `ir_interpreter.c` execute typed streams and shared IR
+  with explicit arena frames; `interpreter_native.c` supplies the SysV host
+  boundary and `interpreter_link.c` materializes data atoms. Their commands are
+  `test-interpreter`, `test-interpreter-native`, `test-interpreter-link`,
+  `test-ir-interpreter`, and `interpret-ir`. [The tools guide](docs/ir-tools.md)
+  records the API, text grammar and frontend-dependent acceptance. Run builds
+  and tests through the approved 9700X's shared per-run lock.
+
 - `ExecutableOptions.symbols` provides optional regular symbol output without
   DWARF. `test-executable` covers the attachment and unchanged-destination
   refusal; `test-debug --cross-check` covers the debug-only consumers. The
