@@ -18,19 +18,20 @@
 //   - Hash: the chunk hash of 256 KB in L2, whole and in pieces of 4 KB and of 100 bytes, and of 64 MB.
 //   - Links: for each --functions (executable_benchmark_functions by default: about the sizes of hello world, the test
 //     defaults, tcc and the document's 46 MB synth), a generated program written into --directory (TMPDIR or /tmp by
-//     default) by a group of --lanes lanes (1 by default), which runs every write of a case, as a compiler runs its
-//     phases on one group: over the file from the previous run (in place), and as a new file (removed before each run,
-//     outside the time); each phase of executable_write, and the total; then the floor, a pwrite of as many bytes from
-//     memory, in place and new; and with one lane, executable_patch_range over the program's atoms, with every kind in
-//     its mix, and the unwind tables' passes (executable_benchmark_unwind). Then the same sizes as programs that call
+//     default) by a group of --lanes lanes (1 by default), which runs every write of the command: over the file from
+//     the previous run (in place), and as a new file (removed before each run, outside the time); each phase of
+//     executable_write, and the total; then the floor, a pwrite of as many bytes from memory, in place and new; and
+//     with one lane, executable_patch_range over the program's atoms, with every kind in its mix, and the unwind
+//     tables' passes (executable_benchmark_unwind). Then the same sizes as programs that call
 //     libc, bound against the system's runtime (runtime.c and bind.c) and written as dynamic PIEs, the same way (--only
 //     dynamic for these alone); bound against its static runtime (runtime_import_static) and written as static
 //     executables (--only static); bound against the static PIE's runtime (runtime_import_static_pie) and written
 //     as static PIEs (--only static-pie); and generated as shared libraries (LinkProgramOptions.shared), bound against
 //     the shared library's runtime (runtime_import_shared) and written as shared libraries (--only shared). Every
 //     kind's GOT relaxation takes the forms it writes, so that a write over them again writes the same file.
-// The exit status is 1 if the arguments are invalid, a variant's bytes differ, the runtime doesn't import, or a link
-// fails.
+// The lane group's startup and shutdown are outside the write timings. --only kernels and --only hash need no group.
+// The exit status is 1 if the arguments are invalid, the lanes don't start, a variant's bytes differ, the runtime
+// doesn't import, or a link fails.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -647,7 +648,7 @@ static void executable_benchmark_lane_main(void* argument)
     }
 }
 
-// Runs the writes on a group of `lanes` lanes. Returns whether they all succeeded.
+// Runs the writes on the command's group of `lanes` lanes. Returns whether they all succeeded.
 static bool executable_benchmark_write(ExecutableBenchmarkWrite* write, uint32_t lanes, uint32_t runs, bool in_place)
 {
     write->runs = runs;
@@ -938,16 +939,27 @@ int run_executable_benchmark(int argc, char** argv)
             valid = false;
         }
     }
+    const bool writes = only == 0 || (strcmp(only, "kernels") != 0 && strcmp(only, "hash") != 0);
+    LaneTeam team = { 0 };
+    const bool started = valid && writes && lane_team_start(&team, (uint32_t)lanes, 0);
     int result = 1;
     if (!valid)
     {
         fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only "
                         "kernels|hash|links|dynamic|static|static-pie|shared]\n");
     }
+    else if (writes && !started)
+    {
+        fprintf(stderr, "benchmark-executable: can't start output lanes\n");
+    }
     else
     {
         bool passed = true;
         uint64_t state = seed;
+        if (writes)
+        {
+            printf("Output lanes: %u; one group for all writes, startup and shutdown outside the write timings\n", (uint32_t)lanes);
+        }
         if (only == 0 || strcmp(only, "kernels") == 0)
         {
             printf("Patch kernels:\n");
@@ -1021,6 +1033,10 @@ int run_executable_benchmark(int argc, char** argv)
             runtime_release(&shared_runtime);
         }
         result = passed ? 0 : 1;
+    }
+    if (started)
+    {
+        lane_team_stop(&team);
     }
     return result;
 }

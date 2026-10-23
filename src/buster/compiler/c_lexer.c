@@ -1434,6 +1434,65 @@ static uint64_t lex_raw_string(const ScalarLexer* lexer, uint64_t position, uint
     return result;
 }
 
+typedef enum CRawStringError
+{
+    C_RAW_STRING_OK,
+    C_RAW_STRING_DELIMITER_CHARACTER,
+    C_RAW_STRING_DELIMITER_NEWLINE,
+    C_RAW_STRING_DELIMITER_LENGTH,
+    C_RAW_STRING_UNTERMINATED,
+} CRawStringError;
+
+// Diagnose an UNKNOWN token only, with the readable remainder of its original source. An invalid delimiter can
+// look past the quote at which the lexer salvaged that token. Its prefix undergoes phases 1/2, its delimiter doesn't. The caller decides
+// whether this is active C text: opaque header names/messages and skipped groups must not diagnose these bytes.
+// This cold query leaves the tokenizer's output/API and its vector chunk loop unchanged.
+static __attribute__((unused)) CRawStringError c_raw_string_error(const uint8_t* source, uint64_t length, uint32_t flags, uint64_t* offset)
+{
+    const ScalarLexer lexer = { .source = source, .length = length, .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0 };
+    char prefix[4];
+    uint32_t count = 0;
+    uint64_t position = 0;
+    bool quoted = false;
+    while (!quoted && count < sizeof(prefix) && position < length)
+    {
+        uint64_t size;
+        uint64_t at;
+        const int32_t c = get_char(&lexer, position, &size, &at);
+        quoted = c == '"';
+        prefix[count] = (char)c;
+        count += 1;
+        position += size;
+    }
+    const bool plain = (count == 2 && memcmp(prefix, "R\"", 2) == 0) || (count == 3 && memcmp(prefix, "LR\"", 3) == 0);
+    const bool utf = (count == 3 && (memcmp(prefix, "uR\"", 3) == 0 || memcmp(prefix, "UR\"", 3) == 0)) ||
+                     (count == 4 && memcmp(prefix, "u8R\"", 4) == 0);
+    const bool cpp = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
+    const bool raw = cpp || (flags & C_TOKENIZER_RAW_STRINGS) != 0;
+    CRawStringError result = C_RAW_STRING_OK;
+    *offset = 0;
+    if (quoted && raw && (plain || (utf && (cpp || (flags & C_TOKENIZER_UTF_RAW_STRINGS) != 0))))
+    {
+        uint32_t delimiter = 0;
+        while (delimiter < 16 && position + delimiter < length && source[position + delimiter] > ' ' && source[position + delimiter] < 0x7F &&
+               source[position + delimiter] != '(' && source[position + delimiter] != ')' && source[position + delimiter] != '\\')
+        {
+            delimiter += 1;
+        }
+        const uint64_t end = position + delimiter;
+        if (end < length && source[end] == '(')
+        {
+            result = C_RAW_STRING_UNTERMINATED;
+        }
+        else
+        {
+            *offset = end;
+            result = delimiter == 16 ? C_RAW_STRING_DELIMITER_LENGTH : end < length && source[end] == '\n' ? C_RAW_STRING_DELIMITER_NEWLINE : C_RAW_STRING_DELIMITER_CHARACTER;
+        }
+    }
+    return result;
+}
+
 // clang's LexCharConstant and LexStringLiteral: returns the end of the literal whose opening quote ends at
 // `position`, and turns `kind` into `C_TOKEN_UNKNOWN` if the literal is unterminated (or an empty character constant).
 // In C++, a user-defined suffix is part of the literal.

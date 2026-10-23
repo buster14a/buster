@@ -1,0 +1,47 @@
+Cloud whole-vector follow-up, 2026-10-23
+
+Same input, compiler, flags and old/refine binaries as parser-k6.txt.
+Only two complete paired results are retained. The raw log ends during the
+third baseline invocation; no timing for that invocation or a third refined
+invocation is claimed. The pairs are 11.044 -> 10.833 and 10.455 -> 10.391
+ns/token. These overlapping process ranges do not establish a whole-parser
+throughput gain.
+
+After the build and preprocessing commands in parser-k6.txt, reproduce the
+two complete pairs from the repository root with:
+
+flock /tmp/buster-simd-bench.lock bash -c '
+for trial in 1 2; do
+    for variant in old refine; do
+        printf "trial=%s variant=%s\n" "$trial" "$variant"
+        taskset -c 2 ../parser-k6-benchmark-$variant benchmark-parser --only vector --passes 11 -nostdinc ../parser-k6-main.i
+    done
+done'
+
+The original loop requested three pairs; the incomplete third start is kept
+below for transparency. No third result is reconstructed from summary notes.
+
+Raw output follows, verbatim:
+
+trial=1 variant=old
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+11 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector                    23.807 ms  11.044 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=1 variant=refine
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+11 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector                    23.352 ms  10.833 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=2 variant=old
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+11 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector                    22.537 ms  10.455 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=2 variant=refine
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0
+../parser-k6-main.i: 2155660 tokens; the fallback took 55 top-level declarations, 31386 tokens (1.456%)
+11 interleaved passes over 1 files, 2155660 tokens, medians (stages per file, less 0 cycles a sample; pipeline counters):
+  vector                    22.398 ms  10.391 ns/token   0.000 cycles/token [0.000-0.000]    0.000 instructions/token IPC 0.00  slots: retiring  0.0% frontend  0.0% backend  0.0% other 100.0%
+trial=3 variant=old
+perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0

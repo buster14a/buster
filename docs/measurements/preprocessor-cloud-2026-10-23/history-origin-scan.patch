@@ -1,0 +1,22 @@
+--- a/src/buster/compiler/c_preprocessor_history.c
++++ b/src/buster/compiler/c_preprocessor_history.c
+@@ -236,6 +236,19 @@
+     {
+         const uint32_t source = tokens->origins[i];
+         uint32_t stop = i + 1;
++        // Check the first lane before a wide load, keeping alternating origins out of the vector loop. Short
++        // remaining ranges and the final partial vector use the scalar scan, also the complete scalar twin.
++        if (pp->vectorized && end - stop >= 16 && tokens->origins[stop] == source)
++        {
++            const __m512i origin = _mm512_set1_epi32((int)source);
++            do
++            {
++                const __m512i values = _mm512_loadu_si512(tokens->origins + stop);
++                const uint32_t different = _mm512_cmpneq_epi32_mask(values, origin);
++                stop += _tzcnt_u32(different | 0x10000u);
++            }
++            while (end - stop >= 16 && tokens->origins[stop] == source);
++        }
+         while (stop < end && tokens->origins[stop] == source)
+         {
+             stop += 1;

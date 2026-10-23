@@ -42,6 +42,10 @@
 //     every part was taken once, that the boundaries are range_part_by_cost's, and that every lane got the same order,
 //     by decreasing bit width of cost and then by index. The loops follow each other with a sync between them, as the
 //     counter must reset itself.
+//   - Teams: one group kept across operations with different active lane counts, with the same thread identities,
+//     published inputs and completed outputs, no work on inactive lanes, and worker scratch released between runs.
+//     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
+//     forked child refuses the inherited team without waiting for workers that exist only in its parent.
 //
 // A watchdog ends the run with status 1 if a group runs for longer than BUSTER_LANE_TEST_TIMEOUT_SECONDS, which is how a
 // lost wake-up would show. The exit status is 1 if the arguments are invalid or a check fails.
@@ -60,7 +64,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
@@ -84,6 +90,8 @@
 #define BUSTER_LANE_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
 // Each check prints its first problems, up to this many.
 #define BUSTER_LANE_TEST_REPORTED 3
+#define BUSTER_LANE_TEST_TEAM_ROUNDS 256
+#define BUSTER_LANE_TEST_TEAM_PARTS 13
 
 static const uint32_t lane_test_counts[] = { 1, 2, 3, 8 };
 static const uint64_t lane_test_record_counts[] = { 0, 1, 2, 3, 63, 64, 65, 1000, 100000 };
@@ -1095,6 +1103,355 @@ static bool lane_test_parse_u64(const char* text, uint64_t* value)
     return result;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// A command's team, kept across many operations
+
+typedef struct LaneTeamTest LaneTeamTest;
+struct LaneTeamTest
+{
+    uint32_t lanes;
+    uint64_t round;
+    pid_t caller;
+    const uint32_t* cpus;
+    pid_t identities[BUSTER_LANE_TEST_MAX_LANES];
+    pid_t observed[BUSTER_LANE_TEST_MAX_LANES];
+    uint64_t called[BUSTER_LANE_TEST_MAX_LANES];
+    uint64_t inputs[BUSTER_LANE_TEST_MAX_LANES];
+    uint64_t outputs[BUSTER_LANE_TEST_MAX_LANES];
+    uint64_t failures[BUSTER_LANE_TEST_MAX_LANES];
+    const uint8_t* scratch_bases[BUSTER_LANE_TEST_MAX_LANES][BUSTER_SCRATCH_ARENA_COUNT];
+    uint32_t parts[BUSTER_LANE_TEST_TEAM_PARTS];
+    uint32_t forbidden_calls;
+    uint32_t invalid_indices;
+};
+
+// A refused operation must not enter even its calling lane. Atomic so a broken refusal reports duplicated work
+// without a data race in the test itself.
+static void lane_test_team_forbidden(void* argument)
+{
+    LaneTeamTest* test = argument;
+    __atomic_add_fetch(&test->forbidden_calls, 1, __ATOMIC_RELAXED);
+}
+
+static void lane_test_team_main(void* argument)
+{
+    LaneTeamTest* test = argument;
+    const uint32_t index = lane_index();
+    const uint32_t lanes = lane_count();
+    if (index >= BUSTER_LANE_TEST_MAX_LANES)
+    {
+        __atomic_add_fetch(&test->invalid_indices, 1, __ATOMIC_RELAXED);
+    }
+    else
+    {
+        uint64_t failures = lanes != test->lanes || index >= test->lanes ? 1 : 0;
+        test->called[index] += 1;
+        test->observed[index] = (pid_t)syscall(SYS_gettid);
+        failures += (index == 0) != (test->observed[index] == test->caller) ? 1 : 0;
+        if (test->cpus != 0)
+        {
+            uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+            failures += syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) <= 0 ? 1 : 0;
+            for (uint32_t word = 0; word < BUSTER_LANE_CPU_MASK_WORDS; word += 1)
+            {
+                const uint64_t expected = word == test->cpus[index] / 64 ? 1ull << (test->cpus[index] % 64) : 0;
+                failures += mask[word] != expected ? 1 : 0;
+            }
+        }
+        for (uint32_t i = 0; i < BUSTER_LANE_TEST_MAX_LANES; i += 1)
+        {
+            failures += test->inputs[i] != lane_test_value(test->round, i) ? 1 : 0;
+        }
+        // Leave the workers' allocations live at return, to require cleanup before their next operation. The
+        // calling lane instead preserves a scratch allocation owned by the command around all its operations.
+        for (uint32_t i = 0; index != 0 && i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
+        {
+            failures += thread_context.scratch[i].base != 0 || thread_context.scratch[i].length != 0 ? 1 : 0;
+        }
+        Scratch first = scratch_begin(0);
+        Scratch second = scratch_begin(first.arena);
+        uint64_t* first_value = BUSTER_ARENA_PUSH_ARRAY(first.arena, uint64_t, 1);
+        uint64_t* second_value = BUSTER_ARENA_PUSH_ARRAY(second.arena, uint64_t, 1);
+        failures += first_value == 0 || second_value == 0 ? 1 : 0;
+        if (first_value != 0 && second_value != 0)
+        {
+            *first_value = test->inputs[index];
+            *second_value = ~test->inputs[index];
+        }
+        test->scratch_bases[index][0] = first.arena->base;
+        test->scratch_bases[index][1] = second.arena->base;
+        if (lanes > 1 && test->round % 64 == 7 && index == test->round % lanes)
+        {
+            lane_test_stall(BUSTER_LANE_TEST_STALL_NANOSECONDS);
+        }
+        test->outputs[index] = ~test->inputs[index];
+        lane_sync();
+        for (uint32_t i = 0; i < lanes && i < BUSTER_LANE_TEST_MAX_LANES; i += 1)
+        {
+            failures += test->outputs[i] != ~lane_test_value(test->round, i) ? 1 : 0;
+            for (uint32_t arena = 0; arena < BUSTER_SCRATCH_ARENA_COUNT; arena += 1)
+            {
+                failures += test->scratch_bases[i][arena] == 0 ? 1 : 0;
+                for (uint32_t earlier = 0; earlier < i * BUSTER_SCRATCH_ARENA_COUNT + arena; earlier += 1)
+                {
+                    failures += test->scratch_bases[i][arena] == test->scratch_bases[earlier / BUSTER_SCRATCH_ARENA_COUNT][earlier % BUSTER_SCRATCH_ARENA_COUNT] ? 1 : 0;
+                }
+            }
+        }
+        const uint32_t source = (uint32_t)(test->round % lanes);
+        failures += lane_broadcast(test->outputs[index], source) != ~lane_test_value(test->round, source) ? 1 : 0;
+        for (uint64_t part = lane_take(BUSTER_LANE_TEST_TEAM_PARTS); part < BUSTER_LANE_TEST_TEAM_PARTS; part = lane_take(BUSTER_LANE_TEST_TEAM_PARTS))
+        {
+            __atomic_add_fetch(&test->parts[part], 1, __ATOMIC_RELAXED);
+        }
+        lane_sync();
+        if (index == 0)
+        {
+            for (uint32_t part = 0; part < BUSTER_LANE_TEST_TEAM_PARTS; part += 1)
+            {
+                failures += test->parts[part] != 1 ? 1 : 0;
+            }
+        }
+        if (test->round < 2)
+        {
+            failures += lane_run(1, lane_test_team_forbidden, test, 0) ? 1 : 0;
+            const Lane previous = lane_alone();
+            failures += lane_run(1, lane_test_team_forbidden, test, 0) ? 1 : 0;
+            LaneTeam nested = { 0 };
+            const bool started = lane_team_start(&nested, 1, 0);
+            failures += started ? 1 : 0;
+            lane_team_stop(&nested);
+            lane_restore(previous);
+        }
+        if (first_value != 0 && second_value != 0)
+        {
+            failures += *first_value != test->inputs[index] || *second_value != ~test->inputs[index] ? 1 : 0;
+        }
+        if (index == 0)
+        {
+            scratch_end(second);
+            scratch_end(first);
+        }
+        test->failures[index] = failures;
+    }
+}
+
+// Counts this process's threads, including the calling one. The one-lane check must not create an idle worker.
+static uint32_t lane_test_thread_count(void)
+{
+    DIR* directory = opendir("/proc/self/task");
+    uint32_t result = directory != 0 ? 0 : UINT32_MAX;
+    if (directory != 0)
+    {
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != 0)
+        {
+            result += entry->d_name[0] >= '0' && entry->d_name[0] <= '9' ? 1 : 0;
+        }
+        closedir(directory);
+    }
+    return result;
+}
+
+// pthread_join observes thread completion; /proc can briefly retain the kernel's task record while it finishes its
+// exit. Bound that observation separately from the operation watchdog.
+static bool lane_test_threads_stopped(uint32_t expected)
+{
+    uint32_t count = lane_test_thread_count();
+    for (uint32_t attempt = 0; count != expected && count != UINT32_MAX && attempt < 100; attempt += 1)
+    {
+        lane_test_stall(BUSTER_LANE_TEST_SHORT_STALL_NANOSECONDS);
+        count = lane_test_thread_count();
+    }
+    return count == expected;
+}
+
+static uint64_t lane_test_team_operation(LaneTeamTest* test, uint32_t lanes, uint64_t round, const uint32_t* cpus)
+{
+    test->lanes = lanes;
+    test->round = round;
+    test->cpus = cpus;
+    memset(test->called, 0, sizeof(test->called));
+    memset(test->observed, 0, sizeof(test->observed));
+    memset(test->outputs, 0, sizeof(test->outputs));
+    memset(test->failures, 0, sizeof(test->failures));
+    memset(test->parts, 0, sizeof(test->parts));
+    for (uint32_t i = 0; i < BUSTER_LANE_TEST_MAX_LANES; i += 1)
+    {
+        test->inputs[i] = lane_test_value(round, i);
+    }
+    const Lane previous = thread_context.lane;
+    const uint64_t previous_taken = thread_context.taken;
+    thread_context.taken = 47;
+    const bool ran = lane_run(lanes, lane_test_team_main, test, cpus);
+    uint64_t failures = ran ? 0 : 1;
+    failures += thread_context.lane.index != previous.index || thread_context.lane.count != previous.count || thread_context.lane.group != previous.group ? 1 : 0;
+    failures += thread_context.taken != 47 ? 1 : 0;
+    thread_context.taken = previous_taken;
+    for (uint32_t i = 0; i < BUSTER_LANE_TEST_MAX_LANES; i += 1)
+    {
+        const bool active = i < lanes;
+        failures += test->called[i] != (active ? 1u : 0u) ? 1 : 0;
+        failures += test->failures[i];
+        if (active)
+        {
+            failures += test->outputs[i] != ~test->inputs[i] || test->observed[i] == 0 ? 1 : 0;
+            failures += test->identities[i] != 0 && test->identities[i] != test->observed[i] ? 1 : 0;
+            test->identities[i] = test->observed[i];
+            for (uint32_t earlier = 0; earlier < i; earlier += 1)
+            {
+                failures += test->observed[i] == test->observed[earlier] ? 1 : 0;
+            }
+        }
+    }
+    failures += test->forbidden_calls != 0 || test->invalid_indices != 0 ? 1 : 0;
+    return failures;
+}
+
+// Pinning failure is startup failure too: the caller's mask and the number of live threads must both be restored.
+// With a valid mask, both the calling lane and its workers are pinned only for their specified lifetime.
+static uint64_t lane_test_team_affinity(LaneTeam* team, uint32_t threads_before)
+{
+    uint64_t before[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    uint64_t after[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const bool saved = syscall(SYS_sched_getaffinity, 0, sizeof(before), before) > 0;
+    uint64_t failures = saved ? 0 : 1;
+    if (saved)
+    {
+        const uint32_t invalid = BUSTER_LANE_CPU_MASK_WORDS * 64;
+        uint32_t valid = 0;
+        while (valid < invalid && (before[valid / 64] & (1ull << (valid % 64))) == 0)
+        {
+            valid += 1;
+        }
+        const uint32_t bad_caller[] = { invalid };
+        const bool caller_started = lane_team_start(team, 1, bad_caller);
+        failures += caller_started ? 1 : 0;
+        lane_team_stop(team);
+        const uint32_t bad_worker[] = { valid, invalid };
+        const bool worker_started = lane_team_start(team, 2, bad_worker);
+        failures += worker_started ? 1 : 0;
+        lane_team_stop(team);
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+        bool restored = syscall(SYS_sched_getaffinity, 0, sizeof(after), after) > 0 && memcmp(before, after, sizeof(before)) == 0;
+        failures += restored ? 0 : 1;
+
+        // Use one allowed CPU for both lanes, so the test also works in a one-CPU affinity set.
+        const uint32_t cpus[] = { valid, valid };
+        const bool started = lane_team_start(team, 2, cpus);
+        failures += started ? 0 : 1;
+        if (started)
+        {
+            LaneTeamTest test = {
+                .caller = (pid_t)syscall(SYS_gettid),
+            };
+            failures += lane_run(1, lane_test_team_forbidden, &test, 0) ? 1 : 0;
+            failures += lane_run(1, lane_test_team_forbidden, &test, bad_caller) ? 1 : 0;
+            failures += lane_test_team_operation(&test, 2, BUSTER_LANE_TEST_TEAM_ROUNDS + 1, cpus);
+            failures += lane_test_team_operation(&test, 1, BUSTER_LANE_TEST_TEAM_ROUNDS + 2, cpus);
+            failures += lane_test_team_operation(&test, 2, BUSTER_LANE_TEST_TEAM_ROUNDS + 3, cpus);
+            failures += test.forbidden_calls != 0 ? 1 : 0;
+            memset(after, 0, sizeof(after));
+            restored = syscall(SYS_sched_getaffinity, 0, sizeof(after), after) > 0 && memcmp(before, after, sizeof(before)) == 0;
+            failures += restored ? 0 : 1;
+        }
+        lane_team_stop(team);
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+        memset(after, 0, sizeof(after));
+        restored = syscall(SYS_sched_getaffinity, 0, sizeof(after), after) > 0 && memcmp(before, after, sizeof(before)) == 0;
+        failures += restored ? 0 : 1;
+    }
+    return failures;
+}
+
+static uint64_t lane_test_teams(void)
+{
+    lane_test_watched_check = "team lifetime";
+    lane_test_watched_lanes = BUSTER_LANE_TEST_MAX_LANES;
+    alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+    const uint32_t threads_before = lane_test_thread_count();
+    const Lane previous = thread_context.lane;
+    Scratch retained = scratch_begin(0);
+    uint64_t* retained_value = BUSTER_ARENA_PUSH_ARRAY(retained.arena, uint64_t, 1);
+    uint64_t failures = retained_value == 0 || threads_before == UINT32_MAX ? 1 : 0;
+    if (retained_value != 0)
+    {
+        *retained_value = BUSTER_LANE_TEST_GOLDEN_RATIO;
+    }
+    LaneTeam team = { 0 };
+    LaneTeamTest test = {
+        .caller = (pid_t)syscall(SYS_gettid),
+    };
+    const bool zero_started = lane_team_start(&team, 0, 0);
+    failures += zero_started ? 1 : 0;
+    lane_team_stop(&team);
+    const bool oversized_started = lane_team_start(&team, BUSTER_LANE_MAX_COUNT + 1, 0);
+    failures += oversized_started ? 1 : 0;
+    lane_team_stop(&team);
+    const bool single_started = lane_team_start(&team, 1, 0);
+    failures += single_started ? 0 : 1;
+    if (single_started)
+    {
+        failures += lane_test_thread_count() != threads_before ? 1 : 0;
+        failures += lane_test_team_operation(&test, 1, 0, 0);
+        failures += lane_test_team_operation(&test, 1, 1, 0);
+    }
+    lane_team_stop(&team);
+    failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    const bool started = lane_team_start(&team, BUSTER_LANE_TEST_MAX_LANES, 0);
+    failures += started ? 0 : 1;
+    if (started)
+    {
+        failures += lane_test_thread_count() != threads_before + BUSTER_LANE_TEST_MAX_LANES - 1 ? 1 : 0;
+        LaneTeam second = { 0 };
+        const bool second_started = lane_team_start(&second, 1, 0);
+        failures += second_started ? 1 : 0;
+        lane_team_stop(&second);
+        failures += lane_run(0, lane_test_team_forbidden, &test, 0) ? 1 : 0;
+        failures += lane_run(BUSTER_LANE_TEST_MAX_LANES + 1, lane_test_team_forbidden, &test, 0) ? 1 : 0;
+        failures += lane_run(1, 0, &test, 0) ? 1 : 0;
+        const uint32_t cpus[BUSTER_LANE_TEST_MAX_LANES] = { 0 };
+        failures += lane_run(1, lane_test_team_forbidden, &test, cpus) ? 1 : 0;
+        static const uint32_t first_counts[] = { 1, 8, 2, 8 };
+        for (uint64_t round = 0; round < BUSTER_LANE_TEST_TEAM_ROUNDS; round += 1)
+        {
+            const uint32_t lanes = round < BUSTER_ARRAY_LENGTH(first_counts) ? first_counts[round] : lane_test_counts[(round * 7) % BUSTER_ARRAY_LENGTH(lane_test_counts)];
+            failures += lane_test_team_operation(&test, lanes, round, 0);
+            failures += retained_value == 0 || *retained_value != BUSTER_LANE_TEST_GOLDEN_RATIO ? 1 : 0;
+            if (round % 64 == 31)
+            {
+                lane_test_stall(BUSTER_LANE_TEST_STALL_NANOSECONDS);
+            }
+        }
+        // Only the calling thread survives fork. The child must refuse the inherited team and forget it on stop,
+        // without waiting for any of the parent's worker identities.
+        fflush(stdout);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+            const bool ran = lane_run(1, lane_test_team_forbidden, &test, 0);
+            lane_team_stop(&team);
+            _exit(ran || test.forbidden_calls != 0 ? 1 : 0);
+        }
+        int status = 0;
+        const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+        failures += waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+        failures += lane_test_team_operation(&test, BUSTER_LANE_TEST_MAX_LANES, BUSTER_LANE_TEST_TEAM_ROUNDS, 0);
+    }
+    lane_team_stop(&team);
+    lane_team_stop(&team);
+    failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    failures += lane_test_team_affinity(&team, threads_before);
+    failures += thread_context.lane.index != previous.index || thread_context.lane.count != previous.count || thread_context.lane.group != previous.group ? 1 : 0;
+    failures += retained_value == 0 || *retained_value != BUSTER_LANE_TEST_GOLDEN_RATIO ? 1 : 0;
+    failures += test.forbidden_calls != 0 || test.invalid_indices != 0 ? 1 : 0;
+    scratch_end(retained);
+    alarm(0);
+    printf("teams: %u operations with changing lane counts, %lu wrong\n", BUSTER_LANE_TEST_TEAM_ROUNDS + 6, (unsigned long)failures);
+    return failures;
+}
+
 static int run_lane_tests(int argc, char** argv)
 {
     uint64_t rounds = BUSTER_LANE_TEST_DEFAULT_ROUNDS;
@@ -1167,6 +1524,7 @@ static int run_lane_tests(int argc, char** argv)
     else
     {
         bool passed = lane_test_arenas();
+        passed = lane_test_teams() == 0 && passed;
         fflush(stdout);
 
         uint64_t state = seed * BUSTER_LANE_TEST_GOLDEN_RATIO + 1;

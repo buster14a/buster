@@ -287,7 +287,8 @@ static ImportResult foreign_link_locals(ForeignLink* output, const ForeignObject
 
 // A symbol table alone cannot tell whether an undefined reference survived COMDAT selection. Only the surviving
 // sections' relocations require a definition, together with explicit -u roots. The extra scan is needed only when
-// resolution left an ordinary strong name undefined; successful ordinary links avoid it entirely.
+// resolution left an ordinary strong name undefined or assigned it to an unneeded DSO; ordinary resolved links
+// avoid it entirely.
 static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign* foreign, RuntimeKind kind, Arena* arena)
 {
     uint8_t* required = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, foreign->names.count);
@@ -295,8 +296,11 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
     for (uint32_t name = 0; required != 0 && name < foreign->names.count; name += 1)
     {
         required[name] = 0;
+        const bool unneeded_shared = foreign->names.resolution[name] == FOREIGN_RESOLUTION_SHARED &&
+                                     !foreign->libraries[foreign->names.library[name]].needed &&
+                                     (foreign->names.flags[name] & BUSTER_FOREIGN_NAME_REFERENCED) != 0;
         unresolved = unresolved || (foreign->names.resolution[name] == FOREIGN_RESOLUTION_UNDEFINED &&
-                                    !runtime_linker_name(kind, foreign->names.bytes[name], foreign->names.length[name]));
+                                    !runtime_linker_name(kind, foreign->names.bytes[name], foreign->names.length[name])) || unneeded_shared;
     }
     for (uint32_t id = 0; required != 0 && unresolved && id < foreign->object_count; id += 1)
     {
@@ -371,6 +375,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         uint64_t value = 0;
         uint64_t size = 0;
         uint16_t version = 0;
+        bool discarded_shared = false;
         if (names->definitions[name] > 1)
         {
             result.error = FOREIGN_LINK_ERROR_DUPLICATE;
@@ -425,9 +430,14 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             const ImportExports* exports = &library->library.exports;
             const uint32_t index = names->symbol[name];
             const bool strong = (names->flags[name] & BUSTER_FOREIGN_NAME_REFERENCED) != 0;
+            discarded_shared = strong && !library->needed && required[name] == 0;
             flags = (uint8_t)((strong ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_WEAK) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
             size = exports->size[index];
-            if (kind == RUNTIME_KIND_STATIC)
+            if (discarded_shared)
+            {
+                // The resolver saw the reference before COMDAT selection; no retained relocation imports it.
+            }
+            else if (kind == RUNTIME_KIND_STATIC)
             {
                 result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
             }
@@ -457,7 +467,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             flags = BUSTER_LINK_SYMBOL_WEAK;
         }
         flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | names->visibility[name] << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
-        const bool discarded_only = resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0;
+        const bool discarded_only = discarded_shared || (resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0);
         if (result.error == FOREIGN_LINK_ERROR_NONE && !discarded_only)
         {
             const NameId named = link_add_name_hashed(link, names->bytes[name], names->length[name], names->hash[name]);
