@@ -309,8 +309,9 @@ typedef enum ExecutablePhase
 // plain data: the program interpreter, the libraries that the imports come from (libc.so.6, and the loader that
 // libc.so's script names as needed) with their versions, a note to repeat (Scrt1.o's .note.ABI-tag), DT_INIT's and
 // DT_FINI's functions (crti.o's _init and _fini) and the definitions to export (Bind.exports). The imports are the
-// link's symbols of source RUNTIME_SHARED, each at the version its column holds (an ExecutableVersion's index, or 0 for
-// none).
+// link's symbols of source RUNTIME_SHARED or FOREIGN_SHARED, each at the version its column holds (an
+// ExecutableVersion's index, or 0/VER_NDX_GLOBAL for none). An imported version above VER_NDX_GLOBAL must occur in
+// the version metadata; the symbol pass refuses a missing definition before opening the output.
 typedef struct ExecutableVersion ExecutableVersion;
 struct ExecutableVersion
 {
@@ -2683,6 +2684,7 @@ struct ExecutableDynamicCounts
     uint64_t got_tpoff;
     uint64_t symbols;
     uint64_t name_bytes;
+    SymbolId unknown_version;
     uint64_t abs64_fixups;
     uint64_t absolute32;
     uint64_t refused;
@@ -3214,6 +3216,10 @@ static void executable_count_dynamic_symbol(const Link* link, ExecutableShared* 
     if (version < shared->version_limit)
     {
         shared->versions_used[lane * shared->version_words + version / 64] |= 1ull << (version % 64);
+    }
+    if (version > VER_NDX_GLOBAL && (version >= shared->version_limit || shared->version_numbers[version] == 0) && counts->unknown_version == 0)
+    {
+        counts->unknown_version = symbol;
     }
 }
 
@@ -5576,6 +5582,16 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         fits = shared->dynamic_bits != 0 && shared->relative_bits != 0 && shared->tpoff_bits != 0 && (!shared->relr || shared->relr_words != 0) &&
                shared->versions_used != 0 && shared->version_numbers != 0 && shared->export_hashes != 0 && shared->bucket_counts != 0 &&
                shared->export_name_bytes != 0 && shared->export_places != 0 && shared->bucket_starts != 0;
+        if (fits)
+        {
+            // Until executable_number_versions, this is the metadata-presence table read by the existing symbol
+            // pass. The count barrier separates those reads from replacement with output version numbers.
+            memset(shared->version_numbers, 0, limit * sizeof(uint16_t));
+            for (uint32_t v = 0; v < dynamic->version_count; v += 1)
+            {
+                shared->version_numbers[dynamic->versions[v].index] = 1;
+            }
+        }
     }
     if (fits && shared->runtime)
     {
@@ -5953,6 +5969,11 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     if (ok && lane == 0 && (entry != 0 || !library) && (entry_atom == 0 || link->atoms.class[entry_atom] != BUSTER_LINK_CLASS_TEXT))
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
+    }
+    if (ok && dynamic && shared->dynamic_counts[lane].unknown_version != 0)
+    {
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0,
+                             shared->dynamic_counts[lane].unknown_version, 0);
     }
     ExecutableFrames frames = { 0 };
     if (ok)
