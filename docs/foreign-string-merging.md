@@ -41,6 +41,10 @@ those passes. It retains ELF section-symbol identity, which the flattened
 Link flags alone cannot express. It applies a pool only if its byte size is
 smaller than the original sections' total.
 
+This pass is an explicit consumer choice. The default foreign driver does
+not call it. Saving literal bytes does not by itself make the complete link
+faster; the measured cost below keeps that choice opt-in.
+
 This is a final-executable pass. The pooled Link must not be sent back to
 the object writer as separately linkable ET_REL sections. Generic import
 keeps wide string sections as ordinary RODATA because the object writer's
@@ -121,6 +125,45 @@ run between samples. The benchmark reports wall time and
 fenced timestamp-counter ticks for the whole interval; TSC ticks are not
 core cycles. Inspect the emitted conditioning loop on the target host before
 using that control as evidence.
+
+## Measured consumer cost
+
+The [October 23 controlled campaign](measurements/foreign-strings-2026-10-23/README.md)
+compares frozen baseline `e74b6727` with candidate `aa2e3257`. The candidate
+removes redundant entry searches during symbol and named-fixup translation;
+the generated named zero-addend ABS64 cases directly exercise that shortcut.
+Three process pairs per conditioning state ran under separate 9700X locks,
+pinned to CPU 2, with eleven timed links per variant. Times include per-link
+reservation and cleanup. Inputs and the page cache were warm.
+
+Every duplicate-and-pool case improved complete link time beyond the observed
+three-process ranges. Median reductions were:
+
+| Literals | Exact, 0 ms | Vector, 0 ms | Exact, 100 ms | Vector, 100 ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 3.63% | 5.73% | 6.16% | 7.23% |
+| 4,096 | 3.95% | 11.97% | 4.85% | 12.10% |
+| 131,072 | 2.11% | 4.70% | 3.65% | 4.78% |
+
+No control slowdown had disjoint ranges. Two controls also improved beyond
+their ranges, so the evidence does not attribute every timing change solely
+to the search removal. Both frozen binaries passed the full foreign
+cross-check suite; all twelve processes passed 14,112 validation checks.
+External input hashes and complete output comparisons, including unique
+no-saving outputs across all four variants, matched. Peak RSS ranges overlap.
+
+Pooling still cost more than omission in all 48 median comparisons. For the
+largest duplicate case, candidate vector pooling cost an additional 26.71%
+without conditioning and 25.51% after 100 ms; literal storage fell from
+4,194,304 bytes to 256. These are gains over the older pooling consumer,
+not a reason to enable pooling by default.
+
+The current PR composition retains the measured consumer but includes later
+main changes and an untimed no-saving validator improvement. The frozen
+measurements do not certify that composition's final-head CI. Nonzero-addend
+and section-relative performance, real-corpus gains, parallel interning and
+whole compilation remain unmeasured by this campaign. The linked record
+preserves exact revisions, ranges, commands, assembly and original logs.
 
 The implementation and fixtures are original project code. LLVM's ELF
 symbol-address handling was consulted as a semantic reference; no source or
