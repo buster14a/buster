@@ -4,14 +4,15 @@
 // makes per input file, faulting and copying memory, and a process's teardown. It takes over the floor programs of the
 // document's appendix. Usage: build/compiler benchmark-floors [--directory PATH] [--cpu N] [--only
 // files|threads|calls|memory|teardown] Run it under the 9700X's lock without taskset: it pins itself to --cpu (CPU 2 by
-// default), and a write by N threads to the first N CPUs this process may use (0 to 7 on the 9700X, one per core).
+// default), and a write by N threads to that CPU first, then the first other CPUs this process may use (one per core
+// when the process may use CPUs 0 to 7 on the 9700X).
 // Every figure is a median, the sections in this order (--only runs one):
 //   - files: the output written from memory into --directory (TMPDIR or /tmp by default) each way a linker can write it
 //     (FloorsBenchmarkMethod), at each of floors_benchmark_sizes: BUSTER_FLOORS_BENCHMARK_RUNS runs, or from
 //     BUSTER_FLOORS_BENCHMARK_LARGE_BYTES BUSTER_FLOORS_BENCHMARK_LARGE_RUNS runs with a syncfs after each, outside the
 //     time. The file is there, written the first way, before a size's first run, and every way's time takes in its
 //     open and its close.
-//   - threads: each of floors_benchmark_parallel_sizes written by 1, 2, 4 and 8 threads, each a contiguous share, by
+//   - threads: each of floors_benchmark_parallel_sizes written by 1, 2, 3, 4 and 8 threads, each a contiguous share, by
 //     pwrite and through a shared mapping: the open and the sizing on the first thread, then from the threads' release
 //     (they wait at a sync once the file is open: starting them isn't timed) until the last has written, and the unmap
 //     and the close; BUSTER_FLOORS_BENCHMARK_LARGE_RUNS runs with a syncfs after each.
@@ -24,7 +25,8 @@
 //     floors_benchmark_teardown_sizes of anonymous memory, with base pages and with MADV_HUGEPAGE, sends this process
 //     the time through a pipe and exits: the time from then to waitpid's return, which a linker that forks hides from
 //     its caller.
-// The exit status is 1 if the arguments are invalid or a call fails.
+// Each file's bytes are checked against the source after its last timed write, outside the time. The exit status is
+// 1 if the arguments are invalid, a call fails, or a file differs.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -90,6 +92,7 @@ static const uint64_t floors_benchmark_parallel_sizes[] = {
 static const uint32_t floors_benchmark_thread_counts[] = {
     1,
     2,
+    3,
     4,
     8,
 };
@@ -120,8 +123,12 @@ typedef enum FloorsBenchmarkMethod
     FLOORS_BENCHMARK_RENAME,
     // unlink, open with O_CREAT, ftruncate, mmap with MAP_SHARED, memcpy, munmap, close.
     FLOORS_BENCHMARK_MAP,
-    // The same with fallocate in place of ftruncate, and MADV_HUGEPAGE on the mapping.
+    // The same with fallocate in place of ftruncate.
     FLOORS_BENCHMARK_MAP_FALLOCATE,
+    // The plain mapping with MADV_HUGEPAGE, independently of fallocate.
+    FLOORS_BENCHMARK_MAP_HUGE,
+    // The mapping with both fallocate and MADV_HUGEPAGE.
+    FLOORS_BENCHMARK_MAP_FALLOCATE_HUGE,
     // The mapping without the unlink.
     FLOORS_BENCHMARK_MAP_IN_PLACE,
     FLOORS_BENCHMARK_METHODS,
@@ -134,6 +141,8 @@ static const char* const floors_benchmark_method_names[FLOORS_BENCHMARK_METHODS]
     [FLOORS_BENCHMARK_RENAME] = "temporary file",
     [FLOORS_BENCHMARK_MAP] = "mmap",
     [FLOORS_BENCHMARK_MAP_FALLOCATE] = "mmap, fallocate",
+    [FLOORS_BENCHMARK_MAP_HUGE] = "mmap, MADV_HUGEPAGE",
+    [FLOORS_BENCHMARK_MAP_FALLOCATE_HUGE] = "mmap, fallocate, MADV_HUGEPAGE",
     [FLOORS_BENCHMARK_MAP_IN_PLACE] = "mmap in place",
 };
 
@@ -143,6 +152,8 @@ static const FloorsBenchmarkMethod floors_benchmark_parallel_methods[] = {
     FLOORS_BENCHMARK_IN_PLACE,
     FLOORS_BENCHMARK_MAP,
     FLOORS_BENCHMARK_MAP_FALLOCATE,
+    FLOORS_BENCHMARK_MAP_HUGE,
+    FLOORS_BENCHMARK_MAP_FALLOCATE_HUGE,
     FLOORS_BENCHMARK_MAP_IN_PLACE,
 };
 
@@ -172,9 +183,12 @@ static uint8_t* floors_benchmark_map(uint64_t size, int advice)
 {
     uint8_t* bytes = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint8_t* result = bytes != MAP_FAILED ? bytes : 0;
-    if (result != 0)
+    if (result != 0 && madvise(result, size, advice) != 0)
     {
-        madvise(result, size, advice);
+        const int error = errno;
+        munmap(result, size);
+        result = 0;
+        errno = error;
     }
     return result;
 }
@@ -207,16 +221,62 @@ static bool floors_benchmark_pwrite(int file, const uint8_t* bytes, uint64_t beg
 // Sizes the open `file` for `size` bytes, as `method` does: fallocate or ftruncate.
 static bool floors_benchmark_size(int file, FloorsBenchmarkMethod method, uint64_t size)
 {
-    const long sized = method == FLOORS_BENCHMARK_MAP_FALLOCATE ? syscall(SYS_fallocate, file, 0, 0, (off_t)size) : ftruncate(file, (off_t)size);
+    const bool allocated = method == FLOORS_BENCHMARK_MAP_FALLOCATE || method == FLOORS_BENCHMARK_MAP_FALLOCATE_HUGE;
+    const long sized = allocated ? syscall(SYS_fallocate, file, 0, 0, (off_t)size) : ftruncate(file, (off_t)size);
     return sized == 0;
+}
+
+static bool floors_benchmark_mapped(FloorsBenchmarkMethod method)
+{
+    return method >= FLOORS_BENCHMARK_MAP && method <= FLOORS_BENCHMARK_MAP_IN_PLACE;
+}
+
+static bool floors_benchmark_huge(FloorsBenchmarkMethod method)
+{
+    return method == FLOORS_BENCHMARK_MAP_HUGE || method == FLOORS_BENCHMARK_MAP_FALLOCATE_HUGE;
+}
+
+// Read back the complete final file, outside the timing. A size or byte mismatch is an I/O failure.
+static bool floors_benchmark_verify(const char* path, const uint8_t* source, uint64_t size)
+{
+    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat status;
+    bool result = file >= 0 && fstat(file, &status) == 0;
+    int error = result ? 0 : errno;
+    if (result && (uint64_t)status.st_size != size)
+    {
+        result = false;
+        error = EIO;
+    }
+    const uint8_t* map = result ? mmap(0, size, PROT_READ, MAP_PRIVATE, file, 0) : MAP_FAILED;
+    if (result)
+    {
+        result = map != MAP_FAILED;
+        error = result ? 0 : errno;
+    }
+    if (result && memcmp(map, source, size) != 0)
+    {
+        result = false;
+        error = EIO;
+    }
+    if (map != MAP_FAILED)
+    {
+        munmap((void*)map, size);
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    errno = error;
+    return result;
 }
 
 // Writes `size` bytes of `source` into the file at `path` by `method` (`temporary` is the rename's name). False if a
 // call failed.
 static bool floors_benchmark_write(FloorsBenchmarkMethod method, const char* path, const char* temporary, const uint8_t* source, uint64_t size)
 {
-    const bool mapped = method == FLOORS_BENCHMARK_MAP || method == FLOORS_BENCHMARK_MAP_FALLOCATE || method == FLOORS_BENCHMARK_MAP_IN_PLACE;
-    if (method == FLOORS_BENCHMARK_NEW_FILE || method == FLOORS_BENCHMARK_MAP || method == FLOORS_BENCHMARK_MAP_FALLOCATE)
+    const bool mapped = floors_benchmark_mapped(method);
+    if (method == FLOORS_BENCHMARK_NEW_FILE || (mapped && method != FLOORS_BENCHMARK_MAP_IN_PLACE))
     {
         unlink(path);
     }
@@ -230,25 +290,32 @@ static bool floors_benchmark_write(FloorsBenchmarkMethod method, const char* pat
         result = result && floors_benchmark_size(file, method, size);
         uint8_t* map = result ? mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0) : MAP_FAILED;
         result = map != MAP_FAILED;
-        if (result && method == FLOORS_BENCHMARK_MAP_FALLOCATE)
+        if (result && floors_benchmark_huge(method))
         {
-            madvise(map, size, MADV_HUGEPAGE);
+            result = madvise(map, size, MADV_HUGEPAGE) == 0;
         }
         if (result)
         {
             memcpy(map, source, size);
+        }
+        const int error = result ? 0 : errno;
+        if (map != MAP_FAILED)
+        {
             munmap(map, size);
         }
+        errno = error;
     }
     else
     {
         result = result && floors_benchmark_pwrite(file, source, 0, size);
         result = result && (method != FLOORS_BENCHMARK_IN_PLACE || ftruncate(file, (off_t)size) == 0);
     }
+    const int error = result ? 0 : errno;
     if (file >= 0)
     {
         close(file);
     }
+    errno = error;
     result = result && (method != FLOORS_BENCHMARK_RENAME || rename(temporary, path) == 0);
     return result;
 }
@@ -262,7 +329,7 @@ static bool floors_benchmark_files(const char* directory, const uint8_t* source)
     char temporary[BUSTER_FLOORS_BENCHMARK_PATH_BYTES];
     snprintf(path, sizeof(path), "%s/buster-floors-output", directory);
     snprintf(temporary, sizeof(temporary), "%s/buster-floors-output.temporary", directory);
-    printf("Creating the output in %s, us (GB/s):\n  %-18s", directory, "");
+    printf("Creating the output in %s, us (GB/s), final bytes checked:\n  %-30s", directory, "");
     for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(floors_benchmark_sizes); s += 1)
     {
         printf(" %17llu KB", (unsigned long long)(floors_benchmark_sizes[s] >> 10));
@@ -271,7 +338,7 @@ static bool floors_benchmark_files(const char* directory, const uint8_t* source)
     bool result = true;
     for (uint32_t method = 0; result && method < FLOORS_BENCHMARK_METHODS; method += 1)
     {
-        printf("  %-18s", floors_benchmark_method_names[method]);
+        printf("  %-30s", floors_benchmark_method_names[method]);
         for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(floors_benchmark_sizes); s += 1)
         {
             const uint64_t size = floors_benchmark_sizes[s];
@@ -291,6 +358,7 @@ static bool floors_benchmark_files(const char* directory, const uint8_t* source)
                     floors_benchmark_sync(directory);
                 }
             }
+            result = result && floors_benchmark_verify(path, source, size);
             const uint64_t median = result ? floors_benchmark_median(times, runs) : 0;
             printf(" %10.1f (%5.2f)", (double)median / 1e3, result ? (double)size / (double)median : 0.0);
             fflush(stdout);
@@ -339,7 +407,7 @@ static void floors_benchmark_parallel_main(void* argument)
     const uint64_t begin = parallel->size * lane_index() / lane_count();
     const uint64_t end = parallel->size * (lane_index() + 1) / lane_count();
     const FloorsBenchmarkMethod method = parallel->method;
-    const bool mapped = method == FLOORS_BENCHMARK_MAP || method == FLOORS_BENCHMARK_MAP_FALLOCATE || method == FLOORS_BENCHMARK_MAP_IN_PLACE;
+    const bool mapped = floors_benchmark_mapped(method);
     bool succeeded = true;
     int error = 0;
     for (uint32_t run = 0; succeeded && run < BUSTER_FLOORS_BENCHMARK_LARGE_RUNS; run += 1)
@@ -350,7 +418,7 @@ static void floors_benchmark_parallel_main(void* argument)
         int failure = 0;
         if (first)
         {
-            if (method == FLOORS_BENCHMARK_NEW_FILE || method == FLOORS_BENCHMARK_MAP || method == FLOORS_BENCHMARK_MAP_FALLOCATE)
+            if (method == FLOORS_BENCHMARK_NEW_FILE || (mapped && method != FLOORS_BENCHMARK_MAP_IN_PLACE))
             {
                 unlink(parallel->path);
             }
@@ -359,11 +427,11 @@ static void floors_benchmark_parallel_main(void* argument)
             ready = parallel->file >= 0 && floors_benchmark_size(parallel->file, method, parallel->size);
             parallel->map = ready && mapped ? mmap(0, parallel->size, PROT_READ | PROT_WRITE, MAP_SHARED, parallel->file, 0) : MAP_FAILED;
             ready = ready && (!mapped || parallel->map != MAP_FAILED);
-            failure = ready ? 0 : errno;
-            if (ready && method == FLOORS_BENCHMARK_MAP_FALLOCATE)
+            if (ready && floors_benchmark_huge(method))
             {
-                madvise(parallel->map, parallel->size, MADV_HUGEPAGE);
+                ready = madvise(parallel->map, parallel->size, MADV_HUGEPAGE) == 0;
             }
+            failure = ready ? 0 : errno;
             opened = floors_benchmark_now();
         }
         ready = lane_broadcast(ready ? 1 : 0, 0) != 0;
@@ -415,10 +483,16 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
     bool result = true;
     // The errno of a lane that failed, which isn't this thread's.
     int lane_error = 0;
+    printf("Thread CPUs in lane order:");
+    for (uint32_t cpu = 0; cpu < cpu_count; cpu += 1)
+    {
+        printf("%s%u", cpu == 0 ? " " : ",", cpus[cpu]);
+    }
+    printf("; each group takes the first N, final bytes checked\n");
     for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(floors_benchmark_parallel_sizes); s += 1)
     {
         const uint64_t size = floors_benchmark_parallel_sizes[s];
-        printf("One file of %llu MB from several threads in %s, ms (GB/s):\n  %-18s", (unsigned long long)(size >> 20), directory, "");
+        printf("One file of %llu MB from several threads in %s, ms (GB/s):\n  %-30s", (unsigned long long)(size >> 20), directory, "");
         for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(floors_benchmark_thread_counts); t += 1)
         {
             printf(" %8u thread%s", floors_benchmark_thread_counts[t], floors_benchmark_thread_counts[t] == 1 ? " " : "s");
@@ -427,7 +501,7 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
         for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(floors_benchmark_parallel_methods); m += 1)
         {
             const FloorsBenchmarkMethod method = floors_benchmark_parallel_methods[m];
-            printf("  %-18s", floors_benchmark_method_names[method]);
+            printf("  %-30s", floors_benchmark_method_names[method]);
             // More threads than CPUs to pin them to aren't run.
             for (uint32_t t = 0; result && t < BUSTER_ARRAY_LENGTH(floors_benchmark_thread_counts); t += 1)
             {
@@ -449,6 +523,7 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
                     floors_benchmark_sync(directory);
                     result = result && lane_run(threads, floors_benchmark_parallel_main, &parallel, cpus) && parallel.succeeded;
                     lane_error = parallel.error;
+                    result = result && floors_benchmark_verify(path, source, size);
                 }
                 const uint64_t median = runs && result ? floors_benchmark_median(parallel.times, BUSTER_FLOORS_BENCHMARK_LARGE_RUNS) : 0;
                 if (runs)
@@ -805,19 +880,21 @@ int run_floors_benchmark(int argc, char** argv)
             valid = false;
         }
     }
-    // The CPUs this process may use, in order: the threads' writes take the first ones.
+    // The selected CPU first, then the other CPUs this process may use: every one-lane measurement uses --cpu.
     uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     uint32_t cpus[BUSTER_FLOORS_BENCHMARK_MAX_THREADS] = { 0 };
-    uint32_t cpu_count = 0;
     const bool known = valid && syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0;
+    const bool selected = known && (allowed[cpu / 64] >> (cpu % 64) & 1) != 0;
+    uint32_t cpu_count = selected ? 1 : 0;
+    cpus[0] = (uint32_t)cpu;
     for (uint32_t c = 0; known && c < BUSTER_LANE_CPU_MASK_WORDS * 64; c += 1)
     {
-        const bool usable = (allowed[c / 64] >> (c % 64) & 1) != 0 && cpu_count < BUSTER_FLOORS_BENCHMARK_MAX_THREADS;
+        const bool usable = c != cpu && (allowed[c / 64] >> (c % 64) & 1) != 0 && cpu_count < BUSTER_FLOORS_BENCHMARK_MAX_THREADS;
         cpus[usable ? cpu_count : 0] = usable ? c : cpus[0];
         cpu_count += usable ? 1 : 0;
     }
     // Only valid arguments have --cpu in range.
-    const bool pin = known && lane_pin((uint32_t)cpu);
+    const bool pin = selected && lane_pin((uint32_t)cpu);
     // The output's bytes, in memory touched beforehand, which the copies read too.
     const bool sourced = (sections & ~(1u << FLOORS_BENCHMARK_TEARDOWN)) != 0;
     uint8_t* source = pin && sourced ? floors_benchmark_map(BUSTER_FLOORS_BENCHMARK_SOURCE_BYTES, MADV_HUGEPAGE) : 0;
