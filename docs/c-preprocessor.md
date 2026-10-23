@@ -8,6 +8,11 @@ item 2, tracked in #117 and its parts #118 to #125. This document records the
 design, how it is checked against clang, the Zen 5 measurements, and what comes
 next.
 
+The [2026-10-23 acceptance refresh](measurements/preprocessor-117-2026-10-23/README.md)
+records frozen source and corpus identities, the independent scalar reference,
+lookup and final-output accounting, and the evidence for #118 through #124.
+The earlier results below retain their original revisions and input scope.
+
 ## Results
 
 **Token-identical to `clang -E`** (clang 23.1.1 on the 9700X, 23.1.3 locally),
