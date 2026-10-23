@@ -70,7 +70,11 @@ do not change loaded-segment sizes, TLS or `_edata`. The writer also emits
 `.symtab` and `.strtab` for the descriptor's functions, with locals before
 globals, their original binding/visibility and actual sizes. This lets perf
 resolve function names as well as DWARF source lines. Dynamic exports are
-unchanged. With no debug descriptor, none of these seven sections is emitted.
+unchanged. An explicit `ExecutableOptions.symbols` selection can supply the
+regular table independently of DWARF, or override its function-only selection;
+the debug address slots still follow the debug descriptor. With neither
+attachment, none of these seven sections is emitted. See
+[the regular-symbol contract](executable-symbols.md).
 
 The consumer fixture exposed an existing loaded-segment layout issue in perf
 7.2.9 with libdw: compact file offsets made its mapping-base calculation differ

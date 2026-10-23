@@ -160,6 +160,12 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `ExecutableOptions.symbols` provides optional regular symbol output without
+  DWARF. `test-executable` covers the attachment and unchanged-destination
+  refusal; `test-debug --cross-check` covers the debug-only consumers. The
+  [symbol-output contract](docs/executable-symbols.md) records producer
+  ownership, supported definitions and pending parallel/performance gates.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
