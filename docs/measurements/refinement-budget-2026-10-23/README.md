@@ -160,6 +160,68 @@ reordered IDs and allocation failures. Its guarded probe test enumerates all
 
 The separate setup control measures fresh table initialization as well as the
 refine phase and whole preprocessing run. A wider table's extra setup cost must
-be charged to the budget; a lower refine time alone is insufficient. Target
-comparison and shared-file validation are pending. The profiles from the second
-screen are retained [with their annotated assembly](profile-second-9700x.txt).
+be charged to the budget; a lower refine time alone is insufficient. The profiles
+from the second screen are retained [with their annotated assembly](profile-second-9700x.txt).
+
+[Run 39956592698](https://github.com/buster14a/buster/actions/runs/39956592698)
+passed the required job for head `84a6b0dc6e58270713d580b7066d76d763f0d0d1`,
+tested as merge `e4ab6c1301bbac50003577f4f654c7fc162e2fe0` with main
+`21d632c202fa9be20841ba3630220a2640087847`. All proposed variants passed the
+seed-116 refinement checks; prefix28 passed the shared-file suite. The
+[81-process comparison](screen-third-9700x.txt), [summary](screen-third-9700x.tsv),
+[54-process kernel comparison](kernels-third-9700x.txt),
+[18-process setup control](setup-third-9700x.txt) and
+[three profiles with annotated assembly](profile-third-9700x.txt) are retained.
+All comparison commands reported zero failed processes.
+
+| SQLite 3.53.4 | Refine range, ms | Median, ms | Whole-run range, ms |
+| --- | ---: | ---: | ---: |
+| Original hash/refinement | 1.703–1.723 | 1.719 | 11.851–11.952 |
+| ahead2 | 1.648–1.653 | 1.651 | 11.805–11.841 |
+| prefetchloop1 | 1.702–1.705 | 1.704 | 11.812–11.901 |
+| prefetchloop2 | 1.662–1.667 | 1.664 | 11.763–11.854 |
+| block2k | 1.646–1.651 | 1.648 | 11.913–12.010 |
+| block4k | 1.645–1.646 | 1.645 | 11.763–11.845 |
+| block8k | 1.618–1.655 | 1.636 | 11.787–11.829 |
+| loop2block2k | 1.628–1.640 | 1.633 | 11.703–11.734 |
+| prefix28 | 1.538–1.540 | 1.538 | 11.821–11.905 |
+
+Prefix28's fresh initialization costs 0.138–0.140 ms versus 0.069–0.071 ms
+for the unchanged layout. Charging that extra setup and the previously moved
+approximately 0.03 ms arena fault leaves about 1.64 ms. Its main.c whole-run
+range also regresses to 36.806–36.820 ms from the control's 36.419–36.522 ms.
+No third-screen candidate meets 1.5 ms. The setup wrapper intentionally omits
+expansion history, so its output token counts differ from the regular benchmark;
+all variants of that wrapper have identical token counts and digests.
+
+## Fourth screen: consume completed lexer blocks
+
+The next experiment uses the existing lexer range routines without changing
+`c_lexer.c` or its interface. It keeps completed logical lines, resumes their
+unfinished suffix in the next source window, and refines complete token blocks
+while their columns and source are still cached. A growing window handles a
+long logical line; scalar-only modes and C++ retain complete-file preparation.
+The public prepared-file representation is unchanged. Lexer restart work stays
+in the lex phase; the temporary leading-space buffer, copy, and refinement state
+are charged to refinement. Any lex-phase increase must also be charged to the
+1.5 ms budget. These are experiments, not accepted production changes.
+
+The private preparation slice does not change #117's active macro-run or
+include/embed accounting functions. The overlay is based on `447941a3`, which
+merges main `de751b9`; its relative includes use the compiler source directory
+as an additional include path. The hash remains the fixed hash. Four source
+window sizes (16, 64, 256 and 1,024 KiB) are compared with the original control
+and ahead2, all with the same preprocessor benchmark and frozen inputs.
+
+Local qualification passed 12,288 guarded lexer/refinement cases and 57,408
+guarded preparation cases under ASan/UBSan. The latter compare the scalar
+complete-file path's IDs and spellings, leading-space bits, physical positions,
+raw-string errors, unterminated comments, directive tables, notes and guards
+at 13 window sizes, in three literal-prefix modes and all 64 alignments. They
+also compare both SQLite inputs and main.c and force allocation failures.
+The shared-file suite passes with 64-byte source windows, forcing the path on
+small fixtures, including lane/ID permutations and 48 constrained-memory runs.
+Clang comparison of main.c and SQLite agrees on all 3,217,305 output tokens.
+Replaying the archived patches also passes the full scalar/oracle suite with
+seed 116 on 9,171 repository/SQLite/libc files (115,706,051 bytes).
+These local checks establish correctness evidence, not 9700X performance.

@@ -151,60 +151,68 @@ jobs:
           uname -srvmo
           cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor /sys/devices/system/cpu/cpu10/online
           executables=()
-          for variant in base ahead2 prefetchloop1 prefetchloop2 block2k block4k block8k loop2block2k prefix28; do
+          for variant in base ahead2 chunks16 chunks64 chunks256 chunks1024; do
               overlay="build/refine116/$variant"
               mkdir -p "$overlay/buster/compiler"
               cp src/buster/compiler/c_refine.c "$overlay/buster/compiler/c_refine.c"
               cp src/buster/compiler/c_intern.c "$overlay/buster/compiler/c_intern.c"
+              chunk=65536
               if [ "$variant" = base ]; then
                   patch --fuzz=0 "$overlay/buster/compiler/c_intern.c" "$evidence/candidates/before-intern.patch"
-              else
+              elif [ "$variant" = ahead2 ]; then
                   patch --fuzz=0 "$overlay/buster/compiler/c_refine.c" "$evidence/candidates/$variant.patch"
-              fi
-              if [ "$variant" = prefix28 ]; then
-                  patch --fuzz=0 "$overlay/buster/compiler/c_intern.c" "$evidence/candidates/prefix28-intern.patch"
+              else
+                  chunk=$(( ${variant#chunks} * 1024 ))
+                  patch --fuzz=0 "$overlay/buster/compiler/c_refine.c" "$evidence/candidates/chunks.patch"
+                  cp src/buster/compiler/c_preprocessor.c "$overlay/buster/compiler/c_preprocessor.c"
+                  patch --fuzz=0 "$overlay/buster/compiler/c_preprocessor.c" "$evidence/candidates/chunks-preprocessor.patch"
                   cp src/buster/compiler/c_refine_test.c "$overlay/buster/compiler/c_refine_test.c"
-                  patch --fuzz=0 "$overlay/buster/compiler/c_refine_test.c" "$evidence/candidates/prefix28-test.patch"
+                  patch --fuzz=0 "$overlay/buster/compiler/c_refine_test.c" "$evidence/candidates/chunks-test.patch"
               fi
-              sha256sum "$overlay/buster/compiler/c_refine.c" "$overlay/buster/compiler/c_intern.c"
-              clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
+              sha256sum "$overlay"/buster/compiler/*.c
+              clang -O3 -g -march=native -DBUSTER_REFINE_SOURCE_CHUNK="$chunk" -I"$overlay" -Isrc -Isrc/buster/compiler \
+                  -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
                   "$evidence/preprocessor-main.c" -o "build/refine116/pp-$variant"
-              clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
-                  "$evidence/refinement-main.c" -o "build/refine116/kernel-$variant"
               # The old hash has a known seed-116/fixed-fold failure, recorded in hash-regression.md.
               # It is a timing control, not a passing candidate. The first screen checked its semantics with seed 42.
-              if [ "$variant" != base ]; then
+              if [ "$variant" = ahead2 ]; then
                   clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
                       "$evidence/refinement-test-main.c" -o "build/refine116/test-$variant"
                   taskset -c 2 "build/refine116/test-$variant" --count 2000 --seed 116 src "$inputs/sqlite-3.53.4.c"
               fi
               executables+=("build/refine116/pp-$variant")
-              if [ "$variant" = base ] || [ "$variant" = ahead2 ] || [ "$variant" = prefix28 ]; then
+              if [ "$variant" = base ] || [ "$variant" = ahead2 ] || [ "$variant" = chunks64 ]; then
                   clang -O3 -g -march=native -I"$overlay" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
-                      "$evidence/setup-main.c" -o "build/refine116/setup-$variant"
+                      "$evidence/refinement-main.c" -o "build/refine116/kernel-$variant"
               fi
           done
-          clang -O3 -g -march=native -Ibuild/refine116/prefix28 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
-              "$evidence/files-test-main.c" -o build/refine116/files-prefix28
-          taskset -c 2 build/refine116/files-prefix28 --seed 116 --id-order 19
+          overlay=build/refine116/chunks64
+          for test in chunk-boundaries chunk-prepare-test; do
+              clang -O3 -g -march=native -I"$overlay" -Isrc -Isrc/buster/compiler -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror \
+                  "$evidence/$test.c" -o "build/refine116/$test"
+          done
+          taskset -c 2 build/refine116/chunk-boundaries --count 2000 --seed 116 src "$inputs/sqlite-3.53.4.c"
+          taskset -c 2 build/refine116/chunk-prepare-test "$inputs/sqlite-3.53.4.c" "$inputs/sqlite-3.53.2.c" src/buster/compiler/main.c
+          clang -O3 -g -march=native -DBUSTER_REFINE_SOURCE_CHUNK=64 -I"$overlay" -Isrc -Isrc/buster/compiler \
+              -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror "$evidence/files-test-main.c" -o build/refine116/files-chunks
+          taskset -c 2 build/refine116/files-chunks --seed 116 --id-order 19
+          taskset -c 2 build/refine116/files-chunks --preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
+              src/buster/compiler/main.c "$inputs/sqlite-3.53.4.c"
           sha256sum build/refine116/pp-*
           ./build/compiler ab --rounds 3 --cpu 2 "${executables[@]}" \
               -- --only vectorized "$inputs/sqlite-3.53.4.c" \
               -- --only vectorized "$inputs/sqlite-3.53.2.c" \
               -- --only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c \
               | tee build/refine116/screen.txt
-          ./build/compiler ab --rounds 3 --cpu 2 build/refine116/kernel-{base,ahead2,prefetchloop1,prefetchloop2,block2k,block4k,block8k,loop2block2k,prefix28} \
+          ./build/compiler ab --rounds 3 --cpu 2 build/refine116/kernel-{base,ahead2,chunks64} \
               -- --only refine_tokens_64 "$inputs/sqlite-3.53.4.c" \
               -- --only refine_tokens_64 --after-scalar 100 "$inputs/sqlite-3.53.4.c" \
               | tee build/refine116/kernels.txt
-          ./build/compiler ab --rounds 3 --cpu 2 build/refine116/setup-{base,ahead2,prefix28} \
-              -- "$inputs/sqlite-3.53.4.c" -- "$inputs/sqlite-3.53.2.c" | tee build/refine116/setup.txt
-          for variant in ahead2 prefetchloop2 prefix28; do
+          for variant in ahead2 chunks64; do
               echo "Profile: $variant"
               perf record -q -e cycles:u -c 20000 -o "build/refine116/$variant.perf" -- \
                   taskset -c 2 "build/refine116/pp-$variant" --only vectorized "$inputs/sqlite-3.53.4.c"
               perf report --stdio --no-children --sort symbol --percent-limit 1 -i "build/refine116/$variant.perf"
-              perf annotate --stdio --stdio-color never -s refine_pass_b_64_plain -i "build/refine116/$variant.perf" || true
           done
 
       - name: Write clang's predefines for the compiler's flags
