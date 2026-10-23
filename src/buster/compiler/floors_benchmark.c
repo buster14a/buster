@@ -3,7 +3,8 @@
 // charge a linker however it works: creating its output, writing one file from several threads, the small calls it
 // makes per input file, faulting and copying memory, and a process's teardown. It takes over the floor programs of the
 // document's appendix. Usage: build/compiler benchmark-floors [--directory PATH] [--cpu N] [--only
-// files|threads|calls|memory|teardown] Run it under the 9700X's lock without taskset: it pins itself to --cpu (CPU 2 by
+// files|threads|calls|memory|teardown] [--size-kb N] [--method NAME]. The filters require --only files or threads and
+// split a long filesystem matrix into bounded runs under the shared lock. Run it without taskset: it pins itself to --cpu (CPU 2 by
 // default), and a write by N threads to that CPU first, then the first other CPUs this process may use (one per core
 // when the process may use CPUs 0 to 7 on the 9700X).
 // Every figure is a median, the sections in this order (--only runs one):
@@ -144,6 +145,18 @@ static const char* const floors_benchmark_method_names[FLOORS_BENCHMARK_METHODS]
     [FLOORS_BENCHMARK_MAP_HUGE] = "mmap, MADV_HUGEPAGE",
     [FLOORS_BENCHMARK_MAP_FALLOCATE_HUGE] = "mmap, fallocate, MADV_HUGEPAGE",
     [FLOORS_BENCHMARK_MAP_IN_PLACE] = "mmap in place",
+};
+
+static const char* const floors_benchmark_method_options[FLOORS_BENCHMARK_METHODS] = {
+    "new",
+    "truncate",
+    "in-place",
+    "rename",
+    "mmap",
+    "fallocate",
+    "huge",
+    "fallocate-huge",
+    "mmap-in-place",
 };
 
 // The ways several threads write one file: by pwrite into a new file or in place, or through a shared mapping.
@@ -323,7 +336,7 @@ static bool floors_benchmark_write(FloorsBenchmarkMethod method, const char* pat
 // ---------------------------------------------------------------------------------------------------------------------
 // Files
 
-static bool floors_benchmark_files(const char* directory, const uint8_t* source)
+static bool floors_benchmark_files(const char* directory, const uint8_t* source, uint64_t selected_size, uint32_t methods)
 {
     char path[BUSTER_FLOORS_BENCHMARK_PATH_BYTES];
     char temporary[BUSTER_FLOORS_BENCHMARK_PATH_BYTES];
@@ -332,16 +345,27 @@ static bool floors_benchmark_files(const char* directory, const uint8_t* source)
     printf("Creating the output in %s, us (GB/s), final bytes checked:\n  %-30s", directory, "");
     for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(floors_benchmark_sizes); s += 1)
     {
-        printf(" %17llu KB", (unsigned long long)(floors_benchmark_sizes[s] >> 10));
+        if (selected_size == 0 || selected_size == floors_benchmark_sizes[s])
+        {
+            printf(" %17llu KB", (unsigned long long)(floors_benchmark_sizes[s] >> 10));
+        }
     }
     printf("\n");
     bool result = true;
     for (uint32_t method = 0; result && method < FLOORS_BENCHMARK_METHODS; method += 1)
     {
+        if ((methods >> method & 1) == 0)
+        {
+            continue;
+        }
         printf("  %-30s", floors_benchmark_method_names[method]);
         for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(floors_benchmark_sizes); s += 1)
         {
             const uint64_t size = floors_benchmark_sizes[s];
+            if (selected_size != 0 && selected_size != size)
+            {
+                continue;
+            }
             const bool large = size >= BUSTER_FLOORS_BENCHMARK_LARGE_BYTES;
             const uint32_t runs = large ? BUSTER_FLOORS_BENCHMARK_LARGE_RUNS : BUSTER_FLOORS_BENCHMARK_RUNS;
             uint64_t times[BUSTER_FLOORS_BENCHMARK_RUNS];
@@ -476,7 +500,7 @@ static void floors_benchmark_parallel_main(void* argument)
     }
 }
 
-static bool floors_benchmark_threads(const char* directory, const uint8_t* source, const uint32_t* cpus, uint32_t cpu_count)
+static bool floors_benchmark_threads(const char* directory, const uint8_t* source, const uint32_t* cpus, uint32_t cpu_count, uint64_t selected_size, uint32_t methods)
 {
     char path[BUSTER_FLOORS_BENCHMARK_PATH_BYTES];
     snprintf(path, sizeof(path), "%s/buster-floors-output", directory);
@@ -492,6 +516,10 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
     for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(floors_benchmark_parallel_sizes); s += 1)
     {
         const uint64_t size = floors_benchmark_parallel_sizes[s];
+        if (selected_size != 0 && selected_size != size)
+        {
+            continue;
+        }
         printf("One file of %llu MB from several threads in %s, ms (GB/s):\n  %-30s", (unsigned long long)(size >> 20), directory, "");
         for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(floors_benchmark_thread_counts); t += 1)
         {
@@ -501,6 +529,10 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
         for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(floors_benchmark_parallel_methods); m += 1)
         {
             const FloorsBenchmarkMethod method = floors_benchmark_parallel_methods[m];
+            if ((methods >> method & 1) == 0)
+            {
+                continue;
+            }
             printf("  %-30s", floors_benchmark_method_names[method]);
             // More threads than CPUs to pin them to aren't run.
             for (uint32_t t = 0; result && t < BUSTER_ARRAY_LENGTH(floors_benchmark_thread_counts); t += 1)
@@ -849,6 +881,9 @@ int run_floors_benchmark(int argc, char** argv)
     const char* directory = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
     uint32_t sections = (1u << FLOORS_BENCHMARK_SECTIONS) - 1;
     unsigned long long cpu = 2;
+    uint64_t selected_size = 0;
+    uint32_t methods = (1u << FLOORS_BENCHMARK_METHODS) - 1;
+    bool filtered = false;
     bool valid = true;
     for (int i = 1; valid && i < argc; i += 1)
     {
@@ -875,10 +910,48 @@ int run_floors_benchmark(int argc, char** argv)
             valid = sections != 0;
             i += 1;
         }
+        else if (strcmp(argv[i], "--size-kb") == 0 && has_value)
+        {
+            char* end = 0;
+            const unsigned long long kibibytes = strtoull(argv[i + 1], &end, 10);
+            valid = argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9' && *end == 0 && kibibytes <= BUSTER_FLOORS_BENCHMARK_SOURCE_BYTES / 1024;
+            selected_size = valid ? kibibytes * 1024 : 0;
+            bool known_size = false;
+            for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(floors_benchmark_sizes); s += 1)
+            {
+                known_size = known_size || selected_size == floors_benchmark_sizes[s];
+            }
+            valid = valid && known_size;
+            filtered = true;
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--method") == 0 && has_value)
+        {
+            methods = 0;
+            for (uint32_t method = 0; method < FLOORS_BENCHMARK_METHODS; method += 1)
+            {
+                methods |= strcmp(argv[i + 1], floors_benchmark_method_options[method]) == 0 ? 1u << method : 0;
+            }
+            valid = methods != 0;
+            filtered = true;
+            i += 1;
+        }
         else
         {
             valid = false;
         }
+    }
+    const bool files_only = sections == (1u << FLOORS_BENCHMARK_FILES);
+    const bool threads_only = sections == (1u << FLOORS_BENCHMARK_THREADS);
+    valid = valid && (!filtered || files_only || threads_only);
+    if (threads_only)
+    {
+        uint32_t parallel_methods = 0;
+        for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(floors_benchmark_parallel_methods); m += 1)
+        {
+            parallel_methods |= 1u << floors_benchmark_parallel_methods[m];
+        }
+        valid = valid && (methods & parallel_methods) != 0 && (selected_size == 0 || selected_size >= BUSTER_FLOORS_BENCHMARK_LARGE_BYTES);
     }
     // The selected CPU first, then the other CPUs this process may use: every one-lane measurement uses --cpu.
     uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
@@ -906,7 +979,9 @@ int run_floors_benchmark(int argc, char** argv)
     bool result = pin && (!sourced || source != 0);
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-floors [--directory PATH] [--cpu N] [--only files|threads|calls|memory|teardown]\n");
+        fprintf(stderr, "usage: benchmark-floors [--directory PATH] [--cpu N] [--only files|threads|calls|memory|teardown]\n"
+                        "       with --only files|threads: [--size-kb 16|256|4096|65536|524288] [--method new|truncate|in-place|rename|mmap|fallocate|huge|fallocate-huge|mmap-in-place]\n"
+                        "       threads supports 65536|524288 KB and excludes truncate|rename\n");
     }
     else if (!result)
     {
@@ -915,11 +990,11 @@ int run_floors_benchmark(int argc, char** argv)
     }
     if (result && (sections >> FLOORS_BENCHMARK_FILES & 1) != 0)
     {
-        result = floors_benchmark_files(directory, source);
+        result = floors_benchmark_files(directory, source, selected_size, methods);
     }
     if (result && (sections >> FLOORS_BENCHMARK_THREADS & 1) != 0)
     {
-        result = floors_benchmark_threads(directory, source, cpus, cpu_count);
+        result = floors_benchmark_threads(directory, source, cpus, cpu_count, selected_size, methods);
     }
     if (result && (sections >> FLOORS_BENCHMARK_CALLS & 1) != 0)
     {
