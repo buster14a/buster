@@ -1,0 +1,1702 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Source initializer lists to ordered, checked subobject writes. Include after c_checker.c and c_check_literals.c.
+// Token spans are half open. check_init_walk uses explicit stacks and retains expression nodes for automatic
+// storage; check_initializer_infer_array shares the same subobject cursor before expression checking. Final
+// reference liveness lives in check_initializer_live, shared by symbol preparation and data emission.
+// Output owns the parts. The two arenas must be disjoint; new allocation suffixes must not overlap input arrays.
+// Live input prefixes in either stable-address arena are permitted. Failed calls publish no partial parts.
+#ifndef BUSTER_C_CHECK_INITIALIZER_INCLUDED
+#define BUSTER_C_CHECK_INITIALIZER_INCLUDED
+
+typedef struct CheckInitString CheckInitString;
+struct CheckInitString
+{
+    uint32_t object;
+    uint32_t token;
+    TypeId type;
+    const uint8_t* bytes;
+    uint64_t byte_count;
+};
+
+typedef enum CheckInitKind
+{
+    CHECK_INIT_VALUE,
+    CHECK_INIT_BYTES,
+    CHECK_INIT_CLEAR,
+} CheckInitKind;
+
+typedef enum CheckInitStatus
+{
+    CHECK_INIT_OK,
+    CHECK_INIT_INVALID,
+    CHECK_INIT_CHECK_FAILED,
+    CHECK_INIT_NON_CONSTANT,
+    CHECK_INIT_UNSUPPORTED,
+    CHECK_INIT_RESOURCE,
+} CheckInitStatus;
+
+typedef struct CheckInitPart CheckInitPart;
+struct CheckInitPart
+{
+    CheckInitKind kind;
+    TypeId type;
+    uint32_t node;
+    uint32_t token;
+    uint64_t bit_offset;
+    uint32_t bit_width;
+    const uint8_t* bytes;
+    uint64_t byte_count;
+    CheckValue value;
+    CheckConversion conversion;
+};
+
+typedef struct CheckInitializer CheckInitializer;
+struct CheckInitializer
+{
+    TypeId type;
+    // Instance storage can extend a GNU flexible-array member without changing the declared type's sizeof.
+    uint64_t object_size;
+    CheckInitPart* parts;
+    uint32_t count;
+    CheckInitStatus status;
+    uint32_t failed_token;
+};
+
+static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
+                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
+                                  TypeId type, uint32_t begin, uint32_t end, bool static_storage,
+                                  Arena* output, Arena* scratch, CheckInitializer* result);
+
+static __attribute__((unused)) bool check_initializer_infer_array(TypeTable* types, const Parser* parser, TypeId type, uint32_t begin, uint32_t end,
+                                          const uint64_t* designator_indices, const uint8_t* designator_valid,
+                                          const TypeId* expression_types, Arena* scratch, TypeId* completed, uint32_t* failed_token, CheckInitStatus* status);
+
+static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const CheckInitPart* part, uint64_t* bits);
+
+typedef struct CheckInitCopy CheckInitCopy;
+typedef struct CheckInitFrame CheckInitFrame;
+struct CheckInitFrame
+{
+    TypeId type;
+    uint64_t offset;
+    uint64_t next;
+    uint32_t width;
+    uint32_t resume;
+    CheckInitCopy* copy;
+    bool braced;
+    bool wrapper;
+};
+
+typedef struct CheckInitSelection CheckInitSelection;
+struct CheckInitSelection
+{
+    TypeId type;
+    uint64_t offset;
+    uint32_t width;
+};
+
+typedef struct CheckInitUnion CheckInitUnion;
+struct CheckInitUnion
+{
+    TypeId type;
+    uint64_t offset;
+    uint64_t member;
+};
+
+struct CheckInitCopy
+{
+    uint64_t source;
+    uint64_t destination;
+    uint64_t bits;
+    uint32_t first;
+    CheckInitUnion* unions;
+    uint32_t union_count;
+    uint32_t union_capacity;
+};
+
+typedef struct CheckInitRange CheckInitRange;
+struct CheckInitRange
+{
+    CheckInitRange* next;
+    uint64_t first;
+    uint64_t last;
+    uint64_t current;
+    uint32_t token;
+};
+
+typedef struct CheckInitRepeat CheckInitRepeat;
+struct CheckInitRepeat
+{
+    CheckInitRepeat* previous;
+    CheckInitRange* first;
+    CheckInitRange* last;
+    uint32_t token;
+    uint32_t stop;
+    uint32_t depth;
+    uint32_t target_depth;
+};
+
+typedef struct CheckInitWalker CheckInitWalker;
+struct CheckInitWalker
+{
+    TypeTable* types;
+    const Parser* parser;
+    const uint32_t* token_nodes;
+    const CheckStream* stream;
+    const CheckInitString* strings;
+    uint32_t string_count;
+    const uint64_t* indices;
+    const uint8_t* index_valid;
+    const TypeId* expression_types;
+    CheckInitFrame* frames;
+    uint32_t depth;
+    uint32_t capacity;
+    CheckInitUnion* unions;
+    uint32_t union_count;
+    uint32_t union_capacity;
+    CheckInitRepeat* repeat;
+    uint64_t extent;
+    TypeId incomplete;
+    TypeId flexible;
+    uint64_t flexible_offset;
+    uint64_t flexible_extent;
+    bool infer;
+    bool static_storage;
+    Arena* output;
+    Arena* scratch;
+    CheckInitializer* result;
+};
+
+static bool check_init_aggregate(const TypeTable* types, TypeId type)
+{
+    const uint8_t kind = type_kind(types, type_strip_aligned(types, type));
+    return kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ||
+           kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+}
+
+static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uint32_t token)
+{
+    if (walker->result->status == CHECK_INIT_OK)
+    {
+        walker->result->status = status;
+        walker->result->failed_token = token;
+    }
+}
+
+static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part)
+{
+    if (!walker->infer && walker->result->status == CHECK_INIT_OK)
+    {
+        CheckInitPart* slot = BUSTER_ARENA_PUSH_ARRAY(walker->output, CheckInitPart, 1);
+        if (slot == 0 || walker->result->count == UINT32_MAX)
+        {
+            check_init_fail(walker, CHECK_INIT_RESOURCE, part->token);
+        }
+        else
+        {
+            if (walker->result->count == 0)
+            {
+                walker->result->parts = slot;
+            }
+            *slot = *part;
+            walker->result->count += 1;
+        }
+    }
+}
+
+static void check_init_clear(CheckInitWalker* walker, TypeId type, uint64_t offset, uint32_t token)
+{
+    if (type_is_complete(walker->types, type))
+    {
+        const CheckInitPart part = {
+            .kind = CHECK_INIT_CLEAR,
+            .type = type,
+            .node = BUSTER_CHECK_NONE,
+            .token = token,
+            .bit_offset = offset,
+            .byte_count = type_size(walker->types, type),
+        };
+        check_init_append(walker, &part);
+    }
+}
+
+static void check_init_flexible_reset(CheckInitWalker* walker, uint32_t token)
+{
+    uint32_t written = 0;
+    for (uint32_t i = 0; !walker->infer && walker->result->status == CHECK_INIT_OK && i < walker->result->count; i += 1)
+    {
+        CheckInitPart part = walker->result->parts[i];
+        uint64_t bits = 0;
+        const CheckInitStatus status = check_initializer_part_bits(walker->types, &part, &bits);
+        if (status != CHECK_INIT_OK)
+        {
+            check_init_fail(walker, status, token);
+        }
+        else if (part.bit_offset < walker->flexible_offset)
+        {
+            if (part.bit_offset + bits > walker->flexible_offset)
+            {
+                if (part.kind == CHECK_INIT_CLEAR || part.kind == CHECK_INIT_BYTES)
+                {
+                    part.byte_count = (walker->flexible_offset - part.bit_offset) / 8;
+                    part.bit_width = 0;
+                }
+                else
+                {
+                    check_init_fail(walker, CHECK_INIT_INVALID, token);
+                }
+            }
+            walker->result->parts[written++] = part;
+        }
+    }
+    if (!walker->infer && walker->result->parts != 0)
+    {
+        walker->result->count = written;
+        arena_pop_to(walker->output, (uint64_t)((uint8_t*)(walker->result->parts + written) - walker->output->base));
+    }
+    walker->flexible_extent = 0;
+}
+
+static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, CheckInitSelection* selected)
+{
+    const TypeTable* types = walker->types;
+    const TypeId base = type_strip_aligned(types, frame->type);
+    const uint8_t kind = type_kind(types, base);
+    bool valid = false;
+    *selected = (CheckInitSelection){
+        .type = frame->type,
+        .offset = frame->offset,
+        .width = frame->width,
+    };
+    if (frame->wrapper || !check_init_aggregate(types, base))
+    {
+        valid = frame->next == 0;
+    }
+    else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+    {
+        selected->type = type_element(types, base);
+        const uint64_t size = type_size(types, selected->type);
+        valid = (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || frame->next < types->types.extent[type_index(base)]) &&
+                size != 0 && size <= UINT64_MAX / 8 && frame->next <= (UINT64_MAX - frame->offset) / (size * 8);
+        if (valid)
+        {
+            selected->offset += frame->next * size * 8;
+        }
+    }
+    else
+    {
+        const uint32_t tag = types->types.index[type_index(base)];
+        const uint32_t begin = types->tags.member_begin[tag];
+        const uint32_t count = types->tags.member_count[tag];
+        while (frame->next < count)
+        {
+            const uint32_t member = begin + (uint32_t)frame->next;
+            const bool bit_field = (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+            const bool flexible = type_kind(types, type_strip_aligned(types, types->members.type[member])) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+            const bool flexible_root = flexible && walker->static_storage && walker->parser->language.gnu &&
+                                       kind == BUSTER_TYPE_KIND_STRUCT && frame == walker->frames + 1 && frame->braced &&
+                                       frame->offset == 0 && frame->next + 1 == count;
+            if ((!bit_field || types->members.name[member] != 0) && (!flexible || flexible_root))
+            {
+                selected->type = types->members.type[member];
+                selected->width = bit_field ? types->members.bit_width[member] : 0;
+                valid = types->members.offset[member] <= UINT64_MAX - frame->offset;
+                selected->offset += valid ? types->members.offset[member] : 0;
+                if (valid && flexible_root)
+                {
+                    walker->flexible = type_strip_aligned(types, selected->type);
+                    walker->flexible_offset = selected->offset;
+                }
+                break;
+            }
+            frame->next += 1;
+        }
+    }
+    return valid;
+}
+
+static uint32_t check_init_union_slot(const CheckInitUnion* entries, uint32_t capacity, TypeId type, uint64_t offset)
+{
+    uint64_t hash = (offset >> 3) ^ ((uint64_t)type * UINT64_C(0x9e3779b97f4a7c15));
+    hash ^= hash >> 32;
+    uint32_t slot = (uint32_t)hash & (capacity - 1);
+    while (entries[slot].type != 0 && (entries[slot].type != type || entries[slot].offset != offset))
+    {
+        slot = (slot + 1) & (capacity - 1);
+    }
+    return slot;
+}
+
+static void check_init_used(CheckInitWalker* walker, const CheckInitFrame* frame, uint32_t token, bool clear_union)
+{
+    const TypeId type = type_strip_aligned(walker->types, frame->type);
+    if (!frame->wrapper && type == walker->incomplete && frame->offset == 0 && frame->next >= walker->extent)
+    {
+        if (frame->next == UINT64_MAX)
+        {
+            check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+        }
+        else
+        {
+            walker->extent = frame->next + 1;
+        }
+    }
+    if (!frame->wrapper && type == walker->flexible && frame->offset == walker->flexible_offset && frame->next >= walker->flexible_extent)
+    {
+        if (frame->next == UINT64_MAX)
+        {
+            check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+        }
+        else
+        {
+            walker->flexible_extent = frame->next + 1;
+        }
+    }
+    if (!frame->wrapper && type_kind(walker->types, type) == BUSTER_TYPE_KIND_UNION)
+    {
+        if (walker->union_count == walker->union_capacity / 2)
+        {
+            const uint32_t capacity = walker->union_capacity == 0 ? 16 : walker->union_capacity <= UINT32_MAX / 2 ? walker->union_capacity * 2 : 0;
+            CheckInitUnion* entries = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitUnion, capacity) : 0;
+            if (entries == 0)
+            {
+                check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+            }
+            else
+            {
+                memset(entries, 0, capacity * sizeof(*entries));
+                for (uint32_t i = 0; i < walker->union_capacity; i += 1)
+                {
+                    const CheckInitUnion* previous = walker->unions + i;
+                    if (previous->type != 0)
+                    {
+                        const uint32_t slot = check_init_union_slot(entries, capacity, previous->type, previous->offset);
+                        entries[slot] = *previous;
+                    }
+                }
+                walker->unions = entries;
+                walker->union_capacity = capacity;
+            }
+        }
+        if (walker->result->status == CHECK_INIT_OK)
+        {
+            const uint32_t slot = check_init_union_slot(walker->unions, walker->union_capacity, type, frame->offset);
+            CheckInitUnion* state = walker->unions + slot;
+            if (state->type == 0)
+            {
+                *state = (CheckInitUnion){
+                    .type = type,
+                    .offset = frame->offset,
+                    .member = frame->next,
+                };
+                walker->union_count += 1;
+            }
+            else if (state->member != frame->next)
+            {
+                if (clear_union)
+                {
+                    check_init_clear(walker, type, frame->offset, token);
+                }
+                state->member = frame->next;
+            }
+        }
+    }
+}
+
+static void check_init_advance(CheckInitWalker* walker)
+{
+    bool finished = false;
+    while (!finished && walker->depth != 0)
+    {
+        CheckInitFrame* frame = &walker->frames[walker->depth - 1];
+        const TypeId base = type_strip_aligned(walker->types, frame->type);
+        if (!frame->wrapper && type_kind(walker->types, base) == BUSTER_TYPE_KIND_UNION)
+        {
+            const uint32_t tag = walker->types->types.index[type_index(base)];
+            frame->next = walker->types->tags.member_count[tag];
+        }
+        else
+        {
+            frame->next += 1;
+        }
+        CheckInitSelection selected = { 0 };
+        finished = frame->braced || frame->wrapper || check_init_select(walker, frame, &selected);
+        if (!finished)
+        {
+            walker->depth -= 1;
+        }
+    }
+}
+
+static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* selected, bool braced, uint32_t token)
+{
+    if (walker->depth == walker->capacity && walker->capacity <= UINT32_MAX / 2)
+    {
+        const uint32_t capacity = walker->capacity * 2;
+        CheckInitFrame* frames = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitFrame, capacity);
+        if (frames != 0)
+        {
+            memcpy(frames, walker->frames, walker->depth * sizeof(*frames));
+            walker->frames = frames;
+            walker->capacity = capacity;
+        }
+    }
+    const bool valid = walker->depth < walker->capacity;
+    if (!valid)
+    {
+        check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+    }
+    else
+    {
+        walker->frames[walker->depth] = (CheckInitFrame){
+            .type = selected->type,
+            .offset = selected->offset,
+            .width = selected->width,
+            .braced = braced,
+        };
+        walker->depth += 1;
+    }
+    return valid;
+}
+
+// Initializer separators live outside every expression delimiter. This also keeps commas in compound literals,
+// parenthesized comma expressions, subscripts and calls inside their checked expression span.
+static uint32_t check_init_expression_end(const Parser* parser, uint32_t begin, uint32_t end)
+{
+    uint32_t depth = 0;
+    uint32_t token = begin;
+    bool done = false;
+    while (token < end && !done)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_BRACE))
+        {
+            done = true;
+        }
+        else
+        {
+            if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+            {
+                depth += 1;
+            }
+            else if (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE)
+            {
+                depth -= depth != 0;
+            }
+            token += 1;
+        }
+    }
+    return token;
+}
+
+static uint32_t check_init_node(CheckInitWalker* walker, uint32_t begin, uint32_t end)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (walker->token_nodes != 0 && walker->stream != 0)
+    {
+        for (uint32_t token = begin; token < end; token += 1)
+        {
+            const uint32_t node = walker->token_nodes[token];
+            if (node < walker->stream->count && (result == BUSTER_CHECK_NONE || node > result))
+            {
+                result = node;
+            }
+        }
+    }
+    return result;
+}
+
+static bool check_init_index(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint64_t* index)
+{
+    bool valid = false;
+    if (walker->infer)
+    {
+        valid = walker->indices != 0 && walker->index_valid != 0 && walker->index_valid[begin] != 0;
+        if (valid)
+        {
+            *index = walker->indices[begin];
+        }
+    }
+    else
+    {
+        // The source adapter may fold an early array-bound/designator expression onto its closing bracket.
+        const uint32_t node = check_init_node(walker, begin + 1, end + 1);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            const CheckValue* value = &walker->stream->values[node];
+            uint32_t width = 0;
+            bool is_signed = false;
+            valid = value->constant_kind == CHECK_CONSTANT_INTEGER && (value->flags & BUSTER_CHECK_ICE) != 0 &&
+                    value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                    check_action_integer_type(walker->types, value->type, &width, &is_signed) &&
+                    (!is_signed || ((value->integer >> (width - 1)) & 1) == 0) && value->integer <= UINT64_MAX;
+            if (valid)
+            {
+                *index = (uint64_t)value->integer;
+            }
+        }
+    }
+    return valid;
+}
+
+// Revisit range targets through the ordinary subobject cursor, rather than copying a template of writes:
+// earlier union members can differ at each destination. Repeated VALUE parts retain the same checked node,
+// so a runtime consumer evaluates a range's expression once and uses that value at every destination.
+static void check_init_repeat(CheckInitWalker* walker, uint32_t* position, bool* after_value)
+{
+    bool active = true;
+    while (active && *after_value && walker->repeat != 0)
+    {
+        CheckInitRepeat* repeat = walker->repeat;
+        bool complete = walker->depth <= repeat->target_depth;
+        if (!complete)
+        {
+            bool implicit = true;
+            for (uint32_t i = repeat->target_depth; implicit && i < walker->depth; i += 1)
+            {
+                implicit = !walker->frames[i].braced;
+            }
+            const uint8_t kind = walker->parser->tokens.kinds[*position];
+            const uint8_t next = *position + 1 < walker->parser->tokens.count ? walker->parser->tokens.kinds[*position + 1] : PARSE_KIND_COMMA;
+            if (implicit && (kind == PARSE_KIND_R_BRACE ||
+                (kind == PARSE_KIND_COMMA && (next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_PERIOD))))
+            {
+                walker->depth = repeat->target_depth;
+                check_init_advance(walker);
+                complete = true;
+            }
+        }
+        if (!complete)
+        {
+            active = false;
+        }
+        else
+        {
+            if (repeat->stop == BUSTER_CHECK_NONE)
+            {
+                repeat->stop = *position;
+            }
+            if (*position != repeat->stop)
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, *position);
+                active = false;
+            }
+        }
+        CheckInitRange* advance = 0;
+        for (CheckInitRange* range = active ? repeat->first : 0; range != 0; range = range->next)
+        {
+            if (range->current < range->last)
+            {
+                advance = range;
+            }
+        }
+        if (advance != 0)
+        {
+            advance->current += 1;
+            for (CheckInitRange* range = advance->next; range != 0; range = range->next)
+            {
+                range->current = range->first;
+            }
+            walker->depth = repeat->depth;
+            *position = repeat->token;
+            *after_value = false;
+        }
+        else if (active)
+        {
+            walker->repeat = repeat->previous;
+        }
+    }
+}
+
+static void check_init_designate(CheckInitWalker* walker, uint32_t* position, uint32_t end)
+{
+    const Parser* parser = walker->parser;
+    uint32_t token = *position;
+    while (walker->depth > 1 && !walker->frames[walker->depth - 1].braced)
+    {
+        walker->depth -= 1;
+    }
+    if (!walker->frames[walker->depth - 1].braced)
+    {
+        check_init_fail(walker, CHECK_INIT_INVALID, token);
+    }
+    const uint32_t base_depth = walker->depth;
+    CheckInitRepeat* repeat = walker->repeat != 0 && walker->repeat->token == token ? walker->repeat : 0;
+    const bool replay = repeat != 0;
+    CheckInitRange* range = replay ? repeat->first : 0;
+    bool more = true;
+    while (more && token < end && walker->result->status == CHECK_INIT_OK)
+    {
+        CheckInitFrame* frame = &walker->frames[walker->depth - 1];
+        const TypeId type = type_strip_aligned(walker->types, frame->type);
+        const uint8_t kind = type_kind(walker->types, type);
+        if (parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE)
+        {
+            uint32_t close = token + 1;
+            uint32_t depth = 1;
+            uint32_t ellipsis = BUSTER_CHECK_NONE;
+            while (close < end && depth != 0)
+            {
+                const uint8_t inner = parser->tokens.kinds[close];
+                if (depth == 1 && inner == PARSE_KIND_ELLIPSIS)
+                {
+                    ellipsis = close;
+                }
+                depth += inner == PARSE_KIND_L_SQUARE;
+                depth -= inner == PARSE_KIND_R_SQUARE;
+                close += depth != 0;
+            }
+            uint64_t index = 0;
+            uint64_t last = 0;
+            if ((kind != BUSTER_TYPE_KIND_ARRAY && kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) || close == end ||
+                !check_init_index(walker, token, ellipsis != BUSTER_CHECK_NONE ? ellipsis : close, &index) ||
+                (ellipsis != BUSTER_CHECK_NONE && (!parser->language.gnu ||
+                 !check_init_index(walker, ellipsis, close, &last) || last < index)))
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, token);
+            }
+            else
+            {
+                last = ellipsis == BUSTER_CHECK_NONE ? index : last;
+                frame->next = last;
+                CheckInitSelection final = { 0 };
+                if (!check_init_select(walker, frame, &final))
+                {
+                    check_init_fail(walker, CHECK_INIT_INVALID, token);
+                }
+                else if (walker->infer)
+                {
+                    // Only the highest target can enlarge the inferred outer extent.
+                    index = last;
+                }
+                else if (last > index)
+                {
+                    if (!replay)
+                    {
+                        if (repeat == 0)
+                        {
+                            repeat = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitRepeat, 1);
+                            if (repeat != 0)
+                            {
+                                *repeat = (CheckInitRepeat){
+                                    .previous = walker->repeat,
+                                    .token = *position,
+                                    .stop = BUSTER_CHECK_NONE,
+                                    .depth = base_depth,
+                                };
+                                walker->repeat = repeat;
+                            }
+                        }
+                        range = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitRange, 1);
+                        if (repeat != 0 && range != 0)
+                        {
+                            *range = (CheckInitRange){
+                                .first = index,
+                                .last = last,
+                                .current = index,
+                                .token = token,
+                            };
+                            if (repeat->last == 0)
+                            {
+                                repeat->first = range;
+                            }
+                            else
+                            {
+                                repeat->last->next = range;
+                            }
+                            repeat->last = range;
+                        }
+                    }
+                    if (repeat == 0 || range == 0)
+                    {
+                        check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+                    }
+                    else if (range->token != token)
+                    {
+                        check_init_fail(walker, CHECK_INIT_INVALID, token);
+                    }
+                    else
+                    {
+                        index = range->current;
+                        range = range->next;
+                    }
+                }
+                frame->next = index;
+                token = close + 1;
+            }
+        }
+        else if (parser->tokens.kinds[token] == PARSE_KIND_PERIOD)
+        {
+            if ((kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION) || token + 1 >= end ||
+                parser->tokens.kinds[token + 1] != PARSE_KIND_IDENTIFIER)
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, token);
+            }
+            else
+            {
+                const uint32_t name = parser->tokens.names[token + 1];
+                bool found = false;
+                while (!found && walker->result->status == CHECK_INIT_OK)
+                {
+                    frame = &walker->frames[walker->depth - 1];
+                    const TypeId record = type_strip_aligned(walker->types, frame->type);
+                    const uint32_t tag = walker->types->types.index[type_index(record)];
+                    const uint32_t begin = walker->types->tags.member_begin[tag];
+                    const uint32_t count = walker->types->tags.member_count[tag];
+                    uint32_t member = 0;
+                    for (uint32_t i = 0; i < count && member == 0; i += 1)
+                    {
+                        if (walker->types->members.name[begin + i] == name)
+                        {
+                            member = begin + i;
+                            found = true;
+                        }
+                    }
+                    for (uint32_t i = 0; i < count && member == 0; i += 1)
+                    {
+                        uint64_t ignored = 0;
+                        if (walker->types->members.name[begin + i] == 0 &&
+                            (walker->types->members.flags[begin + i] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 &&
+                            type_find_member(walker->types, walker->types->members.type[begin + i], name, &ignored) != 0)
+                        {
+                            member = begin + i;
+                        }
+                    }
+                    if (member == 0)
+                    {
+                        check_init_fail(walker, CHECK_INIT_INVALID, token);
+                    }
+                    else
+                    {
+                        frame->next = member - begin;
+                        if (!found)
+                        {
+                            CheckInitSelection selected = { 0 };
+                            if (check_init_select(walker, frame, &selected))
+                            {
+                                check_init_used(walker, frame, token, true);
+                                check_init_push(walker, &selected, false, token);
+                            }
+                            else
+                            {
+                                check_init_fail(walker, CHECK_INIT_INVALID, token);
+                            }
+                        }
+                    }
+                }
+                token += 2;
+            }
+        }
+        else
+        {
+            check_init_fail(walker, CHECK_INIT_INVALID, token);
+        }
+        if (walker->result->status == CHECK_INIT_OK)
+        {
+            CheckInitSelection selected = { 0 };
+            frame = &walker->frames[walker->depth - 1];
+            if (!check_init_select(walker, frame, &selected))
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, token);
+            }
+            else
+            {
+                check_init_used(walker, frame, token, true);
+                more = token < end && (parser->tokens.kinds[token] == PARSE_KIND_PERIOD || parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE);
+                if (more)
+                {
+                    if (!check_init_aggregate(walker->types, selected.type))
+                    {
+                        check_init_fail(walker, CHECK_INIT_INVALID, token);
+                    }
+                    else
+                    {
+                        check_init_push(walker, &selected, false, token);
+                    }
+                }
+            }
+        }
+    }
+    if (walker->result->status == CHECK_INIT_OK)
+    {
+        if (token >= end || parser->tokens.kinds[token] != PARSE_KIND_EQUAL)
+        {
+            check_init_fail(walker, CHECK_INIT_INVALID, token);
+        }
+        else
+        {
+            token += 1;
+            if (repeat != 0 && !replay)
+            {
+                repeat->target_depth = walker->depth;
+            }
+        }
+    }
+    *position = token;
+}
+
+static const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint32_t node)
+{
+    const CheckInitString* result = 0;
+    uint32_t object = 0;
+    if (node != BUSTER_CHECK_NONE)
+    {
+        const CheckValue* value = &walker->stream->values[node];
+        if (type_kind(walker->types, type_strip_aligned(walker->types, value->type)) == BUSTER_TYPE_KIND_ARRAY && value->offset == 0)
+        {
+            object = value->object;
+        }
+    }
+    bool literal_only = begin < end;
+    for (uint32_t token = begin; literal_only && token < end; token += 1)
+    {
+        literal_only = walker->parser->tokens.kinds[token] == PARSE_KIND_STRING;
+    }
+    for (uint32_t i = 0; i < walker->string_count && result == 0; i += 1)
+    {
+        const CheckInitString* string = &walker->strings[i];
+        if ((object != 0 && string->object == object) || (string->token >= begin && string->token < end && literal_only))
+        {
+            result = string;
+        }
+    }
+    return result;
+}
+
+static bool check_init_character(TypeId type)
+{
+    return type == BUSTER_TYPE_CHAR || type == BUSTER_TYPE_SCHAR || type == BUSTER_TYPE_UCHAR;
+}
+
+static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t begin, uint32_t end,
+                                    uint32_t node, TypeId* root_type, uint64_t* source_offset)
+{
+    uint32_t opener = BUSTER_CHECK_NONE;
+    const uint8_t kind = type_kind(walker->types, type_strip_aligned(walker->types, selected->type));
+    const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    if (!walker->infer && walker->static_storage && record && node != BUSTER_CHECK_NONE &&
+        walker->stream->values[node].category == CHECK_LVALUE && (walker->stream->values[node].flags & BUSTER_CHECK_STATIC_OBJECT) != 0)
+    {
+        for (uint32_t token = begin; token < end && opener == BUSTER_CHECK_NONE; token += 1)
+        {
+            if (walker->parser->tree.roles[token] == PARSE_ROLE_OPEN_COMPOUND_BODY)
+            {
+                const uint32_t close = walker->parser->tree.parents[token];
+                const uint32_t root = close > token && close < end ? check_init_node(walker, close, close + 1) : BUSTER_CHECK_NONE;
+                const CheckValue* value = walker->stream->values + node;
+                bool member_path = root != BUSTER_CHECK_NONE;
+                for (uint32_t tail = close + 1; member_path && tail < end;)
+                {
+                    if (walker->parser->tokens.kinds[tail] == PARSE_KIND_R_PAREN)
+                    {
+                        tail += 1;
+                    }
+                    else if (walker->parser->tokens.kinds[tail] == PARSE_KIND_PERIOD && tail + 1 < end &&
+                             walker->parser->tokens.kinds[tail + 1] == PARSE_KIND_IDENTIFIER)
+                    {
+                        tail += 2;
+                    }
+                    else
+                    {
+                        member_path = false;
+                    }
+                }
+                if (member_path && walker->stream->values[root].object == value->object && value->offset >= 0)
+                {
+                    const TypeId type = walker->stream->values[root].type;
+                    const uint64_t size = type_size(walker->types, type);
+                    const uint64_t selected_size = type_size(walker->types, selected->type);
+                    if ((uint64_t)value->offset <= size && selected_size <= size - (uint64_t)value->offset && size <= UINT64_MAX / 8)
+                    {
+                        opener = token;
+                        *root_type = type;
+                        *source_offset = (uint64_t)value->offset * 8;
+                    }
+                }
+            }
+        }
+    }
+    return opener;
+}
+
+// A constant record expression can select a nested subobject of a compound literal. Plan its complete source
+// body in the same iterative walk, then retain only writes that intersect that subobject and translate their
+// offsets. Source union state stays separate until the selected subobject's active members are transferred.
+static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy* copy, uint32_t token)
+{
+    CheckInitUnion* source_unions = walker->unions;
+    const uint32_t source_capacity = walker->union_capacity;
+    walker->unions = copy->unions;
+    walker->union_count = copy->union_count;
+    walker->union_capacity = copy->union_capacity;
+    const uint64_t limit = copy->source + copy->bits;
+    const uint32_t count = walker->result->count;
+    uint32_t written = copy->first;
+    for (uint32_t i = copy->first; walker->result->status == CHECK_INIT_OK && i < count; i += 1)
+    {
+        CheckInitPart part = walker->result->parts[i];
+        uint64_t bits = 0;
+        const CheckInitStatus status = check_initializer_part_bits(walker->types, &part, &bits);
+        if (status != CHECK_INIT_OK)
+        {
+            check_init_fail(walker, status, part.token);
+        }
+        else if (part.bit_offset < limit && part.bit_offset + bits > copy->source)
+        {
+            const uint64_t begin = part.bit_offset > copy->source ? part.bit_offset : copy->source;
+            const uint64_t end = part.bit_offset + bits < limit ? part.bit_offset + bits : limit;
+            if (begin != part.bit_offset || end != part.bit_offset + bits)
+            {
+                if (part.kind == CHECK_INIT_CLEAR)
+                {
+                    part.bit_width = (begin % 8 == 0 && end % 8 == 0) ? 0 : (uint32_t)(end - begin);
+                    part.byte_count = part.bit_width == 0 ? (end - begin) / 8 : 0;
+                }
+                else if (part.kind == CHECK_INIT_BYTES && begin % 8 == 0 && end % 8 == 0)
+                {
+                    part.bytes += (begin - part.bit_offset) / 8;
+                    part.byte_count = (end - begin) / 8;
+                }
+                else
+                {
+                    // Reinterpreting a fraction of a scalar representation needs an explicit target bitcast.
+                    check_init_fail(walker, CHECK_INIT_UNSUPPORTED, token);
+                }
+            }
+            if (walker->result->status == CHECK_INIT_OK)
+            {
+                part.bit_offset = copy->destination + begin - copy->source;
+                walker->result->parts[written++] = part;
+            }
+        }
+    }
+    if (walker->result->status == CHECK_INIT_OK)
+    {
+        walker->result->count = written;
+        arena_pop_to(walker->output, (uint64_t)((uint8_t*)(walker->result->parts + written) - walker->output->base));
+        for (uint32_t i = 0; walker->result->status == CHECK_INIT_OK && i < source_capacity; i += 1)
+        {
+            const CheckInitUnion* source = source_unions + i;
+            if (source->type != 0 && source->offset >= copy->source && source->offset < limit &&
+                type_size(walker->types, source->type) <= (limit - source->offset) / 8)
+            {
+                const CheckInitFrame frame = {
+                    .type = source->type,
+                    .offset = copy->destination + source->offset - copy->source,
+                    .next = source->member,
+                };
+                check_init_used(walker, &frame, token, false);
+            }
+        }
+    }
+}
+
+static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t begin, uint32_t end,
+                             uint32_t node, const CheckInitString* string)
+{
+    const TypeId type = type_unqualified(type_strip_aligned(walker->types, selected->type));
+    const uint8_t kind = type_kind(walker->types, type);
+    bool whole = !check_init_aggregate(walker->types, type);
+    if (!whole && string != 0 && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY))
+    {
+        whole = true;
+    }
+    if (!whole && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
+    {
+        TypeId source = node != BUSTER_CHECK_NONE ? walker->stream->values[node].type : 0;
+        if (walker->infer && walker->expression_types != 0)
+        {
+            for (uint32_t token = begin; token < end; token += 1)
+            {
+                source = walker->expression_types[token] != 0 ? walker->expression_types[token] : source;
+            }
+        }
+        if (type_is_valid(walker->types, source))
+        {
+            const TypeAnswer compatible = type_compatible(walker->types, type, type_unqualified(type_strip_aligned(walker->types, source)));
+            whole = compatible == TYPE_ANSWER_YES;
+            if (compatible == TYPE_ANSWER_FULL)
+            {
+                check_init_fail(walker, CHECK_INIT_RESOURCE, begin);
+            }
+        }
+    }
+    if (!whole && walker->infer && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) &&
+        walker->parser->tokens.kinds[begin] == PARSE_KIND_STRING)
+    {
+        whole = true;
+    }
+    return whole;
+}
+
+static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token,
+                             uint32_t node, const CheckInitString* string)
+{
+    const TypeId type = type_strip_aligned(walker->types, selected->type);
+    const uint8_t kind = type_kind(walker->types, type);
+    if (!walker->infer && string != 0 && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY))
+    {
+        const TypeId element = type_unqualified(type_element(walker->types, type));
+        const TypeId source = type_unqualified(type_element(walker->types, string->type));
+        const uint64_t unit = type_size(walker->types, element);
+        const bool compatible = element == source || (check_init_character(element) && check_init_character(source));
+        uint64_t size = type_size(walker->types, type);
+        if (!compatible || unit == 0 || string->byte_count < unit || string->byte_count % unit != 0 || string->bytes == 0)
+        {
+            check_init_fail(walker, CHECK_INIT_INVALID, token);
+        }
+        else
+        {
+            if (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY && type == walker->incomplete && selected->offset == 0)
+            {
+                walker->extent = string->byte_count / unit;
+                size = string->byte_count;
+            }
+            else if (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY && type == walker->flexible && selected->offset == walker->flexible_offset)
+            {
+                check_init_flexible_reset(walker, token);
+                walker->flexible_extent = string->byte_count / unit;
+                size = string->byte_count;
+            }
+            if (size < string->byte_count - unit)
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, token);
+            }
+            else
+            {
+                const CheckInitPart part = {
+                    .kind = CHECK_INIT_BYTES,
+                    .type = selected->type,
+                    .node = node,
+                    .token = token,
+                    .bit_offset = selected->offset,
+                    .bytes = string->bytes,
+                    .byte_count = size < string->byte_count ? size : string->byte_count,
+                };
+                check_init_clear(walker, selected->type, selected->offset, token);
+                check_init_append(walker, &part);
+            }
+        }
+    }
+    else if (!walker->infer)
+    {
+        if (node == BUSTER_CHECK_NONE || walker->stream->diagnostics[node] != CHECK_DIAG_NONE)
+        {
+            check_init_fail(walker, CHECK_INIT_CHECK_FAILED, token);
+        }
+        else
+        {
+            CheckAction action = {
+                .op = CHECK_OP_INITIALIZE,
+                .type = selected->type,
+                .node = node,
+                .extensions = walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0,
+            };
+            action.operands[0] = walker->stream->values[node];
+            CheckActionResult converted = { 0 };
+            check_action_scalar(walker->types, &action, &converted);
+            if (converted.diagnostic != CHECK_DIAG_NONE)
+            {
+                check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+            }
+            else if (walker->static_storage && (converted.value.constant_kind == CHECK_CONSTANT_NONE ||
+                     converted.value.fault != CHECK_FAULT_NONE || (converted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 ||
+                     (converted.value.constant_kind == CHECK_CONSTANT_ADDRESS && converted.value.object != 0 &&
+                     ((converted.value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || selected->width != 0))))
+            {
+                check_init_fail(walker, CHECK_INIT_NON_CONSTANT, token);
+            }
+            else
+            {
+                const CheckInitPart part = {
+                    .kind = CHECK_INIT_VALUE,
+                    .type = selected->type,
+                    .node = node,
+                    .token = token,
+                    .bit_offset = selected->offset,
+                    .bit_width = selected->width,
+                    .value = converted.value,
+                    .conversion = converted.conversions[0],
+                };
+                check_init_append(walker, &part);
+            }
+        }
+    }
+}
+
+static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin, uint32_t end)
+{
+    walker->capacity = 16;
+    walker->frames = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitFrame, walker->capacity);
+    if (walker->frames == 0 || walker->capacity == 0)
+    {
+        check_init_fail(walker, CHECK_INIT_RESOURCE, begin);
+    }
+    else
+    {
+        walker->frames[0] = (CheckInitFrame){
+            .type = type,
+            .wrapper = true,
+        };
+        walker->depth = 1;
+        const TypeId base = type_strip_aligned(walker->types, type);
+        walker->incomplete = type_kind(walker->types, base) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? base : 0;
+    }
+    uint32_t token = begin;
+    bool after_value = false;
+    while (token < end && walker->result->status == CHECK_INIT_OK)
+    {
+        check_init_repeat(walker, &token, &after_value);
+        const uint8_t kind = walker->parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_R_BRACE)
+        {
+            while (walker->depth > 1 && !walker->frames[walker->depth - 1].braced)
+            {
+                walker->depth -= 1;
+            }
+            if (walker->depth == 1)
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, token);
+            }
+            else
+            {
+                const CheckInitFrame* closing = walker->frames + walker->depth - 1;
+                const uint32_t resume = closing->resume;
+                if (closing->copy != 0)
+                {
+                    check_init_finish_copy(walker, closing->copy, token);
+                }
+                walker->depth -= 1;
+                check_init_advance(walker);
+                token = resume != 0 ? resume : token + 1;
+                after_value = true;
+            }
+        }
+        else if (after_value)
+        {
+            if (kind != PARSE_KIND_COMMA || walker->depth == 1)
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, token);
+            }
+            else
+            {
+                after_value = false;
+                token += 1;
+            }
+        }
+        else
+        {
+            const bool designated = kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE;
+            if (designated)
+            {
+                check_init_designate(walker, &token, end);
+            }
+            CheckInitSelection selected = { 0 };
+            CheckInitFrame* frame = &walker->frames[walker->depth - 1];
+            if (walker->result->status == CHECK_INIT_OK && (token >= end || !check_init_select(walker, frame, &selected)))
+            {
+                check_init_fail(walker, CHECK_INIT_INVALID, token);
+            }
+            if (walker->result->status == CHECK_INIT_OK)
+            {
+                check_init_used(walker, frame, token, true);
+                if (walker->parser->tokens.kinds[token] == PARSE_KIND_L_BRACE)
+                {
+                    if (type_strip_aligned(walker->types, selected.type) == walker->flexible && selected.offset == walker->flexible_offset)
+                    {
+                        check_init_flexible_reset(walker, token);
+                    }
+                    if (!frame->wrapper)
+                    {
+                        if (selected.width != 0)
+                        {
+                            const CheckInitPart clear = {
+                                .kind = CHECK_INIT_CLEAR,
+                                .type = selected.type,
+                                .node = BUSTER_CHECK_NONE,
+                                .token = token,
+                                .bit_offset = selected.offset,
+                                .bit_width = selected.width,
+                            };
+                            check_init_append(walker, &clear);
+                        }
+                        else
+                        {
+                            check_init_clear(walker, selected.type, selected.offset, token);
+                        }
+                    }
+                    check_init_push(walker, &selected, true, token);
+                    token += 1;
+                }
+                else
+                {
+                    const uint32_t stop = check_init_expression_end(walker->parser, token, end);
+                    const uint32_t node = check_init_node(walker, token, stop);
+                    const CheckInitString* string = check_init_string(walker, token, stop, node);
+                    const TypeId element = type_unqualified(type_strip_aligned(walker->types, selected.type));
+                    const TypeId string_element = string != 0 ? type_unqualified(type_element(walker->types, string->type)) : 0;
+                    const bool string_elements = element == string_element || (check_init_character(element) && check_init_character(string_element));
+                    if (stop == token)
+                    {
+                        check_init_fail(walker, CHECK_INIT_INVALID, token);
+                    }
+                    else if (string != 0 && string_elements && !designated && frame->braced && frame->next == 0 &&
+                             (type_kind(walker->types, type_strip_aligned(walker->types, frame->type)) == BUSTER_TYPE_KIND_ARRAY ||
+                              type_kind(walker->types, type_strip_aligned(walker->types, frame->type)) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) &&
+                             !check_init_aggregate(walker->types, selected.type))
+                    {
+                        const CheckInitSelection array = {
+                            .type = frame->type,
+                            .offset = frame->offset,
+                        };
+                        check_init_value(walker, &array, token, node, string);
+                        const TypeId array_type = type_strip_aligned(walker->types, frame->type);
+                        frame->next = array_type == walker->incomplete ? walker->extent : array_type == walker->flexible ? walker->flexible_extent :
+                                      walker->types->types.extent[type_index(array_type)];
+                        token = stop;
+                        after_value = true;
+                    }
+                    else if (check_init_whole(walker, &selected, token, stop, node, string))
+                    {
+                        TypeId root_type = 0;
+                        uint64_t source_offset = 0;
+                        const uint32_t compound = check_init_compound(walker, &selected, token, stop, node, &root_type, &source_offset);
+                        if (compound != BUSTER_CHECK_NONE)
+                        {
+                            check_init_clear(walker, selected.type, selected.offset, token);
+                            CheckInitCopy* copy = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitCopy, 1);
+                            const CheckInitSelection root = { .type = root_type };
+                            if (copy == 0)
+                            {
+                                check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+                            }
+                            else if (walker->result->status == CHECK_INIT_OK && check_init_push(walker, &root, true, token))
+                            {
+                                *copy = (CheckInitCopy){
+                                    .source = source_offset,
+                                    .destination = selected.offset,
+                                    .bits = type_size(walker->types, selected.type) * 8,
+                                    .first = walker->result->count,
+                                    .unions = walker->unions,
+                                    .union_count = walker->union_count,
+                                    .union_capacity = walker->union_capacity,
+                                };
+                                walker->frames[walker->depth - 1].resume = stop;
+                                walker->frames[walker->depth - 1].copy = copy;
+                                walker->unions = 0;
+                                walker->union_count = 0;
+                                walker->union_capacity = 0;
+                                token = compound + 1;
+                            }
+                        }
+                        else
+                        {
+                            check_init_value(walker, &selected, token, node, string);
+                            check_init_advance(walker);
+                            token = stop;
+                            after_value = true;
+                        }
+                    }
+                    else if (frame->wrapper)
+                    {
+                        check_init_fail(walker, CHECK_INIT_INVALID, token);
+                    }
+                    else
+                    {
+                        check_init_push(walker, &selected, false, token);
+                    }
+                }
+            }
+        }
+    }
+    if (walker->result->status == CHECK_INIT_OK && (walker->depth != 1 || walker->frames[0].next != 1))
+    {
+        check_init_fail(walker, CHECK_INIT_INVALID, end);
+    }
+    if (walker->result->status == CHECK_INIT_OK && walker->incomplete != 0)
+    {
+        TypeId completed = type_array(walker->types, type_element(walker->types, walker->incomplete), walker->extent);
+        if (completed == 0)
+        {
+            check_init_fail(walker, CHECK_INIT_RESOURCE, begin);
+        }
+        else
+        {
+            completed = type_qualify(walker->types, completed, type_qualifiers(type));
+            walker->result->type = completed;
+        }
+    }
+    if (walker->result->status == CHECK_INIT_OK)
+    {
+        walker->result->object_size = type_size(walker->types, walker->result->type);
+        if (walker->flexible != 0)
+        {
+            const uint64_t offset = walker->flexible_offset / 8;
+            const uint64_t unit = type_size(walker->types, type_element(walker->types, walker->flexible));
+            if (unit == 0 || walker->flexible_extent > (UINT64_MAX - offset) / unit)
+            {
+                check_init_fail(walker, CHECK_INIT_RESOURCE, end);
+            }
+            else
+            {
+                const uint64_t size = offset + walker->flexible_extent * unit;
+                walker->result->object_size = size > walker->result->object_size ? size : walker->result->object_size;
+            }
+        }
+    }
+    return walker->result->status == CHECK_INIT_OK;
+}
+
+static bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
+                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
+                                  TypeId type, uint32_t begin, uint32_t end, bool static_storage,
+                                  Arena* output, Arena* scratch, CheckInitializer* result)
+{
+    *result = (CheckInitializer){
+        .type = type,
+        .failed_token = BUSTER_CHECK_NONE,
+    };
+    const uint64_t output_start = output != 0 ? output->length : 0;
+    const uint64_t scratch_start = scratch != 0 ? scratch->length : 0;
+    bool valid = types != 0 && parser != 0 && token_nodes != 0 && stream != 0 && output != 0 && scratch != 0 &&
+                 output != scratch && type_is_valid(types, type) && begin < end && end <= parser->tokens.count &&
+                 (string_count == 0 || strings != 0) && stream->values != 0 && stream->diagnostics != 0;
+    result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
+    if (valid && (stream->status != CHECK_STATUS_OK || stream->report_count != 0))
+    {
+        valid = false;
+        result->status = CHECK_INIT_CHECK_FAILED;
+    }
+    if (valid)
+    {
+        CheckInitWalker walker = {
+            .types = types,
+            .parser = parser,
+            .token_nodes = token_nodes,
+            .stream = stream,
+            .strings = strings,
+            .string_count = string_count,
+            .static_storage = static_storage,
+            .output = output,
+            .scratch = scratch,
+            .result = result,
+        };
+        valid = check_init_walk(&walker, type, begin, end);
+    }
+    if (scratch != 0)
+    {
+        arena_pop_to(scratch, scratch_start);
+    }
+    if (!valid)
+    {
+        if (output != 0)
+        {
+            arena_pop_to(output, output_start);
+        }
+        result->parts = 0;
+        result->count = 0;
+    }
+    return valid;
+}
+
+static bool check_initializer_infer_array(TypeTable* types, const Parser* parser, TypeId type, uint32_t begin, uint32_t end,
+                                          const uint64_t* designator_indices, const uint8_t* designator_valid,
+                                          const TypeId* expression_types, Arena* scratch, TypeId* completed, uint32_t* failed_token, CheckInitStatus* status)
+{
+    CheckInitializer result = {
+        .type = type,
+        .failed_token = BUSTER_CHECK_NONE,
+    };
+    const uint64_t scratch_start = scratch != 0 ? scratch->length : 0;
+    bool valid = types != 0 && parser != 0 && scratch != 0 && type_is_valid(types, type) && begin < end && end <= parser->tokens.count;
+    result.status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
+    if (valid)
+    {
+        CheckInitWalker walker = {
+            .types = types,
+            .parser = parser,
+            .indices = designator_indices,
+            .index_valid = designator_valid,
+            .expression_types = expression_types,
+            .infer = true,
+            .scratch = scratch,
+            .result = &result,
+        };
+        valid = check_init_walk(&walker, type, begin, end);
+    }
+    if (scratch != 0)
+    {
+        arena_pop_to(scratch, scratch_start);
+    }
+    *completed = valid ? result.type : 0;
+    *failed_token = result.failed_token;
+    if (status != 0)
+    {
+        *status = result.status;
+    }
+    return valid;
+}
+
+typedef struct CheckInitReference CheckInitReference;
+struct CheckInitReference
+{
+    uint64_t offset;
+    uint32_t part;
+};
+
+static uint32_t check_init_reference_position(const CheckInitReference* references, uint32_t count, uint64_t offset)
+{
+    uint32_t begin = 0;
+    uint32_t end = count;
+    while (begin < end)
+    {
+        const uint32_t middle = begin + (end - begin) / 2;
+        if (references[middle].offset < offset)
+        {
+            begin = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return begin;
+}
+
+static uint32_t check_init_uncovered(uint32_t* next, uint32_t index)
+{
+    uint32_t root = index;
+    while (next[root] != root)
+    {
+        root = next[root];
+    }
+    while (next[index] != index)
+    {
+        const uint32_t previous = index;
+        index = next[index];
+        next[previous] = root;
+    }
+    return root;
+}
+
+static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const CheckInitPart* part, uint64_t* bits)
+{
+    CheckInitStatus status = CHECK_INIT_OK;
+    *bits = 0;
+    if (!type_is_valid(types, part->type) || (uint32_t)part->kind > CHECK_INIT_CLEAR)
+    {
+        status = CHECK_INIT_INVALID;
+    }
+    else
+    {
+        const uint64_t bytes = part->kind == CHECK_INIT_VALUE ? type_size(types, part->type) : part->byte_count;
+        if (part->bit_width != 0)
+        {
+            *bits = part->bit_width;
+        }
+        else if (bytes > UINT64_MAX / 8)
+        {
+            status = CHECK_INIT_INVALID;
+        }
+        else
+        {
+            *bits = bytes * 8;
+        }
+        if (*bits > UINT64_MAX - part->bit_offset)
+        {
+            status = CHECK_INIT_INVALID;
+        }
+    }
+    return status;
+}
+
+// Each candidate pointer start is a point. A later bit-range write covers the points whose eight-byte fields it
+// intersects. Walk writes backwards; a disjoint-set next-uncovered index visits every point at most once. Stable
+// radix sorting and range searches avoid quadratic insertion/movement for reverse-ordered designated arrays.
+static CheckInitStatus check_initializer_live(const TypeTable* types, const CheckInitializer* initializer, Arena* scratch,
+                                               uint8_t** selected, uint32_t* count)
+{
+    *selected = 0;
+    *count = 0;
+    CheckInitStatus status = types != 0 && initializer != 0 && scratch != 0 && initializer->status == CHECK_INIT_OK &&
+                             (initializer->count == 0 || initializer->parts != 0) ? CHECK_INIT_OK : CHECK_INIT_INVALID;
+    uint32_t candidates = 0;
+    for (uint32_t i = 0; status == CHECK_INIT_OK && i < initializer->count; i += 1)
+    {
+        const CheckInitPart* part = initializer->parts + i;
+        uint64_t bits = 0;
+        status = check_initializer_part_bits(types, part, &bits);
+        if (status == CHECK_INIT_OK && part->kind == CHECK_INIT_VALUE && part->value.constant_kind == CHECK_CONSTANT_ADDRESS && part->value.object != 0)
+        {
+            uint32_t width = 0;
+            bool is_signed = false;
+            const bool integer = check_action_integer_type(types, part->type, &width, &is_signed) && width == 64;
+            if (bits != 64 || part->bit_width != 0 || (part->bit_offset % 8) != 0 ||
+                (!integer && type_kind(types, type_strip_aligned(types, part->type)) != BUSTER_TYPE_KIND_POINTER))
+            {
+                status = CHECK_INIT_INVALID;
+            }
+            else
+            {
+                candidates += 1;
+            }
+        }
+    }
+    CheckInitReference* references = 0;
+    CheckInitReference* temporary = 0;
+    uint32_t* positions = 0;
+    uint32_t* next = 0;
+    uint8_t* live = 0;
+    if (status == CHECK_INIT_OK && candidates != 0)
+    {
+        references = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitReference, candidates);
+        temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitReference, candidates);
+        positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, initializer->count);
+        next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)candidates + 1);
+        live = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, initializer->count);
+        if (references == 0 || temporary == 0 || positions == 0 || next == 0 || live == 0)
+        {
+            status = CHECK_INIT_RESOURCE;
+        }
+        else
+        {
+            memset(live, 0, initializer->count);
+            uint32_t at = 0;
+            for (uint32_t i = 0; i < initializer->count; i += 1)
+            {
+                const CheckInitPart* part = initializer->parts + i;
+                positions[i] = UINT32_MAX;
+                if (part->kind == CHECK_INIT_VALUE && part->value.constant_kind == CHECK_CONSTANT_ADDRESS && part->value.object != 0)
+                {
+                    references[at] = (CheckInitReference){
+                        .offset = part->bit_offset,
+                        .part = i,
+                    };
+                    at += 1;
+                }
+            }
+        }
+    }
+    for (uint32_t shift = 0; status == CHECK_INIT_OK && candidates > 1 && shift < 64; shift += 8)
+    {
+        uint32_t counts[256] = { 0 };
+        for (uint32_t i = 0; i < candidates; i += 1)
+        {
+            counts[(references[i].offset >> shift) & 255] += 1;
+        }
+        uint32_t total = 0;
+        for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+        {
+            const uint32_t size = counts[bucket];
+            counts[bucket] = total;
+            total += size;
+        }
+        for (uint32_t i = 0; i < candidates; i += 1)
+        {
+            const uint32_t bucket = (uint32_t)((references[i].offset >> shift) & 255);
+            temporary[counts[bucket]] = references[i];
+            counts[bucket] += 1;
+        }
+        CheckInitReference* swap = references;
+        references = temporary;
+        temporary = swap;
+    }
+    uint32_t unique = 0;
+    for (uint32_t i = 0; status == CHECK_INIT_OK && i < candidates; i += 1)
+    {
+        const CheckInitReference reference = references[i];
+        if (unique == 0 || references[unique - 1].offset != reference.offset)
+        {
+            references[unique] = reference;
+            unique += 1;
+        }
+        positions[reference.part] = unique - 1;
+    }
+    if (status == CHECK_INIT_OK && candidates != 0)
+    {
+        for (uint32_t i = 0; i <= unique; i += 1)
+        {
+            next[i] = i;
+        }
+        for (uint32_t i = initializer->count; i != 0; i -= 1)
+        {
+            const uint32_t part_index = i - 1;
+            const CheckInitPart* part = initializer->parts + part_index;
+            uint64_t bits = 0;
+            status = check_initializer_part_bits(types, part, &bits);
+            assert(status == CHECK_INIT_OK);
+            if (positions[part_index] != UINT32_MAX && check_init_uncovered(next, positions[part_index]) == positions[part_index])
+            {
+                live[part_index] = 1;
+                *count += 1;
+            }
+            if (bits != 0)
+            {
+                const uint32_t begin = check_init_reference_position(references, unique, part->bit_offset >= 63 ? part->bit_offset - 63 : 0);
+                const uint32_t end = check_init_reference_position(references, unique, part->bit_offset + bits);
+                uint32_t at = check_init_uncovered(next, begin);
+                while (at < end)
+                {
+                    next[at] = check_init_uncovered(next, at + 1);
+                    at = next[at];
+                }
+            }
+        }
+        *selected = live;
+    }
+    return status;
+}
+
+// Public object-ID slices retain source order and duplicate IDs from distinct surviving fields. The emitter
+// uses the same live-part classification, so discarded literals and foreign symbols need no shared symbol.
+static __attribute__((unused)) CheckInitStatus check_initializer_references(const TypeTable* types, const CheckInitializer* initializer,
+                                                                          Arena* output, Arena* scratch, uint32_t** objects, uint32_t* count)
+{
+    *objects = 0;
+    *count = 0;
+    const uint64_t output_mark = output != 0 ? output->length : 0;
+    const uint64_t scratch_mark = scratch != 0 ? scratch->length : 0;
+    uint8_t* selected = 0;
+    uint32_t used = 0;
+    CheckInitStatus status = output != 0 && scratch != 0 && output != scratch ?
+                             check_initializer_live(types, initializer, scratch, &selected, &used) : CHECK_INIT_INVALID;
+    uint32_t* result = 0;
+    if (status == CHECK_INIT_OK && used != 0)
+    {
+        result = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, used);
+        if (result == 0)
+        {
+            status = CHECK_INIT_RESOURCE;
+        }
+        else
+        {
+            uint32_t at = 0;
+            for (uint32_t i = 0; i < initializer->count; i += 1)
+            {
+                if (selected[i])
+                {
+                    result[at] = initializer->parts[i].value.object;
+                    at += 1;
+                }
+            }
+            assert(at == used);
+        }
+    }
+    if (status == CHECK_INIT_OK)
+    {
+        *objects = result;
+        *count = used;
+    }
+    else if (output != 0)
+    {
+        arena_pop_to(output, output_mark);
+    }
+    if (scratch != 0)
+    {
+        arena_pop_to(scratch, scratch_mark);
+    }
+    return status;
+}
+#endif

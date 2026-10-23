@@ -30,7 +30,14 @@ struct String8
 
 #include "buster/compiler/lane.c"
 #include "buster/compiler/c_types.c"
+#include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_check_actions.c"
+#include "buster/compiler/c_check_builtin.c"
+#include "buster/compiler/c_check_varargs.c"
+#include "buster/compiler/c_check_builtin_misc.c"
+#include "buster/compiler/c_check_builtin_query.c"
+#include "buster/compiler/c_check_builtin_float.c"
+#include "buster/compiler/c_check_builtin_atomic.c"
 #include "buster/compiler/c_checker.c"
 
 #define BUSTER_CHECK_BENCHMARK_PASSES 21u
@@ -81,18 +88,23 @@ static int check_benchmark_counter(uint64_t event)
     return (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
 }
 
+static bool check_benchmark_value_equal(const CheckValue* x, const CheckValue* y)
+{
+    const bool floating = (isnan(x->floating) && isnan(y->floating)) ||
+                          (x->floating == y->floating && signbit(x->floating) == signbit(y->floating));
+    const bool equal = x->type == y->type && x->category == y->category && x->flags == y->flags && x->constant_kind == y->constant_kind &&
+                       x->integer == y->integer && floating && x->object == y->object && x->offset == y->offset &&
+                       x->bit_width == y->bit_width && x->fault == y->fault && x->fault_node == y->fault_node;
+    return equal;
+}
+
 static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, uint32_t arguments)
 {
-    bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count;
+    bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count && a->effect_count == b->effect_count &&
+                 a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_benchmark_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
-        const CheckValue* x = &a->values[i];
-        const CheckValue* y = &b->values[i];
-        const bool floating = (isnan(x->floating) && isnan(y->floating)) ||
-                              (x->floating == y->floating && signbit(x->floating) == signbit(y->floating));
-        equal = x->type == y->type && x->category == y->category && x->flags == y->flags && x->constant_kind == y->constant_kind &&
-                x->integer == y->integer && floating && x->object == y->object && x->offset == y->offset &&
-                x->bit_width == y->bit_width && x->fault == y->fault && x->fault_node == y->fault_node && a->diagnostics[i] == b->diagnostics[i];
+        equal = check_benchmark_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i];
         equal = equal && a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t j = 0; equal && j < 3; j += 1)
         {
@@ -109,6 +121,18 @@ static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, ui
         equal = a->reports[i].node == b->reports[i].node && a->reports[i].token == b->reports[i].token &&
                 a->reports[i].message == b->reports[i].message && a->reports[i].diagnostic == b->reports[i].diagnostic &&
                 a->reports[i].fault == b->reports[i].fault;
+    }
+    for (uint32_t i = 0; equal && i < a->effect_count; i += 1)
+    {
+        equal = a->effects[i].node == b->effects[i].node && check_benchmark_value_equal(&a->effects[i].value, &b->effects[i].value) &&
+                check_benchmark_value_equal(&a->effects[i].destination, &b->effects[i].destination);
+    }
+    for (uint32_t i = 0; equal && i < a->varargs_count; i += 1)
+    {
+        const CheckVarargsEffect* x = a->varargs + i;
+        const CheckVarargsEffect* y = b->varargs + i;
+        equal = x->node == y->node && x->requested_type == y->requested_type && x->evaluated_operands == y->evaluated_operands &&
+                x->warnings == y->warnings && x->mutates_list == y->mutates_list;
     }
     return equal;
 }

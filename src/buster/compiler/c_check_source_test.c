@@ -8,6 +8,186 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
     const CheckSourceFixture fixtures[] =
     {
         {
+            "goto cannot enter statement expression",
+            "int f(void){goto entered;return ({entered: 3;});}\n",
+            true,
+            false
+        },
+        {
+            "switch cannot enter statement expression",
+            "int f(int n){switch(n){return ({case 0: 3;});}return 0;}\n",
+            true,
+            false
+        },
+        {
+            "statement expression pure folded assertion",
+            "int f(void){_Static_assert(({1;}),\"fold\");return ({3;});}\n",
+            false,
+            false
+        },
+        {
+            "condition statement expression cannot break its pending loop",
+            "int f(void){while(({break;1;})){}return 0;}\n",
+            true,
+            false
+        },
+        {
+            "varargs list and type operands",
+            "typedef __builtin_va_list V; int f(int n,...){V x,y;__builtin_va_start(x,n);__builtin_va_copy(y,x);int r=__builtin_va_arg(y,int);__builtin_va_end(y);__builtin_va_end(x);return r;}\n",
+            false,
+            false
+        },
+        {
+            "varargs start requires variadic function",
+            "typedef __builtin_va_list V; void f(int n){V x;__builtin_va_start(x,n);}\n",
+            true,
+            false
+        },
+        {
+            "varargs rejects unrelated list",
+            "int f(int n,...){int x;__builtin_va_start(x,n);return 0;}\n",
+            true,
+            false
+        },
+        {
+            "parameter array pointer qualifiers",
+            "void f(int x[const 5]); void f(int *const x); void g(int x[static restrict 5]); void g(int *restrict x); void h(int x[const *]); void h(int *const x); void grouped(int (x[const 3]));\n",
+            false,
+            false
+        },
+        {
+            "parameter array qualifier applies to local pointer",
+            "void f(int x[const 5]){x=0;}\n",
+            true,
+            false
+        },
+        {
+            "parameter array star cannot define function",
+            "void f(int x[const *]){x[0]=1;}\n",
+            true,
+            false
+        },
+        {
+            "inner array qualifier is invalid",
+            "void f(int x[3][const 4]);\n",
+            true,
+            false
+        },
+        {
+            "attribute prefixed cast type",
+            "int f(void *p){return ((__attribute__((noinline)) int(*)(void))p)();}\n",
+            false,
+            false
+        },
+        {
+            "attribute inside grouped abstract declarator",
+            "int f(void *p){return ((int(__attribute__((noinline)) *)(void))p)();}\n",
+            false,
+            false
+        },
+        {
+            "final record member without semicolon",
+            "struct S{int member}; struct S s; _Static_assert(sizeof s==sizeof(int),\"member\");\n",
+            false,
+            false
+        },
+        {
+            "thread local declaration identity",
+            "extern _Thread_local int x; _Thread_local int x=3; int f(void){static _Thread_local int y; return x+y;}\n",
+            false,
+            false
+        },
+        {
+            "thread local redeclaration mismatch",
+            "extern _Thread_local int x; int x;\n",
+            true,
+            false
+        },
+        {
+            "block thread local requires storage",
+            "void f(void){_Thread_local int x;}\n",
+            true,
+            false
+        },
+        {
+            "concatenated and wide strings",
+            "char a[]=\"ab\" \"cd\"; unsigned short u[]=u\"x\"; _Static_assert(sizeof a==5,\"a\"); _Static_assert(sizeof u==4,\"u\");\n",
+            false,
+            false
+        },
+        {
+            "sparse local inferred array",
+            "int f(void){int a[]={[3]=7,9}; _Static_assert(sizeof a==20,\"extent\"); return a[4];}\n",
+            false,
+            false
+        },
+        {
+            "anonymous member lookup",
+            "struct S{union{int x;long y;}; int z;}; int f(struct S *p){return p->x+p->z;}\n",
+            false,
+            false
+        },
+        {
+            "anonymous member duplicate",
+            "struct S{struct{int x;}; int x;};\n",
+            true,
+            false
+        },
+        {
+            "anonymous member supports flexible successor",
+            "struct S{struct{int x;}; int values[];}; _Static_assert(sizeof(struct S)==4,\"flexible\");\n",
+            false,
+            false
+        },
+        {
+            "compound scalar lvalue",
+            "int f(void){int *p=&(int){7}; return *p;}\n",
+            false,
+            false
+        },
+        {
+            "compound array extent",
+            "int f(void){return sizeof((int[]){1,2,3});}\n",
+            false,
+            false
+        },
+        {
+            "function labels separate from objects",
+            "int f(int n){goto done; done: return n;} int g(void){int done=3; done: return done;}\n",
+            false,
+            false
+        },
+        {
+            "duplicate function label",
+            "int f(void){x:; {x:;} return 0;}\n",
+            true,
+            false
+        },
+        {
+            "missing function label",
+            "int f(void){goto absent; return 0;}\n",
+            true,
+            false
+        },
+        {
+            "nested switch does not leak expression values",
+            "int f(int x){switch(x){case 1: return 2; default: switch(x+1){case 2:return 3; default:return 4;}}}\n",
+            false,
+            false
+        },
+        {
+            "typeof preserves pointed qualifiers",
+            "const int x=1; __typeof__(&x) p=&x; int f(void){return *p;}\n",
+            false,
+            false
+        },
+        {
+            "unsigned bit precise declaration",
+            "unsigned _BitInt(17) value; _Static_assert(sizeof value==4,\"bits\");\n",
+            false,
+            false
+        },
+        {
             "callback parameter",
             "int f(int (*cb)(int), int x) { return cb(x); }\n",
             false,
@@ -71,6 +251,60 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
             "compatible block function redeclaration",
             "int g(int); int f(void) { int g(int); return g(3); }\n",
             false,
+            false
+        },
+        {
+            "builtin System V variadic list type",
+            "typedef __builtin_va_list V; _Static_assert(sizeof(V)==24, \"va_list\"); void f(V p) { (void)p; }\n",
+            false,
+            false
+        },
+        {
+            "builtin Microsoft variadic list type",
+            "typedef __builtin_ms_va_list V; _Static_assert(sizeof(V)==8, \"ms_va_list\");\n",
+            false,
+            false
+        },
+        {
+            "builtin integer typedefs",
+            "__int128_t x; __uint128_t y; _Static_assert(sizeof(x)==16 && sizeof(y)==16, \"wide\");\n",
+            false,
+            false
+        },
+        {
+            "conflicting builtin typedef",
+            "typedef long __int128_t;\n",
+            true,
+            false
+        },
+        {
+            "block extern uses file object",
+            "int x=3; int f(void) { extern int x; return x; }\n",
+            false,
+            false
+        },
+        {
+            "block extern before file definition",
+            "int f(void) { extern int x; return x; } int x=3;\n",
+            false,
+            false
+        },
+        {
+            "repeated block extern",
+            "int f(void) { extern int x; extern int x; return x; }\n",
+            false,
+            false
+        },
+        {
+            "block extern conflicting linked type",
+            "int x; int f(void) { extern long x; return 0; }\n",
+            true,
+            false
+        },
+        {
+            "block extern initializer rejected",
+            "int f(void) { extern int x=1; return x; }\n",
+            true,
             false
         },
         {
@@ -290,10 +524,10 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
             false
         },
         {
-            "prior incomplete-pointer expression remains unsupported",
+            "pointer comparison before record completion",
             "struct S; struct S *p; int f(void) { return p!=0; } struct S { int x; };\n",
-            true,
-            true
+            false,
+            false
         },
         {
             "flexible member",

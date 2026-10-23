@@ -105,7 +105,7 @@ static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 
 static bool check_test_action_equal(const CheckActionResult* a, const CheckActionResult* b)
 {
-    bool equal = check_test_value_equal(&a->value, &b->value) && a->diagnostic == b->diagnostic &&
+    bool equal = check_test_value_equal(&a->value, &b->value) && a->diagnostic == b->diagnostic && a->warnings == b->warnings &&
                  a->diagnostic_operand == b->diagnostic_operand && a->store_conversion.type == b->store_conversion.type &&
                  a->store_conversion.flags == b->store_conversion.flags;
     for (uint32_t i = 0; equal && i < 3; i += 1)
@@ -1272,10 +1272,11 @@ static void check_test_actions_batch(CheckTest* test, TypeTable* table)
 
 static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, uint32_t arguments)
 {
-    bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count;
+    bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count && a->effect_count == b->effect_count &&
+                 a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_test_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
-        equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] &&
+        equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
                 a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t operand = 0; equal && operand < 3; operand += 1)
         {
@@ -1293,6 +1294,18 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
         const CheckReport* x = &a->reports[i];
         const CheckReport* y = &b->reports[i];
         equal = x->node == y->node && x->token == y->token && x->message == y->message && x->diagnostic == y->diagnostic && x->fault == y->fault;
+    }
+    for (uint32_t i = 0; equal && i < a->effect_count; i += 1)
+    {
+        equal = a->effects[i].node == b->effects[i].node && check_test_value_equal(&a->effects[i].value, &b->effects[i].value) &&
+                check_test_value_equal(&a->effects[i].destination, &b->effects[i].destination);
+    }
+    for (uint32_t i = 0; equal && i < a->varargs_count; i += 1)
+    {
+        const CheckVarargsEffect* x = a->varargs + i;
+        const CheckVarargsEffect* y = b->varargs + i;
+        equal = x->node == y->node && x->requested_type == y->requested_type && x->evaluated_operands == y->evaluated_operands &&
+                x->warnings == y->warnings && x->mutates_list == y->mutates_list;
     }
     return equal;
 }
@@ -2036,11 +2049,10 @@ static void check_test_sources(CheckTest* test, const char* clang)
             false
         },
         {
-            "GNU folded-constant extension remains rejected",
+            "GNU folded-constant extension",
             "int f(void); _Static_assert(1 || f(), \"unevaluated call\");\n",
-            true,
             false,
-            true
+            false
         },
         {
             "conditional constant",
@@ -2109,11 +2121,10 @@ static void check_test_sources(CheckTest* test, const char* clang)
             false
         },
         {
-            "GNU discarded void indirection remains rejected",
+            "GNU discarded void indirection",
             "void f(void *p) { *p; }\n",
-            true,
             false,
-            true
+            false
         },
         {
             "floating remainder",
@@ -2404,10 +2415,19 @@ static void check_test_target_options(CheckTest* test)
 }
 
 #include "c_check_graph_test.c"
+#include "c_check_builtin_graph_test.c"
+#include "c_check_varargs_graph_test.c"
 #include "c_check_binding_test.c"
+#include "c_check_environment_test.c"
 #include "c_check_source_test.c"
+#include "c_check_constant_test.c"
 #include "c_check_data_test.c"
+#include "c_check_actions_extra_test.c"
+#include "c_check_initializer_test.c"
 #include "c_check_data_source_test.c"
+#include "c_check_attribute_test.c"
+#include "c_check_program_test.c"
+#include "c_check_prefix_test.c"
 
 static int run_checker_tests(int argc, char** argv)
 {
@@ -2467,11 +2487,21 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&storage);
             check_test_sources(&test, clang);
             check_test_source_extensions(&test, clang);
+            check_test_constant_sources(&test, clang);
             check_test_type_capacity(&test);
             check_test_target_options(&test);
             check_test_bindings(&test);
+            check_test_builtin_graph(&test, &types.table, clang);
+            check_test_varargs_graph(&test, &types.table);
+            check_test_environments(&test);
             check_test_data(&test, &types.table, clang);
+            check_test_actions_extra(&test, &types.table, clang);
+            check_test_initializers(&test, clang);
             check_test_data_sources(&test);
+            check_test_attributes(&test, clang);
+            check_test_attribute_sources(&test, clang);
+            check_test_programs(&test, clang);
+            check_test_prefixes(&test, clang);
         }
         check_test_types_close(&types);
     }

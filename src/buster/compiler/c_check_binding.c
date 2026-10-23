@@ -48,7 +48,7 @@ static bool check_input_bindings(CheckInputReader* reader, bool scalar)
             {
                 reader->declared_types[token] = handle != 0 ? reader->declared_types[declaration] : 0;
                 if (handle != 0 && (reader->declared_types[token] == 0 ||
-                    (bindings->kind[handle - 1] == C_BINDING_TYPEDEF && reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND)))
+                    (bindings->kind[handle - 1] == C_BINDING_TYPEDEF && reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && !reader->ignored[token])))
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }

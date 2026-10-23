@@ -516,7 +516,7 @@ static void check_data_test_objects(CheckTest* test, TypeTable* types, const cha
 static void check_data_test_limits(CheckTest* test, TypeTable* types)
 {
     const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
-    for (uint32_t failure = 0; failure < 18; failure += 1)
+    for (uint32_t failure = 0; failure < 19; failure += 1)
     {
         CheckDataTestLink test_link;
         const bool initialized = check_data_test_open(&test_link, 4);
@@ -597,8 +597,8 @@ static void check_data_test_limits(CheckTest* test, TypeTable* types)
                     expected = CHECK_DATA_UNSUPPORTED;
                     break;
                 case 10:
-                    test_link.link.symbols.flags[map[2]] = BUSTER_LINK_SYMBOL_TLS | BUSTER_LINK_SYMBOL_GLOBAL;
-                    expected = CHECK_DATA_UNSUPPORTED;
+                    test_link.link.symbols.flags[map[2]] = BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL;
+                    expected = CHECK_DATA_SYMBOL;
                     break;
                 case 11:
                     test_link.link.symbols.flags[map[3]] = BUSTER_LINK_SYMBOL_TLS | BUSTER_LINK_SYMBOL_GLOBAL;
@@ -626,6 +626,10 @@ static void check_data_test_limits(CheckTest* test, TypeTable* types)
                     break;
                 case 17:
                     objects[1].type = BUSTER_TYPE_FLOAT128;
+                    expected = CHECK_DATA_UNSUPPORTED;
+                    break;
+                case 18:
+                    objects[1].alignment_log2 = BUSTER_LINK_MAX_ALIGNMENT_LOG2 + 1;
                     expected = CHECK_DATA_UNSUPPORTED;
                     break;
             }
@@ -884,9 +888,263 @@ static void check_data_test_partitions(CheckTest* test, TypeTable* types)
     }
 }
 
+static void check_data_test_aggregate_transaction(CheckTest* test, TypeTable* types)
+{
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    const TypeId array = type_qualify(types, type_array(types, pointer, 4), BUSTER_TYPE_CONST);
+    CheckInitPart parts[5] = { 0 };
+    const uint32_t offsets[] = {
+        0,
+        16,
+        8,
+        8,
+        0,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(parts); i += 1)
+    {
+        parts[i] = (CheckInitPart){
+            .kind = i == 3 ? CHECK_INIT_CLEAR : CHECK_INIT_VALUE,
+            .type = pointer,
+            .token = i + 10,
+            .bit_offset = (uint64_t)offsets[i] * 8,
+            .byte_count = i == 3 ? 8 : 0,
+            .value = {
+                .type = pointer,
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = i == 2 ? 4 : 3,
+                .offset = i == 4 ? INT64_C(4294967296) : 4,
+            },
+        };
+    }
+    const CheckInitializer initializer = {
+        .type = array,
+        .parts = parts,
+        .count = BUSTER_ARRAY_LENGTH(parts),
+    };
+    const CheckDataObject object = {
+        .type = array,
+        .object = 1,
+        .initializer = BUSTER_CHECK_NONE,
+        .token = 123,
+        .initializer_plan = &initializer,
+        .alignment_log2 = 5,
+    };
+    for (uint32_t failure = 0; failure < 4; failure += 1)
+    {
+        CheckDataTestLink fixture = { 0 };
+        const bool ready = check_data_test_open(&fixture, 8);
+        check_test_expect(test, ready, "aggregate transaction fixture storage");
+        if (ready)
+        {
+            SymbolId map[5] = { 0 };
+            map[1] = check_data_test_symbol(&fixture.link, "aggregate", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            map[3] = check_data_test_symbol(&fixture.link, "target", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            uint32_t* references = 0;
+            uint32_t reference_count = 0;
+            Arena tiny = fixture.bytes;
+            tiny.capacity = 0;
+            const CheckInitStatus too_small = check_initializer_references(types, &initializer, &tiny, &fixture.scratch, &references, &reference_count);
+            check_test_expect(test, too_small == CHECK_INIT_RESOURCE && references == 0 && reference_count == 0 && tiny.length == 0 && fixture.scratch.length == 0,
+                              "reference collection capacity failure publishes no partial object identities");
+            const CheckInitStatus reference_status = check_initializer_references(types, &initializer, &fixture.bytes, &fixture.scratch, &references, &reference_count);
+            check_test_expect(test, reference_status == CHECK_INIT_OK && reference_count == 2 && references[0] == 3 && references[1] == 3 && fixture.scratch.length == 0,
+                              "only final references survive with distinct fields and exact duplicate identities");
+            arena_pop_to(&fixture.bytes, 0);
+            if (failure == 0)
+            {
+                fixture.link.atoms.capacity = fixture.link.atoms.count;
+            }
+            else if (failure == 1)
+            {
+                fixture.link.fixups.capacity = fixture.link.fixups.count + 1;
+            }
+            else if (failure == 2)
+            {
+                fixture.bytes.capacity = 31;
+            }
+            uint8_t before[8192];
+            const bool fits = fixture.tables.length <= sizeof(before);
+            check_test_expect(test, fits, "aggregate transaction snapshot fits");
+            if (fits)
+            {
+                memcpy(before, fixture.tables.base, fixture.tables.length);
+                const Link previous = fixture.link;
+                CheckDataResult result = { 0 };
+                const bool emitted = check_data_emit(types, 0, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                                     &fixture.bytes, &fixture.scratch, &result);
+                check_test_expect(test, emitted == (failure == 3) && result.atom_count == 1 && result.fixup_count == 2 && result.wide_addend_count == 1 && result.byte_count == 32,
+                                  "aggregate emission preflights exact final bytes and relocations after overwrites");
+                if (!emitted)
+                {
+                    check_test_expect(test, result.status == CHECK_DATA_RESOURCE && previous.error == fixture.link.error &&
+                                           previous.atoms.count == fixture.link.atoms.count && previous.symbols.count == fixture.link.symbols.count &&
+                                           previous.fixups.count == fixture.link.fixups.count && previous.fixups.wide_count == fixture.link.fixups.wide_count &&
+                                           memcmp(before, fixture.tables.base, fixture.tables.length) == 0 && fixture.bytes.length == 0 && fixture.scratch.length == 0,
+                                      "aggregate capacity failure leaves Link, symbols, bytes and scratch unchanged");
+                }
+                else
+                {
+                    const AtomId atom = fixture.link.symbols.atom[map[1]];
+                    const FixupId first = fixture.link.atoms.fixup_begin[atom];
+                    check_test_expect(test, link_check(&fixture.link) == LINK_ERROR_NONE && fixture.link.atoms.class[atom] == BUSTER_LINK_CLASS_DATA_RELRO &&
+                                           fixture.link.atoms.alignment_log2[atom] == 5 &&
+                                           fixture.link.fixups.offset[first] == 0 && fixture.link.fixups.offset[first + 1] == 16 &&
+                                           link_fixup_addend(&fixture.link, first) == INT64_C(4294967296) && link_fixup_addend(&fixture.link, first + 1) == 4,
+                                      "aggregate fixups are sorted with exact addends and discarded unmapped targets need no symbol");
+                }
+            }
+            fixture.bytes.capacity = 16384;
+        }
+        check_data_test_close(&fixture);
+    }
+}
+
+static void check_data_test_many_fixups(CheckTest* test, TypeTable* types)
+{
+    enum
+    {
+        COUNT = 1024,
+    };
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    const TypeId array = type_array(types, pointer, COUNT);
+    Arena parts_arena = arena_reserve(UINT64_C(1) << 20);
+    CheckInitPart* parts = BUSTER_ARENA_PUSH_ARRAY(&parts_arena, CheckInitPart, COUNT + 1);
+    CheckDataTestLink fixture = { 0 };
+    bool ready = parts != 0 && check_data_test_open(&fixture, COUNT + 8);
+    if (ready)
+    {
+        arena_release(&fixture.scratch);
+        fixture.scratch = arena_reserve(UINT64_C(1) << 20);
+        ready = fixture.scratch.base != 0;
+    }
+    check_test_expect(test, ready, "reverse-designated reference fixture storage");
+    if (ready)
+    {
+        SymbolId map[5] = { 0 };
+        map[1] = check_data_test_symbol(&fixture.link, "reverse", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        map[3] = check_data_test_symbol(&fixture.link, "even", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        map[4] = check_data_test_symbol(&fixture.link, "odd", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        for (uint32_t i = 0; i < COUNT; i += 1)
+        {
+            const uint32_t index = COUNT - i - 1;
+            parts[i] = (CheckInitPart){
+                .kind = CHECK_INIT_VALUE,
+                .type = pointer,
+                .bit_offset = (uint64_t)index * 64,
+                .value = {
+                    .type = pointer,
+                    .category = CHECK_RVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = 3 + (index & 1),
+                    .offset = (int64_t)index * 4,
+                },
+            };
+        }
+        parts[COUNT] = (CheckInitPart){
+            .kind = CHECK_INIT_CLEAR,
+            .type = array,
+            .bit_offset = (uint64_t)(COUNT / 4) * 64,
+            .byte_count = (uint64_t)(COUNT / 2) * 8,
+        };
+        const CheckInitializer initializer = {
+            .type = array,
+            .parts = parts,
+            .count = COUNT + 1,
+        };
+        const CheckDataObject object = {
+            .type = array,
+            .object = 1,
+            .initializer = BUSTER_CHECK_NONE,
+            .initializer_plan = &initializer,
+        };
+        uint32_t* references = 0;
+        uint32_t count = 0;
+        const CheckInitStatus status = check_initializer_references(types, &initializer, &fixture.bytes, &fixture.scratch, &references, &count);
+        check_test_expect(test, status == CHECK_INIT_OK && count == COUNT / 2 && references[0] == 4 && references[count - 1] == 3,
+                          "reverse designated reference coverage removes the exact overwritten range and preserves source order");
+        arena_pop_to(&fixture.bytes, 0);
+        CheckDataResult result = { 0 };
+        const bool emitted = check_data_emit(types, 0, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0, &fixture.bytes, &fixture.scratch, &result);
+        check_test_expect(test, emitted && result.fixup_count == COUNT / 2 && link_check(&fixture.link) == LINK_ERROR_NONE,
+                          "reverse designated reference emission publishes a valid complete atom");
+        if (emitted)
+        {
+            const AtomId atom = fixture.link.symbols.atom[map[1]];
+            const FixupId first = fixture.link.atoms.fixup_begin[atom];
+            for (uint32_t i = 0; i < COUNT / 2; i += 1)
+            {
+                const uint32_t index = i < COUNT / 4 ? i : i + COUNT / 2;
+                check_test_expect(test, fixture.link.fixups.offset[first + i] == index * 8 &&
+                                       fixture.link.fixups.target[first + i] == map[3 + (index & 1)] &&
+                                       link_fixup_addend(&fixture.link, first + i) == (int64_t)index * 4,
+                                  "reverse designated final relocation order and identity are exact");
+            }
+        }
+    }
+    check_data_test_close(&fixture);
+    arena_release(&parts_arena);
+}
+
+static void check_data_test_address_bit_fields(CheckTest* test, TypeTable* types)
+{
+    const TypeId array = type_array(types, BUSTER_TYPE_ULONG, 2);
+    for (uint32_t variant = 0; variant < 3; variant += 1)
+    {
+        CheckDataTestLink fixture = { 0 };
+        const bool ready = check_data_test_open(&fixture, 4);
+        check_test_expect(test, ready, "symbolic integer bit-field fixture storage");
+        if (ready)
+        {
+            SymbolId map[3] = { 0 };
+            map[1] = check_data_test_symbol(&fixture.link, "bits", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            map[2] = check_data_test_symbol(&fixture.link, "target", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            CheckInitPart part = {
+                .kind = CHECK_INIT_VALUE,
+                .type = BUSTER_TYPE_ULONG,
+                .bit_offset = variant == 2 ? 1 : 0,
+                .bit_width = variant == 1 ? 63 : 64,
+                .value = {
+                    .type = BUSTER_TYPE_ULONG,
+                    .category = CHECK_RVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = 2,
+                    .offset = 5,
+                },
+            };
+            const CheckInitializer initializer = {
+                .type = array,
+                .parts = &part,
+                .count = 1,
+            };
+            const CheckDataObject object = {
+                .type = array,
+                .object = 1,
+                .initializer = BUSTER_CHECK_NONE,
+                .initializer_plan = &initializer,
+            };
+            const Link before = fixture.link;
+            CheckDataResult result = { 0 };
+            const bool emitted = check_data_emit(types, 0, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                                  &fixture.bytes, &fixture.scratch, &result);
+            check_test_expect(test, !emitted && result.status == CHECK_DATA_INVALID && memcmp(&before, &fixture.link, sizeof(before)) == 0 &&
+                                   fixture.link.symbols.atom[map[1]] == 0 && fixture.bytes.length == 0,
+                              "symbolic bit-field fails without changing Link or publishing bytes");
+            check_test_expect(test, fixture.scratch.length == 0, "symbolic bit-field planning restores scratch");
+        }
+        check_data_test_close(&fixture);
+    }
+}
+
 static void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
 {
     check_data_test_objects(test, types, clang);
+    check_data_test_aggregate_transaction(test, types);
+    check_data_test_many_fixups(test, types);
+    check_data_test_address_bit_fields(test, types);
     check_data_test_limits(test, types);
     check_data_test_floating(test);
     check_data_test_composite(test, types);

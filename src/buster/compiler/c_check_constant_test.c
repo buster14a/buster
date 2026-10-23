@@ -1,0 +1,466 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+// Original declaration-time expression fixtures, checked by both parser/checker paths and installed Clang.
+// The FILE-sized arithmetic is authored from the target sizes; no system header or external fixture is copied.
+
+static void check_test_constant_sources(CheckTest* test, const char* clang)
+{
+    // Clang 23 tests only the low 64 bits of this GNU condition; GCC and the full-width C integer truth rule
+    // select 7. Keep the original counterexample as a direct checker regression and an explicit oracle probe.
+    const char* wide_truth_source = "enum { N=__builtin_choose_expr(((__int128)1<<100),7,0) }; _Static_assert(N==7, \"full-width truth\");\n";
+    char nested_source[4096];
+    uint32_t length = (uint32_t)snprintf(nested_source, sizeof(nested_source), "enum { N=");
+    for (uint32_t i = 0; i < 96; i += 1)
+    {
+        length += (uint32_t)snprintf(nested_source + length, sizeof(nested_source) - length, "sizeof(char[");
+    }
+    length += (uint32_t)snprintf(nested_source + length, sizeof(nested_source) - length, "1");
+    for (uint32_t i = 0; i < 96; i += 1)
+    {
+        length += (uint32_t)snprintf(nested_source + length, sizeof(nested_source) - length, "])");
+    }
+    snprintf(nested_source + length, sizeof(nested_source) - length, " }; _Static_assert(N==1, \"nested type queries\");\n");
+    char nested_attributes[8192];
+    length = (uint32_t)snprintf(nested_attributes, sizeof(nested_attributes), "struct S { long value; }; enum { N=");
+    for (uint32_t i = 0; i < 96; i += 1)
+    {
+        length += (uint32_t)snprintf(nested_attributes + length, sizeof(nested_attributes) - length, "sizeof(struct __attribute__((aligned(");
+    }
+    length += (uint32_t)snprintf(nested_attributes + length, sizeof(nested_attributes) - length, "8");
+    for (uint32_t i = 0; i < 96; i += 1)
+    {
+        length += (uint32_t)snprintf(nested_attributes + length, sizeof(nested_attributes) - length, "))) S)");
+    }
+    snprintf(nested_attributes + length, sizeof(nested_attributes) - length, " }; _Static_assert(N==8, \"nested tag attribute jobs\");\n");
+    const CheckSourceFixture fixtures[] =
+    {
+        {
+            .name = "declaration sizeof arithmetic",
+            .source = "struct Buffer { char spare[12 * sizeof(int) - 5 * sizeof(void *)]; }; _Static_assert(sizeof(struct Buffer)==8, \"bound\");\n",
+        },
+        {
+            .name = "deeply nested tag attribute queries",
+            .source = nested_attributes,
+        },
+        {
+            .name = "tag attribute source ordered identity",
+            .source = "enum { A=8, N=sizeof(struct __attribute__((aligned(A))) S*) }; _Static_assert(N==8, \"tag activation after attribute use\");\n",
+        },
+        {
+            .name = "tag attribute nested new identity",
+            .source = "enum { N=sizeof(struct __attribute__((aligned(sizeof(struct S*)))) S*) }; _Static_assert(N==8, \"nested tag identity\");\n",
+        },
+        {
+            .name = "tag attribute invalid alignment",
+            .source = "struct S { int x; }; enum { N=sizeof(struct __attribute__((aligned(3))) S) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "tag attribute evaluated fault",
+            .source = "struct S { int x; }; enum { N=sizeof(struct __attribute__((aligned(1/0))) S) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "raw attribute nested tag query jobs",
+            .source = "struct S { long x; }; typedef int T [[gnu::aligned(sizeof(struct __attribute__((aligned(sizeof(struct S)))) S))]]; _Static_assert(_Alignof(T)==8, \"raw nested tag attributes\");\n",
+        },
+        {
+            .name = "nested type array bound",
+            .source = "enum { N=sizeof(int[2+sizeof(char[3])]) }; _Static_assert(N==20, \"nested\");\n",
+        },
+        {
+            .name = "integer rank and cast in array bound",
+            .source = "int a[(unsigned char)258]; _Static_assert(sizeof a==8, \"cast\");\n",
+        },
+        {
+            .name = "real literal immediate integer cast",
+            .source = "enum { N=(int)3.75 }; int a[N]; _Static_assert(sizeof a==12, \"real cast\");\n",
+        },
+        {
+            .name = "real expression is not ICE",
+            .source = "enum { N=(int)(1.5+2.5) };\n",
+            .rejected = true,
+            .extension = true,
+        },
+        {
+            .name = "declaration conditional",
+            .source = "enum { N=1?7:1/0 }; int a[N]; _Static_assert(sizeof a==28, \"conditional\");\n",
+        },
+        {
+            .name = "declaration GNU omitted conditional",
+            .source = "enum { N=7?:1/0 }; int a[N]; _Static_assert(sizeof a==28, \"conditional\");\n",
+        },
+        {
+            .name = "declaration short circuit",
+            .source = "enum { N=(0 && (1/0)) + (1 || (1/0)) }; int a[N]; _Static_assert(sizeof a==4, \"short circuit\");\n",
+        },
+        {
+            .name = "declaration evaluated fault",
+            .source = "enum { N=0?7:1/0 };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration typedef and object source order",
+            .source = "typedef short T; T object; enum { N=sizeof(T)+sizeof object }; int a[N]; _Static_assert(sizeof a==16, \"bindings\");\n",
+        },
+        {
+            .name = "declaration prior enumerator",
+            .source = "enum { A=3, B=sizeof(int[A]), C=(unsigned char)B }; _Static_assert(C==12, \"enumerator\");\n",
+        },
+        {
+            .name = "declaration future enumerator rejected",
+            .source = "enum { A=sizeof(int[B]), B=3 };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration object shadow",
+            .source = "int x; void f(void) { char x; enum { N=sizeof x }; _Static_assert(N==1, \"inner\"); } enum { N=sizeof x }; _Static_assert(N==4, \"outer\");\n",
+        },
+        {
+            .name = "declaration object is not ICE",
+            .source = "const int x=2; enum { N=x };\n",
+            .rejected = true,
+            .extension = true,
+        },
+        {
+            .name = "declaration alignof callback array",
+            .source = "enum { A=_Alignof(double), B=sizeof(int (*[2])(int)) }; _Static_assert(A==8 && B==16, \"types\");\n",
+        },
+        {
+            .name = "declaration sizeof object expressions",
+            .source = "struct S { int a[3]; }; struct S s; int f(int); enum { A=sizeof s.a[1], B=sizeof f(3), C=sizeof(1/0) }; _Static_assert(A+B+C==12, \"unevaluated\");\n",
+        },
+        {
+            .name = "declaration GNU void and function queries",
+            .source = "int f(void); enum { A=sizeof(void), B=sizeof f, C=__alignof__(void), D=__alignof__(f) }; _Static_assert(A==1 && B==1 && C==1 && D==4, \"GNU queries\");\n",
+        },
+        {
+            .name = "declaration sizeof pointer member",
+            .source = "struct S { int a[3]; }; enum { A=sizeof(((struct S*)0)->a) }; _Static_assert(A==12, \"member\");\n",
+        },
+        {
+            .name = "declaration sizeof comma expression",
+            .source = "enum { A=sizeof((1,2.0)) }; _Static_assert(A==8, \"comma\");\n",
+        },
+        {
+            .name = "declaration unknown sizeof object",
+            .source = "enum { A=sizeof missing };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration string query",
+            .source = "enum { A=sizeof(\"ab\" \"cd\"), B=sizeof(L\"hi\"), C=sizeof(u\"hi\") }; _Static_assert(A==5 && B==12 && C==6, \"strings\");\n",
+        },
+        {
+            .name = "declaration bit field sizeof rejected",
+            .source = "struct S { int x:3; }; struct S s; enum { A=sizeof s.x };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration object alignment",
+            .source = "int x __attribute__((aligned(32))); enum { A=__alignof__(x), B=__alignof__((x)) }; _Static_assert(A==32 && B==32, \"object alignment\");\n",
+        },
+        {
+            .name = "declaration bit field alignof rejected",
+            .source = "struct S { int x:3; }; struct S s; enum { A=__alignof__(s.x) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration incomplete sizeof rejected",
+            .source = "struct S; enum { A=sizeof(struct S) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration type compatibility",
+            .source = "typedef int I; enum { A=__builtin_types_compatible_p(const I,int), B=__builtin_types_compatible_p(int*,const int*) }; _Static_assert(A==1 && B==0, \"compatibility\");\n",
+        },
+        {
+            .name = "declaration nested typeof",
+            .source = "int x; enum { A=sizeof(__typeof__(x)), B=sizeof(__typeof__(int[3])), C=sizeof(__typeof__((x+1))) }; _Static_assert(A==4 && B==12 && C==4, \"typeof\");\n",
+        },
+        {
+            .name = "declaration typeof preserves array",
+            .source = "int a[3]; enum { N=sizeof(__typeof__(a)) }; _Static_assert(N==12, \"typeof array\");\n",
+        },
+        {
+            .name = "declaration atomic type names",
+            .source = "enum { A=sizeof(_Atomic(int)), B=sizeof(_Atomic int), C=sizeof(const _Atomic(int)), D=sizeof(int * _Atomic) }; _Static_assert(A==4 && B==4 && C==4 && D==8, \"atomic\");\n",
+        },
+        {
+            .name = "declaration invalid atomic type",
+            .source = "enum { A=sizeof(_Atomic(const int)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration complex type names",
+            .source = "enum { A=sizeof(double _Complex), B=sizeof(_Complex), C=sizeof(long double _Complex), D=sizeof(_Complex long) }; _Static_assert(A==16 && B==16 && C==32 && D==16, \"complex\");\n",
+        },
+        {
+            .name = "declaration bit integer type name",
+            .source = "enum { A=sizeof(unsigned _BitInt(17)), B=sizeof(_BitInt(1+16)), C=sizeof(unsigned _BitInt(1)) }; _Static_assert(A==4 && B==4 && C==1, \"bit int\");\n",
+        },
+        {
+            .name = "declaration named callback type",
+            .source = "enum { A=sizeof(int (*)(register int x,int y)) }; _Static_assert(A==8, \"callback\");\n",
+        },
+        {
+            .name = "declaration duplicate callback parameter",
+            .source = "enum { A=sizeof(int (*)(int x,int x)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration member offset",
+            .source = "struct S { char c; int a[3]; }; enum { A=__builtin_offsetof(struct S,a[2]) }; _Static_assert(A==12, \"offset\");\n",
+        },
+        {
+            .name = "declaration nested member offset",
+            .source = "struct I { char c; int x; }; struct S { int n; struct I a[2]; }; enum { A=__builtin_offsetof(struct S,a[1].x) }; _Static_assert(A==16, \"offset\");\n",
+        },
+        {
+            .name = "declaration bit field offsetof rejected",
+            .source = "struct S { unsigned x:3; }; enum { A=__builtin_offsetof(struct S,x) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration missing offsetof member",
+            .source = "struct S { int x; }; enum { A=__builtin_offsetof(struct S,missing) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "source type compatibility builtin",
+            .source = "typedef int I; _Static_assert(__builtin_types_compatible_p(const I,int), \"same\"); _Static_assert(!__builtin_types_compatible_p(int*,const int*), \"different\");\n",
+        },
+        {
+            .name = "source member offset builtin",
+            .source = "struct S { char c; int a[3]; }; _Static_assert(__builtin_offsetof(struct S,a[2])==12, \"offset\");\n",
+        },
+        {
+            .name = "source member offset binding identity",
+            .source = "enum { N=1 }; struct S { int a[3]; }; int f(void) { enum { N=2 }; return __builtin_offsetof(struct S,a[N]); } _Static_assert(__builtin_offsetof(struct S,a[N])==4, \"outer enum\");\n",
+        },
+        {
+            .name = "declaration iterative nested type queries",
+            .source = nested_source,
+        },
+        {
+            .name = "declaration generic selection",
+            .source = "enum { N=_Generic(1,int:7,default:1/0) }; _Static_assert(N==7, \"generic\");\n",
+        },
+        {
+            .name = "declaration nested generic selection",
+            .source = "typedef short T; enum { N=_Generic((T)0,T:_Generic(1.0,double:3,default:8),default:9) }; _Static_assert(N==3, \"nested generic\");\n",
+        },
+        {
+            .name = "declaration generic duplicate association",
+            .source = "typedef int I; enum { N=_Generic(1,int:2,I:3) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration generic duplicate default",
+            .source = "enum { N=_Generic(1,default:2,default:3) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration generic no match",
+            .source = "enum { N=_Generic(1,double:2) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration generic incomplete association",
+            .source = "struct S; enum { N=_Generic(1,int:1,struct S:2) }; struct S { int x; };\n",
+            .rejected = true,
+            .extension = true,
+        },
+        {
+            .name = "declaration GNU choose expression",
+            .source = "enum { N=__builtin_choose_expr(1,7,1/0) }; _Static_assert(N==7, \"choose\");\n",
+        },
+        {
+            .name = "declaration GNU choose wide integer condition",
+            .source = "enum { N=__builtin_choose_expr(((__int128)1<<100)|1,7,0) }; _Static_assert(N==7, \"wide condition\");\n",
+        },
+        {
+            .name = "declaration GNU choose full-width truth oracle divergence",
+            .source = wide_truth_source,
+            .extension = true,
+        },
+        {
+            .name = "declaration GNU choose nonconstant condition",
+            .source = "int x; enum { N=__builtin_choose_expr(x,7,2) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic exact selected lvalue",
+            .source = "int x; int f(void) { _Generic(1,int:x,default:0)=3; return x; }\n",
+        },
+        {
+            .name = "generic array and function conversion",
+            .source = "int a[2]; int f(void); _Static_assert(_Generic(a,int*:1,default:0), \"array\"); _Static_assert(_Generic(f,int(*)(void):1,default:0), \"function\");\n",
+        },
+        {
+            .name = "generic qualifier conversion",
+            .source = "const int x=1; _Atomic(int) a; _Static_assert(_Generic(x,int:1,default:0), \"const\"); _Static_assert(_Generic(a,int:1,default:0), \"atomic\");\n",
+        },
+        {
+            .name = "generic exact binding after scopes close",
+            .source = "int x; int f(void) { double x; _Static_assert(_Generic(x,double:1,default:0), \"inner identity\"); return 1; } _Static_assert(_Generic(x,int:1,default:0), \"outer identity\");\n",
+        },
+        {
+            .name = "generic source type compatibility duplicate",
+            .source = "typedef int I; int f(void) { return _Generic(1,int:1,I:2); }\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic source incomplete association",
+            .source = "struct S; int f(void) { return _Generic(1,int:1,struct S:2); } struct S { int x; };\n",
+            .rejected = true,
+            .extension = true,
+        },
+        {
+            .name = "generic rejects invalid unselected expression",
+            .source = "int f(void) { return _Generic(1,int:1,default:missing); }\n",
+            .rejected = true,
+        },
+        {
+            .name = "GNU choose exact selected array",
+            .source = "int a[3]; _Static_assert(sizeof(__builtin_choose_expr(1,a,0))==12, \"array\");\n",
+        },
+        {
+            .name = "GNU choose exact selected lvalue",
+            .source = "int x; int f(void) { __builtin_choose_expr(1,x,0)=3; return x; }\n",
+        },
+        {
+            .name = "GNU choose rejected nonconstant source condition",
+            .source = "int f(int x) { return __builtin_choose_expr(x,1,2); }\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic selected fault",
+            .source = "_Static_assert(_Generic(1,int:1/0,default:1), \"fault\");\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic unselected fault",
+            .source = "_Static_assert(_Generic(1,int:1,default:1/0), \"selected\");\n",
+        },
+        {
+            .name = "declaration integer builtin constant",
+            .source = "enum { A=__builtin_popcount(7), B=__builtin_clz(1), C=__builtin_ctz(8), D=__builtin_parity(7), E=__builtin_ffs(8) }; _Static_assert(A==3 && B==31 && C==3 && D==1 && E==4, \"integer builtins\");\n",
+        },
+        {
+            .name = "declaration builtin array bound",
+            .source = "int a[__builtin_ctz(8)]; _Static_assert(sizeof a==12, \"builtin bound\");\n",
+        },
+        {
+            .name = "declaration nested builtin constant",
+            .source = "enum { A=__builtin_popcount(__builtin_bswap32(0x10203040)), B=__builtin_bswap16(0x1234) }; _Static_assert(A==5 && B==0x3412, \"nested builtin\");\n",
+        },
+        {
+            .name = "declaration builtin converted constants",
+            .source = "enum { A=__builtin_popcount(1.5), B=__builtin_popcount((1,7)) }; _Static_assert(A==1 && B==3, \"builtin conversions\");\n",
+        },
+        {
+            .name = "declaration builtin invalid zero evaluated",
+            .source = "enum { A=__builtin_ctz(0) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration builtin invalid zero unevaluated",
+            .source = "enum { A=sizeof(__builtin_ctz(0)), B=1?3:__builtin_clz(0) }; _Static_assert(A==4 && B==3, \"builtin faults\");\n",
+        },
+        {
+            .name = "declaration builtin incorrect arity",
+            .source = "enum { A=__builtin_popcount(1,2) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "declaration overflow builtin sizeof",
+            .source = "int x; enum { A=sizeof(__builtin_add_overflow(1,2,&x)) }; _Static_assert(A==1, \"overflow type\");\n",
+        },
+        {
+            .name = "declaration overflow builtin is not ICE",
+            .source = "int x; enum { A=__builtin_add_overflow(1,2,&x) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "C23 raw attribute arithmetic",
+            .source = "typedef int T [[gnu::aligned(1 << 4)]]; _Static_assert(_Alignof(T)==16, \"raw arithmetic\");\n",
+        },
+        {
+            .name = "C23 raw attribute enum binding",
+            .source = "enum { A=4 }; typedef int T [[gnu::aligned(A << 2)]]; _Static_assert(_Alignof(T)==16, \"raw binding\");\n",
+        },
+        {
+            .name = "C23 raw attribute cast and conditional",
+            .source = "typedef int T [[gnu::aligned((unsigned)(1?16:1/0))]]; _Static_assert(_Alignof(T)==16, \"raw conditional\");\n",
+        },
+        {
+            .name = "C23 raw attribute nested query",
+            .source = "typedef int T [[gnu::aligned(sizeof(int[2+sizeof(char[2])]))]]; _Static_assert(_Alignof(T)==16, \"raw type\");\n",
+        },
+        {
+            .name = "C23 raw attribute typedef query",
+            .source = "typedef long double T; typedef int I [[gnu::aligned(sizeof(T))]]; _Static_assert(_Alignof(I)==16, \"raw typedef\");\n",
+        },
+        {
+            .name = "C23 raw attribute typeof query",
+            .source = "typedef int T [[gnu::aligned(sizeof(__typeof__(long double)))]]; _Static_assert(_Alignof(T)==16, \"raw typeof\");\n",
+        },
+        {
+            .name = "C23 raw attribute object alignment",
+            .source = "int x __attribute__((aligned(32))); typedef int T [[gnu::aligned(__alignof__((x)))]]; _Static_assert(_Alignof(T)==32, \"raw object\");\n",
+        },
+        {
+            .name = "C23 raw attribute integer builtin",
+            .source = "typedef int T [[gnu::aligned(1 << __builtin_ctz(16))]]; _Static_assert(_Alignof(T)==16, \"raw builtin\");\n",
+        },
+        {
+            .name = "C23 raw attribute invalid alignment",
+            .source = "int x [[gnu::aligned(1+2)]];\n",
+            .rejected = true,
+        },
+        {
+            .name = "C23 raw attribute evaluated fault",
+            .source = "int x [[gnu::aligned(0?16:1/0)]];\n",
+            .rejected = true,
+        },
+    };
+    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
+    char directory[] = "/tmp/buster-checker-constant-XXXXXX";
+    bool ready = mkdtemp(directory) != 0;
+    char paths[FILE_COUNT][160];
+    char* pointers[FILE_COUNT];
+    ParseTestClang outcomes[FILE_COUNT];
+    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        pointers[i] = paths[i];
+        ready = parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
+    }
+    const char* arguments[] = { "-std=gnu17" };
+    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
+    check_test_expect(test, ready, "declaration-time constant Clang oracle could not run");
+    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    {
+        char description[192];
+        snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixtures[i].name);
+        if (fixtures[i].source == wide_truth_source)
+        {
+            printf("test-checker: full-width choose_expr oracle probe: Clang %s the GCC-confirmed checker regression\n", outcomes[i].rejected ? "rejects" : "accepts");
+        }
+        else
+        {
+            check_test_expect(test, outcomes[i].rejected == (fixtures[i].rejected && !fixtures[i].extension), description);
+        }
+        check_test_source(test, &fixtures[i], paths[i], &outcomes[i]);
+    }
+    for (uint32_t i = 0; i < FILE_COUNT; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        unlink(paths[i]);
+    }
+    if (directory[0] != 0)
+    {
+        rmdir(directory);
+    }
+}

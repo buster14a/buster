@@ -242,6 +242,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                 };
                 uint8_t defined[2] = { 0 };
                 uint8_t definition_seen[2] = { 0 };
+                uint8_t thread_local[2] = { 0 };
                 uint32_t objects[] = {
                     17,
                     19,
@@ -258,6 +259,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                 CheckInput input = {
                     .reports = reports,
                     .report_capacity = BUSTER_ARRAY_LENGTH(reports),
+                    .thread_local = thread_local,
                 };
                 CheckInputReader reader = {
                     .output = &input,
