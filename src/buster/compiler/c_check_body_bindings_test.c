@@ -77,11 +77,102 @@ static void check_test_body_binding_failures(CheckTest* test, const CheckEnviron
         CBodyBindingSpan invalid = *span;
         invalid.base = UINT32_MAX;
         valid = c_body_bindings_resolve(&result, environment, &invalid, false, 0, &output, &scratch);
-        check_test_expect(test, !valid && result.status == C_BODY_BINDINGS_INVALID && result.declarations == 0 &&
+        check_test_expect(test, !valid && result.status == C_BODY_BINDINGS_INVALID && result.handles == 0 &&
                                output.length == 0 && scratch.length == mark, "body undo-base underflow escaped validation");
     }
     arena_release(&scratch);
     arena_release(&output);
+}
+
+static void check_test_body_binding_exit_points(CheckTest* test)
+{
+    Arena storage = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    bool ready = storage.base != 0 && scratch.base != 0 && output.base != 0;
+    check_test_expect(test, ready, "body exit convention fixture allocation");
+    for (uint32_t style = 0; ready && style < 4; style += 1)
+    {
+        arena_pop_to(&storage, 0);
+        arena_pop_to(&scratch, 0);
+        arena_pop_to(&output, 0);
+        CBindings source;
+        bool built = c_bindings_initialize(&source, &storage, 6, 32);
+        built = built && c_bindings_declare(&source, C_BINDING_ORDINARY, 5, C_BINDING_TYPEDEF, BUSTER_C_BINDING_NONE, 0, 0) != 0 &&
+                c_bindings_declare(&source, C_BINDING_ORDINARY, 1, C_BINDING_OBJECT, 1, 1, 0) != 0 &&
+                c_bindings_declare(&source, C_BINDING_ORDINARY, 3, C_BINDING_FUNCTION, 2, style >= 2 ? 1 : 2, 0) != 0;
+        if (built && style != 2)
+        {
+            built = c_bindings_declare(&source, C_BINDING_ORDINARY, 2, C_BINDING_OBJECT, 0, 2, 3) != 0 &&
+                    c_bindings_declare(&source, C_BINDING_LABEL, 4, C_BINDING_LABEL_KIND, 7, 2, 3) != 0 &&
+                    c_bindings_use(&source, C_BINDING_ORDINARY, 1, 3, 3) != 0 &&
+                    c_bindings_use(&source, C_BINDING_ORDINARY, 2, 4, 4) != 0 &&
+                    c_bindings_use(&source, C_BINDING_ORDINARY, 5, 5, 5) != 0 &&
+                    c_bindings_use(&source, C_BINDING_LABEL, 4, 6, 6) != 0;
+            built = built && (style != 3 || c_bindings_use(&source, C_BINDING_ORDINARY, 3, 7, 7) != 0);
+            built = built && c_bindings_restore(&source, 3, style == 0 ? 7 : 8);
+        }
+        built = built && c_bindings_restore(&source, 0, 8);
+        CEnvironment file;
+        built = built && c_environment_build(&file, &source, &storage, &scratch);
+        check_test_expect(test, built, "body early/late/omitted restore trace construction");
+        if (built)
+        {
+            const CBodyRange body =
+            {
+                .begin = 2,
+                .end = 8,
+            };
+            const CheckEnvironment environment =
+            {
+                .bindings = &source,
+                .file = file,
+                .bodies = &body,
+                .body_count = 1,
+                .token_count = 8,
+                .valid = true,
+            };
+            uint32_t reference[32];
+            const bool replayed = c_bindings_scalar(&source, reference, &scratch);
+            check_test_expect(test, replayed, "body exit full-stream reference");
+            for (uint32_t mode = 0; mode < 2; mode += 1)
+            {
+                CBodyBindingSpan span;
+                uint32_t maximum = UINT32_MAX;
+                const bool planned = c_body_bindings_spans(&span, 1, &environment, mode == 0, &maximum);
+                check_test_expect(test, planned && span.valid && span.end == source.count - 1 &&
+                                       span.base == (style >= 2 ? 3 : 2) && maximum == span.end - span.begin,
+                                  "body span included translation-unit cleanup or required an empty restore");
+                CBindingReplay replay;
+                const bool initialized = planned && c_bindings_replay_initialize(&replay, &scratch, 6, maximum);
+                CBodyBindings result;
+                const bool resolved = initialized && c_body_bindings_resolve(&result, &environment, &span, mode == 0, &replay, &output, &scratch);
+                check_test_expect(test, resolved && result.count == (style == 2 ? 0 : style == 3 ? 5 : 4), "body exit convention changed identifier resolution");
+                uint32_t used = 0;
+                for (uint32_t event = planned ? span.begin : 0; resolved && event < span.end; event += 1)
+                {
+                    if (source.operation[event] == C_BINDING_USE)
+                    {
+                        const bool present = used < result.count;
+                        check_test_expect(test, present && result.handles[used] == reference[event],
+                                          "body entry parameter/label/builtin activation identity changed");
+                        used += 1;
+                    }
+                }
+                if (resolved && style != 2)
+                {
+                    check_test_expect(test, result.handles[2] == 1 && source.declaration[result.handles[2] - 1] == BUSTER_C_BINDING_NONE &&
+                                           source.kind[result.handles[2] - 1] == C_BINDING_TYPEDEF,
+                                      "source-less builtin collapsed into an unresolved declaration");
+                }
+                arena_pop_to(&scratch, 0);
+                arena_pop_to(&output, 0);
+            }
+        }
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+    arena_release(&storage);
 }
 
 static void check_test_body_binding_guards(CheckTest* test)
@@ -196,7 +287,7 @@ static void check_test_body_binding_guards(CheckTest* test)
                         const uint32_t declaration = guarded.declaration[original];
                         const uint32_t end = operation == C_BINDING_DECLARE ? guarded.end[original] : BUSTER_C_BINDING_NONE;
                         check_test_expect(test, view.declaration[event] == (operation == C_BINDING_RESTORE ? declaration - span.base : declaration) &&
-                                               view.end[event] == (end == BUSTER_C_BINDING_NONE ? end : end - span.begin),
+                                               view.end[event] == (end == BUSTER_C_BINDING_NONE || end >= span.end ? BUSTER_C_BINDING_NONE : end - span.begin),
                                           "guarded body view translation fields");
                     }
                     CBindingReplay replay;
@@ -217,7 +308,7 @@ static void check_test_body_binding_guards(CheckTest* test)
                             if (present && handle != 0)
                             {
                                 check_test_expect(test, result.tokens[used] == guarded.declaration[event] &&
-                                                       result.declarations[used] == guarded.declaration[handle - 1],
+                                                       result.handles[used] == handle,
                                                   "guarded private body differs from full replay");
                             }
                             used += 1;
@@ -249,13 +340,22 @@ static void check_test_body_bindings(CheckTest* test, const CheckInput* input, b
     CBodyBindingSpan* scalar = BUSTER_ARENA_PUSH_ARRAY(&plans, CBodyBindingSpan, (uint64_t)count + 1);
     CBodyBindingSpan* vector = BUSTER_ARENA_PUSH_ARRAY(&plans, CBodyBindingSpan, (uint64_t)count + 1);
     CBodyBindings* results = BUSTER_ARENA_PUSH_ARRAY(&plans, CBodyBindings, (uint64_t)count + 1);
-    bool ready = scalar != 0 && vector != 0 && results != 0;
+    uint32_t* reference = BUSTER_ARENA_PUSH_ARRAY(&plans, uint32_t, (uint64_t)source->count + 1);
+    Arena reference_scratch = arena_reserve(1u << 20);
+    bool ready = scalar != 0 && vector != 0 && results != 0 && reference != 0 && reference_scratch.base != 0 &&
+                 c_bindings_scalar(source, reference, &reference_scratch);
     check_test_expect(test, ready, "body binding job-plan allocation");
     uint32_t maximum = 0;
+    uint32_t vector_maximum = 0;
+    ready = ready && c_body_bindings_spans(scalar, count, environment, true, &maximum) &&
+                    c_body_bindings_spans(vector, count, environment, false, &vector_maximum);
+    check_test_expect(test, ready && maximum == vector_maximum, "complete body span scalar/vector preparation");
     for (uint32_t slot = 0; ready && slot < count; slot += 1)
     {
-        ready = c_body_bindings_span(scalar + slot, environment, slot, true) && c_body_bindings_span(vector + slot, environment, slot, false);
-        check_test_expect(test, ready, "production body events have no enclosing file restore");
+        CBodyBindingSpan single;
+        ready = c_body_bindings_span(&single, environment, slot, false);
+        check_test_expect(test, ready && single.begin == vector[slot].begin && single.end == vector[slot].end && single.base == vector[slot].base,
+                          "single body span differs from whole-unit preparation");
         if (ready)
         {
             check_test_expect(test, scalar[slot].begin == vector[slot].begin && scalar[slot].end == vector[slot].end &&
@@ -324,8 +424,9 @@ static void check_test_body_bindings(CheckTest* test, const CheckInput* input, b
                             check_test_expect(test, present, "body result omitted a source identifier use");
                             if (present)
                             {
-                                const uint32_t declaration = result->declarations[used];
-                                check_test_expect(test, result->tokens[used] == token && declaration == input->declarations[token],
+                                const uint32_t handle = result->handles[used];
+                                const uint32_t declaration = handle != 0 && handle <= source->count ? source->declaration[handle - 1] : BUSTER_CHECK_NONE;
+                                check_test_expect(test, result->tokens[used] == token && handle == reference[event] && declaration == input->declarations[token],
                                                   "independent body binding differs from production sequential resolution");
                                 if (declaration < input->token_count && input->declared_types[token] != 0)
                                 {
@@ -350,5 +451,6 @@ static void check_test_body_bindings(CheckTest* test, const CheckInput* input, b
         }
         check_test_body_binding_failures(test, environment, vector);
     }
+    arena_release(&reference_scratch);
     arena_release(&plans);
 }

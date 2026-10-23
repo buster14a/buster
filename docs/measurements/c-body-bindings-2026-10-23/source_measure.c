@@ -32,12 +32,7 @@ static bool body_measure_open(BodyMeasure* run, const CheckEnvironment* environm
     run->spans = BUSTER_ARENA_PUSH_ARRAY(&run->plans, CBodyBindingSpan, (uint64_t)run->bodies + 1);
     run->results = BUSTER_ARENA_PUSH_ARRAY(&run->plans, CBodyBindings, (uint64_t)run->bodies + 1);
     bool valid = run->spans != 0 && run->results != 0;
-    for (uint32_t slot = 0; valid && slot < run->bodies; slot += 1)
-    {
-        valid = c_body_bindings_span(run->spans + slot, environment, slot, scalar);
-        const uint32_t count = run->spans[slot].end - run->spans[slot].begin;
-        run->maximum = count > run->maximum ? count : run->maximum;
-    }
+    valid = valid && c_body_bindings_spans(run->spans, run->bodies, environment, scalar, &run->maximum);
     for (uint32_t lane = 0; valid && lane < lanes; lane += 1)
     {
         run->output[lane] = arena_reserve(1u << 28);
@@ -80,11 +75,8 @@ static bool body_measure_run(BodyMeasure* bodies, SourceCheck* run, Parser* pars
     bool valid = environment_measure_run(run, parser, pp, capacity, bodies->scalar, false, &ignored);
     bodies->environment = &run->input.environment;
     valid = valid && bodies->environment->body_count == bodies->bodies;
-    for (uint32_t slot = 0; valid && slot < bodies->bodies; slot += 1)
-    {
-        valid = c_body_bindings_span(bodies->spans + slot, bodies->environment, slot, bodies->scalar);
-        valid = valid && bodies->spans[slot].end - bodies->spans[slot].begin <= bodies->maximum;
-    }
+    uint32_t maximum = 0;
+    valid = valid && c_body_bindings_spans(bodies->spans, bodies->bodies, bodies->environment, bodies->scalar, &maximum) && maximum <= bodies->maximum;
     for (uint32_t lane = 0; valid && lane < bodies->lanes; lane += 1)
     {
         arena_pop_to(bodies->output + lane, 0);
@@ -98,7 +90,7 @@ static bool body_measure_run(BodyMeasure* bodies, SourceCheck* run, Parser* pars
     return valid;
 }
 
-static uint64_t body_measure_reference(const CheckInput* input)
+static uint64_t body_measure_reference(const CheckInput* input, const uint32_t* reference)
 {
     const CheckEnvironment* environment = &input->environment;
     const CBindings* bindings = environment->bindings;
@@ -115,13 +107,13 @@ static uint64_t body_measure_reference(const CheckInput* input)
         {
             const uint32_t token = bindings->declaration[event];
             hash = (hash ^ token) * UINT64_C(1099511628211);
-            hash = (hash ^ input->declarations[token]) * UINT64_C(1099511628211);
+            hash = (hash ^ reference[event]) * UINT64_C(1099511628211);
         }
     }
     return hash;
 }
 
-static bool body_measure_equal(const BodyMeasure* bodies, const CheckInput* input, uint64_t expected)
+static bool body_measure_equal(const BodyMeasure* bodies, const CheckInput* input, const uint32_t* reference, uint64_t expected)
 {
     uint64_t hash = UINT64_C(14695981039346656037);
     bool equal = true;
@@ -129,13 +121,26 @@ static bool body_measure_equal(const BodyMeasure* bodies, const CheckInput* inpu
     {
         const CBodyBindings* result = bodies->results + slot;
         equal &= result->status == C_BODY_BINDINGS_OK && result->count == bodies->spans[slot].uses;
-        for (uint32_t use = 0; equal && use < result->count; use += 1)
+        uint32_t use = 0;
+        const CBindings* source = input->environment.bindings;
+        for (uint32_t event = bodies->spans[slot].begin; equal && event < bodies->spans[slot].end; event += 1)
         {
-            const uint32_t token = result->tokens[use];
-            equal = token < input->token_count && result->declarations[use] == input->declarations[token];
-            hash = (hash ^ token) * UINT64_C(1099511628211);
-            hash = (hash ^ result->declarations[use]) * UINT64_C(1099511628211);
+            if (source->operation[event] == C_BINDING_USE)
+            {
+                equal = use < result->count;
+                if (equal)
+                {
+                    const uint32_t token = result->tokens[use];
+                    const uint32_t handle = result->handles[use];
+                    equal = token < input->token_count && token == source->declaration[event] && handle == reference[event] &&
+                            handle != 0 && handle <= source->count && source->declaration[handle - 1] == input->declarations[token];
+                    hash = (hash ^ token) * UINT64_C(1099511628211);
+                    hash = (hash ^ handle) * UINT64_C(1099511628211);
+                }
+                use += 1;
+            }
         }
+        equal &= use == result->count;
     }
     return equal && hash == expected;
 }
@@ -193,7 +198,10 @@ int main(int argc, char** argv)
     }
     uint64_t ignored = 0;
     valid = valid && environment_measure_run(runs + 2, parsers, &pp, capacity, true, false, &ignored);
-    const uint64_t expected = valid ? body_measure_reference(&runs[2].input) : 0;
+    Arena reference_storage = arena_reserve(1u << 30);
+    uint32_t* reference = valid ? BUSTER_ARENA_PUSH_ARRAY(&reference_storage, uint32_t, (uint64_t)runs[2].input.binding_event_count + 1) : 0;
+    valid = valid && reference != 0 && c_bindings_scalar(runs[2].input.environment.bindings, reference, &reference_storage);
+    const uint64_t expected = valid ? body_measure_reference(&runs[2].input, reference) : 0;
     for (uint32_t mode = 0; valid && mode < 2; mode += 1)
     {
         valid = body_measure_open(bodies + mode, &runs[2].input.environment, mode == 0, lanes);
@@ -254,7 +262,7 @@ int main(int argc, char** argv)
             counters &= ioctl(counter, PERF_EVENT_IOC_DISABLE, 0) == 0 && read(counter, counts, sizeof(counts)) == sizeof(counts);
             counters &= counts[1] != 0 && counts[1] == counts[2];
         }
-        valid = valid && checked && source_check_equal(runs + 2, runs + selected, tokens) && body_measure_equal(bodies + selected, &runs[selected].input, expected);
+        valid = valid && checked && source_check_equal(runs + 2, runs + selected, tokens) && body_measure_equal(bodies + selected, &runs[selected].input, reference, expected);
         if (pass != 0)
         {
             nanoseconds[pass - 1] = elapsed;
@@ -308,5 +316,6 @@ int main(int argc, char** argv)
     }
     pp_release(&pp);
     intern_release(&identifiers);
+    arena_release(&reference_storage);
     return !valid;
 }

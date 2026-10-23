@@ -58,8 +58,9 @@ thread-pool startup and first workspace allocation are outside steady-state
 timing. Empty replay heads are reused across bodies instead of clearing the
 complete name universe per body.
 
-After timing, compare every body result with the source reader's original
-declaration column and a source-order reference digest. The existing complete
+After timing, compare every body result with a complete scalar replay's
+original activation handles, the source reader's declaration column and a
+source-order reference digest. Reference replay is outside timing. The existing complete
 graph/type/output equality check also compares the timed path with a retained
 scalar source run. No verification is included in the timed body result scan.
 
@@ -67,7 +68,7 @@ Report median ns/token and useful tokens/second. Hardware user cycles/token
 are reported for one lane when available and unmultiplexed. Eight-lane cycles
 are unavailable (`-1`): the existing per-thread counter does not measure
 aggregate worker cycles. Report process-median ranges, not confidence bounds.
-`body_result_plan_bytes` includes spans/result descriptors, use token/declaration
+`body_result_plan_bytes` includes spans/result descriptors, use token/handle
 columns and alignment; `persistent_replay_bytes` counts initialized private
 scalar workspace. These exclude the source reader, parser, TypeTable and
 transient kernel scratch, so they are not whole-process or peak-live memory.

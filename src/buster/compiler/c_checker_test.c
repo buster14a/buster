@@ -2474,6 +2474,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_bindings(&test);
             check_test_environments(&test);
             check_test_body_binding_guards(&test);
+            check_test_body_binding_exit_points(&test);
             check_test_data(&test, &types.table, clang);
             check_test_data_sources(&test);
         }
