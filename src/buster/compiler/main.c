@@ -229,10 +229,13 @@ int run_snapshot_benchmark(int argc, char** argv);
 #include "buster/compiler/foreign_gc.c"
 #include "buster/compiler/foreign_link.c"
 #include "buster/compiler/foreign_gc_link.c"
+#include "buster/compiler/foreign_unwind_dedup.c"
+#include "buster/compiler/foreign_unwind_dedup_link.c"
 #include "buster/compiler/foreign_strings.c"
 #include "buster/compiler/foreign_strings_link.c"
 #include "buster/compiler/foreign_test.c"
 #include "buster/compiler/foreign_gc_benchmark.c"
+#include "buster/compiler/foreign_unwind_dedup_benchmark.c"
 int run_foreign_benchmark(int argc, char** argv);
 // The link benchmark (the direct path against the object writer and the linkers, on the same programs) and the floors'
 // (what the machine and the kernel charge a linker) are other translation units.
@@ -789,6 +792,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-gc") == 0)
     {
         result = run_foreign_gc_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-unwind-dedup") == 0)
+    {
+        result = run_foreign_unwind_dedup_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
     {

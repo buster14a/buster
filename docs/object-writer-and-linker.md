@@ -3451,6 +3451,79 @@ fixture supplies no dynamic, COMDAT, personality/LSDA, corpus or scaling
 performance evidence. Its first build, oracle run and measurements are still
 pending; source review alone is not validation.
 
+#### Foreign terminal CIE pooling
+
+`foreign_unwind_dedup_plan` considers EH atoms in their emitted order after
+COMDAT pruning and optional collection. Consecutive eligible fragments can
+share one byte-identical CIE only when its canonical fixup targets, kinds,
+relative offsets and full addends also match. A pool contains at most one
+distinct CIE, preserving the executable writer's single-CIE vector path.
+FDE order and the relative order of non-EH atoms remain unchanged. Variable
+record traversal and ordered pool formation are shared; bounded byte/fixup
+comparisons have exact and vector paths.
+
+Terminators, explicit/automatic roots, observable named anchors, references
+into unwind bytes and incompatible CIEs prevent unsafe pooling. A successful
+no-savings plan remains valid. An aliased CIE is distinct from a discarded
+record: its offset still maps to the retained CIE. Every original section
+has an explicit mapped endpoint, so a one-past symbol does not acquire the
+endpoint of a later fragment in the same pool. Pool alignment preserves the
+maximum input section alignment. Individual translated record positions
+preserve the writer's effective fragment requirement, `min(alignment, 4)`:
+the existing executable writer places EH fragments without inter-fragment
+padding. Tests include mixed 4-, 8- and 16-byte section alignments and
+multiple identical CIE records within one atom.
+
+`foreign_unwind_dedup_link` returns a distinct wrapper with fresh mutable
+Link columns, bytes, object maps, root/export arrays and historical unwind
+record maps. Symbol and name IDs remain stable. The wrapper's section maps
+are authoritative for original-ELF-to-pooled byte offsets; historical unwind
+plans retain pre-pooling coordinates, with remapped code-owner atom IDs.
+Immutable library metadata and historical unwind bytes remain borrowed, so
+the `Foreign`, input and both output arenas must outlive the result. Input
+and output are distinct. Any failure rolls arena lengths back and preserves
+both caller objects. `UNSUPPORTED` permits an unchanged-input fallback; it
+does not authorize ignoring malformed input or memory failures.
+
+The output is terminal: it may go to compatible string pooling and the
+executable writer, never back to GC, original relocation import or ET_REL
+writing. Shared-object output is outside this initial contract. A pooled
+wrapper documents this caller contract; its embedded `Link` is not a runtime
+tag that prevents misuse by an unrelated consumer. A pooled
+EH atom uses unit zero; only an EH pool as the source of a reference may
+refer to its constituent units' locals. A local target inside an EH pool
+does not gain a cross-unit exception. The adapter copies the whole link
+for transactional publication, including successful no-savings cases; that
+cost is part of acceptance rather than assumed negligible.
+
+`test-foreign --cross-check` checks plans, capacities, rollback, exact/vector
+agreement, record and endpoint mappings, fixup signatures, pins and alignment.
+The integrated fixture composes losing COMDAT pruning, GC and CIE pooling,
+then runs an original C++ throw/catch/destructor program with personality
+and LSDA records. That runtime gate is separate from the synthetic timing
+fixture and does not establish general C++ corpus coverage.
+
+`benchmark-foreign-unwind-dedup --counts 8,1024 --runs 21` compares exact and
+vector whole links with pooling on/off. Its original static leaf objects
+have either identical CIEs or different code-alignment factors unused by
+their instruction-free FDEs. An independent original-section/FDE map replay,
+runtime checksum and full output-byte comparison run outside timing. Unique
+CIE outputs must match across pooling states as well as paths. Timed work
+includes fresh arenas, input mapping/resolution, conversion, optional
+pooling, writer close and cleanup. Fixture/command generation, output unlink,
+conditioning and validation are excluded; input files and scratch caches
+are warm. Retained arena lengths exclude mappings and transient scratch and
+are not peak RSS. Wall spread, reference TSC ticks, removed records/bytes
+and output size accompany phase and total medians.
+
+Run independently started repetitions under the shared 9700X lock on CPU 2,
+varying `--order`/`--schedule` and optionally `--after-scalar`. Phase medians
+need not add to the total median. This original single-lane static fixture
+supplies no dynamic, COMDAT, personality/LSDA, corpus or scaling performance
+claim. Production/tests passed in the composed driver snapshot; this isolated
+slice's build and runtime gates and controlled performance acceptance remain
+pending. Pooling stays opt-in.
+
 #### Steps 1 to 5, as built
 
 `foreign.c` (the first part of step 7) resolves a command line on a group of
