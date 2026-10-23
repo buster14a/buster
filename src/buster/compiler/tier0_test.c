@@ -1504,8 +1504,10 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         {
             if (local_flags[l] != 0)
             {
-                const X86Instruction* record = &scalar.records[lea];
-                laid &= lea < scalar.count && record->form == X86_FORM_LEA_R64_M && record->rm == X86_REGISTER_RSP && record->displacement >= 0;
+                // The index first: code with fewer records than leas mustn't make the pointer past them.
+                laid &= lea < scalar.count;
+                const X86Instruction* record = laid ? &scalar.records[lea] : 0;
+                laid = laid && record->form == X86_FORM_LEA_R64_M && record->rm == X86_REGISTER_RSP && record->displacement >= 0;
                 places[l] = laid ? (uint32_t)record->displacement : 0;
                 lea += 1;
             }
