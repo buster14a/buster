@@ -233,6 +233,7 @@ int run_snapshot_benchmark(int argc, char** argv);
 #include "buster/compiler/foreign_unwind_dedup_link.c"
 #include "buster/compiler/foreign_strings.c"
 #include "buster/compiler/foreign_strings_link.c"
+#include "buster/compiler/foreign_driver.c"
 #include "buster/compiler/foreign_test.c"
 #include "buster/compiler/foreign_gc_benchmark.c"
 #include "buster/compiler/foreign_unwind_dedup_benchmark.c"
@@ -788,6 +789,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-unwind") == 0)
     {
         result = run_foreign_unwind_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "link-foreign") == 0)
+    {
+        result = run_foreign_link(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-gc") == 0)
     {

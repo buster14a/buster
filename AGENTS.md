@@ -621,6 +621,17 @@ designs and the compilers already built this way.
   defines the one-CIE pool cap, source-only local-reference allowance,
   borrowed lifetimes, alignment and pending performance evidence. Use the
   shared 9700X lock and CPU 2 for each measurement process.
+- `src/buster/compiler/foreign_driver.c` supplies `link-foreign`, a raw input
+  command using the built-in resolver/converter/writer. The caller supplies
+  startup objects and libraries in order. Static no-libc and dynamic PIE
+  outputs are supported; static runtime, static PIE and shared output remain
+  follow-ups. GC, literal pooling and CIE pooling are off by default. See
+  [the command contract](docs/foreign-driver.md) for search defaults, lifetime,
+  terminal-pooling order and the missing regular-symbol attachment.
+  `foreign_driver_test.c`, `foreign_driver_dedup_test.c` and
+  `foreign_driver_pipeline_test.c` run through
+  `test-foreign --cross-check`; validate each new composition on the shared
+  9700X before treating older frozen snapshots as equivalent evidence.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
