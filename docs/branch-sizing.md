@@ -447,3 +447,40 @@ be `x86_encode_scalar`'s of the sized records.
 - **Loop-head alignment** with multi-byte NOPs, which changes offsets and so
   belongs in the same rounds, and the forced-disp32 record bit, both outside
   #144.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The source contract](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/branch_sizing.c#L4)
+is implemented: Tier 0/test records and sorted u32 branch/target columns →
+`x86_measure` offsets → branch-space rank/prefix rounds → bounded worklist if
+needed → final record forms/displacements and u32 offsets → `x86_encode`.
+Fixup references and source side tables remain indexed by the unchanged record
+order. Future scheduler consumers must remap those columns before this stage.
+
+The input is one complete function, valid under `branch_sizing_validate`;
+records and offset output are separate, and branch/target arrays have exactly
+`branch_count` logical elements. Natural typed alignment suffices; caller
+padding is not required. Internal scratch is explicitly allocated, with checked
+count/INT32_MAX extent. Failure leaves records unchanged and offset contents
+unspecified. A target equal to record count means function end. Initial short
+branches and zero displacements are producer obligations, not repaired inputs.
+
+Sixteen-branch vector rounds do not change the semantic batch. Growth is
+monotone to the same least fixpoint; late chains use the worklist. The producer
+already exposes branch locations/targets, so no opcode search or disassembly is
+needed to rediscover them. Ranks and distances depend on the chosen lengths and
+are derived here once. Arbitrary independent function chunks cannot decide
+branches that cross chunk boundaries.
+
+Disposition: retain the **eliminated** full-encode/discarded-byte handoff.
+`x86_measure` replaces old encoded scratch/chunk rebasing; the caller emits
+machine bytes only after sizing. The scalar measure's bounded one-instruction
+buffer is an independent oracle, not a retained whole-function byte stream.
+`test-branch-sizing` covers exact twins, independent fixed-point expectations,
+GNU as, partial/guarded arrays, exhaustion and long chains. Existing matched
+[qualification](measurements/x86-lengths-2026-10-23/refinement.md) distinguishes
+complete sizing/encoding from kernel screens. Future source-driven selection /
+scheduling + sizing + encoding totals remain [#136](https://github.com/buster14a/buster/issues/136)/[#138](https://github.com/buster14a/buster/issues/138)/[#145](https://github.com/buster14a/buster/issues/145), with preparation,
+allocations, scratch, fallback and code quality included.

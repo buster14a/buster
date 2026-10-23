@@ -2139,3 +2139,45 @@ knows.
   `67`. The templates still carry checks and flags that only validation used
   to read (the checks dword's register bits, `NO_MEMORY` aside, which
   `x86_validate` reads): bits a later change can take.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Sources:
+[capacities](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_64_encoder.c#L94),
+[encoding/measurement APIs](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_64_encoder.c#L4990).
+
+| Producer → consumer | Real handoff |
+| --- | --- |
+| Form catalogue → initialized templates → measure/encode | Immutable form-indexed templates; initialization checks fit once. Semantic/ISA/model tables are separate side consumers of form IDs. |
+| Tier 0/assembler/frame/test producers → validator → trusted record kernels | Packed 16-byte `X86Instruction`, physical operands/form/flags; absent fields zero. Counted input needs no readable padding. |
+| `x86_measure` → branch sizing | Exactly count u32 start offsets and returned total; no end sentinel, byte output or fixup ends. 16-record groups and bounded copied tail. |
+| Sized records → `x86_encode` → Link code atoms, disassembly/tests | Variable-length byte stream plus optional per-record u32 offsets. Logical returned length differs from writable output capacity. |
+| Marked records → compact fixup ends + producer `LinkReference` → `link_add_code_fixups` | u32 instruction ends in marked-record order; field distances/addends remain tied to actual instruction form. |
+
+For vector encoding, output capacity is `count * 15 + 64` bytes and fixup-end
+capacity is `marked_count + 16` u32 entries; spare bytes/entries may be
+clobbered. Offsets, when requested, have count elements. The scalar encoder's
+fixup output needs marked count alone. These capacities are not permission to
+serialize padding or consume extra ends. Measurement has a different exact-size
+contract and permits null arrays for zero count. Do not infer the encoder's
+zero-count buffer behavior from the measure API. Keep inputs, bytes and side
+outputs disjoint and alive until downstream consumers finish.
+
+Counts above `UINT32_MAX / 15` are rejected; all records must already satisfy
+the appropriate mode validator. The internal hot loops do not diagnose invalid
+forms. Ordinary 64-bit measurement does not cover address32/APX/16/32-bit modes;
+their separate encoders remain real test/disassembly consumers, not source C
+backend coverage. A logical function/record range can be encoded in partitions
+only with correctly rebased offsets/ends; branch sizing still needs the whole
+function. Initialization must finish before concurrent calls.
+
+Disposition: keep compact record input, trusted validated kernels and explicit
+fixup side output. A SoA producer might save the encoder's transpose but charge
+selection, scheduling, scalar fallback and all other readers; no such saving is
+established. Reusing sized offsets or template classification likewise needs a
+joint measurement rather than extra unconsumed columns. `test-x86-encoder`
+checks independent scalar/known/GNU as bytes, modes, marked fields, exact
+measure tails and rebased partitions; Link/object/native tests check the actual
+fixup consumers. Whole source/backend output evidence remains [#136](https://github.com/buster14a/buster/issues/136)/[#138](https://github.com/buster14a/buster/issues/138)/[#145](https://github.com/buster14a/buster/issues/145);
+existing encoder ns/record is not a whole-compiler result.
