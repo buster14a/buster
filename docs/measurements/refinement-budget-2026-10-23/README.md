@@ -514,3 +514,42 @@ original table's 36.419–36.948 ms. Increasing capacity did not cure the
 wide-table regression. The next experiment keeps the original table, records
 precise splice regions, and restores the leading-space allocation to the
 permanent arena so refinement directly measures its first-touch cost.
+
+## Next bounded checks (target results pending)
+
+`lexprecise` marks only 64-byte regions visited by the existing checked-splice
+walk. Splices preceded by real whitespace cannot make a whitespace-free gap;
+scalar declines and skipped comments still mark their full covered ranges.
+`splicearena` restores permanent leading-space words to the preprocessor arena,
+including their first writes in refinement timing. `precisearena` combines
+those changes. [The twelfth orchestration](twelfth-run.sh) retains controls for
+both the original-table handoff and the eleventh selective-splice result.
+
+`gapword` specializes the common one-word bitmap query; `blockgap` additionally
+skips per-step queries in a block whose source has no marked splice region.
+[The thirteenth orchestration](thirteenth-run.sh) compares the latter with
+`precisearena`. Target runs are still queued as of this checkpoint; these
+variants do not yet establish a performance result or meet the budget.
+
+Local sanitizer checks pass 134,784 guarded preparation cases for the precise
+regions and arena placement. The [expanded test](chunk-prepare-boundaries.c)
+adds 1,200 explicit source-boundary cases, including no-digit-separator modes,
+with splices on either side of cache-line, lexer-chunk and page boundaries.
+`blockgap` passes that test under
+[ASan/UBSan](blockgap-preparation-sanitizers-local.txt). Each new query variant
+passes the full local refinement suite. Diagnostic local timings are retained
+as such; they are not 9700X acceptance evidence.
+
+Applying the same bounded delta to source `5c15340` also passes
+[refinement on 9,232 files](blockgap-newer-source-refinement-local.txt),
+[shared-file and allocation checks](blockgap-newer-source-shared-local.txt),
+and [the preprocessor suite](blockgap-newer-source-preprocessor-local.txt),
+including 3,000 C17 and 3,000 C23 scalar/vector comparisons. The latter checks
+use 64-byte source windows to force the handoff on ordinary fixtures.
+
+The [prepared draft CI comparison](ci-splice-screen.sh) applies the same
+patches to the triggering revision's current sources, preserving intervening
+preprocessor/accounting changes. It compares the fixed-hash production
+control with `lexprecise`, `precisearena` and `blockgap`, including setup,
+whole preprocessing and kernel power-state/corpus measurements. The temporary
+workflow call will be removed before merge.
