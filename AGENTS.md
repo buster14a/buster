@@ -160,6 +160,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `tier1_frame.c` provides interval slot coloring and explicit frame plans for
+  #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
+  `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
+  variadic saves and guarded page probes. [The frame guide](docs/tier1-frame.md)
+  records reservations before allocation and pending corpus evidence. Take the shared 9700X lock per
+  build/test/measurement and pin timing to CPU 2.
+
 - `tier1_schedule.c` provides an opt-in postallocation machine-record scheduler.
   `test-tier1-schedule` checks scalar/vector ordering, barriers and model coverage;
   `benchmark-tier1-schedule` measures scheduling plus encoding and a synthetic
