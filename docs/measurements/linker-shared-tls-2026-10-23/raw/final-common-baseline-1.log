@@ -1,0 +1,26 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T10:36:09+00:00 codex-116: clang -O3 -g -march=native -Ivariants/bitmap -Ibase/src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror pp-screen.c -o pp-bitmap
+  title: Refinement bitmap reuse screen build
+  link: https://github.com/buster14a/buster/issues/116
+1 workers, bound against the shared library's runtime and written as a shared library: 93 atoms, 117 fixups, 795 bytes of code, 12 dynamic symbols, 14 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 2 stubs, a 7016-byte file in 1 chunks, 1 lane:
+  replace          8.6 us ( 0.82 GB/s): count 1.0 layout 0.7 symbols 0.5 dynamic 0.3 open 1.9 chunks 2.0 finish 2.1
+  new file         7.4 us ( 0.95 GB/s): count 1.0 layout 0.8 symbols 0.5 dynamic 0.3 open 1.7 chunks 2.0 finish 1.1
+  in place         0.7 us (10.78 GB/s): the floor, one pwrite
+  new file         1.6 us ( 4.27 GB/s): the floor, one pwrite
+64 workers, bound against the shared library's runtime and written as a shared library: 156 atoms, 936 fixups, 12066 bytes of code, 75 dynamic symbols, 138 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 42 stubs, a 28872-byte file in 1 chunks, 1 lane:
+  replace         13.7 us ( 2.11 GB/s): count 2.1 layout 0.9 symbols 0.7 dynamic 0.9 open 1.8 chunks 4.6 finish 2.6
+  new file        11.8 us ( 2.46 GB/s): count 2.1 layout 0.9 symbols 0.7 dynamic 0.8 open 1.5 chunks 4.6 finish 1.1
+  in place         1.1 us (26.68 GB/s): the floor, one pwrite
+  new file         2.7 us (10.79 GB/s): the floor, one pwrite
+2000 workers, bound against the shared library's runtime and written as a shared library: 2112 atoms, 26105 fixups, 360079 bytes of code, 2011 dynamic symbols, 3745 relocations in .rela.dyn (0 relative) and 45 in 14 words of .relr.dyn, 1273 stubs, a 701776-byte file in 3 chunks, 1 lane:
+  replace        181.9 us ( 3.86 GB/s): count 41.2 layout 6.2 symbols 5.5 dynamic 18.2 open 2.6 chunks 90.7 finish 17.1
+  new file       162.2 us ( 4.33 GB/s): count 41.2 layout 6.1 symbols 5.3 dynamic 17.8 open 2.3 chunks 87.6 finish 1.6
+  in place        17.9 us (39.24 GB/s): the floor, one pwrite
+  new file        42.3 us (16.60 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 185452 atoms, 2342790 fixups, 32370098 bytes of code, 180011 dynamic symbols, 335635 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113884 stubs, a 63181112-byte file in 242 chunks, 1 lane:
+  replace      21534.6 us ( 2.93 GB/s): count 4207.4 layout 713.5 symbols 633.8 dynamic 2136.2 open 72.1 chunks 12066.7 finish 1715.0
+  new file     19479.1 us ( 3.24 GB/s): count 4222.4 layout 703.2 symbols 649.5 dynamic 2149.4 open 69.1 chunks 11677.2 finish 13.0
+  in place      4524.8 us (13.96 GB/s): the floor, one pwrite
+  new file      8091.5 us ( 7.81 GB/s): the floor, one pwrite
+peak_rss_kib 253192
+user_seconds 0.395892
+system_seconds 0.439054

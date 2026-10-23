@@ -184,7 +184,8 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_KIND_ENUM 18
 #define BUSTER_TYPE_KIND_COUNT 19
 
-// Flags. The first two are part of a derived type's key; the rest are properties the table computes.
+// Flags. The first two are part of a derived type's key. Functions additionally use the three record-only high
+// bits for calling convention; pointers retain it through their base TypeId, never through inherited flags.
 #define BUSTER_TYPE_FLAG_UNSIGNED 0x01
 #define BUSTER_TYPE_FLAG_VARIADIC 0x01
 #define BUSTER_TYPE_FLAG_PROTOTYPE 0x02
@@ -198,6 +199,27 @@ typedef uint32_t TypeId;
 #define BUSTER_TYPE_FLAG_DEFINED 0x20
 // A struct or union whose last member is a flexible array member.
 #define BUSTER_TYPE_FLAG_FLEXIBLE 0x40
+// A validated GNU transparent union. This nominal-record property does not make the union itself compatible with
+// its members. The source owner retains activation history when an attribute is added after earlier uses.
+#define BUSTER_TYPE_FLAG_TRANSPARENT_UNION 0x80
+#define BUSTER_TYPE_FUNCTION_ABI_SHIFT 5
+#define BUSTER_TYPE_FUNCTION_ABI_MASK 0xe0
+#define BUSTER_TYPE_FLAG_FUNCTION_KEY (BUSTER_TYPE_FLAG_KEY | BUSTER_TYPE_FUNCTION_ABI_MASK)
+
+// Semantic function identity on the supported x86-64 target. This is not a claim that code generation implements
+// every convention. The ordinary constructor and explicit sysv_abi/cdecl have the same default identity.
+typedef enum TypeFunctionABI
+{
+    TYPE_FUNCTION_ABI_SYSV,
+    TYPE_FUNCTION_ABI_MICROSOFT,
+    TYPE_FUNCTION_ABI_VECTOR,
+    TYPE_FUNCTION_ABI_REG,
+    TYPE_FUNCTION_ABI_PRESERVE_MOST,
+    TYPE_FUNCTION_ABI_PRESERVE_ALL,
+    TYPE_FUNCTION_ABI_PRESERVE_NONE,
+    TYPE_FUNCTION_ABI_COUNT,
+    TYPE_FUNCTION_ABI_INVALID = 255,
+} TypeFunctionABI;
 
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
@@ -250,6 +272,12 @@ typedef enum TypeError
     TYPE_ERROR_BIT_FIELD,
     // An enumeration's underlying type isn't a (non-_BitInt) integer type.
     TYPE_ERROR_UNDERLYING,
+    // An unknown GNU machine mode, including a malformed vector-mode count.
+    TYPE_ERROR_MODE,
+    // A machine mode and the declaration's base type have incompatible categories.
+    TYPE_ERROR_MODE_BASE,
+    // A recognized mode has no target type, or requires a type this table cannot represent.
+    TYPE_ERROR_MODE_UNSUPPORTED,
 } TypeError;
 
 // Per type, by index. What base, index and extent hold depends on the kind:
@@ -401,6 +429,26 @@ struct TypeRecordAttributes
     uint8_t alignment_log2;
 };
 
+typedef enum TypeTransparentUnionStatus
+{
+    TYPE_TRANSPARENT_UNION_APPLIED,
+    TYPE_TRANSPARENT_UNION_NOT_UNION,
+    TYPE_TRANSPARENT_UNION_INCOMPLETE,
+    TYPE_TRANSPARENT_UNION_EMPTY,
+    TYPE_TRANSPARENT_UNION_FIRST_FLOAT,
+    TYPE_TRANSPARENT_UNION_FIRST_VECTOR,
+    TYPE_TRANSPARENT_UNION_SIZE,
+    TYPE_TRANSPARENT_UNION_ALIGNMENT,
+} TypeTransparentUnionStatus;
+
+typedef struct TypeTransparentUnionResult TypeTransparentUnionResult;
+struct TypeTransparentUnionResult
+{
+    TypeTransparentUnionStatus status;
+    // Zero-based field index for a first-field/size/alignment failure; UINT32_MAX for a subject failure.
+    uint32_t member;
+};
+
 // type_derive_batch's requests, as columns: request i asks for kinds[i] of bases[i] with extents[i] and flags[i], as
 // the one-at-a-time constructors take them (type_pointer's kind POINTER, type_array's ARRAY with the length, and so
 // on). Every kind but FUNCTION and the tags.
@@ -454,6 +502,8 @@ static __attribute__((unused)) TypeId type_element(const TypeTable* table, TypeI
 // A function's parameters (count of them) and return type.
 static __attribute__((unused)) const TypeId* type_parameters(const TypeTable* table, TypeId function, uint32_t* count);
 static __attribute__((unused)) TypeId type_return(const TypeTable* table, TypeId function);
+// A function's semantic calling convention; INVALID for a non-function or invalid TypeId.
+static __attribute__((unused)) TypeFunctionABI type_function_abi_kind(const TypeTable* table, TypeId function);
 // The type without ALIGNED at its top: its base, with the ALIGNED type's qualifiers.
 static __attribute__((unused)) TypeId type_strip_aligned(const TypeTable* table, TypeId type);
 
@@ -468,10 +518,18 @@ static __attribute__((unused)) TypeId type_variable_array(TypeTable* table, Type
 // flags: BUSTER_TYPE_FLAG_PROTOTYPE and BUSTER_TYPE_FLAG_VARIADIC. Parameters must be adjusted (type_adjust_parameter);
 // their qualifiers are dropped.
 static __attribute__((unused)) TypeId type_function(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags);
+// As type_function, with an explicit calling convention. Vectorcall and regcall cannot be variadic.
+static __attribute__((unused)) TypeId type_function_abi(TypeTable* table, TypeId result, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi);
 // A vector of `count` elements; ext chooses clang's ext_vector_type over GNU's vector_size (type_vector_size converts
 // the latter's size in bytes).
 static __attribute__((unused)) TypeId type_vector(TypeTable* table, TypeId element, uint32_t count, bool ext);
 static __attribute__((unused)) TypeId type_vector_size(TypeTable* table, TypeId element, uint64_t bytes);
+// GNU mode replaces a declaration's type, including its existing qualifiers and aligned typedef wrappers, as
+// clang does. This is NOT a qualifier-preserving derivation; the checker owns any later declaration qualifiers.
+// An enum typedef becomes an integer without changing its tag. For a mode on an enum tag itself, the caller passes
+// its underlying type (int before completion) and supplies the result to type_enum_complete. mode is a bounded,
+// non-NUL-terminated identifier, with either plain or paired-underscore spelling. No source diagnostics are printed.
+static __attribute__((unused)) TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode);
 static __attribute__((unused)) TypeId type_atomic(TypeTable* table, TypeId value);
 static __attribute__((unused)) TypeId type_aligned(TypeTable* table, TypeId base, uint32_t alignment_log2);
 static __attribute__((unused)) TypeId type_bit_int(TypeTable* table, uint32_t width, bool is_unsigned);
@@ -493,6 +551,12 @@ static __attribute__((unused)) bool type_record_layout(TypeTable* table, TypeId 
 // fails; the others are still laid out.
 static __attribute__((unused)) bool type_layout_records(TypeTable* table, const TypeId* records, uint32_t count);
 static __attribute__((unused)) bool type_complete_record(TypeTable* table, TypeId record, const TypeMember* members, uint32_t count, TypeRecordAttributes attributes);
+// A complete union with at least one member can be transparent when its first member is neither a floating or
+// complex-floating type nor a vector, and every member type has that first type's size and alignment. Member-level
+// packed/aligned/bit-field placement does not change this check. Invalid requests leave the record and last_error
+// unchanged: the source attribute consumer retains Clang's warning/ignored disposition and exact failing field.
+static __attribute__((unused)) TypeTransparentUnionResult type_mark_transparent_union(TypeTable* table, TypeId record);
+static __attribute__((unused)) bool type_is_transparent_union(const TypeTable* table, TypeId type);
 // Completes an enum with its underlying type (fixed, or from type_enum_underlying) and its aligned attribute (log2 + 1,
 // or 0), which may lower its alignment as clang's does.
 static __attribute__((unused)) bool type_enum_complete(TypeTable* table, TypeId enumeration, TypeId underlying, uint8_t alignment_log2);
@@ -539,6 +603,11 @@ typedef enum TypeAnswer
 // the scratch memory is full.
 static __attribute__((unused)) TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId right);
 static __attribute__((unused)) TypeId type_composite(TypeTable* table, TypeId left, TypeId right);
+// History-aware variants of the same relation. Optional tag-indexed activation positions are exclusive source
+// ends; zero and UINT32_MAX are inactive. A non-NULL history hides later transparent-union attributes. NULL asks
+// for final TypeTable semantics. The other nominal/type properties keep the same contracts as the ordinary APIs.
+static __attribute__((unused)) TypeAnswer type_compatible_at(const TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position);
+static __attribute__((unused)) TypeId type_composite_at(TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position);
 // Whether two types have one canonical type (clang's, which has no typedefs): the same TypeId, or the same structure
 // once every ALIGNED is looked through.
 static __attribute__((unused)) TypeAnswer type_same_canonical(const TypeTable* table, TypeId left, TypeId right);
@@ -1043,8 +1112,15 @@ static uint64_t type_key_hash(uint8_t kind, uint8_t flags, TypeId base, uint64_t
     return type_hash_finish(hash);
 }
 
+static uint8_t type_key_flags(uint8_t kind, uint8_t flags)
+{
+    return flags & (kind == BUSTER_TYPE_KIND_FUNCTION ? BUSTER_TYPE_FLAG_FUNCTION_KEY : BUSTER_TYPE_FLAG_KEY);
+}
+
 static uint32_t type_slot_key(uint8_t kind, uint8_t flags, uint64_t extent, uint64_t hash)
 {
+    // Functions have a 32-bit parameter count. Their ABI can share the WIDE bit because key matching dispatches
+    // on FUNCTION before reading WIDE; non-functions never carry the function-only high flag bits.
     const uint32_t wide = extent > UINT32_MAX ? BUSTER_TYPE_SLOT_WIDE : 0;
     return (uint32_t)kind | (uint32_t)flags << 8 | wide | (uint32_t)(hash >> 48) << 16;
 }
@@ -1163,7 +1239,7 @@ static bool type_index_grow(TypeTable* table)
         {
             if ((BUSTER_TYPE_HASHED_KINDS >> types->kind[i] & 1) != 0)
             {
-                const uint8_t flags = types->flags[i] & BUSTER_TYPE_FLAG_KEY;
+                const uint8_t flags = type_key_flags(types->kind[i], types->flags[i]);
                 const uint64_t hash = types->hash[i];
                 type_index_place(index, i, types->base[i], types->extent[i], type_slot_key(types->kind[i], flags, types->extent[i], hash), hash);
             }
@@ -1293,7 +1369,11 @@ static TypeError type_check_derivation(const TypeTable* table, uint8_t kind, uin
         const TypeId result_type = type_strip_aligned(table, base);
         const uint8_t result_kind = type_kind(table, result_type);
         const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
-        if ((flags & ~BUSTER_TYPE_FLAG_KEY) != 0 || (!prototype && (flags != 0 || extent != 0)) || extent > UINT32_MAX)
+        const uint8_t abi = (flags & BUSTER_TYPE_FUNCTION_ABI_MASK) >> BUSTER_TYPE_FUNCTION_ABI_SHIFT;
+        const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        if ((flags & ~BUSTER_TYPE_FLAG_FUNCTION_KEY) != 0 || abi >= TYPE_FUNCTION_ABI_COUNT ||
+            (!prototype && ((flags & BUSTER_TYPE_FLAG_KEY) != 0 || extent != 0)) || extent > UINT32_MAX ||
+            (variadic && (abi == TYPE_FUNCTION_ABI_VECTOR || abi == TYPE_FUNCTION_ABI_REG)))
         {
             result = TYPE_ERROR_OPERAND;
         }
@@ -1640,14 +1720,390 @@ static TypeId type_complex(TypeTable* table, TypeId element)
     return type_derive(table, BUSTER_TYPE_KIND_COMPLEX, 0, element, 0);
 }
 
+// mode's scalar names are a small, cold declaration table. The rules were checked against clang 23.1.1 and its
+// SemaDeclAttr.cpp; the implementation and fixtures here are original. Integer rows name the signed builtin, whose
+// following code is its unsigned twin. Floating rows name a real type; C suffixes make its complex type. Zero is
+// a recognized width with no x86-64 type. HC's complex __fp16 and complex/zero-element vectors are deliberately
+// refused: clang can construct them through mode, but the existing type table cannot represent them.
+typedef struct TypeMachineMode TypeMachineMode;
+struct TypeMachineMode
+{
+    String8 name;
+    uint8_t code;
+    bool integer;
+    bool complex;
+};
+
+static const TypeMachineMode type_machine_modes[] =
+{
+    {
+        .name = {
+            .pointer = "QI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_SCHAR,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "HI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_SHORT,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "SI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_INT,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "DI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "TI",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_INT128,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "XI",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "byte",
+            .length = 4,
+        },
+        .code = BUSTER_TYPE_CODE_SCHAR,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "word",
+            .length = 4,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "pointer",
+            .length = 7,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "unwind_word",
+            .length = 11,
+        },
+        .code = BUSTER_TYPE_CODE_LONG,
+        .integer = true,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "QF",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "HF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_HALF,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "SF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "DF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_DOUBLE,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "XF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_LONG_DOUBLE,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "TF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "KF",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "IF",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = false,
+    },
+    {
+        .name = {
+            .pointer = "QC",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "HC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_HALF,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "SC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "DC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_DOUBLE,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "XC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_LONG_DOUBLE,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "TC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "KC",
+            .length = 2,
+        },
+        .code = BUSTER_TYPE_CODE_FLOAT128,
+        .integer = false,
+        .complex = true,
+    },
+    {
+        .name = {
+            .pointer = "IC",
+            .length = 2,
+        },
+        .code = 0,
+        .integer = false,
+        .complex = true,
+    },
+};
+
+static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
+{
+    TypeId result = 0;
+    const bool operand = type_is_valid(table, base);
+    bool valid = mode.pointer != 0;
+    if (valid && mode.length >= 4 && mode.pointer[0] == '_' && mode.pointer[1] == '_' &&
+        mode.pointer[mode.length - 2] == '_' && mode.pointer[mode.length - 1] == '_')
+    {
+        mode.pointer += 2;
+        mode.length -= 4;
+    }
+    uint64_t vector_count = 0;
+    bool count_overflow = false;
+    const bool vector_mode = valid && mode.length >= 4 && mode.pointer[0] == 'V';
+    if (vector_mode)
+    {
+        uint64_t first = 1;
+        while (first < mode.length && mode.pointer[first] >= '0' && mode.pointer[first] <= '9')
+        {
+            const uint32_t digit = (uint32_t)(mode.pointer[first] - '0');
+            count_overflow |= vector_count > (UINT64_MAX - digit) / 10;
+            if (!count_overflow)
+            {
+                vector_count = vector_count * 10 + digit;
+            }
+            first += 1;
+        }
+        valid = !count_overflow && vector_count != 0 && (vector_count & (vector_count - 1)) == 0;
+        mode.pointer += first;
+        mode.length -= first;
+    }
+    const TypeMachineMode* selected = 0;
+    for (uint32_t i = 0; valid && selected == 0 && i < sizeof(type_machine_modes) / sizeof(type_machine_modes[0]); i += 1)
+    {
+        const TypeMachineMode* candidate = &type_machine_modes[i];
+        if (candidate->name.length == mode.length && memcmp(candidate->name.pointer, mode.pointer, mode.length) == 0)
+        {
+            selected = candidate;
+        }
+    }
+    if (!operand)
+    {
+        table->last_error = TYPE_ERROR_OPERAND;
+    }
+    else if (count_overflow)
+    {
+        table->last_error = TYPE_ERROR_TOO_LARGE;
+    }
+    else if (selected == 0)
+    {
+        table->last_error = TYPE_ERROR_MODE;
+    }
+    else
+    {
+        const TypeId stripped = type_strip_aligned(table, base);
+        const uint8_t kind = type_kind(table, stripped);
+        const bool vector_base = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        const TypeId element = vector_base ? type_strip_aligned(table, type_element(table, stripped)) : stripped;
+        const uint8_t element_kind = type_kind(table, element);
+        const bool enumeration = element_kind == BUSTER_TYPE_KIND_ENUM;
+        const bool integer = element_kind == BUSTER_TYPE_KIND_INTEGER || enumeration;
+        const bool complex = element_kind == BUSTER_TYPE_KIND_COMPLEX && type_kind(table, type_element(table, element)) == BUSTER_TYPE_KIND_FLOATING;
+        const bool floating = element_kind == BUSTER_TYPE_KIND_FLOATING || complex;
+        if ((vector_mode && enumeration) || (selected->integer ? !integer : selected->complex ? !complex : !floating))
+        {
+            table->last_error = TYPE_ERROR_MODE_BASE;
+        }
+        else if (selected->code == 0 || (selected->complex && (selected->code == BUSTER_TYPE_CODE_HALF || vector_base || vector_mode)))
+        {
+            table->last_error = TYPE_ERROR_MODE_UNSUPPORTED;
+        }
+        else
+        {
+            const uint8_t old_code = type_arithmetic_code(table, element);
+            const bool is_signed = old_code == BUSTER_TYPE_CODE_CHAR || (old_code >= BUSTER_TYPE_CODE_SCHAR && old_code <= BUSTER_TYPE_CODE_INT128 && (old_code & 1) == 0);
+            const uint8_t code = selected->code + (selected->integer ? !is_signed : selected->complex ? BUSTER_TYPE_CODE_COMPLEX : 0);
+            result = BUSTER_TYPE_BUILTIN(code);
+            if (vector_base && !vector_mode)
+            {
+                // Count the original elements' actual bytes, not the vector's rounded storage size.
+                vector_count = type_size(table, element) * table->types.extent[type_index(stripped)] / type_size(table, result);
+            }
+            if (vector_mode || vector_base)
+            {
+                if (vector_count == 0)
+                {
+                    result = 0;
+                    table->last_error = TYPE_ERROR_MODE_UNSUPPORTED;
+                }
+                else if (vector_count > UINT32_MAX)
+                {
+                    result = 0;
+                    table->last_error = TYPE_ERROR_TOO_LARGE;
+                }
+                else
+                {
+                    // clang's mode produces a GNU vector even when the old type was an ext_vector_type.
+                    result = type_vector(table, result, (uint32_t)vector_count, false);
+                }
+            }
+            if (result != 0)
+            {
+                table->last_error = TYPE_ERROR_NONE;
+            }
+        }
+    }
+    return result;
+}
+
+static TypeFunctionABI type_function_abi_kind(const TypeTable* table, TypeId function)
+{
+    TypeFunctionABI result = TYPE_FUNCTION_ABI_INVALID;
+    if (type_is_valid(table, function))
+    {
+        const TypeId stripped = type_strip_aligned(table, function);
+        if (type_kind(table, stripped) == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            result = (TypeFunctionABI)((table->types.flags[type_index(stripped)] & BUSTER_TYPE_FUNCTION_ABI_MASK) >> BUSTER_TYPE_FUNCTION_ABI_SHIFT);
+        }
+    }
+    return result;
+}
+
 // Parameters are stored unqualified: a qualified one is copied without its qualifiers into scratch memory first.
-static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags)
+static TypeId type_function_abi(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags, TypeFunctionABI abi)
 {
     TypeId result = 0;
     Scratch scratch = scratch_begin(0);
     const TypeId* normal = parameters;
     bool qualified = false;
-    for (uint32_t i = 0; i < count; i += 1)
+    const bool valid = (flags & ~BUSTER_TYPE_FLAG_KEY) == 0 && (uint32_t)abi < TYPE_FUNCTION_ABI_COUNT && (count == 0 || parameters != 0);
+    for (uint32_t i = 0; valid && i < count; i += 1)
     {
         qualified = qualified || type_qualifiers(parameters[i]) != 0;
     }
@@ -1663,7 +2119,11 @@ static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* 
         }
         normal = copy;
     }
-    if (normal == 0 && count != 0)
+    if (!valid)
+    {
+        table->last_error = TYPE_ERROR_OPERAND;
+    }
+    else if (normal == 0 && count != 0)
     {
         table->last_error = TYPE_ERROR_FULL;
     }
@@ -1673,11 +2133,17 @@ static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* 
     }
     else
     {
-        const uint32_t index = type_find_or_add(table, BUSTER_TYPE_KIND_FUNCTION, flags, result_type, count, normal);
+        const uint8_t key_flags = flags | (uint8_t)((uint32_t)abi << BUSTER_TYPE_FUNCTION_ABI_SHIFT);
+        const uint32_t index = type_find_or_add(table, BUSTER_TYPE_KIND_FUNCTION, key_flags, result_type, count, normal);
         result = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
     }
     scratch_end(scratch);
     return result;
+}
+
+static TypeId type_function(TypeTable* table, TypeId result_type, const TypeId* parameters, uint32_t count, uint8_t flags)
+{
+    return type_function_abi(table, result_type, parameters, count, flags, TYPE_FUNCTION_ABI_SYSV);
 }
 
 static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
@@ -2410,6 +2876,64 @@ static bool type_record_layout(TypeTable* table, TypeId record)
 static bool type_complete_record(TypeTable* table, TypeId record, const TypeMember* members, uint32_t count, TypeRecordAttributes attributes)
 {
     return type_record_define(table, record, members, count, attributes) && type_record_layout(table, record);
+}
+
+static bool type_is_transparent_union(const TypeTable* table, TypeId type)
+{
+    bool transparent = false;
+    if (type_is_valid(table, type))
+    {
+        const TypeId stripped = type_strip_aligned(table, type);
+        transparent = type_kind(table, stripped) == BUSTER_TYPE_KIND_UNION &&
+                      (table->types.flags[type_index(stripped)] & BUSTER_TYPE_FLAG_TRANSPARENT_UNION) != 0;
+    }
+    return transparent;
+}
+
+static TypeTransparentUnionResult type_mark_transparent_union(TypeTable* table, TypeId record)
+{
+    TypeTransparentUnionResult result = { .status = TYPE_TRANSPARENT_UNION_NOT_UNION, .member = UINT32_MAX };
+    if (type_is_valid(table, record))
+    {
+        record = type_strip_aligned(table, record);
+        if (type_kind(table, record) == BUSTER_TYPE_KIND_UNION)
+        {
+            const uint32_t tag = table->types.index[type_index(record)];
+            const uint32_t begin = table->tags.member_begin[tag];
+            const uint32_t count = table->tags.member_count[tag];
+            result.status = !type_is_complete(table, record) ? TYPE_TRANSPARENT_UNION_INCOMPLETE :
+                            count == 0 ? TYPE_TRANSPARENT_UNION_EMPTY : TYPE_TRANSPARENT_UNION_APPLIED;
+            if (result.status == TYPE_TRANSPARENT_UNION_APPLIED)
+            {
+                const TypeId first = table->members.type[begin];
+                const TypeId stripped = type_strip_aligned(table, first);
+                const uint8_t kind = type_kind(table, stripped);
+                const bool floating = kind == BUSTER_TYPE_KIND_FLOATING ||
+                                      (kind == BUSTER_TYPE_KIND_COMPLEX && type_kind(table, type_element(table, stripped)) == BUSTER_TYPE_KIND_FLOATING);
+                if (floating || kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+                {
+                    result.status = floating ? TYPE_TRANSPARENT_UNION_FIRST_FLOAT : TYPE_TRANSPARENT_UNION_FIRST_VECTOR;
+                    result.member = 0;
+                }
+                const uint64_t size = type_size(table, first);
+                const uint32_t alignment = type_alignment_log2(table, first);
+                for (uint32_t member = 1; result.status == TYPE_TRANSPARENT_UNION_APPLIED && member < count; member += 1)
+                {
+                    const TypeId type = table->members.type[begin + member];
+                    if (type_size(table, type) != size || type_alignment_log2(table, type) != alignment)
+                    {
+                        result.status = type_size(table, type) != size ? TYPE_TRANSPARENT_UNION_SIZE : TYPE_TRANSPARENT_UNION_ALIGNMENT;
+                        result.member = member;
+                    }
+                }
+            }
+            if (result.status == TYPE_TRANSPARENT_UNION_APPLIED)
+            {
+                table->types.flags[type_index(record)] |= BUSTER_TYPE_FLAG_TRANSPARENT_UNION;
+            }
+        }
+    }
+    return result;
 }
 
 // The vector layout: 16 records at once, one per 32-bit lane, a member of each per step, with masks for the lanes whose
@@ -3595,6 +4119,7 @@ static bool type_merge_shallow(const TypeTable* table, TypeId left, TypeId right
         {
             result = type_prototype_matches_promotions(table, left_prototype ? l : r);
         }
+        result = result && type_function_abi_kind(table, l) == type_function_abi_kind(table, r);
         *leaf = false;
     }
     else if (left_kind == BUSTER_TYPE_KIND_VECTOR || left_kind == BUSTER_TYPE_KIND_EXT_VECTOR)
@@ -3658,9 +4183,11 @@ static uint64_t type_merge_inner_count(const TypeTable* table, TypeId left)
     return kind == BUSTER_TYPE_KIND_FUNCTION ? 1 + table->types.extent[type_index(l)] : 1;
 }
 
+#include "c_types_transparent.c"
+
 // A worklist of the pairs still to compare, each of which must be compatible, and each pushed once: no composite is
 // made. Invalid operands are incompatible.
-static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId right)
+static TypeAnswer type_compatible_at(const TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position)
 {
     Scratch scratch = scratch_begin(0);
     void* stack = 0;
@@ -3671,6 +4198,13 @@ static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId ri
     };
     bool compatible = type_is_valid(table, left) && type_is_valid(table, right);
     bool fits = !compatible || type_grow_stack(scratch.arena, &stack, &capacity, 1, sizeof(TypePair));
+    TypeTransparentSearch transparent =
+    {
+        .arena = scratch.arena,
+        .activations = activations,
+        .activation_count = activation_count,
+        .source_position = source_position,
+    };
     if (compatible && fits)
     {
         ((TypePair*)stack)[0] = (TypePair){
@@ -3685,7 +4219,16 @@ static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId ri
         const TypePair pair = ((TypePair*)stack)[depth];
         bool leaf = true;
         compatible = type_merge_shallow(table, pair.left, pair.right, &leaf);
-        if (compatible && !leaf)
+        if (compatible && !leaf && type_has_transparent_parameters(table, pair.left, pair.right))
+        {
+            // The ordinary worklist contains only conjunctions. Once a transparent parameter introduces choices,
+            // solve the original relation once with the memoized AND/OR graph, retaining the same source history.
+            const TypeAnswer answer = type_transparent_query(&transparent, table, left, right, false, 0);
+            compatible = answer == TYPE_ANSWER_YES;
+            fits = answer != TYPE_ANSWER_FULL;
+            depth = 0;
+        }
+        else if (compatible && !leaf)
         {
             fits = type_grow_stack(scratch.arena, &stack, &capacity, depth + type_merge_inner_count(table, pair.left), sizeof(TypePair));
             if (fits)
@@ -3700,6 +4243,11 @@ static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId ri
     const TypeAnswer result = !fits ? TYPE_ANSWER_FULL : compatible ? TYPE_ANSWER_YES : TYPE_ANSWER_NO;
     scratch_end(scratch);
     return result;
+}
+
+static TypeAnswer type_compatible(const TypeTable* table, TypeId left, TypeId right)
+{
+    return type_compatible_at(table, left, right, 0, 0, 0);
 }
 
 // The frames of the canonical comparison's and the composite's walks: a pair, and where its inner pairs' results start
@@ -3722,7 +4270,7 @@ static bool type_canonical_shallow(const TypeTable* table, TypeId l, TypeId r)
     const uint32_t ri = type_index(r);
     const uint8_t kind = types->kind[li];
     const bool inside = ((types->flags[li] | types->flags[ri]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE) != 0;
-    return inside && type_qualifiers(l) == type_qualifiers(r) && kind == types->kind[ri] && (types->flags[li] & BUSTER_TYPE_FLAG_KEY) == (types->flags[ri] & BUSTER_TYPE_FLAG_KEY) &&
+    return inside && type_qualifiers(l) == type_qualifiers(r) && kind == types->kind[ri] && type_key_flags(kind, types->flags[li]) == type_key_flags(kind, types->flags[ri]) &&
            types->extent[li] == types->extent[ri] && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_ATOMIC);
 }
 
@@ -3990,17 +4538,17 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         }
         else if (left_prototype && right_prototype)
         {
-            result = type_function(table, merged, results + 1, count, left_flags & BUSTER_TYPE_FLAG_KEY);
+            result = type_function_abi(table, merged, results + 1, count, left_flags & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, l));
         }
         else if (left_prototype || right_prototype)
         {
             const TypeId prototype = left_prototype ? l : r;
             const TypeId* parameters = type_parameters(table, prototype, &count);
-            result = type_function(table, merged, parameters, count, table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY);
+            result = type_function_abi(table, merged, parameters, count, table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, prototype));
         }
         else
         {
-            result = type_function(table, merged, 0, 0, 0);
+            result = type_function_abi(table, merged, 0, 0, 0, type_function_abi_kind(table, l));
         }
     }
     if (full)
@@ -4018,7 +4566,7 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
 // and finishes once they are merged, into the memo. So each pair is expanded once, however many types it is inside. A
 // failure anywhere fails the whole; one of scratch memory, or a comparison that couldn't answer, with last_error
 // TYPE_ERROR_FULL.
-static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
+static TypeId type_composite_at(TypeTable* table, TypeId left, TypeId right, const uint32_t* activations, uint32_t activation_count, uint32_t source_position)
 {
     Scratch frames_scratch = scratch_begin(0);
     Scratch results_scratch = scratch_begin(frames_scratch.arena);
@@ -4033,6 +4581,13 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
     };
     TypePairMemo canonical = {
         .arena = results_scratch.arena,
+    };
+    TypeTransparentSearch transparent =
+    {
+        .arena = results_scratch.arena,
+        .activations = activations,
+        .activation_count = activation_count,
+        .source_position = source_position,
     };
     bool valid = type_is_valid(table, left) && type_is_valid(table, right);
     bool full = valid && !type_grow_stack(frames_scratch.arena, &frames, &frame_capacity, 1, sizeof(TypeMergeFrame));
@@ -4090,6 +4645,19 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
                     frame = (TypeMergeFrame*)frames + depth - 1;
                     TypePair* pairs = (TypePair*)((TypeMergeFrame*)frames + depth + inner);
                     const uint32_t written = type_merge_inner(table, frame->left, frame->right, pairs);
+                    if (type_has_transparent_parameters(table, frame->left, frame->right))
+                    {
+                        for (uint32_t i = 1; valid && !full && i < written; i += 1)
+                        {
+                            if (pairs[i].left != pairs[i].right &&
+                                (type_is_transparent_union(table, pairs[i].left) || type_is_transparent_union(table, pairs[i].right)))
+                            {
+                                const TypeAnswer answer = type_transparent_query(&transparent, table, pairs[i].left, pairs[i].right, true, &pairs[i]);
+                                valid = answer == TYPE_ANSWER_YES;
+                                full = answer == TYPE_ANSWER_FULL;
+                            }
+                        }
+                    }
                     frame->entered = true;
                     frame->results = result_count;
                     for (uint32_t i = 0; i < written; i += 1)
@@ -4139,6 +4707,11 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
     return result;
 }
 
+static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
+{
+    return type_composite_at(table, left, right, 0, 0, 0);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Printing
 
@@ -4163,6 +4736,7 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
 #define BUSTER_TYPE_PRINT_VECTOR_END 9
 #define BUSTER_TYPE_PRINT_EXT_VECTOR_END 10
 #define BUSTER_TYPE_PRINT_NAME 11
+#define BUSTER_TYPE_PRINT_FUNCTION_ABI 12
 
 typedef struct TypePrintFrame TypePrintFrame;
 struct TypePrintFrame
@@ -4412,6 +4986,10 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
         type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        if (type_function_abi_kind(table, type) != TYPE_FUNCTION_ABI_SYSV)
+        {
+            type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_ABI, type, false, false, 0);
+        }
         if ((table->types.flags[index] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0)
         {
             type_print_text(printer, "(");
@@ -4513,6 +5091,25 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
                 type_print_text(printer, "void");
             }
             type_print_text(printer, ")");
+        }
+    }
+    else if (frame.operation == BUSTER_TYPE_PRINT_FUNCTION_ABI)
+    {
+        static const char* const spellings[] = {
+            "sysv_abi",
+            "ms_abi",
+            "vectorcall",
+            "regcall",
+            "preserve_most",
+            "preserve_all",
+            "preserve_none",
+        };
+        const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
+        if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]))
+        {
+            type_print_text(printer, " __attribute__((");
+            type_print_text(printer, spellings[abi]);
+            type_print_text(printer, "))");
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_ATOMIC_END)

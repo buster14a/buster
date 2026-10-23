@@ -1,0 +1,98 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:49:17+00:00 codex-linker-tls85: taskset -c 2 ./build/compiler benchmark-executable --only shared --tls general --functions 1,64,2000,180000
+  title: Shared TLS large ABI benchmark sanity
+  link: https://github.com/buster14a/buster/issues/85
+  libc-defaults: GOT slots 1 RELATIVE, 10 by a dynamic symbol, 5 without relocations (5 of thread-locals' offsets); lld's 1, 10 and 0
+  libc-defaults: the call frame rules of 73 functions, 464 rows, as their pushes and pops give them
+  the unwinder: 6 frames, through main, ending at _start
+  calling libc: 161 atoms, 938 fixups, 10 dynamic symbols, 11 relocations in .rela.dyn (0 relative) and 107 in 16 words of .relr.dyn, 0 stubs, 129 loads and calls relaxed, 16 GOT slots, 74 FDEs, 22992 bytes: ran
+  libc-units-no-sizes: GOT slots 1 RELATIVE, 10 by a dynamic symbol, 17 without relocations (17 of thread-locals' offsets); lld's 1, 10 and 0
+  libc-units-no-sizes: the call frame rules of 317 functions, 2116 rows, as their pushes and pops give them
+  the unwinder: 6 frames, through main, ending at _start
+  calling libc, many units, without sizes: 481 atoms, 4055 fixups, 10 dynamic symbols, 11 relocations in .rela.dyn (0 relative) and 380 in 28 words of .relr.dyn, 0 stubs, 601 loads and calls relaxed, 28 GOT slots, 318 FDEs, 91808 bytes: ran
+  libc-functions: GOT slots 1 RELATIVE, 10 by a dynamic symbol, 2 without relocations (2 of thread-locals' offsets); lld's 1, 10 and 0
+  libc-functions: the call frame rules of 2009 functions, 14016 rows, as their pushes and pops give them
+  the unwinder: 6 frames, through main, ending at _start
+  calling libc, --functions workers: 2097 atoms, 26105 fixups, 10 dynamic symbols, 11 relocations in .rela.dyn (0 relative) and 2042 in 47 words of .relr.dyn, 0 stubs, 4001 loads and calls relaxed, 13 GOT slots, 2010 FDEs, 501616 bytes: ran
+programs: 6334 checks, 0 failed
+  weak-init: GOT slots 0 RELATIVE, 5 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 0
+  weak-init: ran
+  weak-data-start: GOT slots 0 RELATIVE, 5 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 0
+  weak-data-start: ran
+  hidden-puts: refused
+  weak-hidden-puts: GOT slots 0 RELATIVE, 5 by a dynamic symbol, 1 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 1
+  weak-hidden-puts: ran
+  array-bounds: GOT slots 0 RELATIVE, 5 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 0
+  array-bounds: ran
+  loader: GOT slots 0 RELATIVE, 7 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 7 and 0
+  loader: ran
+  weak-loader: GOT slots 0 RELATIVE, 7 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 7 and 0
+  weak-loader: ran
+  mixed-loader: GOT slots 0 RELATIVE, 7 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 7 and 0
+  mixed-loader: ran
+  atexit: GOT slots 0 RELATIVE, 6 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 6 and 0
+  atexit: ran
+cases: 1975 checks, 0 failed
+  exports: GOT slots 0 RELATIVE, 6 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 6 and 0
+  16 exports, 22 dynamic symbols: each found
+exports: 575 checks, 0 failed
+  imports: GOT slots 0 RELATIVE, 261 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 0
+  256 imports: 256 stubs, 517 relocations in .rela.dyn (0 relative) and 3 in .relr.dyn, 261 dynamic symbols: ran
+imports: 3821 checks, 0 failed
+foreign library metadata: 50 checks, 0 failed
+  a pointer to main in .rodata: refused
+  an ABS32 to main in .data: refused
+  a PC32 to a dynamic symbol in .data: refused
+  a call to a weak reference to nothing: ran
+  a pointer to a weak reference to nothing: ran
+  loads through the GOT, a dynamic symbol's slot first: ran
+  a pointer to main at an odd address: ran
+  a lea of a hidden weak reference to nothing: refused
+  a PC64 to a hidden weak reference to nothing in .data: refused
+  a call to a hidden weak reference to nothing: ran
+  a pointer to a hidden weak reference to nothing: ran
+  a pointer to an absolute symbol in .data: ran
+  a pointer to an absolute symbol in .rodata: ran
+  a load of an absolute symbol through the GOT: ran
+  an ABS32 to an absolute symbol in .data: ran
+  a lea of an absolute symbol: refused
+  a call to an absolute symbol: refused
+  a PC64 to an absolute symbol in .data: refused
+refusals: 2364 checks, 0 failed
+shared absolute call: 8 checks, 0 failed
+  shared-defaults: GOT slots 1 RELATIVE, 74 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 1, 58 and 0
+  a shared library: 156 atoms, 934 fixups, 75 dynamic symbols, 139 relocations in .rela.dyn (0 relative) and 42 in 14 words of .relr.dyn, 39 stubs, 75 GOT slots, 28752 bytes: loaded
+  shared-units-no-sizes: GOT slots 1 RELATIVE, 288 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 1, 224 and 0
+  a shared library, many units, without sizes: 476 atoms, 4047 fixups, 311 dynamic symbols, 589 relocations in .rela.dyn (0 relative) and 75 in 22 words of .relr.dyn, 187 stubs, 289 GOT slots, 121040 bytes: loaded
+  shared-functions: GOT slots 1 RELATIVE, 1762 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 1, 1298 and 0
+  a shared library, --functions workers: 2092 atoms, 26098 fixups, 2011 dynamic symbols, 3763 relocations in .rela.dyn (0 relative) and 38 in 14 words of .relr.dyn, 1260 stubs, 1763 GOT slots, 701120 bytes: loaded
+shared libraries: 64378 checks, 0 failed
+  shared-preemption.so: GOT slots 0 RELATIVE, 10 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 10 and 0
+  preemption: 29 atoms, 29 fixups, 11 dynamic symbols, 11 relocations in .rela.dyn and 5 in .relr.dyn, 1 stubs, 10 GOT slots: its checks held
+  shared-atexit.so: GOT slots 0 RELATIVE, 5 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 0
+  atexit: 30 atoms, 21 fixups, 6 dynamic symbols, 5 relocations in .rela.dyn and 3 in .relr.dyn, 0 stubs, 5 GOT slots: its checks held
+  shared-protected-lea.so: GOT slots 0 RELATIVE, 4 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 4 and 0
+  protected-lea: 26 atoms, 18 fixups, 6 dynamic symbols, 4 relocations in .rela.dyn and 3 in .relr.dyn, 0 stubs, 4 GOT slots: its checks held
+  pie-code: 26 atoms, 18 fixups, 0 dynamic symbols, 0 relocations in .rela.dyn and 0 in .relr.dyn, 0 stubs, 0 GOT slots: refused
+  local-exec: 27 atoms, 17 fixups, 0 dynamic symbols, 0 relocations in .rela.dyn and 0 in .relr.dyn, 0 stubs, 0 GOT slots: refused
+  text-relocation: 27 atoms, 18 fixups, 0 dynamic symbols, 0 relocations in .rela.dyn and 0 in .relr.dyn, 0 stubs, 0 GOT slots: refused
+  shared-general-dynamic.so: GOT slots 0 RELATIVE, 12 by a dynamic symbol, 1 without relocations (0 of thread-locals' offsets); lld's 0, 11 and 1
+  general-dynamic: 28 atoms, 30 fixups, 9 dynamic symbols, 12 relocations in .rela.dyn and 3 in .relr.dyn, 1 stubs, 13 GOT slots: its checks held
+  shared-local-dynamic.so: GOT slots 0 RELATIVE, 6 by a dynamic symbol, 1 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 1
+  local-dynamic: 28 atoms, 24 fixups, 6 dynamic symbols, 6 relocations in .rela.dyn and 3 in .relr.dyn, 1 stubs, 7 GOT slots: its checks held
+  shared-mixed-tls.so: GOT slots 0 RELATIVE, 9 by a dynamic symbol, 1 without relocations (0 of thread-locals' offsets); lld's 0, 8 and 1
+  mixed-tls: 27 atoms, 25 fixups, 7 dynamic symbols, 9 relocations in .rela.dyn and 3 in .relr.dyn, 1 stubs, 10 GOT slots: its checks held
+  shared-many-general-dynamic.so: GOT slots 0 RELATIVE, 102 by a dynamic symbol, 1 without relocations (0 of thread-locals' offsets); lld's 0, 101 and 1
+  many-general-dynamic: 28 atoms, 164 fixups, 54 dynamic symbols, 102 relocations in .rela.dyn and 3 in .relr.dyn, 1 stubs, 103 GOT slots: its checks held
+  shared-general-dynamic-got-call.so: GOT slots 0 RELATIVE, 7 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 7 and 0
+  general-dynamic-got-call: 27 atoms, 18 fixups, 7 dynamic symbols, 7 relocations in .rela.dyn and 3 in .relr.dyn, 0 stubs, 7 GOT slots: its checks held
+  shared-local-dynamic-global.so: GOT slots 0 RELATIVE, 6 by a dynamic symbol, 1 without relocations (0 of thread-locals' offsets); lld's 0, 5 and 1
+  local-dynamic-global: 27 atoms, 20 fixups, 7 dynamic symbols, 6 relocations in .rela.dyn and 3 in .relr.dyn, 1 stubs, 7 GOT slots: its checks held
+  shared-general-dynamic-import-only.so: GOT slots 0 RELATIVE, 7 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 6 and 0
+  general-dynamic-import-only: 26 atoms, 18 fixups, 7 dynamic symbols, 7 relocations in .rela.dyn and 3 in .relr.dyn, 1 stubs, 7 GOT slots: its checks held
+  shared-general-dynamic-runtime.so: GOT slots 0 RELATIVE, 8 by a dynamic symbol, 0 without relocations (0 of thread-locals' offsets); lld's 0, 6 and 0
+  general-dynamic-runtime: 26 atoms, 20 fixups, 8 dynamic symbols, 8 relocations in .rela.dyn and 3 in .relr.dyn, 2 stubs, 8 GOT slots: its checks held
+  shared-local-dynamic-got-call.so: GOT slots 0 RELATIVE, 6 by a dynamic symbol, 1 without relocations (0 of thread-locals' offsets); lld's 0, 6 and 1
+  local-dynamic-got-call: 27 atoms, 20 fixups, 6 dynamic symbols, 6 relocations in .rela.dyn and 3 in .relr.dyn, 0 stubs, 7 GOT slots: its checks held
+  local-dynamic-import: 25 atoms, 16 fixups, 0 dynamic symbols, 0 relocations in .rela.dyn and 0 in .relr.dyn, 0 stubs, 0 GOT slots: refused
+  general-dynamic-hidden-weak: 26 atoms, 19 fixups, 0 dynamic symbols, 0 relocations in .rela.dyn and 0 in .relr.dyn, 0 stubs, 0 GOT slots: refused
+compiled shared libraries: 2689 checks, 0 failed

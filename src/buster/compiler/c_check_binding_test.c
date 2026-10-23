@@ -7,6 +7,133 @@
 #ifndef BUSTER_C_CHECK_BINDING_TEST_INCLUDED
 #define BUSTER_C_CHECK_BINDING_TEST_INCLUDED
 
+static uint64_t check_test_binding_parser_hash(const Parser* parser)
+{
+    uint64_t result = UINT64_C(14695981039346656037);
+    for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+    {
+        result = (result ^ parser->tokens.kinds[token]) * UINT64_C(1099511628211);
+        result = (result ^ parser->tokens.names[token]) * UINT64_C(1099511628211);
+        result = (result ^ parser->tokens.flags[token]) * UINT64_C(1099511628211);
+        result = (result ^ parser->tree.roles[token]) * UINT64_C(1099511628211);
+        result = (result ^ parser->tree.parents[token]) * UINT64_C(1099511628211);
+        result = (result ^ parser->tree.depths[token]) * UINT64_C(1099511628211);
+        result = (result ^ parser->postorder[token]) * UINT64_C(1099511628211);
+    }
+    return result;
+}
+
+// Check the new consumer against both the parser's immediate answers and the retained semantic-history oracle.
+// Builtin typedefs and ignored attribute/assembly syntax deliberately do not acquire fabricated source tokens.
+static void check_test_binding_parser_columns(CheckTest* test, Parser* parser, const CheckInput* input, Arena* arena, Arena* scratch)
+{
+    const uint64_t mark = arena->length;
+    const uint64_t temporary = scratch->length;
+    const uint32_t count = parser->tokens.count;
+    ParseBindings parsed = { 0 };
+    const bool built = parse_bindings_build(&parsed, parser, arena);
+    check_test_expect(test, built, "checker binding parser-column oracle build");
+    uint32_t* direct = built ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    check_test_expect(test, direct != 0, "checker binding direct-column storage");
+    if (direct != 0)
+    {
+        memcpy(direct, parsed.declarations, (uint64_t)count * sizeof(uint32_t));
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const bool resolved = parse_bindings_resolve(&parsed, path == 0, scratch);
+            check_test_expect(test, resolved, "checker binding parser-column independent resolution");
+            for (uint32_t token = 0; resolved && token < count; token += 1)
+            {
+                check_test_expect(test, parsed.declarations[token] == direct[token], "checker parser replay differs from direct source column");
+                if (parsed.token_events[token] != 0 && input->declared_types[token] != 0)
+                {
+                    const uint32_t declaration = parsed.declarations[token];
+                    if (parsed.namespaces[token] == C_BINDING_ORDINARY)
+                    {
+                        check_test_expect(test, input->declarations[token] == declaration, "checker ordinary identity differs from parser column");
+                    }
+                    else if (parsed.namespaces[token] == C_BINDING_TAG && declaration < count)
+                    {
+                        check_test_expect(test, input->declarations[token] == input->declarations[declaration],
+                                          "checker tag identity differs from canonical parser declaration");
+                    }
+                }
+            }
+        }
+    }
+    if (input->environment.valid)
+    {
+        uint32_t* declarations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+        TypeId* types = BUSTER_ARENA_PUSH_ARRAY(scratch, TypeId, (uint64_t)count + 1);
+        uint8_t* ignored = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+        CheckInputReport* reports = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInputReport, (uint64_t)count + 1);
+        const bool allocated = declarations != 0 && types != 0 && ignored != 0 && reports != 0;
+        check_test_expect(test, allocated, "checker semantic binding oracle storage");
+        if (allocated)
+        {
+            memcpy(declarations, input->declarations, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memcpy(types, input->declared_types, ((uint64_t)count + 1) * sizeof(TypeId));
+            memset(ignored, 1, (uint64_t)count + 1);
+            CheckInput oracle = {
+                .declarations = declarations,
+                .declared_types = types,
+                .reports = reports,
+                .report_capacity = count + 1,
+            };
+            CheckInputReader reader = {
+                .output = &oracle,
+                .parser = parser,
+                .scratch = scratch,
+                .bindings = *input->environment.bindings,
+                .declared_types = types,
+                .ignored = ignored,
+            };
+            const bool resolved = check_input_binding_events(&reader, true);
+            check_test_expect(test, resolved, "checker retained semantic history replay");
+            for (uint32_t token = 0; resolved && token < count; token += 1)
+            {
+                check_test_expect(test, declarations[token] == input->declarations[token], "parser-column consumer differs from semantic history");
+            }
+        }
+    }
+    arena_pop_to(scratch, temporary);
+    arena_pop_to(arena, mark);
+}
+
+static void check_test_binding_parser_capacity(CheckTest* test, const Parser* parser, Arena* arena, Arena* scratch)
+{
+    const uint64_t output_capacity = arena->capacity;
+    const uint64_t scratch_capacity = scratch->capacity;
+    const uint64_t mark = arena->length;
+    const uint64_t temporary = scratch->length;
+    const Parser original = *parser;
+    const uint64_t parser_hash = check_test_binding_parser_hash(parser);
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        for (uint32_t exhausted = 0; exhausted < 2; exhausted += 1)
+        {
+            uint32_t declaration = 12345;
+            CheckInput input = { .declarations = &declaration };
+            CheckInputReader reader = {
+                .output = &input,
+                .parser = parser,
+                .arena = arena,
+                .scratch = scratch,
+                .bindings = { .valid = true },
+            };
+            arena->capacity = exhausted == 0 ? mark : output_capacity;
+            scratch->capacity = exhausted == 1 ? temporary : scratch_capacity;
+            const bool valid = check_input_bindings(&reader, path == 0);
+            check_test_expect(test, !valid && input.resource && declaration == 12345 && arena->length == mark && scratch->length == temporary,
+                              "parser binding allocation failure published results or retained temporary memory");
+            check_test_expect(test, memcmp(&original, parser, sizeof(Parser)) == 0 && parser_hash == check_test_binding_parser_hash(parser),
+                              "failed parser binding consumer changed its borrowed parser");
+        }
+    }
+    arena->capacity = output_capacity;
+    scratch->capacity = scratch_capacity;
+}
+
 static void check_test_binding_source(CheckTest* test, const char* source, const char* name, const uint32_t* expected, uint32_t expected_count, bool accepted, bool fallback)
 {
     static InternTable identifiers;
@@ -43,9 +170,18 @@ static void check_test_binding_source(CheckTest* test, const char* source, const
         if (parsed)
         {
             const uint64_t mark = scratch[path].length;
+            const Parser original = parsers[path];
+            const uint64_t parser_hash = check_test_binding_parser_hash(&parsers[path]);
             adapted[path] = check_input(&inputs[path], &parsers[path], &pp, &types[path].table, &storage[path], &scratch[path]);
             check_test_expect(test, !inputs[path].resource && adapted[path] == accepted, "source binding fixture acceptance");
             check_test_expect(test, scratch[path].length == mark, "source binding fixture retained scratch");
+            check_test_expect(test, memcmp(&original, &parsers[path], sizeof(Parser)) == 0 && parser_hash == check_test_binding_parser_hash(&parsers[path]),
+                              "checker parser-column adapter mutated parser input or scratch");
+            check_test_binding_parser_columns(test, &parsers[path], &inputs[path], &storage[path], &scratch[path]);
+            if (source[0] == 0)
+            {
+                check_test_binding_parser_capacity(test, &parsers[path], &storage[path], &scratch[path]);
+            }
             uint32_t occurrences[128];
             uint32_t count = 0;
             for (uint32_t token = 0; token < parsers[path].tokens.count; token += 1)
@@ -83,7 +219,7 @@ static void check_test_binding_source(CheckTest* test, const char* source, const
             }
             if (path == 1 && fallback)
             {
-                check_test_expect(test, inputs[path].binding_statistics.walked_uses != 0 && inputs[path].binding_statistics.fallback_uses != 0,
+                check_test_expect(test, inputs[path].parser_binding_statistics.walked_uses != 0 && inputs[path].parser_binding_statistics.fallback_uses != 0,
                                   "closed sibling scopes did not exercise binding fallback");
             }
         }
@@ -104,6 +240,10 @@ static void check_test_binding_source(CheckTest* test, const char* source, const
                                inputs[0].binding_statistics.identifiers == inputs[1].binding_statistics.identifiers &&
                                inputs[0].binding_statistics.declarations == inputs[1].binding_statistics.declarations,
                           "source paths recorded different binding events");
+        check_test_expect(test, inputs[0].parser_binding_event_count == inputs[1].parser_binding_event_count &&
+                               inputs[0].parser_binding_statistics.identifiers == inputs[1].parser_binding_statistics.identifiers &&
+                               inputs[0].parser_binding_statistics.declarations == inputs[1].parser_binding_statistics.declarations,
+                          "source paths consumed different parser binding streams");
         check_test_expect(test, inputs[0].report_count == inputs[1].report_count, "binding source diagnostic counts differ");
         for (uint32_t i = 0; inputs[0].report_count == inputs[1].report_count && i < inputs[0].report_count; i += 1)
         {
@@ -169,7 +309,7 @@ static void check_test_binding_failures(CheckTest* test)
             .declared_types = types,
         };
         const uint64_t mark = scratch.length;
-        bool valid = check_input_bindings(&reader, path == 0);
+        bool valid = check_input_binding_events(&reader, path == 0);
         check_test_expect(test, !valid && !input.resource && input.report_count == 1 && reports[0].token == 3 && reports[0].message == CHECK_INPUT_UNDECLARED,
                           "unresolved binding did not remain a source diagnostic");
         check_test_expect(test, declarations[1] == 0 && types[1] == BUSTER_TYPE_INT && declarations[3] == BUSTER_CHECK_NONE && types[3] == 0,
@@ -181,21 +321,95 @@ static void check_test_binding_failures(CheckTest* test)
         reader.scratch = &exhausted;
         input.report_count = 0;
         declarations[1] = BUSTER_CHECK_NONE;
-        valid = check_input_bindings(&reader, path == 0);
+        valid = check_input_binding_events(&reader, path == 0);
         check_test_expect(test, !valid && input.resource && exhausted.length == 0 && declarations[1] == BUSTER_CHECK_NONE,
                           "binding handoff scratch failure published partial results");
         input.resource = false;
         reader.bindings.valid = false;
-        valid = check_input_bindings(&reader, path == 0);
+        valid = check_input_binding_events(&reader, path == 0);
         check_test_expect(test, !valid && input.resource && exhausted.length == 0, "invalid binding events escaped failure propagation");
         input.resource = false;
         reader.bindings = (CBindings){ .valid = true };
-        valid = check_input_bindings(&reader, path == 0);
+        valid = check_input_binding_events(&reader, path == 0);
         check_test_expect(test, valid && !input.resource && input.binding_event_count == 0 && exhausted.length == 0,
                           "empty binding handoff required scratch storage");
     }
     arena_release(&scratch);
     arena_release(&storage);
+}
+
+static void check_test_binding_column_failures(CheckTest* test)
+{
+    CheckTestTypes types = { 0 };
+    Arena storage = arena_reserve(UINT64_C(1) << 16);
+    CBindings events = { 0 };
+    bool ready = check_test_types_open(&types) && storage.base != 0 && c_bindings_initialize(&events, &storage, 3, 4);
+    const TypeId incomplete = ready ? type_incomplete_array(&types.table, BUSTER_TYPE_INT) : 0;
+    const TypeId complete = ready ? type_array(&types.table, BUSTER_TYPE_INT, 3) : 0;
+    ready = ready && incomplete != 0 && complete != 0 &&
+            c_bindings_declare(&events, C_BINDING_ORDINARY, 1, C_BINDING_OBJECT, 0, 0, 0) != 0 &&
+            c_bindings_use(&events, C_BINDING_ORDINARY, 1, 1, 1) != 0;
+    check_test_expect(test, ready, "parser binding consumer failure fixture");
+    uint8_t roles[] = { PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_OPERAND, PARSE_ROLE_SPECIFIER };
+    const Parser parser = { .tokens = { .count = 3 }, .tree = { .roles = roles } };
+    uint32_t token_events[] = { 1, 2, 3 };
+    uint32_t source_declarations[] = { 0, 0, BUSTER_PARSE_NONE };
+    uint8_t namespaces[] = { C_BINDING_ORDINARY, C_BINDING_ORDINARY, C_BINDING_ORDINARY };
+    uint8_t kinds[] = { C_BINDING_OBJECT, C_BINDING_OBJECT, C_BINDING_TYPEDEF };
+    const ParseBindings parsed = {
+        .events = { .count = 3 },
+        .token_events = token_events,
+        .declarations = source_declarations,
+        .namespaces = namespaces,
+        .kinds = kinds,
+        .count = 3,
+        .valid = true,
+    };
+    for (uint32_t scenario = 0; ready && scenario < 4; scenario += 1)
+    {
+        uint32_t declarations[] = { 0, 0, BUSTER_CHECK_NONE };
+        TypeId declared_types[] = { complete, incomplete, BUSTER_TYPE_INT128 };
+        uint8_t ignored[] = { 0, 0, 1 };
+        CheckInputReport reports[4];
+        CheckInput input = {
+            .declarations = declarations,
+            .declared_types = declared_types,
+            .reports = reports,
+            .report_capacity = BUSTER_ARRAY_LENGTH(reports),
+        };
+        CheckInputReader reader = {
+            .output = &input,
+            .parser = &parser,
+            .bindings = events,
+            .declared_types = declared_types,
+            .declaration_kinds = kinds,
+            .ignored = ignored,
+        };
+        source_declarations[1] = scenario == 1 ? BUSTER_PARSE_NONE : scenario == 2 ? 3 : 0;
+        token_events[1] = scenario == 3 ? 0 : 2;
+        const bool valid = check_input_binding_columns(&reader, &parsed);
+        if (scenario == 0 || scenario == 3)
+        {
+            check_test_expect(test, valid && declared_types[1] == incomplete && declarations[1] == 0,
+                              scenario == 0 ? "parser binding replaced a captured source-time type with its completed declaration" :
+                                              "raw attribute identity was lost without a parser namespace event");
+            check_test_expect(test, declarations[2] == BUSTER_CHECK_NONE && declared_types[2] == BUSTER_TYPE_INT128,
+                              "source-less builtin typedef indexed or overwrote source metadata");
+        }
+        else if (scenario == 1)
+        {
+            check_test_expect(test, !valid && !input.resource && input.report_count == 1 && reports[0].token == 1 &&
+                                   reports[0].message == CHECK_INPUT_UNDECLARED && declarations[1] == BUSTER_CHECK_NONE && declared_types[1] == 0,
+                              "parser unresolved use retained a stale semantic lookup answer");
+        }
+        else
+        {
+            check_test_expect(test, !valid && input.resource && input.report_count == 0 && declarations[1] == 0 && declared_types[1] == incomplete,
+                              "invalid parser declaration column published partial results");
+        }
+    }
+    arena_release(&storage);
+    check_test_types_close(&types);
 }
 
 static void check_test_binding_compatibility_capacity(CheckTest* test)
@@ -242,6 +456,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                 };
                 uint8_t defined[2] = { 0 };
                 uint8_t definition_seen[2] = { 0 };
+                uint8_t thread_local[2] = { 0 };
                 uint32_t objects[] = {
                     17,
                     19,
@@ -258,6 +473,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                 CheckInput input = {
                     .reports = reports,
                     .report_capacity = BUSTER_ARRAY_LENGTH(reports),
+                    .thread_local = thread_local,
                 };
                 CheckInputReader reader = {
                     .output = &input,
@@ -362,6 +578,36 @@ static void check_test_bindings(CheckTest* test)
         2,
     };
     check_test_binding_source(test, "int x; int f(void) { int y = x, x = y; return x; }", "x", multiple, BUSTER_ARRAY_LENGTH(multiple), true, false);
+    const uint32_t declarator_bound[] = {
+        0,
+        1,
+        0,
+        1,
+    };
+    check_test_binding_source(test, "int x; int f(void) { int x[sizeof x]; return sizeof x; }", "x", declarator_bound, BUSTER_ARRAY_LENGTH(declarator_bound), true, false);
+    const uint32_t typeof_shadow[] = {
+        0,
+        0,
+        2,
+        2,
+    };
+    check_test_binding_source(test, "int x; int f(void) { __typeof__(x) x = 1; return x; }", "x", typeof_shadow, BUSTER_ARRAY_LENGTH(typeof_shadow), true, false);
+    const uint32_t earlier_array[] = {
+        0,
+        0,
+        2,
+    };
+    check_test_binding_source(test, "extern int x[]; int f(void) { return sizeof x; } int x[2];", "x", earlier_array, BUSTER_ARRAY_LENGTH(earlier_array), true, false);
+    const uint32_t builtin_shadow[] = {
+        0,
+        0,
+    };
+    check_test_binding_source(test, "int __builtin_popcount(int); int f(void) { return __builtin_popcount(1); }", "__builtin_popcount",
+                              builtin_shadow, BUSTER_ARRAY_LENGTH(builtin_shadow), true, false);
+    check_test_binding_source(test, "typedef __int128_t Wide; int f(void) { { typedef long __int128_t; __int128_t x = 0; } Wide y = 0; return y; }", "Wide",
+                              builtin_shadow, BUSTER_ARRAY_LENGTH(builtin_shadow), true, false);
+    check_test_binding_source(test, "enum { A = 16 }; int x __attribute__((aligned(A))); int f(void) { return __alignof__(x); }", "A",
+                              builtin_shadow, BUSTER_ARRAY_LENGTH(builtin_shadow), true, false);
     const uint32_t prototype[] = {
         0,
         1,
@@ -459,6 +705,7 @@ static void check_test_bindings(CheckTest* test)
         check_test_binding_source(test, source, "x", expected, widths[i] + 2, true, widths[i] > BUSTER_C_BINDING_WALK_LIMIT);
     }
     check_test_binding_failures(test);
+    check_test_binding_column_failures(test);
     check_test_binding_compatibility_capacity(test);
 }
 

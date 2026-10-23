@@ -98,14 +98,16 @@ static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 {
     const bool floating = (isnan(a->floating) && isnan(b->floating)) ||
                           (a->floating == b->floating && signbit(a->floating) == signbit(b->floating));
+    const bool imaginary = (isnan(a->imaginary) && isnan(b->imaginary)) ||
+                           (a->imaginary == b->imaginary && signbit(a->imaginary) == signbit(b->imaginary));
     return a->type == b->type && a->category == b->category && a->flags == b->flags &&
-           a->constant_kind == b->constant_kind && a->integer == b->integer && floating && a->object == b->object &&
+           a->constant_kind == b->constant_kind && a->integer == b->integer && floating && imaginary && a->object == b->object && a->overload_head == b->overload_head &&
            a->offset == b->offset && a->bit_width == b->bit_width && a->fault == b->fault && a->fault_node == b->fault_node;
 }
 
 static bool check_test_action_equal(const CheckActionResult* a, const CheckActionResult* b)
 {
-    bool equal = check_test_value_equal(&a->value, &b->value) && a->diagnostic == b->diagnostic &&
+    bool equal = check_test_value_equal(&a->value, &b->value) && a->diagnostic == b->diagnostic && a->warnings == b->warnings &&
                  a->diagnostic_operand == b->diagnostic_operand && a->store_conversion.type == b->store_conversion.type &&
                  a->store_conversion.flags == b->store_conversion.flags;
     for (uint32_t i = 0; equal && i < 3; i += 1)
@@ -1272,10 +1274,12 @@ static void check_test_actions_batch(CheckTest* test, TypeTable* table)
 
 static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, uint32_t arguments)
 {
-    bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count;
+    bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count && a->effect_count == b->effect_count &&
+                 a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_test_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
-        equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] &&
+        equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
+                (a->warning_ignored != NULL ? a->warning_ignored[i] : 0) == (b->warning_ignored != NULL ? b->warning_ignored[i] : 0) &&
                 a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t operand = 0; equal && operand < 3; operand += 1)
         {
@@ -1293,6 +1297,17 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
         const CheckReport* x = &a->reports[i];
         const CheckReport* y = &b->reports[i];
         equal = x->node == y->node && x->token == y->token && x->message == y->message && x->diagnostic == y->diagnostic && x->fault == y->fault;
+    }
+    for (uint32_t i = 0; equal && i < a->effect_count; i += 1)
+    {
+        equal = check_store_effect_equal(a->effects + i, b->effects + i, check_test_value_equal);
+    }
+    for (uint32_t i = 0; equal && i < a->varargs_count; i += 1)
+    {
+        const CheckVarargsEffect* x = a->varargs + i;
+        const CheckVarargsEffect* y = b->varargs + i;
+        equal = x->node == y->node && x->requested_type == y->requested_type && x->evaluated_operands == y->evaluated_operands &&
+                x->warnings == y->warnings && x->mutates_list == y->mutates_list;
     }
     return equal;
 }
@@ -1759,7 +1774,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             .standard = 2017,
             .gnu = true
         },
-        .no_standard_includes = true
+        .no_standard_includes = true,
+        .semantic_pragmas = true,
     };
     const ParseOptions parser_options[2] = {
         {
@@ -1816,7 +1832,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             for (uint32_t i = 0; i < input[p].report_count; i += 1)
             {
                 const CheckInputReport* report = &input[p].reports[i];
-                first = report->token < first ? report->token : first;
+                const uint32_t source = check_diagnostic_input_report_source(&input[p], &parsers[p], report);
+                first = source < first ? source : first;
                 unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED;
             }
             if (adapted)
@@ -1829,10 +1846,29 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                 rejected[p] = !checked[p] || streams[p].report_count != 0;
                 if (checked[p] && streams[p].report_count != 0)
                 {
-                    first = streams[p].reports[0].token;
+                    const uint32_t token = streams[p].reports[0].token;
+                    const uint32_t source = token < parsers[p].tokens.count ? parsers[p].tokens.sources[token] : BUSTER_CHECK_NONE;
+                    first = source < first ? source : first;
+                }
+                if (checked[p] && streams[p].report_count == 0)
+                {
+                    CheckInitializers initializers = { 0 };
+                    const bool initialized = check_initializers_run(&initializers, &input[p], &streams[p], &parsers[p], &types[p].table,
+                                                                   &output_storage[p], &scratch[p]);
+                    check_test_expect(test, initializers.status != CHECK_INIT_RESOURCE, "source initializer fixture exhausted resources");
+                    rejected[p] |= !initialized;
+                    unsupported[p] |= initializers.status == CHECK_INIT_UNSUPPORTED;
+                    if (!initialized)
+                    {
+                        const uint32_t token = initializers.token;
+                        const uint32_t source = token < parsers[p].tokens.count ? parsers[p].tokens.sources[token] : BUSTER_CHECK_NONE;
+                        first = source < first ? source : first;
+                    }
                 }
             }
-            lines[p] = first == BUSTER_CHECK_NONE ? 0 : check_test_source_line(&parsers[p], &pp, first);
+            const char* name = NULL;
+            uint32_t length = 0;
+            lines[p] = first < pp.output.count ? pp_presumed(&pp, pp.output.locations[first], &name, &length) : 0;
         }
         char description[320];
         snprintf(description, sizeof(description), "%s: %s expected, %s from %s path, first line %u (clang %u)", fixture->name,
@@ -2036,11 +2072,10 @@ static void check_test_sources(CheckTest* test, const char* clang)
             false
         },
         {
-            "GNU folded-constant extension remains rejected",
+            "GNU folded-constant extension",
             "int f(void); _Static_assert(1 || f(), \"unevaluated call\");\n",
-            true,
             false,
-            true
+            false
         },
         {
             "conditional constant",
@@ -2109,11 +2144,10 @@ static void check_test_sources(CheckTest* test, const char* clang)
             false
         },
         {
-            "GNU discarded void indirection remains rejected",
+            "GNU discarded void indirection",
             "void f(void *p) { *p; }\n",
-            true,
             false,
-            true
+            false
         },
         {
             "floating remainder",
@@ -2404,10 +2438,45 @@ static void check_test_target_options(CheckTest* test)
 }
 
 #include "c_check_graph_test.c"
+#include "c_check_builtin_graph_test.c"
+#include "c_check_varargs_graph_test.c"
+#include "c_check_special_graph_test.c"
+#include "c_check_builtin_vector_graph_test.c"
+#include "c_check_x86_graph_test.c"
 #include "c_check_binding_test.c"
+#include "c_check_body_bindings_test.c"
+#include "c_check_environment_test.c"
 #include "c_check_source_test.c"
+#include "c_check_overload_test.c"
+#include "c_check_overload_address_test.c"
+#include "c_types_function_abi_test.c"
+#include "c_check_constant_test.c"
+#include "c_check_enum_test.c"
+#include "c_check_vla_test.c"
 #include "c_check_data_test.c"
+#include "c_check_actions_extra_test.c"
+#include "c_check_transparent_test.c"
+#include "c_check_transparent_type_test.c"
+#include "c_check_complex_test.c"
+#include "c_check_integer_extension_test.c"
+#include "c_check_integer_policy_test.c"
+#include "c_check_fp_actions_test.c"
+#include "c_check_query_runtime_test.c"
+#include "c_check_vector_test.c"
+#include "c_check_vector_graph_test.c"
+#include "c_check_function_name_test.c"
+#include "c_check_pragma_test.c"
+#include "c_check_diagnostic_test.c"
+#include "c_check_lazy_test.c"
+#include "c_check_intrinsic_input_test.c"
+#include "c_check_initializer_test.c"
 #include "c_check_data_source_test.c"
+#include "c_check_attribute_test.c"
+#include "c_check_program_test.c"
+#include "c_check_prefix_test.c"
+#include "c_check_repair_test.c"
+
+static void check_test_source_benchmark(CheckTest* test);
 
 static int run_checker_tests(int argc, char** argv)
 {
@@ -2467,11 +2536,48 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&storage);
             check_test_sources(&test, clang);
             check_test_source_extensions(&test, clang);
+            check_test_overloads(&test, clang);
+            check_test_overload_sources(&test, clang);
+            check_test_overload_addresses(&test, clang);
+            check_test_function_abis(&test, clang);
+            check_test_constant_sources(&test, clang);
+            check_test_enum_sources(&test, clang);
+            check_test_vla_sources(&test, clang);
             check_test_type_capacity(&test);
             check_test_target_options(&test);
             check_test_bindings(&test);
+            check_test_builtin_graph(&test, &types.table, clang);
+            check_test_varargs_graph(&test, &types.table);
+            check_test_special_graph(&test, &types.table, clang);
+            check_test_builtin_vector_graph(&test, &types.table, clang);
+            check_test_x86_graph(&test, &types.table, clang);
+            check_test_environments(&test);
+            check_test_body_binding_guards(&test);
+            check_test_body_binding_exit_points(&test);
             check_test_data(&test, &types.table, clang);
+            check_test_actions_extra(&test, &types.table, clang);
+            check_test_transparent_calls(&test, &types.table, clang);
+            check_test_transparent_types(&test, clang);
+            check_test_complex(&test, &types.table, clang);
+            check_test_integer_extensions(&test, clang);
+            check_test_integer_policy(&test, &types.table, clang);
+            check_test_fp_actions(&test, &types.table);
+            check_test_query_runtime(&test, &types.table, clang);
+            check_test_vectors(&test, &types.table, clang);
+            check_test_vector_graph(&test, &types.table);
+            check_test_function_names(&test, clang);
+            check_test_pragmas(&test, clang);
+            check_test_diagnostic_policy(&test);
+            check_test_lazy(&test);
+            check_test_intrinsic_inputs(&test, clang);
+            check_test_initializers(&test, clang);
             check_test_data_sources(&test);
+            check_test_attributes(&test, clang);
+            check_test_attribute_sources(&test, clang);
+            check_test_programs(&test, clang);
+            check_test_prefixes(&test, clang);
+            check_test_repairs(&test, clang);
+            check_test_source_benchmark(&test);
         }
         check_test_types_close(&types);
     }

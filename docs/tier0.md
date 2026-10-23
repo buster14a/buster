@@ -15,6 +15,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Both paths:**
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
+- **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
+- **Indirect calls,** through `r11`.
+- **Block copies** (`COPY`) of up to 256 bytes, a struct's assignment.
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -43,22 +46,40 @@ exact rules):
 
 Beside them are three tables:
 
-- **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`).
+- **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`). Two optional columns
+  make some of them **objects** in the frame: arrays, structs and unions.
+  - `local_sizes`: an object's size in bytes, 0 for a value's local.
+  - `local_alignments`: its alignment's log2, at most 4 (16 bytes).
+
+  An object:
+  - is a local of class VOID with `ADDRESS_TAKEN`, and not a parameter;
+  - is reached only through `LOCAL_ADDRESS`: its elements and members are loads and stores through that address
+    (`PTR_ADD`, `LOAD`, `SET`), as a front end lowers `a[i]` and `s.m`;
+  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), so that every frame displacement fits a disp32.
+
+  A function without objects leaves both columns 0.
 - **The parameters' locations** at entry, and the result's.
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
-  `AbiCall`.
+  `AbiCall`. A callee of 0 makes the call indirect: the stream pushes the address it calls (U64) before its
+  arguments, and the `CALL` pops it after them.
 
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
 vectorized across the unit that way, and Tier 0 needs no type table.
 
-**Expressions** are in postorder, so each entry's last operand is the entry before it. The kinds are:
+**Expressions** are in postorder, so each entry's last operand is the entry before it, and both paths read that
+operand's class from the entry before (its stack, and the entry's template key and variant). `tier0_validate` refuses
+an entry whose last operand has another class. A value left under a store of its class, as an increment's `DUP` leaves
+the old one under its `SET`, has it too, and is compiled right. A call reads its arguments' classes from the calls
+table. The kinds are:
 
 - leaves: `CONST`, `LOCAL`, `LOCAL_ADDRESS`, `GLOBAL`, `GLOBAL_ADDRESS`, `DUP`;
 - unary: `NEG`, `NOT`, `CONVERT`, `LOAD`;
 - binary: `ADD` to `SHR`, `PTR_ADD` (with the element's size), and the compares `EQ` to `GE`;
 - stores: `STORE` and `SET` (through a pointer, with and without a value), `STORE_LOCAL` and `SET_LOCAL`,
   `STORE_GLOBAL` and `SET_GLOBAL`;
-- `CALL` and `DISCARD`.
+- `CALL` and `DISCARD`;
+- `COPY`: `value` bytes, 1 to 256, from the address on top to the one under it, the ranges the same or apart (a
+  struct's assignment). A front end copies more through `memcpy`, as clang -O0 does past 16 stores of 16 bytes.
 
 **The checker makes explicit** what C leaves implicit:
 
@@ -97,6 +118,46 @@ arrives at a target, the stacks hold the same values; `tier0_validate` checks th
 The rest of what fusion needs is in the stream. A unit-wide API, one stream for every function of a unit, would keep
 the 64-entry batches full across small functions. That is a follow-up, measured once #133 produces real units.
 
+## Incoming variadic frames
+
+`Tier0Function.incoming_variadic` optionally borrows the `AbiCall` produced by
+`abi_assign` for the callee's named arguments only, with `count == named_count`
+and `variadic = true`. Its GP count includes a hidden result pointer where
+applicable. `stack_bytes` ends the named stack arguments, including their
+internal alignment; it is not rounded to an outgoing area's final alignment.
+A null pointer retains the ordinary frame.
+
+The optional prologue saves six GP argument registers and all 128 bits of eight
+XMM argument registers into a distinct 176-byte incoming area before moving
+parameters. Unaligned baseline SSE stores preserve the full vector slots
+without reading AL or changing floating-point status. The incoming area never
+shares the outgoing call-preservation area.
+
+Three mutually exclusive local roles require `ADDRESS_TAKEN`, class U64 and a
+nonparameter local. `VA_LIST` reserves exactly 24 bytes; `REGISTER_SAVE_AREA`
+aliases the incoming save area; `OVERFLOW_ARG_AREA` aliases entry RSP plus the
+return address and the named-only `stack_bytes`. The anchors require incoming
+metadata. These descriptors support only `LOCAL_ADDRESS`; ordinary local
+loads and stores are rejected. Existing varargs recipes receive the resulting
+pointers and apply each requested argument's own overflow alignment.
+
+Both compilation paths reject malformed role/ABI metadata and frame or
+incoming displacements outside signed 32-bit addressing. This bounded profile
+requires the ordinary 16-byte stack alignment. Shared `AbiVaList` and save-area
+constants are unchanged. Source production and Tier 1 support remain separate;
+the typed-to-IR consumer must reject these roles until it supports their layout.
+
+`test-tier0-variadic-frame` prepares actual Clang-compiled callers of generated
+variadic callees with GP/FP exhaustion, named stack arguments, real va_start /
+va_copy / va_arg recipes, intervening calls and full vector saves. It compares
+both Tier 0 paths and both encoders, guarded output edges, 24-byte list storage
+and independent ordinary-function byte fixtures. Every fixture also holds an
+object aligned to 16 (#362), whose bytes must survive the lists, the save area
+and the call, at a multiple of 16, apart from the lists, the canaries and the
+save area and below the overflow area. Run builds and tests only on
+the approved 9700X, each through its own shared lock. This description records
+the test contract; qualification results are reported with the exact revision.
+
 ## The output (contract 1 of #135)
 
 **Records:**
@@ -111,7 +172,7 @@ record index (ascending) and its target's; the function's end is the epilogue's 
 `branch_sizing_validate` accepts.
 
 **Symbolic fields** (`[rip + global]`, `call f`) are records with `BUSTER_X86_FORM_FIXUP` and a `LinkReference`:
-`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order.
+`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order. An indirect call is `call r11`, with none.
 
 ## The design
 
@@ -156,9 +217,18 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
    reached, nor a template's fixed registers, nor anything if the function calls.
 3. Then they take the callee-saved registers, for a local referenced at least twice (a push and a pop).
 4. Floating locals take free XMM registers.
-5. Address-taken locals and the rest get 8-byte frame slots, rsp-relative (no frame pointer). A stack parameter keeps
-   its incoming slot, unless it took a register, which the prologue loads from that slot. No home is a register a
-   parameter arrives in, so the prologue's moves and loads never overwrite one another's sources.
+5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (no frame
+   pointer), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
+   register, which the prologue loads from that slot. No home is a register a parameter arrives in, so the prologue's
+   moves and loads never overwrite one another's sources.
+6. Objects come after the slots, in the locals' order:
+   - each at a multiple of its alignment, taking its size rounded up to 8;
+   - with an object aligned to 16, the frame keeps rsp a multiple of 16, as a function that calls does.
+
+   The stack parameters' places and the overflow area's anchor count from the frame's final size, objects included,
+   and every displacement is checked in 64 bits before it narrows to a disp32.
+
+   The vector path finds the objects 16 locals at a time as a mask of nonzero sizes, as it finds the slots.
 
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
@@ -183,12 +253,25 @@ template fixes is that byte; a hole's is its index in the hole block. Expansion 
 4. one 64-byte store at the entry's place, overwritten past its records by the next entry.
 
 **Deferred entries** go to `tier0_emit_deferred`, which writes their records at the places measuring reserved. The
-vector path's measuring counts a call's records with `tier0_count_deferred`, from its arguments' locations and the
-cycles of its parallel move, without emitting it; the scalar path runs the emitter to count, which checks the count:
+vector path's measuring counts a call's records with `tier0_count_deferred`, in one pass from its last argument back
+(an argument's register is its stack's depth less the arguments after it), from their locations and the cycles of its
+parallel move, without emitting it; the scalar path runs the emitter to count, which checks the count:
 
-- Calls: saves, stack arguments, the register arguments by a parallel move (cycles broken with `xchg`), al for a
-  variadic call, the call, the result moved, the restores.
+- Calls: saves, stack arguments, the register arguments by a parallel move, al for a variadic call, the call, the
+  result moved, the restores. An indirect call's callee joins the parallel move, into r11, which no argument and not
+  al takes; then `call r11`. The moves' sources are distinct registers, as are their destinations, so they form
+  paths and cycles, resolved on bitmasks: a move whose destination no other move still reads goes first, and what is
+  left are cycles, each of n moves taking n − 1 `xchg`s. With rax first in the depth table and rdi first in the ABI's
+  order, a call makes cycles of two alone; a test of the resolver's own covers every length.
 - Division and shifts by a register at depths where rax, rdx or rcx hold other values (through two fixed frame slots).
+- Copies, through their stacks' first free register (an XMM one from 16 bytes, a general one below), which selection
+  counts as reached, so that no local takes it as its home:
+  - from 16 bytes, a load and a store with `movups` per 16, the last 16 ending at the end;
+  - below, two of a general register's 8, 4, 2 or 1 bytes, the second ending at the end (one when that is all).
+
+  Overlapping pieces copy what they would apart, the ranges being the same or apart. `rep movsb` would copy any size
+  in a few records, but `x86_semantics.c` has no row for it, and `unwind_tier0.c` refuses a function with an
+  instruction of unknown effects.
 - The immediates: every record with an immediate takes the shortest form that keeps its value and the flags its
   template reads (`x86_choose_forms`): imm8, the accumulator's form, `xor` for zero, `test r, r` for `cmp r, 0`, `inc`
   and `dec`.
@@ -215,12 +298,22 @@ live flags and row, and the offsets of K, its scale, A and B). A slot's word als
 homes, and whether its four cases' words differ in the template alone (uniform).
 
 1. **Selection** gathers each entry's word from its slot's (`vpgatherdq`, from the slot table's 32,768 words). The
-   depth checks are masks, the depths each stack reaches lane maxima, and only the deferred entries' touches (a call's
-   saves, division's fixed registers) are taken an entry at a time.
+   depth checks are masks, the depths each stack reaches lane maxima, the kept templates' words are ORed together
+   (their fixed rdx) and the unsupported lanes collected, so that a block takes no branch but on a deferred entry,
+   whose touches (a call's saves, division's fixed registers) are taken an entry at a time. The first unsupported
+   entry is looked for only when there is one, in a compile that fails.
 2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their
-   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The rest works per local,
-   and both paths share it.
-3. **Measuring** resolves a home-dependent word to its homes' case. A local's home comes from four registers by
+   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The scalar path then sorts
+   the locals by references and gives them registers in that order, greedily. The greedy loop gives the k-th local of
+   a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of its
+   kind: the caller-saved registers in depth order, then the callee-saved ones to a local referenced twice or more
+   (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no order:
+   each such local's rank among its kind's, counted by vector compares 16 locals at a time, picks its register from
+   the free registers' list (`vpermd`), and its home is a masked store. The frame's slots go to a mask of the locals
+   that need one, from the homes, the references and the flags, 16 at a time, and the prologue's records are counted
+   rather than emitted twice.
+3. **Measuring** resolves a home-dependent word to its homes' case. Which of up to 64 locals are in registers is one
+   mask, of which a lane's case is a shift (`vpsrlvq`); past 64 locals, a local's home comes from four registers by
    `vpermt2q` for up to 32 locals, or by a gather past that. A uniform slot's case is added to the template; another's
    word is gathered. The lengths come from the words, or a deferred entry's from its count, and the positions are
    their prefix sum in registers.
@@ -234,12 +327,14 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    expanded records. The branches, then the references and the deferred entries, follow in entry order by their masks'
    bits.
 
-The immediates' choice is one `x86_choose_forms` over every request.
+The immediates' choice is one `x86_choose_forms` over every request, and each chosen form is applied from a byte per
+form (its immediate's size, and whether it takes no operands or its destination twice) to the record's two 8-byte
+halves, without a branch.
 
 **The scalar path** (`tier0_compile_scalar`) does the same an entry at a time, with each rule in plain code. Selection
-looks each entry's slot up, measuring counts a deferred entry's records by running its emitter, and emission builds
-each record field by field from the templates' specifications, not from their compiled bytes. It chooses with
-`x86_choose_forms_scalar`.
+looks each entry's slot up, homes sort the locals, measuring counts a deferred entry's records by running its emitter,
+and emission builds each record field by field from the templates' specifications, not from their compiled bytes. It
+chooses with `x86_choose_forms_scalar` and applies each choice with `x86_choice_instruction`.
 
 ## Tests
 
@@ -249,8 +344,55 @@ of integers, integers and calls, everything, and larger, 300 each by default. Ea
 1. Every function must pass `tier0_validate`.
 2. Both paths must compile it to the same records, branch columns and references.
 3. The records must pass `x86_validate` and the branch columns `branch_sizing_validate`.
-4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs. The result and every
-   global's bytes must equal what the test's interpreter of the typed stream gives.
+4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs, which an alarm stops
+   after 10 s (a frame laid out wrong can make code loop). The result and every global's bytes must equal what the
+   test's interpreter of the typed stream gives.
+
+Before the programs, checks of their own:
+
+- **moves:** 20,000 random sets of argument moves, resolved by the call emitter's resolver and run on a register file:
+  every destination must get its source's value, every other register keep its own, and the records be as many as
+  the moves less the cycles. The general registers' sets have paths and cycles of every length, though a call makes
+  cycles of two alone, and the XMM registers' only paths, as a call's floating arguments only move down.
+- **applies:** the vector path's application of the chosen forms against the scalar path's
+  (`x86_choice_instruction`), on 2,000 batches of random records, each with a candidate form of a random row or
+  `X86_FORM_NONE` (which keeps the record) and a random value.
+- **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
+  places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
+  stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate). And both must
+  compile 40 locals set from constants their stores absorb, from INT32_MIN on: past 32 locals emission gathers the
+  homes, and an absorbed lane mustn't look its value up as a local's.
+- **objects:**
+  - `tier0_validate` must refuse each break of an object's rules at its locals: a class, no `ADDRESS_TAKEN`, a
+    parameter, aligned to 32, sizes without alignments, a `LOCAL` of it, and past `BUSTER_TIER0_MAX_OBJECT_BYTES`.
+    It must take exactly the limit.
+  - 2,000 random frames, each of up to 24 locals: objects of 1 to 300 bytes at every alignment to 16, 8-byte values,
+    some address-taken, and `VA_LIST`s of 24 bytes. Both paths compile them, and must agree. Each local's place, from
+    its `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment (8 but for objects), inside the frame and apart
+    from every other local's bytes. Under an object aligned to 16, rsp must be a multiple of 16.
+- **copies:**
+  - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
+  - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
+    Both selections must count its scratch register among the frame's clobbers, or refuse the function as too deep
+    where its stack has none left, and both paths must compile it alike. The values are then folded in postorder, the
+    doubles onto a zero pushed above them, which takes one more floating depth: 16 doubles are too deep whatever the
+    copy.
+- **operands:** `tier0_validate` must refuse each of nine streams at the entry whose last operand has another class
+  than the entry before it (a binary operation, a compare and a `CONVERT` after a store of another class, a `DISCARD`
+  after a `COPY`, a `COPY`'s source, a returned value, one from under a call that returns nothing, a branch's
+  condition and an arm's value), and take 16 others:
+  their versions in postorder, a store that pushes, `DUP`, values left under a store of their class (an increment's
+  old value), and calls, whatever is under their arguments.
+- **variadic calls** (#363's review): two callers call a probe through a pointer, variadically, with six integers and
+  three doubles past a named first one. The probe, records of the test's own, stores what it sees: the argument
+  registers, rax, r11 and the vector registers. Its al must be 3, r11 its own address and the arguments the call's:
+  - with the callee in rax, under arguments whose moves are 2-cycles (rcx and rdi, rdx and rsi), so that al is set
+    only once the callee has gone to r11;
+  - with it in rdi, under four integers and two doubles saved around the call, so that the moves run through r11
+    (rbx to r8 to rdi to r11 to rcx) and the vector registers (xmm4 to xmm2 to xmm0). The caller returns what the
+    values below make of the result, which must come back right.
+
+  Both paths must compile each alike, and each encoder's bytes run in a child.
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
@@ -260,17 +402,40 @@ of integers, integers and calls, everything, and larger, 300 each by default. Ea
 - if and else, counted while, for and do loops with break and continue, early returns;
 - expressions of every operation over every class, with conversions, `?:`, `&&` and `||` as values, and compares;
 - pointer arithmetic as a U64 value, with element sizes for each of its templates: 1 to 8, imul's imm32, and sizes past
-  it to 2^64 − 8.
+  it to 2^64 − 8;
+- with the `objects` option (the shapes everything and larger), up to three objects a function:
+  - local arrays of 2 to 16 elements and structs of 2 to 5 members laid out as C lays them out, some `_Alignas(16)`;
+  - elements and members read, written (an element also by `+=`) and pointed into;
+  - each object's address modulo its alignment as a value (`(unsigned long)&v & 15`), 0 wherever the object is placed
+    right;
+  - twins (an object of the layout of the one before) and copies between them, of all their bytes or a prefix, as
+    statements and before call arguments (a `COPY` above the arguments before it). C leaves the order of a call's
+    arguments unspecified, and another argument may read the copy's destination, so a call with a copy is written in
+    C as a block that evaluates its arguments into temporaries in order, the copy a statement at its place;
+  - at each function's end, every element's and member's bits XORed into a global (padding left out), so that a
+    byte any store or copy puts wrong shows in the globals.
+
+  A program without objects is the one the same seed gave before they existed;
+- with the `indirect` option (the shapes with calls), a third of the calls indirect: through locals that hold an
+  earlier function's address (C calls through them), or through the function's address itself:
+  - four functions in ten take an earlier function's type, so that a type has several functions;
+  - statements give a pointer one function of its type or another by a condition (`p = c ? f : g`), so that a call
+    through it reaches whichever it holds when it runs;
+  - the interpreter calls the function an address names, once its tag and its type are checked against the call's (its
+    result's class and each parameter's, apart from the generator's choice of candidates), and a call's work budget is
+    its costliest candidate's.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
 
 **The cross-check** (`--cross-check`, 60 programs of the larger shape) writes Tier 0's code as an ELF object through the
-link representation and the object writer. clang -O0 compiles the same program as C, and a generated harness links
-both, runs them on the same inputs and compares the results and every global. These programs keep to what C defines:
-clang folds an out-of-range floating conversion of a constant its own way, so a floating value converts to an integer
-only from a short's value. A floating global's elements compare as their bytes, but any two NaNs are the same: C leaves
-a NaN's sign and payload to the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN.
+link representation and the object writer. clang -O0 compiles the same program as C, and a generated harness links both,
+runs them on the same inputs and compares the results and every global. clang compiles them in this repository's own
+dialect, `-fwrapv` (signed arithmetic wraps, as Tier 0's does) and `-fno-strict-aliasing` (the objects' checksums read
+floating parts' bits through integer pointers). These programs keep to what that defines: clang folds an out-of-range
+floating conversion of a constant its own way, so a floating value converts to an integer only from a short's value. A
+floating global's elements compare as their bytes, but any two NaNs are the same: C leaves a NaN's sign and payload to
+the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN.
 
 **Robustness:**
 
@@ -284,7 +449,65 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
   - a uniform case not added for half the lanes: 304;
   - a call's count one too high past 9 records: 29;
   - the accumulator's context inverted: 244;
-  - a local's references miscounted: 749.
+  - a local's references miscounted: 749;
+  - the ranks' tie-break inverted: 778; callee-saved registers for locals referenced once: 686, or left out of the
+    frame's pushes: 614;
+  - a call's argument registers one depth off in its count: 551; a stack parameter's load left out of the prologue's
+    count: 161, or given a frame slot: 565;
+  - a chosen form's destination not taken twice: 800; an imm16 written as an imm32: 390;
+  - a cycle's `xchg` not passing its value on, which only the moves test reaches: 189 of its rounds;
+  - and on the objects, 300 programs per shape:
+    - objects not aligned: 968 of the objects test's checks and 27 programs' runs (an address modulo 16 that is 8);
+    - the frame not kept a multiple of 16 for them: 697 and 2;
+    - objects overlapping: the objects test, and runs that crash, loop until the alarm, or differ;
+    - the vector path giving objects slots too, or the scalar path: 1,951 and 599 (the paths disagree);
+    - each rule of the validator's for objects left out: its break taken;
+    - a `VA_LIST`'s 24 bytes (#356's frames) taken as a value's 8 by either path or by both: 1,184 of the objects
+      test's checks each;
+  - and on copies:
+    - the last 16-byte piece not pulled back to end at the copy's end, so that it copies past it: 17 programs' runs,
+      once their objects' bits are folded into a global, and none before;
+    - the second piece of a copy below 16 bytes left out: 101; the vector path's count without the last 16 bytes' load
+      and store: 69;
+    - the scratch left out of selection, general or XMM, on either path: 952 and 714 of the copies check;
+    - the validator's size limits left out: their breaks taken.
+  - and on indirect calls:
+    - the callee's register one depth off: the paths disagree and runs crash;
+    - its move left out of the vector path's count: 767; the call's depths, the emitter's: 767;
+    - the callee left out of the effects: 713; or of the validator: 764 (valid streams refused);
+    - the interpreter calling the generator's own choice, not the function the pointer holds: 29 programs' runs;
+    - the generator's candidates of one arity but other parameters' or result's classes: 3 and 6 programs, whose
+      calls the interpreter refuses. Checking the arity alone, as it did, the first passed and the second crashed
+      the test.
+    - al set before the moves have put the callee in r11, or not at all for an indirect call: the variadic calls'
+      child crashes (its callee in rax overwritten), and their probe sees al 0. The programs, whose calls aren't
+      variadic, see neither.
+
+    Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
+    changes no value.
+  - and absorbed lanes looking their value up as a local, past 32 locals (on main): the errors check's 40 locals,
+    whose stray gather faults.
+  - and on the operands' classes:
+    - the rule left out: the operands check's nine refused streams taken;
+    - the class compared with the entry's own, not the entry before's: 120 failed checks, the generated programs'
+      streams refused among them.
+- **Every stream source against the operands' rule:** a scratch build validated every function each compile path
+  took, besides the validations the sources make, and printed every refusal. The sources were:
+  - the generator's programs, with and without the cross-check;
+  - `test-tier0`'s own streams;
+  - #356's variadic frames;
+  - the builtin lowering's recipes and helpers, the atomic RMW helpers' on the 9700X (their oracles need its Clang);
+  - the unwind tests and benchmarks;
+  - `benchmark-backend`;
+  - #357's producer (`test-checker`) and #322's adapter, on #357's branch.
+
+  Two tests' own streams broke the rule, and are rewritten in postorder here:
+  - the copies check's;
+  - one of the atomic RMW helpers' callers, which returned a value from under a call that returns nothing. It compiled
+    right only because the return was the stream's last entry, the stack effect it was given being one short.
+
+  A strict postorder rule (the entry before must push) would also have refused 110 of #357's streams, where a
+  post-increment's old value is left under a store of its class, which both paths compile right.
 
 ## Measurements
 
@@ -310,17 +533,31 @@ path's 11.1.
 - **The passes after fusion:** vectorizing selection, measuring and emission, and counting calls without emitting
   them, took the vector path from 142.4 to 85.7 cycles per entry (1.66 times as fast), and 2.63 times as fast as the
   scalar path.
+- **The second round** (the call emitter's moves on bitmasks, the homes by ranks, the frame's slots by masks, the
+  prologue counted, the chosen forms applied from a byte per form, selection without per-block branches, measuring's
+  register mask), against #303's head on the current programs, run in turn three times: the vector path from 87.7 to
+  76.5 cycles per entry back to back (196.7 to 163.4 instructions, 15.8 to 13.8 ns), from 89.3 to 78.4 in the full
+  benchmark and to 78.7 after 100 ms of the scalar path, its power cap's count 2.1 per record against the head's 3.1.
+  The scalar path, which shares the call emitter, went from 233.2 to 226.2 (589.0 to 559.8 instructions).
+- **The chosen forms applied on the records' halves** (the compiler had split the fields into byte loads and
+  stores): 75.6 to 74.8 cycles per entry, 163.5 to 162.0 instructions, in four rounds run in turn, each 1.0 to 1.2%.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
-  The vector path is still about 2.7 times that; the budget is not met.
-- **Where the time goes** (perf on the 9700X, each pass kept out of line), about, in cycles per entry:
-  - emission 15, measuring 12 (counting calls 3 of it), selection 10 (the gather 1.3);
-  - the call emitter 9, homes 9 (sorting the locals 3), applying the chosen forms 6;
-  - fusion and depths (P0 to P4) 14, the frame and the prologue 6.
+  The vector path is still about 2.3 times that; the budget is not met.
+- **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
+  vector path's time:
+  - emission 21%, fusion and depths (P0 to P4) 16%, selection 13% (the slot gather the largest part), measuring 10%;
+  - the call emitter and its count 14% together, for the 3.6% of entries that are deferred;
+  - the immediates' choice (`x86_choose_forms`) and applying it 11%;
+  - the homes, the frame, the prologue and the per-function setup 15%.
 
-**Generated code against clang -O0** (60 cross-checked programs on the 9700X):
+**Generated code against clang -O0** (the cross-check's 60 programs for each of seeds 1, 2, 3, 5, 7 and 11, on the
+9700X, each run alone under its lock and pinned to CPU 2):
 
-- **Run time:** 0.79 of clang's (0.70 to 0.78 on the 7940HS, over 1,310 programs of six seeds).
-- **Code size:** 1.11 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
+- **Run time:** 0.93 to 0.95 of clang's (0.86 to 0.92 on the 7940HS). The programs have had objects, indirect calls
+  and copies since #362 to #364, and every object's bytes are read into a global as each function ends. An object
+  lives in memory for both compilers, so Tier 0's register homes gain less on such code: before them, its run time
+  was 0.79 of clang's (0.70 to 0.78 on the 7940HS).
+- **Code size:** 1.10 to 1.11 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
   through a general register (up to 15 bytes) where clang loads them from `.rodata` (not counted in its `.text`).
   They are also full of constant arithmetic, which #133 will fold before Tier 0 sees it.
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
@@ -331,19 +568,74 @@ path's 11.1.
   them to the scalar path, with frame slots.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - conversions between U64 and floating values;
-  - aggregates and struct copies;
+  - aggregates passed and returned by value (the objects they live in and copies of up to 256 bytes are done);
+  - objects aligned past 16, which need a frame pointer;
   - bit-fields;
-  - `va_arg`, a variadic function's prologue, `long double` and `_Complex`;
+  - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
   - variable-length arrays, inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table);
-  - indirect calls;
   - globals of shared libraries through the GOT (a front end's visibility decision).
-- **The rest of the time:** the call emitter (an entry at a time), sorting the locals by references (an insertion
-  sort that mispredicts), applying the chosen forms (`x86_choice_instruction` per request), and selection's gather
-  from a table larger than L1.
+- **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
+  per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.
+- **The immediates' choice** costs about 7 cycles per entry: the application about 5 (its loads of the records more
+  than its arithmetic), `x86_choose_forms` about 2 (3.6 cycles per request, batched), the requests' columns about 1.
+  27% of the entries make a request; 6% of the requests are static (a branch on a local's `cmp home, 0`), so deciding
+  those per template at initialization would save under 1%; and choosing in emission's blocks of 8 would run the
+  chooser's candidates on 8 lanes for about 2 requests, more than the batch costs. What would remove the requests is
+  deciding each form at selection, from the constant's value class (P0 has its predicates) and whether its register
+  is rax (its depth's), with templates keyed by them.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
 - **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on
   them; c-testsuite (#145); `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole
   compile against tcc.
-- **Unwind tables (#88)** for the prologue and the epilogue, which follow fixed templates.
+- **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
+  records, the fixed prologue and epilogue (`docs/unwind.md`).
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The implementation's five phases and contracts](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/tier0.c#L4)
+are real, but the statement that [#133](https://github.com/buster14a/buster/issues/133) produces its input describes the intended
+integration: at this pin the complete source producer does not exist. The
+actual current producer is `tier0_generate` and the tests' manually built
+`Tier0Function` fixtures. `CheckStream` is not a drop-in replacement.
+
+| Producer → consumer | Implemented or missing contract |
+| --- | --- |
+| Checked C/graph → ordered typed function/ABI metadata | Missing source bridge, [#133](https://github.com/buster14a/buster/issues/133)/[#136](https://github.com/buster14a/buster/issues/136)/[#145](https://github.com/buster14a/buster/issues/145). Must lower control flow, short-circuiting and explicit conversions and retain source identity. |
+| `Tier0Function` → fusion → stack depths → homes/frame | Implemented. Byte kind/class columns plus u64 value; local/call tables and ABI locations. Labels stop fusion; stack prefix sums describe execution order. |
+| Fusion/depth/home columns → templates/deferred sizes → record offsets | Implemented count/prefix placement. Calls/fixed-register exceptional entries compute demand before emission, so variable output has disjoint ranges. |
+| Template/hole blocks → expanded records → `x86_choose_forms` | Implemented direct 16-byte record emission. Scalar twin constructs fields independently; immediate shortening must preserve value and live flags. |
+| Final records/branch columns → `size_branches` → `x86_encode` | Implemented generated-program path. Branch indices/targets stay in record coordinates until sizing; fixup markings/references retain record order. |
+| Encoded bytes/fixup ends + `LinkReference` → `link_add_code_fixups` | Implemented object/executable test path; symbol identity/addends are carried, not rediscovered from instruction bytes. |
+
+A logical batch is one complete function; kernels classify 64 entries and
+read u64 values eight at a time with bounded masks. Input columns need natural
+alignment, no padding; caller storage remains immutable. Output arena records
+include **four extra records** for the expansion's final full store, separate
+from logical record count. Scratch is thread-local, and allocation/unsupported/
+depth failure restores its pushed storage. Do not hand padding records to a
+consumer as real instructions. Initialization of encoder/semantics/templates
+precedes use and concurrent readers.
+
+The typed producer already knows machine classes, pointer scale, explicit
+conversion, branch targets and ABI placement; omitting them would force
+reconstruction. Labels are deliberately derived from control entries and the
+last-operand class from a shifted load. Keeping an extra label column requires
+a measured benefit and a consistency rule. Small-function occupancy motivates
+a unit-batch alternative, but batching cannot fuse across function boundaries,
+mix value stacks or hide per-function setup. Whole-function validation remains
+the trusted-input prerequisite; malformed streams are not handled by hot loops.
+
+Disposition: keep direct machine-record output and explicit variable-output
+placement. `test-tier0 --cross-check` compares exact scalar/vector records,
+branch columns and references, then sizes/encodes/executes them against its
+independent interpreter and Clang-generated fixtures. This validates the
+synthetic producer/consumer path, not actual C source lowering.
+`benchmark-backend` separately times compilation, sizing and encoding; do not
+sum its rows into a claimed measured total. [#136](https://github.com/buster14a/buster/issues/136)/[#145](https://github.com/buster14a/buster/issues/145) require source-driven
+small/large full path measurements, ABI/initialization/copy/arena costs,
+partial-batch/fallback counts and generated code quality. Shared IR/SSA and
+Tier 1 remain [separately tracked branch integrations](simd-boundary-audit.md#pending-stage-integration).
