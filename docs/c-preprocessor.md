@@ -1935,11 +1935,25 @@ full-corpus reproduction and frozen CI subset.
   messages preserve the source after their logical newline; excluded ones
   retain the skipped group's raw lexing. Exceptional lexical overlaps get a
   private prepared view for that inclusion, retaining macro snapshots and
-  shared cache/once/guard state. At most 64 direct and 8 query repairs per
-  inclusion bound full-file copying/preparation and retained storage by
-  `O((64 + 8) * file size)`; capacity exhaustion is an explicit fatal error.
-  Ordinary diagnostic lines consume no repairs. Boundary checks exercise
-  64 successful repairs, the 65th fatal repair, and 65 ordinary messages.
+  shared cache/once/guard state. There is no separate repair-count limit.
+  Each repair must mask new bytes, so source length bounds progress; actual
+  arena or data-index exhaustion fails explicitly. One masking buffer is
+  reused per inclusion, while immutable prepared columns remain alive for
+  old macro definitions. For `R` exceptional repairs of `N` source bytes,
+  preparation still costs `O(R * N)` and retained storage is `O(N + sum of
+  prepared columns)`. Ordinary inputs create no private views. Tests cross
+  8/9, 64/65 and 257 repairs, checking earlier macro definitions after all
+  repairs; 65 exceptional diagnostic messages must also preserve the tail.
+  Failure injection checks allocation, index exhaustion and lack of progress.
+- **Raw-string diagnostics** (#285). Invalid delimiter characters, newlines,
+  delimiters over 16 bytes and unterminated bodies produce errors at their
+  physical source positions. Preparation records only exceptional unknown
+  tokens; emission waits until active source or a directive consumes them.
+  Definitions diagnose once, including an unused definition, and unused
+  macro arguments still diagnose. Excluded group bodies and confirmed opaque
+  header names/messages suppress these errors. An untaken `#elif` directive's
+  own line is still lexed and diagnosed, as Clang does. Scalar/vector checks compare the
+  records; diagnostic fixtures compare text and locations against Clang.
 - **Definitions** (#121). Ten fixtures of `#define`'s and `#undef`'s
   constraints and of redefinitions (the groups above, C90's and C99's
   whitespace, and identical and different redefinitions) must give the same
@@ -2123,18 +2137,6 @@ spellings alone would miss this change (#272).
   answers without options, but for the sanitizers': `-fblocks`, `-fno-builtin`,
   `-fno-gnu-inline-asm` and the other options that change clang's answers
   (#281's item 5) don't change ours.
-- Invalid raw delimiters and unterminated raw strings still lack Clang's
-  lexer diagnostics. Their token spelling is retained, including a line
-  splice inside an invalid delimiter.
-- A header query whose builtin identity appears during macro expansion can
-  require a private prepared view when raw-looking header bytes swallowed
-  later source. Each inclusion permits eight such repairs. A ninth produces
-  a fatal capacity diagnostic. Executing direct directives have a separate
-  budget of 64 exceptional repairs; ordinary directives consume none. The
-  combined full-file copy/preparation work and retained storage are bounded
-  by `O((64 + 8) * N)` for a file of `N` bytes. Unlimited contextual recovery
-  remains follow-up work in #285. Excluded directives retain ordinary lexing,
-  and ordinary multiline raw macro arguments retain their original tokens.
 - c89 and C94 are lexed as clang's `-E` lexes them, without `//` comments. A
   compile driver would need clang's compiling rule there (`//` comments but for a
   `//*` before a file's first one), or to refuse those modes (#288).

@@ -143,6 +143,13 @@ The corresponding `Lexer.cpp` and `UnicodeCharSets.h` carry
 bounded slices, simplified diagnostics and different storage/control flow.
 These existing LLVM terms are not the new first-party grant.
 
+The #285 raw-error query follows the delimiter rules in that same pinned
+`Lexer.cpp` (`LexRawStringLiteral`). Its diagnostic wording follows
+`clang/include/clang/Basic/DiagnosticLexKinds.td` at `llvmorg-23.1.3`, under
+the retained LLVM terms. The new fixtures and contextual error-record,
+emission and recovery code are original project work; Clang runs externally
+as their diagnostics and preprocessing oracle.
+
 The range data reflects Unicode identifier properties plus Clang's
 mathematical-notation extensions. Retain the Unicode data notice as well:
 **Copyright © 1991-2026 Unicode, Inc.** and the complete
