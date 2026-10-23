@@ -67,11 +67,22 @@ including duplicate, zero and out-of-range IDs. It compares complete output
 across exact/vector writers and 1, 2, 3 and 8
 lanes, recomputes the build ID, executes the original fixture, and checks that
 invalid selections and missing TLS sections preserve an existing destination.
+PIE and shared-output fixtures also cover imported functions, initial-exec TLS,
+owned TLS and relocatable image boundaries. Removing the attachment must
+restore the complete output produced without it.
 Existing `test-debug --cross-check` covers the debug-only attachment's consumers.
 It also compares all five finalized DWARF sections with explicit empty and
 single-function symbol selections across exact/vector writers and all four
 lane counts, then restores the debug-only file for the external consumers.
 Builds and tests run on the approved 9700X through the shared host lock.
+
+The integrated source at `568e6c93ba28f62e9f363be9ae37234d6f8efd6a`
+passed `test-executable --keep` (2,490 regular-symbol checks) and
+`test-debug --cross-check --keep` (120 native-debug checks plus the GNU and
+Buster GDB/perf consumers). The archive SHA256 was
+`4bcaba55894d4ceeecf186d128c491d3a0e5e6b288fa5ad0e096998ca967f980`.
+These are correctness results; whole-path performance qualification remains
+pending.
 
 The exact twin retains the scalar lane-zero baseline. The vector path's ID
 classification and lane-partitioned validation/emission must be compared with
