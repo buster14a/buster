@@ -1,4 +1,4 @@
-name: Hosted stage 1 exact-head validation (research branch only)
+name: Hosted simplified stage 1 validation
 on:
   workflow_dispatch:
 permissions:
@@ -10,17 +10,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 53685555a3310d9a2258f6264a242e8db5623899
-      - name: Check stage 1 linker selection without compiling Buster
+          ref: e7217fa16fa080bf8f849985c73575fda59836c2
+          fetch-depth: 2
+      - name: Validate simplified build script using the prior regression harness
         shell: bash
         run: |
           set -euo pipefail
           bash -n build.sh
-          mkdir -p build
-          clang -O2 -Wall -Wextra -Werror tools/build_linker_test.c -o build/build-linker-test
-          build/build-linker-test "$PWD/build.sh"
-          clang -O2 -Wall -Wextra -Werror tools/linker_measure.c -o build/linker-measure
-          build/linker-measure time build/samples.csv success 3 0 true
-          build/linker-measure time build/samples.csv nonzero 3 1 false
-          if build/linker-measure time build/samples.csv failure 1 0 false; then exit 1; fi
-          if build/linker-measure time build/samples.csv invalid 0 0 true; then exit 1; fi
+          git diff --check 829fc6d16342920f678b27ad443db3d91737bfef HEAD
+          git show 53685555a3310d9a2258f6264a242e8db5623899:tools/build_linker_test.c > "$RUNNER_TEMP/build_linker_test.c"
+          clang -O2 -Wall -Wextra -Werror "$RUNNER_TEMP/build_linker_test.c" -o "$RUNNER_TEMP/build-linker-test"
+          "$RUNNER_TEMP/build-linker-test" "$PWD/build.sh"
