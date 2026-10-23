@@ -1446,7 +1446,7 @@ typedef enum CRawStringError
 // Diagnose an UNKNOWN token only. Its prefix undergoes phases 1/2, its delimiter doesn't. The caller decides
 // whether this is active C text: opaque header names/messages and skipped groups must not diagnose these bytes.
 // This cold query leaves the tokenizer's output/API and its vector chunk loop unchanged.
-static CRawStringError c_raw_string_error(const uint8_t* source, uint64_t length, uint32_t flags, uint64_t* offset)
+static __attribute__((unused)) CRawStringError c_raw_string_error(const uint8_t* source, uint64_t length, uint32_t flags, uint64_t* offset)
 {
     const ScalarLexer lexer = { .source = source, .length = length, .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0 };
     char prefix[4];
