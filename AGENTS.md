@@ -160,6 +160,13 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `tier1_schedule.c` provides an opt-in postallocation machine-record scheduler.
+  `test-tier1-schedule` checks scalar/vector ordering, barriers and model coverage;
+  `benchmark-tier1-schedule` measures scheduling plus encoding and a synthetic
+  generated loop. [The scheduling guide](docs/tier1-scheduling.md) records the
+  API and the source-corpus evidence still needed for #172/#181. Use the shared
+  9700X lock for each build/test/measurement and CPU 2 for timing.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
