@@ -134,7 +134,7 @@ outputs and measurement conditions.
 ## Existing source handoff and remaining integration
 
 The checker implementation from [PR #312](https://github.com/buster14a/buster/pull/312)
-has landed on main. At `47e1d96d9ab25fd21221e41c5c9162daf5a997ff`, its checker,
+has landed on main. At `21d632c202fa9be20841ba3630220a2640087847`, its checker,
 source reader, checker driver and static-data reader match the inspected
 `991f9ba756800c4b78b47bc983ae3ec7416000e4` revision. This already supplies a real
 source-to-static-data path. `CheckInput` retains resolved declaration uses,
@@ -144,6 +144,12 @@ duration, definition/tentative flags and checked initializer nodes.
 `check_data_emit` produces link atoms and fixups. That path currently selects
 every static object definition, including block statics. Static storage
 duration alone does not make an object an emission root.
+
+The opt-in `ParseBindings` producer from #128 now supplies lexical declaration
+identities, namespace/kind columns and scope events. Its trace excludes
+attribute and asm symbols. The default syntax driver does not request these
+columns. They provide binding identities for a future adapter; emission still
+requires the semantic graph and policy described below.
 
 An adapter must map those token-derived identities to dense definition IDs in
 source order and map the selected IDs back to the emitter's object records.
