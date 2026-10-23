@@ -494,6 +494,8 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
     bool line_start = true;
     bool valid = candidates == 0 || ranges != 0;
     uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
+    uint32_t pragma_token = 0;
+    bool expanded_pragma = false;
     uint32_t current_line = BUSTER_PP_NONE;
     uint32_t silent = 0;
     uint32_t at = 0;
@@ -503,6 +505,15 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
         const uint8_t kind = out->kinds[i];
         const bool written = pp_spelled_as_written(pragma, kind);
         pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
+        if (pragma == BUSTER_PP_PRAGMA_NAME)
+        {
+            pragma_token = 0;
+            expanded_pragma = false;
+        }
+        else if (pragma != BUSTER_PP_PRAGMA_OUTSIDE)
+        {
+            pragma_token += 1;
+        }
         uint32_t silent_place = BUSTER_PP_NONE;
         for (; silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i; silent += 1)
         {
@@ -573,6 +584,10 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
                                : buffer != 0 ? pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling)
                                              : 0;
             valid = spelling != 0;
+            if (pragma != BUSTER_PP_PRAGMA_OUTSIDE && pragma_token == 2)
+            {
+                expanded_pragma = valid && n == 3 && memcmp(spelling, "omp", 3) == 0;
+            }
             const bool breaks = valid && pp_fuzz_breaks(kind, spelling, n);
             const long start = breaks ? ftell(stream) : 0;
             fwrite(spelling != 0 ? spelling : (const uint8_t*)"", 1, n, stream);
@@ -585,6 +600,7 @@ static char* pp_fuzz_clang_text(Preprocessor* pp, size_t* length, Arena* arena, 
                     .end = (uint32_t)end,
                     .kind = kind,
                     .pragma = pragma != BUSTER_PP_PRAGMA_OUTSIDE,
+                    .expanded_pragma = expanded_pragma && pragma != BUSTER_PP_PRAGMA_OUTSIDE,
                 };
                 range_count += 1;
             }
@@ -693,13 +709,57 @@ static PreprocessorFuzzDifference pp_fuzz_compare(Arena* scratch, PreprocessorFu
     return lost && difference == BUSTER_PPF_EQUAL ? BUSTER_PPF_TOKEN_COUNT : difference;
 }
 
+// Compare independently observed Clang tokens with all of our whole tokens in the selected stream: ordinary output,
+// or the expanded operands of #pragma omp. Match kinds and full spellings in order, including trailing literal bytes.
+static PreprocessorFuzzDifference pp_fuzz_confirm_ends(PreprocessorFuzzOutput ours, const PreprocessorFuzzClangTokens* theirs, bool pragmas)
+{
+    uint64_t expected = 0;
+    for (uint64_t w = 0; w < ours.whole_count; w += 1)
+    {
+        expected += pragmas ? ours.whole[w].expanded_pragma : !ours.whole[w].pragma;
+    }
+    uint64_t w = 0;
+    uint64_t matched = 0;
+    PreprocessorFuzzDifference result = BUSTER_PPF_EQUAL;
+    for (uint64_t t = 0; result == BUSTER_PPF_EQUAL && t < theirs->count; t += 1)
+    {
+        const PreprocessorFuzzClangToken* token = &theirs->tokens[t];
+        const bool unknown = token->kind.length == 7 && memcmp(token->kind.pointer, "unknown", 7) == 0 &&
+                             pp_fuzz_runs_on((const uint8_t*)token->spelling.pointer, token->spelling.length);
+        const bool string = token->kind.length == 14 && memcmp(token->kind.pointer, "string_literal", 14) == 0 &&
+                            pp_fuzz_broken_string((const uint8_t*)token->spelling.pointer, (uint32_t)token->spelling.length);
+        while (w < ours.whole_count && !(pragmas ? ours.whole[w].expanded_pragma : !ours.whole[w].pragma))
+        {
+            w += 1;
+        }
+        if (token->pragma == pragmas && (unknown || string))
+        {
+            if (w == ours.whole_count)
+            {
+                result = BUSTER_PPF_TOKEN_COUNT;
+            }
+            else
+            {
+                const PreprocessorFuzzWhole* mine = &ours.whole[w];
+                const uint64_t length = (uint64_t)mine->end - mine->start;
+                const bool same_kind = (mine->kind == C_TOKEN_UNKNOWN) == unknown;
+                const bool same_spelling = token->spelling.length == length && memcmp(token->spelling.pointer, ours.text.pointer + mine->start, length) == 0;
+                result = !same_kind ? BUSTER_PPF_TOKEN_KIND : !same_spelling ? BUSTER_PPF_TOKEN_SPELLING : BUSTER_PPF_EQUAL;
+                w += 1;
+                matched += 1;
+            }
+        }
+    }
+    return result == BUSTER_PPF_EQUAL && matched != expected ? BUSTER_PPF_TOKEN_COUNT : result;
+}
+
 // Where our whole tokens off pragma lines end, which clang's text followed (preprocessor_fuzz_lex_printed), clang's own
 // tokens for the case alone confirm (preprocessor_fuzz_clang_tokens): its unknown tokens that run on (pp_fuzz_runs_on)
 // and broken strings (pp_fuzz_broken_string), in order, must be those tokens of ours, of their kinds and spellings. A
 // pragma's tokens are among neither. Returns the difference (BUSTER_PPF_EQUAL if there is none, or no such token of
-// ours), or BUSTER_PPF_INVALID if clang's tokens can't be had. Sets *checked when there were tokens to confirm, and
-// *unverified when the texts agree only as far as they show: a token of ours on a pragma's line that runs on
-// (preprocessor_fuzz_whole_runs_on), whose end clang's text followed and clang's tokens can't confirm.
+// ours), or BUSTER_PPF_INVALID if requested token evidence can't be had. The optional external pragma oracle confirms
+// expanded omp operands. Sets *checked when there were tokens to confirm, and *unverified when a continuing pragma
+// token's end still has no independent evidence.
 static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char* clang_path, bool c23, const PreprocessorFuzzCase* test_case, PreprocessorFuzzOutput ours, bool* checked,
                                                      bool* unverified)
 {
@@ -718,35 +778,21 @@ static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char*
     {
         result = BUSTER_PPF_INVALID;
     }
-    uint64_t w = 0;
-    uint64_t matched = 0;
-    for (uint64_t t = 0; *checked && result == BUSTER_PPF_EQUAL && t < theirs.count; t += 1)
+    if (*checked && result == BUSTER_PPF_EQUAL)
     {
-        const PreprocessorFuzzClangToken* token = &theirs.tokens[t];
-        const bool unknown = token->kind.length == 7 && memcmp(token->kind.pointer, "unknown", 7) == 0 &&
-                             pp_fuzz_runs_on((const uint8_t*)token->spelling.pointer, token->spelling.length);
-        const bool string = token->kind.length == 14 && memcmp(token->kind.pointer, "string_literal", 14) == 0 &&
-                            pp_fuzz_broken_string((const uint8_t*)token->spelling.pointer, (uint32_t)token->spelling.length);
-        while (w < ours.whole_count && ours.whole[w].pragma)
+        result = pp_fuzz_confirm_ends(ours, &theirs, false);
+    }
+    const char* oracle = getenv("BUSTER_PPF_PRAGMA_ORACLE");
+    if (result == BUSTER_PPF_EQUAL && unconfirmed != 0 && oracle != 0 && oracle[0] != 0)
+    {
+        PreprocessorFuzzClangTokens pragmas = { 0 };
+        result = preprocessor_fuzz_clang_pragma_tokens(scratch, clang_path, oracle, c23, test_case, &pragmas) ? pp_fuzz_confirm_ends(ours, &pragmas, true) : BUSTER_PPF_INVALID;
+        *checked = true;
+        for (uint64_t p = 0; result == BUSTER_PPF_EQUAL && p < ours.whole_count; p += 1)
         {
-            w += 1;
-        }
-        if ((unknown || string) && w == ours.whole_count)
-        {
-            result = BUSTER_PPF_TOKEN_COUNT;
-        }
-        else if (unknown || string)
-        {
-            const PreprocessorFuzzWhole* mine = &ours.whole[w];
-            const uint64_t length = (uint64_t)mine->end - mine->start;
-            const bool same_kind = (mine->kind == C_TOKEN_UNKNOWN) == unknown;
-            const bool same_spelling = token->spelling.length == length && memcmp(token->spelling.pointer, ours.text.pointer + mine->start, length) == 0;
-            result = !same_kind ? BUSTER_PPF_TOKEN_KIND : !same_spelling ? BUSTER_PPF_TOKEN_SPELLING : BUSTER_PPF_EQUAL;
-            w += 1;
-            matched += 1;
+            unconfirmed -= ours.whole[p].expanded_pragma && preprocessor_fuzz_whole_runs_on(ours.text, &ours.whole[p]);
         }
     }
-    result = result == BUSTER_PPF_EQUAL && matched != followed ? BUSTER_PPF_TOKEN_COUNT : result;
     *unverified = result == BUSTER_PPF_EQUAL && unconfirmed != 0;
     arena_pop_to(scratch, begin);
     return result;
@@ -1308,6 +1354,10 @@ static void pp_fuzz_against_clang(Arena* arena, const PPFuzzOptions* options, bo
             tally->ends += checked && result != BUSTER_PPF_INVALID;
             tally->unverified += unverified;
             tally->invalid += answered[k] && result == BUSTER_PPF_INVALID;
+            if (unverified && !pp_test_quiet)
+            {
+                printf("fuzz: %s, seed %" PRIu64 ", case %" PRIu64 ": clang's pragma token ends are unverified\n", c23 ? "c23" : "c17", options->seed, grouped[k].id);
+            }
             if (answered[k] && result == BUSTER_PPF_INVALID && !pp_test_quiet)
             {
                 printf("fuzz: %s, seed %" PRIu64 ", case %" PRIu64 ": the comparison with clang gave no result\n", c23 ? "c23" : "c17", options->seed, grouped[k].id);
@@ -1467,12 +1517,24 @@ static const PPFuzzEndsCase pp_fuzz_ends_cases[] = {
         "#define Q 'q\n#pragma omp Q x\n",
         true,
     },
+    {
+        "#define Q 'q  \n#pragma omp Q __COUNTER__\n__COUNTER__\n",
+        true,
+    },
+    {
+        "#define ID(x) x\n#define Q 'q  \n#pragma omp ID(Q) x\n",
+        true,
+    },
+    {
+        "#define Q 'q  \n_Pragma(\"omp Q x\")\n",
+        true,
+    },
 };
 
 // Each source above in each mode as it is, which must agree with clang, its ends confirmed by clang's tokens
-// (pp_fuzz_check_ends), or unverified; then with the first of our tokens that its text can't lex back one byte shorter,
-// as #263's second review shortened it, which must differ. The first source's text puts the byte it lost among the
-// printer's spaces, which don't count: only clang's tokens show it. Returns whether every source gives its results.
+// (pp_fuzz_check_ends), or unverified when the optional pragma oracle is unavailable; then with the first token one
+// byte shorter, as #263's second review shortened it. It must differ or remain unverified. The first source puts the
+// byte it lost among the printer's spaces: only clang's tokens show it. Returns whether every source gives its results.
 static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
 {
     Arena scratch = arena_reserve(BUSTER_PP_FUZZ_ARENA_BYTES);
@@ -1506,7 +1568,10 @@ static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
             bool checked = false;
             bool unverified = false;
             bool shortened = false;
+            bool shortened_unverified = false;
             bool counted = true;
+            const char* oracle = getenv("BUSTER_PPF_PRAGMA_ORACLE");
+            const bool expected_unverified = ends_case->unverified && (oracle == 0 || oracle[0] == 0);
             for (uint32_t pass = 0; ran && pass < 2; pass += 1)
             {
                 Preprocessor* pp = &pp_fuzz_state.runs[0];
@@ -1527,20 +1592,24 @@ static bool pp_fuzz_check_ends_cases(const PPFuzzOptions* options)
                                                                 : texts[pass];
                 checked |= pass == 0 && pass_checked;
                 unverified |= pass == 0 && pass_unverified;
+                shortened_unverified |= pass == 1 && pass_unverified;
                 if (pass == 0 && ends_case->unverified)
                 {
                     // The real comparison path must report this case separately, without counting its unchecked end
                     // as a verified comparison. The review's pragma source is accepted by both preprocessors.
                     const bool usable = true;
                     PPFuzzTally tally = { 0 };
+                    const bool saved_quiet = pp_test_quiet;
+                    pp_test_quiet = true;
                     pp_fuzz_against_clang(&scratch, options, c23, false, &test_case, &ours, &lost, &usable, 1, &tally);
-                    counted = tally.unverified == 1 && tally.compared == 0 && tally.invalid == 0 && tally.differences == 0;
+                    pp_test_quiet = saved_quiet;
+                    counted = tally.unverified == expected_unverified && tally.compared == !expected_unverified && tally.invalid == 0 && tally.differences == 0;
                 }
             }
             pp_fuzz_release(&pp_fuzz_state);
             arena_pop_to(&scratch, 0);
-            const bool agrees = results[0] == BUSTER_PPF_EQUAL && checked == !ends_case->unverified && unverified == ends_case->unverified;
-            const bool differs = shortened && results[1] != BUSTER_PPF_EQUAL && results[1] != BUSTER_PPF_INVALID;
+            const bool agrees = results[0] == BUSTER_PPF_EQUAL && checked == !expected_unverified && unverified == expected_unverified;
+            const bool differs = shortened && ((results[1] != BUSTER_PPF_EQUAL && results[1] != BUSTER_PPF_INVALID) || (expected_unverified && shortened_unverified));
             const bool only_tokens = i != 0 || (texts[1] == BUSTER_PPF_EQUAL && results[1] == BUSTER_PPF_TOKEN_SPELLING);
             if (!agrees || !differs || !only_tokens || !counted)
             {

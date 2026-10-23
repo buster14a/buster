@@ -18,6 +18,9 @@ minimizes differences (`preprocessor_fuzz*.c`, `test-preprocessor-fuzz`).
 ./build/compiler test-preprocessor-fuzz --std c17
 ./build/compiler test-preprocessor-fuzz --std c23
 ./build/compiler benchmark-preprocessor-fuzz --std c17
+# Optional token oracle for expanded omp operands (installed Clang 23 / LLVM development libraries):
+bash tools/build-preprocessor-pragma-oracle.sh
+BUSTER_PPF_PRAGMA_ORACLE="$PWD/build/preprocessor-pragma-oracle" ./build/compiler test-preprocessor --clang --fuzz 100000 --seed 211 --jobs 8
 ```
 
 - `test-preprocessor` runs its fixtures, then 1,500 generated cases in each
@@ -44,10 +47,14 @@ now settled. The preprocessor's fuzzing is an option of its test command,
 harness keeps `test-preprocessor-fuzz` for its self-tests.
 
 On the 9700X, take the lock for each run:
-`EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND`. A million
-cases in each mode take about 10 minutes on 15 threads there, longer than a
-CI job may wait. So split a long run with `--first` and `--fuzz` into runs of
-about 5 minutes, each under its own lock.
+`EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND`. Split long
+campaigns with `--first` and `--fuzz` into lock holds of about two minutes,
+with about a minute between them, yielding to CI. Start with 100,000 cases
+per mode and size later slices from their measured duration. Locally, set
+niceness to 19 outright and I/O priority to idle, use at most half the
+threads, and keep the receipts and `TMPDIR` on disk. A STOP file checked
+between slices provides a cooperative stop without discarding completed
+receipts. Pin the source tree, executable and oracle before starting.
 
 ## Files
 
@@ -132,12 +139,13 @@ are lexed as `preprocessor_fuzz_lex_printed` says:
   unknown tokens aren't among them, since they end where a lexer ends them:
   clang also calls unknown a `##` that it took out of a macro's argument,
   which ours keeps a `##`.
-- A pragma's tokens aren't among clang's either. A pragma whose tokens are
-  expanded (`#pragma omp`) can go on past such a token on its line, and
-  there nothing confirms its end: the case counts as unverified, apart from
-  the cases compared. A run with any unverified case fails qualification.
-  Seed 133's case 832692, in C17, was the first, in 3.5
-  million cases per mode.
+- A pragma's tokens aren't among clang's ordinary dump either. A pragma whose
+  tokens are expanded (`#pragma omp`) can go on past such a token on its
+  line. The optional oracle below independently observes these token ends.
+  Without it, the case counts as unverified, apart from the cases compared.
+  A run with any unverified case fails qualification. Seed 133's case
+  832692, C17, first exposed this gap; seed 201 exposed three cases per mode
+  in a 200,000-case slice of merged main `a0c6176`.
 - A comment can only be a `/` printed before a `*` or a `/`, and a line
   splice a `\` before a newline. Their `/` and `\` are tokens, and lexing goes
   on after them.
@@ -166,6 +174,48 @@ and `A` printed as `'a ` lexed equal to clang's `'a  `, the lost space taken
 for the printer's. A comparison that couldn't be made, as when its tokens
 don't fit its arena, also counted as compared. It now leaves the case
 without a result, which fails the run.
+
+#### Expanded pragma token ends
+
+`tools/preprocessor_pragma_oracle.cpp` is an optional external oracle. It uses
+Clang 23's C++ frontend API, which is required for this adapter, to run the
+original source under the same `-E -P -undef -nostdinc -std=...` configuration.
+A pragma handler observes `omp` operands through Clang's live macro state;
+it does not rewrite the source or infer a boundary from Buster's output.
+The expansion rule was checked against
+[Clang 23.1.3's printer](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/lib/Frontend/PrintPreprocessedOutput.cpp).
+No Clang implementation or headers are copied into this project.
+
+Build it with `bash tools/build-preprocessor-pragma-oracle.sh [OUTPUT]`, using
+the installed `clang++`, `llvm-config`, `libclang-cpp` and LLVM library.
+`CXX` and `LLVM_CONFIG` can select matching installations. Set
+`BUSTER_PPF_PRAGMA_ORACLE` to the resulting executable. The ordinary compiler
+build has no new dependency. The adapter and selected `clang` must have the
+same complete release version; a version mismatch, failed process, unreadable
+dump or missing end marker leaves the comparison without a result.
+
+Only a case with an otherwise unconfirmed pragma token runs this adapter.
+The tagged token dump identifies pragma operands independently. Their kinds
+and complete spellings must match all corresponding opaque tokens, in order,
+including trailing spaces within malformed literals. Normal token ends still
+use Clang's ordinary dump. With the adapter unavailable, unconfirmed cases
+remain unverified and fail qualification; they are never filtered or counted
+as successful comparisons. Reports identify their seed and case number.
+
+The permanent end/mutation controls cover a macro's malformed literal with
+trailing spaces, a nested invocation, `__COUNTER__` across a pragma and the
+following source, and `_Pragma`. They require a shortened spelling to differ
+with the oracle present, and remain unverified when no oracle can confirm it.
+Harness reader controls cover tagged versus ordinary records, trailing bytes,
+and mismatched release versions.
+
+This is a partial prototype at the October 23 handoff. Seed 201's cases
+20983, 30319 and 89431 still count as unverified in both modes with the
+adapter present: their ordinary/unknown `_Pragma` operands also need
+independent token evidence. The adapter currently observes `omp` operands.
+The preserved inputs, replay receipts and next steps are in
+[the handoff](measurements/preprocessor-fuzz-109-handoff-2026-10-23/README.md).
+The final ten-million-per-mode qualification on either host remains pending.
 
 #### Clang's `-P` printer, emulated
 

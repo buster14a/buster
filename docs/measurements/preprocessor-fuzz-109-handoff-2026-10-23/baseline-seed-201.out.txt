@@ -1,0 +1,43 @@
+cases: 0 of 320 fail
+macro batches: 522 boundary calls and long literal/optional runs: agree
+timestamps: each file's modification time, and SOURCE_DATE_EPOCH's
+feature answers: as expected (what buster implements by default, clang's with --clang-features)
+predefines target: as expected (x86_target.c's features, its six profiles, -m switches, other CPUs and -mtune)
+predefines: -m options refused though clang takes them, and those taken: as expected
+history diagnostics: 0 of 36 fail (Clang oracle)
+history runs: pass (201 lengths, split copies, scalar/vector queries, guard page)
+history lifetimes: pass (redefinition, repeated parameters, retained generated inputs, builtins, recording control)
+history growth: pass (all eight initial slices, repeated arguments, generated sources)
+embed text: 1204 checks, 0 failures
+embed lookups: 0 of 2 fail
+directive tables: 0 of 2004 random sources and nests differ from the oracle (1981533 tokens, 631903 directives, 46969 notes, 8 guards)
+directive structure: 0 of 26 fixtures differ from clang's diagnostics
+diagnostic text: 0 of 7 fixtures differ from clang's diagnostics
+diagnostic recovery capacity: 0 of 6 kernel runs differ
+diagnostic recovery predefines origin: preserved
+definitions: 0 of 10 fixtures differ from clang's diagnostics
+include guards: 0 of 20 fixtures differ (outputs and skips by guards against clang's)
+location space: 2 of 2 runs out where expected
+location option: 5 of 5 runs of the commands take --location-limit and its value as ours, clang without them
+preprocessor determinism: 320 fixtures, 1/2/3/8 lanes, both kernels/orders, ID seed 153: pass
+dollar printing: 0 of 16 cases fail
+raw query private views: pass (fresh, cold shared and warm shared caches, both kernels)
+opaque recovery capacity: pass (8/9 queries, 64/65 direct repairs, ordinary directives uncharged, both kernels)
+option sets: 0 of 70 refused or taken wrongly, 0 of 29 refused ones change nothing in clang's -E and 0 of 41 taken ones differ from clang's
+predefines: 0 of 26 option sets differ from clang -dM
+headers: 0 of 20 files differ from clang with --buster-headers, as test-preprocessor compares files (18475 tokens): buster's and clang's headers after an -isystem directory's, and under links whose names clang escapes (0 differ); __has_include with the flag alone, with -nobuiltininc and with -nostdinc; and clang's resource directory and buster's given again in 13 ways (0 differ)
+clang command: 305 arguments to clang, all of them read
+headers: 0 of 176 header, mode and hosting sets differ from clang's; our preprocessor differs from clang on 0 of 16 modes with them; 0 of 32 units among the C library's and clang's other headers differ; 0 of 3 runs with -nobuiltininc, -nostdinc and neither find other headers than clang; quoted names beside clang's headers are found where they should be
+predefines tables: 117 features, 79 CPUs and 105 -mtune names, 0 differences from clang's
+predefines: 0 of 2178 option sets differ from clang -dM (400 random from seed 201)
+predefines: -dM and __FLT_EVAL_METHOD__, 0 of 7 differ from clang's
+keywords: 0 of 11 modes and 0 of 25 -f option sets differ from clang's __is_identifier (776 names)
+features: 0 of 11 modes differ from clang's __has_feature and __has_extension (251 names)
+feature options: 0 of 54 sanitizer and target option sets differ from clang's answers
+fuzz isolation: 0 of 24 sources fail
+fuzz comparison: 0 of 46 pairs fail
+fuzz emulation: 0 of 40 cases differ from clang
+fuzz ends: 0 of 10 cases fail
+fuzz failed comparison: a case without a result
+fuzz: c17, seed 201: 200000 cases, 83534 accepted; the kernels differ on 0; 199997 compared with clang (3920 with clang's tokens, 3 unverified), 0 differ (2048 read alone), 0 batches differ from the case alone, 0 batches read case by case; 0 without a result; 9027 whose text can't lex back, as clang's can't
+fuzz: c23, seed 201: 200000 cases, 83652 accepted; the kernels differ on 0; 199997 compared with clang (4258 with clang's tokens, 3 unverified), 0 differ (2048 read alone), 0 batches differ from the case alone, 0 batches read case by case; 0 without a result; 9294 whose text can't lex back, as clang's can't

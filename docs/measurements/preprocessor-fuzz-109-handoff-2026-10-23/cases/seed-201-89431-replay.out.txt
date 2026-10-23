@@ -1,0 +1,9 @@
+fuzz isolation: 0 of 24 sources fail
+fuzz comparison: 0 of 46 pairs fail
+fuzz emulation: 0 of 40 cases differ from clang
+fuzz ends: 0 of 16 cases fail
+fuzz failed comparison: a case without a result
+fuzz: c17, seed 201, case 89431: clang's pragma token ends are unverified
+fuzz: c23, seed 201, case 89431: clang's pragma token ends are unverified
+fuzz: c17, seed 201: 1 cases, 1 accepted; the kernels differ on 0; 0 compared with clang (1 with clang's tokens, 1 unverified), 0 differ (1 read alone), 0 batches differ from the case alone, 0 batches read case by case; 0 without a result; 1 whose text can't lex back, as clang's can't
+fuzz: c23, seed 201: 1 cases, 1 accepted; the kernels differ on 0; 0 compared with clang (1 with clang's tokens, 1 unverified), 0 differ (1 read alone), 0 batches differ from the case alone, 0 batches read case by case; 0 without a result; 1 whose text can't lex back, as clang's can't

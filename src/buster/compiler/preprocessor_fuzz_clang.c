@@ -41,6 +41,7 @@ struct PreprocessorFuzzClangToken
 {
     String8 kind;
     String8 spelling;
+    bool pragma;
 };
 
 typedef struct PreprocessorFuzzClangTokens PreprocessorFuzzClangTokens;
@@ -732,7 +733,7 @@ static bool preprocessor_fuzz_clang_dump_token(Arena* arena, String8 line, Prepr
 // of file. A token that needs cleaning shows its bytes as written last ([UnClean='...']), unescaped, so that its line
 // splices' newlines go on to more lines; each of those but the last ends in its splice's `\` (or a trigraph's), so
 // the flag ends at the first line that ends in "']". Returns false if the text can't be read.
-static bool preprocessor_fuzz_clang_dump(Arena* arena, String8 dump, PreprocessorFuzzClangTokens* result)
+static bool preprocessor_fuzz_clang_dump_read(Arena* arena, String8 dump, bool pragmas, PreprocessorFuzzClangTokens* result)
 {
     const uint64_t saved_length = arena->length;
     uint64_t lines = 0;
@@ -752,12 +753,17 @@ static bool preprocessor_fuzz_clang_dump(Arena* arena, String8 dump, Preprocesso
         {
             end += 1;
         }
-        const String8 line = {
+        String8 line = {
             .pointer = dump.pointer + begin,
             .length = end - begin,
         };
+        const String8 prefix = BUSTER_S8("BUSTER_PPF_PRAGMA ");
+        const bool pragma = pragmas && line.length >= prefix.length && memcmp(line.pointer, prefix.pointer, prefix.length) == 0;
+        line.pointer += pragma ? prefix.length : 0;
+        line.length -= pragma ? prefix.length : 0;
         uint64_t location = 0;
         success = preprocessor_fuzz_clang_dump_token(arena, line, &tokens.tokens[tokens.count], &location);
+        tokens.tokens[tokens.count].pragma = pragma;
         const String8 flags = {
             .pointer = line.pointer + location,
             .length = line.length - location,
@@ -780,8 +786,8 @@ static bool preprocessor_fuzz_clang_dump(Arena* arena, String8 dump, Preprocesso
     }
     const String8 marker = BUSTER_S8(BUSTER_PPF_CLANG_MARKER_PREFIX "0");
     const PreprocessorFuzzClangToken* last = success && tokens.count >= 2 ? &tokens.tokens[tokens.count - 2] : 0;
-    success = last != 0 && last->spelling.length == marker.length && memcmp(last->spelling.pointer, marker.pointer, marker.length) == 0;
-    success = success && last[1].kind.length == 3 && memcmp(last[1].kind.pointer, "eof", 3) == 0;
+    success = last != 0 && !last->pragma && last->spelling.length == marker.length && memcmp(last->spelling.pointer, marker.pointer, marker.length) == 0;
+    success = success && !last[1].pragma && last[1].kind.length == 3 && memcmp(last[1].kind.pointer, "eof", 3) == 0;
     if (success)
     {
         tokens.count -= 2;
@@ -792,6 +798,58 @@ static bool preprocessor_fuzz_clang_dump(Arena* arena, String8 dump, Preprocesso
         arena_pop_to(arena, saved_length);
     }
     return success;
+}
+
+static bool preprocessor_fuzz_clang_dump(Arena* arena, String8 dump, PreprocessorFuzzClangTokens* result)
+{
+    return preprocessor_fuzz_clang_dump_read(arena, dump, false, result);
+}
+
+// Optional Clang C++ API adapter: its tagged token dump includes expanded #pragma omp operands, which Clang's
+// ordinary dump action omits. Refuse a failed process, a different Clang version, malformed dumps or missing markers.
+static bool preprocessor_fuzz_clang_same_version(String8 clang, String8 oracle)
+{
+    const String8 prefix = BUSTER_S8("clang version 23.");
+    bool valid = oracle.length > prefix.length && oracle.pointer[oracle.length - 1] == '\n' && memcmp(oracle.pointer, prefix.pointer, prefix.length) == 0;
+    const uint64_t length = oracle.length - (oracle.length != 0);
+    for (uint64_t i = prefix.length; valid && i < length; i += 1)
+    {
+        valid = (oracle.pointer[i] >= '0' && oracle.pointer[i] <= '9') || oracle.pointer[i] == '.';
+    }
+    bool same = false;
+    for (uint64_t i = 0; valid && !same && i + length <= clang.length; i += 1)
+    {
+        const uint64_t end = i + length;
+        const bool boundary = end == clang.length || clang.pointer[end] == ' ' || clang.pointer[end] == '\n' || clang.pointer[end] == '\r' || clang.pointer[end] == '(';
+        same = boundary && memcmp(clang.pointer + i, oracle.pointer, length) == 0;
+    }
+    return valid && same;
+}
+
+static bool preprocessor_fuzz_clang_pragma_tokens(Arena* arena, const char* clang_path, const char* oracle, bool c23, const PreprocessorFuzzCase* test_case,
+                                                 PreprocessorFuzzClangTokens* tokens)
+{
+    Arena scratch = arena_reserve(BUSTER_PPF_CLANG_SCRATCH_BYTES);
+    const uint64_t capacity = BUSTER_PPF_MAX_CASE_BYTES + 128;
+    PreprocessorFuzzBuffer source = {
+        .data = scratch.base != 0 ? arena_push(&scratch, capacity, 1) : 0,
+        .capacity = capacity,
+    };
+    source.valid = source.data != 0;
+    bool result = test_case->source.length <= BUSTER_PPF_MAX_CASE_BYTES && preprocessor_fuzz_batch_source(&source, &test_case, 1);
+    if (result)
+    {
+        char* arguments[] = { (char*)oracle, c23 ? "-std=c23" : "-std=c17", 0 };
+        const String8 input = { .pointer = source.data, .length = source.length };
+        const PreprocessorFuzzProcess process = preprocessor_fuzz_clang_process(&scratch, arguments, input, 64 * BUSTER_PPF_MAX_OUTPUT_BYTES);
+        char* version_arguments[] = { (char*)clang_path, "--no-default-config", "--version", 0 };
+        const PreprocessorFuzzProcess version = preprocessor_fuzz_clang_process(&scratch, version_arguments, BUSTER_S8(""), BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES);
+        const bool same = preprocessor_fuzz_clang_same_version(version.output, process.output);
+        result = process.valid && process.exit_code == 0 && version.valid && version.exit_code == 0 && same &&
+                 preprocessor_fuzz_clang_dump_read(arena, process.diagnostic, true, tokens);
+    }
+    arena_release(&scratch);
+    return result;
 }
 
 // Clang's own tokens for case `test_case` alone, as its -dump-tokens action gives them after preprocessing, with -E's
