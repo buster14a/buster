@@ -3,8 +3,9 @@
 //
 // Whole foreign-input pipeline with and without string merging. Include after foreign_link_test.c. The object
 // writer produces frozen original ET_REL inputs before timing. Every sample resolves those files afresh, converts
-// them, optionally merges their literals, and writes a fresh executable. Execution and complete byte comparison
-// are outside timing. Exact/vector outputs must agree within each merge state; merged and unmerged layouts may
+// them, optionally merges their literals, writes a fresh executable, and releases the per-link mappings and arenas.
+// Execution, complete byte comparison, and removal of the previous output are outside timing. Exact/vector outputs
+// must agree within each merge state; merged and unmerged layouts may
 // differ. Retained arena bytes exclude mapped input files, generated inputs and transient scratch, not peak RSS.
 //
 // Usage: benchmark-foreign-strings [--counts LIST] [--runs N] [--order LIST] [--only duplicate|unique]
@@ -233,7 +234,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
     ForeignStringsBenchmarkInput input = { 0 };
     bool valid = foreign_strings_benchmark_generate(directory, count, duplicate, arena, &input);
     foreign_test_expect(&tally, valid, "generate frozen named-relocation string objects", 0);
-    uint64_t* times = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)5 * runs);
+    uint64_t* times = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)6 * runs);
     uint64_t* ticks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runs);
     valid = valid && times != 0 && ticks != 0;
     String8 reference[2] = { 0 };
@@ -247,7 +248,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
         for (uint32_t run = 0; valid && run <= runs; run += 1)
         {
             const uint64_t iteration = arena->length;
-            Arena names = arena_reserve(1ull << 30);
+            Arena names = { 0 };
             ForeignTestPath path;
             snprintf(path, sizeof(path), "%s/strings_output_%u_%u_%u", directory, count, duplicate ? 1 : 0, order[v]);
             const String8 destination = {
@@ -261,6 +262,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
             foreign_strings_benchmark_after_scalar(after_scalar);
             const uint64_t start_ticks = foreign_strings_benchmark_ticks();
             const uint64_t start = foreign_now();
+            names = arena_reserve(1ull << 30);
             foreign_run(&foreign, &input.command, variant->path, 1, 0);
             const uint64_t resolved = foreign_now();
             const ForeignLinkResult built = foreign_link_build(&converted, &foreign, arena, &names);
@@ -279,15 +281,10 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
                 emitted = variant->path == FOREIGN_PATH_EXACT ? executable_test_write_exact(&converted.link, entry, destination, 1, &written) :
                                                               executable_test_write(&converted.link, entry, destination, 1, &written, 0, 0);
             }
-            const uint64_t finished = foreign_now();
-            const uint64_t finished_ticks = foreign_strings_benchmark_ticks();
+            const uint64_t written_at = foreign_now();
+            const unsigned resolve_error = (unsigned)foreign.failure.error;
             valid = foreign.failure.error == FOREIGN_ERROR_NONE && built.error == FOREIGN_LINK_ERROR_NONE &&
                     merge_error == FOREIGN_STRINGS_ERROR_NONE && emitted;
-            char detail[256];
-            snprintf(detail, sizeof(detail), "%s count %u %s iteration %u: resolve %u convert %u import %u merge %u write %u",
-                     duplicate ? "duplicate" : "unique", count, variant->name, run, (unsigned)foreign.failure.error,
-                     (unsigned)built.error, (unsigned)built.import.error, (unsigned)merge_error, (unsigned)written.error);
-            foreign_test_expect(&tally, valid, "whole string pipeline succeeds", detail);
             if (valid)
             {
                 retained = arena->length - iteration + names.length + foreign.arena.length;
@@ -298,13 +295,28 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
                 output_bytes = written.file_size;
                 literal_bytes = merged.applied ? merged.strings.size : (uint64_t)count * BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES;
                 applied = merged.applied;
+            }
+            arena_release(&names);
+            foreign_release(&foreign);
+            arena_pop_to(arena, iteration);
+            const uint64_t finished = foreign_now();
+            const uint64_t finished_ticks = foreign_strings_benchmark_ticks();
+            char detail[256];
+            snprintf(detail, sizeof(detail), "%s count %u %s iteration %u: resolve %u convert %u import %u merge %u write %u",
+                     duplicate ? "duplicate" : "unique", count, variant->name, run, resolve_error,
+                     (unsigned)built.error, (unsigned)built.import.error, (unsigned)merge_error, (unsigned)written.error);
+            foreign_test_expect(&tally, valid, "whole string pipeline succeeds", detail);
+            const uint64_t validation = arena->length;
+            if (valid)
+            {
                 if (run != 0)
                 {
                     times[run - 1] = resolved - start;
                     times[runs + run - 1] = converted_at - resolved;
                     times[2 * runs + run - 1] = merged_at - converted_at;
-                    times[3 * runs + run - 1] = finished - merged_at;
-                    times[4 * runs + run - 1] = finished - start;
+                    times[3 * runs + run - 1] = written_at - merged_at;
+                    times[4 * runs + run - 1] = finished - written_at;
+                    times[5 * runs + run - 1] = finished - start;
                     ticks[run - 1] = finished_ticks - start_ticks;
                 }
                 const bool ran = executable_test_runs(path, (const uint8_t*)&input.expected, sizeof(input.expected));
@@ -318,9 +330,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
                 foreign_test_expect(&tally, applied == expected_merge, "duplicate pool applies and unique control remains unchanged", detail);
                 valid = ran && same && applied == expected_merge;
             }
-            arena_release(&names);
-            foreign_release(&foreign);
-            arena_pop_to(arena, iteration);
+            arena_pop_to(arena, validation);
             const uint32_t state = variant->merge ? 1 : 0;
             if (valid && reference[state].pointer == 0)
             {
@@ -331,15 +341,15 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
         }
         if (valid)
         {
-            double medians[5];
+            double medians[6];
             for (uint32_t phase = 0; phase < BUSTER_ARRAY_LENGTH(medians); phase += 1)
             {
                 medians[phase] = foreign_link_test_median(times + phase * runs, runs);
             }
             qsort(ticks, runs, sizeof(*ticks), foreign_link_test_compare_time);
-            printf("foreign-strings %s count %u units %u %s runs %u: resolve %.1f us convert %.1f us merge %.1f us write %.1f us total %.1f us wall %llu ns TSCticks %llu after-scalar %u ms input %llu bytes output %llu bytes literal-input %llu bytes literal-output %llu bytes retained-arena %llu bytes applied %u\n",
+            printf("foreign-strings %s count %u units %u %s runs %u: resolve %.1f us convert %.1f us merge %.1f us write %.1f us cleanup %.1f us total %.1f us wall %llu ns TSCticks %llu after-scalar %u ms input %llu bytes output %llu bytes literal-input %llu bytes literal-output %llu bytes retained-arena %llu bytes applied %u\n",
                    duplicate ? "duplicate" : "unique", count, input.units, variant->name, runs,
-                   medians[0], medians[1], medians[2], medians[3], medians[4], (unsigned long long)times[4 * runs + runs / 2],
+                   medians[0], medians[1], medians[2], medians[3], medians[4], medians[5], (unsigned long long)times[5 * runs + runs / 2],
                    (unsigned long long)ticks[runs / 2], after_scalar, (unsigned long long)input.input_bytes,
                    (unsigned long long)output_bytes, (unsigned long long)((uint64_t)count * BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES),
                    (unsigned long long)literal_bytes, (unsigned long long)retained, applied ? 1 : 0);

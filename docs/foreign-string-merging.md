@@ -93,11 +93,15 @@ outputs must match. `--cross-check` links and runs the same original inputs
 with GNU ld and lld.
 
 `benchmark-foreign-strings` writes deterministic original ET_REL inputs
-before timing, then measures resolution, conversion, pooling, writing and
-their whole interval. Each sample starts from fresh input mappings and Link
+before timing, then measures resolution, conversion, pooling, writing, cleanup
+and their whole interval. The interval includes reservation of the per-link
+name arena, release of input mappings and foreign lane storage, release of
+the name arena, and reset of the caller's reusable output arena. Each sample starts from fresh input mappings and Link
 columns. Every emitted program hashes all referenced literal bytes against
 an independent expected checksum; these runs and full-image comparisons
-are outside the timed interval. Reported retained arena bytes exclude mapped
+are outside the timed interval, as is removal of the preceding output file.
+This is per-link pipeline time, not process startup or frozen-input generation.
+Reported retained arena bytes are captured before cleanup, exclude mapped
 inputs and transient scratch, and are not peak process memory.
 
 The default cases contain 64, 4,096 and 131,072 named literals, with either

@@ -271,13 +271,15 @@ static void foreign_strings_output_oracles(ForeignTestTally* tally, const char* 
             inputs[1],
             0,
         };
-        const bool linked = object_test_run(arguments, output, errors) == 0;
+        const int link_status = object_test_run(arguments, output, errors);
         char* run[] = {
             executable,
             0,
         };
-        const bool executed = linked && object_test_run(run, output, errors) == 42;
-        foreign_test_expect(tally, executed, "external linker executes the same original string references", linkers[linker]);
+        const int run_status = link_status == 0 ? object_test_run(run, output, errors) : -1;
+        char detail[192];
+        snprintf(detail, sizeof(detail), "%s / %s: link status %d, run status %d", linkers[linker], foreign_strings_output_fixtures[fixture].name, link_status, run_status);
+        foreign_test_expect(tally, link_status == 0 && run_status == 42, "external linker executes the same original string references", detail);
     }
 }
 
