@@ -159,6 +159,9 @@ jobs:
           # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
           # and runs them.
           ./build/compiler test-object-writer --cross-check
+          == Test DWARF source lines and late address finalization
+          # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
+          ./build/compiler test-debug --cross-check
           == Test the preprocessor on the repository's translation units against clang
           # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
           # tokens. -target and its triple (clang's default) go to both.
@@ -170,6 +173,8 @@ jobs:
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang
+          == Test GNU syntax metadata against clang
+          ./build/compiler test-gnu --clang
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
           == Test C-source binding identities and scope semantics
@@ -556,6 +561,11 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-object-writer
 
+      - name: Benchmark DWARF validation, sizing, emission and final addresses
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-debug
+
       - name: Benchmark the import path
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -640,6 +650,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Benchmark GNU syntax metadata and parser handoff
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-gnu -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
       - name: Benchmark C-source binding production and resolution
         run: |
