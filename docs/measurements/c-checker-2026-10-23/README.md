@@ -18,6 +18,17 @@ assignment. They exercise the common subset accepted by original PR head
 both as GNU17. The generator and fixtures are original project work; no external
 source corpus is copied here.
 
+| Input | SHA-256 |
+| --- | --- |
+| `source-small.c`, 4 functions | `be568cb5db8dd471edc19be730653ce43623143c033ccc8cc883b640e263dcee` |
+| `source-large.c`, 4,096 functions | `0e33678843ad025277ad6bf0c918c556e526d9421ca78c3f42ab3dd5f5dc47a7` |
+
+The separate corpus acceptance probe uses the existing external SQLite 3.53.4
+amalgamation, SHA-256
+`b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189`,
+with the target's system headers. That source is not vendored. An unsupported
+corpus produces a diagnostic, not a throughput number.
+
 Build from the repository root on the protected 9700X, taking the shared host
 lock for each build or invocation. Use the repository's unchanged native
 compiler flags:
@@ -39,15 +50,21 @@ invoke the lock separately for each process, allowing CI to go first:
 
 ```sh
 EXCLUSIVE_OWNER=codex-checker-133 ~/buster-fast-bench/exclusive.sh \
-  taskset -c 2 /tmp/checker-source-measure /tmp/source-small.c
+  taskset -c 2 /tmp/checker-source-measure --only scalar /tmp/source-small.c
 EXCLUSIVE_OWNER=codex-checker-133 ~/buster-fast-bench/exclusive.sh \
-  taskset -c 2 /tmp/checker-source-measure --after-scalar 200 /tmp/source-small.c
+  taskset -c 2 /tmp/checker-source-measure --only vector /tmp/source-small.c
+EXCLUSIVE_OWNER=codex-checker-133 ~/buster-fast-bench/exclusive.sh \
+  taskset -c 2 /tmp/checker-source-measure --only vector --after-scalar 200 /tmp/source-small.c
 ```
 
-Repeat both commands for the large input and for three independent processes
-per configuration. Each process has one warmup and 21 recorded passes, alternating
-scalar/vector order. `--after-scalar 200` performs scalar work for at least 200 ms
-before each vector sample. Counter results are user-space hardware CPU cycles;
+Repeat all three commands for the large input and for three independent processes
+per configuration. Each process has one warmup and 21 recorded passes. These
+isolated runs measure repeated scalar work, repeated vector-path work and vector
+work after scalar conditioning separately. The harness's optional default mode
+alternates both paths; it is not used for those two-state comparisons.
+`--after-scalar 200` performs scalar work for at least 200 ms before each vector
+sample. This reports whole-call medians, not a trace of the initial frequency
+transition inside a call. Counter results are user-space hardware CPU cycles;
 denied or multiplexed counters print `-1`. Input/output arena bytes omit the
 type table, parser, source text and scratch peak; they are not total memory use.
 

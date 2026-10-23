@@ -198,6 +198,115 @@ static void check_test_binding_failures(CheckTest* test)
     arena_release(&storage);
 }
 
+static void check_test_binding_compatibility_capacity(CheckTest* test)
+{
+    CheckTestTypes types = { 0 };
+    Arena storage = arena_reserve(UINT64_C(1) << 16);
+    bool ready = check_test_types_open(&types) && storage.base != 0;
+    const TypeId function = ready ? type_function(&types.table, BUSTER_TYPE_INT, 0, 0, BUSTER_TYPE_FLAG_PROTOTYPE) : 0;
+    ready &= function != 0;
+    check_test_expect(test, ready, "binding compatibility capacity fixture allocation");
+    static uint32_t names[] = {
+        1,
+        1,
+    };
+    static const Parser parser = {
+        .tokens = {
+            .count = BUSTER_ARRAY_LENGTH(names),
+            .names = names,
+        },
+    };
+    for (uint32_t hidden = 0; ready && hidden < 2; hidden += 1)
+    {
+        for (uint32_t exhausted = 0; exhausted < 2; exhausted += 1)
+        {
+            arena_pop_to(&storage, 0);
+            CBindings bindings;
+            bool bound = c_bindings_initialize(&bindings, &storage, 2, 8) &&
+                         c_bindings_declare(&bindings, C_BINDING_ORDINARY, 1, C_BINDING_FUNCTION, 0, 0, hidden) != 0;
+            bound = bound && (!hidden || c_bindings_restore(&bindings, 0, 1));
+            check_test_expect(test, bound, "binding compatibility visible or restored-scope fixture");
+            if (bound)
+            {
+                TypeId declared_types[] = {
+                    function,
+                    function,
+                };
+                uint8_t declaration_kinds[] = {
+                    C_BINDING_FUNCTION,
+                    C_BINDING_FUNCTION,
+                };
+                uint8_t linkage[] = {
+                    2,
+                    2,
+                };
+                uint8_t defined[2] = { 0 };
+                uint8_t definition_seen[2] = { 0 };
+                uint32_t objects[] = {
+                    17,
+                    19,
+                };
+                uint32_t linked_declarations[] = {
+                    0,
+                    1,
+                };
+                TypeId linked_types[] = {
+                    0,
+                    function,
+                };
+                CheckInputReport reports[4];
+                CheckInput input = {
+                    .reports = reports,
+                    .report_capacity = BUSTER_ARRAY_LENGTH(reports),
+                };
+                CheckInputReader reader = {
+                    .output = &input,
+                    .parser = &parser,
+                    .types = &types.table,
+                    .bindings = bindings,
+                    .declared_types = declared_types,
+                    .declaration_kinds = declaration_kinds,
+                    .defined = defined,
+                    .definition_seen = definition_seen,
+                    .linkage = linkage,
+                    .objects = objects,
+                    .linked_declarations = linked_declarations,
+                    .linked_types = linked_types,
+                    .scope_count = hidden,
+                };
+                // Preconstruct the function type so the only forced failure is the compatibility query. With
+                // the first declaration restored out of scope, the second check uses the TU linkage registry.
+                Scratch internal = scratch_begin(0);
+                const uint64_t capacity = internal.arena->capacity;
+                if (exhausted)
+                {
+                    internal.arena->capacity = internal.arena->length;
+                }
+                const TypeAnswer compatible = type_compatible(&types.table, function, function);
+                check_input_bind(&reader, 1, 2);
+                const bool released = internal.arena->length == internal.length;
+                internal.arena->capacity = capacity;
+                scratch_end(internal);
+                check_test_expect(test, released, "binding compatibility query retained internal scratch");
+                if (exhausted)
+                {
+                    check_test_expect(test, compatible == TYPE_ANSWER_FULL && input.resource && input.report_count == 1 &&
+                                           reports[0].token == 1 && reports[0].message == CHECK_INPUT_RESOURCE,
+                                      hidden ? "hidden linked compatibility exhaustion became a semantic conflict" :
+                                               "visible declaration compatibility exhaustion became a semantic conflict");
+                }
+                else
+                {
+                    check_test_expect(test, compatible == TYPE_ANSWER_YES && !input.resource && input.report_count == 0 && objects[1] == objects[0],
+                                      "compatible declaration control lost acceptance or linked object identity");
+                }
+            }
+        }
+    }
+    arena_release(&storage);
+    check_test_types_close(&types);
+}
+
 static void check_test_bindings(CheckTest* test)
 {
     check_test_binding_source(test, "", "x", 0, 0, true, false);
@@ -350,6 +459,7 @@ static void check_test_bindings(CheckTest* test)
         check_test_binding_source(test, source, "x", expected, widths[i] + 2, true, widths[i] > BUSTER_C_BINDING_WALK_LIMIT);
     }
     check_test_binding_failures(test);
+    check_test_binding_compatibility_capacity(test);
 }
 
 #endif

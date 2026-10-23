@@ -68,6 +68,78 @@ static void check_test_source_extensions(CheckTest* test, const char* clang)
             false
         },
         {
+            "compatible block function redeclaration",
+            "int g(int); int f(void) { int g(int); return g(3); }\n",
+            false,
+            false
+        },
+        {
+            "conflicting block function redeclaration",
+            "int g(int); int f(void) { int g(double); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "linked object and block function conflict",
+            "int f; int g(void) { int f(void); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "compatible disjoint block prototypes",
+            "int g(void) { { int f(int); } { int f(int); return f(3); } }\n",
+            false,
+            false
+        },
+        {
+            "incompatible disjoint block prototypes",
+            "int g(void) { { int f(int); } { int f(double); } return 0; }\n",
+            true,
+            false
+        },
+        {
+            "block prototype before conflicting file declaration",
+            "int g(void) { int f(int); return 0; } int f(double);\n",
+            true,
+            false
+        },
+        {
+            "conflicting prototypes in different functions",
+            "int g(void) { int f(int); return 0; } int h(void) { int f(double); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "local shadow preserves linked conflict",
+            "int f(int); int g(void) { int f; { int f(double); } return 0; }\n",
+            true,
+            false
+        },
+        {
+            "expired prototype does not strengthen later declaration",
+            "int g(void) { { int f(int); } return 0; } int f(); int h(void) { return f(); }\n",
+            false,
+            false
+        },
+        {
+            "inner prototype does not strengthen outer declaration",
+            "int f(); int g(void) { { int f(int); } return f(); }\n",
+            false,
+            false
+        },
+        {
+            "hidden prototype conflicts with parameterless definition",
+            "int g(void) { { int f(int); } return 0; } int f() { return 0; }\n",
+            true,
+            false
+        },
+        {
+            "GNU17 prototype after parameterless definition",
+            "int f() { return 0; } int g(void) { int f(int); return 0; }\n",
+            false,
+            false
+        },
+        {
             "nested duplicate parameter",
             "int f(int x, int (*cb)(int x), int x);\n",
             true,

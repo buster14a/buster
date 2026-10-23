@@ -55,15 +55,19 @@ declare/use/restore events for the production batch resolver in
 ordinary use retains its exact declaration identity. It also retains the
 composite declaration types, canonical object identities, linkage, storage
 duration, actual and tentative definitions, and each selected initializer node.
+Linked declarations also retain translation-unit identity across closed blocks.
+An out-of-scope prototype constrains later declarations of the same entity but
+does not silently change the type visible to an unprototyped call.
 
 String objects, aggregate initializer lists, compound literals, `switch`/`case`,
 labels and `goto`, inline assembly and attributes still need source elaboration.
 VLA evaluation, `sizeof`/casts/conditional expressions inside declaration ICEs,
 anonymous members, parameter-scope tag definitions, wide or fixed-base enums,
 generic selections, atomic semantics, extension-specific builtins and the full
-C23 surface also require integration. Retained pragmas are rejected. Expressions
-that use an incomplete tag before its later completion are conservatively
-unsupported, avoiding retroactive completion of an earlier semantic context.
+C23 surface also require integration. Retained pragmas and block-scope `extern`
+declarations are rejected. Expression uses of incomplete tags, including through
+pointers, are conservatively unsupported. This includes tags that stay opaque
+and avoids retroactive completion of an earlier semantic context.
 An unsupported declaration or unresolved identifier never acquires a guessed
 `int` type.
 
@@ -465,3 +469,20 @@ successful run used `ASAN_OPTIONS=detect_leaks=0` and
 `UBSAN_OPTIONS=halt_on_error=1`. Leak detection is therefore not a validated
 gate here. Benchmark runs overlapped compilation on a shared VM, so their
 unstable wall-clock rates are deliberately omitted from this record.
+
+### Takeover validation, 2026-10-23
+
+After integrating main through `c62cd84`, the expanded checker passed **67,677
+checks, zero failures** with local Clang 23.1.3, seed 133, ASan, UBSan and leak
+detection enabled. The source adapter's SHA-256 for this run was
+`96b93a0fcbc23dbc16b504a4ac4e4acff8c2ef3b21d12a058f39daaf81f8831c`;
+the source/test files stayed unchanged across compilation and execution.
+This Ryzen 9 diagnostic run does not substitute for protected 9700X validation.
+Independent source review also compared 86 original cases with Clang on both
+schedules, finding no remaining Clang-rejected inputs accepted in that matrix.
+
+The source producer/binding/checker measurement harness, frozen input hashes,
+and reproduction commands are retained in
+[the measurement directory](measurements/c-checker-2026-10-23/README.md).
+Whole-corpus semantics, multicore scaling and the runtime backend consumer
+remain acceptance work even when these bounded fixtures pass.

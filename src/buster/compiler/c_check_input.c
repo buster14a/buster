@@ -108,6 +108,8 @@ struct CheckInputReader
     uint32_t* parameter_seen;
     uint32_t* parameter_previous;
     uint32_t* member_seen;
+    uint32_t* linked_declarations;
+    TypeId* linked_types;
     TypeId* tag_types;
     uint32_t* tag_ends;
     int64_t* enum_values;
@@ -1409,10 +1411,13 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const uint32_t name = reader->parser->tokens.names[token];
     const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
     const CBindingKind kind = (CBindingKind)reader->declaration_kinds[token];
-    if (old != 0 && reader->bindings.depth[old - 1] == reader->scope_count)
+    const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
+    const bool linked_visible = old != 0 && reader->linkage[old_declaration] != 0 && reader->linkage[token] != 0;
+    if (old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
         const TypeAnswer compatible = type_compatible(reader->types, reader->declared_types[previous], reader->declared_types[token]);
+        reader->output->resource |= compatible == TYPE_ANSWER_FULL;
         const bool repeatable = kind == C_BINDING_TYPEDEF || kind == C_BINDING_FUNCTION || reader->scope_count == 0;
         bool parameter_conflict = false;
         if (kind == C_BINDING_FUNCTION && reader->bindings.kind[old - 1] == kind && reader->defined[token])
@@ -1427,11 +1432,6 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         }
         else
         {
-            if (reader->defined[token] && reader->definition_seen[previous])
-            {
-                check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
-            }
-            reader->definition_seen[token] |= reader->definition_seen[previous];
             reader->objects[token] = reader->objects[previous];
             const TypeId composite = check_input_type_result(reader, type_composite(reader->types, reader->declared_types[previous], reader->declared_types[token]));
             if (composite == 0)
@@ -1443,6 +1443,48 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 reader->declared_types[token] = composite;
             }
         }
+    }
+    if (reader->linkage[token] != 0 && reader->output->report_count == 0)
+    {
+        // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
+        // object identity for the translation unit, while only a visible declaration contributes to the source
+        // type above. A prototype in a closed block must not change a later unprototyped declaration's call type.
+        const uint32_t linked = reader->linked_declarations[name];
+        TypeId composite = reader->declared_types[token];
+        if (linked != 0)
+        {
+            const uint32_t previous = linked - 1;
+            const TypeAnswer compatible = type_compatible(reader->types, reader->linked_types[name], reader->declared_types[token]);
+            reader->output->resource |= compatible == TYPE_ANSWER_FULL;
+            bool parameter_conflict = false;
+            if (kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind)
+            {
+                uint32_t previous_count = 0;
+                type_parameters(reader->types, reader->linked_types[name], &previous_count);
+                parameter_conflict = reader->defined[token] && previous_count != 0 &&
+                                     (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
+            }
+            if (reader->declaration_kinds[previous] != kind || reader->linkage[previous] != reader->linkage[token] || compatible != TYPE_ANSWER_YES ||
+                (reader->defined[token] && reader->definition_seen[previous]) || parameter_conflict)
+            {
+                check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+            }
+            else
+            {
+                reader->definition_seen[token] |= reader->definition_seen[previous];
+                reader->objects[token] = reader->objects[previous];
+                composite = check_input_type_result(reader, type_composite(reader->types, reader->linked_types[name], reader->declared_types[token]));
+                if (composite == 0)
+                {
+                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                }
+            }
+        }
+        if (linked == 0 || !reader->defined[linked - 1])
+        {
+            reader->linked_declarations[name] = token + 1;
+        }
+        reader->linked_types[name] = composite;
     }
     if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, reader->scope_count) == 0)
     {
@@ -2030,6 +2072,10 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
     valid &= reader.parameter_seen != 0;
     reader.member_seen = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
     valid &= reader.member_seen != 0;
+    reader.linked_declarations = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
+    valid &= reader.linked_declarations != 0;
+    reader.linked_types = valid ? arena_push_array(scratch, pp->table->count, sizeof(TypeId), 64) : 0;
+    valid &= reader.linked_types != 0;
     reader.tag_completions = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint32_t), 4) : 0;
     valid &= reader.tag_completions != 0;
     valid &= c_bindings_initialize(&reader.bindings, scratch, pp->table->count, count * 4 + 1);
@@ -2053,6 +2099,8 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
         memset(reader.objects, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.parameter_seen, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.member_seen, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
+        memset(reader.linked_declarations, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
+        memset(reader.linked_types, 0, (uint64_t)pp->table->count * sizeof(TypeId));
         memset(reader.tag_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.tag_completions, 0, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         memset(reader.initializers, 0, (uint64_t)count + 1);
