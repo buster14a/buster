@@ -1024,6 +1024,7 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(UNEXPECTED_TOKEN, "unexpected token") \
     X(TOO_DEEP, "nesting too deep for the parser") \
     X(OUT_OF_MEMORY, "out of memory for the parser") \
+    X(INVALID_GNU_METADATA, "inconsistent GNU syntax metadata from the parser") \
     X(TOO_MANY_TOKENS, "too many tokens for the parser")
 
 typedef enum ParseMessage
@@ -1126,6 +1127,8 @@ typedef enum ParseMode
     // In `__attribute__(`: the list's `(`, then its `)`.
     PARSE_MODE_ATTRIBUTE_LIST,
     PARSE_MODE_ATTRIBUTE_END,
+    // After GNU attributes at a block-item boundary: the next token chooses a declaration or a statement.
+    PARSE_MODE_BLOCK_ATTRIBUTE,
     // In `[[`: the list's `[`, then the second `]` after the list's.
     PARSE_MODE_STANDARD_ATTRIBUTE_LIST,
     PARSE_MODE_STANDARD_ATTRIBUTE_END,
@@ -1214,6 +1217,9 @@ typedef enum ParseMode
 #define BUSTER_PARSE_FRAME_DEFINITION_PARAMETERS 0x800000u
 // The declaration's current declarator follows a comma: a function definition has one declarator, so no body follows.
 #define BUSTER_PARSE_FRAME_LATER_DECLARATOR 0x1000000u
+// GNU attributes seen at a block-item boundary, classified only to resolve declaration/expression ambiguity.
+#define BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE 0x2000000u
+#define BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE 0x4000000u
 
 // What a declarator's name is, from the derivation its declarator applies to it first (going out from the name, past
 // groups without a `*`), as clang's Declarator::isFunctionDeclarator decides it: none read yet, not known yet, a
@@ -1372,6 +1378,8 @@ struct ParseMeanings
 {
     uint8_t* meanings;
     uint32_t capacity;
+    // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
+    const InternTable* table;
 };
 
 typedef struct ParseScalar ParseScalar;
@@ -1394,6 +1402,7 @@ struct ParseScalar
     uint32_t waiting_count;
     // By name id.
     uint8_t* meanings;
+    const InternTable* table;
     uint32_t* log_names;
     uint8_t* log_meanings;
     uint32_t log_count;
@@ -2749,6 +2758,17 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             step->role = PARSE_ROLE_SPECIFIER;
             frame->mode = PARSE_MODE_LOCAL_LABEL_NAME;
         }
+        else if (kind == PARSE_KIND_ATTRIBUTE)
+        {
+            // At a block-item boundary the following token decides whether attributes introduce a declaration or a
+            // statement. After a label they may precede the statement without a separating ';', and after a control
+            // head they must not make a declaration into a statement. Keep the head waiting until that token arrives.
+            step->role = PARSE_ROLE_LEAF_RIGHT;
+            frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
+            frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+            frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
+            frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
+        }
         else if ((parse_scalar_starts_declaration(parser, i, true) || kind == PARSE_KIND_STATIC_ASSERT) && waiting && !labeled)
         {
             parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_EXPRESSION, BUSTER_PARSE_AT_TOKEN);
@@ -2771,6 +2791,56 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
     else
     {
         parse_scalar_begin_expression(frame, false, false, step);
+    }
+}
+
+// Clang's statement reader distinguishes `__attribute__((noinline)) f();` from a declaration beginning with other
+// attributes. Statement keywords and labels decide directly; after a control head only a statement is permitted.
+// A named label consumes its own attributes before its statement. None of these places uses a compound body's
+// special handling of `__extension__` before a declaration: there it is an expression prefix.
+static void parse_scalar_block_attribute(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
+{
+    const uint8_t kind = parser->kinds[i];
+    if (kind == PARSE_KIND_ATTRIBUTE)
+    {
+        step->role = PARSE_ROLE_LEAF_RIGHT;
+        frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
+        frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+        frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
+    }
+    else
+    {
+        const ParseStatement* top = parse_statement_top(parser);
+        const bool waiting = top != 0 && top->state == PARSE_STATEMENT_WAITING;
+        const bool head = waiting && top->kind != PARSE_KIND_CASE;
+        const bool attributes = (frame->flags & BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE) != 0 &&
+                                (frame->flags & BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE) == 0;
+        const bool statement = kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
+                               kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK ||
+                               kind == PARSE_KIND_RETURN || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE ||
+                               kind == PARSE_KIND_SEMI || kind == PARSE_KIND_ASM ||
+                               (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
+        frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
+        if (kind == PARSE_KIND_R_BRACE && !head && attributes)
+        {
+            parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_STATEMENT, BUSTER_PARSE_AT_TOKEN);
+        }
+        else if (!head && !attributes && !statement)
+        {
+            parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
+            // An attribute has already started the declaration: an extension marker is not a specifier here.
+            frame->mode = kind == PARSE_KIND_EXTENSION ? PARSE_MODE_DECLARATOR : frame->mode;
+        }
+        else if (kind == PARSE_KIND_EXTENSION)
+        {
+            frame->statement = PARSE_ITEM_EXPRESSION;
+            parse_scalar_begin_expression(frame, false, false, step);
+        }
+        else
+        {
+            frame->mode = PARSE_MODE_ITEM;
+            step->again = true;
+        }
     }
 }
 
@@ -3379,6 +3449,40 @@ static uint32_t parse_scalar_asm_sections(const ParseScalar* parser, const Parse
     return result;
 }
 
+// The GNU spellings Clang 23 recognizes as statement attributes. Only this syntactic distinction is made here;
+// applicability, arguments and effects belong to semantic checking. No lookup is paid outside a block prefix.
+static bool parse_scalar_statement_attribute(const ParseScalar* parser, IdentId name)
+{
+    static const char* const names[] =
+    {
+        "always_inline",
+        "atomic",
+        "assume",
+        "code_align",
+        "fallthrough",
+        "musttail",
+        "noinline",
+        "nomerge",
+        "no_outline",
+        "opencl_unroll_hint",
+        "suppress",
+    };
+    bool result = false;
+    if (parser->table != 0 && name != 0 && name < parser->table->count)
+    {
+        const uint8_t* bytes = intern_bytes(parser->table, name);
+        uint32_t length = intern_length(parser->table, name);
+        const bool alternate = length >= 4 && bytes[0] == '_' && bytes[1] == '_' && bytes[length - 2] == '_' && bytes[length - 1] == '_';
+        bytes += alternate ? 2 : 0;
+        length -= alternate ? 4 : 0;
+        for (uint32_t n = 0; !result && n < sizeof(names) / sizeof(names[0]); n += 1)
+        {
+            result = length == strlen(names[n]) && memcmp(bytes, names[n], length) == 0;
+        }
+    }
+    return result;
+}
+
 // In an expression, where an operand comes next.
 static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
@@ -3441,6 +3545,12 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     }
     else if (kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING || (attribute && kind >= PARSE_KIND_TYPE))
     {
+        if (attribute && frame->role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST && parser->frame_count >= 3 &&
+            parser->frames[parser->frame_count - 2].continuation == PARSE_MODE_BLOCK_ATTRIBUTE)
+        {
+            const bool statement = parse_scalar_statement_attribute(parser, parser->names[i]);
+            parser->frames[parser->frame_count - 3].flags |= statement ? BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE : BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE;
+        }
         // GNU's `&&label` names a label, whatever the ordinary names mean.
         const bool ordinary = !attribute && !(previous == PARSE_KIND_AMPAMP && parser->roles[(int64_t)i - 1] == PARSE_ROLE_PREFIX);
         if (ordinary && parse_scalar_is_typedef_name(parser, i) && previous == PARSE_KIND_SIZEOF)
@@ -4030,6 +4140,7 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
             switch (frame->mode)
             {
                 case PARSE_MODE_ITEM: parse_scalar_item(parser, i, frame, &step); break;
+                case PARSE_MODE_BLOCK_ATTRIBUTE: parse_scalar_block_attribute(parser, i, frame, &step); break;
                 case PARSE_MODE_SPECIFIERS: parse_scalar_specifiers(parser, i, frame, &step); break;
                 case PARSE_MODE_TAG:
                 case PARSE_MODE_TAG_BODY: parse_scalar_tag(parser, i, frame, &step); break;
@@ -4544,6 +4655,7 @@ static ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_
         .waiting = BUSTER_ARENA_PUSH_ARRAY(scratch, ParseWaiting, slots + 1),
         .waiting_count = 1,
         .meanings = meanings->meanings,
+        .table = meanings->table,
         .log_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
         .log_meanings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots),
         .log_count = 0,
@@ -11426,6 +11538,8 @@ static void parse_postorder_sorted(const uint32_t* parents, uint32_t count, uint
 // ---------------------------------------------------------------------------------------------------------------------
 // The entry point
 
+#include "buster/compiler/c_gnu.c"
+
 typedef struct ParseOptions ParseOptions;
 struct ParseOptions
 {
@@ -11433,6 +11547,8 @@ struct ParseOptions
     bool scalar;
     // Build the syntax tree and diagnostics without the postorder and subtree sizes that later stages consume.
     bool tree_only;
+    // Retain bounded GNU attribute and asm-label records for a semantic consumer; syntax-only callers leave it off.
+    bool extension_metadata;
 };
 
 // What a parse did, for benchmark-parser and test-parser.
@@ -11469,6 +11585,8 @@ struct Parser
     // or PARSE_MESSAGE_NONE.
     ParseMessage fatal;
     ParseStatistics statistics;
+    GnuSyntax gnu;
+    Arena gnu_arena;
     // The token columns and the tree's, each in an arena of its own, so that their first pages are base pages
     // (lane.c), and the scalar parser's stacks.
     Arena columns[13];
@@ -11520,6 +11638,7 @@ static void parse_release(Parser* parser)
     }
     arena_release(&parser->scratch);
     arena_release(&parser->vector_arena);
+    arena_release(&parser->gnu_arena);
     *parser = (Parser){ 0 };
 }
 
@@ -11546,6 +11665,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     const uint32_t capacity = table->count;
     parser->meanings.meanings = result ? parse_column(parser, 9, capacity, 1) : 0;
     parser->meanings.capacity = capacity;
+    parser->meanings.table = table;
     result = result && parser->meanings.meanings != 0;
     if (result)
     {
@@ -11571,6 +11691,8 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
     parser->errors = 0;
     parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_TOO_MANY_TOKENS;
     parser->statistics = (ParseStatistics){ 0 };
+    parser->gnu = (GnuSyntax){ 0 };
+    arena_release(&parser->gnu_arena);
     if (result)
     {
         // The columns, reserved in turn until one can't be.
@@ -11661,6 +11783,21 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
     else if (result)
     {
         parser->diagnostic_count = 0;
+    }
+    if (result && parser->options.extension_metadata)
+    {
+        // Reserve an upper bound virtually; only the exact measured arrays are committed. Each record requires
+        // at least one source token, so this covers all three arrays and their alignment without count overflow.
+        const uint64_t bytes = (uint64_t)parser->tokens.count * (sizeof(GnuAttributeGroup) + sizeof(GnuAttribute) + sizeof(GnuAsmLabel)) + 64;
+        parser->gnu_arena = arena_reserve(bytes);
+        const GnuSyntaxStatus status = parser->gnu_arena.base != 0 ?
+            gnu_syntax_build(&parser->tokens, &parser->tree, &parser->gnu_arena, &parser->gnu, parser->options.scalar) : GNU_SYNTAX_MEMORY;
+        result = status == GNU_SYNTAX_OK;
+        if (!result)
+        {
+            parser->errors += 1;
+            parser->fatal = status == GNU_SYNTAX_MEMORY ? PARSE_MESSAGE_OUT_OF_MEMORY : PARSE_MESSAGE_INVALID_GNU_METADATA;
+        }
     }
     if (result && !parser->options.tree_only)
     {

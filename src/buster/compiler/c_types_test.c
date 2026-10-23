@@ -3798,6 +3798,297 @@ static bool type_test_clang(uint64_t seed, uint32_t count, const char* clang, bo
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
+typedef struct TypeTestMachineMode TypeTestMachineMode;
+struct TypeTestMachineMode
+{
+    TypeId base;
+    const char* mode;
+    TypeId result;
+    TypeError error;
+    const char* base_text;
+    const char* result_text;
+    // Clang accepts a few mode types the table deliberately does not represent yet.
+    bool clang_rejects;
+};
+
+// Original mode fixtures. Every accepted request also becomes C with pointer compatibility checks (which retain
+// qualifiers), size/alignment checks, and a surrounding record's size/alignment/member offset. Rejected source
+// cases run separately so that one expected error cannot hide another case's accidental acceptance.
+static bool type_test_machine_modes(const char* clang, bool keep)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test = { 0 };
+    Arena text_arena = arena_reserve(1ull << 20);
+    Arena read_arena = arena_reserve(1ull << 20);
+    char directory[BUSTER_TYPE_TEST_PATH_BYTES];
+    const char* temporary = getenv("TMPDIR");
+    snprintf(directory, sizeof(directory), "%s/buster-modes-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const bool ready = type_test_table_open(&test, 256) && text_arena.base != 0 && read_arena.base != 0;
+    if (type_test_expect(&tally, ready && mkdtemp(directory) != 0, "machine modes", "can't initialize the test"))
+    {
+        TypeTable* table = &test.table;
+        const TypeId signed_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 1);
+        const TypeId unsigned_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 2);
+        const TypeId incomplete_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 3);
+        type_enum_complete(table, signed_enum, BUSTER_TYPE_INT, 0);
+        type_enum_complete(table, unsigned_enum, BUSTER_TYPE_UINT, 0);
+        const TypeId int_vector = type_vector(table, BUSTER_TYPE_INT, 4, false);
+        const TypeId char_vector = type_vector(table, BUSTER_TYPE_CHAR, 4, false);
+        const TypeId short_vector = type_vector(table, BUSTER_TYPE_SHORT, 8, false);
+        const TypeId float_vector = type_vector(table, BUSTER_TYPE_FLOAT, 4, false);
+        const TypeId int_ext = type_vector(table, BUSTER_TYPE_INT, 3, true);
+        const TypeId long_vector = type_vector(table, BUSTER_TYPE_LONG, 1, false);
+        const TypeId bool_ext = type_vector(table, BUSTER_TYPE_BOOL, 16, true);
+        const TypeId ushort_vector = type_vector(table, BUSTER_TYPE_USHORT, 8, false);
+        const TypeTestMachineMode fixtures[] =
+        {
+#define BUSTER_TYPE_MODE_TEST(base_, mode_, result_, error_, base_text_, result_text_, rejects_) \
+            { \
+                .base = (base_), \
+                .mode = (mode_), \
+                .result = (result_), \
+                .error = (error_), \
+                .base_text = (base_text_), \
+                .result_text = (result_text_), \
+                .clang_rejects = (rejects_), \
+            }
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "QI", BUSTER_TYPE_SCHAR, TYPE_ERROR_NONE, "int", "signed char", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_UINT, "__QI__", BUSTER_TYPE_UCHAR, TYPE_ERROR_NONE, "unsigned int", "unsigned char", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_CHAR, "HI", BUSTER_TYPE_SHORT, TYPE_ERROR_NONE, "char", "short", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_UCHAR, "HI", BUSTER_TYPE_USHORT, TYPE_ERROR_NONE, "unsigned char", "unsigned short", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_LONG, "SI", BUSTER_TYPE_INT, TYPE_ERROR_NONE, "long", "int", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_ULONG, "SI", BUSTER_TYPE_UINT, TYPE_ERROR_NONE, "unsigned long", "unsigned int", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_LLONG, "DI", BUSTER_TYPE_LONG, TYPE_ERROR_NONE, "long long", "long", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_ULLONG, "DI", BUSTER_TYPE_ULONG, TYPE_ERROR_NONE, "unsigned long long", "unsigned long", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "TI", BUSTER_TYPE_INT128, TYPE_ERROR_NONE, "int", "__int128", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_UINT, "TI", BUSTER_TYPE_UINT128, TYPE_ERROR_NONE, "unsigned int", "unsigned __int128", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_BOOL, "word", BUSTER_TYPE_ULONG, TYPE_ERROR_NONE, "_Bool", "unsigned long", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "__byte__", BUSTER_TYPE_SCHAR, TYPE_ERROR_NONE, "int", "signed char", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "__word__", BUSTER_TYPE_LONG, TYPE_ERROR_NONE, "int", "long", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_UINT, "pointer", BUSTER_TYPE_ULONG, TYPE_ERROR_NONE, "unsigned int", "unsigned long", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "unwind_word", BUSTER_TYPE_LONG, TYPE_ERROR_NONE, "int", "long", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "HF", BUSTER_TYPE_HALF, TYPE_ERROR_NONE, "float", "__fp16", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_DOUBLE, "SF", BUSTER_TYPE_FLOAT, TYPE_ERROR_NONE, "double", "float", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "DF", BUSTER_TYPE_DOUBLE, TYPE_ERROR_NONE, "float", "double", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "XF", BUSTER_TYPE_LONG_DOUBLE, TYPE_ERROR_NONE, "float", "long double", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "TF", BUSTER_TYPE_FLOAT128, TYPE_ERROR_NONE, "float", "__float128", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "__KF__", BUSTER_TYPE_FLOAT128, TYPE_ERROR_NONE, "float", "__float128", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_DOUBLE, "SC", BUSTER_TYPE_COMPLEX_FLOAT, TYPE_ERROR_NONE, "_Complex double", "_Complex float", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "DC", BUSTER_TYPE_COMPLEX_DOUBLE, TYPE_ERROR_NONE, "_Complex float", "_Complex double", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "XC", BUSTER_TYPE_COMPLEX_LONG_DOUBLE, TYPE_ERROR_NONE, "_Complex float", "_Complex long double", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "TC", BUSTER_TYPE_COMPLEX(BUSTER_TYPE_CODE_FLOAT128), TYPE_ERROR_NONE, "_Complex float", "__typeof__((__float128)0 + (_Complex double)0)", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "KC", BUSTER_TYPE_COMPLEX(BUSTER_TYPE_CODE_FLOAT128), TYPE_ERROR_NONE, "_Complex float", "__typeof__((__float128)0 + (_Complex double)0)", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "DF", BUSTER_TYPE_DOUBLE, TYPE_ERROR_NONE, "_Complex float", "double", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT | BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE, "QI", BUSTER_TYPE_SCHAR, TYPE_ERROR_NONE, "const volatile int", "signed char", false),
+            BUSTER_TYPE_MODE_TEST(type_aligned(table, BUSTER_TYPE_INT | BUSTER_TYPE_CONST, 5), "HI", BUSTER_TYPE_SHORT, TYPE_ERROR_NONE, "const int __attribute__((aligned(32)))", "short", false),
+            BUSTER_TYPE_MODE_TEST(signed_enum, "QI", BUSTER_TYPE_SCHAR, TYPE_ERROR_NONE, "enum ModeSigned", "signed char", false),
+            BUSTER_TYPE_MODE_TEST(unsigned_enum, "QI", BUSTER_TYPE_UCHAR, TYPE_ERROR_NONE, "enum ModeUnsigned", "unsigned char", false),
+            BUSTER_TYPE_MODE_TEST(incomplete_enum, "QI", BUSTER_TYPE_UCHAR, TYPE_ERROR_NONE, "enum ModeIncomplete", "unsigned char", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "V4SI", int_vector, TYPE_ERROR_NONE, "int", "int __attribute__((vector_size(16)))", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "__V4SF__", float_vector, TYPE_ERROR_NONE, "float", "float __attribute__((vector_size(16)))", false),
+            BUSTER_TYPE_MODE_TEST(int_vector, "HI", short_vector, TYPE_ERROR_NONE, "int __attribute__((vector_size(16)))", "short __attribute__((vector_size(16)))", false),
+            BUSTER_TYPE_MODE_TEST(int_ext, "DI", long_vector, TYPE_ERROR_NONE, "int __attribute__((ext_vector_type(3)))", "long __attribute__((vector_size(8)))", false),
+            BUSTER_TYPE_MODE_TEST(bool_ext, "HI", ushort_vector, TYPE_ERROR_NONE, "_Bool __attribute__((ext_vector_type(16)))", "unsigned short __attribute__((vector_size(16)))", false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "BF", 0, TYPE_ERROR_MODE, "int", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "__libgcc_cmp_return__", 0, TYPE_ERROR_MODE, "int", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "__QI___", 0, TYPE_ERROR_MODE, "int", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "V0SI", 0, TYPE_ERROR_MODE, "int", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "V3SI", 0, TYPE_ERROR_MODE, "int", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "V18446744073709551616SI", 0, TYPE_ERROR_TOO_LARGE, "int", 0, false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "XI", 0, TYPE_ERROR_MODE_UNSUPPORTED, "int", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "QF", 0, TYPE_ERROR_MODE_UNSUPPORTED, "float", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "IF", 0, TYPE_ERROR_MODE_UNSUPPORTED, "float", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "IC", 0, TYPE_ERROR_MODE_UNSUPPORTED, "_Complex float", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "QI", 0, TYPE_ERROR_MODE_BASE, "float", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "DF", 0, TYPE_ERROR_MODE_BASE, "int", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_FLOAT, "DC", 0, TYPE_ERROR_MODE_BASE, "float", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "SI", 0, TYPE_ERROR_MODE_BASE, "_Complex float", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX(BUSTER_TYPE_CODE_INT), "SC", 0, TYPE_ERROR_MODE_BASE, "_Complex int", 0, true),
+            BUSTER_TYPE_MODE_TEST(type_pointer(table, BUSTER_TYPE_INT), "pointer", 0, TYPE_ERROR_MODE_BASE, "int *", 0, true),
+            BUSTER_TYPE_MODE_TEST(type_atomic(table, BUSTER_TYPE_INT), "QI", 0, TYPE_ERROR_MODE_BASE, "_Atomic(int)", 0, true),
+            BUSTER_TYPE_MODE_TEST(type_bit_int(table, 25, false), "HI", 0, TYPE_ERROR_MODE_BASE, "_BitInt(25)", 0, true),
+            BUSTER_TYPE_MODE_TEST(unsigned_enum, "V4SI", 0, TYPE_ERROR_MODE_BASE, "enum ModeUnsigned", 0, true),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "HC", 0, TYPE_ERROR_MODE_UNSUPPORTED, "_Complex float", 0, false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_COMPLEX_FLOAT, "V2SC", 0, TYPE_ERROR_MODE_UNSUPPORTED, "_Complex float", 0, false),
+            BUSTER_TYPE_MODE_TEST(char_vector, "DI", 0, TYPE_ERROR_MODE_UNSUPPORTED, "char __attribute__((vector_size(4)))", 0, false),
+            BUSTER_TYPE_MODE_TEST(BUSTER_TYPE_INT, "V4294967296SI", 0, TYPE_ERROR_TOO_LARGE, "int", 0, false),
+            BUSTER_TYPE_MODE_TEST(0, "QI", 0, TYPE_ERROR_OPERAND, 0, 0, false),
+#undef BUSTER_TYPE_MODE_TEST
+        };
+        TypeTestText text = {
+            .arena = &text_arena,
+            .valid = true,
+        };
+        char* expected[BUSTER_ARRAY_LENGTH(fixtures)] = { 0 };
+        const char* what[BUSTER_ARRAY_LENGTH(fixtures)] = { 0 };
+        TypeTestOracle oracle = {
+            .expected = expected,
+            .what = what,
+            .count = BUSTER_ARRAY_LENGTH(fixtures),
+        };
+        uint32_t accepted = 0;
+        const char* declarations = "enum ModeSigned { ModeNegative = -1 };\nenum ModeUnsigned { ModePositive = 1 };\nenum ModeIncomplete;\n";
+        type_test_format(&text, "%s", declarations);
+        const long page = sysconf(_SC_PAGESIZE);
+        uint8_t* guarded = page > 0 ? mmap(0, (uint64_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+        const bool guard_ready = guarded != MAP_FAILED && mprotect(guarded + page, (uint64_t)page, PROT_NONE) == 0;
+        type_test_expect(&tally, guard_ready, "machine modes", "can't create the guarded name buffer");
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+        {
+            const TypeTestMachineMode* fixture = &fixtures[i];
+            const uint64_t length = strlen(fixture->mode);
+            String8 name = {
+                .pointer = (char*)fixture->mode,
+                .length = length,
+            };
+            if (guard_ready)
+            {
+                name.pointer = (char*)guarded + page - length;
+                memcpy(name.pointer, fixture->mode, length);
+            }
+            const TypeId actual = type_machine_mode(table, fixture->base, name);
+            char detail[256];
+            snprintf(detail, sizeof(detail), "case %u, %s mode(%s): type %u against %u, error %u against %u", i,
+                     fixture->base_text != 0 ? fixture->base_text : "invalid", fixture->mode, actual, fixture->result, table->last_error, fixture->error);
+            type_test_expect(&tally, actual == fixture->result && table->last_error == fixture->error, "machine modes", detail);
+            if (actual != 0 && fixture->result != 0)
+            {
+                const TypeId record = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 0);
+                const TypeMember members[3] = {
+                    type_test_member(1, BUSTER_TYPE_CHAR, BUSTER_TYPE_NOT_BIT_FIELD),
+                    type_test_member(2, actual, BUSTER_TYPE_NOT_BIT_FIELD),
+                    type_test_member(3, BUSTER_TYPE_CHAR, BUSTER_TYPE_NOT_BIT_FIELD),
+                };
+                const bool laid_out = type_complete_record(table, record, members, 3, (TypeRecordAttributes){ 0 });
+                uint64_t offset = 0;
+                const bool found = laid_out && type_find_member(table, record, 2, &offset) != 0;
+                type_test_expect(&tally, found, "machine mode layout", fixture->mode);
+                type_test_format(&text, "typedef %s Input_%u;\ntypedef Input_%u Output_%u __attribute__((mode(%s)));\ntypedef %s Expected_%u;\n",
+                                 fixture->base_text, i, i, i, fixture->mode, fixture->result_text, i);
+                type_test_format(&text, "typedef Output_%u Ty_%u;\n", i, i);
+                const String8 spelling = type_print(table, &read_arena, actual, (String8){ 0 }, 0, 0);
+                expected[i] = arena_push(&read_arena, spelling.length + 1, 1);
+                if (type_test_expect(&tally, expected[i] != 0 && spelling.length != 0, "machine modes", "can't retain the canonical type spelling"))
+                {
+                    memcpy(expected[i], spelling.pointer, spelling.length);
+                    expected[i][spelling.length] = 0;
+                    what[i] = fixture->mode;
+                    accepted += 1;
+                }
+                type_test_format(&text, "_Static_assert(__builtin_types_compatible_p(Output_%u *, Expected_%u *), \"case %u type\");\n", i, i, i);
+                type_test_format(&text, "_Static_assert(sizeof(Output_%u) == %" PRIu64 " && _Alignof(Output_%u) == %" PRIu64 ", \"case %u size and alignment\");\n",
+                                 i, type_size(table, actual), i, type_alignment(table, actual), i);
+                type_test_format(&text, "struct Record_%u { char a; Output_%u b; char c; };\n", i, i);
+                type_test_format(&text, "_Static_assert(sizeof(struct Record_%u) == %" PRIu64 " && _Alignof(struct Record_%u) == %" PRIu64 ", \"case %u record layout\");\n",
+                                 i, type_size(table, record), i, type_alignment(table, record), i);
+                type_test_format(&text, "_Static_assert(__builtin_offsetof(struct Record_%u, b) == %" PRIu64 ", \"case %u member offset\");\n", i, offset / 8, i);
+            }
+        }
+        type_test_expect(&tally, type_size(table, signed_enum) == 4 && type_size(table, unsigned_enum) == 4 && !type_is_complete(table, incomplete_enum),
+                         "machine modes", "an enum typedef's mode changed its tag");
+        type_test_expect(&tally, type_machine_mode(table, BUSTER_TYPE_INT, (String8){ 0 }) == 0 && table->last_error == TYPE_ERROR_MODE,
+                         "machine modes", "an empty name was accepted");
+        type_test_expect(&tally, type_machine_mode(table, BUSTER_TYPE_INT, (String8){ .pointer = 0, .length = UINT64_MAX }) == 0 && table->last_error == TYPE_ERROR_MODE,
+                         "machine modes", "a null name was read");
+        if (guard_ready)
+        {
+            type_test_expect(&tally, type_machine_mode(table, BUSTER_TYPE_INT, (String8){ .pointer = (char*)guarded + page, .length = 0 }) == 0,
+                             "machine modes", "a zero-length name at a guard page was read");
+        }
+        if (guarded != MAP_FAILED)
+        {
+            munmap(guarded, (uint64_t)page * 2);
+        }
+        TypeTestTable full = { 0 };
+        if (type_test_expect(&tally, type_test_table_open(&full, 0), "machine modes", "can't make a table without derived-type capacity"))
+        {
+            type_test_expect(&tally, type_machine_mode(&full.table, BUSTER_TYPE_INT, BUSTER_S8("V4SI")) == 0 && full.table.last_error == TYPE_ERROR_FULL &&
+                             full.table.types.count == BUSTER_TYPE_BUILTIN_COUNT, "machine modes", "a vector mode did not preserve capacity failure");
+            type_test_expect(&tally, type_machine_mode(&full.table, BUSTER_TYPE_INT, BUSTER_S8("DI")) == BUSTER_TYPE_LONG && full.table.last_error == TYPE_ERROR_NONE,
+                             "machine modes", "a scalar mode allocated a derived type or retained a stale error");
+        }
+        type_test_table_close(&full);
+        char source[BUSTER_TYPE_TEST_PATH_BYTES];
+        char output[BUSTER_TYPE_TEST_PATH_BYTES];
+        char errors[BUSTER_TYPE_TEST_PATH_BYTES];
+        snprintf(source, sizeof(source), "%s/accepted.c", directory);
+        snprintf(output, sizeof(output), "%s/output.txt", directory);
+        snprintf(errors, sizeof(errors), "%s/errors.txt", directory);
+        char* arguments[] = {
+            (char*)clang,
+            "-std=gnu17",
+            "-fsyntax-only",
+            "-Wno-everything",
+            "-ferror-limit=0",
+            source,
+            0,
+        };
+        if (type_test_expect(&tally, type_test_write_file(source, &text), "machine modes clang", "can't write accepted.c"))
+        {
+            const int status = type_test_run(arguments, output, errors);
+            type_test_clang_errors(&tally, type_test_read_file(&read_arena, errors), "machine modes clang");
+            type_test_expect(&tally, status == 0, "machine modes clang", "the accepted cases or their layouts differ");
+            char* dumping[] = {
+                (char*)clang,
+                "-std=gnu17",
+                "-fsyntax-only",
+                "-Wno-everything",
+                "-Xclang",
+                "-ast-dump",
+                "-Xclang",
+                "-ast-dump-filter=Ty_",
+                source,
+                0,
+            };
+            const int dumped = type_test_run(dumping, output, errors);
+            type_test_expect(&tally, dumped == 0, "machine modes clang", "clang's canonical type dump failed");
+            uint64_t compared = 0;
+            type_test_compare_dump(&tally, &oracle, type_test_read_file(&read_arena, output), &compared);
+            type_test_expect(&tally, compared == accepted, "machine modes clang", "the canonical type dump omitted a fixture");
+        }
+        if (!keep)
+        {
+            unlink(source);
+        }
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+        {
+            const TypeTestMachineMode* fixture = &fixtures[i];
+            if (fixture->clang_rejects)
+            {
+                arena_pop_to(&text_arena, 0);
+                text = (TypeTestText){ .arena = &text_arena, .valid = true };
+                type_test_format(&text, "%stypedef %s Input;\ntypedef Input Output __attribute__((mode(%s)));\n", declarations, fixture->base_text, fixture->mode);
+                snprintf(source, sizeof(source), "%s/rejected-%u.c", directory, i);
+                if (type_test_expect(&tally, type_test_write_file(source, &text), "machine modes clang", "can't write a rejected case"))
+                {
+                    const int status = type_test_run(arguments, output, errors);
+                    const String8 diagnostic = type_test_read_file(&read_arena, errors);
+                    type_test_expect(&tally, status > 0 && type_test_contains(diagnostic.pointer, diagnostic.length, ": error:"), "machine modes clang", fixture->mode);
+                }
+                if (!keep)
+                {
+                    unlink(source);
+                }
+            }
+        }
+        if (keep)
+        {
+            printf("machine mode files are in %s\n", directory);
+        }
+        else
+        {
+            unlink(output);
+            unlink(errors);
+            rmdir(directory);
+        }
+    }
+    type_test_table_close(&test);
+    arena_release(&text_arena);
+    arena_release(&read_arena);
+    type_test_report("machine modes", tally);
+    return tally.failures == 0;
+}
+
 static bool type_test_parse_u64(const char* text, uint64_t* value)
 {
     char* end = 0;
@@ -4116,6 +4407,7 @@ static int run_type_tests(int argc, char** argv)
     {
         bool passed = type_test_builtin_types();
         passed = type_test_validation() && passed;
+        passed = type_test_machine_modes(clang, keep) && passed;
         passed = type_test_normalization(&arena) && passed;
         passed = type_test_hash_consing(seed, (uint32_t)count) && passed;
         passed = type_test_batches(seed, (uint32_t)count * 8) && passed;

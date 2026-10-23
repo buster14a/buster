@@ -140,6 +140,8 @@ int run_files_benchmark(int argc, char** argv);
 // test-parser command.
 #include "buster/compiler/c_parser.c"
 #include "buster/compiler/c_parser_test.c"
+#include "buster/compiler/c_gnu_test.c"
+#include "buster/compiler/c_gnu_benchmark.c"
 int run_parser_benchmark(int argc, char** argv);
 
 // Scoped name-resolution kernels and their event-stream oracle; c_parser.c includes the shared kernels.
@@ -356,6 +358,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
     {
         result = run_parser_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-gnu") == 0)
+    {
+        result = run_gnu_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-gnu") == 0)
+    {
+        result = run_gnu_benchmark(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-bindings") == 0)
     {

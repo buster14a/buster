@@ -134,7 +134,7 @@ outputs and measurement conditions.
 ## Existing source handoff and remaining integration
 
 The checker implementation from [PR #312](https://github.com/buster14a/buster/pull/312)
-has landed on main. At `21d632c202fa9be20841ba3630220a2640087847`, its checker,
+has landed on main. At `9a2294dad133e7c8d78b9e13b9635b61b7979918`, its checker,
 source reader, checker driver and static-data reader match the inspected
 `991f9ba756800c4b78b47bc983ae3ec7416000e4` revision. This already supplies a real
 source-to-static-data path. `CheckInput` retains resolved declaration uses,
@@ -151,13 +151,21 @@ attribute and asm symbols. The default syntax driver does not request these
 columns. They provide binding identities for a future adapter; emission still
 requires the semantic graph and policy described below.
 
+Opt-in `Parser.gnu` records from #147 now retain attribute names, bounded
+argument slices, syntactic attachment roles and asm-label string slices.
+The checker driver does not request those records, its source reader still
+rejects GNU attributes, and attribute arguments remain undecoded. An adapter
+must resolve these records to declaration identities and apply their semantic
+effects before producing emission roots and alias targets.
+
 An adapter must map those token-derived identities to dense definition IDs in
 source order and map the selected IDs back to the emitter's object records.
 Checked address constants already identify initializer targets. Supported
 typed body expressions also retain object references, but the graph does not
 yet publish their containing definition or the evaluated-emission dependencies.
-Persistent inline policy and retention/alias metadata, complete body dependency
-selection, and the function bridge to Tier 0 remain missing. Filtering objects
+Persistent inline policy, checked and redeclaration-resolved retention flags
+and alias-target identities, complete body dependency selection, and the
+function bridge to Tier 0 remain missing. Filtering objects
 while dropping those body references would be unsound.
 
 A separately scoped data-only adapter could accept successfully checked units
