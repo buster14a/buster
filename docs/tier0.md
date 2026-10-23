@@ -220,11 +220,15 @@ template fixes is that byte; a hole's is its index in the hole block. Expansion 
 4. one 64-byte store at the entry's place, overwritten past its records by the next entry.
 
 **Deferred entries** go to `tier0_emit_deferred`, which writes their records at the places measuring reserved. The
-vector path's measuring counts a call's records with `tier0_count_deferred`, from its arguments' locations and the
-cycles of its parallel move, without emitting it; the scalar path runs the emitter to count, which checks the count:
+vector path's measuring counts a call's records with `tier0_count_deferred`, in one pass from its last argument back
+(an argument's register is its stack's depth less the arguments after it), from their locations and the cycles of its
+parallel move, without emitting it; the scalar path runs the emitter to count, which checks the count:
 
-- Calls: saves, stack arguments, the register arguments by a parallel move (cycles broken with `xchg`), al for a
-  variadic call, the call, the result moved, the restores.
+- Calls: saves, stack arguments, the register arguments by a parallel move, al for a variadic call, the call, the
+  result moved, the restores. The moves' sources are distinct registers, as are their destinations, so they form
+  paths and cycles, resolved on bitmasks: a move whose destination no other move still reads goes first, and what is
+  left are cycles, each of n moves taking n − 1 `xchg`s. With rax first in the depth table and rdi first in the ABI's
+  order, a call makes cycles of two alone; a test of the resolver's own covers every length.
 - Division and shifts by a register at depths where rax, rdx or rcx hold other values (through two fixed frame slots).
 - The immediates: every record with an immediate takes the shortest form that keeps its value and the flags its
   template reads (`x86_choose_forms`): imm8, the accumulator's form, `xor` for zero, `test r, r` for `cmp r, 0`, `inc`
@@ -252,12 +256,22 @@ live flags and row, and the offsets of K, its scale, A and B). A slot's word als
 homes, and whether its four cases' words differ in the template alone (uniform).
 
 1. **Selection** gathers each entry's word from its slot's (`vpgatherdq`, from the slot table's 32,768 words). The
-   depth checks are masks, the depths each stack reaches lane maxima, and only the deferred entries' touches (a call's
-   saves, division's fixed registers) are taken an entry at a time.
+   depth checks are masks, the depths each stack reaches lane maxima, the kept templates' words are ORed together
+   (their fixed rdx) and the unsupported lanes collected, so that a block takes no branch but on a deferred entry,
+   whose touches (a call's saves, division's fixed registers) are taken an entry at a time. The first unsupported
+   entry is looked for only when there is one, in a compile that fails.
 2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their
-   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The rest works per local,
-   and both paths share it.
-3. **Measuring** resolves a home-dependent word to its homes' case. A local's home comes from four registers by
+   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The scalar path then sorts
+   the locals by references and gives them registers in that order, greedily. The greedy loop gives the k-th local of
+   a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of its
+   kind: the caller-saved registers in depth order, then the callee-saved ones to a local referenced twice or more
+   (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no order:
+   each such local's rank among its kind's, counted by vector compares 16 locals at a time, picks its register from
+   the free registers' list (`vpermd`), and its home is a masked store. The frame's slots go to a mask of the locals
+   that need one, from the homes, the references and the flags, 16 at a time, and the prologue's records are counted
+   rather than emitted twice.
+3. **Measuring** resolves a home-dependent word to its homes' case. Which of up to 64 locals are in registers is one
+   mask, of which a lane's case is a shift (`vpsrlvq`); past 64 locals, a local's home comes from four registers by
    `vpermt2q` for up to 32 locals, or by a gather past that. A uniform slot's case is added to the template; another's
    word is gathered. The lengths come from the words, or a deferred entry's from its count, and the positions are
    their prefix sum in registers.
@@ -271,12 +285,14 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    expanded records. The branches, then the references and the deferred entries, follow in entry order by their masks'
    bits.
 
-The immediates' choice is one `x86_choose_forms` over every request.
+The immediates' choice is one `x86_choose_forms` over every request, and each chosen form is applied from a byte per
+form (its immediate's size, and whether it takes no operands or its destination twice) to the record's two 8-byte
+halves, without a branch.
 
 **The scalar path** (`tier0_compile_scalar`) does the same an entry at a time, with each rule in plain code. Selection
-looks each entry's slot up, measuring counts a deferred entry's records by running its emitter, and emission builds
-each record field by field from the templates' specifications, not from their compiled bytes. It chooses with
-`x86_choose_forms_scalar`.
+looks each entry's slot up, homes sort the locals, measuring counts a deferred entry's records by running its emitter,
+and emission builds each record field by field from the templates' specifications, not from their compiled bytes. It
+chooses with `x86_choose_forms_scalar` and applies each choice with `x86_choice_instruction`.
 
 ## Tests
 
@@ -288,6 +304,19 @@ of integers, integers and calls, everything, and larger, 300 each by default. Ea
 3. The records must pass `x86_validate` and the branch columns `branch_sizing_validate`.
 4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs. The result and every
    global's bytes must equal what the test's interpreter of the typed stream gives.
+
+Before the programs, two checks of their own:
+
+- **moves:** 20,000 random sets of argument moves, resolved by the call emitter's resolver and run on a register file:
+  every destination must get its source's value, every other register keep its own, and the records be as many as
+  the moves less the cycles. The general registers' sets have paths and cycles of every length, though a call makes
+  cycles of two alone, and the XMM registers' only paths, as a call's floating arguments only move down.
+- **applies:** the vector path's application of the chosen forms against the scalar path's
+  (`x86_choice_instruction`), on 2,000 batches of random records, each with a candidate form of a random row or
+  `X86_FORM_NONE` (which keeps the record) and a random value.
+- **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
+  places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
+  stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate).
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
@@ -321,7 +350,13 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
   - a uniform case not added for half the lanes: 304;
   - a call's count one too high past 9 records: 29;
   - the accumulator's context inverted: 244;
-  - a local's references miscounted: 749.
+  - a local's references miscounted: 749;
+  - the ranks' tie-break inverted: 778; callee-saved registers for locals referenced once: 686, or left out of the
+    frame's pushes: 614;
+  - a call's argument registers one depth off in its count: 551; a stack parameter's load left out of the prologue's
+    count: 161, or given a frame slot: 565;
+  - a chosen form's destination not taken twice: 800; an imm16 written as an imm32: 390;
+  - a cycle's `xchg` not passing its value on, which only the moves test reaches: 189 of its rounds.
 
 ## Measurements
 
@@ -347,12 +382,22 @@ path's 11.1.
 - **The passes after fusion:** vectorizing selection, measuring and emission, and counting calls without emitting
   them, took the vector path from 142.4 to 85.7 cycles per entry (1.66 times as fast), and 2.63 times as fast as the
   scalar path.
+- **The second round** (the call emitter's moves on bitmasks, the homes by ranks, the frame's slots by masks, the
+  prologue counted, the chosen forms applied from a byte per form, selection without per-block branches, measuring's
+  register mask), against #303's head on the current programs, run in turn three times: the vector path from 87.7 to
+  76.5 cycles per entry back to back (196.7 to 163.4 instructions, 15.8 to 13.8 ns), from 89.3 to 78.4 in the full
+  benchmark and to 78.7 after 100 ms of the scalar path, its power cap's count 2.1 per record against the head's 3.1.
+  The scalar path, which shares the call emitter, went from 233.2 to 226.2 (589.0 to 559.8 instructions).
+- **The chosen forms applied on the records' halves** (the compiler had split the fields into byte loads and
+  stores): 75.6 to 74.8 cycles per entry, 163.5 to 162.0 instructions, in four rounds run in turn, each 1.0 to 1.2%.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
-  The vector path is still about 2.7 times that; the budget is not met.
-- **Where the time goes** (perf on the 9700X, each pass kept out of line), about, in cycles per entry:
-  - emission 15, measuring 12 (counting calls 3 of it), selection 10 (the gather 1.3);
-  - the call emitter 9, homes 9 (sorting the locals 3), applying the chosen forms 6;
-  - fusion and depths (P0 to P4) 14, the frame and the prologue 6.
+  The vector path is still about 2.3 times that; the budget is not met.
+- **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
+  vector path's time:
+  - emission 21%, fusion and depths (P0 to P4) 16%, selection 13% (the slot gather the largest part), measuring 10%;
+  - the call emitter and its count 14% together, for the 3.6% of entries that are deferred;
+  - the immediates' choice (`x86_choose_forms`) and applying it 11%;
+  - the homes, the frame, the prologue and the per-function setup 15%.
 
 **Generated code against clang -O0** (60 cross-checked programs on the 9700X):
 
@@ -375,9 +420,15 @@ path's 11.1.
   - `switch` (no kind yet: a compare sequence or a jump table);
   - indirect calls;
   - globals of shared libraries through the GOT (a front end's visibility decision).
-- **The rest of the time:** the call emitter (an entry at a time), sorting the locals by references (an insertion
-  sort that mispredicts), applying the chosen forms (`x86_choice_instruction` per request), and selection's gather
-  from a table larger than L1.
+- **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
+  per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.
+- **The immediates' choice** costs about 7 cycles per entry: the application about 5 (its loads of the records more
+  than its arithmetic), `x86_choose_forms` about 2 (3.6 cycles per request, batched), the requests' columns about 1.
+  27% of the entries make a request; 6% of the requests are static (a branch on a local's `cmp home, 0`), so deciding
+  those per template at initialization would save under 1%; and choosing in emission's blocks of 8 would run the
+  chooser's candidates on 8 lanes for about 2 requests, more than the batch costs. What would remove the requests is
+  deciding each form at selection, from the constant's value class (P0 has its predicates) and whether its register
+  is rax (its depth's), with templates keyed by them.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
 - **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on
