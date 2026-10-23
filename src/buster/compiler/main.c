@@ -181,6 +181,7 @@ int run_snapshot_benchmark(int argc, char** argv);
 // the archive members the link needs loaded and COMDAT groups picked) and their tests, for the test-foreign command. Its
 // benchmark is another translation unit.
 #include "buster/compiler/foreign.c"
+#include "buster/compiler/foreign_link.c"
 #include "buster/compiler/foreign_test.c"
 int run_foreign_benchmark(int argc, char** argv);
 // The link benchmark (the direct path against the object writer and the linkers, on the same programs) and the floors'
@@ -447,6 +448,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-foreign") == 0)
     {
         result = run_foreign_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-output") == 0)
+    {
+        result = run_foreign_link_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
     {
