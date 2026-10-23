@@ -160,6 +160,51 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_gnu.c` retains bounded GNU attribute groups/arguments
+  and declarator asm labels when `ParseOptions.extension_metadata` is enabled.
+  `test-gnu --clang` checks exact records, scalar/vector agreement and guarded
+  capacities; `benchmark-gnu [-E's options] file.c` measures collection,
+  allocation and the parser handoff. `test-types` also checks GNU machine-mode
+  type actions. [The GNU extension guide](docs/c-gnu-extensions.md) records
+  the source-checker/lowering work still required before #147 can close.
+
+- `test-differential-harness` validates the Csmith/YARPGen harness with original
+  fixtures. `test-differential` requires explicit compiler/tier configuration
+  and preserves generators, commands, artifacts and failures. Missing tools or
+  executable source lowering return unavailable, never a campaign pass. See
+  [the differential guide](docs/differential.md). Use the shared 9700X lock per
+  run and bounded campaigns that yield to CI.
+
+- `dominators.c` analyzes borrowed CFG columns into dominance intervals,
+  optional frontier bitsets and natural loops. `test-dominators` checks both
+  paths against independent graph definitions; `benchmark-dominators` includes
+  analysis and synthetic producer/consumer measurements. [The dominator
+  guide](docs/dominators.md) records memory limits and pending corpus evidence.
+  Take the shared 9700X lock per build/test/measurement and pin timing to CPU 2.
+
+- `tier1_allocate.c` and `tier1_rematerialize.c` supply bounded interval
+  allocation, required-use reload splitting, parallel moves and baseline-x86
+  rematerialization. `test-tier1-allocation` includes native execution and
+  guarded tails; `benchmark-tier1-allocation` measures full preparation and
+  allocation. [The allocation guide](docs/tier1-allocation.md) records producer
+  constraints and pending CFG/corpus emission. Use the shared 9700X lock per
+  build/test/measurement and CPU 2 for timing.
+
+- `tier1_frame.c` provides interval slot coloring and explicit frame plans for
+  #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
+  `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
+  variadic saves and guarded page probes. [The frame guide](docs/tier1-frame.md)
+  records reservations before allocation and pending corpus evidence. Take the shared 9700X lock per
+  build/test/measurement and pin timing to CPU 2.
+
+- `tier1_schedule.c` provides an opt-in postallocation machine-record scheduler.
+  `test-tier1-schedule` checks scalar/vector ordering, barriers and model coverage;
+  `benchmark-tier1-schedule` measures scheduling plus encoding and a synthetic
+  generated loop. [The scheduling guide](docs/tier1-scheduling.md) records the
+  API and the source-corpus evidence still needed for #172/#181. Use the shared
+  9700X lock for each build/test/measurement and CPU 2 for timing.
+
 - `src/buster/compiler/c_builtin.c` supplies the integer builtin actions for
   #148: byte swaps, bit counts/searches, and mixed-type overflow folds, with
   AVX-512 and scalar twins. `test-builtins [--seed N]` checks Clang's results,
@@ -488,6 +533,24 @@ designs and the compilers already built this way.
   `./build/compiler test-types` runs them) and `c_types_benchmark.c` provides
   `benchmark-types`. `docs/c-types.md` records the design and its 9700X
   measurements.
+- `src/buster/compiler/c_check_actions.c` supplies the reader-independent
+  expression rules and constant folding for #133. `c_checker.c` checks an
+  explicit postorder operand graph either in source order or in stable
+  dependency levels, with scalar barriers for actions that intern types.
+  `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
+  `c_check_binding.c` resolves its source events through the batch or independent
+  scalar kernel. `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
+  opts into it. Unsupported
+  syntax is diagnosed. The normal syntax driver still uses the parser.
+  `test-checker [--seed N] [--clang PATH]` compares fresh scalar/vector tables,
+  protected tails and original source fixtures against Clang. `c_check_data.c`
+  and `c_check_data_input.c` turn selected static scalar definitions into real
+  Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
+  `benchmark-checker --shape wide|chain` measures synthetic graph checking,
+  including scheduling and output materialization. `docs/c-checker.md`
+  records the actual contract and the remaining declaration/initializer,
+  control-flow, corpus and downstream integration still needed
+  for #133; this module does not establish whole-compiler semantic coverage.
 - `src/buster/compiler/calling_convention.c` is the System V AMD64 calling
   convention (#137, contract 3 for #136): every `TypeId`'s classes as clang 23
   classifies them, a row of 16 offsets per type, records and arrays folded
@@ -661,6 +724,9 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
+./build/compiler test-checker --seed 133
+./build/compiler benchmark-checker --shape wide
+./build/compiler benchmark-checker --shape chain --nodes 4096
 ./build/compiler test-calling-convention --cross-check
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
@@ -819,6 +885,9 @@ second's counts after the first's. The inputs:
 `--raw-strings` enables C11's raw prefixes in C; `--raw-strings-c99`
 enables `R` and `LR`. Raw literals and near misses are checked around
 chunk and page boundaries. Both modes run in the 9700X workflow.
+The separate raw-error query is checked on invalid/unterminated literals and
+every truncated prefix against a protected page; diagnostic offsets are
+physical bytes even when a prefix has line splices.
 `--no-digraphs` and `--no-line-comments` tokenize C without digraphs and without
 `//` comments (`C_TOKENIZER_NO_DIGRAPHS` and `C_TOKENIZER_NO_LINE_COMMENTS`), as
 the preprocessor lexes `-std=c89` (both), C94 (the second) and `-fno-digraphs`
@@ -2925,6 +2994,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     pasted and stringized too, and `-f[no-]digraphs` in four modes (#288);
   - each difference from clang that #109's fuzzing found, minimized, and the
     ones probing around it found;
+  - raw-string errors in active text, definitions and unused macro arguments,
+    suppressed in excluded group bodies and opaque headers/messages (an
+    untaken `#elif` line still diagnoses); exact Clang
+    diagnostic/location comparisons; contextual recovery beyond 8/64/256
+    repairs with earlier macro snapshots retained, and failure injection for
+    allocation, data-index exhaustion and an unchanged recovery mask (#285);
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
@@ -3370,8 +3445,18 @@ binding kernels: stack replay and the vector batch against an independent
 scope oracle, 100,000-level nesting, protected-page tails and allocation
 failure. `benchmark-bindings [--events N] [--names N] [--only scalar|batch|sort]
 [--after-scalar MS]` measures synthetic events under the 9700X lock, pinned to
-CPU 2. The parser adapter and corpus acceptance for #128 remain pending;
-[docs/c-bindings.md](docs/c-bindings.md) describes the contract and boundaries.
+CPU 2. `test-parser-bindings [--clang [PATH]] [--seed N] [--count N]
+[preprocessor options] [file or directory...]` checks real-source declaration
+identities, both parser schedules and both resolvers. Without files it runs
+scope fixtures, generated programs, K3 fallback checks and allocation failure
+tests. `benchmark-parser-bindings [--passes N] [--only
+prepare|scalar|batch|sort|source-scalar|source-batch] [--after-scalar MS]
+[preprocessor options] file...` measures source-event production, resolution
+and the combined parser/adapter/consumer path. Run benchmarks on the locked
+9700X, pinned to CPU 2. [docs/c-bindings.md](docs/c-bindings.md) describes the
+opt-in adapter, the declaration-token columns, corpus provenance and the
+explicit cost of its scalar grammar replay. The syntax-only driver does not
+request these columns.
 
 ## Type tests
 

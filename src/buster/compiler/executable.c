@@ -30,8 +30,8 @@
 // _GLOBAL_OFFSET_TABLE_ for all four, and _DYNAMIC for the PIEs.
 //
 // The image, at BUSTER_EXECUTABLE_BASE (or a PIE's at 0, which the loader places), is lld's: four PT_LOAD segments in
-// lld's order, each from the next page at its file offset's place in a page (4 KB-congruent, with contiguous file
-// offsets and no file padding):
+// lld's order, each from the next page at its file offset's place in a page. File offsets equal virtual offsets from
+// the image base (4 KB-congruent), with zero-filled gaps between loads so consumers recover one mapping base:
 //   - R: the ELF header and program headers (which a program finds through AT_PHDR), a PIE's .interp, .note.ABI-tag
 //     (with the C runtime), .note.gnu.build-id, a PIE's .dynsym, .gnu.version, .gnu.version_r, .gnu.hash, .dynstr,
 //     .rela.dyn and .relr.dyn, a static executable's .rela.iplt (with the C runtime), .rodata (RODATA atoms, then
