@@ -3254,6 +3254,18 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
+## Fragment experiment tests
+
+The test-only expression-fragment experiment is described in
+[docs/c-parser-fragments.md](docs/c-parser-fragments.md).
+`./build/compiler test-fragment-interleave [--seed N]` compares scalar and
+AVX-512 byte routing, including exhaustive short masks and exact protected-page
+boundaries. `./build/compiler test-fragments` checks the scalar recognizer's
+experimental sink, compiled separately in `main_unit_fragments.c`; production
+parser units have no fragment sink. These checks do not establish semantic or
+SSA IR identity. The complete #107 comparison still requires the shared
+semantic consumer and its actual output.
+
 ## Scoped binding kernels
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
