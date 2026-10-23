@@ -3380,8 +3380,11 @@ tag-completion positions and parser-role body ranges for #113, including
 guarded tails and queries on 1, 2, 3 and 8 lanes. `benchmark-environments`
 measures the synthetic index/query handoff and completeness checks; use
 `--only full-vector [--after-scalar 100]` for its vector states, under the
-9700X's per-run lock and pinned to CPU 2. The checker source adapter, actual
-deferred body/effect checking and corpus acceptance are still pending.
+9700X's per-run lock and pinned to CPU 2. `check_input` publishes the real
+source reader's retained events, declaration types, tag completion positions
+and body slots through `c_check_environment.c`; `test-checker` checks their
+scratch lifetime and scalar/vector replay. Actual deferred body/effect
+checking and corpus acceptance are still pending.
 [docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C

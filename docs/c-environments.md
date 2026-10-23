@@ -5,8 +5,10 @@
 declaration history, answers scalar and batched position queries, checks tag
 completion at a use's position, and extracts source-ordered body ranges from
 the validated parser output. It does not turn on deferred checking in the
-compiler. The source adapter and checker are being developed in
+compiler. The sequential source checker landed in
 [#312](https://github.com/buster14a/buster/pull/312), under #128 and #133.
+`c_check_environment.c` now connects that reader to the retained history
+handoff described below. The reader still visits function bodies in order.
 
 ## Producer, handoff and consumer
 
@@ -28,7 +30,8 @@ AVX-512; filling each name's history retains the original activation order.
 The index owns offsets and two columns per file-scope declaration: activation
 point and original activation handle. It borrows the `CBindings` stream.
 Allocation failure empties the result and rolls back the output and scratch
-arenas; the two arenas must be distinct and must not own the input columns.
+arenas; the two arenas must be distinct. Input columns may share an arena
+when they precede its entry mark and cannot overlap the new allocations.
 Scratch is released on success too. The complete index and source events must
 remain alive and unchanged until all readers join; resetting or appending to
 the source during that phase violates the handoff contract.
@@ -112,6 +115,50 @@ and composite types in source order after joining. The environment index
 does not itself introduce file-scope visibility for those block-scope names.
 It supplies no scheduler, IR merger or composite-type effect merger.
 
+## Production source-reader handoff
+
+On a successful `check_input`, `check_environment_publish` builds
+`CheckInput.environment` before the reader releases its scratch. Rejected or
+unsupported units publish no usable environment. Publication failure empties
+the handoff, rolls back its allocations and sets the existing resource status.
+The sequential entry point, declaration columns and graph stay compatible.
+
+The handoff retains the actual declaration/use/restore events produced by the
+reader, including local events. Its read-only `CBindings` view has exactly
+`count` elements in each of five u32 columns (`key`, `declaration`, `point`,
+`end`, `depth`) and two byte columns (`operation`, `kind`), without padding.
+It omits mutable heads, the undo stack and `previous`. Use only
+`c_bindings_scalar`, `c_bindings_batch` and read-only environment queries with
+this view; `c_bindings_lookup`, append and reset require the mutable producer.
+The file index filters the retained events by semantic scope zero.
+Restore events define only `operation`, `declaration` (the undo mark) and
+`point`; their other entries are unspecified, just as in the producer.
+
+`declaration_types` borrows the retained `CheckInput.declared_types` column,
+indexed by original declaration token. A later compatible declaration may
+form a new composite TypeId; it does not overwrite an earlier declaration's
+type. The reader's separate translation-unit `linked_types` state is never
+used for historical visibility. Tag completion positions are copied by tag
+index, with `UINT32_MAX` for missing/incomplete positions and the token after
+the closing brace for a completed definition. Body ranges are counted from
+parser roles and allocated to their exact count before assigning source slots.
+
+The environment stores its own event-view object in the output arena, so the
+`CheckEnvironment` value can move without leaving an internal pointer to the
+old struct. Its arrays, declaration types and TypeTable must remain alive and
+unchanged through all readers. Scratch is reusable immediately after
+`check_input`. `retained_bytes` reports the snapshot, completion/body columns,
+file index and alignment; it excludes the existing declaration/type columns,
+parser, TypeTable and transient reader storage.
+
+This publication step follows the existing sequential resolver and expression
+reader. It does not establish top-level-only preparation: that resolver still
+walks bodies and creates their local types. General initializer semantics,
+private body type construction, ordered linkage effects and an actual deferred
+consumer remain separate integration work. The parser binding producer in
+[#320](https://github.com/buster14a/buster/pull/320) retains its own interface
+and is not replaced by this checker handoff.
+
 ## Tests and measurements
 
 ```sh
@@ -135,6 +182,16 @@ the issue's examples, typedef shadowing, a block `extern`, macro-generated
 bodies, and nested initializer/tag braces. **Semantic events in these tests
 are supplied explicitly**, rather than extracted by a production adapter.
 These tests establish the boundary's behavior, not completed source checking.
+
+`test-checker` additionally exercises the **production** handoff through both
+parser/resolver paths, overwrites released scratch, and replays the retained
+events with both binding kernels. Explicit declaration occurrences pin file
+visibility through local shadowing, closed block prototypes and later function
+prototypes/array bounds. Tag fixtures distinguish local tag identities from a
+file tag completed after an earlier body. Macro-expanded bodies retain stable
+source-order slots. One/eight-lane reversed queries and several batch
+partitions consume that same source-produced history. These schedule queries,
+not deferred body checking. Allocation boundaries test complete rollback.
 
 The synthetic benchmark reports index construction, scalar/vector lookups,
 the complete index-to-query handoff, and scalar/vector completeness checks,
@@ -200,13 +257,15 @@ The same CI run's `main.c` parser measurement covered 2,291,368 tokens in
 60.001 cycles/token and 295.241 instructions/token; the vector path reported
 13.391 ms, 5.844 ns/token, 32.329 cycles/token and 60.913 instructions/token.
 Its fallback covered 58 top-level declarations and 33,911 tokens (1.480%).
-The environment numbers above are synthetic per-query costs. Measuring their
-added cost in the source parser/checker pipeline requires the adapter below.
+The environment numbers above are synthetic per-query costs. The additional
+[source measurement harness](measurements/c-environments-2026-10-23/README.md)
+includes parsing, the production reader, publication and expression checking.
+Its source-pipeline measurements remain pending.
 
 ## Remaining acceptance for #113
 
-- Connect the #128/#133 source adapter to the immutable file environment,
-  per-declaration type identities, and tag-completion-position producer.
+- Qualify the new production history handoff on the locked 9700X, separately
+  from the earlier kernel-only CI and measurements above.
 - Check every top-level initializer and its scope effects before deferring
   bodies; keep body-local type construction private.
 - Implement source-ordered linkage/composite-type effects and connect actual

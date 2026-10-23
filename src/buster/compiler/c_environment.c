@@ -48,7 +48,8 @@ struct CBodyRange
 };
 
 // Allocates only the immutable file-scope index; scratch is released even on success. The output is empty and both
-// arena marks are restored on failure. The arenas must be distinct and must not contain the input stream's storage.
+// arena marks are restored on failure. The arenas must be distinct. Input columns sharing an arena must precede
+// its entry mark, so neither allocation nor rollback can invalidate them.
 static bool c_environment_build(CEnvironment* environment, const CBindings* bindings, Arena* arena, Arena* scratch)
 {
     const uint64_t mark = arena->length;

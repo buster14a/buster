@@ -226,6 +226,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_environment.c"
 #include "buster/compiler/c_environment_test.c"
 #include "buster/compiler/c_environment_benchmark.c"
+#include "buster/compiler/c_check_environment.c"
 
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
