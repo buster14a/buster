@@ -39,6 +39,7 @@ struct CFragmentCoverageNode
     uint32_t canonical;
     uint32_t boundary;
     uint8_t context;
+    uint8_t attribute_context;
     uint8_t kind;
     bool transparent;
     bool bridge;
@@ -62,6 +63,120 @@ static bool c_fragment_coverage_type(uint8_t role)
 {
     return role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_TAG || role == PARSE_ROLE_CLOSE_SPECIFIER ||
            role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+}
+
+// Attribute spelling only selects declaration versus statement grammar here; semantic applicability is separate.
+// Keep the oracle's list independent of the recognizer's transient frame flags and classification helper.
+static bool c_fragment_coverage_statement_attribute(const Parser* parser, uint32_t token, bool* statement)
+{
+    static const char* const names[] =
+    {
+        "always_inline",
+        "atomic",
+        "assume",
+        "code_align",
+        "fallthrough",
+        "musttail",
+        "noinline",
+        "nomerge",
+        "no_outline",
+        "opencl_unroll_hint",
+        "suppress",
+    };
+    const InternTable* table = parser->meanings.table;
+    const IdentId name = parser->tokens.names[token];
+    const bool result = table != 0 && name != 0 && name < table->count;
+    *statement = false;
+    if (result)
+    {
+        const uint8_t* bytes = intern_bytes(table, name);
+        uint32_t length = intern_length(table, name);
+        if (length >= 4 && bytes[0] == '_' && bytes[1] == '_' && bytes[length - 2] == '_' && bytes[length - 1] == '_')
+        {
+            bytes += 2;
+            length -= 4;
+        }
+        for (uint32_t k = 0; !*statement && k < sizeof(names) / sizeof(names[0]); k += 1)
+        {
+            *statement = length == strlen(names[k]) && memcmp(bytes, names[k], length) == 0;
+        }
+    }
+    return result;
+}
+
+// GNU attributes at a block boundary may introduce a statement or a declaration. Read complete adjacent lists,
+// skipping each argument by its ordinary matching closer. Each list is visited once, including long chains.
+// A named label or control head requires a statement; a case label still permits an attributed declaration.
+static bool c_fragment_coverage_attribute_contexts(const Parser* parser, CFragmentCoverageNode* nodes)
+{
+    const uint32_t count = parser->tokens.count;
+    bool result = true;
+    for (uint32_t token = 0; result && token < count; token += 1)
+    {
+        const uint32_t enclosing = nodes[token].enclosing;
+        const bool block = enclosing < count && (parser->tree.roles[enclosing] == PARSE_ROLE_OPEN_BODY || parser->tree.roles[enclosing] == PARSE_ROLE_OPEN_BLOCK);
+        if (block && parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE && token + 1 < count && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER)
+        {
+            uint32_t after = token;
+            bool statement_names = false;
+            bool declaration_names = false;
+            bool more = true;
+            while (result && more)
+            {
+                const uint32_t open = after + 1;
+                const uint32_t close = parser->tree.parents[open];
+                const uint32_t list = open + 1;
+                const uint32_t end = list < count ? parser->tree.parents[list] : count;
+                result = close < count && list < close && end > list && end + 1 == close && parser->tree.roles[list] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
+                uint32_t name = list + 1;
+                while (result && name < end)
+                {
+                    if (parser->tokens.kinds[name] == PARSE_KIND_COMMA)
+                    {
+                        name += 1;
+                    }
+                    else
+                    {
+                        bool statement = false;
+                        result = c_fragment_coverage_statement_attribute(parser, name, &statement);
+                        statement_names |= statement;
+                        declaration_names |= !statement;
+                        name += 1;
+                        if (result && name < end && parser->tokens.kinds[name] == PARSE_KIND_L_PAREN)
+                        {
+                            const uint32_t argument_end = parser->tree.parents[name];
+                            result = argument_end > name && argument_end < end;
+                            name = result ? argument_end + 1 : end;
+                        }
+                        result = result && (name == end || parser->tokens.kinds[name] == PARSE_KIND_COMMA);
+                    }
+                }
+                after = result ? close + 1 : count;
+                more = after + 1 < count && parser->tokens.kinds[after] == PARSE_KIND_ATTRIBUTE && nodes[after].enclosing == enclosing &&
+                       parser->tree.roles[after + 1] == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER;
+            }
+            if (result)
+            {
+                const uint8_t before = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_NONE;
+                const uint8_t next = after < count ? parser->tokens.kinds[after] : PARSE_KIND_END;
+                const bool head = before == PARSE_ROLE_LABEL || before == PARSE_ROLE_CLOSE_CONDITION || before == PARSE_ROLE_CLOSE_FOR ||
+                                  before == PARSE_ROLE_DO || before == PARSE_ROLE_ELSE;
+                const bool statement = next == PARSE_KIND_IF || next == PARSE_KIND_SWITCH || next == PARSE_KIND_WHILE || next == PARSE_KIND_DO || next == PARSE_KIND_FOR ||
+                                       next == PARSE_KIND_GOTO || next == PARSE_KIND_CONTINUE || next == PARSE_KIND_BREAK || next == PARSE_KIND_RETURN ||
+                                       next == PARSE_KIND_CASE || next == PARSE_KIND_DEFAULT || next == PARSE_KIND_L_BRACE || next == PARSE_KIND_SEMI || next == PARSE_KIND_ASM ||
+                                       (next == PARSE_KIND_IDENTIFIER && after + 1 < count && parser->tokens.kinds[after + 1] == PARSE_KIND_COLON);
+                const uint8_t context = head || statement || (statement_names && !declaration_names) ? C_FRAGMENT_COVER_ITEM : C_FRAGMENT_COVER_DECLARATION;
+                for (uint32_t group = token; group < after;)
+                {
+                    const uint32_t close = parser->tree.parents[group + 1];
+                    nodes[close].attribute_context = context;
+                    group = close + 1;
+                }
+            }
+            token = after - 1;
+        }
+    }
+    return result;
 }
 
 // These mappings deliberately do not call the producer's classification helpers or use its arity/fixity tables.
@@ -165,6 +280,7 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
                 .canonical = BUSTER_C_FRAGMENT_NONE,
                 .boundary = BUSTER_C_FRAGMENT_NONE,
                 .context = C_FRAGMENT_COVER_UNSET,
+                .attribute_context = C_FRAGMENT_COVER_UNSET,
                 .kind = C_FRAGMENT_KIND_COUNT,
             };
         }
@@ -254,6 +370,11 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
         failed = enclosing;
         reason = "unclosed ordinary group";
     }
+    if (result && !c_fragment_coverage_attribute_contexts(parser, nodes))
+    {
+        result = false;
+        reason = "ordinary attribute continuation";
+    }
     // Reverse postorder visits every parent before its children. Context comes solely from that parent and from
     // source positions relative to its opener/operator, not from the recognizer's transient mode or sink metadata.
     for (uint32_t position = count; result && position != 0; position -= 1)
@@ -341,9 +462,14 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
             }
             else if (role >= PARSE_ROLE_CLOSE_ATTRIBUTE && role <= PARSE_ROLE_CLOSE_ATTRIBUTE_LIST)
             {
-                // Attribute closers can also own the surrounding declarator; exclude only their inner syntax.
+                // Attribute closers can own a declarator or the statement after a GNU block prefix. Their inner
+                // syntax remains excluded, and the closer remains a publication barrier in either continuation.
                 middle = C_FRAGMENT_COVER_EXCLUDED;
                 left = right = context == C_FRAGMENT_COVER_ITEM ? C_FRAGMENT_COVER_DECLARATION : context;
+                if (context == C_FRAGMENT_COVER_ITEM && node->attribute_context != C_FRAGMENT_COVER_UNSET)
+                {
+                    right = node->attribute_context;
+                }
             }
             else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
             {
@@ -727,13 +853,15 @@ struct CFragmentCoverageFixtureNode
     uint8_t source;
     uint8_t type_root;
     uint8_t auxiliary;
+    bool publication;
 };
 
-#define BUSTER_FRAGMENT_EXPECT(token, kind) { token, C_FRAGMENT_##kind, token, UINT8_MAX, UINT8_MAX }
-#define BUSTER_FRAGMENT_EXPECT_GROUP(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, UINT8_MAX }
-#define BUSTER_FRAGMENT_EXPECT_TYPE(token, kind, source, type) { token, C_FRAGMENT_##kind, source, type, UINT8_MAX }
-#define BUSTER_FRAGMENT_EXPECT_TERNARY(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, token }
-#define BUSTER_FRAGMENT_EXPECT_BRIDGE(token) { token, C_FRAGMENT_KIND_COUNT, token, UINT8_MAX, UINT8_MAX }
+#define BUSTER_FRAGMENT_EXPECT(token, kind) { token, C_FRAGMENT_##kind, token, UINT8_MAX, UINT8_MAX, false }
+#define BUSTER_FRAGMENT_EXPECT_GROUP(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, UINT8_MAX, false }
+#define BUSTER_FRAGMENT_EXPECT_TYPE(token, kind, source, type) { token, C_FRAGMENT_##kind, source, type, UINT8_MAX, false }
+#define BUSTER_FRAGMENT_EXPECT_TERNARY(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, token, false }
+#define BUSTER_FRAGMENT_EXPECT_BRIDGE(token) { token, C_FRAGMENT_KIND_COUNT, token, UINT8_MAX, UINT8_MAX, false }
+#define BUSTER_FRAGMENT_EXPECT_PUBLISHED(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, UINT8_MAX, true }
 
 // These are hand-specified token positions in the literal fixtures in c_fragments_test.c, relative to the return
 // operand except fixtures 14, 21 and 23 onward (whole file). They do not query parser roles to decide what should be emitted.
@@ -1033,22 +1161,57 @@ static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_32[] = {
     BUSTER_FRAGMENT_EXPECT(16, NUMBER),
     BUSTER_FRAGMENT_EXPECT(20, IDENTIFIER),
 };
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_33[] = {
+    BUSTER_FRAGMENT_EXPECT(14, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(16, CALL, 15),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_34[] = {
+    BUSTER_FRAGMENT_EXPECT(12, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(14, CALL, 13),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_35[] = {
+    BUSTER_FRAGMENT_EXPECT(12, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(14, CALL, 13),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_36[] = {
+    BUSTER_FRAGMENT_EXPECT(12, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(14, CALL, 13),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_37[] = {
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(8, NUMBER, 8),
+    BUSTER_FRAGMENT_EXPECT(16, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(18, CALL, 17),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_38[] = {
+    BUSTER_FRAGMENT_EXPECT(37, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(40, CALL, 39),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_39[] = {
+    BUSTER_FRAGMENT_EXPECT(21, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(23, CALL, 22),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_40[] = {
+    BUSTER_FRAGMENT_EXPECT_PUBLISHED(51, IDENTIFIER, 51),
+};
 
 #undef BUSTER_FRAGMENT_EXPECT
 #undef BUSTER_FRAGMENT_EXPECT_GROUP
 #undef BUSTER_FRAGMENT_EXPECT_TYPE
 #undef BUSTER_FRAGMENT_EXPECT_TERNARY
 #undef BUSTER_FRAGMENT_EXPECT_BRIDGE
+#undef BUSTER_FRAGMENT_EXPECT_PUBLISHED
 
 static bool c_fragment_coverage_fixture_matches(const CFragmentSink* sink, const CFragmentCoverageFixtureNode* expected, uint32_t length, uint32_t base)
 {
     uint32_t emitted = 0;
     uint32_t bridges = 0;
     uint32_t required = 0;
+    uint32_t publications = 0;
     bool result = sink->expression_count != 0;
     for (uint32_t k = 0; k < length; k += 1)
     {
         required += expected[k].kind != C_FRAGMENT_KIND_COUNT;
+        publications += expected[k].publication;
     }
     for (uint32_t token = 0; token < sink->token_count; token += 1)
     {
@@ -1056,6 +1219,7 @@ static bool c_fragment_coverage_fixture_matches(const CFragmentSink* sink, const
         bridges += sink->syntax[token].bridge;
     }
     result &= emitted == required && bridges == length - required;
+    result &= publications == 0 || sink->expression_count == publications;
     for (uint32_t k = 0; result && k < length; k += 1)
     {
         const CFragmentCoverageFixtureNode* wanted = &expected[k];
@@ -1074,6 +1238,15 @@ static bool c_fragment_coverage_fixture_matches(const CFragmentSink* sink, const
             {
                 result = actual->emitted && !actual->bridge && sink->kinds[token] == wanted->kind && actual->source == base + wanted->source &&
                          actual->type_root == type && actual->auxiliary == auxiliary;
+            }
+            if (result && wanted->publication)
+            {
+                uint32_t matches = 0;
+                for (uint32_t e = 0; e < sink->expression_count; e += 1)
+                {
+                    matches += sink->expressions[e].root == token;
+                }
+                result = matches == 1;
             }
         }
     }
@@ -1121,6 +1294,14 @@ static bool c_fragment_test_coverage_fixture(const Parser* parser, const CFragme
         BUSTER_FRAGMENT_FIXTURE(30),
         BUSTER_FRAGMENT_FIXTURE(31),
         BUSTER_FRAGMENT_FIXTURE(32),
+        BUSTER_FRAGMENT_FIXTURE(33),
+        BUSTER_FRAGMENT_FIXTURE(34),
+        BUSTER_FRAGMENT_FIXTURE(35),
+        BUSTER_FRAGMENT_FIXTURE(36),
+        BUSTER_FRAGMENT_FIXTURE(37),
+        BUSTER_FRAGMENT_FIXTURE(38),
+        BUSTER_FRAGMENT_FIXTURE(39),
+        BUSTER_FRAGMENT_FIXTURE(40),
 #undef BUSTER_FRAGMENT_FIXTURE
     };
     bool result = true;

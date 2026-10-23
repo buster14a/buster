@@ -586,6 +586,14 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
         "int f(int x,int y) { int a[]={ [(((0)))] (((x+y))) }; return a[0]; }\n",
         "int f(int x) { return (int)(x); }\n",
         "int f(int x) { (x+1); (x+1); return x; }\n",
+        "void f(void) { L: __attribute__((unused)) f(); }\n",
+        "void f(void) { __attribute__((noinline)) f(); }\n",
+        "void f(void) { __attribute__((always_inline)) f(); }\n",
+        "void f(void) { __attribute__((__noinline__)) f(); }\n",
+        "void f(void) { if (1) __attribute__((noinline)) f(); }\n",
+        "void f(void) { __attribute__((unused)) int x; int (* __attribute__((unused)) p)(int); __attribute__((noinline)) (f)(); }\n",
+        "void f(void) { __attribute__((noinline)) __attribute__((always_inline(unused))) f(); }\n",
+        "void f(void) { __attribute__((unknown)) a; __attribute__(()) b; __attribute__((noinline,unused)) c; __attribute__((noinline)) __attribute__((unused)) d; __attribute__((noinline)) a; }\n",
     };
     static const char* const invalid[] = {
         "int f(void) { return +; }\n",
@@ -601,8 +609,11 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
     uint32_t failures = 0;
     for (uint32_t k = 0; k < sizeof(sources) / sizeof(sources[0]); k += 1)
     {
+        PPOptions fixture_options = options;
+        // The last attribute-control fixture deliberately includes accepted C89 implicit-int declarations.
+        fixture_options.language.standard = k == 40 ? 1989 : 2017;
         const bool written = parse_test_write(path, sources[k], strlen(sources[k]));
-        const uint32_t failed = written ? c_fragment_test_file(path, &options, 1, totals, (int)k, 0) : 1;
+        const uint32_t failed = written ? c_fragment_test_file(path, &fixture_options, 1, totals, (int)k, 0) : 1;
         if (failed != 0)
         {
             fprintf(stderr, "fragment fixture %u: %s", k, sources[k]);
