@@ -393,6 +393,27 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
                                    file.pointer != 0 && memcmp(file.pointer, reference.pointer, file.length) == 0, "invalid descriptor preserves destination", 10 * exact + i);
         }
     }
+    // Linker boundaries have image addresses, not module TLS offsets. Link accepts this contradictory type, so the
+    // optional table must refuse it before changing the existing destination, on every path and lane partition.
+    const uint8_t boundary_flags = link->symbols.flags[ids[6]];
+    link->symbols.flags[ids[6]] = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS;
+    for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+    {
+        write.options.exact = exact != 0;
+        write.options.symbols = &selected;
+        for (uint32_t l = 0; valid && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+        {
+            const uint32_t lanes = executable_test_lane_counts[l];
+            write.succeeded = false;
+            const bool checked = link_check(link) == LINK_ERROR_NONE;
+            const bool ran = checked && lane_run(lanes, executable_test_lane_main, &write, 0);
+            const String8 file = object_test_read_file(&saved, path);
+            executable_test_expect(&tally, ran && !write.succeeded && write.result.error == EXECUTABLE_ERROR_UNSUPPORTED && file.length == reference.length &&
+                                   file.pointer != 0 && memcmp(file.pointer, reference.pointer, file.length) == 0,
+                                   "linker boundary TLS refusal preserves destination", 10 * exact + lanes);
+        }
+    }
+    link->symbols.flags[ids[6]] = boundary_flags;
     // Zero-sized TLS definitions are valid Link input. If their output section would be absent, refuse the optional
     // attachment rather than pairing a TLS-relative value with a non-TLS section index.
     for (uint32_t i = 0; valid && i < 2; i += 1)

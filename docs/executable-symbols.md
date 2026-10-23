@@ -40,6 +40,9 @@ references use a stub. Absolute definitions use `SHN_ABS`; undefined and
 shared-library imports use `SHN_UNDEF` and value zero. Linker-defined image
 boundaries remain associated with an allocated non-TLS section so a PIE's
 boundary value remains relocatable.
+Linker-defined boundaries cannot carry a TLS type: their image addresses are
+not module offsets. An explicit selection containing one is refused before
+opening the destination.
 
 A selected zero-sized TLS definition whose class has no output section is
 currently refused before opening the destination. The writer must not pair

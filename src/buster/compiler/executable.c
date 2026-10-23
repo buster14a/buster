@@ -6096,7 +6096,9 @@ static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* 
         if (valid)
         {
             const NameId name = link->symbols.name[symbol];
-            valid = name < link->names.count;
+            const uint8_t type = link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE;
+            const bool boundary_tls = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER && type == BUSTER_LINK_SYMBOL_TLS;
+            valid = name < link->names.count && !boundary_tls;
             if (valid)
             {
                 const uint32_t length = link->names.length[name];
