@@ -1,0 +1,13 @@
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 20000 inputs differ (421965 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (1059591 ids in use)

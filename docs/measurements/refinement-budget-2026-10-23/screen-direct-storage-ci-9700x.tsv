@@ -1,0 +1,13 @@
+tree	input	rounds	refine_min_ms	refine_median_ms	refine_max_ms	lex_min_ms	lex_median_ms	lex_max_ms	directives_median_ms	whole_min_ms	whole_median_ms	whole_max_ms
+build/refine116/pp-fixed	sqlite-3.53.4.c	3	1.722	1.723	1.732	2.434	2.440	2.441	0.293	11.835	11.888	11.898
+build/refine116/pp-coldpref	sqlite-3.53.4.c	3	1.517	1.524	1.525	2.408	2.417	2.424	0.235	11.544	11.567	11.578
+build/refine116/pp-directspace	sqlite-3.53.4.c	3	1.498	1.507	1.517	2.418	2.430	2.431	0.227	11.572	11.583	11.597
+build/refine116/pp-directcold	sqlite-3.53.4.c	3	1.534	1.540	1.559	2.422	2.426	2.437	0.225	11.577	11.590	11.595
+build/refine116/pp-fixed	sqlite-3.53.2.c	3	1.717	1.719	1.734	2.423	2.438	2.442	0.294	11.849	11.891	11.904
+build/refine116/pp-coldpref	sqlite-3.53.2.c	3	1.522	1.524	1.543	2.411	2.413	2.417	0.236	11.565	11.567	11.719
+build/refine116/pp-directspace	sqlite-3.53.2.c	3	1.494	1.520	1.525	2.420	2.427	2.441	0.227	11.579	11.590	11.662
+build/refine116/pp-directcold	sqlite-3.53.2.c	3	1.527	1.558	1.568	2.417	2.421	2.441	0.226	11.585	11.599	11.684
+build/refine116/pp-fixed	main.c	3	4.129	4.136	4.141	4.268	4.278	4.293	0.313	41.862	42.016	42.125
+build/refine116/pp-coldpref	main.c	3	3.870	3.883	3.965	4.388	4.406	4.408	0.323	41.745	41.801	41.920
+build/refine116/pp-directspace	main.c	3	3.809	3.824	3.850	4.355	4.368	4.390	0.317	41.763	41.816	42.191
+build/refine116/pp-directcold	main.c	3	3.898	3.908	3.911	4.368	4.384	4.384	0.309	41.811	41.872	41.915

@@ -1,0 +1,36 @@
+cases: 0 of 332 fail
+macro batches: 522 boundary calls and long literal/optional runs: agree
+timestamps: each file's modification time, and SOURCE_DATE_EPOCH's
+feature answers and 152 catalog names: as expected (source acceptance by default, clang's independent oracle mode)
+predefines target: as expected (x86_target.c's features, its six profiles, -m switches, other CPUs and -mtune)
+predefines: -m options refused though clang takes them, and those taken: as expected
+history diagnostics: 0 of 36 fail
+history runs: pass (201 lengths, split copies, scalar/vector queries, guard page)
+history copies: pass (66 lengths, distinct buffers and same-buffer overlaps, scalar/vector)
+history lifetimes: pass (redefinition, repeated parameters, retained generated inputs, builtins, recording control)
+history growth: pass (all eight initial slices, repeated arguments, generated sources)
+embed text: 1204 checks, 0 failures
+embed lookups: 0 of 2 fail
+lookup accounting: as expected (file and metadata attempts, unit/shared caches, scalar/vector and timing off)
+final copy accounting: as expected (captures excluded, direct objects, empty output, scalar/vector and timing off)
+scalar reference: as expected (inverted macro-name bits, definitions, captures, builtins, poison and kernel override)
+directive tables: 0 of 2004 random sources and nests differ from the oracle (1989039 tokens, 633958 directives, 46286 notes, 10 guards)
+directive structure: 0 of 26 fixtures differ between the kernels
+diagnostic text: 0 of 7 fixtures differ between the kernels
+raw string diagnostics: 0 of 14 fixtures differ between the kernels
+diagnostic recovery capacity: 0 of 6 kernel runs differ
+diagnostic recovery predefines origin: preserved
+definitions: 0 of 10 fixtures differ between the kernels
+include guards: 0 of 20 fixtures differ
+location space: 2 of 2 runs out where expected
+location option: 4 of 4 runs of the commands take --location-limit and its value as ours
+preprocessor determinism: 332 fixtures, 1/2/3/8 lanes, both kernels/orders, ID seed 153: pass
+dollar printing: 0 of 16 cases fail
+raw query private views: pass (fresh, cold shared and warm shared caches, both kernels)
+opaque recovery: pass (8/9/64/65/257 queries and direct repairs, macro snapshots, both kernels)
+opaque recovery failure guards: pass (allocation, data indexes, progress)
+option sets: 0 of 70 refused or taken wrongly
+fuzz isolation: 0 of 24 sources fail
+fuzz comparison: 0 of 46 pairs fail
+fuzz: c17, seed 116: 3000 cases, 1263 accepted; the kernels differ on 0; 0 without a result; 131 whose text can't lex back, as clang's can't
+fuzz: c23, seed 116: 3000 cases, 1267 accepted; the kernels differ on 0; 0 without a result; 143 whose text can't lex back, as clang's can't

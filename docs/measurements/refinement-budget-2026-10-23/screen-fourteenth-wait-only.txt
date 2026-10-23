@@ -1,0 +1,20 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:59:25+00:00 CI job of buster14a/buster (run 39990388026, worker 203229)
+  title: 9700X test / test: Add scalar atomic read-modify-write checking and baseline helpers (#352)
+  link: https://github.com/buster14a/buster/actions/runs/39990388026/attempts/1
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T17:06:08+00:00 CI job of buster14a/buster (run 39990747943, worker 264184)
+  title: 9700X test / test: #328: Add transactional pooling for eligible foreign string sections
+  link: https://github.com/buster14a/buster/actions/runs/39990747943/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/328
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T17:09:23+00:00 CI job of buster14a/buster (run 39990788890, worker 303963)
+  title: 9700X test / test: #355: Add type-first bit-cast constraints and exact representation metadata
+  link: https://github.com/buster14a/buster/actions/runs/39990788890/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/355
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T17:10:52+00:00 CI job of buster14a/buster (run 39991762776, worker 341513)
+  title: 9700X test / test: Merge pull request #316 from buster14a/codex/linker-shared-tls-85
+  link: https://github.com/buster14a/buster/actions/runs/39991762776/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T17:17:36+00:00 CI job of buster14a/buster (run 39992461786, worker 403144)
+  title: 9700X test / test: #334: Fix intern hash mixing and qualify the refinement budget
+  link: https://github.com/buster14a/buster/actions/runs/39992461786/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/334
+[tailscale-ssh: process died: signal: terminated]

@@ -1,0 +1,5 @@
+chunk preparation: 134784 guarded cases, pass
+splice source boundaries: 1200 guarded cases, pass
+mixed handoff: 2000 cases, pass
+preparation allocation failures: pass
+partial handoff allocation failure: pass

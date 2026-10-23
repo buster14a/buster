@@ -1,0 +1,66 @@
+== round 1 tree work/local-directcold config [--only vectorized work/inputs/sqlite3.c]
+1 files, 1243769 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   18.929 ms   54.19 cycles/input token   95.31 cycles/output token  129.19 instructions/input token  IPC 2.38
+               read 9.3%  lex 20.4%  refine 13.4%  directives 1.8%  main loop 55.1%
+               read 1.762 ms  lex 3.851 ms  refine 2.529 ms  directives 0.347 ms  main loop 10.423 ms
+             then the release 0.765 ms
+             -E -P with printing 25.045 ms (printing 6.052 ms): 412 MB/s of input (10312424 bytes), 28.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16750 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree work/local-plainkeys config [--only vectorized work/inputs/sqlite3.c]
+1 files, 1243769 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   18.770 ms   54.37 cycles/input token   95.63 cycles/output token  128.77 instructions/input token  IPC 2.37
+               read 9.3%  lex 20.4%  refine 13.1%  directives 1.9%  main loop 55.3%
+               read 1.739 ms  lex 3.833 ms  refine 2.462 ms  directives 0.348 ms  main loop 10.376 ms
+             then the release 0.761 ms
+             -E -P with printing 24.781 ms (printing 6.041 ms): 416 MB/s of input (10312424 bytes), 28.5 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16750 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree work/local-plainkeys config [--only vectorized work/inputs/sqlite3.c]
+1 files, 1243769 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   19.891 ms   55.31 cycles/input token   97.29 cycles/output token  128.77 instructions/input token  IPC 2.33
+               read 9.4%  lex 19.9%  refine 12.8%  directives 1.9%  main loop 56.0%
+               read 1.815 ms  lex 3.860 ms  refine 2.474 ms  directives 0.371 ms  main loop 10.833 ms
+             then the release 0.800 ms
+             -E -P with printing 25.994 ms (printing 6.085 ms): 397 MB/s of input (10312424 bytes), 27.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16750 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree work/local-directcold config [--only vectorized work/inputs/sqlite3.c]
+1 files, 1243769 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   18.841 ms   54.81 cycles/input token   96.40 cycles/output token  129.19 instructions/input token  IPC 2.36
+               read 9.5%  lex 20.1%  refine 13.3%  directives 1.9%  main loop 55.2%
+               read 1.790 ms  lex 3.796 ms  refine 2.507 ms  directives 0.356 ms  main loop 10.426 ms
+             then the release 0.800 ms
+             -E -P with printing 24.836 ms (printing 5.970 ms): 415 MB/s of input (10312424 bytes), 28.5 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16750 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree work/local-directcold config [--only vectorized work/inputs/sqlite3.c]
+1 files, 1243769 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   18.964 ms   55.94 cycles/input token   98.39 cycles/output token  129.19 instructions/input token  IPC 2.31
+               read 8.9%  lex 20.0%  refine 12.9%  directives 1.8%  main loop 56.4%
+               read 1.688 ms  lex 3.773 ms  refine 2.441 ms  directives 0.333 ms  main loop 10.662 ms
+             then the release 0.763 ms
+             -E -P with printing 24.925 ms (printing 5.920 ms): 414 MB/s of input (10312424 bytes), 28.4 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16750 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree work/local-plainkeys config [--only vectorized work/inputs/sqlite3.c]
+1 files, 1243769 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   18.663 ms   54.43 cycles/input token   95.74 cycles/output token  128.77 instructions/input token  IPC 2.37
+               read 9.2%  lex 20.3%  refine 12.8%  directives 1.8%  main loop 55.9%
+               read 1.710 ms  lex 3.784 ms  refine 2.378 ms  directives 0.330 ms  main loop 10.410 ms
+             then the release 0.780 ms
+             -E -P with printing 24.551 ms (printing 5.886 ms): 420 MB/s of input (10312424 bytes), 28.8 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16750 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105

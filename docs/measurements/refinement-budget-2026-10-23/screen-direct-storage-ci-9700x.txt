@@ -1,0 +1,1145 @@
+##[group]Run bash docs/measurements/refinement-budget-2026-10-23/ci-splice-screen.sh
+^[[36;1mbash docs/measurements/refinement-budget-2026-10-23/ci-splice-screen.sh^[[0m
+shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+##[endgroup]
+/var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c: OK
+/var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c: OK
+src/buster/compiler/c_refine.c: OK
+/usr/include/alloca.h: OK
+/usr/include/asm-generic/bitsperlong.h: OK
+/usr/include/asm-generic/errno-base.h: OK
+/usr/include/asm-generic/errno.h: OK
+/usr/include/asm-generic/int-ll64.h: OK
+/usr/include/asm-generic/ioctl.h: OK
+/usr/include/asm-generic/ioctls.h: OK
+/usr/include/asm-generic/posix_types.h: OK
+/usr/include/asm-generic/sockios.h: OK
+/usr/include/asm-generic/types.h: OK
+/usr/include/asm/bitsperlong.h: OK
+/usr/include/asm/errno.h: OK
+/usr/include/asm/ioctl.h: OK
+/usr/include/asm/ioctls.h: OK
+/usr/include/asm/posix_types.h: OK
+/usr/include/asm/posix_types_64.h: OK
+/usr/include/asm/sockios.h: OK
+/usr/include/asm/types.h: OK
+/usr/include/assert.h: OK
+/usr/include/bits/atomic_wide_counter.h: OK
+/usr/include/bits/byteswap.h: OK
+/usr/include/bits/cloexec.h: OK
+/usr/include/bits/confname.h: OK
+/usr/include/bits/cpu-set.h: OK
+/usr/include/bits/dl_find_object.h: OK
+/usr/include/bits/dlfcn.h: OK
+/usr/include/bits/endian.h: OK
+/usr/include/bits/endianness.h: OK
+/usr/include/bits/environments.h: OK
+/usr/include/bits/errno.h: OK
+/usr/include/bits/fcntl-linux.h: OK
+/usr/include/bits/fcntl.h: OK
+/usr/include/bits/floatn-common.h: OK
+/usr/include/bits/floatn.h: OK
+/usr/include/bits/flt-eval-method.h: OK
+/usr/include/bits/fp-fast.h: OK
+/usr/include/bits/fp-logb.h: OK
+/usr/include/bits/getopt_core.h: OK
+/usr/include/bits/getopt_posix.h: OK
+/usr/include/bits/ioctl-types.h: OK
+/usr/include/bits/ioctls.h: OK
+/usr/include/bits/iscanonical.h: OK
+/usr/include/bits/libc-header-start.h: OK
+/usr/include/bits/libm-simd-decl-stubs.h: OK
+/usr/include/bits/long-double.h: OK
+/usr/include/bits/math-vector.h: OK
+/usr/include/bits/mathcalls-helper-functions.h: OK
+/usr/include/bits/mathcalls-macros.h: OK
+/usr/include/bits/mathcalls-narrow.h: OK
+/usr/include/bits/mathcalls.h: OK
+/usr/include/bits/mman-linux.h: OK
+/usr/include/bits/mman-map-flags-generic.h: OK
+/usr/include/bits/mman-shared.h: OK
+/usr/include/bits/mman.h: OK
+/usr/include/bits/mman_ext.h: OK
+/usr/include/bits/openat2.h: OK
+/usr/include/bits/posix_opt.h: OK
+/usr/include/bits/pthread_stack_min-dynamic.h: OK
+/usr/include/bits/pthreadtypes-arch.h: OK
+/usr/include/bits/pthreadtypes.h: OK
+/usr/include/bits/sched.h: OK
+/usr/include/bits/select.h: OK
+/usr/include/bits/setjmp.h: OK
+/usr/include/bits/stat.h: OK
+/usr/include/bits/statx-generic.h: OK
+/usr/include/bits/statx.h: OK
+/usr/include/bits/stdint-intn.h: OK
+/usr/include/bits/stdint-least.h: OK
+/usr/include/bits/stdint-uintn.h: OK
+/usr/include/bits/stdio_lim.h: OK
+/usr/include/bits/stdlib-float.h: OK
+/usr/include/bits/struct_mutex.h: OK
+/usr/include/bits/struct_rwlock.h: OK
+/usr/include/bits/struct_stat.h: OK
+/usr/include/bits/thread-shared-types.h: OK
+/usr/include/bits/time.h: OK
+/usr/include/bits/time64.h: OK
+/usr/include/bits/timesize.h: OK
+/usr/include/bits/timex.h: OK
+/usr/include/bits/types.h: OK
+/usr/include/bits/types/FILE.h: OK
+/usr/include/bits/types/__FILE.h: OK
+/usr/include/bits/types/__fpos64_t.h: OK
+/usr/include/bits/types/__fpos_t.h: OK
+/usr/include/bits/types/__locale_t.h: OK
+/usr/include/bits/types/__mbstate_t.h: OK
+/usr/include/bits/types/__sigset_t.h: OK
+/usr/include/bits/types/clock_t.h: OK
+/usr/include/bits/types/clockid_t.h: OK
+/usr/include/bits/types/cookie_io_functions_t.h: OK
+/usr/include/bits/types/error_t.h: OK
+/usr/include/bits/types/locale_t.h: OK
+/usr/include/bits/types/once_flag.h: OK
+/usr/include/bits/types/sigset_t.h: OK
+/usr/include/bits/types/struct_FILE.h: OK
+/usr/include/bits/types/struct___jmp_buf_tag.h: OK
+/usr/include/bits/types/struct_iovec.h: OK
+/usr/include/bits/types/struct_itimerspec.h: OK
+/usr/include/bits/types/struct_sched_param.h: OK
+/usr/include/bits/types/struct_statx.h: OK
+/usr/include/bits/types/struct_statx_timestamp.h: OK
+/usr/include/bits/types/struct_timespec.h: OK
+/usr/include/bits/types/struct_timeval.h: OK
+/usr/include/bits/types/struct_tm.h: OK
+/usr/include/bits/types/time_t.h: OK
+/usr/include/bits/types/timer_t.h: OK
+/usr/include/bits/typesizes.h: OK
+/usr/include/bits/uintn-identity.h: OK
+/usr/include/bits/unistd_ext.h: OK
+/usr/include/bits/waitflags.h: OK
+/usr/include/bits/waitstatus.h: OK
+/usr/include/bits/wchar.h: OK
+/usr/include/bits/wordsize.h: OK
+/usr/include/ctype.h: OK
+/usr/include/dlfcn.h: OK
+/usr/include/endian.h: OK
+/usr/include/errno.h: OK
+/usr/include/fcntl.h: OK
+/usr/include/features-time64.h: OK
+/usr/include/features.h: OK
+/usr/include/gnu/stubs-64.h: OK
+/usr/include/gnu/stubs.h: OK
+/usr/include/linux/close_range.h: OK
+/usr/include/linux/errno.h: OK
+/usr/include/linux/falloc.h: OK
+/usr/include/linux/ioctl.h: OK
+/usr/include/linux/openat2.h: OK
+/usr/include/linux/posix_types.h: OK
+/usr/include/linux/sched/types.h: OK
+/usr/include/linux/sockios.h: OK
+/usr/include/linux/stat.h: OK
+/usr/include/linux/stddef.h: OK
+/usr/include/linux/types.h: OK
+/usr/include/math.h: OK
+/usr/include/pthread.h: OK
+/usr/include/sched.h: OK
+/usr/include/stdc-predef.h: OK
+/usr/include/stdint.h: OK
+/usr/include/stdio.h: OK
+/usr/include/stdlib.h: OK
+/usr/include/string.h: OK
+/usr/include/strings.h: OK
+/usr/include/sys/cdefs.h: OK
+/usr/include/sys/ioctl.h: OK
+/usr/include/sys/mman.h: OK
+/usr/include/sys/select.h: OK
+/usr/include/sys/stat.h: OK
+/usr/include/sys/time.h: OK
+/usr/include/sys/ttydefaults.h: OK
+/usr/include/sys/types.h: OK
+/usr/include/time.h: OK
+/usr/include/unistd.h: OK
+/usr/lib/clang/23/include/__stdarg___gnuc_va_list.h: OK
+/usr/lib/clang/23/include/__stdarg___va_copy.h: OK
+/usr/lib/clang/23/include/__stdarg_header_macro.h: OK
+/usr/lib/clang/23/include/__stdarg_va_arg.h: OK
+/usr/lib/clang/23/include/__stdarg_va_copy.h: OK
+/usr/lib/clang/23/include/__stdarg_va_list.h: OK
+/usr/lib/clang/23/include/__stddef_header_macro.h: OK
+/usr/lib/clang/23/include/__stddef_max_align_t.h: OK
+/usr/lib/clang/23/include/__stddef_null.h: OK
+/usr/lib/clang/23/include/__stddef_offsetof.h: OK
+/usr/lib/clang/23/include/__stddef_ptrdiff_t.h: OK
+/usr/lib/clang/23/include/__stddef_size_t.h: OK
+/usr/lib/clang/23/include/__stddef_wchar_t.h: OK
+/usr/lib/clang/23/include/endian.h: OK
+/usr/lib/clang/23/include/stdarg.h: OK
+/usr/lib/clang/23/include/stddef.h: OK
+/usr/lib/clang/23/include/stdint.h: OK
+1689f11f3af4aa9e1d7f66ae94b646067636688f
+Fri Oct 23 05:18:14 PM UTC 2026
+Linux 6.18.50-2-lts #1 SMP PREEMPT_DYNAMIC Tue, 08 Sep 2026 10:48:06 +0000 x86_64 GNU/Linux
+performance
+0
+5d350f5f68c90eb576d048ffb20ac6ea72d67569439298c48358fdd5af2b9536  build/refine116/fixed/buster/compiler/c_lexer.c
+1ccfe43097c525c42352cb67836bbf1bb23e3f12ee4d0dae93a8f9c0ac783bd6  build/refine116/fixed/buster/compiler/c_preprocessor.c
+d9bcc9e2c979d19eea5ed611e8fa971a2af357494c9526fd27d125751e3d9f95  build/refine116/fixed/buster/compiler/c_refine.c
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9252 files, 117850310 bytes (691665 ids in use)
+patching file build/refine116/coldpref/buster/compiler/c_lexer.c
+patching file build/refine116/coldpref/buster/compiler/c_refine.c
+patching file build/refine116/coldpref/buster/compiler/c_preprocessor.c
+Hunk #1 succeeded at 2470 (offset 20 lines).
+Hunk #2 succeeded at 2512 (offset 20 lines).
+Hunk #3 succeeded at 2518 (offset 20 lines).
+Hunk #4 succeeded at 2548 (offset 20 lines).
+3f7213ba51fd27f2247f8f5f6d331837c195d2fa9c4c35b89e267aacc4b46d67  build/refine116/coldpref/buster/compiler/c_lexer.c
+a5c6b3cdac1584f46a527d7d9540f3e2a3722af6bcae985a7fe8d349ed478216  build/refine116/coldpref/buster/compiler/c_preprocessor.c
+51ab1053f5d64b36936266cbe0da04d03428aa273aa9a6993da0e3673c457b22  build/refine116/coldpref/buster/compiler/c_refine.c
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9252 files, 117850310 bytes (691665 ids in use)
+patching file build/refine116/directspace/buster/compiler/c_lexer.c
+patching file build/refine116/directspace/buster/compiler/c_refine.c
+patching file build/refine116/directspace/buster/compiler/c_preprocessor.c
+Hunk #1 succeeded at 2470 (offset 20 lines).
+Hunk #2 succeeded at 2512 (offset 20 lines).
+Hunk #3 succeeded at 2518 (offset 20 lines).
+Hunk #4 succeeded at 2548 (offset 20 lines).
+3f7213ba51fd27f2247f8f5f6d331837c195d2fa9c4c35b89e267aacc4b46d67  build/refine116/directspace/buster/compiler/c_lexer.c
+6e1004167dee2e3d1bb6c0bebbd588ae8c4ed1f1eab084e390ea88d8701e43e4  build/refine116/directspace/buster/compiler/c_preprocessor.c
+f50ffc132e93b53d087f76cfd621a65288976ab3926f96f61d453269f35dcf74  build/refine116/directspace/buster/compiler/c_refine.c
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9252 files, 117850310 bytes (691665 ids in use)
+patching file build/refine116/directcold/buster/compiler/c_lexer.c
+patching file build/refine116/directcold/buster/compiler/c_refine.c
+patching file build/refine116/directcold/buster/compiler/c_preprocessor.c
+Hunk #1 succeeded at 2470 (offset 20 lines).
+Hunk #2 succeeded at 2512 (offset 20 lines).
+Hunk #3 succeeded at 2518 (offset 20 lines).
+Hunk #4 succeeded at 2548 (offset 20 lines).
+3f7213ba51fd27f2247f8f5f6d331837c195d2fa9c4c35b89e267aacc4b46d67  build/refine116/directcold/buster/compiler/c_lexer.c
+6e1004167dee2e3d1bb6c0bebbd588ae8c4ed1f1eab084e390ea88d8701e43e4  build/refine116/directcold/buster/compiler/c_preprocessor.c
+51ab1053f5d64b36936266cbe0da04d03428aa273aa9a6993da0e3673c457b22  build/refine116/directcold/buster/compiler/c_refine.c
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9252 files, 117850310 bytes (691665 ids in use)
+chunk preparation: 134784 guarded cases, pass
+splice source boundaries: 1200 guarded cases, pass
+preparation corpus /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c: pass
+preparation corpus /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c: pass
+preparation corpus src/buster/compiler/main.c: pass
+preparation allocation failures: pass
+tree, with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 440 of 441 names with other ids (seeds 19 to 22)
+tree: 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found without a diagnostic
+tree, split once, with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 440 of 441 names with other ids (seeds 19 to 22)
+tree, split once: 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found without a diagnostic
+tree (scalar kernels), with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 440 of 441 names with other ids (seeds 19 to 22)
+tree (scalar kernels): 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found without a diagnostic
+tree, split once (scalar kernels), with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 440 of 441 names with other ids (seeds 19 to 22)
+tree, split once (scalar kernels): 13 files prepared once each in 4 rounds, the same on every lane count; 1 unused, 2 not found without a diagnostic
+spellings, with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 164711 of 164712 names with other ids (seeds 19 to 22)
+spellings: 240 files, 164507 ids, 469938 tokens, the same on every lane count, in parts, split once and on two lanes
+spellings in two runs: the same as one run, on every lane count
+contexts, with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 425 of 426 names with other ids (seeds 19 to 22)
+contexts: a header that includes itself through ./ and sub/.. walked once, and one in two directories in both
+dollars, with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 425 of 425 names with other ids (seeds 19 to 22)
+dollars: '$' as punctuation in a shared cache, on every lane count
+special paths, with the ids in another order: the same -E text, diagnostics, locations and records on every lane count, at least 425 of 425 names with other ids (seeds 19 to 22)
+special paths: a FIFO under #if 0 and active, and a name of 2400 bytes in a directory of 2539, as each unit alone
+memory: 48 runs short of the round's arena or a lane's scratch memory, 38 of them failed; every unit as alone
+test-files: passed
+files: 0 of 2 differ (3799372 tokens)
+d64b2e6fec83bdbad92dad498ec1c46487ba93fa1221ea981e941729b2f631bb  build/refine116/pp-coldpref
+91128f39a5fa8f8ef3cd0d3a31404d477efd0fe31d72772209f1d8e5c7d1bf25  build/refine116/pp-directcold
+2e4ccc860ff8b4150af7ce877c0abefcbc699cb2e304fd097009e8dcbafb0667  build/refine116/pp-directspace
+9e1ba5e570a951157f9b491bb4341232a17e436b6ec904e34bce54e6b6d2406d  build/refine116/pp-fixed
+3b353576a5f9ed324130f5019f1272f55f54854c9fcf26ad95eb982703f25919  build/refine116/kernel-directcold
+faad897e399f21e95edf8de2e1506ac33d0a38a53a56b30eb123441c2780a865  build/refine116/kernel-fixed
+== round 1 tree build/refine116/pp-fixed config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.898 ms   41.90 cycles/input token   73.69 cycles/output token  135.94 instructions/input token  IPC 3.24
+               read 5.6%  lex 20.5%  refine 14.6%  directives 2.5%  main loop/setup 56.9%
+               read 0.664 ms  lex 2.434 ms  refine 1.732 ms  directives 0.293 ms  main loop/setup 6.772 ms
+             then the release 0.452 ms
+             inclusive lookup medians (overlap phases above): includes 0.566 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.272 ms (printing 4.365 ms): 634 MB/s of input (10312758 bytes), 43.5 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-coldpref config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.578 ms   41.18 cycles/input token   72.44 cycles/output token  132.09 instructions/input token  IPC 3.21
+               read 5.6%  lex 21.0%  refine 13.2%  directives 2.0%  main loop/setup 58.2%
+               read 0.650 ms  lex 2.424 ms  refine 1.525 ms  directives 0.235 ms  main loop/setup 6.731 ms
+             then the release 0.419 ms
+             inclusive lookup medians (overlap phases above): includes 0.551 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.006 ms (printing 4.428 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-directspace config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.572 ms   41.30 cycles/input token   72.64 cycles/output token  132.01 instructions/input token  IPC 3.20
+               read 5.6%  lex 20.9%  refine 13.0%  directives 2.0%  main loop/setup 58.5%
+               read 0.647 ms  lex 2.418 ms  refine 1.507 ms  directives 0.227 ms  main loop/setup 6.771 ms
+             then the release 0.423 ms
+             inclusive lookup medians (overlap phases above): includes 0.548 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.994 ms (printing 4.399 ms): 645 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-directcold config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.595 ms   41.27 cycles/input token   72.59 cycles/output token  132.17 instructions/input token  IPC 3.20
+               read 5.5%  lex 21.0%  refine 13.3%  directives 1.9%  main loop/setup 58.2%
+               read 0.640 ms  lex 2.426 ms  refine 1.540 ms  directives 0.225 ms  main loop/setup 6.736 ms
+             then the release 0.419 ms
+             inclusive lookup medians (overlap phases above): includes 0.545 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.032 ms (printing 4.429 ms): 643 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-fixed config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.891 ms   41.89 cycles/input token   73.68 cycles/output token  136.04 instructions/input token  IPC 3.25
+               read 5.6%  lex 20.4%  refine 14.5%  directives 2.5%  main loop/setup 57.1%
+               read 0.663 ms  lex 2.423 ms  refine 1.719 ms  directives 0.294 ms  main loop/setup 6.787 ms
+             then the release 0.464 ms
+             inclusive lookup medians (overlap phases above): includes 0.567 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.201 ms (printing 4.318 ms): 636 MB/s of input (10304454 bytes), 43.6 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-coldpref config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.565 ms   41.29 cycles/input token   72.62 cycles/output token  132.06 instructions/input token  IPC 3.20
+               read 5.6%  lex 20.9%  refine 13.2%  directives 2.0%  main loop/setup 58.3%
+               read 0.650 ms  lex 2.411 ms  refine 1.522 ms  directives 0.236 ms  main loop/setup 6.733 ms
+             then the release 0.422 ms
+             inclusive lookup medians (overlap phases above): includes 0.554 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.968 ms (printing 4.398 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-directspace config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.590 ms   41.29 cycles/input token   72.62 cycles/output token  131.99 instructions/input token  IPC 3.20
+               read 5.6%  lex 20.9%  refine 12.9%  directives 2.0%  main loop/setup 58.6%
+               read 0.642 ms  lex 2.420 ms  refine 1.494 ms  directives 0.226 ms  main loop/setup 6.782 ms
+             then the release 0.424 ms
+             inclusive lookup medians (overlap phases above): includes 0.545 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.975 ms (printing 4.391 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-directcold config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.585 ms   41.30 cycles/input token   72.64 cycles/output token  132.14 instructions/input token  IPC 3.20
+               read 5.6%  lex 21.0%  refine 13.2%  directives 2.0%  main loop/setup 58.3%
+               read 0.645 ms  lex 2.421 ms  refine 1.527 ms  directives 0.227 ms  main loop/setup 6.735 ms
+             then the release 0.422 ms
+             inclusive lookup medians (overlap phases above): includes 0.548 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.007 ms (printing 4.417 ms): 644 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-fixed config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.862 ms   76.49 cycles/input token   62.68 cycles/output token  297.43 instructions/input token  IPC 3.89
+               read 6.0%  lex 10.3%  refine 9.9%  directives 0.7%  main loop/setup 73.1%
+               read 2.517 ms  lex 4.293 ms  refine 4.141 ms  directives 0.312 ms  main loop/setup 30.585 ms
+             then the release 1.102 ms
+             inclusive lookup medians (overlap phases above): includes 2.720 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 60.934 ms (printing 19.102 ms): 304 MB/s of input (18519988 bytes), 50.7 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-coldpref config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.920 ms   76.64 cycles/input token   62.80 cycles/output token  295.41 instructions/input token  IPC 3.85
+               read 6.0%  lex 10.5%  refine 9.3%  directives 0.8%  main loop/setup 73.4%
+               read 2.528 ms  lex 4.408 ms  refine 3.883 ms  directives 0.323 ms  main loop/setup 30.793 ms
+             then the release 1.113 ms
+             inclusive lookup medians (overlap phases above): includes 2.723 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 60.990 ms (printing 19.046 ms): 304 MB/s of input (18519988 bytes), 50.7 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-directspace config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.763 ms   76.35 cycles/input token   62.56 cycles/output token  294.92 instructions/input token  IPC 3.86
+               read 6.0%  lex 10.4%  refine 9.1%  directives 0.8%  main loop/setup 73.7%
+               read 2.519 ms  lex 4.355 ms  refine 3.809 ms  directives 0.316 ms  main loop/setup 30.755 ms
+             then the release 1.119 ms
+             inclusive lookup medians (overlap phases above): includes 2.716 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 60.846 ms (printing 19.077 ms): 304 MB/s of input (18519988 bytes), 50.8 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree build/refine116/pp-directcold config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.915 ms   76.77 cycles/input token   62.91 cycles/output token  295.43 instructions/input token  IPC 3.85
+               read 6.0%  lex 10.5%  refine 9.3%  directives 0.7%  main loop/setup 73.5%
+               read 2.513 ms  lex 4.384 ms  refine 3.911 ms  directives 0.309 ms  main loop/setup 30.791 ms
+             then the release 1.110 ms
+             inclusive lookup medians (overlap phases above): includes 2.715 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 61.074 ms (printing 19.149 ms): 303 MB/s of input (18519988 bytes), 50.6 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-coldpref config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.567 ms   41.18 cycles/input token   72.43 cycles/output token  132.09 instructions/input token  IPC 3.21
+               read 5.6%  lex 20.9%  refine 13.1%  directives 2.0%  main loop/setup 58.3%
+               read 0.647 ms  lex 2.417 ms  refine 1.517 ms  directives 0.236 ms  main loop/setup 6.737 ms
+             then the release 0.419 ms
+             inclusive lookup medians (overlap phases above): includes 0.548 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.980 ms (printing 4.413 ms): 645 MB/s of input (10312758 bytes), 44.3 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-directspace config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.583 ms   41.38 cycles/input token   72.77 cycles/output token  132.01 instructions/input token  IPC 3.19
+               read 5.5%  lex 21.0%  refine 13.1%  directives 2.0%  main loop/setup 58.4%
+               read 0.641 ms  lex 2.431 ms  refine 1.517 ms  directives 0.227 ms  main loop/setup 6.753 ms
+             then the release 0.428 ms
+             inclusive lookup medians (overlap phases above): includes 0.543 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.994 ms (printing 4.398 ms): 645 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-directcold config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.577 ms   41.32 cycles/input token   72.68 cycles/output token  132.17 instructions/input token  IPC 3.20
+               read 5.6%  lex 21.1%  refine 13.3%  directives 1.9%  main loop/setup 58.1%
+               read 0.651 ms  lex 2.437 ms  refine 1.534 ms  directives 0.225 ms  main loop/setup 6.727 ms
+             then the release 0.431 ms
+             inclusive lookup medians (overlap phases above): includes 0.552 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.020 ms (printing 4.428 ms): 644 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-fixed config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.835 ms   41.61 cycles/input token   73.19 cycles/output token  135.94 instructions/input token  IPC 3.27
+               read 5.6%  lex 20.6%  refine 14.6%  directives 2.5%  main loop/setup 56.7%
+               read 0.662 ms  lex 2.440 ms  refine 1.723 ms  directives 0.293 ms  main loop/setup 6.704 ms
+             then the release 0.461 ms
+             inclusive lookup medians (overlap phases above): includes 0.562 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.149 ms (printing 4.304 ms): 639 MB/s of input (10312758 bytes), 43.8 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-coldpref config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.567 ms   41.20 cycles/input token   72.46 cycles/output token  132.06 instructions/input token  IPC 3.21
+               read 5.6%  lex 20.9%  refine 13.2%  directives 2.0%  main loop/setup 58.2%
+               read 0.652 ms  lex 2.417 ms  refine 1.524 ms  directives 0.236 ms  main loop/setup 6.711 ms
+             then the release 0.419 ms
+             inclusive lookup medians (overlap phases above): includes 0.554 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.972 ms (printing 4.398 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-directspace config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.579 ms   41.30 cycles/input token   72.64 cycles/output token  131.99 instructions/input token  IPC 3.20
+               read 5.6%  lex 21.0%  refine 13.1%  directives 2.0%  main loop/setup 58.3%
+               read 0.647 ms  lex 2.427 ms  refine 1.520 ms  directives 0.227 ms  main loop/setup 6.738 ms
+             then the release 0.421 ms
+             inclusive lookup medians (overlap phases above): includes 0.549 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.975 ms (printing 4.395 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-directcold config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.599 ms   41.40 cycles/input token   72.81 cycles/output token  132.14 instructions/input token  IPC 3.19
+               read 5.6%  lex 20.9%  refine 13.5%  directives 2.0%  main loop/setup 58.0%
+               read 0.646 ms  lex 2.417 ms  refine 1.568 ms  directives 0.226 ms  main loop/setup 6.717 ms
+             then the release 0.424 ms
+             inclusive lookup medians (overlap phases above): includes 0.547 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.021 ms (printing 4.413 ms): 643 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-fixed config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.904 ms   42.01 cycles/input token   73.88 cycles/output token  136.04 instructions/input token  IPC 3.24
+               read 5.6%  lex 20.5%  refine 14.6%  directives 2.5%  main loop/setup 56.8%
+               read 0.663 ms  lex 2.438 ms  refine 1.734 ms  directives 0.296 ms  main loop/setup 6.761 ms
+             then the release 0.461 ms
+             inclusive lookup medians (overlap phases above): includes 0.562 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.222 ms (printing 4.306 ms): 635 MB/s of input (10304454 bytes), 43.5 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-coldpref config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.745 ms   76.18 cycles/input token   62.43 cycles/output token  295.41 instructions/input token  IPC 3.88
+               read 6.0%  lex 10.6%  refine 9.5%  directives 0.8%  main loop/setup 73.2%
+               read 2.493 ms  lex 4.406 ms  refine 3.965 ms  directives 0.320 ms  main loop/setup 30.563 ms
+             then the release 1.120 ms
+             inclusive lookup medians (overlap phases above): includes 2.691 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 60.738 ms (printing 19.008 ms): 305 MB/s of input (18519988 bytes), 50.9 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-directspace config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   42.191 ms   77.08 cycles/input token   63.17 cycles/output token  294.92 instructions/input token  IPC 3.83
+               read 6.0%  lex 10.4%  refine 9.1%  directives 0.8%  main loop/setup 73.7%
+               read 2.525 ms  lex 4.390 ms  refine 3.850 ms  directives 0.317 ms  main loop/setup 31.096 ms
+             then the release 1.106 ms
+             inclusive lookup medians (overlap phases above): includes 2.728 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 61.324 ms (printing 19.113 ms): 302 MB/s of input (18519988 bytes), 50.4 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-directcold config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.811 ms   76.44 cycles/input token   62.64 cycles/output token  295.43 instructions/input token  IPC 3.87
+               read 6.0%  lex 10.5%  refine 9.3%  directives 0.7%  main loop/setup 73.4%
+               read 2.520 ms  lex 4.368 ms  refine 3.898 ms  directives 0.311 ms  main loop/setup 30.692 ms
+             then the release 1.127 ms
+             inclusive lookup medians (overlap phases above): includes 2.716 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 61.012 ms (printing 19.201 ms): 304 MB/s of input (18519988 bytes), 50.7 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree build/refine116/pp-fixed config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   42.125 ms   77.03 cycles/input token   63.12 cycles/output token  297.43 instructions/input token  IPC 3.86
+               read 6.0%  lex 10.2%  refine 9.8%  directives 0.7%  main loop/setup 73.3%
+               read 2.515 ms  lex 4.278 ms  refine 4.129 ms  directives 0.313 ms  main loop/setup 30.875 ms
+             then the release 1.113 ms
+             inclusive lookup medians (overlap phases above): includes 2.717 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 61.292 ms (printing 19.142 ms): 302 MB/s of input (18519988 bytes), 50.5 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-directspace config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.597 ms   41.33 cycles/input token   72.69 cycles/output token  132.01 instructions/input token  IPC 3.19
+               read 5.6%  lex 21.0%  refine 12.9%  directives 2.0%  main loop/setup 58.6%
+               read 0.651 ms  lex 2.430 ms  refine 1.498 ms  directives 0.227 ms  main loop/setup 6.789 ms
+             then the release 0.433 ms
+             inclusive lookup medians (overlap phases above): includes 0.551 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.033 ms (printing 4.399 ms): 643 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-directcold config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.590 ms   41.34 cycles/input token   72.71 cycles/output token  132.17 instructions/input token  IPC 3.20
+               read 5.6%  lex 20.9%  refine 13.5%  directives 1.9%  main loop/setup 58.1%
+               read 0.648 ms  lex 2.422 ms  refine 1.559 ms  directives 0.224 ms  main loop/setup 6.733 ms
+             then the release 0.429 ms
+             inclusive lookup medians (overlap phases above): includes 0.549 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.004 ms (printing 4.410 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-fixed config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.888 ms   41.76 cycles/input token   73.45 cycles/output token  135.94 instructions/input token  IPC 3.26
+               read 5.6%  lex 20.6%  refine 14.5%  directives 2.5%  main loop/setup 56.8%
+               read 0.665 ms  lex 2.441 ms  refine 1.722 ms  directives 0.294 ms  main loop/setup 6.744 ms
+             then the release 0.460 ms
+             inclusive lookup medians (overlap phases above): includes 0.563 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.214 ms (printing 4.322 ms): 636 MB/s of input (10312758 bytes), 43.6 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-coldpref config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.544 ms   41.12 cycles/input token   72.32 cycles/output token  132.09 instructions/input token  IPC 3.21
+               read 5.6%  lex 20.9%  refine 13.2%  directives 2.0%  main loop/setup 58.3%
+               read 0.649 ms  lex 2.408 ms  refine 1.524 ms  directives 0.234 ms  main loop/setup 6.720 ms
+             then the release 0.425 ms
+             inclusive lookup medians (overlap phases above): includes 0.551 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 560742 file-run + 108352 buffer-run tokens (94.6%), 37841 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 15.955 ms (printing 4.395 ms): 646 MB/s of input (10312758 bytes), 44.3 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-directspace config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.662 ms   41.60 cycles/input token   73.17 cycles/output token  131.99 instructions/input token  IPC 3.17
+               read 5.6%  lex 21.0%  refine 13.1%  directives 2.0%  main loop/setup 58.4%
+               read 0.650 ms  lex 2.441 ms  refine 1.525 ms  directives 0.229 ms  main loop/setup 6.802 ms
+             then the release 0.428 ms
+             inclusive lookup medians (overlap phases above): includes 0.553 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.067 ms (printing 4.411 ms): 641 MB/s of input (10304454 bytes), 44.0 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-directcold config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.684 ms   41.84 cycles/input token   73.58 cycles/output token  132.14 instructions/input token  IPC 3.16
+               read 5.5%  lex 20.9%  refine 13.4%  directives 1.9%  main loop/setup 58.3%
+               read 0.646 ms  lex 2.441 ms  refine 1.558 ms  directives 0.225 ms  main loop/setup 6.800 ms
+             then the release 0.430 ms
+             inclusive lookup medians (overlap phases above): includes 0.547 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.086 ms (printing 4.394 ms): 641 MB/s of input (10304454 bytes), 43.9 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-fixed config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.849 ms   41.68 cycles/input token   73.31 cycles/output token  136.04 instructions/input token  IPC 3.26
+               read 5.6%  lex 20.6%  refine 14.5%  directives 2.5%  main loop/setup 56.8%
+               read 0.661 ms  lex 2.442 ms  refine 1.717 ms  directives 0.293 ms  main loop/setup 6.725 ms
+             then the release 0.452 ms
+             inclusive lookup medians (overlap phases above): includes 0.563 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.161 ms (printing 4.294 ms): 638 MB/s of input (10304454 bytes), 43.7 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-coldpref config [--only vectorized /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.2.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.719 ms   41.85 cycles/input token   73.61 cycles/output token  132.06 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.6%  refine 13.2%  directives 2.0%  main loop/setup 58.7%
+               read 0.651 ms  lex 2.413 ms  refine 1.543 ms  directives 0.234 ms  main loop/setup 6.879 ms
+             then the release 0.427 ms
+             inclusive lookup medians (overlap phases above): includes 0.553 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 480 open, 170 fstat; stat: 0 embed, 4 directory setup (not process-wide syscall totals)
+             includes/pass: 361 searches, 346 found, 479 open, 169 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 559953 file-run + 108261 buffer-run tokens (94.6%), 37807 direct object tokens (5.4%); 100.0% fast copies
+             -E -P with printing 16.122 ms (printing 4.387 ms): 639 MB/s of input (10304454 bytes), 43.8 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-directspace config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.816 ms   76.34 cycles/input token   62.56 cycles/output token  294.92 instructions/input token  IPC 3.86
+               read 6.0%  lex 10.4%  refine 9.1%  directives 0.8%  main loop/setup 73.6%
+               read 2.521 ms  lex 4.368 ms  refine 3.824 ms  directives 0.317 ms  main loop/setup 30.769 ms
+             then the release 1.109 ms
+             inclusive lookup medians (overlap phases above): includes 2.713 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 60.905 ms (printing 19.081 ms): 304 MB/s of input (18519988 bytes), 50.8 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-directcold config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.872 ms   76.56 cycles/input token   62.74 cycles/output token  295.43 instructions/input token  IPC 3.86
+               read 6.0%  lex 10.5%  refine 9.3%  directives 0.7%  main loop/setup 73.5%
+               read 2.513 ms  lex 4.384 ms  refine 3.908 ms  directives 0.308 ms  main loop/setup 30.756 ms
+             then the release 1.112 ms
+             inclusive lookup medians (overlap phases above): includes 2.716 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 61.020 ms (printing 19.162 ms): 304 MB/s of input (18519988 bytes), 50.7 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-fixed config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   42.016 ms   76.79 cycles/input token   62.92 cycles/output token  297.43 instructions/input token  IPC 3.87
+               read 6.0%  lex 10.2%  refine 9.8%  directives 0.7%  main loop/setup 73.2%
+               read 2.532 ms  lex 4.268 ms  refine 4.136 ms  directives 0.314 ms  main loop/setup 30.763 ms
+             then the release 1.096 ms
+             inclusive lookup medians (overlap phases above): includes 2.736 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 61.116 ms (printing 19.078 ms): 303 MB/s of input (18519988 bytes), 50.6 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree build/refine116/pp-coldpref config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2533934 input tokens, 3092219 output tokens; 21 passes, medians:
+  vectorized   41.801 ms   76.45 cycles/input token   62.65 cycles/output token  295.41 instructions/input token  IPC 3.86
+               read 6.1%  lex 10.5%  refine 9.3%  directives 0.8%  main loop/setup 73.4%
+               read 2.531 ms  lex 4.388 ms  refine 3.870 ms  directives 0.324 ms  main loop/setup 30.694 ms
+             then the release 1.101 ms
+             inclusive lookup medians (overlap phases above): includes 2.729 ms (read + main loop), embeds 0.000 ms (main loop)
+             direct file calls/pass: 1524 open, 568 fstat; stat: 0 embed, 5 directory setup (not process-wide syscall totals)
+             includes/pass: 1758 searches, 1714 found, 1523 open, 567 fstat (subset of direct file calls); embeds: 0 searches, 0 found
+             final output: 1943719 file-run + 915827 buffer-run tokens (92.5%), 231541 direct object tokens (7.5%); 100.0% fast copies
+             -E -P with printing 60.913 ms (printing 19.119 ms): 304 MB/s of input (18519988 bytes), 50.8 million output tokens/s
+             history: 22347684 bytes total, 22347684.0 bytes/TU mean, 22347684 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 239656 expansions, 380973 argument runs, 119487 generated tokens, 794446 output runs
+  per pass: 23609 directives, 64717 file runs (1943719 tokens), 268473 buffer runs (933749 tokens), 133967 object-like expansions copied out and 41125 buffered, 62175 invocations (344956 arguments, 15501 expanded first), 110577 pastes, 2389 builtins, 1000 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1358 lines of 7.0 tokens on average after expansion, 47 of more than 32, the longest 105
+ab: done, 0 failed runs
+== round 1 tree build/refine116/pp-fixed config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.062477/0.070962/0.077354 refine 1.706151/1.725286/1.760086 whole 11.804146/11.865451/12.092905
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 1 tree build/refine116/pp-directspace config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.056105/0.062267/0.071794 refine 1.496650/1.514865/1.561668 whole 11.446046/11.520665/11.872764
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 1 tree build/refine116/pp-directcold config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.054712/0.061656/0.065943 refine 1.524603/1.530787/1.609983 whole 11.457848/11.538278/11.635300
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 2 tree build/refine116/pp-directspace config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.057317/0.061806/0.065242 refine 1.496634/1.507939/1.628696 whole 11.449391/11.503282/11.638775
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 2 tree build/refine116/pp-directcold config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.056906/0.062787/0.064180 refine 1.540620/1.547724/1.630538 whole 11.504595/11.581319/11.658744
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 2 tree build/refine116/pp-fixed config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.064520/0.075892/0.152565 refine 1.706117/1.733795/1.809042 whole 11.729918/11.861774/11.950850
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 3 tree build/refine116/pp-directcold config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.060683/0.062657/0.072716 refine 1.546055/1.552787/1.628342 whole 11.582932/11.673792/11.940470
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 3 tree build/refine116/pp-fixed config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.062457/0.071764/0.076273 refine 1.710190/1.722526/1.786393 whole 11.778548/11.856623/11.951522
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 3 tree build/refine116/pp-directspace config [--setup /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+21 passes, min/median/max ms: setup 0.059772/0.061555/0.136506 refine 1.494164/1.499240/1.559626 whole 11.462887/11.523661/11.829682
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+ab: done, 0 failed runs
+== round 1 tree build/refine116/kernel-fixed config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.364 ms    1.17 ns/token    6.47 cycles/token [6.45-6.55]   22.45 instructions/token  IPC 3.47   16.63 cycles/identifier
+== round 1 tree build/refine116/kernel-directcold config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.318 ms    1.13 ns/token    6.25 cycles/token [6.23-6.34]   20.11 instructions/token  IPC 3.22   16.05 cycles/identifier
+== round 1 tree build/refine116/kernel-fixed config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.406 ms    1.20 ns/token    6.67 cycles/token [6.65-6.69]   22.45 instructions/token  IPC 3.37   17.13 cycles/identifier
+== round 1 tree build/refine116/kernel-directcold config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.372 ms    1.17 ns/token    6.50 cycles/token [6.49-6.62]   20.11 instructions/token  IPC 3.09   16.71 cycles/identifier
+== round 1 tree build/refine116/kernel-fixed config [--only refine_tokens_64 /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc]
+8983 files, 93836361 bytes, 13152141 tokens, 6115884 identifiers
+check: 0 of 8983 files differ; 597638 ids in use, 597427 added: 90.23% of identifiers are found
+scalar paths: 2036 identifiers longer than 63 bytes, 0 with a backslash, 1073 tokens after a line splice
+21 interleaved passes over 13152141 tokens (6115884 identifiers, 597637 distinct), medians (cycles/token also min-max):
+  refine_tokens_64       28.193 ms    2.14 ns/token   11.88 cycles/token [11.86-11.91]   30.40 instructions/token  IPC 2.56   25.55 cycles/identifier
+== round 1 tree build/refine116/kernel-directcold config [--only refine_tokens_64 /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc]
+8983 files, 93836361 bytes, 13152141 tokens, 6115884 identifiers
+check: 0 of 8983 files differ; 597638 ids in use, 597427 added: 90.23% of identifiers are found
+scalar paths: 2036 identifiers longer than 63 bytes, 0 with a backslash, 1073 tokens after a line splice
+21 interleaved passes over 13152141 tokens (6115884 identifiers, 597637 distinct), medians (cycles/token also min-max):
+  refine_tokens_64       27.684 ms    2.10 ns/token   11.67 cycles/token [11.64-11.83]   27.63 instructions/token  IPC 2.37   25.09 cycles/identifier
+== round 2 tree build/refine116/kernel-directcold config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.326 ms    1.14 ns/token    6.29 cycles/token [6.28-6.37]   20.11 instructions/token  IPC 3.20   16.17 cycles/identifier
+== round 2 tree build/refine116/kernel-fixed config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.352 ms    1.16 ns/token    6.41 cycles/token [6.38-6.49]   22.45 instructions/token  IPC 3.50   16.47 cycles/identifier
+== round 2 tree build/refine116/kernel-directcold config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.337 ms    1.14 ns/token    6.34 cycles/token [6.33-6.38]   20.11 instructions/token  IPC 3.17   16.29 cycles/identifier
+== round 2 tree build/refine116/kernel-fixed config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.413 ms    1.21 ns/token    6.70 cycles/token [6.68-6.91]   22.45 instructions/token  IPC 3.35   17.21 cycles/identifier
+== round 2 tree build/refine116/kernel-directcold config [--only refine_tokens_64 /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc]
+8983 files, 93836361 bytes, 13152141 tokens, 6115884 identifiers
+check: 0 of 8983 files differ; 597638 ids in use, 597427 added: 90.23% of identifiers are found
+scalar paths: 2036 identifiers longer than 63 bytes, 0 with a backslash, 1073 tokens after a line splice
+21 interleaved passes over 13152141 tokens (6115884 identifiers, 597637 distinct), medians (cycles/token also min-max):
+  refine_tokens_64       27.689 ms    2.11 ns/token   11.66 cycles/token [11.66-11.79]   27.63 instructions/token  IPC 2.37   25.08 cycles/identifier
+== round 2 tree build/refine116/kernel-fixed config [--only refine_tokens_64 /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc]
+8983 files, 93836361 bytes, 13152141 tokens, 6115884 identifiers
+check: 0 of 8983 files differ; 597638 ids in use, 597427 added: 90.23% of identifiers are found
+scalar paths: 2036 identifiers longer than 63 bytes, 0 with a backslash, 1073 tokens after a line splice
+21 interleaved passes over 13152141 tokens (6115884 identifiers, 597637 distinct), medians (cycles/token also min-max):
+  refine_tokens_64       28.144 ms    2.14 ns/token   11.85 cycles/token [11.83-12.18]   30.40 instructions/token  IPC 2.56   25.49 cycles/identifier
+== round 3 tree build/refine116/kernel-fixed config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.349 ms    1.15 ns/token    6.40 cycles/token [6.38-6.47]   22.45 instructions/token  IPC 3.51   16.45 cycles/identifier
+== round 3 tree build/refine116/kernel-directcold config [--only refine_tokens_64 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), medians (cycles/token also min-max):
+  refine_tokens_64        1.324 ms    1.13 ns/token    6.26 cycles/token [6.25-6.36]   20.11 instructions/token  IPC 3.21   16.09 cycles/identifier
+== round 3 tree build/refine116/kernel-fixed config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.404 ms    1.20 ns/token    6.66 cycles/token [6.62-6.71]   22.45 instructions/token  IPC 3.37   17.11 cycles/identifier
+== round 3 tree build/refine116/kernel-directcold config [--only refine_tokens_64 --after-scalar 100 /var/lib/buster-9700x/refine116-inputs.Ad1OBe/sqlite-3.53.4.c]
+1 files, 9515341 bytes, 1168130 tokens, 454717 identifiers
+check: 0 of 1 files differ; 16979 ids in use, 16768 added: 96.31% of identifiers are found
+scalar paths: 0 identifiers longer than 63 bytes, 0 with a backslash, 34 tokens after a line splice
+21 interleaved passes over 1168130 tokens (454717 identifiers, 16978 distinct), the vectorized ones each after 100 ms of the scalar path, medians (cycles/token also min-max):
+  refine_tokens_64        1.342 ms    1.15 ns/token    6.37 cycles/token [6.33-6.43]   20.11 instructions/token  IPC 3.16   16.35 cycles/identifier
+== round 3 tree build/refine116/kernel-fixed config [--only refine_tokens_64 /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc]
+8983 files, 93836361 bytes, 13152141 tokens, 6115884 identifiers
+check: 0 of 8983 files differ; 597638 ids in use, 597427 added: 90.23% of identifiers are found
+scalar paths: 2036 identifiers longer than 63 bytes, 0 with a backslash, 1073 tokens after a line splice
+21 interleaved passes over 13152141 tokens (6115884 identifiers, 597637 distinct), medians (cycles/token also min-max):
+  refine_tokens_64       28.176 ms    2.14 ns/token   11.88 cycles/token [11.86-12.14]   30.40 instructions/token  IPC 2.56   25.54 cycles/identifier
+== round 3 tree build/refine116/kernel-directcold config [--only refine_tokens_64 /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc]
+8983 files, 93836361 bytes, 13152141 tokens, 6115884 identifiers
+check: 0 of 8983 files differ; 597638 ids in use, 597427 added: 90.23% of identifiers are found
+scalar paths: 2036 identifiers longer than 63 bytes, 0 with a backslash, 1073 tokens after a line splice
+21 interleaved passes over 13152141 tokens (6115884 identifiers, 597637 distinct), medians (cycles/token also min-max):
+  refine_tokens_64       27.657 ms    2.10 ns/token   11.65 cycles/token [11.63-11.73]   27.63 instructions/token  IPC 2.37   25.06 cycles/identifier
+ab: done, 0 failed runs
+/usr/include/alloca.h: OK
+/usr/include/asm-generic/bitsperlong.h: OK
+/usr/include/asm-generic/errno-base.h: OK
+/usr/include/asm-generic/errno.h: OK
+/usr/include/asm-generic/int-ll64.h: OK
+/usr/include/asm-generic/ioctl.h: OK
+/usr/include/asm-generic/ioctls.h: OK
+/usr/include/asm-generic/posix_types.h: OK
+/usr/include/asm-generic/sockios.h: OK
+/usr/include/asm-generic/types.h: OK
+/usr/include/asm/bitsperlong.h: OK
+/usr/include/asm/errno.h: OK
+/usr/include/asm/ioctl.h: OK
+/usr/include/asm/ioctls.h: OK
+/usr/include/asm/posix_types.h: OK
+/usr/include/asm/posix_types_64.h: OK
+/usr/include/asm/sockios.h: OK
+/usr/include/asm/types.h: OK
+/usr/include/assert.h: OK
+/usr/include/bits/atomic_wide_counter.h: OK
+/usr/include/bits/byteswap.h: OK
+/usr/include/bits/cloexec.h: OK
+/usr/include/bits/confname.h: OK
+/usr/include/bits/cpu-set.h: OK
+/usr/include/bits/dl_find_object.h: OK
+/usr/include/bits/dlfcn.h: OK
+/usr/include/bits/endian.h: OK
+/usr/include/bits/endianness.h: OK
+/usr/include/bits/environments.h: OK
+/usr/include/bits/errno.h: OK
+/usr/include/bits/fcntl-linux.h: OK
+/usr/include/bits/fcntl.h: OK
+/usr/include/bits/floatn-common.h: OK
+/usr/include/bits/floatn.h: OK
+/usr/include/bits/flt-eval-method.h: OK
+/usr/include/bits/fp-fast.h: OK
+/usr/include/bits/fp-logb.h: OK
+/usr/include/bits/getopt_core.h: OK
+/usr/include/bits/getopt_posix.h: OK
+/usr/include/bits/ioctl-types.h: OK
+/usr/include/bits/ioctls.h: OK
+/usr/include/bits/iscanonical.h: OK
+/usr/include/bits/libc-header-start.h: OK
+/usr/include/bits/libm-simd-decl-stubs.h: OK
+/usr/include/bits/long-double.h: OK
+/usr/include/bits/math-vector.h: OK
+/usr/include/bits/mathcalls-helper-functions.h: OK
+/usr/include/bits/mathcalls-macros.h: OK
+/usr/include/bits/mathcalls-narrow.h: OK
+/usr/include/bits/mathcalls.h: OK
+/usr/include/bits/mman-linux.h: OK
+/usr/include/bits/mman-map-flags-generic.h: OK
+/usr/include/bits/mman-shared.h: OK
+/usr/include/bits/mman.h: OK
+/usr/include/bits/mman_ext.h: OK
+/usr/include/bits/openat2.h: OK
+/usr/include/bits/posix_opt.h: OK
+/usr/include/bits/pthread_stack_min-dynamic.h: OK
+/usr/include/bits/pthreadtypes-arch.h: OK
+/usr/include/bits/pthreadtypes.h: OK
+/usr/include/bits/sched.h: OK
+/usr/include/bits/select.h: OK
+/usr/include/bits/setjmp.h: OK
+/usr/include/bits/stat.h: OK
+/usr/include/bits/statx-generic.h: OK
+/usr/include/bits/statx.h: OK
+/usr/include/bits/stdint-intn.h: OK
+/usr/include/bits/stdint-least.h: OK
+/usr/include/bits/stdint-uintn.h: OK
+/usr/include/bits/stdio_lim.h: OK
+/usr/include/bits/stdlib-float.h: OK
+/usr/include/bits/struct_mutex.h: OK
+/usr/include/bits/struct_rwlock.h: OK
+/usr/include/bits/struct_stat.h: OK
+/usr/include/bits/thread-shared-types.h: OK
+/usr/include/bits/time.h: OK
+/usr/include/bits/time64.h: OK
+/usr/include/bits/timesize.h: OK
+/usr/include/bits/timex.h: OK
+/usr/include/bits/types.h: OK
+/usr/include/bits/types/FILE.h: OK
+/usr/include/bits/types/__FILE.h: OK
+/usr/include/bits/types/__fpos64_t.h: OK
+/usr/include/bits/types/__fpos_t.h: OK
+/usr/include/bits/types/__locale_t.h: OK
+/usr/include/bits/types/__mbstate_t.h: OK
+/usr/include/bits/types/__sigset_t.h: OK
+/usr/include/bits/types/clock_t.h: OK
+/usr/include/bits/types/clockid_t.h: OK
+/usr/include/bits/types/cookie_io_functions_t.h: OK
+/usr/include/bits/types/error_t.h: OK
+/usr/include/bits/types/locale_t.h: OK
+/usr/include/bits/types/once_flag.h: OK
+/usr/include/bits/types/sigset_t.h: OK
+/usr/include/bits/types/struct_FILE.h: OK
+/usr/include/bits/types/struct___jmp_buf_tag.h: OK
+/usr/include/bits/types/struct_iovec.h: OK
+/usr/include/bits/types/struct_itimerspec.h: OK
+/usr/include/bits/types/struct_sched_param.h: OK
+/usr/include/bits/types/struct_statx.h: OK
+/usr/include/bits/types/struct_statx_timestamp.h: OK
+/usr/include/bits/types/struct_timespec.h: OK
+/usr/include/bits/types/struct_timeval.h: OK
+/usr/include/bits/types/struct_tm.h: OK
+/usr/include/bits/types/time_t.h: OK
+/usr/include/bits/types/timer_t.h: OK
+/usr/include/bits/typesizes.h: OK
+/usr/include/bits/uintn-identity.h: OK
+/usr/include/bits/unistd_ext.h: OK
+/usr/include/bits/waitflags.h: OK
+/usr/include/bits/waitstatus.h: OK
+/usr/include/bits/wchar.h: OK
+/usr/include/bits/wordsize.h: OK
+/usr/include/ctype.h: OK
+/usr/include/dlfcn.h: OK
+/usr/include/endian.h: OK
+/usr/include/errno.h: OK
+/usr/include/fcntl.h: OK
+/usr/include/features-time64.h: OK
+/usr/include/features.h: OK
+/usr/include/gnu/stubs-64.h: OK
+/usr/include/gnu/stubs.h: OK
+/usr/include/linux/close_range.h: OK
+/usr/include/linux/errno.h: OK
+/usr/include/linux/falloc.h: OK
+/usr/include/linux/ioctl.h: OK
+/usr/include/linux/openat2.h: OK
+/usr/include/linux/posix_types.h: OK
+/usr/include/linux/sched/types.h: OK
+/usr/include/linux/sockios.h: OK
+/usr/include/linux/stat.h: OK
+/usr/include/linux/stddef.h: OK
+/usr/include/linux/types.h: OK
+/usr/include/math.h: OK
+/usr/include/pthread.h: OK
+/usr/include/sched.h: OK
+/usr/include/stdc-predef.h: OK
+/usr/include/stdint.h: OK
+/usr/include/stdio.h: OK
+/usr/include/stdlib.h: OK
+/usr/include/string.h: OK
+/usr/include/strings.h: OK
+/usr/include/sys/cdefs.h: OK
+/usr/include/sys/ioctl.h: OK
+/usr/include/sys/mman.h: OK
+/usr/include/sys/select.h: OK
+/usr/include/sys/stat.h: OK
+/usr/include/sys/time.h: OK
+/usr/include/sys/ttydefaults.h: OK
+/usr/include/sys/types.h: OK
+/usr/include/time.h: OK
+/usr/include/unistd.h: OK
+/usr/lib/clang/23/include/__stdarg___gnuc_va_list.h: OK
+/usr/lib/clang/23/include/__stdarg___va_copy.h: OK
+/usr/lib/clang/23/include/__stdarg_header_macro.h: OK
+/usr/lib/clang/23/include/__stdarg_va_arg.h: OK
+/usr/lib/clang/23/include/__stdarg_va_copy.h: OK
+/usr/lib/clang/23/include/__stdarg_va_list.h: OK
+/usr/lib/clang/23/include/__stddef_header_macro.h: OK
+/usr/lib/clang/23/include/__stddef_max_align_t.h: OK
+/usr/lib/clang/23/include/__stddef_null.h: OK
+/usr/lib/clang/23/include/__stddef_offsetof.h: OK
+/usr/lib/clang/23/include/__stddef_ptrdiff_t.h: OK
+/usr/lib/clang/23/include/__stddef_size_t.h: OK
+/usr/lib/clang/23/include/__stddef_wchar_t.h: OK
+/usr/lib/clang/23/include/endian.h: OK
+/usr/lib/clang/23/include/stdarg.h: OK
+/usr/lib/clang/23/include/stddef.h: OK
+/usr/lib/clang/23/include/stdint.h: OK

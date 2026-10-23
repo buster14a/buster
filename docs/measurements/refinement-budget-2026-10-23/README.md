@@ -1,5 +1,10 @@
 # Refinement budget qualification, 2026-10-23
 
+The session stopped at David's request on 2026-10-23. The
+[handoff](HANDOFF.md) records released claims, exact revisions, the final
+completed CI measurements, preserved experiments and remaining work. The
+1.5 ms target remains unproven; no performance candidate is selected.
+
 This draft experiment addresses the remaining #116 budget: the actual
 `benchmark-preprocessor` refine phase for raw SQLite and its system headers,
 including any cost moved into adjacent phases. It makes no performance claim
