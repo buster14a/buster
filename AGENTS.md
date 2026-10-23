@@ -3870,8 +3870,8 @@ arguments, past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
-into, copied (twins' bytes, all or a prefix, in statements and inside call
-arguments), each address's remainder by its alignment a value, and every
+into, copied (twins' bytes, all or a prefix, in statements and before a call's
+arguments, its C sequenced), each address's remainder by its alignment a value, and every
 object's bits folded into a global at its function's end. Before them it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
 cycles of every length) run on a register file, the vector path's application

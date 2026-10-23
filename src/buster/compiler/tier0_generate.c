@@ -1441,6 +1441,24 @@ static bool tier0_same_signature(const Tier0Program* program, uint32_t a, uint32
     return same;
 }
 
+// A call's head as C: the assignment to its destination, if it has one, and its callee, by name or through the local
+// that holds its address.
+static void tier0_text_call(Tier0Program* program, uint32_t destination, uint32_t pointer, const char* prefix, uint32_t callee)
+{
+    if (destination != UINT32_MAX)
+    {
+        tier0_text(program, "v%u = ", destination);
+    }
+    if (pointer != UINT32_MAX)
+    {
+        tier0_text(program, "v%u(", pointer);
+    }
+    else
+    {
+        tier0_text(program, "%sf%u(", prefix, callee);
+    }
+}
+
 // A random one of a set's bits (which isn't empty).
 static uint32_t tier0_generate_bit(uint64_t* random, uint64_t bits)
 {
@@ -1506,45 +1524,72 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
                 }
                 destination = candidate_count != 0 ? candidates[tier0_generate_below(random, candidate_count)] : UINT32_MAX;
             }
-            tier0_indent(program, state);
-            if (destination != UINT32_MAX)
+            // Now and then a copy between twins before an argument: a COPY above the values before it. C leaves the
+            // order of a call's arguments unspecified, and another of them may read the copy's destination, so a call
+            // with a copy is written in C as a block of its own, its arguments into temporaries in the stream's order
+            // and each copy a statement at its place there, then the call of the temporaries.
+            bool copies[BUSTER_TIER0_GENERATE_MAX_PARAMETERS];
+            bool sequenced = false;
+            for (uint32_t p = 0; p < target->parameter_count; p += 1)
             {
-                tier0_text(program, "v%u = ", destination);
+                copies[p] = state->scope.object_count > 1 && tier0_generate_chance(random, 10) && tier0_has_twins(&state->scope);
+                sequenced |= copies[p];
             }
+            tier0_indent(program, state);
+            tier0_text(program, sequenced ? "{\n" : "");
             // An indirect call's callee, before its arguments: the local that holds its address (C calls through it),
             // or its address (C names it; the call is the same).
             if (pointer != UINT32_MAX)
             {
                 tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, pointer);
-                tier0_text(program, "v%u(", pointer);
             }
-            else
+            else if (indirect)
             {
-                if (indirect)
-                {
-                    tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->global_count + 1 + callee);
-                }
-                tier0_text(program, "%sf%u(", state->prefix, callee);
+                tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->global_count + 1 + callee);
+            }
+            if (!sequenced)
+            {
+                tier0_text_call(program, destination, pointer, state->prefix, callee);
             }
             for (uint32_t p = 0; p < target->parameter_count; p += 1)
             {
                 const uint32_t class = program->local_classes[target->first_local + p];
                 program->argument_classes[program->argument_count] = (uint8_t)class;
                 program->argument_count += 1;
-                tier0_text(program, p == 0 ? "" : ", ");
-                // Now and then a copy between twins first, as a comma expression: a COPY above the values before it.
-                const bool copied = state->scope.object_count > 1 && tier0_generate_chance(random, 10) && tier0_has_twins(&state->scope);
-                if (copied)
+                if (copies[p])
                 {
-                    tier0_text(program, "(");
+                    tier0_text(program, "    ");
                     tier0_generate_copy(program, &state->scope, random);
-                    tier0_text(program, ", ");
+                    tier0_text(program, ";\n");
+                }
+                if (sequenced)
+                {
+                    tier0_text(program, "    %s t%u = ", tier0_c_type(class), p);
+                }
+                else
+                {
+                    tier0_text(program, p == 0 ? "" : ", ");
                 }
                 tier0_generate_value_of(program, function, &state->scope, random, class, 1 + tier0_generate_below(random, options->expression_nodes / 2 + 1),
                                         options->floating, state->prefix, p + (indirect ? 1 : 0));
-                tier0_text(program, copied ? ")" : "");
+                tier0_text(program, sequenced ? ";\n" : "");
             }
-            tier0_text(program, ");\n");
+            if (sequenced)
+            {
+                tier0_text(program, "    ");
+                tier0_text_call(program, destination, pointer, state->prefix, callee);
+                for (uint32_t p = 0; p < target->parameter_count; p += 1)
+                {
+                    tier0_text(program, p == 0 ? "t%u" : ", t%u", p);
+                }
+                tier0_text(program, ");\n");
+                tier0_indent(program, state);
+                tier0_text(program, "}\n");
+            }
+            else
+            {
+                tier0_text(program, ");\n");
+            }
             tier0_emit(program, BUSTER_TYPED_CALL, result, call);
             if (destination != UINT32_MAX)
             {

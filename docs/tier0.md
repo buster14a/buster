@@ -397,7 +397,9 @@ Before the programs, checks of their own:
   - each object's address modulo its alignment as a value (`(unsigned long)&v & 15`), 0 wherever the object is placed
     right;
   - twins (an object of the layout of the one before) and copies between them, of all their bytes or a prefix, as
-    statements and inside call arguments (`f(a, (memcpy(&x, &y, n), b))`, a `COPY` above the arguments before it);
+    statements and before call arguments (a `COPY` above the arguments before it). C leaves the order of a call's
+    arguments unspecified, and another argument may read the copy's destination, so a call with a copy is written in
+    C as a block that evaluates its arguments into temporaries in order, the copy a statement at its place;
   - at each function's end, every element's and member's bits XORed into a global (padding left out), so that a
     byte any store or copy puts wrong shows in the globals.
 
