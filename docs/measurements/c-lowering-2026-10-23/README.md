@@ -59,5 +59,12 @@ EXCLUSIVE_OWNER=codex-126-lowering \
   ~/buster-fast-bench/exclusive.sh ./lowering-sanitize --clang
 ```
 
+The requested-oracle failure control ran the normal binary with
+`test-lowering --clang /bin/false` under its own shared lock. It exited 1,
+reporting 57 expected failures and zero Clang comparisons. The shell accepted
+only that exact exit status. [The diagnostic output](clang-negative.log)
+records the failed comparisons; no successful external check is inferred from
+this deliberately failing run.
+
 The semantic handoff and outstanding source/corpus acceptance are described
 in [the lowering guide](../../c-lowering.md).

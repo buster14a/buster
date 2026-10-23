@@ -6,10 +6,10 @@ reachable from the unit's roots, and returns them in source order. It has a
 vector path and an independent scalar worklist. Neither path recurses.
 
 This is a graph consumer. The source checker must supply the complete graph
-before this planner can select actual C bodies and initializers. The current
-source checker work in #133/#312 does not yet supply complete body references,
-inline-emission decisions, or the complete checker-to-Tier-0 bridge. Graph
-tests and manually modeled C fixtures do not establish source-corpus lowering
+before this planner can select actual C bodies and initializers. The source
+checker from #133/#312 has landed on main, but does not yet supply complete
+body references, inline-emission decisions, or the complete checker-to-Tier-0
+bridge. Graph tests and manually modeled C fixtures do not establish source-corpus lowering
 or time saved compiling `main.c`. Issue #129 remains open for that integration.
 
 ## Producer and consumer
@@ -127,10 +127,16 @@ compiler. The required SQLite/libc/c-testsuite emission comparison and
 `main.c` counts and time saved require the source producer and downstream
 lowering path described above.
 
+[The qualification record](measurements/c-lowering-2026-10-23/README.md)
+retains the exact compiler revision, host and binary identities, raw test
+outputs and measurement conditions.
+
 ## Existing source handoff and remaining integration
 
-The checker implementation from [PR #312](https://github.com/buster14a/buster/pull/312),
-inspected at `991f9ba756800c4b78b47bc983ae3ec7416000e4`, already has a real
+The checker implementation from [PR #312](https://github.com/buster14a/buster/pull/312)
+has landed on main. At `47e1d96d9ab25fd21221e41c5c9162daf5a997ff`, its checker,
+source reader, checker driver and static-data reader match the inspected
+`991f9ba756800c4b78b47bc983ae3ec7416000e4` revision. This already supplies a real
 source-to-static-data path. `CheckInput` retains resolved declaration uses,
 stable object identities across redeclarations, types, linkage, static storage
 duration, definition/tentative flags and checked initializer nodes.

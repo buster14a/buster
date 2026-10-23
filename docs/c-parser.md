@@ -419,6 +419,14 @@ On the 9700X, at `d59d035`, with `--clang`:
   translation units (13,619,726 tokens, 7.6 s): every file accepted, as clang
   accepts it, with both paths' trees and every kernel's twin agreeing.
 
+The separately claimed #126 c-testsuite qualification at `5a9e050` adds all
+220 pinned C sources (254,294 tokens) on the locked 9700X. Every source agrees
+with Clang's preprocessor output and syntax acceptance, and the parser paths
+and kernel twins agree. Another 2,200 mutations have zero mismatches under
+the Clang parse-error rules; this mutation run does not compare the two parser
+paths. [The qualification record](measurements/parser-c-testsuite-2026-10-23/README.md)
+retains the exact corpus revision, manifests, configuration, controls and results.
+
 Locally, on a Ryzen 9 7940HS, at `a04f6c0` (the parser as at `d59d035`, whose
 merge of main brought other modules' changes): Lua 5.4.8's 34 files (572,263
 tokens) with `--clang` as well, the fixtures, and mutations of the corpora,
