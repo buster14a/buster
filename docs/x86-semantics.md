@@ -593,3 +593,32 @@ movabs are faster too. Whole-program run time waits for the code generators
   effects, including VEX's merges from vvvv and zeroed upper lanes.
 - **#181:** key its latencies by the same forms, and decide inc and dec.
 - **#222:** may switch `x86_match.c`'s immediate ranges to the shared rule.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The shared semantic tables](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/x86_semantics.c#L4)
+are side-table producers for several consumers:
+
+| Producer → consumer | Contract |
+| --- | --- |
+| Form catalogue → `x86_semantics_initialize` → `x86_effects` | Immutable per-form effects after initialization; unknown forms get conservative all-effects records, never assumed pure. |
+| Allocated record operands + form effects → `x86_instructions_effects` → scheduler/verifier | Two u64 resolved resource sets per record; physical registers, zero idioms and immediate shifts matter. Eight-record vector groups have bounded tails. |
+| Tier 0 semantic immediate requests → `x86_choose_forms` → final machine records | Value/width/destination/live-flags information drives 32-request classification; chosen form must preserve value and all live flags. |
+| Forms/records → `x86_target_forms` / model lookups / encoding | ISA legality, performance observations and encoding are separate consumers; effect coverage does not imply target legality or measured cost. |
+
+Keep the instruction record at 16 bytes. Counted natural-aligned arrays and
+separate result columns have no implied readable padding; initialization
+precedes parallel reads. Call clobbers must additionally come from ABI metadata:
+architectural CALL effects do not encode a callee's convention. Live flags are
+producer knowledge that cannot safely be reconstructed from opcode alone.
+
+Disposition: retain shared effects and semantic form requests. An emitter that
+already has resolved effects may avoid rebuilding them, but any cached columns
+must be invalidated after register assignment, form substitution or operand
+changes. Measure requests/effects construction, selection/scheduling and final
+encoding together before retaining more per-record data. `test-x86-semantics`
+uses scalar twins, native flags/value checks and GNU as; [#221](https://github.com/buster14a/buster/issues/221)/[#141](https://github.com/buster14a/buster/issues/141)/[#172](https://github.com/buster14a/buster/issues/172) retain
+source-corpus consumer integration and generated-program quality. Unknowns
+remain conservative, not candidates for unproved reordering.

@@ -8,6 +8,11 @@ item 2, tracked in #117 and its parts #118 to #125. This document records the
 design, how it is checked against clang, the Zen 5 measurements, and what comes
 next.
 
+The [2026-10-23 acceptance refresh](measurements/preprocessor-117-2026-10-23/README.md)
+records frozen source and corpus identities, the independent scalar reference,
+lookup and final-output accounting, and the evidence for #118 through #124.
+The earlier results below retain their original revisions and input scope.
+
 ## Results
 
 **Token-identical to `clang -E`** (clang 23.1.1 on the 9700X, 23.1.3 locally),
@@ -499,8 +504,11 @@ makes its own; with one, the units and lanes that share it read each file once
 
 ### Macros
 
-The macro table is indexed by `IdentId` (`macro_of`). A bitset of the names
-that are macros (`is_macro`) is what the main loop tests. A definition records
+The macro table is indexed by `IdentId` (`macro_of`). The vectorized main loop
+tests a bitset of the names that have macro records (`is_macro`); the scalar
+reference tests `macro_of` directly. Both include the sentinel records for
+poisoned names and `defined`, which must stop a run even though `#ifdef` does
+not consider them definitions. A definition records
 where its replacement list is in the defining file's tokens, and nothing is
 copied (#121). A redefinition that differs (C 6.10.4p2: the same form,
 parameters, replacement list, and whitespace in the same places) is diagnosed,
@@ -511,6 +519,20 @@ into body items: tokens, parameters (by index), `#` with its parameter, `##`,
 and `__VA_OPT__` with its content. Each parameter gets a bit saying whether it
 is ever substituted expanded, so arguments only `#` or `##` use are never
 expanded.
+
+The producer `pp_compile_macro` also records literal runs for the consumer
+`pp_substitute`. A `PP_ITEM_TOKEN` uses its otherwise unused 16-bit
+`parameter` field for the number of consecutive literal items after it,
+capped at 65,535; `PPItem` remains eight bytes. A backwards pass computes
+every suffix once, including suffixes that substitution can enter after a
+paste. Items must be adjacent both in the recipe and in the defining file's
+token indices. Removing a `__VA_OPT__` closing parenthesis therefore ends a
+run, and substitution additionally checks its active optional-content bound.
+The metadata is immutable after successful compilation and lives with the
+macro's recipe; a failed compilation discards its items as before. Longer
+runs become copies of at most 65,536 tokens, without a new allocation or
+changing the scalar substitution loop. Measurements include this one-time
+producer cost as well as repeated substitution.
 
 ### The main loop
 
@@ -534,7 +556,12 @@ macro's expansion, an argument being expanded, or a directive's line):
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
-  go. Otherwise the main loop collects them a token at a time
+  go. At depth zero, if no opener precedes the first closer in a block, its
+  comma and closer masks already identify the separators and end; no depth
+  prefix scan is needed. A block with no parentheses at positive depth also
+  needs no prefix scan. Blocks containing nested transitions use the existing
+  scan, and the same masked input bounds, separator limits and fallback rules
+  apply to all paths. Otherwise the main loop collects them a token at a time
   (`pp_collect_step`), from the contexts below (popping the ones they exhaust,
   which enables their macros again), and runs any directive on the way. A
   directive among a macro's arguments is undefined behavior that clang accepts
@@ -1562,8 +1589,11 @@ EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
 - refinement;
 - the directive scan, and the conditionals' pairing;
 - the file and buffer runs;
+- macro-name lookup, directly through `macro_of` instead of the cached name
+  bitset;
 - the bulk copies (arguments, body runs, object-like bodies), and the
   argument scan;
+- temporary expansion-origin copies and output-history compression;
 - identifier pastes, which the vectorized kernels intern without lexing;
 - the keyword pass;
 - the printer.
@@ -1571,6 +1601,18 @@ EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
 `test-preprocessor` requires the two to produce the same stream, token for
 token (kind, flags, value and location), and the same directive tables.
 Both printers must give the same bytes, with line markers and without.
+
+Scalar preprocessing copies token columns and temporary origins one element
+at a time. Its macro eligibility checks, including those inside shared
+expansion and directive helpers, use `macro_of[id] != 0`. The vector run
+loops still call their bitset lookup directly. Macro updates keep both tables
+current, allowing the definition benchmark to change kernels on one state;
+`-dM` also enumerates the bitset. Neither is part of scalar expansion lookup.
+The scalar-reference regression deliberately makes every known identifier's
+cached bit disagree with its macro record before use, including after an
+undefine/redefine phase. It compares explicit expected tokens and diagnostics
+with the vector run's full stream, history and directive tables. Separate
+history-copy cases cover both overlap directions and empty copies.
 
 ## Data-parallel design, piece by piece
 
@@ -1584,9 +1626,9 @@ differ by up to 1% from code placement alone.
 | Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9%; 0.62 cycles per token on the C library corpus, against 3.99 |
 | Directive tables (#118) | The scan, the kinds and line ends, the pairing below, and the notes only where the pairing finds a file can have any | The stack, and the notes for every file | 2.31 cycles per token and 51 per directive on the C library corpus (`benchmark-preprocessor --tables`), against 6.50 and 143 |
 | Conditional pairing (#118) | Depth as a prefix sum, pairing as nearest smaller values by pointer jumping, 32 conditionals at a time | The stack; files with a continuation too many | 16% faster on a file of 36,868 conditionals; within noise on `sqlite3.c` |
-| File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | The scalar twins: 22.8 ms against 12.0 ms in all |
+| File and buffer runs (#122) | 64 tokens per step: one compare finds the identifiers, whole-vector stores | Token at a time | Earlier scalar twins, still sharing the macro-name bitset: 22.8 ms against 12.0 ms in all |
 | Argument scan (#122) | Paren depth as a byte prefix sum; the `)` and the top-level commas from compares | Token at a time, through the contexts below | Equal on `sqlite3.c`; 0.4% faster on `main.c`, 1.5% fewer instructions |
-| Macro-name test (#122) | A scalar load per identifier a run's compare finds (a gather is 64 uops) | The same | 1.5% of `sqlite3.c`'s time; a postings index costs more to build |
+| Macro-name test (#122) | A scalar bitset load per identifier a run's compare finds (a gather is 64 uops) | `macro_of[id] != 0`, independent of the bitset | 1.5% of the vector run's `sqlite3.c` time; a postings index costs more to build |
 | Pastes (#122) | Two identifiers, or an identifier and a number, interned without lexing | Lexing every paste | `main.c` (66,520 pastes) 16.5 to 15.2 ms |
 | `#if` (#123) | Scalar: the lines are short (below) | Precedence parser with explicit stacks | Under 0.3% of `sqlite3.c`'s time |
 | Keyword pass (#124) | 64 kinds at a time against a table of the language mode's keywords | Token at a time | Not measured on its own |
@@ -1916,11 +1958,25 @@ full-corpus reproduction and frozen CI subset.
   messages preserve the source after their logical newline; excluded ones
   retain the skipped group's raw lexing. Exceptional lexical overlaps get a
   private prepared view for that inclusion, retaining macro snapshots and
-  shared cache/once/guard state. At most 64 direct and 8 query repairs per
-  inclusion bound full-file copying/preparation and retained storage by
-  `O((64 + 8) * file size)`; capacity exhaustion is an explicit fatal error.
-  Ordinary diagnostic lines consume no repairs. Boundary checks exercise
-  64 successful repairs, the 65th fatal repair, and 65 ordinary messages.
+  shared cache/once/guard state. There is no separate repair-count limit.
+  Each repair must mask new bytes, so source length bounds progress; actual
+  arena or data-index exhaustion fails explicitly. One masking buffer is
+  reused per inclusion, while immutable prepared columns remain alive for
+  old macro definitions. For `R` exceptional repairs of `N` source bytes,
+  preparation still costs `O(R * N)` and retained storage is `O(N + sum of
+  prepared columns)`. Ordinary inputs create no private views. Tests cross
+  8/9, 64/65 and 257 repairs, checking earlier macro definitions after all
+  repairs; 65 exceptional diagnostic messages must also preserve the tail.
+  Failure injection checks allocation, index exhaustion and lack of progress.
+- **Raw-string diagnostics** (#285). Invalid delimiter characters, newlines,
+  delimiters over 16 bytes and unterminated bodies produce errors at their
+  physical source positions. Preparation records only exceptional unknown
+  tokens; emission waits until active source or a directive consumes them.
+  Definitions diagnose once, including an unused definition, and unused
+  macro arguments still diagnose. Excluded group bodies and confirmed opaque
+  header names/messages suppress these errors. An untaken `#elif` directive's
+  own line is still lexed and diagnosed, as Clang does. Scalar/vector checks compare the
+  records; diagnostic fixtures compare text and locations against Clang.
 - **Definitions** (#121). Ten fixtures of `#define`'s and `#undef`'s
   constraints and of redefinitions (the groups above, C90's and C99's
   whitespace, and identical and different redefinitions) must give the same
@@ -2011,6 +2067,42 @@ rejection's reason. Musl is also checked under its upstream build configuration.
 
 ## Where the time goes
 
+The benchmark reports explicit lookup work separately from its phase totals.
+`open` and `fstat` counts cover file-cache probes, including failed opens,
+aliases not yet cached and nonregular candidates; cached paths, including
+cached misses, make neither call. Include-search counts are a subset of these
+file probes. Embed lookup's `stat` attempts and search-directory setup's
+`stat` attempts are separate. These are calls made explicitly by the
+preprocessor, excluding the harness and libc's directory-enumeration calls;
+they are not process-wide syscall totals. Counts belong to the translation
+unit, including when the prepared-file cache is shared.
+
+Include lookup's inclusive interval starts before constructing candidates and
+ends after locating or acquiring the file's bytes, before preparing or
+executing its header. Embed lookup's interval covers constructing and checking
+its candidate paths, before reading a resource. Both overlap the ordinary
+phase breakdown and must not be added to it or subtracted again. The
+`main loop/setup` remainder includes initialization as well as execution.
+
+The final-output copy shares count file runs, buffer runs and direct
+object-like copies at their destination. An intermediate capture contributes
+nothing until tokens reach the final stream, where each copied token is
+counted once. The denominator includes the final stream's pragma records and
+its one record per embed resource; it does not expand an embed into bytes.
+The rest of the stream comes from individual emissions or lifted pragma
+records. The older run-work counters below include intermediate captures,
+so their sum is not a final-output share. Timing-disabled preprocessing does
+not collect the lookup intervals or final-output copy counters.
+
+The [cloud macro-batching comparison](measurements/preprocessor-cloud-2026-10-23/README.md)
+records the flat-argument shortcut and compiled literal-run metadata, including
+their construction cost, generated assembly, differential tests and complete
+paired samples. The later [9700X/Clang 23 paired measurements](https://github.com/buster14a/buster/pull/304#issuecomment-6361692970)
+and [control reduction](https://github.com/buster14a/buster/pull/304#issuecomment-6361693442)
+support a literal-run gain, smaller flat/nested gains and a small observed
+argument-copy slowdown. They do not establish a general frontend gain:
+real-main differences are comparable to the baseline/baseline controls.
+
 The benchmark counts what a run does (`PPStatistics`). On `sqlite3.c`, four
 counts match clang's own statistics (`-Xclang -print-stats`, in #117) exactly:
 31,587 object-like expansions (28,197 copied straight out, 3,390 through a
@@ -2097,18 +2189,6 @@ spellings alone would miss this change (#272).
   answers without options, but for the sanitizers': `-fblocks`, `-fno-builtin`,
   `-fno-gnu-inline-asm` and the other options that change clang's answers
   (#281's item 5) don't change ours.
-- Invalid raw delimiters and unterminated raw strings still lack Clang's
-  lexer diagnostics. Their token spelling is retained, including a line
-  splice inside an invalid delimiter.
-- A header query whose builtin identity appears during macro expansion can
-  require a private prepared view when raw-looking header bytes swallowed
-  later source. Each inclusion permits eight such repairs. A ninth produces
-  a fatal capacity diagnostic. Executing direct directives have a separate
-  budget of 64 exceptional repairs; ordinary directives consume none. The
-  combined full-file copy/preparation work and retained storage are bounded
-  by `O((64 + 8) * N)` for a file of `N` bytes. Unlimited contextual recovery
-  remains follow-up work in #285. Excluded directives retain ordinary lexing,
-  and ordinary multiline raw macro arguments retain their original tokens.
 - c89 and C94 are lexed as clang's `-E` lexes them, without `//` comments. A
   compile driver would need clang's compiling rule there (`//` comments but for a
   `//*` before a file's first one), or to refuse those modes (#288).
@@ -2119,13 +2199,11 @@ spellings alone would miss this change (#272).
   `prefix(...)`). `-dE` (printing the directive rather than its data) isn't
   supported. A FIFO or a socket that `#embed` names is reported as a device
   file, where clang would read it.
-- Individual feature switches (`-m*`, other than the supported `-march=` and
-  `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
-  `--predefines` for their macro effects. The target-builtin query table remains
-  a bounded subset; see [the target contract](x86-target.md).
-- The feature tests (`__has_attribute` and the others) always answer from
-  clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
-  are to answer what the compiler implements (#123, #148).
+- The target-builtin query table remains a bounded subset; see
+  [the target contract](x86-target.md). Target feature switches and the
+  predefined macros they affect are implemented as described in "The
+  predefined macros" above. Feature queries use the compiler's implemented
+  answers by default and Clang's answers with `--clang-features`.
 - The printer's spacing differs from clang's in places. It puts a space between
   `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
   to its column. It keeps apart tokens that clang's printer joins into one,
@@ -2166,8 +2244,7 @@ spellings alone would miss this change (#272).
   message from a macro is an error here. #109's generator writes them
   literally.
 - In `#if`, a character constant's `\N{name}` escape is refused (there is no
-  table of Unicode's names), and `-funsigned-char` doesn't make ordinary
-  character constants unsigned, as it does in clang.
+  table of Unicode's names).
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.
@@ -2222,3 +2299,115 @@ taskset -c 2 ./build/compiler benchmark-preprocessor --tables path/to/libc
 On the 9700X, run each one under `EXCLUSIVE_OWNER=<name>
 ~/buster-fast-bench/exclusive.sh`. `benchmark-preprocessor --only vectorized`
 runs one implementation, for `perf record`.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). The
+[entry-point map](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor.c#L4),
+[token/file contracts](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor.c#L317)
+and [history implementation](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor_history.c#L4)
+identify these real edges, including the output's other consumers.
+
+| Producer → consumer | Representation and readiness |
+| --- | --- |
+| `pp_prepare_into` → `pp_directive_table` → `pp_run_file` / include run-ahead | Per-file kind/start/value columns and space bits; directive u32 hash/end/next columns, byte kind, guard and skipped-diagnostic notes. Conditional pairing is prepared once, but macro state is consulted per inclusion. |
+| Macro definition reader → compiled replacement items → `pp_expand_object` / function substitution | Definition/parameter ranges, parameter references and paste/stringify/VA_OPT operations reuse retained file tokens. Redefinition, disabled-macro and painted-occurrence semantics remain ordered. |
+| Argument capture → pre-expansion/substitution → `pp_run_contexts` | Counted `PPTokens` buffers plus temporary origins and explicit context stack. Raw arguments remain available for paste/stringification; final-token lifetime extends through rescan. |
+| File/buffer no-macro runs → `pp_copy_file_run_vector` / `pp_copy_buffer_run_vector` → output | Bulk kind/flag/value/location stores, stopping at an exceptional macro/directive/state boundary. Scalar twins preserve exact token order. |
+| `#if`/`#elif`, includes, `_Pragma`, `#embed` → ordered unit state/output | Conditional evaluation and header search cannot be reordered across effects. Embed output retains a bounded data descriptor; pragma events keep output order. |
+| Final output → `pp_resolve_keywords` → parser conversion | Mode-dependent keyword kinds, assigned only after macro expansion. Parser then derives grammar kinds, names, source indices, pragma positions and split colons. |
+| Final output → `pp_print` / token oracle / assembly preprocessing | Exact spellings, leading-space and line/location metadata; the printer may insert necessary separation and line markers. This consumer still needs the original token representation. |
+| Expansion/substitution/generated-origin producers → `pp_history_at` / `pp_history_lookup` / `pp_diagnose_output` | Tagged handles and append-only tables; final output uses sorted maximal `(token, origin)` runs, temporary buffers use origin columns. Diagnostics retain expansion occurrences, not merely spelling locations. |
+
+`PPTokens` is four SoA columns: u8 kind, u8 flags, u32 value and u32 spelling
+location (10 logical bytes/token), with count/capacity separate. Identifier
+values are intern IDs; other values are end locations or the documented
+special-token payload. Column arenas, origin storage, location ranges and
+scratch spelling bytes remain alive until their consumers finish. The final
+stream has no per-token origin column. The retained history tables/columns have
+checked handle limits; growth preserves handles, and exhaustion is fatal.
+An allocation error never licenses a truncated successful stream.
+
+Internal reserve helpers provide their documented writable slack; consumers
+must use logical counts or an explicit initialized-padding contract. The parser
+conversion uses masked input loads and creates its own sentinel padding.
+No source mapping, output count or arena reservation independently authorizes
+wide reads. Shared per-file data is borrowed, whereas output, inclusion ranges,
+macro state, generated spellings and history are unit-owned. Releasing the
+cache/intern table first would invalidate spelling and diagnostic readers.
+
+Batch boundaries are semantic runs/context transitions and source files, not
+merely a vector width. A partial run flushes before directives, expansions,
+pragma events and end of context; no batch can cross a macro-state dependency.
+History compaction follows copied origins outside the token-copy loop.
+Stringification/pasting and rare spellings need exact scalar work. Existing
+batch/ordering tests vary legal run boundaries and compare full output/history,
+not just tokens with whitespace stripped.
+
+Observed potential duplication: final keyword resolution followed by parser
+kind conversion/materialization, and raw/expanded argument storage where both
+are semantically needed. The former is scoped in
+[#335](https://github.com/buster14a/buster/issues/335); compare an opt-in parser
+sink or bounded conversion with the current output, including `-E`, diagnostics
+and assembly consumers. The latter is not removable without preserving raw
+argument semantics. Include replay ([#111](https://github.com/buster14a/buster/issues/111)) must account for changed macro state,
+locations and diagnostic history, not replay bytes alone.
+
+Disposition: retain the current representations and the deliberate compressed
+history. [#117](https://github.com/buster14a/buster/issues/117)/[#118](https://github.com/buster14a/buster/issues/118)–[#124](https://github.com/buster14a/buster/issues/124) own remaining PP budgets/accounting; active [#323](https://github.com/buster14a/buster/pull/323)'s
+lookup and scalar-reference changes are outside the pin. `test-preprocessor`,
+its batch/directive/history/order tests and the independent oracle/fuzzer
+validate the implemented subset. Current end-to-end PP tests are not complete
+source compilation. Existing benchmark phase counters omit some cross-stage
+memory/occupancy costs; [#117](https://github.com/buster14a/buster/issues/117)/[#335](https://github.com/buster14a/buster/issues/335) require current frozen small/header-heavy/
+SQLite totals, after-lighter-work controls and honest remaining budget results.
+
+## Header inclusion transcript experiment (#111)
+
+The isolated [#111 experiment](measurements/header-replay-2026-10-23/README.md)
+compares the existing preprocessor with a macro-read-set validated inclusion
+transcript. Its serial batch consumer shares the file cache and intern table
+across translation units, while charging the construction and destruction of a
+fresh transcript cache to each candidate batch. It preserves token locations,
+complete expansion history and macro effects, and falls back for unsupported
+state. The general compiler driver in #152 is still a separate integration gap.
+
+The decision is **reject**. The initial three-round 9700X screen was
+1.60–1.96% slower on 1,315 Makefile-selected musl static-libc C units and
+17.96–20.37% slower on Lua's 34 units. A second layout implements separate
+identifier/definition columns, discards temporary location metadata, and cuts
+musl's retained transcripts from 96,150,694 to 84,930,294 bytes. It still loses
+when charging fresh file-cache/intern-table/transcript lifetimes, release and
+the common output consumer inside one contiguous batch interval:
+
+| Three process rounds on the 9700X | Original median range | Fresh replay median range | Replay cost |
+| --- | ---: | ---: | ---: |
+| musl, 1,315 selected C units | 405.610–415.382 ms | 426.641–431.124 ms | +3.17–5.18% |
+| Lua 5.4.8, 34 C units | 29.943–30.318 ms | 36.379–36.791 ms | +20.30–21.89% |
+
+All selected musl original observations span 404.967–416.687 ms, while replay
+spans 426.138–433.009 ms: no speedup beyond run-to-run spread. Musl peak process
+RSS rises from about 32.6 to 116.8–117.0 MiB. These are multi-unit preprocessing
+batches, excluding process startup and option parsing; the selected musl C
+inputs use x86-64 replacement rules, mallocng and common static-libc flags,
+rather than constituting a complete musl build.
+
+Headers accounted for about 95.6% of musl's original main preprocessing
+interval, itself only about 154–156 ms of the initial screen's 382–384 ms
+sampled total. Replacing that execution does not repay read-set validation,
+complete provenance copying and first-batch recording. Musl's fresh cache
+retains 1,100 transcripts and performs 1,908 replays, 1,163 eligible misses and
+2,374,363 identity checks per batch.
+
+Native equivalence passed for all token/provenance columns, diagnostics,
+macro dumps and both printers: three passes over the musl/Lua units, all
+8,983 libc C/header inputs, and 500 generated programs each in C17/C23.
+The new vector kernels also pass their scalar/protected-page checks. The
+supplemental parser/100 ms conditioning matrix ended after the primary gate
+failed, withdrawing the last unacquired request; it supplies no complete-matrix
+or full-compilation claim. The linked report retains raw timings, ranges,
+memory, source identities
+and the exact comparison boundaries. Per-header distributions are separately
+labelled local diagnostics. This closes #111 through its measured
+negative-result alternative. No production cache or dormant hooks are retained.

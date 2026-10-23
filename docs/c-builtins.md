@@ -1,5 +1,9 @@
 # C builtin integer actions
 
+The [typed checking and runtime integration guide](c-builtins-integration.md)
+describes the additional typed-action and executable-stream interfaces. The
+action-level measurements below retain their original scope and revision.
+
 `c_builtin.c` is the dependency-independent integer-action part of
 [#148](https://github.com/buster14a/buster/issues/148). It recognizes 21 names
 and folds independent constant calls with AVX-512 and exact scalar paths:
@@ -43,9 +47,10 @@ Overflow rows use `a_type`, `b_type`, and `result_type`: a bit width from 1 to
 64, plus `BUSTER_CBUILTIN_SIGNED` for signed values. Signed one-bit types are
 invalid. Upper bits outside each width are ignored. A descriptor represents an
 integer's arithmetic shape, not a `TypeId`; the checker must validate actual C
-types. For example, it must reject a boolean or enum destination even if its
-width resembles an accepted integer, and can describe a boolean input as
-unsigned one-bit. Wider integers need another action and are not silently
+types. Clang accepts non-const boolean and enum destinations for its generic
+overflow builtins, unlike GCC's documented restriction; the typed adapter
+retains their actual integer shape. A boolean is unsigned one-bit. Wider
+integers need another action and are not silently
 truncated into this API.
 
 Every output row has:
@@ -71,6 +76,21 @@ the bit-operation and overflow families; invalid rows do not require a scalar
 fallback. Every load and store has a bounded tail mask. The scalar action remains
 callable independently, including for tiny batches and testing.
 
+Within the bit-operation family, a 32-entry table keeps the parameter-width
+shift and operation flags together. One `vpermi2d` classifies the eight rows,
+replacing repeated width comparisons and operation-range tests. The input IDs
+are widened to qwords already, so each high dword selects the zero descriptor
+at index zero; the result has one complete descriptor per qword without another
+conversion. The permute uses only five index bits. Every operation still uses
+the supported-family mask computed from the full ID, so unsupported IDs that
+alias a valid descriptor remain unsupported.
+
+This is a fixed 128-byte lookup table, not another per-row representation. The
+input columns, output columns and producer's IDs are unchanged; no sorting,
+allocation, copying or extra pass is added. Any legal partition of the rows,
+including a partial flush before the next eight-row batch, produces identical
+results in original order.
+
 ## Integration still required
 
 The checker must own argument count/type checking, constant-expression rules,
@@ -86,18 +106,20 @@ generated-code ISA. An AVX-512 host fold grants no ISA feature to emitted code;
 baseline x86-64 bit operations need baseline sequences where `lzcnt`, `tzcnt`,
 or `popcnt` are unavailable. Execution fixtures must cover both selectors.
 
-`__has_builtin` is not wired to this list. The current preprocessing-only
-command retains its Clang-oracle feature table from #117/#154. Recognition or
-constant folding alone is insufficient evidence for advertising source support.
-When the C compile path exists, #148 still needs a capability inventory that
-reports only builtins with checking and both required lowering paths, plus tests
-of that inventory. Do not substitute this module's 21 recognized names for it.
+The normal `__has_builtin` mode consults the shared capability inventory in
+`c_builtin_catalog.c`; its integer entries currently advertise folding only.
+The separate Clang-oracle feature table from #117/#154 remains available for
+preprocessor comparisons. Recognition or constant folding alone is insufficient
+evidence for advertising source support. Source capabilities require checking
+and both required lowering paths. Do not substitute this module's 21 recognized
+names for that acceptance evidence.
 
-The other #148 families remain unimplemented here: varargs (using #137's ABI
+The other #148 families are outside this fold kernel: varargs (using #137's ABI
 plans), `offsetof`, hints/traps, compile-time queries, floating point, memory and
 strings, atomics, and frame/return addresses. Wider overflow operand types also
-remain. Their actions should consume the actual typed stream and selector
-interfaces as those become available.
+remain outside its supported contract. Companion typed actions and runtime
+expansion are described in [the integration guide](c-builtins-integration.md);
+their validation is separate from full source and two-tier acceptance.
 
 ## Validation and measurements
 
@@ -111,6 +133,12 @@ rows, invalid descriptors and undefined inputs. Guard pages follow every
 column for counts 0 through 33, and follow every recognized name. Compile-time
 assertions also exercise Clang's folding of fixed bit-operation fixtures.
 These are action-level comparisons, not C programs compiled by Buster.
+
+The descriptor-lookup regressions put invalid IDs with every low five-bit
+index beside valid operations, at every lane position, and compare all outputs
+with Clang's oracle. Partition checks split the same mixed rows into batches
+of 1 through 17 across counts around the vector boundaries and a 257-row input;
+they require the scalar result and unchanged memory beyond the logical output.
 
 `./build/compiler benchmark-builtins [--only scalar|vector]
 [--after-scalar MS]` times 16,384-row bit, overflow, and mixed batches, including
@@ -174,6 +202,61 @@ passed on this head, including the existing compiler suite and the new builtin
 tests. These receipts establish the integer actions' validation; the source
 language and selector acceptance listed above remains outstanding.
 
+### Descriptor lookup: cloud measurements, October 23, 2026 (#301)
+
+The descriptor change was compared with `c_builtin.c` from
+`1f1e116ad358bed8d5a97824b916908d7cb44e96` using the existing
+`c_builtin_benchmark.c` through a standalone entry point that calls
+`run_builtin_benchmark`. Both binaries used Ubuntu Clang 18.1.3 with
+`-O3 -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall
+-Werror -g`, on a cloud AMD EPYC 9V74, pinned to CPU 4. Adding the full
+compiler build's `-mmwaitx -Wno-bitwise-instead-of-logical` switches produced
+byte-identical `.text` sections for both binaries. This host is not the 9700X;
+these measurements qualify the change for target-host measurement and do not
+replace it or measure complete C compilation.
+
+Three independently started processes of each binary ran each configuration,
+alternating baseline and candidate. Every process held the common experiment
+lock for its own run. Each reports the existing benchmark's 21 calibrated
+samples over 16,384 rows, including complete result stores and scalar-output
+comparison. The [18 original process logs](measurements/simd-301-2026-10-23/builtins.txt)
+and [standalone benchmark entry point](measurements/simd-301-2026-10-23/builtin-benchmark.c)
+are checked in with the measurement record. The table gives the median of the
+three process medians in ns/row, with their minimum and maximum in brackets:
+
+| Workload | State | Before | Descriptor lookup |
+| --- | --- | ---: | ---: |
+| Bit operations | interleaved | 1.452 [1.432, 1.496] | 1.086 [1.062, 1.096] |
+| Bit operations | vector alone | 1.414 [1.412, 1.448] | 1.074 [1.050, 1.101] |
+| Bit operations | after 100 ms scalar | 1.438 [1.412, 1.529] | 1.109 [1.066, 1.154] |
+| Overflow | interleaved | 2.847 [2.843, 2.873] | 2.923 [2.856, 2.932] |
+| Overflow | vector alone | 2.813 [2.811, 2.857] | 2.880 [2.808, 3.100] |
+| Overflow | after 100 ms scalar | 2.951 [2.773, 3.013] | 2.834 [2.774, 2.861] |
+| Mixed | interleaved | 2.388 [2.331, 2.440] | 2.090 [2.060, 2.101] |
+| Mixed | vector alone | 2.398 [2.369, 2.459] | 2.069 [2.062, 2.155] |
+| Mixed | after 100 ms scalar | 2.363 [2.362, 2.422] | 2.094 [2.049, 2.129] |
+
+The bit-operation time falls by 23–25%, and the mixed time by 11–14%.
+Overflow does not use the descriptor lookup; its ranges overlap and no
+improvement is claimed. Small-count checks over 64 independent calls at batch
+counts 1, 7, 8, 9 and 16 also compare complete outputs with the scalar twin.
+Across three processes, their median throughput ratios are 1.31–1.46 for bit
+operations and 1.08–1.31 for mixed valid/invalid rows. Overflow remains near
+parity, with overlapping process ranges at the two counts whose medians were
+about 3% slower. The [six small-count process logs](measurements/simd-301-2026-10-23/builtin-tiny.txt)
+and their [standalone harness](measurements/simd-301-2026-10-23/builtin-tiny.c)
+retain the tested workload and calibration. Both standalone harnesses select
+the baseline or candidate source through `-I<checkout>/src`. No tiny-batch
+dispatch threshold was introduced.
+
+The standalone optimized `cbuiltin_fold` shrinks from 1,417 to 1,307 bytes.
+Its assembly has the intended `vpermi2d`, with no gathers, scatters or vector
+spills. Both binaries retain the same two scalar input-pointer spill/reload
+slots in the overflow branch; the bit-operation branch has none. The original
+guarded-tail, 221,184 boundary-row and 1,019,519
+generated-row tests pass, together with 8,224 alias-index oracle rows and
+the partition checks. The scalar implementation is unchanged.
+
 ## Behavioral references and provenance
 
 The code, fixtures and benchmark inputs are original. The semantic references
@@ -182,3 +265,31 @@ are GCC's [bit operation builtins](https://gcc.gnu.org/onlinedocs/gcc/Bit-Operat
 and [integer overflow builtins](https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html),
 checked against Clang itself. No implementation or generated table from those
 projects was imported. The builtin spellings are the identifiers named in #148.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md).
+[The module boundary](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_builtin.c#L4)
+is descriptor lookup → `cbuiltin_fold`/`cbuiltin_fold_scalar` → folded value,
+overflow and status columns. At this pin, tests/benchmarks supply the inputs;
+ordinary checker calls do not establish full builtin source integration.
+
+Inputs are counted u32 IDs/type descriptors and u64 integer operands; outputs
+are u64 value and u32 overflow/status. Natural alignment suffices, no padding
+is required, and input/output columns do not overlap. Zero count permits null
+columns. Eight-lane kernels write status for every logical item, including
+undefined, unsupported and invalid types. Each independent constant call is
+ready only after the source checker has validated and converted its arguments.
+The overflow store and evaluation ordering belong to the eventual consumer;
+a folded boolean alone is not its complete behavior.
+
+Retain builtin ID at binding instead of repeating spelling lookup in later
+passes. This is an integration obligation, not evidence that the current
+source binder does so. Compare producer argument packing and result/store
+materialization together; a packed fold benchmark cannot prove this useful
+for sparse source calls. Disposition: retain the bounded module, with guarded
+and external-Clang checks in `test-builtins`. [#148](https://github.com/buster14a/buster/issues/148) owns binding/checking,
+selector/feature-table agreement and actual-source throughput, memory and
+fallback qualification. Do not advertise an unsupported builtin solely because
+its isolated fold kernel exists.

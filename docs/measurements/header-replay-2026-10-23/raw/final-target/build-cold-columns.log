@@ -1,0 +1,1 @@
+command clang -I/home/david/buster-fast-bench/codex-header111/soa-probe -O3 -g -march=native -I/home/david/buster-fast-bench/codex-header111/tree/src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror /home/david/buster-fast-bench/codex-header111/soa-probe/cold-batch.c -o /home/david/buster-fast-bench/codex-header111/cold-columns 

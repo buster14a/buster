@@ -1,0 +1,71 @@
+--- src/buster/compiler/c_preprocessor.c
++++ src/buster/compiler/c_preprocessor.c
+@@ -5335,7 +5335,8 @@
+ 
+ // Appends tokens [begin, end) of a stack to the expansions, all of them from a macro and none starting a line (one that
+ // did gets a leading space instead). With `replace_first`, the first takes `first_flags`' leading space: an argument's
+-// first token takes its parameter's.
++// first token takes its parameter's. A source in expansions is wholly below its count; masked source loads and the
++// output's slack permit whole-vector stores even for the last group, without overwriting unread source tokens.
+ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, bool replace_first, uint8_t first_flags)
+ {
+     PPTokens* out = &pp->expansions;
+@@ -5351,19 +5352,48 @@
+         uint32_t* out_values = out->values;
+         uint32_t* out_locations = out->locations;
+         uint32_t count = out->count;
+-        for (uint32_t i = begin; i < end; i += 1)
++        if (pp->vectorized)
+         {
+-            uint8_t token_flags = flags[i];
+-            token_flags = (uint8_t)((token_flags & ~BUSTER_PP_START_OF_LINE) | ((token_flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+-            if (i == begin && replace_first)
++            for (uint32_t i = begin; i < end; i += 16)
+             {
+-                token_flags = (uint8_t)((token_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE)) | (first_flags & BUSTER_PP_SPACE));
++                const uint32_t available = end - i < 16 ? end - i : 16;
++                const __mmask16 valid = (__mmask16)_bzhi_u32(~0u, available);
++                const __m128i token_kinds = _mm_maskz_loadu_epi8(valid, kinds + i);
++                const __m128i token_flags = _mm_maskz_loadu_epi8(valid, flags + i);
++                const __m512i token_values = _mm512_maskz_loadu_epi32(valid, values + i);
++                const __m512i token_locations = _mm512_maskz_loadu_epi32(valid, locations + i);
++                const __mmask16 lines = _mm_test_epi8_mask(token_flags, _mm_set1_epi8(BUSTER_PP_START_OF_LINE));
++                const __m128i spaces = _mm_maskz_mov_epi8(lines, _mm_set1_epi8(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE));
++                const __m128i kept = _mm_andnot_si128(_mm_set1_epi8(BUSTER_PP_START_OF_LINE), token_flags);
++                const __m128i copied_flags = _mm_or_si128(kept, _mm_or_si128(spaces, _mm_set1_epi8(BUSTER_PP_FROM_MACRO)));
++                _mm_storeu_si128((__m128i*)(out_kinds + count), token_kinds);
++                _mm_storeu_si128((__m128i*)(out_flags + count), copied_flags);
++                _mm512_storeu_si512(out_values + count, token_values);
++                _mm512_storeu_si512(out_locations + count, token_locations);
++                count += available;
++            }
++            if (begin < end && replace_first)
++            {
++                const uint32_t first = out->count;
++                out_flags[first] = (uint8_t)((out_flags[first] & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE)) | (first_flags & BUSTER_PP_SPACE));
++            }
++        }
++        else
++        {
++            for (uint32_t i = begin; i < end; i += 1)
++            {
++                uint8_t token_flags = flags[i];
++                token_flags = (uint8_t)((token_flags & ~BUSTER_PP_START_OF_LINE) | ((token_flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
++                if (i == begin && replace_first)
++                {
++                    token_flags = (uint8_t)((token_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE)) | (first_flags & BUSTER_PP_SPACE));
++                }
++                out_kinds[count] = kinds[i];
++                out_flags[count] = token_flags;
++                out_values[count] = values[i];
++                out_locations[count] = locations[i];
++                count += 1;
+             }
+-            out_kinds[count] = kinds[i];
+-            out_flags[count] = token_flags;
+-            out_values[count] = values[i];
+-            out_locations[count] = locations[i];
+-            count += 1;
+         }
+         pp_history_argument(pp, tokens, begin, end, out->count, pp->history_anchor);
+         out->count = count;

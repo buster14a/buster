@@ -7,6 +7,11 @@ are identical to main `829fc6d16342920f678b27ad443db3d91737bfef`.
 Both binaries were built with Clang 23.1.1 on the approved Ryzen 7 9700X.
 The TLS compiler remained unchanged throughout these measurements.
 
+The subsequent integration merges main
+`2740ff1d59bce335747bdcfd7d9994ce4426c320`, including its debug layout and
+command-owned benchmark lane group. The figures below describe only the
+frozen binaries above; they are not measurements of that integrated tree.
+
 `campaign-plan.tsv` records each invocation and its captured status;
 `writer-microseconds.tsv` transcribes all 216 workload/publication rows,
 with every timing column in microseconds. The raw logs remain authoritative.

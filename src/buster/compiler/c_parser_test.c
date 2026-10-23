@@ -304,6 +304,12 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "[[deprecated]] int x; int y [[maybe_unused]];\n", "", 0 },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     { "int x = (int){1}; int a[3] = { [1 ... 2] = 0 };\n", "", 0 },
+    // GNU's single array designator may omit '=', including a range, a prefix operand and a braced initializer.
+    { "int a[] = { [0] 1, [3] 4, [4] -1, [5] (int)2 };\n", "", 0 },
+    { "int a[2] = { [0 ... 1] +1 }; int b[1][2] = { [0] { 1, 2 } };\n", "", "c17" },
+    // GNU's old-style field designator uses ':' in place of '.member =', including a typedef-shadowing member.
+    { "struct p { int x, y; }; struct p q = { y: 2, x: 1 };\n", "", 0 },
+    { "typedef int T; struct p { int T, x; }; struct p q = { T: 1, x: 2 };\n", "", "c17" },
     { "void f(int x) { asm volatile (\"\" : [r] \"=r\" (x) : \"r\" (x) : \"memory\"); }\n", "", 0 },
     { "int f(a, b) int a; char b; { return a + b; }\n", "", 0 },
     { "int x = 1 ? : 2;\n", "", 0 },
@@ -314,6 +320,23 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x = sizeof(int) + _Alignof(int) + __builtin_offsetof(struct { int a; }, a);\n", "", 0 },
     { "int x = _Generic(1, int: 2, default: 3);\n", "", 0 },
     { "static_assert(1); auto x = 1; constexpr int y = 2; bool b = true; void *p = nullptr;\n", "", "c23" },
+    // GNU's reserved spellings remain keywords in strict C; plain asm and (before C23) typeof do not.
+    { "__extension__ typedef __signed__ __int128 Wide;\n__inline __const int *aliases(__const__ int *__restrict p, __volatile__ int *__restrict__ q) { return p; }\n__inline__ int widths(void) { return __alignof__(Wide) + __alignof(__signed int); }\n", "", "c17" },
+    { "int asm, typeof; int f(void) { asm = typeof + 1; return asm; }\n", "", "c17" },
+    { "int x; __typeof(x) y; __typeof__(const int) z; __typeof__(int (*)(int)) fp;\nint f(void) { __typeof__(&x) p = &x; __typeof__(*p) value = *p; return value; }\n", "", "c17" },
+    { "int a[3]; typeof(a) b; typeof(int (*)(int)) f;\nint g(int x) { typeof((x + 1)) y = x; return y; }\n", "", 0 },
+    { "const int x = 1; typeof(x) y = 2; typeof_unqual(x) z;\nint f(void) { typeof(int) n = 3; return n + y; }\n", "", "c23" },
+    // A typeof operand follows the visible binding; nested statement expressions and __extension__ keep their scope.
+    { "typedef int T; int f(void) { int T = 3; __typeof__(T) x = T; { typedef char T; __typeof__(T) y = 1; x += y; } return x; }\n", "", 0 },
+    { "int f(int x) { __auto_type y = ({ __auto_type z = x + 1; z; }); return ({ __typeof__(y) z = y; z + 1; }); }\n", "", 0 },
+    { "__extension__ typedef __int128 Wide;\nint f(int x) { __extension__ Wide y = x; return __extension__ ({ int z = (int)y; __extension__ (z ?: 1); }); }\n", "", "c17" },
+    { "const char *f(void) { const char *names[] = { __func__, __FUNCTION__, __PRETTY_FUNCTION__ }; return names[0]; }\n", "", "c17" },
+    { "struct S { int empty[0]; int value; }; int a[4] = { [0 ... 3] = 2 };\nint f(int x) { switch (x) { case -2 ... 2: return a[x + 2]; default: return x ?: 4; } }\n", "", 0 },
+    { "__typeof__ int x;\n", "1:12: expected '(' after '__typeof__'", 0 },
+    { "__typeof__() x;\n", "1:12: expected expression", 0 },
+    { "__typeof__(int, char) x;\n", "1:15: expected ')'", 0 },
+    { "__typeof__(int x;\n", "1:16: expected ')'", 0 },
+    { "__typeof__(({ int x = 1; x; })) y;\n", "1:12: statement expression not allowed at file scope", 0 },
     // Invalid code, with clang 23's first error.
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },
@@ -412,6 +435,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void (f(void)) {}\nint (*g(void))[3] { return 0; }\n", "", 0 },
     { "int (q)(int x) { return x; }\nint *(r)(void) { return 0; }\n", "", 0 },
     { "int (*p)(int) { return 0; }\n", "1:14: expected ';' after top level declarator", 0 },
+    // A function's typedef declaration cannot carry a body, even though the declarator is a function's.
+    { "typedef int f(int x) { return x; }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "typedef int f(int x) { return x; }\nint g(void) { return f(1); }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "int typedef f(void) { return 0; }\n", "1:5: function definition declared 'typedef'", 0 },
     { "int f(int a), g(int b) { return b; }\n", "1:23: expected ';' after top level declarator", 0 },
     { "int (*f(void)) x\n", "1:16: expected function body after function declarator", 0 },
     // The end of an identifier is where its spelling ends: a UCN and a line splice make it longer than its bytes.
@@ -444,6 +471,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     // An initializer's designators take `.`, never `->`.
     { "struct S { int a; } s = { ->a = 1 };\n", "1:27: expected expression", 0 },
     { "struct S { struct { int b; } a; } s = { .a->b = 1 };\n", "1:43: expected '=' or another designator", 0 },
+    // Only a single array subscript allows GNU's missing '='; field and chained designators still require it.
+    { "struct S { int a; } s = { .a 1 };\n", "1:30: expected '=' or another designator", 0 },
+    { "int a[1][2] = { [0][1] 1 };\n", "1:24: expected '=' or another designator", 0 },
+    { "struct S { int a[1]; } s = { .a[0] 1 };\n", "1:36: expected '=' or another designator", 0 },
     // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
     { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
     { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
@@ -560,6 +591,29 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "#define C :\n[[gnu:C unused]] int x;\n", "2:6: expected ','", "c23" },
     { "#define C ::\n[[gnu C unused]] int x;\n", "", "c23" },
     { "#define C :\n[[gnu C: unused]] int x;\n", "2:6: expected ','", "c23" },
+    // GNU label attributes need no empty statement before the next statement, declaration, block or closing brace.
+    { "void f(void) { L: __attribute__((unused)) return; }\n", "", 0 },
+    { "void f(void) { L: __attribute__((unused)) f(); }\n", "", 0 },
+    { "void f(void) { L: __attribute__((cold)) __attribute__((unused)) { return; } }\n", "", 0 },
+    { "void f(void) { L: __attribute__((unused)) }\n", "", 0 },
+    { "void f(void) { L: __attribute__((unused)) int x; }\n", "", 0 },
+    // Statement attributes have the same continuation at a block-item boundary and after a control head.
+    { "void f(void) { __attribute__((noinline)) f(); }\n", "", 0 },
+    { "void f(void) { __attribute__((always_inline)) f(); }\n", "", 0 },
+    { "void f(void) { __attribute__((__noinline__)) f(); }\n", "", 0 },
+    { "void f(void) { if (1) __attribute__((noinline)) f(); }\n", "", 0 },
+    { "void f(void) { if (1) __attribute__((noinline)) { f(); } }\n", "", 0 },
+    { "void f(void) { if (1) __attribute__((unused)) int x; }\n", "1:47: expected expression", 0 },
+    { "void f(void) { if (1) __attribute__((noinline)) }\n", "1:49: expected statement", 0 },
+    { "void f(void) { __attribute__((noinline)) }\n", "1:42: expected statement", 0 },
+    { "void f(int x) { switch (x) { case 0: __attribute__((always_inline)) } }\n", "1:69: expected statement", 0 },
+    { "void f(int x) { switch (x) { default: __attribute__((__noinline__)) } }\n", "1:69: expected statement", 0 },
+    { "void f(void) { __attribute__((__always_inline__, noinline)) }\n", "1:61: expected statement", 0 },
+    { "void f(void) { __attribute__((unknown)) x; }\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "void f(void) { __attribute__((unused)) __extension__ int x; }\n", "1:40: expected identifier or '('", 0 },
+    { "void f(void) { L: __attribute__((unused)) __extension__ int x; }\n", "1:57: expected expression", 0 },
+    // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.
+    { "void f(void) { __attribute__((unused)); }\n", "", 0, true },
 };
 
 // Writes `text` to `path`. Returns false if it can't.
@@ -1151,6 +1205,55 @@ static uint32_t parse_test_kernel_differs(const Parser* parser, Preprocessor* pp
         result = 1;
     }
     return result;
+}
+
+// Every role/kind refinement, with either typed state and with both in one block, against the scalar classifier.
+// Unused virtual kinds preserve the original role and its typed variant.
+static uint32_t parse_test_check_k6_tables(void)
+{
+    parse_tables_initialize();
+    uint32_t failures = 0;
+    for (uint32_t r = 0; r < PARSE_ROLE_COUNT; r += 1)
+    {
+        const __m512i roles = _mm512_set1_epi8((char)r);
+        const __m512i role_bits = parse_table8(parse_check_vector.role_bits, roles);
+        for (uint32_t first = 0; first < 128; first += 64)
+        {
+            uint8_t kinds[64];
+            for (uint32_t lane = 0; lane < 64; lane += 1)
+            {
+                kinds[lane] = (uint8_t)(first + lane);
+            }
+            for (uint32_t state = 0; state < 3; state += 1)
+            {
+                const __mmask64 typed = state == 0 ? 0 : state == 1 ? ~(__mmask64)0 : 0xaaaaaaaaaaaaaaaaull;
+                uint8_t expected[64];
+                for (uint32_t lane = 0; lane < 64; lane += 1)
+                {
+                    const bool is_typed = ((typed >> lane) & 1) != 0;
+                    uint8_t value = (uint8_t)r;
+                    if (kinds[lane] < BUSTER_PARSE_VKINDS)
+                    {
+                        value = parse_check_class((uint8_t)r, kinds[lane], 0, is_typed);
+                    }
+                    else if (is_typed)
+                    {
+                        value = r == PARSE_ROLE_SPECIFIER ? PARSE_CLASS_TYPED : r == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ? PARSE_CLASS_TYPED_ATTRIBUTE : (uint8_t)r;
+                    }
+                    expected[lane] = value;
+                }
+                const __m512i actual = parse_check_classes_avx512(roles, _mm512_loadu_si512(kinds), role_bits, typed);
+                const uint64_t different = _mm512_cmpneq_epi8_mask(actual, _mm512_loadu_si512(expected));
+                if (different != 0)
+                {
+                    parse_test_report("K6 refinement differs: role %u, kind %u, typed state %u\n", r, first + (uint32_t)__builtin_ctzll(different), state);
+                    failures += 1;
+                }
+            }
+        }
+    }
+    printf("K6 compact tables: %u failures\n", failures);
+    return failures;
 }
 
 // K5 in AVX-512 against the twin, from the parents K4 left in kernels->parents: the same verdict, and when it is true,
@@ -2447,6 +2550,8 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_LARGE, 0, 0, 1, "fatal error: can't read '%s': File too large\n", false },
     { PARSE_TEST_DRIVER_NOTHING, 0, 0, 1, "usage: compiler [-fsyntax-only] ", true },
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--bogus", 1, "unknown argument: --bogus\nusage: compiler [-fsyntax-only] ", true },
+    { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-gnu-keywords", 0, "", false },
+    { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
 };
 
 // Whether a run of case `c` did what it must.
@@ -2793,6 +2898,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     else
     {
         failures += parse_test_check_postorder_self(&arena);
+        failures += parse_test_check_k6_tables();
         failures += parse_test_check_snippets(directory, clang);
         failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
         failures += parse_test_check_fixtures(directory);

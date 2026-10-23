@@ -18,55 +18,10 @@
 #include <stdbool.h>
 #include <string.h>
 #include <immintrin.h>
+#include "c_builtin_catalog.c"
 
 #define BUSTER_CBUILTIN_SIGNED 128u
 #define BUSTER_CBUILTIN_LANES 8u
-#define BUSTER_CBUILTIN_NAMES(X) \
-    X(BSWAP16, "__builtin_bswap16") \
-    X(BSWAP32, "__builtin_bswap32") \
-    X(BSWAP64, "__builtin_bswap64") \
-    X(CLZ, "__builtin_clz") \
-    X(CLZL, "__builtin_clzl") \
-    X(CLZLL, "__builtin_clzll") \
-    X(CTZ, "__builtin_ctz") \
-    X(CTZL, "__builtin_ctzl") \
-    X(CTZLL, "__builtin_ctzll") \
-    X(POPCOUNT, "__builtin_popcount") \
-    X(POPCOUNTL, "__builtin_popcountl") \
-    X(POPCOUNTLL, "__builtin_popcountll") \
-    X(PARITY, "__builtin_parity") \
-    X(PARITYL, "__builtin_parityl") \
-    X(PARITYLL, "__builtin_parityll") \
-    X(FFS, "__builtin_ffs") \
-    X(FFSL, "__builtin_ffsl") \
-    X(FFSLL, "__builtin_ffsll") \
-    X(ADD_OVERFLOW, "__builtin_add_overflow") \
-    X(SUB_OVERFLOW, "__builtin_sub_overflow") \
-    X(MUL_OVERFLOW, "__builtin_mul_overflow")
-
-typedef enum CBuiltinId
-{
-    CBUILTIN_NONE,
-#define BUSTER_CBUILTIN_ENUM(id, name) CBUILTIN_##id,
-    BUSTER_CBUILTIN_NAMES(BUSTER_CBUILTIN_ENUM)
-#undef BUSTER_CBUILTIN_ENUM
-    CBUILTIN_COUNT,
-} CBuiltinId;
-
-typedef struct CBuiltinName CBuiltinName;
-struct CBuiltinName
-{
-    char bytes[32];
-    uint32_t length;
-};
-
-static const CBuiltinName cbuiltin_names[CBUILTIN_COUNT] =
-{
-    { "", 0 },
-#define BUSTER_CBUILTIN_NAME(id, name) { name, sizeof(name) - 1 },
-    BUSTER_CBUILTIN_NAMES(BUSTER_CBUILTIN_NAME)
-#undef BUSTER_CBUILTIN_NAME
-};
 
 typedef enum CBuiltinFoldStatus
 {
@@ -273,8 +228,46 @@ static __m512i cbuiltin_vector_extend(__m512i bits, __m512i type)
     return _mm512_mask_blend_epi64(is_signed, _mm512_srlv_epi64(shifted, shift), _mm512_srav_epi64(shifted, shift));
 }
 
+#define BUSTER_CBUILTIN_BIT_SHIFT_MASK 63u
+#define BUSTER_CBUILTIN_BIT_SWAP (1u << 8)
+#define BUSTER_CBUILTIN_BIT_CLZ (1u << 9)
+#define BUSTER_CBUILTIN_BIT_CTZ (1u << 10)
+#define BUSTER_CBUILTIN_BIT_POP (1u << 11)
+#define BUSTER_CBUILTIN_BIT_PARITY (1u << 12)
+#define BUSTER_CBUILTIN_BIT_FFS (1u << 13)
+
+// Low six bits hold 64 minus the parameter width; the flags select its operation. Widened ids have a zero high
+// dword, so descriptor 0 must stay zero: a dword permute then produces one complete descriptor per qword lane.
+// The permute wraps indices modulo 32. The original id's bits mask still gates every operation, including invalid
+// ids whose low bits alias a supported id. Arithmetic and unsupported entries deliberately stay zero.
+static const uint32_t cbuiltin_bit_descriptors[32] __attribute__((aligned(64))) =
+{
+    [CBUILTIN_BSWAP16] = 48 | BUSTER_CBUILTIN_BIT_SWAP,
+    [CBUILTIN_BSWAP32] = 32 | BUSTER_CBUILTIN_BIT_SWAP,
+    [CBUILTIN_BSWAP64] = BUSTER_CBUILTIN_BIT_SWAP,
+    [CBUILTIN_CLZ] = 32 | BUSTER_CBUILTIN_BIT_CLZ,
+    [CBUILTIN_CLZL] = BUSTER_CBUILTIN_BIT_CLZ,
+    [CBUILTIN_CLZLL] = BUSTER_CBUILTIN_BIT_CLZ,
+    [CBUILTIN_CTZ] = 32 | BUSTER_CBUILTIN_BIT_CTZ,
+    [CBUILTIN_CTZL] = BUSTER_CBUILTIN_BIT_CTZ,
+    [CBUILTIN_CTZLL] = BUSTER_CBUILTIN_BIT_CTZ,
+    [CBUILTIN_POPCOUNT] = 32 | BUSTER_CBUILTIN_BIT_POP,
+    [CBUILTIN_POPCOUNTL] = BUSTER_CBUILTIN_BIT_POP,
+    [CBUILTIN_POPCOUNTLL] = BUSTER_CBUILTIN_BIT_POP,
+    [CBUILTIN_PARITY] = 32 | BUSTER_CBUILTIN_BIT_PARITY,
+    [CBUILTIN_PARITYL] = BUSTER_CBUILTIN_BIT_PARITY,
+    [CBUILTIN_PARITYLL] = BUSTER_CBUILTIN_BIT_PARITY,
+    [CBUILTIN_FFS] = 32 | BUSTER_CBUILTIN_BIT_FFS,
+    [CBUILTIN_FFSL] = BUSTER_CBUILTIN_BIT_FFS,
+    [CBUILTIN_FFSLL] = BUSTER_CBUILTIN_BIT_FFS,
+};
+
+_Static_assert(CBUILTIN_FFSLL < 32, "bit builtin descriptors fit in two vectors");
+
 static void cbuiltin_fold(CBuiltinIntegers input, CBuiltinIntegerResults output, uint32_t count)
 {
+    const __m512i bit_descriptors_low = _mm512_load_si512(cbuiltin_bit_descriptors);
+    const __m512i bit_descriptors_high = _mm512_load_si512(cbuiltin_bit_descriptors + 16);
     const __m512i zero = _mm512_setzero_si512();
     const __m512i one = _mm512_set1_epi64(1);
     const __m512i ones = _mm512_set1_epi64(-1);
@@ -293,22 +286,18 @@ static void cbuiltin_fold(CBuiltinIntegers input, CBuiltinIntegerResults output,
         __m512i status = _mm512_mask_mov_epi64(_mm512_set1_epi64(CBUILTIN_UNSUPPORTED), bits | arithmetic, zero);
         if (bits != 0)
         {
-            const __mmask8 narrow = _mm512_cmpeq_epi64_mask(id, _mm512_set1_epi64(CBUILTIN_BSWAP32)) |
-                _mm512_cmpeq_epi64_mask(id, _mm512_set1_epi64(CBUILTIN_CLZ)) | _mm512_cmpeq_epi64_mask(id, _mm512_set1_epi64(CBUILTIN_CTZ)) |
-                _mm512_cmpeq_epi64_mask(id, _mm512_set1_epi64(CBUILTIN_POPCOUNT)) | _mm512_cmpeq_epi64_mask(id, _mm512_set1_epi64(CBUILTIN_PARITY)) |
-                _mm512_cmpeq_epi64_mask(id, _mm512_set1_epi64(CBUILTIN_FFS));
-            __m512i shift = _mm512_maskz_mov_epi64(narrow, _mm512_set1_epi64(32));
-            shift = _mm512_mask_mov_epi64(shift, _mm512_cmpeq_epi64_mask(id, one), _mm512_set1_epi64(48));
+            const __m512i descriptor = _mm512_permutex2var_epi32(bit_descriptors_low, id, bit_descriptors_high);
+            const __m512i shift = _mm512_and_si512(descriptor, _mm512_set1_epi64(BUSTER_CBUILTIN_BIT_SHIFT_MASK));
             const __m512i x = _mm512_and_si512(a, _mm512_srlv_epi64(ones, shift));
             const __m512i trailing = _mm512_popcnt_epi64(_mm512_andnot_si512(x, _mm512_sub_epi64(x, one)));
             const __m512i population = _mm512_popcnt_epi64(x);
-            const __mmask8 clz = bits & _mm512_cmp_epu64_mask(_mm512_sub_epi64(id, _mm512_set1_epi64(CBUILTIN_CLZ)), _mm512_set1_epi64(3), _MM_CMPINT_LT);
-            const __mmask8 ctz = bits & _mm512_cmp_epu64_mask(_mm512_sub_epi64(id, _mm512_set1_epi64(CBUILTIN_CTZ)), _mm512_set1_epi64(3), _MM_CMPINT_LT);
-            const __mmask8 pop = bits & _mm512_cmp_epu64_mask(_mm512_sub_epi64(id, _mm512_set1_epi64(CBUILTIN_POPCOUNT)), _mm512_set1_epi64(3), _MM_CMPINT_LT);
-            const __mmask8 parity = bits & _mm512_cmp_epu64_mask(_mm512_sub_epi64(id, _mm512_set1_epi64(CBUILTIN_PARITY)), _mm512_set1_epi64(3), _MM_CMPINT_LT);
-            const __mmask8 ffs = bits & _mm512_cmp_epu64_mask(id, _mm512_set1_epi64(CBUILTIN_FFS), _MM_CMPINT_GE);
+            const __mmask8 clz = bits & _mm512_test_epi64_mask(descriptor, _mm512_set1_epi64(BUSTER_CBUILTIN_BIT_CLZ));
+            const __mmask8 ctz = bits & _mm512_test_epi64_mask(descriptor, _mm512_set1_epi64(BUSTER_CBUILTIN_BIT_CTZ));
+            const __mmask8 pop = bits & _mm512_test_epi64_mask(descriptor, _mm512_set1_epi64(BUSTER_CBUILTIN_BIT_POP));
+            const __mmask8 parity = bits & _mm512_test_epi64_mask(descriptor, _mm512_set1_epi64(BUSTER_CBUILTIN_BIT_PARITY));
+            const __mmask8 ffs = bits & _mm512_test_epi64_mask(descriptor, _mm512_set1_epi64(BUSTER_CBUILTIN_BIT_FFS));
             const __mmask8 nonzero = _mm512_cmpneq_epi64_mask(x, zero);
-            value = _mm512_mask_mov_epi64(value, bits & _mm512_cmp_epu64_mask(id, _mm512_set1_epi64(CBUILTIN_BSWAP64), _MM_CMPINT_LE), _mm512_srlv_epi64(_mm512_shuffle_epi8(x, reverse), shift));
+            value = _mm512_mask_mov_epi64(value, bits & _mm512_test_epi64_mask(descriptor, _mm512_set1_epi64(BUSTER_CBUILTIN_BIT_SWAP)), _mm512_srlv_epi64(_mm512_shuffle_epi8(x, reverse), shift));
             value = _mm512_mask_mov_epi64(value, clz & nonzero, _mm512_sub_epi64(_mm512_lzcnt_epi64(x), shift));
             value = _mm512_mask_mov_epi64(value, ctz & nonzero, trailing);
             value = _mm512_mask_mov_epi64(value, pop, population);

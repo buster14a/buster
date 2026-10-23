@@ -96,7 +96,7 @@ struct CBindingReplay
     uint32_t capacity;
 };
 
-static bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity)
+static __attribute__((unused)) bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity)
 {
     const uint64_t mark = arena->length;
     *bindings = (CBindings){ .name_capacity = names, .capacity = capacity };
@@ -125,7 +125,7 @@ static bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t na
     return valid;
 }
 
-static void c_bindings_reset(CBindings* bindings)
+static __attribute__((unused)) void c_bindings_reset(CBindings* bindings)
 {
     while (bindings->active_count != 0)
     {
@@ -136,7 +136,7 @@ static void c_bindings_reset(CBindings* bindings)
     bindings->valid = bindings->heads != 0;
 }
 
-static uint32_t c_bindings_mark(const CBindings* bindings)
+static __attribute__((unused)) uint32_t c_bindings_mark(const CBindings* bindings)
 {
     return bindings->active_count;
 }
@@ -300,78 +300,86 @@ static __m512i c_bindings_digits(const uint64_t* keys, uint32_t lanes, uint32_t 
 
 // Stable LSD radix sort. Input is already in event order, so only the four bytes of (namespace, IdentId) need
 // sorting. Conflict masks give each lane's rank in its bucket. Only the last lane updates the histogram/cursor;
-// stores to the destination use scalar addresses, never the expensive hardware scatter on Zen 5.
-static void c_bindings_sort(uint64_t* keys, uint64_t* temporary, uint32_t count, bool vector)
+// stores to the destination use scalar addresses, never the expensive hardware scatter on Zen 5. `varying` includes
+// every high-half bit that differs between input keys. The producer computes it while packing keys, so the vector
+// path skips constant digits without scanning them. The scalar oracle always takes all four passes. Return the
+// buffer holding the sorted keys: an odd number of passes ends in temporary, with no copy back. Both buffers have
+// count readable/writable entries, do not overlap, and stay alive through the consumer; count <= 1 reads neither.
+static uint64_t* c_bindings_sort(uint64_t* keys, uint64_t* temporary, uint32_t count, bool vector, uint32_t varying)
 {
     uint64_t* input = keys;
     uint64_t* output = temporary;
-    for (uint32_t pass = 0; pass < 4; pass += 1)
+    for (uint32_t pass = 0; count > 1 && pass < 4; pass += 1)
     {
-        uint32_t histogram[256] = { 0 };
-        const uint32_t shift = 32 + pass * 8;
-        for (uint32_t phase = 0; phase < 2; phase += 1)
+        if (!vector || ((varying >> (pass * 8)) & 255) != 0)
         {
-            if (phase == 1)
+            uint32_t histogram[256] = { 0 };
+            const uint32_t shift = 32 + pass * 8;
+            for (uint32_t phase = 0; phase < 2; phase += 1)
             {
-                uint32_t total = 0;
-                for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+                if (phase == 1)
                 {
-                    const uint32_t frequency = histogram[bucket];
-                    histogram[bucket] = total;
-                    total += frequency;
-                }
-            }
-            if (vector)
-            {
-                for (uint32_t begin = 0; begin < count;)
-                {
-                    const uint32_t lanes = count - begin < 16 ? count - begin : 16;
-                    const __mmask16 mask = (__mmask16)((1u << lanes) - 1);
-                    const __m512i digits = _mm512_and_si512(c_bindings_digits(input + begin, lanes, shift), _mm512_set1_epi32(255));
-                    const __m512i conflicts = _mm512_maskz_conflict_epi32(mask, digits);
-                    const __m512i ranks = _mm512_popcnt_epi32(conflicts);
-                    const uint32_t earlier = (uint32_t)_mm512_reduce_or_epi32(conflicts);
-                    uint32_t buckets[16];
-                    uint32_t offsets[16];
-                    _mm512_storeu_si512(buckets, digits);
-                    _mm512_storeu_si512(offsets, ranks);
-                    if (phase == 1)
+                    uint32_t total = 0;
+                    for (uint32_t bucket = 0; bucket < 256; bucket += 1)
                     {
-                        for (uint32_t lane = 0; lane < lanes; lane += 1)
+                        const uint32_t frequency = histogram[bucket];
+                        histogram[bucket] = total;
+                        total += frequency;
+                    }
+                }
+                if (vector)
+                {
+                    for (uint32_t begin = 0; begin < count;)
+                    {
+                        const uint32_t lanes = count - begin < 16 ? count - begin : 16;
+                        const __mmask16 mask = (__mmask16)((1u << lanes) - 1);
+                        const __m512i digits = _mm512_and_si512(c_bindings_digits(input + begin, lanes, shift), _mm512_set1_epi32(255));
+                        const __m512i conflicts = _mm512_maskz_conflict_epi32(mask, digits);
+                        const __m512i ranks = _mm512_popcnt_epi32(conflicts);
+                        const uint32_t earlier = (uint32_t)_mm512_reduce_or_epi32(conflicts);
+                        uint32_t buckets[16];
+                        uint32_t offsets[16];
+                        _mm512_storeu_si512(buckets, digits);
+                        _mm512_storeu_si512(offsets, ranks);
+                        if (phase == 1)
                         {
-                            output[histogram[buckets[lane]] + offsets[lane]] = input[begin + lane];
+                            for (uint32_t lane = 0; lane < lanes; lane += 1)
+                            {
+                                output[histogram[buckets[lane]] + offsets[lane]] = input[begin + lane];
+                            }
+                        }
+                        uint32_t last = (uint32_t)mask & ~earlier;
+                        while (last != 0)
+                        {
+                            const uint32_t lane = (uint32_t)__builtin_ctz(last);
+                            histogram[buckets[lane]] += offsets[lane] + 1;
+                            last &= last - 1;
+                        }
+                        begin += lanes;
+                    }
+                }
+                else
+                {
+                    for (uint32_t i = 0; i < count; i += 1)
+                    {
+                        const uint32_t bucket = (uint32_t)(input[i] >> shift) & 255;
+                        if (phase == 0)
+                        {
+                            histogram[bucket] += 1;
+                        }
+                        else
+                        {
+                            output[histogram[bucket]++] = input[i];
                         }
                     }
-                    uint32_t last = (uint32_t)mask & ~earlier;
-                    while (last != 0)
-                    {
-                        const uint32_t lane = (uint32_t)__builtin_ctz(last);
-                        histogram[buckets[lane]] += offsets[lane] + 1;
-                        last &= last - 1;
-                    }
-                    begin += lanes;
                 }
             }
-            else
-            {
-                for (uint32_t i = 0; i < count; i += 1)
-                {
-                    const uint32_t bucket = (uint32_t)(input[i] >> shift) & 255;
-                    if (phase == 0)
-                    {
-                        histogram[bucket] += 1;
-                    }
-                    else
-                    {
-                        output[histogram[bucket]++] = input[i];
-                    }
-                }
-            }
+            uint64_t* swap = input;
+            input = output;
+            output = swap;
         }
-        uint64_t* swap = input;
-        input = output;
-        output = swap;
     }
+    return input;
 }
 
 // Allocate and sort the active records. The caller keeps the scratch mark alive through c_bindings_scan, then
@@ -384,14 +392,19 @@ static bool c_bindings_sorted(const CBindings* bindings, Arena* scratch, uint64_
     *count = 0;
     if (valid)
     {
+        uint32_t any = 0;
+        uint32_t every = UINT32_MAX;
         for (uint32_t i = 0; i < bindings->count; i += 1)
         {
             if (bindings->operation[i] != C_BINDING_RESTORE)
             {
-                (*keys)[(*count)++] = ((uint64_t)bindings->key[i] << 32) | i;
+                const uint32_t key = bindings->key[i];
+                (*keys)[(*count)++] = ((uint64_t)key << 32) | i;
+                any |= key;
+                every &= key;
             }
         }
-        c_bindings_sort(*keys, temporary, *count, vector);
+        *keys = c_bindings_sort(*keys, temporary, *count, vector, any ^ every);
     }
     return valid;
 }
@@ -479,7 +492,7 @@ static bool c_bindings_scan(const CBindings* bindings, const uint64_t* keys, uin
     return valid;
 }
 
-static bool c_bindings_batch(const CBindings* bindings, uint32_t* results, Arena* scratch, CBindingStatistics* statistics)
+static __attribute__((unused)) bool c_bindings_batch(const CBindings* bindings, uint32_t* results, Arena* scratch, CBindingStatistics* statistics)
 {
     const uint64_t mark = scratch->length;
     uint64_t* keys = 0;

@@ -1440,9 +1440,13 @@ These are four `PT_LOAD`s, as lld writes for hello world, with `PT_PHDR`,
 `PT_INTERP`, `PT_DYNAMIC`, `PT_GNU_RELRO`, `PT_GNU_EH_FRAME`, `PT_GNU_STACK`
 (not executable), `PT_NOTE` and `PT_TLS` when there is TLS.
 
-File offsets are contiguous. Each segment's address continues at the next page
-plus its offset within a page, so there is no file padding, and segments stay
-4 KB-congruent.
+Each loaded segment's file offset equals its virtual address relative to the
+image base. Its address continues at the next page plus its offset within a
+page, preserving 4 KB congruence. The current four-segment layout adds at most
+12 KiB of zero-filled file gaps, which the writer includes in the build ID.
+This keeps the mapping base used by perf/libdw consistent across segments;
+compact file offsets previously made native DWARF unwinding fail with
+overlapping modules. See [the debug consumer checks](debug.md#checks).
 
 The TLS segment then needn't start on a multiple of its alignment: `.tdata`
 starts at its own alignment, which can be less than `.tbss`'s. The TLS block
@@ -3267,6 +3271,70 @@ from the mapped files. Each step is a lane phase (see "Lanes"):
 Steps 1–3 and 7 are where most of the foreign path's work is, and where the
 vector kernels go. Steps 4–6 are graph walks bound by memory latency.
 
+#### Foreign COMDAT unwind pruning
+
+`foreign_unwind.c` filters an object's `.eh_frame` while the original
+section ownership is still available. A unique `R_X86_64_PC32` relocation
+at the FDE's initial-address field identifies its original code section.
+The selected section-to-atom map decides whether that FDE survives. A
+canonical symbol with the same name in a winning COMDAT group cannot keep
+the losing group's FDE alive. The pass also drops CIEs no retained FDE uses;
+deduplicating compatible live CIEs is a separate pass.
+
+The supported input is DWARF32 CIE version 1 or 3 with `zR`/`zPLR` augmentation
+and the optional signal-frame marker, and PC-relative signed four-byte FDE
+addresses. Personalities and LSDAs can use fixed absolute four/eight-byte
+or PC-relative four-byte pointers, including indirect pointers. Their
+relocations follow the owning record; they do not decide code liveness.
+Unsupported encodings, missing or ambiguous ownership, overlapping fields
+and malformed records are refused before the executable is written.
+
+The producer returns fresh compact bytes, relocation records and an
+original-to-compact interval map. It rewrites CIE backlinks and relocation
+offsets, preserves retained CFI and augmentation bytes, and leaves the input
+unchanged. A failed prune restores the output arena and leaves the result
+untouched. An all-discarded section stays empty; the pass does not invent a
+terminator. The original section endpoint has an explicit mapping.
+
+`foreign_unwind_link.c` applies this only to selected objects with discarded
+COMDAT sections, before canonical names and relocation requirements are
+finished. It remaps retained symbols and their extents. A section symbol at
+zero names the compact section even if its first original record was dropped.
+References with nonzero addends into a changed unwind fragment are currently
+refused because their address-expression bias is not retained. Local labels
+in discarded records become inert slots; any surviving use is rejected.
+The ordinary relocation importer consumes the compact records through
+`import_relocation_entries`; its existing section-table wrappers retain their
+contract. Mapped foreign inputs and the conversion arena outlive writing.
+
+`test-foreign --cross-check` exercises original records, malformed fields,
+relocation tails, rollback, symbol endpoints and COMDAT ownership through the
+exact and vector paths. Its C++ fixture compiles two original translation
+units with a duplicated throwing template. The losing object retains another
+function; throwing through that function must run both cleanup destructors
+and reach the caller's catch. GNU ld and lld link and run the same inputs.
+The explicit runtime line includes `-lstdc++ -lm`, as the observed system C++
+driver does. Finding libraries named only in another DSO's `DT_NEEDED` is
+outside this unwind test's contract.
+
+`benchmark-foreign-unwind [--runs N] [--fdes N] [--profile mixed|all|none]`
+measures the complete prune call on original synthetic `zR`/`zPLR` records.
+Defaults are 21 paired samples after two warm-up pairs, 33/4,097/65,537
+FDEs, and mixed/all/no retained-code profiles. An independent compact byte,
+relocation and interval-map oracle validates both paths before timing; every
+sample is checked afterward and the frozen input must remain identical.
+Both paths share variable-record parsing and ownership lookup. The vector
+path batches relocation classification and transposes retained output records.
+
+Each measurement process runs under the shared 9700X lock on CPU 2. Timing
+includes validation, sorting, scratch/output allocation, copying and relocation
+transposition. Arena resets, verification and statistics are outside the clock;
+the reusable arenas retain committed pages. Reported arena lengths are logical
+bytes, and the labelled temporary-payload estimate excludes alignment, VM
+reservations and RSS. These are synthetic phase measurements, not complete
+foreign-link throughput, corpus acceptance or evidence that the wider linker
+performance target has been reached.
+
 #### Steps 1 to 5, as built
 
 `foreign.c` (the first part of step 7) resolves a command line on a group of
@@ -3382,8 +3450,8 @@ are the later parts.
   carries the number of decisions its lane had taken, and a decision counts
   only the failures from before it, which the sync before it shows every
   lane; a failure in the next phase, of a lane that has gone on, waits for
-  the next decision. A group that `lane_run` couldn't start fails as
-  `FOREIGN_ERROR_LANES`.
+  the next decision. A group that `lane_run` couldn't start, or an operation
+  its command-owned team couldn't accept, fails as `FOREIGN_ERROR_LANES`.
 
 The members loaded and each name's winner are GNU ld's, except where GNU ld's
 result depends on the order of the archives on the command line; there they
@@ -3446,7 +3514,10 @@ are 2.07 ms opening, 4.82 loading and 9.16 resolving.
 Phase by phase, for the synth-size links by the vector path, on one lane and
 on 8 (`--lanes 1,8 --cpus 2,0,1,3,4,5,6,7`: lane 0 on CPU 2, the others on
 the cores that run `powersave`), in ms; the whole is `foreign_run`'s call to
-its return, which starts the lanes:
+its return. These measurements predate command-owned teams and include
+starting and joining the lanes on every call. The current `benchmark-foreign`
+starts its team once; its whole samples include dispatch and completion on
+those existing threads, excluding that one-time startup and shutdown:
 
 | Phase | dynamic, 1 lane | 8 lanes | static, 1 lane | 8 lanes | members, 1 lane | 8 lanes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -3545,25 +3616,56 @@ static Range64 range_part_by_cost(const uint64_t* cost_prefix, uint64_t count, u
 static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
 // The next number this lane takes from its group's counter: 0, 1, 2, ... across the lanes, then parts or more.
 static uint64_t lane_take(uint64_t parts);
-// Runs entry(argument) on a group of count lanes, the calling thread being lane 0, and returns once they all have.
+// Starts a command's fixed team, with the calling thread as lane 0; team starts zero-initialized.
+static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* cpus);
+// Joins the team's workers. Also safe after a failed start or with a zero-initialized team.
+static void lane_team_stop(LaneTeam* team);
+// Runs entry(argument) on count lanes of the current team, the caller being lane 0, and waits for all to finish.
+// Without a command-owned team, starts and joins a temporary group, as the cold-start tests and benchmark require.
 static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
 ```
+
+**The command owns the threads.** After validating its options, a parallel
+command starts one `LaneTeam` with its chosen capacity and CPU assignment,
+uses it for its whole operations, then stops it once during cleanup. Every
+phase within an operation remains a direct function call made by all its
+lanes. The team is fixed: a run can use an active prefix, such as 1, 8, 2 and
+8 lanes, and the same workers return at the same indices. The other workers
+sleep on futexes. A one-lane team starts no worker threads.
+
+Startup must create and pin every requested worker before the team is
+installed; a failure joins every worker it did create. An operation with too
+many lanes, a different CPU assignment or a nested `lane_run` fails without
+calling its entry or starting replacement threads. `lane_alone` does not
+permit nesting. The entry's shared writes are visible when `lane_run` returns;
+each worker releases its scratch arenas after the operation, while the
+calling thread keeps its scratch and gets its prior lane context, counter and
+CPU affinity back. Dispatch/completion synchronization is separate from the
+barriers inside an operation.
+
+`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
+output modes of `benchmark-executable` own teams. Each handler starts and
+stops its team in the translation unit that runs the operations: the split
+build's copies of `lane.c` have separate thread-local contexts. The ordinary
+preprocess/parse command still runs on one lane; the broader frontend work is
+tracked in [#149](https://github.com/buster14a/buster/issues/149).
 
 The lane lives in a thread-local context with the thread's scratch arenas, as
 `TCTX` holds the RAD Debugger's `LaneCtx`. A thread that has to run a phase
 alone, while the others do something else, makes itself a group of one (index
 0, count 1, no barrier) with `lane_alone` and restores its group afterwards.
 The barrier is a counter and a generation word: it spins briefly, waits in
-`mwaitx`, then sleeps on a futex. Its atomics, and the counter `lane_take` adds
-to, are the only ones the linker has: one atomic add per part, and none with one
-lane.
+`mwaitx`, then sleeps on a futex. Within an operation, its atomics and the
+counter `lane_take` adds to provide the lane coordination: one atomic add per
+part, and none with one lane. The command's team also synchronizes dispatch
+and completion between whole operations.
 
 Three things differ from the RAD Debugger, each measured below:
 
 - **The calling thread is lane 0.** radbin's main thread waits for its lanes;
-  here it is one of them, so a group of one starts no thread. A program starts
-  its group once, with all of its phases in the entry point, since starting
-  threads costs as much as 180 to 220 syncs.
+  here it is one of them, so a group of one starts no thread. A command starts
+  its team once and reuses it for its operations, with each operation's phases
+  in its entry point, since starting threads costs as much as 180 to 220 syncs.
 - **A broadcast is one barrier.** `lane_sync_u64` copies the value in, waits,
   copies it out and waits again. Here the source offers its value on the
   barrier's arrival line, which it writes anyway as it arrives; the last lane to
@@ -3687,8 +3789,9 @@ runs, each of them the median of 21 passes:
   "How long to wait before sleeping", took 10–15 µs to wake on the cores with
   the powersave governor, and 1.4–2.4 µs on CPU 2, whose governor is
   performance (see the appendix).
-- **Starting:** `lane_run` of an entry point that returns at once, without
-  pinning, from the call until it returns. That is what 180 to 220 syncs cost,
+- **Starting:** `lane_run` outside a command-owned team, of an entry point
+  that returns at once, without pinning, from the call until it returns. This
+  remains a cold create/join measurement. That is what 180 to 220 syncs cost,
   hence one group per program. It costs 0.5 to 3 µs more than with the barrier
   before `mwaitx`: its passes now follow the ones in which the lanes sleep for
   3 ms.
@@ -4459,3 +4562,105 @@ The 64-bit variants:
 The `Elf64_Rela` writers fill 24-byte records from four 32-bit columns
 (offset, symbol, type, addend): scalar, or three `vpermt2q` and three masked
 `vpermq` per eight records.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Pinned sources:
+[Link](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/link.c#L4),
+[object writer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/object_writer.c#L4),
+[import](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/import.c#L4),
+[foreign resolution](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/foreign.c#L4),
+[foreign handoff](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/foreign_link.c#L4),
+[snapshot](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/snapshot.c#L4),
+[dynamic inputs](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/dynamic.c#L4),
+[executable](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/executable.c#L4).
+
+| Producer → consumer | Implemented handoff and other readers |
+| --- | --- |
+| Tier 0/assembler/test records → encoding/fixup ends → `link_add_code_fixups` | Code atom bytes plus symbolic references become offset-sorted, nonoverlapping fixups. Marked-instruction order, field kind and source addend survive. Object and direct writers both consume them. |
+| Checked scalar definitions → `check_data_input`/`check_data_emit` → Link | Canonical object-to-symbol IDs, atom bytes and address fixups; current supported scalar subset only. Tests write objects and execute linked fixtures; the checker CLI dumps this output. |
+| Frontend/import/generator names → Link names → binding/object/string tables | Counted spelling, NUL for ELF, length and retained u64 `link_hash`. Names are not automatically interned; the producer supplies one ID per spelling where required. |
+| ELF bytes → `import_object`/archive/library/script readers → Runtime or Foreign | Checked section/symbol/relocation columns and input-index mappings. Eight-record vector paths decline to exact readers; archive indices support lazy member loading. |
+| File search/import → `runtime_import*` → snapshot → `runtime_open*` → binding | Counted runtime pieces, global-name index/filter, archive refs/COMDAT and library versions. Mapped snapshot pointers/deltas avoid rebuilding columns; directory validation precedes use, piece hashes are checked when consumed. |
+| `foreign_run` parse → exchange/resolve → archive frontier → winners/COMDAT | Stable input/member positions, hashed name partitions and selected definitions. Count/place/fill phases have collective proceed decisions; a round ends only when no new member/library reference loads. |
+| Foreign winners → `foreign_link_build*` → canonical Link/dynamic inputs | Reuses resolved names and selected members; input-local symbol maps and original input order preserve references and initialization order. No second name resolution. |
+| Program Link + runtime pieces → binding → `dynamic_*_inputs` → `executable_write` | Canonical symbol bindings, imports/exports, library/version arrays, TLS/runtime metadata. Bind before selection is the intended source integration; current generators/foreign inputs exercise consumers. |
+| Link → `object_prepare`/`object_map_symbols` → `object_build`/`object_write_units` | Group units/classes, count/place exact ELF ranges, fill once. One lane owns an entire object, with its own symbol-map/scratch. Other linkers and `import_object` are output readers. |
+| Link + options → executable symbol classes/count/place → resolve | Class/alignment buckets and prefix offsets, dynamic symbol/GOT/relocation metadata, atom addresses and symbol references. Ordered init/fini/unwind classes preserve required order. |
+| Final layout/references → chunk patch/hash/write → loader/debug readers | Disjoint chunk work and collective barriers; patched bytes, build ID and published file. Native debug/source-event producers and actual compilation overlap remain [#88](https://github.com/buster14a/buster/issues/88). |
+
+### Memory, ownership and ordering
+
+Link uses u32 IDs (zero absent) and counted SoA tables. Atom sizes/addresses and
+name hashes are wide; fixups use u32 offset/target/addend and a byte kind
+(13 logical bytes per fixup). Wide addends are indexed in a side table and
+accessed through `link_fixup_addend`; a consumer must not interpret the index
+as the addend. Every atom's fixups form one contiguous sorted range; fields
+cannot overlap or extend outside its bytes. A capacity failure is sticky and
+an add returns zero. `link_check` validates whole-representation invariants
+including local-unit and TLS/reference-kind constraints.
+
+Tables/name arenas and atom bytes have different owners. Object writing reads
+atom bytes. Executable patching **writes them in place**, as well as its owned
+address/reference/GOT/dynamic-index columns. Source-generated bytes and private
+foreign mappings must remain writable and alive until writing finishes.
+`foreign_link_build` borrows `Foreign` mappings; its failure may leave partial
+caller-owned output. Restore/rebuild pristine inputs before comparing a second
+writer variant. It is not the static-data emitter's transactional contract.
+Do not run object writing concurrently with executable mutation of the same
+bytes or reuse scratch as retained atoms.
+
+Import reads untrusted counted bytes with checked offset arithmetic and
+`memcpy` field loads; no input alignment/padding is assumed. Snapshot regions
+are 64-byte aligned and layout/version/executable-identity checked; that format
+is not a blanket permission for a new consumer to vector-read outside a region.
+Record kernels use bounded masks/tails or their explicit internal allocations;
+encoder output slack must not be counted as atom bytes. A serialized object is
+one exactly sized buffer. Zero-fill atoms have no byte payload, and empty units
+still have object-output semantics.
+
+`ExecutableDynamic` borrows counted library/version arrays. Library indices are
+u32, version indices are unique 2..0x7fff and grouped by library; required
+unversioned libraries are not inferred only from version use. Preserve selected
+input order. Binding/resolve completion precedes final layout and relocation
+patching. Archive rounds, COMDAT choice, init/fini priorities and version
+numbering are semantic boundaries; arbitrary reordering for batch fullness is
+invalid. Lanes reserve once, fill disjoint ranges, synchronize and make the same
+failure decision. Independent complete objects/functions can be distributed;
+one ELF record's 8/16/64-lane kernel width is not the whole-link batch size.
+
+### Waste, alternatives and disposition
+
+The encoded-to-Link boundary already retains field kinds, addends and targets;
+re-disassembly would lose useful producer knowledge. Reusing canonical foreign
+winners already removes repeated global resolution. Snapshot loading already
+avoids reparsing unchanged runtime objects. Exact ET_REL construction already
+avoids per-symbol allocations and buffer growth. These are retained designs,
+not new optimizations in the audit.
+
+Remaining observable passes include unit/class grouping for ET_REL, executable
+class/relocation counting and patch/hash/write, input-index remaps, and cold
+snapshot/file checks. Each serves a different consumer or publication boundary;
+removing it requires proving its data unused or available earlier. Compare
+producer-supplied counts/order with current count/place/fill, or bounded streamed
+publication with materialization, charging metadata maintenance, synchronization,
+bytes, file layout and every reader. Existing measurements rejected an isolated
+ELF relocation transpose; stores and the full object path matter.
+
+Disposition: retain the current shared Link and writer protocols. `test-link`,
+object/import/bind/snapshot tests, native dynamic/static/foreign tests and
+lane/determinism tests exercise scalar/exact/vector, poisoned output, invalid
+metadata, capacities, guarded inputs, schedule changes and external ELF/runtime
+oracles. Existing `benchmark-link` includes runtime opening, binding and writing
+for generated programs; it excludes real C production. Object/foreign kernel
+results and separate phase rows are not full compiler measurements.
+
+The active linker owner retains [#80](https://github.com/buster14a/buster/issues/80)/[#85](https://github.com/buster14a/buster/issues/85)/[#86](https://github.com/buster14a/buster/issues/86)/[#87](https://github.com/buster14a/buster/issues/87)/[#88](https://github.com/buster14a/buster/issues/88) and [#145](https://github.com/buster14a/buster/issues/145)'s output boundary.
+Pending [#316](https://github.com/buster14a/buster/pull/316)/[#328](https://github.com/buster14a/buster/pull/328)/[#329](https://github.com/buster14a/buster/pull/329)/[#332](https://github.com/buster14a/buster/pull/332) and the owner's GC/symbol/unwind/streaming work are
+not silently included at this pin. Missing source-generated symbols/CFI, general
+foreign qualification, shared dynamic TLS and true compilation/output overlap
+remain linked acceptance work. Completion requires matched small/large actual
+inputs and complete producer + conversion + writer costs, bytes/s and ns/cycles,
+live/scratch memory, allocations, bytes moved, fallback and lane occupancy,
+plus identical output/execution and debugger/profiler consumers where relevant.
