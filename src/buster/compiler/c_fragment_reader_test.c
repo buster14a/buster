@@ -29,6 +29,7 @@ struct CFragmentReaderTestStatistics
     uint64_t frame_backing_peak;
     uint64_t visits_backing_peak;
     uint64_t event_peak;
+    uint64_t cursor_peak;
     uint64_t test_arena_peak;
 };
 
@@ -130,6 +131,79 @@ static bool c_fragment_reader_test_events(const Parser* parser, const CFragmentC
     return valid && at == result->count && nodes == result->nodes;
 }
 
+static CFragmentReaderStatus c_fragment_reader_test_next(CFragmentReaderCursor* cursor, CFragmentReaderEvent* event, uint32_t mode)
+{
+    CFragmentReaderStatus status;
+    if (mode < 2)
+    {
+        status = c_fragment_reader_next_flat(cursor, event);
+    }
+    else if (mode == 2)
+    {
+        status = c_fragment_reader_next_direct_scalar(cursor, event);
+    }
+    else
+    {
+        status = c_fragment_reader_next_direct_vector(cursor, event);
+    }
+    return status;
+}
+
+static bool c_fragment_reader_test_cleared(const CFragmentReaderEvent* event)
+{
+    const uint8_t* bytes = (const uint8_t*)event;
+    bool valid = true;
+    for (uint32_t i = 0; i < sizeof(*event); i += 1)
+    {
+        valid = valid && bytes[i] == 0;
+    }
+    return valid;
+}
+
+// Moving the paused cursor between two addresses after every event catches window/phase state kept outside
+// the cursor. Only this test collector materializes a trace; its expected events still come from the raw tree.
+static CFragmentReaderResult c_fragment_reader_test_stream(CFragmentDirectReader* reader, const uint8_t* kinds, const uint32_t* tokens, uint32_t positions,
+                                                          CFragmentReaderVisits* visits, CFragmentReaderFrame* stack, uint32_t stack_capacity,
+                                                          CFragmentReaderEvent* events, uint32_t event_capacity, uint32_t mode)
+{
+    CFragmentReaderCursor cursors[2];
+    cursors[0] = c_fragment_reader_cursor(reader, kinds, tokens, positions, visits, stack, stack_capacity, mode < 2);
+    uint32_t current = 0;
+    uint32_t written = 0;
+    bool valid = cursors[0].result.valid;
+    bool finished = false;
+    for (uint64_t turn = 0; valid && !finished && turn <= (uint64_t)event_capacity; turn += 1)
+    {
+        CFragmentReaderEvent event;
+        memset(&event, 0xa5, sizeof(event));
+        CFragmentReaderCursor* cursor = &cursors[current];
+        const CFragmentReaderStatus status = c_fragment_reader_test_next(cursor, &event, mode);
+        if (status == C_FRAGMENT_READER_EVENT)
+        {
+            valid = written < event_capacity && cursor->result.count == written + 1 && event.phase <= C_FRAGMENT_READER_ATTACH;
+            if (valid)
+            {
+                events[written++] = event;
+                cursors[current ^ 1] = *cursor;
+                memset(cursor, 0xa5, sizeof(*cursor));
+                current ^= 1;
+            }
+        }
+        else
+        {
+            finished = status == C_FRAGMENT_READER_END;
+            valid = finished && c_fragment_reader_test_cleared(&event) && cursor->result.count == written;
+            memset(&event, 0xa5, sizeof(event));
+            const CFragmentReaderStatus repeated = c_fragment_reader_test_next(cursor, &event, mode);
+            valid = valid && repeated == status && c_fragment_reader_test_cleared(&event) && cursor->result.count == written;
+        }
+    }
+    CFragmentReaderResult result = cursors[current].result;
+    result.count = written;
+    result.valid = valid && finished && result.valid;
+    return result;
+}
+
 static bool c_fragment_reader_test_file(const Parser* parser, const CFragmentSink* sink, const CFragmentCoverage* coverage, const uint32_t* parents, Arena* arena, CFragmentReaderTestStatistics* total)
 {
     CFragmentReaderTestStatistics pending = *total;
@@ -226,8 +300,10 @@ static bool c_fragment_reader_test_file(const Parser* parser, const CFragmentSin
             }
         }
     }
-    for (uint32_t mode = 0; valid && mode < 4; mode += 1)
+    for (uint32_t pass = 0; valid && pass < 8; pass += 1)
     {
+        const uint32_t mode = pass & 3;
+        const bool stream = pass >= 4;
         memset(visits.states, 0, slots);
         memset(visits.nodes, 0, slots);
         visits.depth = 0;
@@ -260,18 +336,22 @@ static bool c_fragment_reader_test_file(const Parser* parser, const CFragmentSin
                             locations[position] = UINT32_MAX - 1;
                         }
                     }
-                    if (valid)
+                    if (valid && !stream)
                     {
                         result = c_fragment_reader_flat(&reader, flat, locations, handle.positions, &visits, stack, count + 1, events, events_capacity);
                     }
                 }
-                else if (valid && mode == 2)
+                else if (valid && !stream && mode == 2)
                 {
                     result = c_fragment_reader_direct_scalar(&reader, handle.positions, &visits, stack, count + 1, events, events_capacity);
                 }
-                else if (valid)
+                else if (valid && !stream)
                 {
                     result = c_fragment_reader_direct_vector(&reader, handle.positions, &visits, stack, count + 1, events, events_capacity);
+                }
+                if (valid && stream)
+                {
+                    result = c_fragment_reader_test_stream(&reader, flat, locations, handle.positions, &visits, stack, count + 1, events, events_capacity, mode);
                 }
                 valid = valid && c_fragment_reader_test_events(parser, coverage, &tree, root, events, &result, work, events_capacity) &&
                         c_fragment_reader_complete(&visits, &reader.leaves) && !c_fragment_reader_claim(&visits, &reader.leaves);
@@ -289,7 +369,7 @@ static bool c_fragment_reader_test_file(const Parser* parser, const CFragmentSin
                 }
                 else
                 {
-                    fprintf(stderr, "fragment reader: mode=%u expression=%u boundary=%u root=%u payload=%u events=%u nodes=%u\n", mode, e, boundary, root, store.payload, result.count, result.nodes);
+                    fprintf(stderr, "fragment reader: mode=%u stream=%u expression=%u boundary=%u root=%u payload=%u events=%u nodes=%u\n", mode, stream, e, boundary, root, store.payload, result.count, result.nodes);
                 }
             }
         }
@@ -309,6 +389,7 @@ static bool c_fragment_reader_test_file(const Parser* parser, const CFragmentSin
         c_fragment_reader_test_peak(&statistics->flat_backing_peak, (uint64_t)positions_capacity * (sizeof(uint8_t) + sizeof(uint32_t)));
         c_fragment_reader_test_peak(&statistics->frame_backing_peak, slots * sizeof(CFragmentReaderFrame));
         c_fragment_reader_test_peak(&statistics->visits_backing_peak, slots * (2 * sizeof(uint8_t) + sizeof(uint32_t)));
+        c_fragment_reader_test_peak(&statistics->cursor_peak, sizeof(CFragmentReaderCursor));
         c_fragment_reader_test_peak(&statistics->test_arena_peak, arena->length - mark);
         *total = pending;
     }
@@ -476,6 +557,531 @@ static void c_fragment_reader_unit_check(uint32_t* checks, uint32_t* failures, b
     }
 }
 
+static CFragmentReaderCursor c_fragment_reader_unit_cursor(CFragmentReaderUnit* unit, CFragmentDirectReader* reader, uint8_t* kinds, uint32_t* tokens, uint32_t mode)
+{
+    *reader = c_fragment_reader_unit_begin(unit);
+    if (mode < 2)
+    {
+        CFragmentDirectReader flatten = *reader;
+        reader->valid = mode == 0 ? c_fragment_reader_flatten(&flatten, kinds, tokens, BUSTER_C_FRAGMENT_READER_TEST_TOKENS, false) :
+                                   c_fragment_reader_flatten(&flatten, kinds, tokens, BUSTER_C_FRAGMENT_READER_TEST_TOKENS, true);
+        for (uint32_t position = 0; reader->valid && position < unit->handle.positions; position += 1)
+        {
+            if (kinds[position] != C_FRAGMENT_END && c_fragment_arities[kinds[position]] == 0)
+            {
+                tokens[position] = UINT32_MAX - 1;
+            }
+        }
+    }
+    return c_fragment_reader_cursor(reader, kinds, tokens, unit->handle.positions, &unit->visits, unit->stack, BUSTER_C_FRAGMENT_READER_TEST_TOKENS, mode < 2);
+}
+
+static bool c_fragment_reader_unit_action(const CFragmentReaderEvent* event, const CFragmentReaderTestAction* expected, uint32_t expanded_base, uint32_t reference)
+{
+    const uint8_t kind = expected->token == 1 ? C_FRAGMENT_ADD : C_FRAGMENT_NUMBER;
+    return event->phase == expected->phase && event->token == expected->token && event->child == expected->child && event->ordinal == expected->ordinal && event->kind == kind &&
+           event->boundary == 1 && event->source == expected->token && event->expanded == expanded_base + expected->token && event->auxiliary == BUSTER_C_FRAGMENT_NONE &&
+           event->expanded_auxiliary == BUSTER_C_FRAGMENT_NONE && event->reference == (expected->token == 1 ? reference : BUSTER_C_FRAGMENT_NONE);
+}
+
+static bool c_fragment_reader_unit_rejected(CFragmentReaderCursor* cursor, uint32_t mode)
+{
+    CFragmentReaderStatus status = C_FRAGMENT_READER_EVENT;
+    CFragmentReaderEvent event;
+    bool valid = true;
+    for (uint32_t advance = 0; valid && status == C_FRAGMENT_READER_EVENT && advance < 5 * BUSTER_C_FRAGMENT_READER_TEST_TOKENS + 1; advance += 1)
+    {
+        memset(&event, 0xa5, sizeof(event));
+        status = c_fragment_reader_test_next(cursor, &event, mode);
+        valid = status != C_FRAGMENT_READER_EVENT || event.phase != C_FRAGMENT_READER_ATTACH;
+    }
+    valid = valid && status == C_FRAGMENT_READER_ERROR && !cursor->result.valid && c_fragment_reader_test_cleared(&event);
+    const uint32_t consumed = cursor->consumed;
+    const uint32_t count = cursor->result.count;
+    const uint32_t depth = cursor->depth;
+    for (uint32_t repeat = 0; repeat < 3; repeat += 1)
+    {
+        memset(&event, 0xa5, sizeof(event));
+        status = c_fragment_reader_test_next(cursor, &event, mode);
+        valid = valid && status == C_FRAGMENT_READER_ERROR && c_fragment_reader_test_cleared(&event) && cursor->consumed == consumed && cursor->result.count == count && cursor->depth == depth;
+    }
+    return valid;
+}
+
+static bool c_fragment_reader_unit_reject(CFragmentReaderUnit* unit, const uint8_t* kinds, const uint32_t* tokens, uint32_t positions, uint32_t frames, uint32_t mode)
+{
+    CFragmentDirectReader reader = c_fragment_reader_unit_begin(unit);
+    CFragmentReaderCursor cursor = c_fragment_reader_cursor(&reader, kinds, tokens, positions, &unit->visits, unit->stack, frames, mode < 2);
+    return c_fragment_reader_unit_rejected(&cursor, mode);
+}
+
+static bool c_fragment_reader_unit_step(CFragmentReaderCursor* cursor, uint32_t mode, uint8_t phase, uint32_t token, uint32_t child, uint32_t ordinal)
+{
+    CFragmentReaderEvent event;
+    memset(&event, 0xa5, sizeof(event));
+    return c_fragment_reader_test_next(cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == phase && event.token == token && event.child == child && event.ordinal == ordinal &&
+           event.source == token && event.expanded == 1000 + token && event.boundary == 0 && event.reference == BUSTER_C_FRAGMENT_NONE;
+}
+
+static void c_fragment_reader_cursor_tests(uint32_t* checks, uint32_t* failures, const CFragmentReaderTestAction* binary, uint32_t binary_count)
+{
+    static CFragmentReaderUnit units[2];
+    uint8_t kinds[2][BUSTER_C_FRAGMENT_READER_TEST_TOKENS];
+    uint32_t tokens[2][BUSTER_C_FRAGMENT_READER_TEST_TOKENS];
+    CFragmentReaderEvent event;
+    const CFragmentReaderTestAction reference =
+    {
+        .token = 1,
+        .child = BUSTER_C_FRAGMENT_NONE,
+        .phase = C_FRAGMENT_READER_REFERENCE,
+    };
+    for (uint32_t mode = 0; mode < 4; mode += 1)
+    {
+        // Separate sources and ledgers, alternating after every event, expose accidentally shared phase/window
+        // state. The first stream has an extra REFERENCE and different expanded-source handles from the second.
+        c_fragment_reader_unit_binary(&units[0]);
+        c_fragment_reader_unit_binary(&units[1]);
+        units[0].syntax[1].type_root = 3;
+        for (uint32_t token = 0; token < BUSTER_C_FRAGMENT_READER_TEST_TOKENS; token += 1)
+        {
+            units[1].expanded[token] = 9000 + token;
+        }
+        CFragmentDirectReader readers[2];
+        CFragmentReaderCursor cursors[2];
+        cursors[0] = c_fragment_reader_unit_cursor(&units[0], &readers[0], kinds[0], tokens[0], mode);
+        cursors[1] = c_fragment_reader_unit_cursor(&units[1], &readers[1], kinds[1], tokens[1], 3 - mode);
+        bool valid = cursors[0].result.valid && cursors[1].result.valid;
+        uint32_t phases = 0;
+        for (uint32_t at = 0; valid && at < binary_count + 1; at += 1)
+        {
+            const CFragmentReaderTestAction* expected = at == 1 ? &reference : &binary[at - (at > 1)];
+            memset(&event, 0xa5, sizeof(event));
+            valid = c_fragment_reader_test_next(&cursors[0], &event, mode) == C_FRAGMENT_READER_EVENT &&
+                    c_fragment_reader_unit_action(&event, expected, 1000, 3) && cursors[0].result.count == at + 1;
+            if (valid)
+            {
+                phases |= 1u << event.phase;
+                valid = units[0].visit_nodes[0] == (at < 2 ? C_FRAGMENT_READER_UNSEEN : at < 4 ? C_FRAGMENT_READER_ACTIVE : C_FRAGMENT_READER_DONE) &&
+                        units[0].visit_nodes[2] == (at < 6 ? C_FRAGMENT_READER_UNSEEN : at < 8 ? C_FRAGMENT_READER_ACTIVE : C_FRAGMENT_READER_DONE) &&
+                        units[0].visit_nodes[1] == (at < 11 ? C_FRAGMENT_READER_ACTIVE : C_FRAGMENT_READER_DONE) && cursors[0].result.nodes == (at < 2 ? 1 : at < 6 ? 2 : 3);
+            }
+            if (valid && mode >= 2 && at < 2)
+            {
+                valid = cursors[0].window_at == 1 && cursors[0].window_count == 3 && readers[0].remaining == 0 && readers[0].leaves.next == BUSTER_C_FRAGMENT_NONE;
+            }
+            if (valid && at < binary_count)
+            {
+                memset(&event, 0xa5, sizeof(event));
+                valid = c_fragment_reader_test_next(&cursors[1], &event, 3 - mode) == C_FRAGMENT_READER_EVENT &&
+                        c_fragment_reader_unit_action(&event, &binary[at], 9000, BUSTER_C_FRAGMENT_NONE) && cursors[1].result.count == at + 1;
+            }
+        }
+        valid = valid && phases == (1u << (C_FRAGMENT_READER_ATTACH + 1)) - 1 && c_fragment_reader_complete(&units[0].visits, &readers[0].leaves) &&
+                c_fragment_reader_complete(&units[1].visits, &readers[1].leaves);
+        units[0].kinds[4] = C_FRAGMENT_NUMBER;
+        units[0].owners[4] = 4;
+        units[0].boundaries[4] = 4;
+        units[0].first[4] = 4;
+        CFragmentLeafCursor later = c_fragment_leaf_cursor(&units[0].source, 4);
+        valid = valid && c_fragment_reader_claim(&units[0].visits, &later);
+        for (uint32_t repeat = 0; repeat < 3; repeat += 1)
+        {
+            for (uint32_t index = 0; index < 2; index += 1)
+            {
+                memset(&event, 0xa5, sizeof(event));
+                const uint32_t selected = index == 0 ? mode : 3 - mode;
+                const CFragmentReaderStatus status = c_fragment_reader_test_next(&cursors[index], &event, selected);
+                valid = valid && status == C_FRAGMENT_READER_END && c_fragment_reader_test_cleared(&event) && cursors[index].result.count == binary_count + (index == 0);
+            }
+        }
+        valid = valid && units[0].visits.depth == 1 && units[0].visit_states[4] == C_FRAGMENT_READER_ACTIVE && units[0].visit_nodes[4] == C_FRAGMENT_READER_UNSEEN;
+        c_fragment_reader_unit_check(checks, failures, valid, "interleaved event cursors lost a phase/window/source identity or repeated ATTACH after claim release");
+
+        // A reference owns a raw opaque interval containing a separately published leaf expression. The child
+        // has its own frame slice and cursor but shares root/node visitation. Direct read-ahead must survive it.
+        for (uint32_t scenario = 0; scenario < 4; scenario += 1)
+        {
+            const bool cast = scenario >= 2;
+            const bool violation = scenario & 1;
+            const uint8_t root_kind = cast ? C_FRAGMENT_CAST : C_FRAGMENT_TYPE_NAME;
+            CFragmentReaderUnit* unit = &units[0];
+            c_fragment_reader_unit_initialize(unit);
+            unit->boundary = 1;
+            unit->kinds[1] = root_kind;
+            unit->owners[1] = 1;
+            unit->boundaries[1] = 1;
+            unit->first[1] = cast ? 2 : 1;
+            unit->handle.positions = cast ? 2 : 1;
+            if (cast)
+            {
+                unit->kinds[2] = C_FRAGMENT_NUMBER;
+                unit->owners[2] = 1;
+                *c_fragment_header(&unit->store, 0) = (CFragmentHeader)
+                {
+                    .operator_mask = 1,
+                    .next = BUSTER_C_FRAGMENT_NONE,
+                    .used = 2,
+                    .operator_count = 1,
+                };
+                c_fragment_operators(&unit->store, 0)[0] = C_FRAGMENT_CAST;
+                unit->locations[0] = 1;
+            }
+            else
+            {
+                unit->handle.head = BUSTER_C_FRAGMENT_NONE;
+                unit->handle.tail = BUSTER_C_FRAGMENT_NONE;
+            }
+            unit->syntax[1].type_root = 3;
+            unit->spans[1].end = 6;
+            unit->spans[3].end = 6;
+            unit->kinds[4] = C_FRAGMENT_NUMBER;
+            unit->owners[4] = 4;
+            unit->first[4] = 4;
+            unit->boundaries[4] = 4;
+            CFragmentDirectReader outer;
+            CFragmentReaderCursor outer_cursor = c_fragment_reader_unit_cursor(unit, &outer, kinds[0], tokens[0], mode);
+            valid = c_fragment_reader_test_next(&outer_cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == C_FRAGMENT_READER_ENTER && event.token == 1 && event.kind == root_kind &&
+                    c_fragment_reader_test_next(&outer_cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == C_FRAGMENT_READER_REFERENCE && event.token == 1 && event.reference == 3 &&
+                    outer_cursor.depth == 1 && unit->visit_nodes[1] == C_FRAGMENT_READER_ACTIVE && unit->visit_nodes[2] == C_FRAGMENT_READER_UNSEEN;
+            CFragmentLeafCursor nested = outer.leaves;
+            CFragmentLeafCursor saved[1];
+            uint32_t nested_depth = 0;
+            valid = valid && c_fragment_leaf_enter(&nested, 3, 4, saved, &nested_depth, 1);
+            const CFragmentHandle handle =
+            {
+                .head = BUSTER_C_FRAGMENT_NONE,
+                .tail = BUSTER_C_FRAGMENT_NONE,
+                .positions = 1,
+                .leaf = BUSTER_C_FRAGMENT_NONE,
+                .frozen = true,
+            };
+            CFragmentDirectReader inner = c_fragment_direct_reader(&unit->store, &handle, &unit->source, 4);
+            valid = valid && inner.valid && nested.root == inner.leaves.root && c_fragment_reader_claim(&unit->visits, &inner.leaves);
+            CFragmentReaderFrame inner_stack[1];
+            const uint8_t inner_kind[1] = { C_FRAGMENT_NUMBER };
+            const uint32_t inner_token[1] = { UINT32_MAX - 1 };
+            CFragmentReaderCursor inner_cursor = c_fragment_reader_cursor(&inner, inner_kind, inner_token, 1, &unit->visits, inner_stack, 1, mode < 2);
+            const uint32_t consumed = outer_cursor.consumed;
+            const uint32_t window_at = outer_cursor.window_at;
+            const uint32_t read = outer.leaves.read;
+            if (violation != 0)
+            {
+                valid = valid && c_fragment_reader_unit_rejected(&outer_cursor, mode) && outer_cursor.consumed == consumed && outer_cursor.window_at == window_at && outer.leaves.read == read;
+            }
+            static const uint8_t child_phases[] =
+            {
+                C_FRAGMENT_READER_ENTER,
+                C_FRAGMENT_READER_REDUCE,
+                C_FRAGMENT_READER_LEAVE,
+                C_FRAGMENT_READER_ATTACH,
+            };
+            for (uint32_t at = 0; valid && at < sizeof(child_phases); at += 1)
+            {
+                valid = c_fragment_reader_test_next(&inner_cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == child_phases[at] && event.token == 4 &&
+                        event.boundary == 4 && event.child == BUSTER_C_FRAGMENT_NONE && event.source == 4 && event.expanded == 1004;
+            }
+            valid = valid && c_fragment_reader_complete(&unit->visits, &inner.leaves) && !c_fragment_reader_claim(&unit->visits, &inner.leaves);
+            nested = inner.leaves;
+            valid = valid && c_fragment_leaf_leave(&nested, saved, &nested_depth, 1) && nested_depth == 0 && nested.root == outer.leaves.root &&
+                    nested.next == outer.leaves.next && nested.previous == outer.leaves.previous && nested.read == outer.leaves.read;
+            if (violation == 0)
+            {
+                static const CFragmentReaderTestAction after_reference[] =
+                {
+                    {
+                        .token = 2,
+                        .child = BUSTER_C_FRAGMENT_NONE,
+                        .phase = C_FRAGMENT_READER_ENTER,
+                    },
+                    {
+                        .token = 2,
+                        .child = BUSTER_C_FRAGMENT_NONE,
+                        .phase = C_FRAGMENT_READER_REDUCE,
+                    },
+                    {
+                        .token = 2,
+                        .child = BUSTER_C_FRAGMENT_NONE,
+                        .phase = C_FRAGMENT_READER_LEAVE,
+                    },
+                    {
+                        .token = 1,
+                        .child = 2,
+                        .phase = C_FRAGMENT_READER_CHILD,
+                    },
+                    {
+                        .token = 1,
+                        .child = BUSTER_C_FRAGMENT_NONE,
+                        .phase = C_FRAGMENT_READER_REDUCE,
+                    },
+                    {
+                        .token = 1,
+                        .child = BUSTER_C_FRAGMENT_NONE,
+                        .phase = C_FRAGMENT_READER_LEAVE,
+                    },
+                    {
+                        .token = 1,
+                        .child = BUSTER_C_FRAGMENT_NONE,
+                        .phase = C_FRAGMENT_READER_ATTACH,
+                    },
+                };
+                for (uint32_t at = cast ? 0 : 4; valid && at < sizeof(after_reference) / sizeof(after_reference[0]); at += 1)
+                {
+                    const CFragmentReaderTestAction* expected = &after_reference[at];
+                    valid = c_fragment_reader_test_next(&outer_cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == expected->phase && event.token == expected->token &&
+                            event.child == expected->child && event.ordinal == 0 && event.kind == (event.token == 1 ? root_kind : C_FRAGMENT_NUMBER) &&
+                            event.source == expected->token && event.expanded == 1000 + expected->token && event.reference == (event.token == 1 ? 3 : BUSTER_C_FRAGMENT_NONE);
+                }
+                valid = valid && c_fragment_reader_complete(&unit->visits, &outer.leaves) && unit->visits.depth == 0 && outer_cursor.result.count == (cast ? 9 : 5);
+            }
+            else
+            {
+                // Restoring the ledger cannot revive a cursor that attempted to resume under another root.
+                valid = valid && c_fragment_reader_unit_rejected(&outer_cursor, mode);
+            }
+            memset(&event, 0xa5, sizeof(event));
+            valid = valid && c_fragment_reader_test_next(&inner_cursor, &event, mode) == C_FRAGMENT_READER_END && c_fragment_reader_test_cleared(&event);
+            c_fragment_reader_unit_check(checks, failures, valid, violation == 0 ? "opaque nested traversal damaged a suspended outer event cursor" : "outer resume bypassed the active nested root or recovered from ERROR");
+        }
+
+        // Fail each active phase separately; no resume may publish a stale event or make progress after a root
+        // claim is removed. ATTACH is terminal already, and is covered by the stable END checks above.
+        for (uint32_t pause = 0; pause < binary_count; pause += 1)
+        {
+            c_fragment_reader_unit_binary(&units[0]);
+            units[0].syntax[1].type_root = 3;
+            CFragmentDirectReader reader;
+            CFragmentReaderCursor cursor = c_fragment_reader_unit_cursor(&units[0], &reader, kinds[0], tokens[0], mode);
+            valid = cursor.result.valid;
+            for (uint32_t at = 0; valid && at <= pause; at += 1)
+            {
+                valid = c_fragment_reader_test_next(&cursor, &event, mode) == C_FRAGMENT_READER_EVENT;
+            }
+            const uint32_t consumed = cursor.consumed;
+            const uint32_t emitted = cursor.result.count;
+            units[0].visits.depth = 0;
+            valid = valid && c_fragment_reader_unit_rejected(&cursor, mode) && cursor.consumed == consumed && cursor.result.count == emitted;
+            c_fragment_reader_unit_check(checks, failures, valid, "paused cursor advanced after its root claim disappeared");
+        }
+
+        // 64-position refill followed by a three-position tail: a list root plus 65 source-ordered leaves and END.
+        CFragmentReaderUnit* unit = &units[0];
+        c_fragment_reader_unit_initialize(unit);
+        unit->kinds[0] = C_FRAGMENT_INITIALIZER;
+        unit->owners[0] = 0;
+        unit->first[0] = 1;
+        unit->boundaries[0] = 0;
+        unit->spans[0].end = 66;
+        unit->store.allocated = 2;
+        unit->live[1] = 1;
+        unit->handle.tail = 1;
+        unit->handle.positions = 67;
+        for (uint32_t token = 1; token <= 65; token += 1)
+        {
+            unit->kinds[token] = C_FRAGMENT_NUMBER;
+            unit->owners[token] = 0;
+            unit->next[token] = token == 65 ? BUSTER_C_FRAGMENT_NONE : token + 1;
+        }
+        *c_fragment_header(&unit->store, 0) = (CFragmentHeader)
+        {
+            .operator_mask = 1,
+            .next = 1,
+            .used = 64,
+            .operator_count = 1,
+        };
+        *c_fragment_header(&unit->store, 1) = (CFragmentHeader)
+        {
+            .operator_mask = 4,
+            .next = BUSTER_C_FRAGMENT_NONE,
+            .used = 3,
+            .operator_count = 1,
+        };
+        c_fragment_operators(&unit->store, 0)[0] = C_FRAGMENT_INITIALIZER;
+        c_fragment_operators(&unit->store, 1)[0] = C_FRAGMENT_END;
+        unit->locations[0] = 0;
+        CFragmentDirectReader reader;
+        CFragmentReaderCursor cursor = c_fragment_reader_unit_cursor(unit, &reader, kinds[0], tokens[0], mode);
+        valid = c_fragment_reader_test_next(&cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == C_FRAGMENT_READER_ENTER && event.token == 0;
+        if (valid && mode >= 2)
+        {
+            valid = reader.leaves.next == 64 && reader.remaining == 3 && cursor.window_count == 64 && cursor.window_at == 1;
+        }
+        for (uint32_t token = 1; valid && token <= 65; token += 1)
+        {
+            static const uint8_t leaf_phases[] =
+            {
+                C_FRAGMENT_READER_ENTER,
+                C_FRAGMENT_READER_REDUCE,
+                C_FRAGMENT_READER_LEAVE,
+                C_FRAGMENT_READER_CHILD,
+            };
+            for (uint32_t at = 0; valid && at < sizeof(leaf_phases); at += 1)
+            {
+                valid = c_fragment_reader_test_next(&cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == leaf_phases[at] &&
+                        event.token == (at == 3 ? 0 : token) && event.child == (at == 3 ? token : BUSTER_C_FRAGMENT_NONE) && event.ordinal == (at == 3 ? token - 1 : 0);
+            }
+        }
+        static const uint8_t root_phases[] =
+        {
+            C_FRAGMENT_READER_REDUCE,
+            C_FRAGMENT_READER_LEAVE,
+            C_FRAGMENT_READER_ATTACH,
+        };
+        for (uint32_t at = 0; valid && at < sizeof(root_phases); at += 1)
+        {
+            valid = c_fragment_reader_test_next(&cursor, &event, mode) == C_FRAGMENT_READER_EVENT && event.phase == root_phases[at] && event.token == 0 && event.kind == C_FRAGMENT_INITIALIZER;
+        }
+        valid = valid && cursor.result.count == 264 && cursor.result.nodes == 66 && cursor.result.stack_peak == 2 && c_fragment_reader_complete(&unit->visits, &reader.leaves);
+        memset(&event, 0xa5, sizeof(event));
+        valid = valid && c_fragment_reader_test_next(&cursor, &event, mode) == C_FRAGMENT_READER_END && c_fragment_reader_test_cleared(&event);
+        c_fragment_reader_unit_check(checks, failures, valid, "event suspension lost source order or END framing across the full/tail window boundary");
+
+        // Two 64+1 layouts place END alone in the tail, or at slot 63 just before the parent's final leaf.
+        // Both describe explicit trees with 64 nodes: CALL(63 leaves), and ADD(CALL(61 leaves), final leaf).
+        for (uint32_t layout = 0; layout < 2; layout += 1)
+        {
+            c_fragment_reader_unit_initialize(unit);
+            const uint32_t call = layout;
+            const uint32_t first = layout + 1;
+            const uint32_t last = layout == 0 ? 63 : 62;
+            unit->kinds[0] = layout == 0 ? C_FRAGMENT_CALL : C_FRAGMENT_ADD;
+            unit->owners[0] = 0;
+            unit->kinds[call] = C_FRAGMENT_CALL;
+            unit->owners[call] = 0;
+            unit->first[0] = first;
+            unit->boundaries[0] = 0;
+            unit->spans[0].end = 64;
+            unit->store.allocated = 2;
+            unit->live[1] = 1;
+            unit->handle.tail = 1;
+            unit->handle.positions = 65;
+            for (uint32_t token = first; token <= 63; token += 1)
+            {
+                unit->kinds[token] = C_FRAGMENT_NUMBER;
+                unit->owners[token] = 0;
+                unit->next[token] = token == 63 ? BUSTER_C_FRAGMENT_NONE : token + 1;
+            }
+            *c_fragment_header(&unit->store, 0) = (CFragmentHeader)
+            {
+                .operator_mask = layout == 0 ? 1 : (UINT64_C(1) << 63) | 3,
+                .next = 1,
+                .used = 64,
+                .operator_count = layout == 0 ? 1 : 3,
+            };
+            *c_fragment_header(&unit->store, 1) = (CFragmentHeader)
+            {
+                .operator_mask = layout == 0 ? 1 : 0,
+                .next = BUSTER_C_FRAGMENT_NONE,
+                .used = 1,
+                .operator_count = layout == 0 ? 1 : 0,
+            };
+            c_fragment_operators(&unit->store, 0)[0] = unit->kinds[0];
+            unit->locations[0] = 0;
+            if (layout == 0)
+            {
+                c_fragment_operators(&unit->store, 1)[0] = C_FRAGMENT_END;
+            }
+            else
+            {
+                c_fragment_operators(&unit->store, 0)[1] = C_FRAGMENT_CALL;
+                c_fragment_operators(&unit->store, 0)[2] = C_FRAGMENT_END;
+                unit->locations[1] = 1;
+            }
+            cursor = c_fragment_reader_unit_cursor(unit, &reader, kinds[0], tokens[0], mode);
+            valid = c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ENTER, 0, BUSTER_C_FRAGMENT_NONE, 0);
+            if (layout != 0)
+            {
+                valid = valid && c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ENTER, call, BUSTER_C_FRAGMENT_NONE, 0);
+            }
+            for (uint32_t token = first; valid && token <= last; token += 1)
+            {
+                valid = c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ENTER, token, BUSTER_C_FRAGMENT_NONE, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_REDUCE, token, BUSTER_C_FRAGMENT_NONE, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_LEAVE, token, BUSTER_C_FRAGMENT_NONE, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_CHILD, call, token, token - first);
+            }
+            valid = valid && c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_REDUCE, call, BUSTER_C_FRAGMENT_NONE, 0) &&
+                    c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_LEAVE, call, BUSTER_C_FRAGMENT_NONE, 0);
+            if (layout != 0)
+            {
+                valid = valid && c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_CHILD, 0, call, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ENTER, 63, BUSTER_C_FRAGMENT_NONE, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_REDUCE, 63, BUSTER_C_FRAGMENT_NONE, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_LEAVE, 63, BUSTER_C_FRAGMENT_NONE, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_CHILD, 0, 63, 1) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_REDUCE, 0, BUSTER_C_FRAGMENT_NONE, 0) &&
+                        c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_LEAVE, 0, BUSTER_C_FRAGMENT_NONE, 0);
+            }
+            valid = valid && c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ATTACH, 0, BUSTER_C_FRAGMENT_NONE, 0) && cursor.result.count == 256 && cursor.result.nodes == 64 &&
+                    c_fragment_reader_complete(&unit->visits, &reader.leaves);
+            memset(&event, 0xa5, sizeof(event));
+            valid = valid && c_fragment_reader_test_next(&cursor, &event, mode) == C_FRAGMENT_READER_END && c_fragment_reader_test_cleared(&event);
+            c_fragment_reader_unit_check(checks, failures, valid, "END-only/final-leaf tail changed call/parent event order or repeated framing");
+        }
+    }
+
+    // Initialization and next have defined null/error results before any borrowed metadata can be inspected.
+    CFragmentReaderCursor invalid = c_fragment_reader_cursor(0, 0, 0, 1, 0, 0, 0, false);
+    bool valid = !invalid.result.valid && c_fragment_reader_unit_rejected(&invalid, 2);
+    memset(&event, 0xa5, sizeof(event));
+    valid = valid && c_fragment_reader_next_direct_vector(0, &event) == C_FRAGMENT_READER_ERROR && c_fragment_reader_test_cleared(&event);
+    c_fragment_reader_unit_check(checks, failures, valid, "null initialization/cursor did not produce a cleared sticky error");
+    c_fragment_reader_unit_binary(&units[0]);
+    CFragmentDirectReader reader;
+    CFragmentReaderCursor cursor = c_fragment_reader_unit_cursor(&units[0], &reader, kinds[0], tokens[0], 2);
+    valid = c_fragment_reader_next_direct_scalar(&cursor, 0) == C_FRAGMENT_READER_ERROR && cursor.result.count == 0 && c_fragment_reader_unit_rejected(&cursor, 2);
+    c_fragment_reader_unit_check(checks, failures, valid, "null event output advanced the cursor or failed to poison it");
+    for (uint32_t mode = 0; mode < 4; mode += 1)
+    {
+        c_fragment_reader_unit_binary(&units[0]);
+        cursor = c_fragment_reader_unit_cursor(&units[0], &reader, kinds[0], tokens[0], mode);
+        units[0].visit_roots[0] = 2;
+        valid = c_fragment_reader_unit_rejected(&cursor, mode) && cursor.result.count == 0;
+        c_fragment_reader_unit_check(checks, failures, valid, "cursor entered under the wrong root claim");
+        c_fragment_reader_unit_binary(&units[0]);
+        cursor = c_fragment_reader_unit_cursor(&units[0], &reader, kinds[0], tokens[0], mode);
+        cursor.stack_capacity = 1;
+        valid = c_fragment_reader_unit_rejected(&cursor, mode) && cursor.result.count == 1;
+        c_fragment_reader_unit_check(checks, failures, valid, "streaming cursor exceeded its pending-frame slice");
+        c_fragment_reader_unit_binary(&units[0]);
+        cursor = c_fragment_reader_unit_cursor(&units[0], &reader, kinds[0], tokens[0], mode);
+        valid = c_fragment_reader_test_next(&cursor, &event, mode) == C_FRAGMENT_READER_EVENT;
+        units[0].visits.capacity = 1;
+        units[0].visits.depth = 2;
+        cursor.claim_depth = 2;
+        units[0].visit_roots[1] = reader.leaves.root;
+        valid = valid && c_fragment_reader_unit_rejected(&cursor, mode) && cursor.result.count == 1;
+        c_fragment_reader_unit_check(checks, failures, valid, "resumed cursor indexed malformed visit depth even with a matching root");
+        c_fragment_reader_unit_binary(&units[0]);
+        units[0].kinds[3] = C_FRAGMENT_ADD;
+        units[0].owners[3] = 1;
+        units[0].locations[0] = 3;
+        cursor = c_fragment_reader_unit_cursor(&units[0], &reader, kinds[0], tokens[0], mode);
+        valid = c_fragment_reader_unit_rejected(&cursor, mode) && cursor.result.count == 0;
+        c_fragment_reader_unit_check(checks, failures, valid, "streaming cursor admitted another operator as the claimed root");
+    }
+    for (uint32_t omission = 0; omission < 7; omission += 1)
+    {
+        c_fragment_reader_unit_binary(&units[0]);
+        reader = c_fragment_reader_unit_begin(&units[0]);
+        if (omission == 4)
+        {
+            reader.leaves.source = 0;
+        }
+        else if (omission == 5)
+        {
+            units[0].source.parser = 0;
+        }
+        else if (omission == 6)
+        {
+            units[0].source.next = 0;
+        }
+        cursor = c_fragment_reader_cursor(&reader, omission == 2 ? 0 : kinds[0], omission == 3 ? 0 : tokens[0], 3,
+                                          omission == 0 ? 0 : &units[0].visits, omission == 1 ? 0 : units[0].stack, 128, true);
+        valid = !cursor.result.valid && c_fragment_reader_unit_rejected(&cursor, 0);
+        c_fragment_reader_unit_check(checks, failures, valid, "invalid initialization dereferenced absent frame/visit/input/source metadata");
+    }
+}
+
 static uint32_t c_fragment_reader_tests(void)
 {
     static CFragmentReaderUnit unit;
@@ -575,6 +1181,7 @@ static uint32_t c_fragment_reader_tests(void)
         }
         c_fragment_reader_unit_check(&checks, &failures, valid, "hand-specified binary event order/source identities differ");
     }
+    c_fragment_reader_cursor_tests(&checks, &failures, binary, sizeof(binary) / sizeof(binary[0]));
     for (uint32_t mutation = 0; mutation < 15; mutation += 1)
     {
         c_fragment_reader_unit_binary(&unit);
@@ -639,6 +1246,9 @@ static uint32_t c_fragment_reader_tests(void)
         CFragmentReaderResult scalar = c_fragment_reader_unit_direct(&unit, false);
         CFragmentReaderResult vector = c_fragment_reader_unit_direct(&unit, true);
         c_fragment_reader_unit_check(&checks, &failures, !scalar.valid && !vector.valid, "malformed chain/mask/count/tail/source leaf index was accepted");
+        c_fragment_reader_unit_check(&checks, &failures,
+                                     c_fragment_reader_unit_reject(&unit, 0, 0, unit.handle.positions, 128, 2) && c_fragment_reader_unit_reject(&unit, 0, 0, unit.handle.positions, 128, 3),
+                                     "malformed direct cursor yielded ATTACH or failed to retain a cleared error");
         if (mutation >= 10)
         {
             flat[0] = C_FRAGMENT_ADD;
@@ -649,6 +1259,7 @@ static uint32_t c_fragment_reader_tests(void)
             locations[2] = UINT32_MAX - 1;
             const CFragmentReaderResult flattened = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 128, 64);
             c_fragment_reader_unit_check(&checks, &failures, !flattened.valid, "flat traversal accepted an exhausted/leftover/reordered/duplicate leaf index");
+            c_fragment_reader_unit_check(&checks, &failures, c_fragment_reader_unit_reject(&unit, flat, locations, 3, 128, 0), "malformed flat source cursor did not retain a cleared error");
         }
     }
     c_fragment_reader_unit_binary(&unit);
@@ -659,17 +1270,27 @@ static uint32_t c_fragment_reader_tests(void)
     locations[1] = BUSTER_C_FRAGMENT_NONE;
     locations[2] = BUSTER_C_FRAGMENT_NONE;
     CFragmentReaderResult result = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 1, 64);
-    c_fragment_reader_unit_check(&checks, &failures, !result.valid, "exhausted continuation stack was accepted");
+    c_fragment_reader_unit_check(&checks, &failures, !result.valid && !result.overflow, "exhausted continuation stack was accepted or mislabeled as output overflow");
+    memset(&unit.events[11], 0xa5, sizeof(unit.events[11]));
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 128, 11);
-    c_fragment_reader_unit_check(&checks, &failures, !result.valid, "truncated event output was accepted");
+    CFragmentReaderEvent untouched;
+    memset(&untouched, 0xa5, sizeof(untouched));
+    c_fragment_reader_unit_check(&checks, &failures, !result.valid && result.overflow && result.count == 11 && memcmp(&unit.events[11], &untouched, sizeof(untouched)) == 0,
+                                 "collector failed to report output overflow or overwrote the tail");
+    result = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 128, 0);
+    c_fragment_reader_unit_check(&checks, &failures, !result.valid && result.overflow && result.count == 0, "zero-capacity collector did not report output overflow");
+    result = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 2, 12);
+    c_fragment_reader_unit_check(&checks, &failures, result.valid && !result.overflow && result.count == 12 && result.stack_peak == 2, "exact frame/event capacities failed");
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 0, 128, 64);
     c_fragment_reader_unit_check(&checks, &failures, !result.valid, "empty expression was accepted");
     flat[2] = C_FRAGMENT_END;
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 128, 64);
     c_fragment_reader_unit_check(&checks, &failures, !result.valid, "END closed a fixed-arity expression");
+    c_fragment_reader_unit_check(&checks, &failures, c_fragment_reader_unit_reject(&unit, flat, locations, 3, 128, 0), "fixed-arity END failed to poison the streaming cursor");
     flat[0] = C_FRAGMENT_KIND_COUNT;
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 128, 64);
     c_fragment_reader_unit_check(&checks, &failures, !result.valid, "out-of-range kind was accepted");
+    c_fragment_reader_unit_check(&checks, &failures, c_fragment_reader_unit_reject(&unit, flat, locations, 3, 128, 0), "out-of-range flat kind failed to poison the streaming cursor");
     CFragmentDirectReader invalid = { 0 };
     result = c_fragment_reader_direct_scalar(&invalid, 1, &unit.visits, 0, 0, 0, 0);
     c_fragment_reader_unit_check(&checks, &failures, !result.valid && result.count == 0, "invalid context read metadata");
@@ -722,6 +1343,21 @@ static uint32_t c_fragment_reader_tests(void)
         valid = unit.events[i].kind != C_FRAGMENT_END && unit.events[i].token < 2;
     }
     c_fragment_reader_unit_check(&checks, &failures, valid, "synthetic END became a semantic token event");
+    for (uint32_t mode = 0; mode < 4; mode += 1)
+    {
+        CFragmentDirectReader reader;
+        CFragmentReaderCursor cursor = c_fragment_reader_unit_cursor(&unit, &reader, flat, locations, mode);
+        valid = c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ENTER, 0, BUSTER_C_FRAGMENT_NONE, 0) &&
+                c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ENTER, 1, BUSTER_C_FRAGMENT_NONE, 0) &&
+                c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_REDUCE, 1, BUSTER_C_FRAGMENT_NONE, 0) &&
+                c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_LEAVE, 1, BUSTER_C_FRAGMENT_NONE, 0) &&
+                c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_CHILD, 0, 1, 0) &&
+                c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_REDUCE, 0, BUSTER_C_FRAGMENT_NONE, 0) &&
+                c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_LEAVE, 0, BUSTER_C_FRAGMENT_NONE, 0) &&
+                c_fragment_reader_unit_step(&cursor, mode, C_FRAGMENT_READER_ATTACH, 0, BUSTER_C_FRAGMENT_NONE, 0) && cursor.result.count == 8 &&
+                c_fragment_reader_complete(&unit.visits, &reader.leaves);
+        c_fragment_reader_unit_check(&checks, &failures, valid, "consecutive nested empty-list END positions skipped or repeated an event");
+    }
     flat[1] = C_FRAGMENT_END;
     locations[1] = BUSTER_C_FRAGMENT_NONE;
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 2, 128, 64);
@@ -734,15 +1370,20 @@ static uint32_t c_fragment_reader_tests(void)
     c_fragment_reader_unit_check(&checks, &failures, !nested_scalar.valid && !nested_vector.valid, "direct traversal duplicated an operator identity");
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 4, 128, 64);
     c_fragment_reader_unit_check(&checks, &failures, !result.valid, "duplicate operator identity was accepted");
+    c_fragment_reader_unit_check(&checks, &failures, c_fragment_reader_unit_reject(&unit, flat, locations, 4, 128, 0) &&
+                                 c_fragment_reader_unit_reject(&unit, flat, locations, 4, 128, 2) && c_fragment_reader_unit_reject(&unit, flat, locations, 4, 128, 3),
+                                 "duplicate operator identity did not poison flat/scalar/vector cursors");
     locations[1] = 1;
     unit.handle.positions = 3;
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 3, 128, 64);
     c_fragment_reader_unit_check(&checks, &failures, !result.valid, "unterminated list was accepted");
+    c_fragment_reader_unit_check(&checks, &failures, c_fragment_reader_unit_reject(&unit, flat, locations, 3, 128, 0), "unterminated flat list did not end with a cleared sticky error");
     unit.handle.positions = 1;
     flat[0] = C_FRAGMENT_END;
     locations[0] = BUSTER_C_FRAGMENT_NONE;
     result = c_fragment_reader_unit_flat(&unit, flat, locations, 1, 128, 64);
     c_fragment_reader_unit_check(&checks, &failures, !result.valid, "naked list END was accepted");
+    c_fragment_reader_unit_check(&checks, &failures, c_fragment_reader_unit_reject(&unit, flat, locations, 1, 128, 0), "naked flat END did not end with a cleared sticky error");
 
     // A physical all-leaf window must not touch even a null identity column. Its leaves are not one expression;
     // this tests bounded refill independently of scheduling. 64+1 covers a full window and the shortest tail.
