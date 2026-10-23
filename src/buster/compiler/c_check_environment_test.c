@@ -245,8 +245,11 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
     };
     CheckTestTypes types[2] = { 0 };
     Arena storage[2] = { 0 };
+    Arena checked_storage[2] = { 0 };
     Arena scratch[2] = { 0 };
     CheckInput inputs[2] = { 0 };
+    CheckStream streams[2] = { 0 };
+    bool checked[2] = { 0 };
     bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
                  pp_run_source(&pp, "checker-environment.c", (const uint8_t*)fixture->source, (uint32_t)strlen(fixture->source));
     for (uint32_t path = 0; path < 2; path += 1)
@@ -254,8 +257,9 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
         const ParseOptions parse_options = { .scalar = path == 0 };
         ready = ready && parse_initialize(&parsers[path], &parse_options, options.language) && check_test_types_open(&types[path]);
         storage[path] = arena_reserve(1u << 24);
+        checked_storage[path] = arena_reserve(1u << 24);
         scratch[path] = arena_reserve(1u << 24);
-        ready = ready && storage[path].base != 0 && scratch[path].base != 0;
+        ready = ready && storage[path].base != 0 && checked_storage[path].base != 0 && scratch[path].base != 0;
     }
     check_test_expect(test, ready, "production environment source allocation/preprocessing");
     for (uint32_t path = 0; ready && path < 2; path += 1)
@@ -289,6 +293,10 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
                     memset(poison, 0xa5, 1u << 20);
                 }
                 arena_pop_to(&scratch[path], mark);
+                const CheckOptions check_options = { .scalar = path == 0 };
+                checked[path] = check_graph_run(&types[path].table, &inputs[path].graph, &checked_storage[path], &scratch[path], &check_options, &streams[path]);
+                check_test_expect(test, checked[path] && streams[path].report_count == 0 && scratch[path].length == mark,
+                                  "production history fixture lost valid sequential graph output after scratch reuse");
                 check_test_environment_replay(test, &inputs[path], &scratch[path]);
                 if (fixture->name[0] != 0)
                 {
@@ -314,6 +322,9 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
         const CBindings* y = b->bindings;
         const bool counts = x->count == y->count && a->body_count == b->body_count && a->tag_count == b->tag_count;
         check_test_expect(test, counts, "production scalar/vector history counts differ");
+        check_test_expect(test, checked[0] && checked[1] && inputs[0].graph.argument_count == inputs[1].graph.argument_count &&
+                               check_test_stream_equal(&streams[0], &streams[1], inputs[0].graph.argument_count),
+                          "production history handoff changed scalar/vector sequential typed output");
         for (uint32_t event = 0; counts && event < x->count; event += 1)
         {
             const bool restore = x->operation[event] == C_BINDING_RESTORE;
@@ -329,6 +340,7 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
     for (uint32_t path = 0; path < 2; path += 1)
     {
         arena_release(&scratch[path]);
+        arena_release(&checked_storage[path]);
         arena_release(&storage[path]);
         check_test_types_close(&types[path]);
         parse_release(&parsers[path]);

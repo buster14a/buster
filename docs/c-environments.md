@@ -119,9 +119,12 @@ It supplies no scheduler, IR merger or composite-type effect merger.
 
 On a successful `check_input`, `check_environment_publish` builds
 `CheckInput.environment` before the reader releases its scratch. Rejected or
-unsupported units publish no usable environment. Publication failure empties
+unsupported source-reader constructs publish no usable environment. Publication failure empties
 the handoff, rolls back its allocations and sets the existing resource status.
 The sequential entry point, declaration columns and graph stay compatible.
+The `valid` flag certifies a coherent retained history; expression acceptance
+is still decided by `check_graph_run`, which may report semantic errors after
+publication. A consumer must preserve that validation before accepting the unit.
 
 The handoff retains the actual declaration/use/restore events produced by the
 reader, including local events. Its read-only `CBindings` view has exactly

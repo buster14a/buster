@@ -6,6 +6,8 @@
 // events, declaration-specific types, tag completion positions and parser-derived body slots. It does not defer the
 // resolver or make the shared TypeTable writable by body workers. Body-local types and linkage effects still need
 // private construction and ordered reconciliation before an actual deferred checker can consume this handoff.
+// valid certifies a coherent retained source history. check_graph_run still determines expression acceptance;
+// publication alone does not authorize accepting a translation unit or launching a deferred checker.
 //
 // The snapshot owns exactly count events (no padding), without mutable heads, an undo stack or a previous column.
 // Only c_bindings_scalar/batch and read-only environment APIs may consume that CBindings view; never append, reset
