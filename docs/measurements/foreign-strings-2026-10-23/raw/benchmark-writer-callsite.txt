@@ -1,0 +1,708 @@
+
+/home/david/buster-fast-bench/linker-strings86/build3/build/compiler:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000b61380 <main_unit_executable+0x1b40>:
+  b61380:	00 00                	add    %al,(%rax)
+  b61382:	48 8d 94 24 60 02 00 	lea    0x260(%rsp),%rdx
+  b61389:	00 
+  b6138a:	48 8d 8c 24 c0 02 00 	lea    0x2c0(%rsp),%rcx
+  b61391:	00 
+  b61392:	e8 c9 40 0c 00       	call   c25460 <foreign_strings_merge>
+  b61397:	48 89 44 24 70       	mov    %rax,0x70(%rsp)
+  b6139c:	bf 01 00 00 00       	mov    $0x1,%edi
+  b613a1:	48 8d b4 24 00 19 00 	lea    0x1900(%rsp),%rsi
+  b613a8:	00 
+  b613a9:	e8 82 de b9 ff       	call   6ff230 <clock_gettime@plt>
+  b613ae:	4c 69 a4 24 00 19 00 	imul   $0x3b9aca00,0x1900(%rsp),%r12
+  b613b5:	00 00 ca 9a 3b 
+  b613ba:	4c 89 b4 24 c0 00 00 	mov    %r14,0xc0(%rsp)
+  b613c1:	00 
+  b613c2:	4c 03 a4 24 08 19 00 	add    0x1908(%rsp),%r12
+  b613c9:	00 
+  b613ca:	4c 89 a4 24 68 01 00 	mov    %r12,0x168(%rsp)
+  b613d1:	00 
+  b613d2:	45 85 f6             	test   %r14d,%r14d
+  b613d5:	74 29                	je     b61400 <main_unit_executable+0x1bc0>
+  b613d7:	83 7c 24 70 00       	cmpl   $0x0,0x70(%rsp)
+  b613dc:	48 c7 44 24 60 00 00 	movq   $0x0,0x60(%rsp)
+  b613e3:	00 00 
+  b613e5:	41 0f 94 c5          	sete   %r13b
+  b613e9:	45 31 f6             	xor    %r14d,%r14d
+  b613ec:	45 31 e4             	xor    %r12d,%r12d
+  b613ef:	e9 6c 05 00 00       	jmp    b61960 <main_unit_executable+0x2120>
+  b613f4:	66 66 66 2e 0f 1f 84 	data16 data16 cs nopw 0x0(%rax,%rax,1)
+  b613fb:	00 00 00 00 00 
+  b61400:	48 8b 8c 24 f0 03 00 	mov    0x3f0(%rsp),%rcx
+  b61407:	00 
+  b61408:	b8 00 00 00 00       	mov    $0x0,%eax
+  b6140d:	48 c7 44 24 60 00 00 	movq   $0x0,0x60(%rsp)
+  b61414:	00 00 
+  b61416:	c5 f1 ef c9          	vpxor  %xmm1,%xmm1,%xmm1
+  b6141a:	48 85 c9             	test   %rcx,%rcx
+  b6141d:	0f 84 dd 00 00 00    	je     b61500 <main_unit_executable+0x1cc0>
+  b61423:	8b 94 24 dc 03 00 00 	mov    0x3dc(%rsp),%edx
+  b6142a:	48 bf 0e 6c a4 e0 0d 	movabs $0xf598490de0a46c0e,%rdi
+  b61431:	49 98 f5 
+  b61434:	31 c0                	xor    %eax,%eax
+  b61436:	89 d6                	mov    %edx,%esi
+  b61438:	40 f6 de             	neg    %sil
+  b6143b:	85 d2                	test   %edx,%edx
+  b6143d:	c4 e2 cb f7 d7       	shrx   %rsi,%rdi,%rdx
+  b61442:	be 00 00 00 00       	mov    $0x0,%esi
+  b61447:	89 d2                	mov    %edx,%edx
+  b61449:	48 0f 45 f2          	cmovne %rdx,%rsi
+  b6144d:	48 6b f6 58          	imul   $0x58,%rsi,%rsi
+  b61451:	48 8b 14 31          	mov    (%rcx,%rsi,1),%rdx
+  b61455:	48 85 d2             	test   %rdx,%rdx
+  b61458:	0f 84 a2 00 00 00    	je     b61500 <main_unit_executable+0x1cc0>
+  b6145e:	48 01 f1             	add    %rsi,%rcx
+  b61461:	8b 71 08             	mov    0x8(%rcx),%esi
+  b61464:	89 f7                	mov    %esi,%edi
+  b61466:	81 e7 0e 6c a4 e0    	and    $0xe0a46c0e,%edi
+  b6146c:	eb 0b                	jmp    b61479 <main_unit_executable+0x1c39>
+  b6146e:	66 90                	xchg   %ax,%ax
+  b61470:	ff c7                	inc    %edi
+  b61472:	21 f7                	and    %esi,%edi
+  b61474:	45 85 c0             	test   %r8d,%r8d
+  b61477:	75 69                	jne    b614e2 <main_unit_executable+0x1ca2>
+  b61479:	41 89 f8             	mov    %edi,%r8d
+  b6147c:	46 8b 0c 82          	mov    (%rdx,%r8,4),%r9d
+  b61480:	45 85 c9             	test   %r9d,%r9d
+  b61483:	74 7b                	je     b61500 <main_unit_executable+0x1cc0>
+  b61485:	4c 8b 51 10          	mov    0x10(%rcx),%r10
+  b61489:	45 8d 59 ff          	lea    -0x1(%r9),%r11d
+  b6148d:	49 be 0e 6c a4 e0 0d 	movabs $0xf598490de0a46c0e,%r14
+  b61494:	49 98 f5 
+  b61497:	45 31 c0             	xor    %r8d,%r8d
+  b6149a:	49 c1 e3 06          	shl    $0x6,%r11
+  b6149e:	4f 39 34 1a          	cmp    %r14,(%r10,%r11,1)
+  b614a2:	75 cc                	jne    b61470 <main_unit_executable+0x1c30>
+  b614a4:	4d 01 da             	add    %r11,%r10
+  b614a7:	41 83 7a 10 06       	cmpl   $0x6,0x10(%r10)
+  b614ac:	75 c2                	jne    b61470 <main_unit_executable+0x1c30>
+  b614ae:	4d 8b 52 08          	mov    0x8(%r10),%r10
+  b614b2:	41 bb 3f 00 00 00    	mov    $0x3f,%r11d
+  b614b8:	c4 c1 fb 92 cb       	kmovq  %r11,%k1
+  b614bd:	62 d1 7f c9 6f 02    	vmovdqu8 (%r10),%zmm0{%k1}{z}
+  b614c3:	62 f3 7d 48 3f 05 b2 	vpcmpneqb -0x5eac4e(%rip),%zmm0,%k0        # 576880 <bind_test_shared_rule_link.definitions.rel+0x84>
+  b614ca:	53 a1 ff 04 
+  b614ce:	c4 61 fb 93 d0       	kmovq  %k0,%r10
+  b614d3:	41 f6 c2 3f          	test   $0x3f,%r10b
+  b614d7:	75 97                	jne    b61470 <main_unit_executable+0x1c30>
+  b614d9:	44 03 49 50          	add    0x50(%rcx),%r9d
+  b614dd:	45 89 c8             	mov    %r9d,%r8d
+  b614e0:	eb 8e                	jmp    b61470 <main_unit_executable+0x1c30>
+  b614e2:	48 8b 84 24 20 17 00 	mov    0x1720(%rsp),%rax
+  b614e9:	00 
+  b614ea:	41 ff c8             	dec    %r8d
+  b614ed:	42 8b 04 80          	mov    (%rax,%r8,4),%eax
+  b614f1:	66 66 66 66 66 66 2e 	data16 data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+  b614f8:	0f 1f 84 00 00 00 00 
+  b614ff:	00 
+  b61500:	48 83 bc 24 e0 04 00 	cmpq   $0x0,0x4e0(%rsp)
+  b61507:	00 00 
+  b61509:	0f 95 c1             	setne  %cl
+  b6150c:	83 7c 24 70 00       	cmpl   $0x0,0x70(%rsp)
+  b61511:	40 0f 94 c6          	sete   %sil
+  b61515:	41 20 f5             	and    %sil,%r13b
+  b61518:	41 20 cd             	and    %cl,%r13b
+  b6151b:	41 80 fd 01          	cmp    $0x1,%r13b
+  b6151f:	0f 85 e6 00 00 00    	jne    b6160b <main_unit_executable+0x1dcb>
+  b61525:	83 bc 24 84 01 00 00 	cmpl   $0x1,0x184(%rsp)
+  b6152c:	01 
+  b6152d:	48 be 00 00 20 00 10 	movabs $0x1000200000,%rsi
+  b61534:	00 00 00 
+  b61537:	48 8d 8c 24 d8 17 00 	lea    0x17d8(%rsp),%rcx
+  b6153e:	00 
+  b6153f:	0f 87 d4 00 00 00    	ja     b61619 <main_unit_executable+0x1dd9>
+  b61545:	48 8d 94 24 00 16 00 	lea    0x1600(%rsp),%rdx
+  b6154c:	00 
+  b6154d:	62 f1 fe 48 7f 89 d8 	vmovdqu64 %zmm1,0xd8(%rcx)
+  b61554:	00 00 00 
+  b61557:	62 f1 fe 48 7f 49 03 	vmovdqu64 %zmm1,0xc0(%rcx)
+  b6155e:	62 f1 fe 48 7f 49 02 	vmovdqu64 %zmm1,0x80(%rcx)
+  b61565:	62 f1 fe 48 7f 49 01 	vmovdqu64 %zmm1,0x40(%rcx)
+  b6156c:	62 f1 fe 48 7f 09    	vmovdqu64 %zmm1,(%rcx)
+  b61572:	48 8d bc 24 c0 1a 00 	lea    0x1ac0(%rsp),%rdi
+  b61579:	00 
+  b6157a:	48 89 94 24 c0 17 00 	mov    %rdx,0x17c0(%rsp)
+  b61581:	00 
+  b61582:	48 8b 94 24 88 00 00 	mov    0x88(%rsp),%rdx
+  b61589:	00 
+  b6158a:	48 89 bc 24 c8 17 00 	mov    %rdi,0x17c8(%rsp)
+  b61591:	00 
+  b61592:	48 89 94 24 d0 17 00 	mov    %rdx,0x17d0(%rsp)
+  b61599:	00 
+  b6159a:	89 84 24 d8 17 00 00 	mov    %eax,0x17d8(%rsp)
+  b615a1:	c6 84 24 f0 17 00 00 	movb   $0x1,0x17f0(%rsp)
+  b615a8:	01 
+  b615a9:	64 4c 8b 34 25 e0 f6 	mov    %fs:0xfffffffffffff6e0,%r14
+  b615b0:	ff ff 
+  b615b2:	4d 85 f6             	test   %r14,%r14
+  b615b5:	0f 84 d5 00 00 00    	je     b61690 <main_unit_executable+0x1e50>
+  b615bb:	64 80 3c 25 e8 f6 ff 	cmpb   $0x0,%fs:0xfffffffffffff6e8
+  b615c2:	ff 00 
+  b615c4:	75 3d                	jne    b61603 <main_unit_executable+0x1dc3>
+  b615c6:	45 8b be 90 85 00 00 	mov    0x8590(%r14),%r15d
+  b615cd:	c5 f8 77             	vzeroupper
+  b615d0:	e8 6b e0 b9 ff       	call   6ff640 <getpid@plt>
+  b615d5:	41 39 c7             	cmp    %eax,%r15d
+  b615d8:	75 29                	jne    b61603 <main_unit_executable+0x1dc3>
+  b615da:	4d 8b be 88 85 00 00 	mov    0x8588(%r14),%r15
+  b615e1:	e8 4a dd b9 ff       	call   6ff330 <pthread_self@plt>
+  b615e6:	49 39 c7             	cmp    %rax,%r15
+  b615e9:	75 18                	jne    b61603 <main_unit_executable+0x1dc3>
+  b615eb:	41 83 be 80 85 00 00 	cmpl   $0x0,0x8580(%r14)
+  b615f2:	00 
+  b615f3:	74 0e                	je     b61603 <main_unit_executable+0x1dc3>
+  b615f5:	41 80 be 94 85 00 00 	cmpb   $0x0,0x8594(%r14)
+  b615fc:	00 
+  b615fd:	0f 84 d1 0e 00 00    	je     b624d4 <main_unit_executable+0x2c94>
+  b61603:	45 31 e4             	xor    %r12d,%r12d
+  b61606:	e9 2d 03 00 00       	jmp    b61938 <main_unit_executable+0x20f8>
+  b6160b:	45 31 f6             	xor    %r14d,%r14d
+  b6160e:	45 31 e4             	xor    %r12d,%r12d
+  b61611:	41 89 f5             	mov    %esi,%r13d
+  b61614:	e9 47 03 00 00       	jmp    b61960 <main_unit_executable+0x2120>
+  b61619:	48 8b bc 24 88 00 00 	mov    0x88(%rsp),%rdi
+  b61620:	00 
+  b61621:	48 8d 94 24 00 16 00 	lea    0x1600(%rsp),%rdx
+  b61628:	00 
+  b61629:	4c 8d 84 24 c0 1a 00 	lea    0x1ac0(%rsp),%r8
+  b61630:	00 
+  b61631:	62 f1 fe 48 7f 89 d8 	vmovdqu64 %zmm1,0xd8(%rcx)
+  b61638:	00 00 00 
+  b6163b:	62 f1 fe 48 7f 49 03 	vmovdqu64 %zmm1,0xc0(%rcx)
+  b61642:	62 f1 fe 48 7f 49 02 	vmovdqu64 %zmm1,0x80(%rcx)
+  b61649:	62 f1 fe 48 7f 49 01 	vmovdqu64 %zmm1,0x40(%rcx)
+  b61650:	62 f1 fe 48 7f 09    	vmovdqu64 %zmm1,(%rcx)
+  b61656:	c5 f9 ef c0          	vpxor  %xmm0,%xmm0,%xmm0
+  b6165a:	48 89 94 24 c0 17 00 	mov    %rdx,0x17c0(%rsp)
+  b61661:	00 
+  b61662:	4c 89 84 24 c8 17 00 	mov    %r8,0x17c8(%rsp)
+  b61669:	00 
+  b6166a:	48 89 bc 24 d0 17 00 	mov    %rdi,0x17d0(%rsp)
+  b61671:	00 
+  b61672:	89 84 24 d8 17 00 00 	mov    %eax,0x17d8(%rsp)
+  b61679:	c5 fa 7f 41 20       	vmovdqu %xmm0,0x20(%rcx)
+  b6167e:	64 4c 8b 34 25 e0 f6 	mov    %fs:0xfffffffffffff6e0,%r14
+  b61685:	ff ff 
+  b61687:	4d 85 f6             	test   %r14,%r14
+  b6168a:	0f 85 2b ff ff ff    	jne    b615bb <main_unit_executable+0x1d7b>
+  b61690:	48 8d 05 79 50 04 00 	lea    0x45079(%rip),%rax        # ba6710 <executable_test_lane_main>
+  b61697:	62 f1 fd 48 7f 4c 24 	vmovdqa64 %zmm1,0x1980(%rsp)
+  b6169e:	66 
+  b6169f:	62 f1 fd 48 7f 4c 24 	vmovdqa64 %zmm1,0x1a40(%rsp)
+  b616a6:	69 
+  b616a7:	62 f1 fd 48 7f 4c 24 	vmovdqa64 %zmm1,0x1a00(%rsp)
+  b616ae:	68 
+  b616af:	62 f1 fd 48 7f 4c 24 	vmovdqa64 %zmm1,0x19c0(%rsp)
+  b616b6:	67 
+  b616b7:	62 f1 fd 48 7f 4c 24 	vmovdqa64 %zmm1,0x1940(%rsp)
+  b616be:	65 
+  b616bf:	62 f1 fd 48 7f 4c 24 	vmovdqa64 %zmm1,0x1900(%rsp)
+  b616c6:	64 
+  b616c7:	48 89 84 24 88 19 00 	mov    %rax,0x1988(%rsp)
+  b616ce:	00 
+  b616cf:	48 8d 84 24 c0 17 00 	lea    0x17c0(%rsp),%rax
+  b616d6:	00 
+  b616d7:	48 89 84 24 90 19 00 	mov    %rax,0x1990(%rsp)
+  b616de:	00 
+  b616df:	b8 02 00 00 00       	mov    $0x2,%eax
+  b616e4:	87 84 24 80 19 00 00 	xchg   %eax,0x1980(%rsp)
+  b616eb:	a8 01                	test   $0x1,%al
+  b616ed:	74 3b                	je     b6172a <main_unit_executable+0x1eea>
+  b616ef:	48 83 ec 08          	sub    $0x8,%rsp
+  b616f3:	48 8d b4 24 88 19 00 	lea    0x1988(%rsp),%rsi
+  b616fa:	00 
+  b616fb:	bf ca 00 00 00       	mov    $0xca,%edi
+  b61700:	ba 81 00 00 00       	mov    $0x81,%edx
+  b61705:	b9 ff ff ff 7f       	mov    $0x7fffffff,%ecx
+  b6170a:	45 31 c0             	xor    %r8d,%r8d
+  b6170d:	45 31 c9             	xor    %r9d,%r9d
+  b61710:	31 c0                	xor    %eax,%eax
+  b61712:	6a 00                	push   $0x0
+  b61714:	c5 f8 77             	vzeroupper
+  b61717:	e8 84 e4 b9 ff       	call   6ffba0 <syscall@plt>
+  b6171c:	48 be 00 00 20 00 10 	movabs $0x1000200000,%rsi
+  b61723:	00 00 00 
+  b61726:	48 83 c4 10          	add    $0x10,%rsp
+  b6172a:	48 8b 84 24 f8 00 00 	mov    0xf8(%rsp),%rax
+  b61731:	00 
+  b61732:	64 4c 8b 2c 25 38 f7 	mov    %fs:0xfffffffffffff738,%r13
+  b61739:	ff ff 
+  b6173b:	64 44 0f b6 24 25 e8 	movzbl %fs:0xfffffffffffff6e8,%r12d
+  b61742:	f6 ff ff 
+  b61745:	c5 fa 6f 00          	vmovdqu (%rax),%xmm0
+  b61749:	48 b8 00 00 00 00 01 	movabs $0x100000000,%rax
+  b61750:	00 00 00 
+  b61753:	64 48 89 04 25 d0 f6 	mov    %rax,%fs:0xfffffffffffff6d0
+  b6175a:	ff ff 
+  b6175c:	48 8d 84 24 00 19 00 	lea    0x1900(%rsp),%rax
+  b61763:	00 
+  b61764:	64 48 89 04 25 d8 f6 	mov    %rax,%fs:0xfffffffffffff6d8
+  b6176b:	ff ff 
+  b6176d:	64 48 c7 04 25 38 f7 	movq   $0x0,%fs:0xfffffffffffff738
+  b61774:	ff ff 00 00 00 00 
+  b6177a:	64 c6 04 25 e8 f6 ff 	movb   $0x1,%fs:0xfffffffffffff6e8
+  b61781:	ff 01 
+  b61783:	64 48 83 3c 25 f0 f6 	cmpq   $0x0,%fs:0xfffffffffffff6f0
+  b6178a:	ff ff 00 
+  b6178d:	c5 f9 7f 84 24 70 05 	vmovdqa %xmm0,0x570(%rsp)
+  b61794:	00 00 
+  b61796:	74 25                	je     b617bd <main_unit_executable+0x1f7d>
+  b61798:	64 4c 8b 34 25 f8 f6 	mov    %fs:0xfffffffffffff6f8,%r14
+  b6179f:	ff ff 
+  b617a1:	64 48 8b 04 25 00 f7 	mov    %fs:0xfffffffffffff700,%rax
+  b617a8:	ff ff 
+  b617aa:	80 bc 24 d8 18 00 00 	cmpb   $0x1,0x18d8(%rsp)
+  b617b1:	01 
+  b617b2:	0f 84 cf 00 00 00    	je     b61887 <main_unit_executable+0x2047>
+  b617b8:	e9 07 01 00 00       	jmp    b618c4 <main_unit_executable+0x2084>
+  b617bd:	ba 03 00 00 00       	mov    $0x3,%edx
+  b617c2:	b9 22 40 00 00       	mov    $0x4022,%ecx
+  b617c7:	41 b8 ff ff ff ff    	mov    $0xffffffff,%r8d
+  b617cd:	31 ff                	xor    %edi,%edi
+  b617cf:	45 31 c9             	xor    %r9d,%r9d
+  b617d2:	49 89 f7             	mov    %rsi,%r15
+  b617d5:	c5 f8 77             	vzeroupper
+  b617d8:	e8 f3 e3 b9 ff       	call   6ffbd0 <mmap@plt>
+  b617dd:	48 83 f8 ff          	cmp    $0xffffffffffffffff,%rax
+  b617e1:	74 68                	je     b6184b <main_unit_executable+0x200b>
+  b617e3:	4c 8d b0 ff ff 20 00 	lea    0x20ffff(%rax),%r14
+  b617ea:	4c 89 6c 24 60       	mov    %r13,0x60(%rsp)
+  b617ef:	ba 0f 00 00 00       	mov    $0xf,%edx
+  b617f4:	48 89 c7             	mov    %rax,%rdi
+  b617f7:	49 81 e6 00 00 e0 ff 	and    $0xffffffffffe00000,%r14
+  b617fe:	4d 89 f5             	mov    %r14,%r13
+  b61801:	49 29 c5             	sub    %rax,%r13
+  b61804:	49 8d 8d 00 00 ff ff 	lea    -0x10000(%r13),%rcx
+  b6180b:	4c 89 ee             	mov    %r13,%rsi
+  b6180e:	48 89 8c 24 88 00 00 	mov    %rcx,0x88(%rsp)
+  b61815:	00 
+  b61816:	e8 65 e3 b9 ff       	call   6ffb80 <madvise@plt>
+  b6181b:	4c 89 fe             	mov    %r15,%rsi
+  b6181e:	4c 29 ee             	sub    %r13,%rsi
+  b61821:	4c 8b 6c 24 60       	mov    0x60(%rsp),%r13
+  b61826:	ba 0e 00 00 00       	mov    $0xe,%edx
+  b6182b:	4c 89 f7             	mov    %r14,%rdi
+  b6182e:	e8 4d e3 b9 ff       	call   6ffb80 <madvise@plt>
+  b61833:	48 8b 8c 24 88 00 00 	mov    0x88(%rsp),%rcx
+  b6183a:	00 
+  b6183b:	49 81 c6 00 00 ff ff 	add    $0xffffffffffff0000,%r14
+  b61842:	49 8d 87 00 00 e0 ff 	lea    -0x200000(%r15),%rax
+  b61849:	eb 07                	jmp    b61852 <main_unit_executable+0x2012>
+  b6184b:	45 31 f6             	xor    %r14d,%r14d
+  b6184e:	31 c0                	xor    %eax,%eax
+  b61850:	31 c9                	xor    %ecx,%ecx
+  b61852:	64 4c 89 34 25 f0 f6 	mov    %r14,%fs:0xfffffffffffff6f0
+  b61859:	ff ff 
+  b6185b:	64 48 c7 04 25 f8 f6 	movq   $0x0,%fs:0xfffffffffffff6f8
+  b61862:	ff ff 00 00 00 00 
+  b61868:	64 48 89 04 25 00 f7 	mov    %rax,%fs:0xfffffffffffff700
+  b6186f:	ff ff 
+  b61871:	45 31 f6             	xor    %r14d,%r14d
+  b61874:	64 48 89 0c 25 08 f7 	mov    %rcx,%fs:0xfffffffffffff708
+  b6187b:	ff ff 
+  b6187d:	80 bc 24 d8 18 00 00 	cmpb   $0x1,0x18d8(%rsp)
+  b61884:	01 
+  b61885:	75 3d                	jne    b618c4 <main_unit_executable+0x2084>
+  b61887:	64 8b 0c 25 d0 f6 ff 	mov    %fs:0xfffffffffffff6d0,%ecx
+  b6188e:	ff 
+  b6188f:	3b 8c 24 dc 18 00 00 	cmp    0x18dc(%rsp),%ecx
+  b61896:	75 2c                	jne    b618c4 <main_unit_executable+0x2084>
+  b61898:	48 8b 8c 24 e0 18 00 	mov    0x18e0(%rsp),%rcx
+  b6189f:	00 
+  b618a0:	48 89 c2             	mov    %rax,%rdx
+  b618a3:	4c 29 f2             	sub    %r14,%rdx
+  b618a6:	48 39 ca             	cmp    %rcx,%rdx
+  b618a9:	0f 96 c2             	setbe  %dl
+  b618ac:	4c 39 f0             	cmp    %r14,%rax
+  b618af:	40 0f 92 c6          	setb   %sil
+  b618b3:	40 08 d6             	or     %dl,%sil
+  b618b6:	75 0c                	jne    b618c4 <main_unit_executable+0x2084>
+  b618b8:	48 29 c8             	sub    %rcx,%rax
+  b618bb:	64 48 89 04 25 f8 f6 	mov    %rax,%fs:0xfffffffffffff6f8
+  b618c2:	ff ff 
+  b618c4:	48 8b bc 24 c0 17 00 	mov    0x17c0(%rsp),%rdi
+  b618cb:	00 
+  b618cc:	48 8d b4 24 c8 17 00 	lea    0x17c8(%rsp),%rsi
+  b618d3:	00 
+  b618d4:	48 8d 94 24 08 18 00 	lea    0x1808(%rsp),%rdx
+  b618db:	00 
+  b618dc:	c5 f8 77             	vzeroupper
+  b618df:	e8 8c 52 04 00       	call   ba6b70 <executable_write>
+  b618e4:	64 4c 3b 34 25 f8 f6 	cmp    %fs:0xfffffffffffff6f8,%r14
+  b618eb:	ff ff 
+  b618ed:	0f 87 9b 25 00 00    	ja     b63e8e <main_unit_executable+0x464e>
+  b618f3:	64 4c 89 34 25 f8 f6 	mov    %r14,%fs:0xfffffffffffff6f8
+  b618fa:	ff ff 
+  b618fc:	64 83 3c 25 d0 f6 ff 	cmpl   $0x0,%fs:0xfffffffffffff6d0
+  b61903:	ff 00 
+  b61905:	75 07                	jne    b6190e <main_unit_executable+0x20ce>
+  b61907:	88 84 24 e8 18 00 00 	mov    %al,0x18e8(%rsp)
+  b6190e:	c5 f9 6f 84 24 70 05 	vmovdqa 0x570(%rsp),%xmm0
+  b61915:	00 00 
+  b61917:	48 8b 84 24 f8 00 00 	mov    0xf8(%rsp),%rax
+  b6191e:	00 
+  b6191f:	64 44 88 24 25 e8 f6 	mov    %r12b,%fs:0xfffffffffffff6e8
+  b61926:	ff ff 
+  b61928:	64 4c 89 2c 25 38 f7 	mov    %r13,%fs:0xfffffffffffff738
+  b6192f:	ff ff 
+  b61931:	41 b4 01             	mov    $0x1,%r12b
+  b61934:	c5 fa 7f 00          	vmovdqu %xmm0,(%rax)
+  b61938:	8b 84 24 08 18 00 00 	mov    0x1808(%rsp),%eax
+  b6193f:	4c 8b b4 24 28 18 00 	mov    0x1828(%rsp),%r14
+  b61946:	00 
+  b61947:	44 22 a4 24 e8 18 00 	and    0x18e8(%rsp),%r12b
+  b6194e:	00 
+  b6194f:	41 b5 01             	mov    $0x1,%r13b
+  b61952:	48 89 44 24 60       	mov    %rax,0x60(%rsp)
+  b61957:	66 0f 1f 84 00 00 00 	nopw   0x0(%rax,%rax,1)
+  b6195e:	00 00 
+  b61960:	bf 01 00 00 00       	mov    $0x1,%edi
+  b61965:	48 8d b4 24 00 19 00 	lea    0x1900(%rsp),%rsi
+  b6196c:	00 
+  b6196d:	c5 f8 77             	vzeroupper
+  b61970:	e8 bb d8 b9 ff       	call   6ff230 <clock_gettime@plt>
+  b61975:	48 69 84 24 00 19 00 	imul   $0x3b9aca00,0x1900(%rsp),%rax
+  b6197c:	00 00 ca 9a 3b 
+  b61981:	48 03 84 24 08 19 00 	add    0x1908(%rsp),%rax
+  b61988:	00 
+  b61989:	48 89 84 24 60 01 00 	mov    %rax,0x160(%rsp)
+  b61990:	00 
+  b61991:	8b 84 24 70 04 00 00 	mov    0x470(%rsp),%eax
+  b61998:	49 89 c7             	mov    %rax,%r15
+  b6199b:	0b 84 24 c0 00 00 00 	or     0xc0(%rsp),%eax
+  b619a2:	0f 94 c0             	sete   %al
+  b619a5:	45 20 e5             	and    %r12b,%r13b
+  b619a8:	41 20 c5             	and    %al,%r13b
+  b619ab:	41 80 fd 01          	cmp    $0x1,%r13b
+  b619af:	0f 85 37 02 00 00    	jne    b61bec <main_unit_executable+0x23ac>
+  b619b5:	48 8b 9c 24 68 02 00 	mov    0x268(%rsp),%rbx
+  b619bc:	00 
+  b619bd:	8b 84 24 44 03 00 00 	mov    0x344(%rsp),%eax
+  b619c4:	48 2b 9c 24 08 01 00 	sub    0x108(%rsp),%rbx
+  b619cb:	00 
+  b619cc:	48 03 9c 24 e8 04 00 	add    0x4e8(%rsp),%rbx
+  b619d3:	00 
+  b619d4:	48 03 9c 24 58 03 00 	add    0x358(%rsp),%rbx
+  b619db:	00 
+  b619dc:	48 85 c0             	test   %rax,%rax
+  b619df:	74 1c                	je     b619fd <main_unit_executable+0x21bd>
+  b619e1:	48 8b 8c 24 60 04 00 	mov    0x460(%rsp),%rcx
+  b619e8:	00 
+  b619e9:	48 8b bc 24 58 01 00 	mov    0x158(%rsp),%rdi
+  b619f0:	00 
+  b619f1:	83 f8 08             	cmp    $0x8,%eax
+  b619f4:	73 14                	jae    b61a0a <main_unit_executable+0x21ca>
+  b619f6:	31 d2                	xor    %edx,%edx
+  b619f8:	e9 94 01 00 00       	jmp    b61b91 <main_unit_executable+0x2351>
+  b619fd:	48 8b bc 24 58 01 00 	mov    0x158(%rsp),%rdi
+  b61a04:	00 
+  b61a05:	e9 b5 01 00 00       	jmp    b61bbf <main_unit_executable+0x237f>
+  b61a0a:	83 f8 20             	cmp    $0x20,%eax
+  b61a0d:	73 07                	jae    b61a16 <main_unit_executable+0x21d6>
+  b61a0f:	31 d2                	xor    %edx,%edx
+  b61a11:	e9 f4 00 00 00       	jmp    b61b0a <main_unit_executable+0x22ca>
+  b61a16:	62 f1 fd 48 6f 15 a0 	vmovdqa64 -0x5eb160(%rip),%zmm2        # 5768c0 <bind_test_shared_rule_link.definitions.rel+0xc4>
+  b61a1d:	4e a1 ff 
+  b61a20:	62 f2 fd 48 59 3d 26 	vpbroadcastq -0x5485da(%rip),%zmm7        # 619450 <link_program_emit_worker.forms+0x10>
+  b61a27:	7a ab ff 
+  b61a2a:	62 72 fd 48 59 05 24 	vpbroadcastq -0x5485dc(%rip),%zmm8        # 619458 <link_program_emit_worker.forms+0x18>
+  b61a31:	7a ab ff 
+  b61a34:	89 c2                	mov    %eax,%edx
+  b61a36:	83 e2 e0             	and    $0xffffffe0,%edx
+  b61a39:	c4 e1 f9 6e c3       	vmovq  %rbx,%xmm0
+  b61a3e:	c5 f1 ef c9          	vpxor  %xmm1,%xmm1,%xmm1
+  b61a42:	c5 e1 ef db          	vpxor  %xmm3,%xmm3,%xmm3
+  b61a46:	c5 d9 ef e4          	vpxor  %xmm4,%xmm4,%xmm4
+  b61a4a:	48 89 d6             	mov    %rdx,%rsi
+  b61a4d:	0f 1f 00             	nopl   (%rax)
+  b61a50:	62 f2 ed 48 40 ef    	vpmullq %zmm7,%zmm2,%zmm5
+  b61a56:	c5 fd 46 c8          	kxnorb %k0,%k0,%k1
+  b61a5a:	c5 c9 ef f6          	vpxor  %xmm6,%xmm6,%xmm6
+  b61a5e:	62 d1 ed 48 d4 d0    	vpaddq %zmm8,%zmm2,%zmm2
+  b61a64:	48 83 c6 e0          	add    $0xffffffffffffffe0,%rsi
+  b61a68:	62 f2 fd 49 91 74 29 	vpgatherqq 0x8(%rcx,%zmm5,1),%zmm6{%k1}
+  b61a6f:	01 
+  b61a70:	c5 fd 46 c8          	kxnorb %k0,%k0,%k1
+  b61a74:	62 f1 cd 48 d4 c0    	vpaddq %zmm0,%zmm6,%zmm0
+  b61a7a:	c5 c9 ef f6          	vpxor  %xmm6,%xmm6,%xmm6
+  b61a7e:	62 f2 fd 49 91 b4 29 	vpgatherqq 0x608(%rcx,%zmm5,1),%zmm6{%k1}
+  b61a85:	08 06 00 00 
+  b61a89:	c5 fd 46 c8          	kxnorb %k0,%k0,%k1
+  b61a8d:	62 f1 cd 48 d4 c9    	vpaddq %zmm1,%zmm6,%zmm1
+  b61a93:	c5 c9 ef f6          	vpxor  %xmm6,%xmm6,%xmm6
+  b61a97:	62 f2 fd 49 91 b4 29 	vpgatherqq 0xc08(%rcx,%zmm5,1),%zmm6{%k1}
+  b61a9e:	08 0c 00 00 
+  b61aa2:	c5 fd 46 c8          	kxnorb %k0,%k0,%k1
+  b61aa6:	62 f1 cd 48 d4 db    	vpaddq %zmm3,%zmm6,%zmm3
+  b61aac:	c5 c9 ef f6          	vpxor  %xmm6,%xmm6,%xmm6
+  b61ab0:	62 f2 fd 49 91 b4 29 	vpgatherqq 0x1208(%rcx,%zmm5,1),%zmm6{%k1}
+  b61ab7:	08 12 00 00 
+  b61abb:	62 f1 cd 48 d4 e4    	vpaddq %zmm4,%zmm6,%zmm4
+  b61ac1:	75 8d                	jne    b61a50 <main_unit_executable+0x2210>
+  b61ac3:	62 f1 f5 48 d4 c0    	vpaddq %zmm0,%zmm1,%zmm0
+  b61ac9:	62 f1 e5 48 d4 c0    	vpaddq %zmm0,%zmm3,%zmm0
+  b61acf:	62 f1 dd 48 d4 c0    	vpaddq %zmm0,%zmm4,%zmm0
+  b61ad5:	62 f3 fd 48 3b c1 01 	vextracti64x4 $0x1,%zmm0,%ymm1
+  b61adc:	62 f1 fd 48 d4 c1    	vpaddq %zmm1,%zmm0,%zmm0
+  b61ae2:	c4 e3 7d 39 c1 01    	vextracti128 $0x1,%ymm0,%xmm1
+  b61ae8:	c5 f9 d4 c1          	vpaddq %xmm1,%xmm0,%xmm0
+  b61aec:	c5 f9 70 c8 ee       	vpshufd $0xee,%xmm0,%xmm1
+  b61af1:	c5 f9 d4 c1          	vpaddq %xmm1,%xmm0,%xmm0
+  b61af5:	c4 e1 f9 7e c3       	vmovq  %xmm0,%rbx
+  b61afa:	39 c2                	cmp    %eax,%edx
+  b61afc:	0f 84 bd 00 00 00    	je     b61bbf <main_unit_executable+0x237f>
+  b61b02:	a8 18                	test   $0x18,%al
+  b61b04:	0f 84 87 00 00 00    	je     b61b91 <main_unit_executable+0x2351>
+  b61b0a:	48 89 d6             	mov    %rdx,%rsi
+  b61b0d:	62 f2 fd 48 7c ce    	vpbroadcastq %rsi,%zmm1
+  b61b13:	62 f1 f5 48 eb 0d a3 	vporq  -0x5eb25d(%rip),%zmm1,%zmm1        # 5768c0 <bind_test_shared_rule_link.definitions.rel+0xc4>
+  b61b1a:	4d a1 ff 
+  b61b1d:	62 f2 fd 48 59 25 29 	vpbroadcastq -0x5486d7(%rip),%zmm4        # 619450 <link_program_emit_worker.forms+0x10>
+  b61b24:	79 ab ff 
+  b61b27:	62 f2 fd 48 59 2d 2f 	vpbroadcastq -0x5486d1(%rip),%zmm5        # 619460 <link_program_emit_worker.forms+0x20>
+  b61b2e:	79 ab ff 
+  b61b31:	89 c2                	mov    %eax,%edx
+  b61b33:	83 e2 f8             	and    $0xfffffff8,%edx
+  b61b36:	c4 e1 f9 6e c3       	vmovq  %rbx,%xmm0
+  b61b3b:	48 29 d6             	sub    %rdx,%rsi
+  b61b3e:	66 90                	xchg   %ax,%ax
+  b61b40:	62 f2 f5 48 40 d4    	vpmullq %zmm4,%zmm1,%zmm2
+  b61b46:	c5 fd 46 c8          	kxnorb %k0,%k0,%k1
+  b61b4a:	c5 e1 ef db          	vpxor  %xmm3,%xmm3,%xmm3
+  b61b4e:	62 f1 f5 48 d4 cd    	vpaddq %zmm5,%zmm1,%zmm1
+  b61b54:	48 83 c6 08          	add    $0x8,%rsi
+  b61b58:	62 f2 fd 49 91 5c 11 	vpgatherqq 0x8(%rcx,%zmm2,1),%zmm3{%k1}
+  b61b5f:	01 
+  b61b60:	62 f1 e5 48 d4 c0    	vpaddq %zmm0,%zmm3,%zmm0
+  b61b66:	75 d8                	jne    b61b40 <main_unit_executable+0x2300>
+  b61b68:	62 f3 fd 48 3b c1 01 	vextracti64x4 $0x1,%zmm0,%ymm1
+  b61b6f:	62 f1 fd 48 d4 c1    	vpaddq %zmm1,%zmm0,%zmm0
+  b61b75:	c4 e3 7d 39 c1 01    	vextracti128 $0x1,%ymm0,%xmm1
+  b61b7b:	c5 f9 d4 c1          	vpaddq %xmm1,%xmm0,%xmm0
+  b61b7f:	c5 f9 70 c8 ee       	vpshufd $0xee,%xmm0,%xmm1
+  b61b84:	c5 f9 d4 c1          	vpaddq %xmm1,%xmm0,%xmm0
+  b61b88:	c4 e1 f9 7e c3       	vmovq  %xmm0,%rbx
+  b61b8d:	39 c2                	cmp    %eax,%edx
+  b61b8f:	74 2e                	je     b61bbf <main_unit_executable+0x237f>
+  b61b91:	48 29 d0             	sub    %rdx,%rax
+  b61b94:	48 8d 14 52          	lea    (%rdx,%rdx,2),%rdx
+  b61b98:	48 c1 e2 06          	shl    $0x6,%rdx
+  b61b9c:	48 8d 4c 11 08       	lea    0x8(%rcx,%rdx,1),%rcx
+  b61ba1:	66 66 66 66 66 66 2e 	data16 data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+  b61ba8:	0f 1f 84 00 00 00 00 
+  b61baf:	00 
+  b61bb0:	48 03 19             	add    (%rcx),%rbx
+  b61bb3:	48 81 c1 c0 00 00 00 	add    $0xc0,%rcx
+  b61bba:	48 ff c8             	dec    %rax
+  b61bbd:	75 f1                	jne    b61bb0 <main_unit_executable+0x2370>
+  b61bbf:	0f b6 8c 24 08 03 00 	movzbl 0x308(%rsp),%ecx
+  b61bc6:	00 
+  b61bc7:	8b 84 24 c8 02 00 00 	mov    0x2c8(%rsp),%eax
+  b61bce:	4c 89 b4 24 a0 01 00 	mov    %r14,0x1a0(%rsp)
+  b61bd5:	00 
+  b61bd6:	84 c9                	test   %cl,%cl
+  b61bd8:	48 89 8c 24 98 00 00 	mov    %rcx,0x98(%rsp)
+  b61bdf:	00 
+  b61be0:	48 0f 44 c7          	cmove  %rdi,%rax
+  b61be4:	48 89 84 24 a8 01 00 	mov    %rax,0x1a8(%rsp)
+  b61beb:	00 
+  b61bec:	48 8b bc 24 e0 04 00 	mov    0x4e0(%rsp),%rdi
+  b61bf3:	00 
+  b61bf4:	48 85 ff             	test   %rdi,%rdi
+  b61bf7:	74 37                	je     b61c30 <main_unit_executable+0x23f0>
+  b61bf9:	48 8b 84 24 f0 04 00 	mov    0x4f0(%rsp),%rax
+  b61c00:	00 
+  b61c01:	48 2b bc 24 f8 04 00 	sub    0x4f8(%rsp),%rdi
+  b61c08:	00 
+  b61c09:	48 8d 88 ff 0f 00 00 	lea    0xfff(%rax),%rcx
+  b61c10:	48 81 e1 00 f0 ff ff 	and    $0xfffffffffffff000,%rcx
+  b61c17:	48 3d 01 00 01 00    	cmp    $0x10001,%rax
+  b61c1d:	48 8d b1 00 00 20 00 	lea    0x200000(%rcx),%rsi
+  b61c24:	48 0f 42 f1          	cmovb  %rcx,%rsi
+  b61c28:	c5 f8 77             	vzeroupper
+  b61c2b:	e8 d0 d7 b9 ff       	call   6ff400 <munmap@plt>
+  b61c30:	48 8b 84 24 70 03 00 	mov    0x370(%rsp),%rax
+  b61c37:	00 
+  b61c38:	c5 f9 ef c0          	vpxor  %xmm0,%xmm0,%xmm0
+  b61c3c:	c5 fd 7f 84 24 e0 04 	vmovdqa %ymm0,0x4e0(%rsp)
+  b61c43:	00 00 
+  b61c45:	c5 f9 ef c0          	vpxor  %xmm0,%xmm0,%xmm0
+  b61c49:	48 85 c0             	test   %rax,%rax
+  b61c4c:	74 62                	je     b61cb0 <main_unit_executable+0x2470>
+  b61c4e:	41 be 30 00 00 00    	mov    $0x30,%r14d
+  b61c54:	49 c7 c4 ff ff ff ff 	mov    $0xffffffffffffffff,%r12
+  b61c5b:	eb 0c                	jmp    b61c69 <main_unit_executable+0x2429>
+  b61c5d:	0f 1f 00             	nopl   (%rax)
+  b61c60:	49 83 c6 48          	add    $0x48,%r14
+  b61c64:	48 85 c0             	test   %rax,%rax
+  b61c67:	74 47                	je     b61cb0 <main_unit_executable+0x2470>
+  b61c69:	8b 8c 24 78 03 00 00 	mov    0x378(%rsp),%ecx
+  b61c70:	49 ff c4             	inc    %r12
+  b61c73:	49 39 cc             	cmp    %rcx,%r12
+  b61c76:	73 38                	jae    b61cb0 <main_unit_executable+0x2470>
+  b61c78:	4a 8b 74 30 f8       	mov    -0x8(%rax,%r14,1),%rsi
+  b61c7d:	48 85 f6             	test   %rsi,%rsi
+  b61c80:	74 de                	je     b61c60 <main_unit_executable+0x2420>
+  b61c82:	42 80 3c 30 00       	cmpb   $0x0,(%rax,%r14,1)
+  b61c87:	75 d7                	jne    b61c60 <main_unit_executable+0x2420>
+  b61c89:	4a 8b 7c 30 f0       	mov    -0x10(%rax,%r14,1),%rdi
+  b61c8e:	c5 f8 77             	vzeroupper
+  b61c91:	e8 6a d7 b9 ff       	call   6ff400 <munmap@plt>
+  b61c96:	48 8b 84 24 70 03 00 	mov    0x370(%rsp),%rax
+  b61c9d:	00 
+  b61c9e:	c5 f9 ef c0          	vpxor  %xmm0,%xmm0,%xmm0
+  b61ca2:	eb bc                	jmp    b61c60 <main_unit_executable+0x2420>
+  b61ca4:	66 66 66 2e 0f 1f 84 	data16 data16 cs nopw 0x0(%rax,%rax,1)
+  b61cab:	00 00 00 00 00 
+  b61cb0:	48 8b 84 24 b0 03 00 	mov    0x3b0(%rsp),%rax
+  b61cb7:	00 
+  b61cb8:	48 85 c0             	test   %rax,%rax
+  b61cbb:	74 53                	je     b61d10 <main_unit_executable+0x24d0>
+  b61cbd:	41 be 30 00 00 00    	mov    $0x30,%r14d
+  b61cc3:	49 c7 c4 ff ff ff ff 	mov    $0xffffffffffffffff,%r12
+  b61cca:	eb 10                	jmp    b61cdc <main_unit_executable+0x249c>
+  b61ccc:	0f 1f 40 00          	nopl   0x0(%rax)
+  b61cd0:	49 81 c6 28 01 00 00 	add    $0x128,%r14
+  b61cd7:	48 85 c0             	test   %rax,%rax
+  b61cda:	74 34                	je     b61d10 <main_unit_executable+0x24d0>
+  b61cdc:	8b 8c 24 b8 03 00 00 	mov    0x3b8(%rsp),%ecx
+  b61ce3:	49 ff c4             	inc    %r12
+  b61ce6:	49 39 cc             	cmp    %rcx,%r12
+  b61ce9:	73 25                	jae    b61d10 <main_unit_executable+0x24d0>
+  b61ceb:	4a 8b 34 30          	mov    (%rax,%r14,1),%rsi
+  b61cef:	48 85 f6             	test   %rsi,%rsi
+  b61cf2:	74 dc                	je     b61cd0 <main_unit_executable+0x2490>
+  b61cf4:	4a 8b 7c 30 f8       	mov    -0x8(%rax,%r14,1),%rdi
+  b61cf9:	c5 f8 77             	vzeroupper
+  b61cfc:	e8 ff d6 b9 ff       	call   6ff400 <munmap@plt>
+  b61d01:	48 8b 84 24 b0 03 00 	mov    0x3b0(%rsp),%rax
+  b61d08:	00 
+  b61d09:	c5 f9 ef c0          	vpxor  %xmm0,%xmm0,%xmm0
+  b61d0d:	eb c1                	jmp    b61cd0 <main_unit_executable+0x2490>
+  b61d0f:	90                   	nop
+  b61d10:	4c 8b b4 24 60 04 00 	mov    0x460(%rsp),%r14
+  b61d17:	00 
+  b61d18:	44 88 ac 24 88 00 00 	mov    %r13b,0x88(%rsp)
+  b61d1f:	00 
+  b61d20:	4d 85 f6             	test   %r14,%r14
+  b61d23:	0f 84 87 00 00 00    	je     b61db0 <main_unit_executable+0x2570>
+  b61d29:	49 c7 c4 ff ff ff ff 	mov    $0xffffffffffffffff,%r12
+  b61d30:	45 31 ed             	xor    %r13d,%r13d
+  b61d33:	eb 2b                	jmp    b61d60 <main_unit_executable+0x2520>
+  b61d35:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  b61d3c:	00 00 00 00 
+  b61d40:	4d 01 ee             	add    %r13,%r14
+  b61d43:	c5 f1 ef c9          	vpxor  %xmm1,%xmm1,%xmm1
+  b61d47:	49 81 c5 c0 00 00 00 	add    $0xc0,%r13
+  b61d4e:	c4 c1 7e 7f 0e       	vmovdqu %ymm1,(%r14)
+  b61d53:	4c 8b b4 24 60 04 00 	mov    0x460(%rsp),%r14
+  b61d5a:	00 
+  b61d5b:	4d 85 f6             	test   %r14,%r14
+  b61d5e:	74 50                	je     b61db0 <main_unit_executable+0x2570>
+  b61d60:	8b 84 24 44 03 00 00 	mov    0x344(%rsp),%eax
+  b61d67:	49 ff c4             	inc    %r12
+  b61d6a:	49 39 c4             	cmp    %rax,%r12
+  b61d6d:	73 41                	jae    b61db0 <main_unit_executable+0x2570>
+  b61d6f:	4b 8b 3c 2e          	mov    (%r14,%r13,1),%rdi
+  b61d73:	48 85 ff             	test   %rdi,%rdi
+  b61d76:	74 c8                	je     b61d40 <main_unit_executable+0x2500>
+  b61d78:	4b 8b 44 2e 10       	mov    0x10(%r14,%r13,1),%rax
+  b61d7d:	4b 2b 7c 2e 18       	sub    0x18(%r14,%r13,1),%rdi
+  b61d82:	48 8d 88 ff 0f 00 00 	lea    0xfff(%rax),%rcx
+  b61d89:	48 81 e1 00 f0 ff ff 	and    $0xfffffffffffff000,%rcx
+  b61d90:	48 3d 01 00 01 00    	cmp    $0x10001,%rax
+  b61d96:	48 8d b1 00 00 20 00 	lea    0x200000(%rcx),%rsi
+  b61d9d:	48 0f 42 f1          	cmovb  %rcx,%rsi
+  b61da1:	c5 f8 77             	vzeroupper
+  b61da4:	e8 57 d6 b9 ff       	call   6ff400 <munmap@plt>
+  b61da9:	c5 f9 ef c0          	vpxor  %xmm0,%xmm0,%xmm0
+  b61dad:	eb 91                	jmp    b61d40 <main_unit_executable+0x2500>
+  b61daf:	90                   	nop
+  b61db0:	48 8b bc 24 50 03 00 	mov    0x350(%rsp),%rdi
+  b61db7:	00 
+  b61db8:	48 85 ff             	test   %rdi,%rdi
+  b61dbb:	74 3b                	je     b61df8 <main_unit_executable+0x25b8>
+  b61dbd:	48 8b 84 24 60 03 00 	mov    0x360(%rsp),%rax
+  b61dc4:	00 
+  b61dc5:	48 2b bc 24 68 03 00 	sub    0x368(%rsp),%rdi
+  b61dcc:	00 
+  b61dcd:	48 8d 88 ff 0f 00 00 	lea    0xfff(%rax),%rcx
+  b61dd4:	48 81 e1 00 f0 ff ff 	and    $0xfffffffffffff000,%rcx
+  b61ddb:	48 3d 01 00 01 00    	cmp    $0x10001,%rax
+  b61de1:	48 8d b1 00 00 20 00 	lea    0x200000(%rcx),%rsi
+  b61de8:	48 0f 42 f1          	cmovb  %rcx,%rsi
+  b61dec:	c5 f8 77             	vzeroupper
+  b61def:	e8 0c d6 b9 ff       	call   6ff400 <munmap@plt>
+  b61df4:	c5 f9 ef c0          	vpxor  %xmm0,%xmm0,%xmm0
+  b61df8:	48 8b 84 24 08 01 00 	mov    0x108(%rsp),%rax
+  b61dff:	00 
+  b61e00:	62 f1 fe 48 7f 84 24 	vmovdqu64 %zmm0,0x470(%rsp)
+  b61e07:	70 04 00 00 
+  b61e0b:	62 f1 fd 48 7f 44 24 	vmovdqa64 %zmm0,0x440(%rsp)
+  b61e12:	11 
+  b61e13:	62 f1 fd 48 7f 44 24 	vmovdqa64 %zmm0,0x400(%rsp)
+  b61e1a:	10 
+  b61e1b:	62 f1 fd 48 7f 44 24 	vmovdqa64 %zmm0,0x3c0(%rsp)
+  b61e22:	0f 
+  b61e23:	62 f1 fd 48 7f 44 24 	vmovdqa64 %zmm0,0x380(%rsp)
+  b61e2a:	0e 
+  b61e2b:	62 f1 fd 48 7f 44 24 	vmovdqa64 %zmm0,0x340(%rsp)
+  b61e32:	0d 
+  b61e33:	48 3b 84 24 68 02 00 	cmp    0x268(%rsp),%rax
+  b61e3a:	00 
+  b61e3b:	0f 87 4d 20 00 00    	ja     b63e8e <main_unit_executable+0x464e>
+  b61e41:	bf 01 00 00 00       	mov    $0x1,%edi
+  b61e46:	48 8d b4 24 00 19 00 	lea    0x1900(%rsp),%rsi
+  b61e4d:	00 
+  b61e4e:	48 89 84 24 68 02 00 	mov    %rax,0x268(%rsp)
+  b61e55:	00 
+  b61e56:	c5 f8 77             	vzeroupper
+  b61e59:	e8 d2 d3 b9 ff       	call   6ff230 <clock_gettime@plt>
+  b61e5e:	4c 69 a4 24 00 19 00 	imul   $0x3b9aca00,0x1900(%rsp),%r12
+  b61e65:	00 00 ca 9a 3b 
+  b61e6a:	be 00 01 00 00       	mov    $0x100,%esi
+  b61e6f:	48 8d bc 24 c0 17 00 	lea    0x17c0(%rsp),%rdi
+  b61e76:	00 
+  b61e77:	4c 03 a4 24 08 19 00 	add    0x1908(%rsp),%r12
+  b61e7e:	00 
+  b61e7f:	0f ae e8             	lfence
+  b61e82:	0f 31                	rdtsc
+  b61e84:	0f ae e8             	lfence
+  b61e87:	44 8b 94 24 a0 02 00 	mov    0x2a0(%rsp),%r10d
+  b61e8e:	00 
+  b61e8f:	48 8b 8c 24 30 01 00 	mov    0x130(%rsp),%rcx
+  b61e96:	00 
+  b61e97:	4c 8b 44 24 68       	mov    0x68(%rsp),%r8
+  b61e9c:	49 89 d5             	mov    %rdx,%r13
+  b61e9f:	48 8d 15 24 da b0 ff 	lea    -0x4f25dc(%rip),%rdx        # 66f8ca <fuzz_comment_end+0x1107a>
+  b61ea6:	49 89 c6             	mov    %rax,%r14
+  b61ea9:	48 8b 84 24 40 01 00 	mov    0x140(%rsp),%rax
+  b61eb0:	00 
+  b61eb1:	4c 8b 08             	mov    (%rax),%r9
+  b61eb4:	31 c0                	xor    %eax,%eax
+  b61eb6:	4c 89 8c 24 08 01 00 	mov    %r9,0x108(%rsp)
+  b61ebd:	00 
+  b61ebe:	ff 74 24 60          	push   0x60(%rsp)
+  b61ec2:	ff 74 24 78          	push   0x78(%rsp)
+  b61ec6:	41 52                	push   %r10
+  b61ec8:	ff b4 24 d8 00 00 00 	push   0xd8(%rsp)
+  b61ecf:	41 57                	push   %r15
+  b61ed1:	4c 8b 7c 24 58       	mov    0x58(%rsp),%r15
+  b61ed6:	41 57                	push   %r15
+  b61ed8:	e8 c3 d2 b9 ff       	call   6ff1a0 <snprintf@plt>
+  b61edd:	48 83 c4 30          	add    $0x30,%rsp
+  b61ee1:	80 bc 24 88 00 00 00 	cmpb   $0x0,0x88(%rsp)
+  b61ee8:	00 
+  b61ee9:	0f 84 1f 0a 00 00    	je     b6290e <main_unit_executable+0x30ce>
+  b61eef:	48 8b 84 24 68 02 00 	mov    0x268(%rsp),%rax
+  b61ef6:	00 
+  b61ef7:	48 89 44 24 70       	mov    %rax,0x70(%rsp)
+  b61efc:	45 85 ff             	test   %r15d,%r15d
+  b61eff:	0f                   	.byte 0xf

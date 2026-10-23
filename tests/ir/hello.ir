@@ -1,0 +1,10 @@
+function () -> i32 {
+  slot $0 size=8 align=8 type=i64 flags=0x00
+b0:
+  %0 = stack_addr.ptr $0
+  %1 = const.i64 0x000000000000000000000a6f6c6c6568
+  %2 = store.void %0, %1 align=8
+  %3 = call.i32 @100(%0) fixed=(ptr) variadic=1
+  %4 = const.i32 0x00000000000000000000000000000000
+  %5 = ret.void %4
+}

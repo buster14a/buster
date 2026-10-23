@@ -1,0 +1,18 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:08:33+00:00 codex-linker-foreign86: bash -c cd /home/david/buster-fast-bench/codex-linker-foreign86-cie-v1 && ./build.sh
+  title: Isolated CIE v1 exact source build
+  link: https://github.com/buster14a/buster/issues/86
+64 workers, bound against the shared library's runtime and written as a shared library: 284 atoms, 1064 fixups, 13858 bytes of code, 172 dynamic symbols, 235 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 43 stubs, a 39928-byte file in 1 chunks, 8 lanes:
+  replace         23.8 us ( 1.68 GB/s): count 2.2 layout 1.9 symbols 0.4 dynamic 1.9 open 2.2 chunks 11.8 finish 2.8
+  new file        19.6 us ( 2.04 GB/s): count 2.2 layout 1.9 symbols 0.4 dynamic 2.0 open 1.5 chunks 10.1 finish 1.2
+  general-dynamic TLS: 64 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place         1.3 us (31.37 GB/s): the floor, one pwrite
+  new file         3.1 us (12.77 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 365516 atoms, 2702790 fixups, 37410098 bytes of code, 450012 dynamic symbols, 605636 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113885 stubs, a 93509416-byte file in 357 chunks, 8 lanes:
+  replace      25870.0 us ( 3.61 GB/s): count 2544.1 layout 1502.8 symbols 543.3 dynamic 2671.8 open 77.9 chunks 14993.8 finish 3597.2
+  new file     23347.3 us ( 4.01 GB/s): count 2530.5 layout 1514.6 symbols 523.2 dynamic 2682.1 open 74.0 chunks 15955.6 finish 13.9
+  general-dynamic TLS: 180000 callable probes and distinct symbols, 64 backing objects, vector path, all results checked
+  in place      6984.9 us (13.39 GB/s): the floor, one pwrite
+  new file     12353.1 us ( 7.57 GB/s): the floor, one pwrite
+peak_rss_kib 381448
+user_seconds 2.045770
+system_seconds 3.154497

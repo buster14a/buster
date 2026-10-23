@@ -9,6 +9,10 @@ didn't have, which lets the vector path take only code the scalar parser would
 accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
+The test-only [expression-fragment experiment](c-parser-fragments.md) records
+the alternative representation's contracts and the semantic-consumer work
+required before the complete comparison in #107 can select a representation.
+
 On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.54 ms,
 27.6 cycles a token, 2.37 times as fast as the scalar parser (65.4), and the
 libc corpus at 21.5 cycles a token, 2.37 times as fast (50.6); with the
@@ -44,6 +48,11 @@ The output, in `Parser`:
   diagnostic says it (out of memory, or past the parser's token limit).
 - **Statistics**: the share of top-level declarations and tokens the vector
   path left to the scalar parser.
+- **Optional GNU metadata**: `ParseOptions.extension_metadata` fills `Parser.gnu`
+  with source-ordered attribute groups, each group's contiguous names/argument
+  ranges, and declarator asm labels. This works with `tree_only` too; ordinary
+  syntax-only parsing leaves it off. [The GNU extension guide](c-gnu-extensions.md)
+  defines the ownership, batching, failure and semantic integration boundaries.
 
 What the tree guarantees, which the later passes may rely on:
 
@@ -150,6 +159,14 @@ perhaps in a scope (`gnu::unused`) and with an argument clause, a balanced run
 of tokens, separated by commas; its items and a GNU attribute list's may be
 empty, the last one too.
 
+GNU attributes at a block boundary now retain the choice between declaration
+and statement syntax until their following token is known. Attributes after a
+named label or a control head permit the following statement; at an ordinary
+block boundary, Clang's recognized statement-attribute names decide the
+declaration/expression ambiguity. The scalar state machine handles these
+prefixes, and the vector validator defers them to it. Applicability and effects
+remain the checker's responsibility.
+
 Each frame keeps the index of the frame its declarators' names belong to and
 what a comma at its top level is, so that no token costs more for what is open
 around it: 320,000 nested parentheses, ternaries with commas in them, or
@@ -186,9 +203,11 @@ an exact scalar twin (the twins together are `parse_twins`):
    A unit whose brackets don't balance goes to the scalar parser.
 2. **K3, type names.** A scalar pass in source order over the typedef
    declarations alone, found by a vector search for the keyword, then every
-   identifier classified against the set of names they declare, with mask
-   loops. A typedef name used before its first declarator, or declared in a
-   block, is flagged.
+   identifier classified with mask loops and dense per-name heads. Sparse
+   activation records distinguish names before, inside and after each block,
+   with visibility beginning after the complete declarator. Nested and sibling
+   aliases restore their previous heads. An ordinary name hiding a typedef
+   still goes to the exact scalar fallback when K2 finds its declarator.
 3. **K2, roles.** Each token's role from its kind, its neighbors' kinds, the
    role before it and its group's role, in rounds to a fixpoint from refined
    guesses (at most 8; the block loop runs one), with what the kinds decide
@@ -419,6 +438,14 @@ On the 9700X, at `d59d035`, with `--clang`:
   translation units (13,619,726 tokens, 7.6 s): every file accepted, as clang
   accepts it, with both paths' trees and every kernel's twin agreeing.
 
+The separately claimed #126 c-testsuite qualification at `5a9e050` adds all
+220 pinned C sources (254,294 tokens) on the locked 9700X. Every source agrees
+with Clang's preprocessor output and syntax acceptance, and the parser paths
+and kernel twins agree. Another 2,200 mutations have zero mismatches under
+the Clang parse-error rules; this mutation run does not compare the two parser
+paths. [The qualification record](measurements/parser-c-testsuite-2026-10-23/README.md)
+retains the exact corpus revision, manifests, configuration, controls and results.
+
 Locally, on a Ryzen 9 7940HS, at `a04f6c0` (the parser as at `d59d035`, whose
 merge of main brought other modules' changes): Lua 5.4.8's 34 files (572,263
 tokens) with `--clang` as well, the fixtures, and mutations of the corpora,
@@ -586,10 +613,59 @@ isolate the parser change over the same frozen source as the kernel runs.
 - The parser's diagnostics don't show the preprocessor's expansion notes yet
   ("expanded from macro"): #229's `pp_diagnose_output` renders them for an
   output token, which each diagnostic's token gives.
-- Block-scope typedef names, which K3 flags: exact per-identifier binding
-  stacks in K3 (#128) would keep those declarations on the vector path.
+- Ordinary declarations that shadow typedef names still use the scalar
+  fallback; K3 now handles unshadowed block-scope aliases directly (#128).
 - Multicore (#149, #151): top-level declarations start with empty stacks at
   depth 0, so a unit splits there, with only the typedef pass ordered.
 - `test-parser` builds a fresh intern table, preprocessor and parser for every
   unit it parses, and its generated inputs' units cost it about 2 million page
   faults, most of its time.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Source:
+[input columns/conversion](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_parser.c#L430),
+[vector orchestration](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_parser.c#L11109),
+[unit publication](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_parser.c#L11390).
+
+| Producer → consumer | Actual representation and completion |
+| --- | --- |
+| PP output → `parse_tokens_from_output` → all parser paths | u8 grammar kinds/flags, u32 names and PP source indices; pragma source/position columns. Keywords merge, pragma lines leave as events, `::` becomes two tokens sharing a PP identity. |
+| K1 brackets → K3 typedef candidates → K2 roles → secondary K1 | Bracket matches/depths, candidate type-name information, roles and secondary matches are separate dependencies. K3 at this pin is not the later [#320](https://github.com/buster14a/buster/pull/320) scoped-binding producer. |
+| Roles/depths → K4 nearest-smaller parents → K5 statements | Contiguous token columns and block summaries, including cross-block search state. A subtree is a source-contiguous range; source order and statement attachments are semantic. |
+| Kernel checks → top-level fallback → final tree | Flagged top-level declarations are reparsed by the scalar parser. Parent/role/depth output and diagnostics become usable only after fallback/completion; counts report actual deferred work. |
+| Tree → `parse_postorder_sorted` → `check_input` | u32 postorder token permutation and subtree sizes on an error-free full parse. Checker requires both and retains the tree, tokens and PP identities. |
+| Tree/diagnostics → `run_parse_command` / `parse_print_diagnostics` | `tree_only` deliberately omits postorder/sizes; diagnostics resolve PP source indices and macro history. Tests/benchmarks are additional tree/postorder consumers. |
+
+Parser token columns allocate for up to twice the PP token count before
+conversion, plus **128 initialized entries before and after** the logical
+range. Kinds use END sentinels and other padding is zero. Token, parent and key
+limits are bounded by `BUSTER_PARSE_MAX_TOKENS` (1 << 30). Do not extend this
+padding guarantee to every unrelated scratch/side array. Parser-owned arenas
+outlive checker adaptation; PP/intern/cache storage outlives spelling and
+error rendering. A parse with diagnostics/fatal status is not valid semantic
+input even if some tree columns were filled.
+
+The logical unit and top-level declaration fallback boundaries are independent
+of 64-token/16-lane kernels. Cross-block brackets, typedef state, statement
+ownership and nearest-smaller searches prevent treating arbitrary chunks as
+independent parses. Postorder is published only after the complete parent tree;
+changing partitions must preserve parents, roles, depths, ordering and source
+mapping. Pragmas remain events, not removable noise for future checking.
+
+Observed costs include PP-to-parser copying/remapping and full-tree postorder
+construction. [#335](https://github.com/buster14a/buster/issues/335) compares the first with an optional producer-aware path;
+#104–#107/#315 own the fragment alternatives to the second. Neither may change
+checker semantics, source identity or move uncounted reconstruction downstream.
+Parser-derived bindings proposed in [#320](https://github.com/buster14a/buster/pull/320) and environment/extension branches
+#319/#324 are **not** main-branch outputs at this pin; #336 tracks shared checker
+consumption after integration.
+
+Disposition: keep full postorder for actual checking, retain the already
+measured elimination for the diagnostics-only driver. The driver comparison
+above is complete fresh-process syntax checking; parser-kernel results are not
+that measurement. `test-parser --clang` checks kernel twins, independent
+postorder, alignments/depth/recovery and tree-only equivalence. [#126](https://github.com/buster14a/buster/issues/126)/[#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)
+retain corpus and source-checker acceptance, including memory and fallback
+costs over real units, rather than assuming a fast kernel satisfies the handoff.

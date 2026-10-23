@@ -1313,6 +1313,69 @@ static void ir_inline_test_failure(IrInlineTest* test, const IrInlineUnit* unit,
     ir_inline_test_expect(test, memcmp(&result, &preserved, sizeof(result)) == 0 && output->length == output_mark && scratch->length == scratch_mark, "transactional result and arena rollback");
 }
 
+// A void callee whose body is only its return but which carries 32 constant rows costs 32 and grows no instructions.
+// Its 32,769 calls would append 2^20 + 32 constant rows: every call that fits stays selected, and the last one is a
+// growth decision rather than a representation-limit error for the whole unit.
+static void ir_inline_test_side_table_growth(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    const uint32_t calls = BUSTER_IR_INLINE_MAX_ITEMS / 32 + 1;
+    IrFunction functions[2];
+    functions[0] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = calls + 1,
+                                                            .block_count = 1,
+                                                            .call_count = calls,
+                                                        },
+                                           IR_VOID);
+    functions[1] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 1,
+                                                            .block_count = 1,
+                                                            .constant_count = 32,
+                                                        },
+                                           IR_VOID);
+    if (test->failures == 0)
+    {
+        for (uint32_t c = 0; c < calls; c += 1)
+        {
+            ir_inline_test_call(&functions[0], c, c, 2, 0, 0, IR_VOID);
+        }
+        ir_inline_test_node(&functions[0], calls, IR_RET, IR_VOID, UINT32_MAX, UINT32_MAX, UINT32_MAX);
+        for (uint32_t k = 0; k < 32; k += 1)
+        {
+            functions[1].constants[k] = (IrConstant){ .low = k };
+        }
+        ir_inline_test_node(&functions[1], 0, IR_RET, IR_VOID, UINT32_MAX, UINT32_MAX, UINT32_MAX);
+        const uint32_t symbols[] = {
+            1,
+            2,
+        };
+        const uint8_t flags[] = {
+            0,
+            BUSTER_IR_INLINE_INTERNAL,
+        };
+        const IrInlineUnit unit = {
+            functions,
+            symbols,
+            flags,
+            2,
+            128,
+        };
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
+        {
+            bool decisions = result.call_count == calls;
+            for (uint32_t c = 0; decisions && c < calls; c += 1)
+            {
+                decisions = result.decisions[c] == (c + 1 < calls ? IR_INLINE_SELECTED : IR_INLINE_GROWTH);
+            }
+            ir_inline_test_expect(test, decisions && result.inlined_calls == calls - 1, "side-table growth past the representation limit is a growth decision");
+            ir_inline_test_expect(test, result.functions[0].constant_count == BUSTER_IR_INLINE_MAX_ITEMS && result.functions[0].instruction_count == 2 && result.functions[0].op[0] == IR_CALL, "side-table limit keeps exactly the call that would overflow");
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
+}
+
 static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     IrFunction functions[2];
@@ -1457,6 +1520,7 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_graphs(&test, &input, &output, &twin, &scratch);
         ir_inline_test_threshold_guards(&test);
         ir_inline_test_empty_and_identity(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_side_table_growth(&test, &input, &output, &twin, &scratch);
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
     }
     arena_release(&scratch);

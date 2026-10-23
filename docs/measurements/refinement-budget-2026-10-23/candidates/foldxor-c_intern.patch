@@ -1,0 +1,16 @@
+--- a/src/buster/compiler/c_intern.c
++++ b/src/buster/compiler/c_intern.c
+@@ -527 +527 @@
+-    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(state, _mm_setzero_si128()));
++    return (uint64_t)_mm_cvtsi128_si64(_mm_xor_si128(state, _mm_srli_si128(state, 8)));
+@@ -550 +550,2 @@
+-    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(intern_fold(intern_with_length(v, length)), _mm_setzero_si128()));
++    const __m128i state = intern_fold(intern_with_length(v, length));
++    return (uint64_t)_mm_cvtsi128_si64(_mm_xor_si128(state, _mm_srli_si128(state, 8)));
+@@ -578 +579,2 @@
+-    return _mm512_aesenc_epi128(_mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96), zero);
++    const __m512i state = _mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96);
++    return _mm512_xor_si512(state, _mm512_bsrli_epi128(state, 8));
+@@ -604 +606 @@
+-    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(state, _mm_setzero_si128()));
++    return (uint64_t)_mm_cvtsi128_si64(_mm_xor_si128(state, _mm_srli_si128(state, 8)));

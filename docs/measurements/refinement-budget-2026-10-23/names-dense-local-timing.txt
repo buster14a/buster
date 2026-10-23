@@ -1,0 +1,10 @@
+1 files, 1243769 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   18.070 ms   58.52 cycles/input token  102.93 cycles/output token  131.04 instructions/input token  IPC 2.24
+               read 8.2%  lex 19.3%  refine 18.8%  directives 2.1%  main loop 51.6%
+               read 1.484 ms  lex 3.507 ms  refine 3.415 ms  directives 0.376 ms  main loop 9.365 ms
+             then the release 0.629 ms
+             -E -P with printing 23.367 ms (printing 5.274 ms): 441 MB/s of input (10312424 bytes), 30.3 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16750 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105

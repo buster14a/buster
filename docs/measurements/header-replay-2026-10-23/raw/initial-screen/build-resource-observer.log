@@ -1,0 +1,1 @@
+command clang -O2 -march=native -Wall -Wextra -Werror /home/david/buster-fast-bench/codex-header111/measure-run.c -o /home/david/buster-fast-bench/codex-header111/measure-run 

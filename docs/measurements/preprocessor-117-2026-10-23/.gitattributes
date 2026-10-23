@@ -1,0 +1,2 @@
+# Raw oracle TSV rows retain their empty final diagnostic field.
+raw/*.tsv whitespace=-blank-at-eol
