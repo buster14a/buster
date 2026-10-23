@@ -181,6 +181,7 @@ int run_snapshot_benchmark(int argc, char** argv);
 // the archive members the link needs loaded and COMDAT groups picked) and their tests, for the test-foreign command. Its
 // benchmark is another translation unit.
 #include "buster/compiler/foreign.c"
+#include "buster/compiler/foreign_unwind.c"
 #include "buster/compiler/foreign_link.c"
 #include "buster/compiler/foreign_test.c"
 int run_foreign_benchmark(int argc, char** argv);

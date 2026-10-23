@@ -2838,6 +2838,8 @@ static bool foreign_test_extended(const char* directory, Arena* arena)
 
 #include "buster/compiler/foreign_link_test.c"
 #include "buster/compiler/foreign_dynamic_test.c"
+#include "buster/compiler/foreign_unwind_test.c"
+#include "buster/compiler/foreign_unwind_runtime_test.c"
 
 static int run_foreign_tests(int argc, char** argv)
 {
@@ -2912,6 +2914,8 @@ static int run_foreign_tests(int argc, char** argv)
         passed = foreign_test_extended(directory, &arena) && passed;
         passed = foreign_link_test(directory, &arena, cross_check) && passed;
         passed = foreign_dynamic_test(directory, &arena, cross_check, &system) && passed;
+        passed = foreign_unwind_test() && passed;
+        passed = foreign_unwind_runtime_test(directory, &arena, cross_check, &system) && passed;
         if (!keep)
         {
             char* remove[] = {
