@@ -588,3 +588,49 @@ Receipts are under `~/buster-fast-bench/codex-takeover/293` on `benchpress`:
 `raw-preprocessor-provenance`, `raw-preprocessor-ab.log`,
 `raw-fixed-preprocessor.log` and `saved-repro-*.log`.
 `bench293-lexer.sh` and `bench293-preprocessor.sh` reproduce the bounded runs.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). The
+[raw API](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_lexer.c#L425)
+and [actual file producer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_preprocessor.c#L2381)
+make these implemented edges:
+
+| Producer → consumer | Representation and completion |
+| --- | --- |
+| File read/map or `pp_run_source` → `c_tokenize` | Immutable counted bytes, no readable padding or NUL required. The backing file/cache or supplied bytes must survive all token/spelling readers. |
+| `c_tokenize_vectorized` plus scalar recovery → `pp_lex_for_mode` → `refine_tokens` | Three disjoint columns: byte kind/start-of-line flag, u32 start, u32 end, source order; successful nonnegative count publishes the logical extent. Mode recovery can split/re-lex before refinement. |
+| Lexer columns → scalar/reference tests and benchmarks | The same raw contract; a negative result, including the raw vector-only decline, is not a publishable stream. |
+
+Each output column needs `length + 128` elements, not merely the number of
+logical tokens. This authorizes the lexer's whole-vector **stores**, not
+reads past source bytes. Source and all output columns are nonoverlapping;
+positions require `length <= UINT32_MAX - 128`. `pp_prepare_into` supplies
+64-byte-aligned columns, then trims their reservation to actual count plus
+slack before allocating leading-space words. Source alignment is unrestricted;
+the source tail is bounded by the lexer. Scalar recovery retains token order
+and exact physical source spans; it is not a second whole-file lexer pass in
+the common case.
+
+The logical batch is a file. Chunk carry includes lexical context, so an
+arbitrary split of source bytes is not a legal independent lexing partition.
+The implementation's fixed-width chunks, final partial chunk and recovery
+windows are internal. Full stores into provisioned output slack do not turn
+those entries into tokens. Empty source still needs the API's output capacity
+where the caller provides buffers; do not infer a null-pointer contract from
+a zero logical count.
+
+The producer retains starts/ends and line-start state, but refinement still
+classifies identifier kinds, compacts spans and scans for backslashes. Those
+are observed passes, not proof that exporting more lexer masks would help:
+normalization depends on mode, and most consumers do not need dense identifier
+metadata. Compare retaining a mask or fusing bounded preparation with the
+current in-place handoff under [#116](https://github.com/buster14a/buster/issues/116), including memory traffic and lifetime.
+Do not extend the raw API merely to improve `benchmark-lexer`.
+
+Disposition: retain the raw columns and bounded source contract. Existing
+lexer guarded/chunk/alignment and Clang checks plus refinement's independent
+oracle cover this handoff; whole-file preparation/refinement and actual
+preprocessing costs belong to [#116](https://github.com/buster14a/buster/issues/116)/[#117](https://github.com/buster14a/buster/issues/117). Contextual raw-string recovery remains
+with [#285](https://github.com/buster14a/buster/issues/285). Kernel ns/byte does not establish joint lex/refine/PP throughput.

@@ -197,3 +197,49 @@ raw process output, source and executable identities, commands, and limits.
 The implementation, tests, generator and timing/counter code are original
 project code. No external implementation, generated table or corpus is
 incorporated. Existing arena and intrinsic interfaces are used directly.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). The
+[event producer/solver contract](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_bindings.c#L4)
+and [actual checker consumer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_check_binding.c#L4)
+are implemented. `check_input_resolve` emits declare/use/restore events while
+elaborating declarations; `check_input_bindings` invokes `c_bindings_batch` or
+its independent scalar replay and maps activation handles to original token
+identities/types for expression reading. Parser source-column extraction in
+PR [#320](https://github.com/buster14a/buster/pull/320) is a separate pending producer.
+
+The event SoA has u32 key/declaration/point/end/previous/depth columns and byte
+operation/kind columns, with explicit count/capacity and dense namespace heads.
+A result is activation event + 1 (zero unresolved), not a declaration token;
+`declaration[result - 1]` supplies that token. Declaration activation follows
+the complete declarator, before its initializer; repeated parameter activation
+retains original source identity. Tags and labels have separate namespaces;
+member lookup belongs to the type table. Restore closes visibility intervals.
+
+Caller arenas own the events/results; workspace is private to a compilation
+thread. Internal allocations are 64-byte aligned, but input padding is not
+required. Capacity failure is sticky; a caller rejects the unit and resets.
+Checker scratch results are released only after mapping them into retained
+columns. An empty stream allocates nothing there. On resolver/allocation
+failure it publishes no usable use results, rather than accepting partial IDs.
+
+The batch solver stably sorts by namespace/name/event position, then scans
+16 candidates and bounds backward visibility walks before one lazy scalar
+replay. Sorting does not reorder declarations in the language. A full event
+stream or an explicitly retained initial environment is needed: arbitrary
+independent event slices lose earlier declarations/restores. Reset reuses heads
+across units without clearing every process-wide name.
+
+The current checker constructs and resolves its own binding events. Integrating
+the pending parser's retained columns would create duplicate syntactic event
+production unless the two consumers share a contract. Sorting/mapping also
+costs work relative to reusable stacks. [#336](https://github.com/buster14a/buster/issues/336) requires
+joint parser + typed elaboration + resolution + checking measurements before
+choosing retained columns or another resolver. It preserves [#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)/[#113](https://github.com/buster14a/buster/issues/113)
+owners; synthetic batch timings are not a source acceptance result.
+Disposition: retain the integrated checker path at the pin. `test-bindings`
+and checker source tests cover scope order, guard tails, capacities, independent
+replay and source identities. [#128](https://github.com/buster14a/buster/issues/128) and [#336](https://github.com/buster14a/buster/issues/336) retain actual corpus, whole-path
+memory, sorting share, event/identifier denominators and fallback acceptance.
