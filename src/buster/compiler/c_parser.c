@@ -3231,8 +3231,14 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         }
         else if (frame->flags & BUSTER_PARSE_FRAME_TYPEDEF)
         {
-            // A typedef can declare a function type, but cannot define a function. Report before binding the name.
-            parse_scalar_error(parser, i, PARSE_MESSAGE_FUNCTION_DEFINITION_TYPEDEF, BUSTER_PARSE_AT_TOKEN);
+            // Clang points at the storage-class specifier, not the body. Search only this declaration's file-scope
+            // specifiers: the keyword may follow the type, or one inside an attribute may precede the real specifier.
+            uint32_t at = parser->item_begin;
+            while (at < i && (parser->kinds[at] != PARSE_KIND_TYPEDEF || parser->depths[at] != 0))
+            {
+                at += 1;
+            }
+            parse_scalar_error(parser, at < i ? at : i, PARSE_MESSAGE_FUNCTION_DEFINITION_TYPEDEF, BUSTER_PARSE_AT_TOKEN);
         }
         else
         {
