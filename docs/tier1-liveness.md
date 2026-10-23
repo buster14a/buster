@@ -55,6 +55,9 @@ register with the result; the selector's destructive-operation handling and
 reserved R11 make that reuse legal. The input register pool is obtained from
 the selector's own allowed-register predicate: caller-saved GPRs excluding R11,
 RSP and callee-saved registers. The current adapter emits GPR intervals only.
+Narrow `I8`/`I16` definitions use canonical 32-bit registers and four-byte
+spill storage; their one/two-byte memory accesses remain a selector property.
+This does not admit narrow parameter/call ABI forms or narrow arithmetic.
 
 Parameters begin at position zero in their fixed SysV registers RDI, RSI, RDX,
 RCX, R8 and R9. The emitter emits no parameter move, so beginning a parameter
@@ -76,6 +79,13 @@ intervals. There are no fabricated phi copies or edge moves.
 If allocation produces a nonuniform or
 spilled value location, the current leaf emitter declines it explicitly. This
 does not claim that the general allocator lacks fragment support.
+
+The native consumer accepts forward block chains ending in a return, explicit
+unreachable, or a final block containing only a branch to itself. The empty
+terminal sink has no value locations to reconcile. The adapter's conservative
+CFG intervals alone do not authorize other machine-code joins or backedges:
+those require explicit predecessor/successor location reconciliation and
+edge-specific phi uses.
 
 ## Dense rows and conservative envelopes
 

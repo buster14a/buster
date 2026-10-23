@@ -133,11 +133,30 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
                 }
             }
         }
-        else if (plan->patterns[node].rule == TIER1_RULE_CALL)
+        else if (op == IR_UNREACHABLE)
+        {
+            const Tier1SelectPattern* pattern = &plan->patterns[node];
+            if (plan->covered[node] || pattern->rule != TIER1_RULE_UNREACHABLE || pattern->width != 0 || pattern->fold_count != 0 || first != end)
+            {
+                error = TIER1_LIVENESS_INVALID;
+            }
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
+            {
+                if (pattern->values[operand] != BUSTER_IR_NONE)
+                {
+                    error = TIER1_LIVENESS_INVALID;
+                }
+            }
+        }
+        else if (plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_UNREACHABLE)
         {
             error = TIER1_LIVENESS_INVALID;
         }
-        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0))
+        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0 || (type != IR_I32 && type != IR_I64 && type != IR_PTR)))
+        {
+            error = TIER1_LIVENESS_UNSUPPORTED;
+        }
+        else if (op == IR_RET && function->a[node] != BUSTER_IR_NONE && (function->type[function->a[node]] == IR_I8 || function->type[function->a[node]] == IR_I16))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;
         }

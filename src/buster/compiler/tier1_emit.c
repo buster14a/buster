@@ -12,8 +12,9 @@
 // flags conservatively live. Initial definitions are still emitted. Direct scalar calls publish symbolic CALL
 // references, save live caller registers in fixed frame rows and resolve argument moves with reserved R11.
 //
-// This consumer accepts a straight-line chain ending in RET; every earlier block must branch to the immediately
-// following block. General CFGs need edge location reconciliation; numeric fragment order is not a substitute.
+// This consumer accepts a straight-line chain ending in RET, UNREACHABLE or an empty self-loop sink; every earlier
+// block must branch to the immediately following block. The sink has no values to reconcile and retains its branch.
+// General CFGs need edge location reconciliation; numeric fragment order is not a substitute.
 // Indirect/variadic/wide-ABI calls, phi nodes, dynamic/variadic frames and direct register-to-register
 // fragment transitions are explicit unsupported cases. R11 remains reserved for selection and frame probes.
 //
@@ -572,7 +573,8 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
 {
     const uint32_t count = plan->function->instruction_count;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)result->allocation.fragment_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * 2 + (uint64_t)result->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS;
-    const uint32_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * 2;
+    const bool terminal_sink = count != 0 && plan->function->op[count - 1] == IR_BR;
+    const uint32_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * 2 + terminal_sink;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1EmitError error = capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
@@ -654,6 +656,21 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         if (error == TIER1_EMIT_OK && calls)
         {
             error = tier1_emit_call(plan, node, argument_registers, &transitions, &buffer, scratch, result);
+        }
+        else if (error == TIER1_EMIT_OK && terminal_sink && node + 1 == count)
+        {
+            // Only the validated one-instruction final block reaches here. Keep the actual infinite loop if a
+            // preceding ordinary call returns; a helper's name is not proof that replacing the loop is legal.
+            if (buffer.branch_count == buffer.branch_capacity || !tier1_emit_append(&buffer, (X86Instruction){ .form = X86_FORM_JMP_REL8 }))
+            {
+                error = TIER1_EMIT_MEMORY;
+            }
+            else
+            {
+                buffer.branches[buffer.branch_count] = buffer.count - 1;
+                buffer.targets[buffer.branch_count] = code->node_first[node];
+                buffer.branch_count += 1;
+            }
         }
         else if (error == TIER1_EMIT_OK && !plan->covered[node] && plan->function->op[node] != IR_BR)
         {
@@ -747,7 +764,9 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
         {
             const uint32_t last = function->block_offsets[block + 1] - 1;
             const bool final = block + 1 == function->block_count;
-            if ((final && function->op[last] != IR_RET) || (!final && (function->op[last] != IR_BR || function->a[last] != block + 1)))
+            const bool sink = function->op[last] == IR_BR && function->a[last] == block && function->block_offsets[block] == last;
+            const bool terminal = function->op[last] == IR_RET || function->op[last] == IR_UNREACHABLE || sink;
+            if ((final && !terminal) || (!final && (function->op[last] != IR_BR || function->a[last] != block + 1)))
             {
                 error = TIER1_EMIT_UNSUPPORTED;
             }

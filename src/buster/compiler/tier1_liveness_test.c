@@ -204,12 +204,12 @@ static bool tier1_liveness_test_compare(Tier1LivenessTest* test, const Tier1Sele
         tier1_liveness_test_expect(test, valid, "scalar/vector sizes, dense values and fixpoint iterations agree");
         if (valid)
         {
-            tier1_liveness_test_expect(test, memcmp(scalar->allocation.starts, vector->allocation.starts, bytes) == 0, "scalar/vector interval starts agree");
-            tier1_liveness_test_expect(test, memcmp(scalar->allocation.ends, vector->allocation.ends, bytes) == 0, "scalar/vector interval ends agree");
-            tier1_liveness_test_expect(test, memcmp(scalar->allocation.values, vector->allocation.values, bytes) == 0, "scalar/vector value identities agree");
-            tier1_liveness_test_expect(test, memcmp(scalar->allocation.allowed_registers, vector->allocation.allowed_registers, bytes) == 0, "scalar/vector register constraints agree");
+            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.starts, vector->allocation.starts, bytes) == 0, "scalar/vector interval starts agree");
+            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.ends, vector->allocation.ends, bytes) == 0, "scalar/vector interval ends agree");
+            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.values, vector->allocation.values, bytes) == 0, "scalar/vector value identities agree");
+            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.allowed_registers, vector->allocation.allowed_registers, bytes) == 0, "scalar/vector register constraints agree");
             tier1_liveness_test_expect(test, memcmp(scalar->allocation.use_offsets, vector->allocation.use_offsets, (uint64_t)(scalar->allocation.count + 1) * 4) == 0, "scalar/vector use offsets agree");
-            tier1_liveness_test_expect(test, memcmp(scalar->allocation.use_positions, vector->allocation.use_positions, (uint64_t)scalar->allocation.use_count * 4) == 0, "scalar/vector use positions agree");
+            tier1_liveness_test_expect(test, scalar->allocation.use_count == 0 || memcmp(scalar->allocation.use_positions, vector->allocation.use_positions, (uint64_t)scalar->allocation.use_count * 4) == 0, "scalar/vector use positions agree");
             tier1_liveness_test_oracle(test, plan, cfg, vector);
         }
     }
@@ -796,6 +796,146 @@ static void tier1_liveness_test_call_fold(Tier1LivenessTest* test)
     tier1_liveness_test_expect(test, valid, "folded source spanning direct call fixture completed");
 }
 
+static void tier1_liveness_test_narrow(Tier1LivenessTest* test)
+{
+    const IrSizes sizes =
+    {
+        .instruction_count = 7,
+        .block_count = 2,
+        .parameter_count = 1,
+    };
+    IrFunction function;
+    if (ir_create(&test->input, &sizes, &function) == IR_OK)
+    {
+        function.result_type = IR_I64;
+        function.block_offsets[1] = 3;
+        function.block_offsets[2] = 7;
+        function.parameter_types[0] = IR_PTR;
+        tier1_liveness_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 1, IR_LOAD, IR_I8, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 2, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 3, IR_SEXT, IR_I16, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 4, IR_STORE, IR_VOID, 0, 3, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 5, IR_ZEXT, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_liveness_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        Tier1SelectPlan plan;
+        IrCfg cfg;
+        if (tier1_liveness_test_plan(test, &function, &plan, &cfg))
+        {
+            Tier1Liveness scalar;
+            Tier1Liveness vector;
+            if (tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector))
+            {
+                const uint32_t expected_values[] =
+                {
+                    0,
+                    1,
+                    3,
+                    5,
+                };
+                const uint32_t expected_starts[] =
+                {
+                    0,
+                    3,
+                    7,
+                    11,
+                };
+                const uint32_t expected_ends[] =
+                {
+                    9,
+                    7,
+                    11,
+                    13,
+                };
+                const uint32_t expected_offsets[] =
+                {
+                    0,
+                    2,
+                    3,
+                    5,
+                    6,
+                };
+                const uint32_t expected_uses[] =
+                {
+                    2,
+                    8,
+                    6,
+                    8,
+                    10,
+                    12,
+                };
+                const Tier1AllocationInput* allocation = &vector.allocation;
+                tier1_liveness_test_expect(test, allocation->count == 4 && allocation->use_count == 6 && vector.cross_block_values == 2, "narrow definitions and cross-block uses retain ordinary GPR intervals");
+                if (allocation->count == 4 && allocation->use_count == 6)
+                {
+                    tier1_liveness_test_expect(test, memcmp(allocation->values, expected_values, sizeof(expected_values)) == 0 && memcmp(allocation->starts, expected_starts, sizeof(expected_starts)) == 0 && memcmp(allocation->ends, expected_ends, sizeof(expected_ends)) == 0, "narrow load and widening have exact use-before-definition endpoints");
+                    tier1_liveness_test_expect(test, memcmp(allocation->use_offsets, expected_offsets, sizeof(expected_offsets)) == 0 && memcmp(allocation->use_positions, expected_uses, sizeof(expected_uses)) == 0, "narrow selected uses are neither dropped nor fabricated");
+                }
+                tier1_liveness_test_expect(test, tier1_select_width(IR_I8) == 4 && tier1_select_width(IR_I16) == 4 && plan.patterns[1].width == 1 && plan.patterns[4].width == 2, "narrow register storage is separate from source memory width");
+            }
+        }
+    }
+    else
+    {
+        tier1_liveness_test_expect(test, false, "create narrow liveness fixture");
+    }
+    arena_pop_to(&test->input, 0);
+    arena_pop_to(&test->left, 0);
+    arena_pop_to(&test->right, 0);
+}
+
+static void tier1_liveness_test_unreachable(Tier1LivenessTest* test)
+{
+    const IrSizes sizes =
+    {
+        .instruction_count = 1,
+        .block_count = 1,
+    };
+    IrFunction function;
+    if (ir_create(&test->input, &sizes, &function) == IR_OK)
+    {
+        function.block_offsets[1] = 1;
+        tier1_liveness_test_node(&function, 0, IR_UNREACHABLE, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        Tier1SelectPlan plan;
+        IrCfg cfg;
+        if (tier1_liveness_test_plan(test, &function, &plan, &cfg))
+        {
+            Tier1Liveness scalar;
+            Tier1Liveness vector;
+            if (tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector))
+            {
+                tier1_liveness_test_expect(test, vector.allocation.count == 0 && vector.allocation.use_count == 0 && vector.cross_block_values == 0, "unreachable requires neither a value interval nor a use");
+            }
+            for (uint32_t mutation = 0; mutation < 3; mutation += 1)
+            {
+                const Tier1SelectPattern before_pattern = plan.patterns[0];
+                plan.patterns[0].width = mutation == 0 ? 4 : 0;
+                plan.patterns[0].values[0] = mutation == 1 ? 0 : BUSTER_IR_NONE;
+                plan.covered[0] = mutation == 2;
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    Tier1Liveness live;
+                    memset(&live, 0xa5, sizeof(live));
+                    const Tier1Liveness before = live;
+                    const uint64_t mark = test->left.length;
+                    const uint64_t scratch_mark = test->scratch.length;
+                    const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, path != 0, &live);
+                    tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&live, &before, sizeof(live)) == 0, "malformed unreachable plan is refused transactionally");
+                }
+                plan.patterns[0] = before_pattern;
+                plan.covered[0] = 0;
+            }
+        }
+    }
+    else
+    {
+        tier1_liveness_test_expect(test, false, "create unreachable liveness fixture");
+    }
+    arena_pop_to(&test->input, 0);
+    arena_pop_to(&test->left, 0);
+    arena_pop_to(&test->right, 0);
+}
+
 static int run_tier1_liveness_tests(int argc, char** argv)
 {
     Tier1LivenessTest test = { .seed = 143 };
@@ -847,6 +987,8 @@ static int run_tier1_liveness_tests(int argc, char** argv)
         tier1_liveness_test_guards(&test);
         tier1_liveness_test_calls(&test);
         tier1_liveness_test_call_fold(&test);
+        tier1_liveness_test_narrow(&test);
+        tier1_liveness_test_unreachable(&test);
     }
     else
     {

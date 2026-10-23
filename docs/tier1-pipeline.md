@@ -55,7 +55,7 @@ changes to compiler options or production routing.
 ## Supported fixtures and independent oracles
 
 Each supported function takes three `uint64_t` parameters and returns a
-`uint64_t`. Six original fixtures cover:
+`uint64_t`. Eight original fixtures cover:
 
 | Fixture | Handoff exercised |
 | --- | --- |
@@ -65,15 +65,17 @@ Each supported function takes three `uint64_t` parameters and returns a
 | `uint64_t`/`uint32_t` conversions and local arithmetic | Narrowing, unsigned wraparound, zero extension and shared local uses |
 | Direct call to a constant-returning local helper | Zero-argument calls, ordinary symbolic references and caller stack alignment |
 | Three-argument local helper with values live across the call | Argument permutation, preservation across CALL and helper/entry compilation through the complete pipeline |
+| The byte-swap-16 typed recipe followed by a widened result | Wide mask/shift expansion, `I16` truncation and canonical zero extension |
+| Signed byte, word and dword locals | Local promotion and signed widening, including `I8` through `I16` to `I64` |
 
 Every fixture runs through scalar and vector paths, with rematerialization both
 disabled and enabled. A five-register pool contains the three required System V
 parameter registers. The rematerializing configuration also keeps a frame
 pointer and disables the red zone. The tests require actual spill/reload counts
 for pressure cases, actual rematerialization for constant pressure, a valid
-allocation, and exactly one compact frame row per spilled value.
+allocation, one compact frame row per spilled value and dedicated call-save rows.
 
-Thirty-two inputs combine zero, one, 32-bit boundaries, high-bit values,
+Thirty-two inputs combine zero, one, 8/16/32-bit sign boundaries, high-bit values,
 `UINT64_MAX` and deterministic random values from the existing Tier 0 input
 generator. Shifts are within width and arithmetic is unsigned, so the C oracle
 has no signed-overflow or shift undefined behavior.
@@ -89,9 +91,9 @@ formulas with Clang at `-O0` and `-O2`, using `-march=x86-64`, and checks every
 fixture/input pair against the typed interpreter. It does not translate selected
 instructions or optimized IR back into C.
 
-A successful complete run reports 768 native results, including eight emitted
+A successful complete run reports 1,024 native results, including eight emitted
 call sites across the scalar/vector and rematerialization combinations. A
-cross-check additionally reports 384 Clang results. Original typed symbols
+cross-check additionally reports 512 Clang results. Original typed symbols
 resolve to helpers compiled through the same complete pipeline; relocation
 metadata, signed rel32 range and encoder instruction ends are checked before
 execution. The check count also includes stage validation,
@@ -115,7 +117,10 @@ as native code.
 
 The current machine consumer supports one block or a physical straight-line
 chain whose intermediate terminators branch to the next block and whose final
-terminator returns. General control flow needs edge location reconciliation.
+block returns, ends in explicit unreachable, or contains only a branch to
+itself. The terminal consumer tests exercise these last two forms separately;
+they preserve a real self-loop even when a preceding helper unexpectedly
+returns. General control flow needs edge location reconciliation.
 Indirect/variadic/wide-ABI calls, phis, floating point, dynamic/variadic frames, dynamic shifts, division,
 undefined values and unsupported conversions remain outside this integration
 subset. See [selection](tier1-selection.md), [liveness](tier1-liveness.md),
