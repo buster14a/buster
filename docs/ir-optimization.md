@@ -141,9 +141,10 @@ conditions change. Default samples alternate which path runs first. `--only`
 isolates one path, and `--after-scalar` runs lighter scalar work before every
 vector sample. The benchmark shares the original test fixture builders and
 is included after `ir_optimize_test.c`. The default 9700X job runs it, and
-`benchmark-ir-optimize-passes`, after the tests, pinned to one allowed CPU,
-each also with `--only vector --after-scalar 200`; like the others, their
-measurements are informational.
+`benchmark-ir-optimize-passes`, after the tests, pinned to one allowed CPU;
+on pushes to main, dispatched runs and pull requests that change `ir.c`,
+`ir_validate.c` or `ir_optimize*.c`, each also with `--only vector
+--after-scalar 200`. Like the others, their measurements are informational.
 
 The output reports nanoseconds, TSC ticks (not core cycles), useful input
 instructions per second, output size and retained analysis workspace. That

@@ -33,7 +33,11 @@ jobs:
   # measure other programs and the machine, the same for every pull request, so `test` measures them on pushes to main,
   # dispatched runs and pull requests that change these harnesses, as when this job is skipped or fails. The same for
   # benchmark-foreign's mold and wild (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the
-  # foreign path's phases.
+  # foreign path's phases. And, per module, whether it changes the sources of a benchmark whose isolated and
+  # after-scalar samples (`--only`, `--after-scalar 200`, repeated in separate processes) cost far more than its plain
+  # run: about 200 ms before each of 21 samples per case, 150 s of a pull request's job in all. Every run has the plain
+  # benchmark, with its checks against the scalar twins; those samples run on pushes to main, dispatched runs and pull
+  # requests that change what they measure.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -45,6 +49,13 @@ jobs:
       baselines: ${{ steps.files.outputs.baselines }}
       foreign: ${{ steps.files.outputs.foreign }}
       branch_sizing: ${{ steps.files.outputs.branch_sizing }}
+      zen5: ${{ steps.files.outputs.zen5 }}
+      ssa: ${{ steps.files.outputs.ssa }}
+      parser_bindings: ${{ steps.files.outputs.parser_bindings }}
+      environments: ${{ steps.files.outputs.environments }}
+      ir: ${{ steps.files.outputs.ir }}
+      ir_lowering: ${{ steps.files.outputs.ir_lowering }}
+      ir_optimize: ${{ steps.files.outputs.ir_optimize }}
     steps:
       - id: files
         env:
@@ -55,12 +66,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize)
+          # The sources each module's conditioned benchmark samples measure, under src/buster/compiler/.
+          declare -A sources=(
+              [zen5]='x86_zen5[a-z_]*'
+              [ssa]='ssa|ssa_program|ssa_benchmark|dominators'
+              [parser_bindings]='c_parser|c_parser_binding_trace|c_parser_bindings[a-z_]*|c_bindings[a-z_]*'
+              [environments]='c_environment[a-z_]*'
+              [ir]='ir|ir_validate|ir_benchmark'
+              [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_benchmark'
+              [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
+          )
+          declare -A measure
           # The API lists at most 3,000 files of a pull request: past that, take it as changing code and the harnesses.
           if [ "$COUNT" -ge 3000 ]; then
               code=true
               baselines=true
               foreign=true
               branch_sizing=true
+              for module in "${modules[@]}"; do
+                  measure[$module]=true
+              done
           else
               gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
                   --jq '.[] | .filename, (.previous_filename // empty)' > files
@@ -87,15 +113,28 @@ jobs:
               else
                   branch_sizing=false
               fi
+              for module in "${modules[@]}"; do
+                  if grep -Ex "src/buster/compiler/(${sources[$module]})\.c" files > /dev/null; then
+                      measure[$module]=true
+                  else
+                      measure[$module]=false
+                  fi
+              done
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "baselines=$baselines" >> "$GITHUB_OUTPUT"
           echo "foreign=$foreign" >> "$GITHUB_OUTPUT"
           echo "branch_sizing=$branch_sizing" >> "$GITHUB_OUTPUT"
+          for module in "${modules[@]}"; do
+              echo "$module=${measure[$module]}" >> "$GITHUB_OUTPUT"
+          done
           echo "Changes code: $code"
           echo "Changes the baselines' harnesses: $baselines"
           echo "Changes the foreign inputs' benchmark: $foreign"
           echo "Changes the branch-sizing implementation or measurement fixtures: $branch_sizing"
+          for module in "${modules[@]}"; do
+              echo "Changes what $module's conditioned benchmark samples measure: ${measure[$module]}"
+          done
 
   test:
     name: Build and execute on Ryzen 7 9700X
@@ -443,11 +482,19 @@ jobs:
           done
 
       - name: Benchmark Zen 5 cost lookup
+        run: taskset -c 2 ./build/compiler benchmark-x86-zen5
+
+      - name: Benchmark Zen 5 cost lookup in isolation and after scalar work
+        # Where `changes` doesn't rule it out (the module's sources): with the plain run above, three processes of each
+        # mode.
+        if: needs.changes.outputs.zen5 != 'false'
         run: |
           cpu=2
           for sample in 1 2 3; do
             echo "Zen 5 lookup sample $sample"
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
+            if [ "$sample" != 1 ]; then
+              taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
+            fi
             taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
             taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
           done
@@ -622,7 +669,13 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ssa
-          # Compare isolated execution and vector samples after warm scalar work across separate processes.
+
+      - name: Benchmark local SSA construction in isolation and after scalar work
+        # Where `changes` doesn't rule it out (the module's sources). Compare isolated execution and vector samples
+        # after warm scalar work across separate processes.
+        if: needs.changes.outputs.ssa != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           for repetition in 1 2 3; do
               echo "SSA repetition $repetition"
               taskset -c "$cpu" ./build/compiler benchmark-ssa --only scalar
@@ -754,6 +807,14 @@ jobs:
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           system=(-march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
           taskset -c "$cpu" ./build/compiler benchmark-parser-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
+
+      - name: Benchmark C-source binding resolution in isolation and after scalar work
+        # Where `changes` doesn't rule it out (the module's sources, the parser's among them).
+        if: needs.changes.outputs.parser_bindings != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          system=(-march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
           # Isolate both paths and the vector work after a lighter phase; do not infer a speedup from mixed passes.
           taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only scalar "${system[@]}" "$corpus/sqlite/sqlite3.c"
           taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch "${system[@]}" "$corpus/sqlite/sqlite3.c"
@@ -768,8 +829,12 @@ jobs:
         # Synthetic environment handoff only; actual deferred checker/corpus acceptance stays with #113.
         # The runner hook already holds the 9700X lock. Isolate both vector states in independent processes.
         # This step also checks every benchmark result against its scalar twin.
+        run: taskset -c 2 ./build/compiler benchmark-environments
+
+      - name: Benchmark source-position environments in isolation and after scalar work
+        # Where `changes` doesn't rule it out (the module's sources).
+        if: needs.changes.outputs.environments != 'false'
         run: |
-          taskset -c 2 ./build/compiler benchmark-environments
           for sample in 1 2 3; do
             echo "Environment observation process $sample"
             taskset -c 2 ./build/compiler benchmark-environments --only full-vector
@@ -810,18 +875,36 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir
+
+      - name: Benchmark the IR verifier after scalar work
+        # Where `changes` doesn't rule it out (the module's sources).
+        if: needs.changes.outputs.ir != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
 
       - name: Benchmark typed-stream lowering through IR verification
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
+
+      - name: Benchmark typed-stream lowering after scalar work
+        # Where `changes` doesn't rule it out (the module's sources).
+        if: needs.changes.outputs.ir_lowering != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
 
       - name: Benchmark the verified Tier 1 optimization passes
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize
-          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes
+
+      - name: Benchmark the verified Tier 1 optimization passes after scalar work
+        # Where `changes` doesn't rule it out (the module's sources).
+        if: needs.changes.outputs.ir_optimize != 'false'
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200

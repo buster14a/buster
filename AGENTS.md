@@ -873,6 +873,15 @@ there at a time, so everything takes one lock:
   number and title (or a push's first line), the run's link and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
+- Every pull request's job queues behind every other's, so keep the job short.
+  A benchmark's plain run, which checks its paths against their scalar twins,
+  runs on every pull request; its isolated and after-scalar samples
+  (`--only`, `--after-scalar`, repeated processes), which cost about 200 ms
+  before each of 21 samples per case, go in a step of their own that runs where
+  the `changes` job's output for the module isn't `false`: on pushes to main,
+  dispatched runs and pull requests that change the module's sources (its
+  pattern in `changes`). The same holds for the linkers' baselines and floors
+  and mold's and wild's foreign phases.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 
@@ -3936,6 +3945,7 @@ the complete available typed-stream-to-verified-IR path on generated mixed
 programs. Both require optimized builds, calibrate samples to at least 2 ms,
 rotate variant order and report 21-pass medians by default. TSC ticks are
 labeled separately from core cycles. The 9700X workflow runs the tests and
-pins each benchmark to one allowed CPU, both normally and after 200 ms of
-scalar work before each vector sample. [The guide](docs/ir.md) records
+pins each benchmark to one allowed CPU; it adds the runs after 200 ms of scalar
+work before each vector sample where the pull request changes the module
+("Sharing the 9700X"). [The guide](docs/ir.md) records
 interfaces, measurement scope and outstanding source-corpus acceptance.
