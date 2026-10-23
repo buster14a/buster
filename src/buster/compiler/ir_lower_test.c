@@ -508,7 +508,10 @@ static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b)
 
 static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
 {
-    IrFunction twin = {0};
+    IrFunction twin =
+    {
+        0
+    };
     const IrCheck vector = ir_lower_typed(source, result_type, symbols, output, scratch, function);
     const IrCheck scalar = ir_lower_typed_scalar(source, result_type, symbols, twin_output, scratch, &twin);
     bool ok = ir_lower_test_expect(tally, vector.error == IR_OK && scalar.error == IR_OK, "both lowering paths accept", seed, index);
@@ -528,7 +531,10 @@ static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* so
 
 static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count)
 {
-    Tier0Tables tables = {0};
+    Tier0Tables tables =
+    {
+        0
+    };
     Arena input = arena_reserve(1ull << 30);
     Arena output = arena_reserve(1ull << 30);
     Arena twin_output = arena_reserve(1ull << 30);
@@ -547,7 +553,8 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
         IrFunction* functions = BUSTER_ARENA_PUSH_ARRAY(&input, IrFunction, BUSTER_TIER0_GENERATE_MAX_FUNCTIONS);
         uint8_t* globals = BUSTER_ARENA_PUSH_ARRAY(&input, uint8_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS * 8 + 64);
         uint8_t* expected_globals = BUSTER_ARENA_PUSH_ARRAY(&input, uint8_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS * 8 + 64);
-        const Tier0ProgramOptions options = {
+        const Tier0ProgramOptions options =
+        {
             .functions = 8,
             .statements = 40,
             .expression_nodes = 30,
@@ -613,11 +620,20 @@ static void ir_lower_test_fixture(IrLowerTestTally* tally, const char* name, con
     Arena twin_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
     Arena execution = arena_reserve(1ull << 20);
-    IrFunction function = {0};
+    IrFunction function =
+    {
+        0
+    };
     if (ir_lower_test_lower(tally, source, result_type, 1, &output, &twin_output, &scratch, &function, 0, 0))
     {
-        Tier0TestData data = {0};
-        uint8_t globals[1] = {0};
+        Tier0TestData data =
+        {
+            0
+        };
+        uint8_t globals[1] =
+        {
+            0
+        };
         bool fault = false;
         const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, arguments, source->parameter_count, &execution, &fault);
         ir_lower_test_expect(tally, !fault && actual == expected, name, 0, 0);
@@ -631,38 +647,119 @@ static void ir_lower_test_fixture(IrLowerTestTally* tally, const char* name, con
 static void ir_lower_test_fixtures(IrLowerTestTally* tally)
 {
     // 10 + (outer ? (inner ? 20 : 30) : 40), preserving the outer value at both joins.
-    const uint8_t conditional_kinds[] = {BUSTER_TYPED_CONST, BUSTER_TYPED_CONST, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CONST, BUSTER_TYPED_BRANCH_FALSE,
-                                          BUSTER_TYPED_CONST, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CONST, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CONST,
-                                          BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN};
-    const uint8_t conditional_classes[] = {BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
-                                            BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64,
-                                            BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64};
-    uint64_t conditional_values[] = {10, 0, 9, 0, 7, 20, 8, 30, 10, 40, 0, 0};
-    const Tier0Function conditional = {
+    const uint8_t conditional_kinds[] =
+    {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN
+    };
+    const uint8_t conditional_classes[] =
+    {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64
+    };
+    uint64_t conditional_values[] =
+    {
+        10,
+        0,
+        9,
+        0,
+        7,
+        20,
+        8,
+        30,
+        10,
+        40,
+        0,
+        0
+    };
+    const Tier0Function conditional =
+    {
         .kinds = conditional_kinds,
         .classes = conditional_classes,
         .values = conditional_values,
         .count = BUSTER_ARRAY_LENGTH(conditional_kinds),
     };
-    uint64_t arguments[BUSTER_TIER0_MAX_CALL_ARGUMENTS] = {0};
+    uint64_t arguments[BUSTER_TIER0_MAX_CALL_ARGUMENTS] =
+    {
+        0
+    };
     ir_lower_test_fixture(tally, "nested false arm restores live outer operand", &conditional, IR_I64, arguments, 50);
     conditional_values[1] = 1;
     ir_lower_test_fixture(tally, "nested inner false arm crosses both joins", &conditional, IR_I64, arguments, 40);
     conditional_values[3] = 1;
     ir_lower_test_fixture(tally, "nested true arm carries two JUMP_VALUE edges", &conditional, IR_I64, arguments, 30);
 
-    const uint8_t loop_kinds[] = {BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL,
-                                  BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN};
-    const uint8_t loop_classes[] = {BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
-                                    BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64};
-    const uint64_t loop_values[] = {0, 1, 0, 0, 0, 0, 0, 0};
-    const uint8_t local_classes[] = {BUSTER_TYPED_CLASS_U64};
-    const uint8_t local_flags[] = {BUSTER_TYPED_LOCAL_ADDRESS_TAKEN};
-    const AbiLocation parameter = {
-        .kind = BUSTER_ABI_LOCATION_REGISTERS,
-        .registers = {X86_REGISTER_RDI},
+    const uint8_t loop_kinds[] =
+    {
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SUB,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_RETURN
     };
-    const Tier0Function loop = {
+    const uint8_t loop_classes[] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64
+    };
+    const uint64_t loop_values[] =
+    {
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+    };
+    const uint8_t local_classes[] =
+    {
+        BUSTER_TYPED_CLASS_U64
+    };
+    const uint8_t local_flags[] =
+    {
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN
+    };
+    const AbiLocation parameter =
+    {
+        .kind = BUSTER_ABI_LOCATION_REGISTERS,
+        .registers =
+        {
+            X86_REGISTER_RDI
+        },
+    };
+    const Tier0Function loop =
+    {
         .kinds = loop_kinds,
         .classes = loop_classes,
         .values = loop_values,
@@ -676,10 +773,29 @@ static void ir_lower_test_fixtures(IrLowerTestTally* tally)
     arguments[0] = 3;
     ir_lower_test_fixture(tally, "backedge to entry zero does not reinitialize parameters", &loop, IR_I64, arguments, 0);
 
-    const uint8_t shift_kinds[] = {BUSTER_TYPED_CONST, BUSTER_TYPED_CONST, BUSTER_TYPED_SHR, BUSTER_TYPED_RETURN};
-    const uint8_t shift_classes[] = {BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64};
-    const uint64_t shift_values[] = {240, 3, 0, 0};
-    const Tier0Function shift = {
+    const uint8_t shift_kinds[] =
+    {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SHR,
+        BUSTER_TYPED_RETURN
+    };
+    const uint8_t shift_classes[] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64
+    };
+    const uint64_t shift_values[] =
+    {
+        240,
+        3,
+        0,
+        0
+    };
+    const Tier0Function shift =
+    {
         .kinds = shift_kinds,
         .classes = shift_classes,
         .values = shift_values,
@@ -687,11 +803,36 @@ static void ir_lower_test_fixtures(IrLowerTestTally* tally)
     };
     ir_lower_test_fixture(tally, "shift count of a narrower integer class", &shift, IR_I64, arguments, 30);
 
-    const uint8_t pointer_kinds[] = {BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_DUP, BUSTER_TYPED_CONST, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_SUB, BUSTER_TYPED_RETURN};
-    const uint8_t pointer_classes[] = {BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64};
+    const uint8_t pointer_kinds[] =
+    {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_DUP,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_PTR_ADD,
+        BUSTER_TYPED_SUB,
+        BUSTER_TYPED_RETURN
+    };
+    const uint8_t pointer_classes[] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64
+    };
     const uint64_t scale = (1ull << 40) + 3;
-    const uint64_t pointer_values[] = {0, 0, 1, scale, 0, 0};
-    const Tier0Function pointer = {
+    const uint64_t pointer_values[] =
+    {
+        0,
+        0,
+        1,
+        scale,
+        0,
+        0
+    };
+    const Tier0Function pointer =
+    {
         .kinds = pointer_kinds,
         .classes = pointer_classes,
         .values = pointer_values,
@@ -702,7 +843,10 @@ static void ir_lower_test_fixtures(IrLowerTestTally* tally)
     };
     ir_lower_test_fixture(tally, "wide pointer scale retains all 64 bits", &pointer, IR_I64, arguments, 0 - scale);
 
-    const Tier0Function empty = {0};
+    const Tier0Function empty =
+    {
+        0
+    };
     ir_lower_test_fixture(tally, "empty void body reaches its return", &empty, IR_VOID, arguments, 0);
 }
 
@@ -710,16 +854,30 @@ static void ir_lower_test_failures(IrLowerTestTally* tally)
 {
     Arena output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
-    const uint8_t good_kinds[] = {BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN};
-    const uint8_t good_classes[] = {BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64};
-    const uint64_t good_values[] = {7, 0};
-    Tier0Function source = {
+    const uint8_t good_kinds[] =
+    {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN
+    };
+    const uint8_t good_classes[] =
+    {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64
+    };
+    const uint64_t good_values[] =
+    {
+        7,
+        0
+    };
+    Tier0Function source =
+    {
         .kinds = good_kinds,
         .classes = good_classes,
         .values = good_values,
         .count = 2,
     };
-    IrFunction preserved = {
+    IrFunction preserved =
+    {
         .instruction_count = 123,
         .block_count = 17,
     };
@@ -728,7 +886,10 @@ static void ir_lower_test_failures(IrLowerTestTally* tally)
         IrFunction result = preserved;
         const uint64_t output_mark = output.length;
         const uint64_t scratch_mark = scratch.length;
-        IrFunction measured = {0};
+        IrFunction measured =
+        {
+            0
+        };
         IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &measured, vector != 0);
         const uint64_t required = output.length - output_mark;
         ir_lower_test_expect(tally, check.error == IR_OK && required != 0, "measure allocation before exhaustion", 0, vector);
@@ -771,7 +932,11 @@ static void ir_lower_test_failures(IrLowerTestTally* tally)
         ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark,
                              "missing source column rejected", 0, vector);
         source.kinds = good_kinds;
-        const uint8_t bad_kinds[] = {BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN};
+        const uint8_t bad_kinds[] =
+        {
+            BUSTER_TYPED_ADD,
+            BUSTER_TYPED_RETURN
+        };
         source.kinds = bad_kinds;
         check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
         ir_lower_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark,
@@ -812,13 +977,17 @@ static void ir_lower_test_guarded(IrLowerTestTally* tally)
                 kinds[count - 1] = BUSTER_TYPED_RETURN;
                 classes[count - 1] = count > 1 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_VOID;
             }
-            const Tier0Function source = {
+            const Tier0Function source =
+            {
                 .kinds = kinds,
                 .classes = classes,
                 .values = values,
                 .count = count,
             };
-            IrFunction function = {0};
+            IrFunction function =
+            {
+                0
+            };
             ir_lower_test_lower(tally, &source, count > 1 ? IR_I64 : IR_VOID, 1, &output, &twin_output, &scratch, &function, 0, count);
             arena_pop_to(&output, 0);
             arena_pop_to(&twin_output, 0);
@@ -871,7 +1040,10 @@ static int run_ir_lower_tests(int argc, char** argv)
     }
     else
     {
-        IrLowerTestTally tally = {0};
+        IrLowerTestTally tally =
+        {
+            0
+        };
         ir_lower_test_fixtures(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_guarded(&tally);

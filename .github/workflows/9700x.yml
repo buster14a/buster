@@ -328,6 +328,8 @@ jobs:
           ./build/compiler test-dataflow
           == Test local SSA construction and its memory interpreter
           ./build/compiler test-ssa
+          == Test shared IR local promotion and typed-stream semantics
+          ./build/compiler test-ssa-ir
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
@@ -529,6 +531,13 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ssa
+          # Compare isolated execution and vector samples after warm scalar work across separate processes.
+          for repetition in 1 2 3; do
+              echo "SSA repetition $repetition"
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only scalar
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector
+              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector --after-scalar 200
+          done
 
       - name: Benchmark the preprocessor fuzz harness
         run: |
@@ -644,8 +653,10 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir
+          taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
 
       - name: Benchmark typed-stream lowering through IR verification
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
+          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200

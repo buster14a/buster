@@ -244,8 +244,10 @@ int run_backend_benchmark(int argc, char** argv);
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
 #include "buster/compiler/ir_lower.c"
+#include "buster/compiler/ssa_ir.c"
 #include "buster/compiler/ir_test.c"
 #include "buster/compiler/ir_lower_test.c"
+#include "buster/compiler/ssa_ir_test.c"
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 
@@ -288,6 +290,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ssa") == 0)
     {
         result = run_ssa_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-ir") == 0)
+    {
+        result = run_ssa_ir_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
     {
