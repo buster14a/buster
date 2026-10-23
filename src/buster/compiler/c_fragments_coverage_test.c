@@ -626,6 +626,7 @@ struct CFragmentCoverageFixtureNode
 #define BUSTER_FRAGMENT_EXPECT_GROUP(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, UINT8_MAX }
 #define BUSTER_FRAGMENT_EXPECT_TYPE(token, kind, source, type) { token, C_FRAGMENT_##kind, source, type, UINT8_MAX }
 #define BUSTER_FRAGMENT_EXPECT_TERNARY(token, kind, source) { token, C_FRAGMENT_##kind, source, UINT8_MAX, token }
+#define BUSTER_FRAGMENT_EXPECT_BRIDGE(token) { token, C_FRAGMENT_KIND_COUNT, token, UINT8_MAX, UINT8_MAX }
 
 // These are hand-specified token positions in the literal fixtures in c_fragments_test.c, relative to the return
 // operand except fixtures 14, 21 and 23 onward (whole file). They do not query parser roles to decide what should be emitted.
@@ -813,12 +814,41 @@ static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_23[] = {
     BUSTER_FRAGMENT_EXPECT_TYPE(17, CAST, 15, 16),
     BUSTER_FRAGMENT_EXPECT(18, IDENTIFIER),
 };
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_24[] = {
+    BUSTER_FRAGMENT_EXPECT(17, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(18),
+    BUSTER_FRAGMENT_EXPECT(19, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(20, ADD),
+    BUSTER_FRAGMENT_EXPECT(21, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(22, INITIALIZER, 15),
+    BUSTER_FRAGMENT_EXPECT(25, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(27, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(28, SUBSCRIPT, 26),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_25[] = {
+    BUSTER_FRAGMENT_EXPECT(20, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(21),
+    BUSTER_FRAGMENT_EXPECT(22, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(24, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(25, CALL, 23),
+    BUSTER_FRAGMENT_EXPECT(26, SEPARATOR),
+    BUSTER_FRAGMENT_EXPECT(28, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(29),
+    BUSTER_FRAGMENT_EXPECT(30, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(31, POST_INCREMENT),
+    BUSTER_FRAGMENT_EXPECT_GROUP(32, INITIALIZER, 18),
+    BUSTER_FRAGMENT_EXPECT(35, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(37, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(38, SUBSCRIPT, 36),
+};
 static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_26[] = {
     BUSTER_FRAGMENT_EXPECT(14, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(15),
     BUSTER_FRAGMENT_EXPECT(16, NEGATIVE),
     BUSTER_FRAGMENT_EXPECT(17, IDENTIFIER),
     BUSTER_FRAGMENT_EXPECT(18, SEPARATOR),
     BUSTER_FRAGMENT_EXPECT(20, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(21),
     BUSTER_FRAGMENT_EXPECT_TYPE(24, CAST, 22, 23),
     BUSTER_FRAGMENT_EXPECT(25, IDENTIFIER),
     BUSTER_FRAGMENT_EXPECT_GROUP(26, INITIALIZER, 12),
@@ -826,21 +856,90 @@ static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_26[] = {
     BUSTER_FRAGMENT_EXPECT(31, NUMBER),
     BUSTER_FRAGMENT_EXPECT_GROUP(32, SUBSCRIPT, 30),
 };
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_27[] = {
+    BUSTER_FRAGMENT_EXPECT(12, NUMBER),
+    BUSTER_FRAGMENT_EXPECT(17, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(18),
+    BUSTER_FRAGMENT_EXPECT(20, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(21, SEPARATOR),
+    BUSTER_FRAGMENT_EXPECT(22, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(23, INITIALIZER, 19),
+    BUSTER_FRAGMENT_EXPECT_GROUP(24, INITIALIZER, 15),
+    BUSTER_FRAGMENT_EXPECT(29, NUMBER),
+    BUSTER_FRAGMENT_EXPECT(34, NUMBER),
+    BUSTER_FRAGMENT_EXPECT(35, RANGE),
+    BUSTER_FRAGMENT_EXPECT(36, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(37),
+    BUSTER_FRAGMENT_EXPECT(38, POSITIVE),
+    BUSTER_FRAGMENT_EXPECT(39, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(40, INITIALIZER, 32),
+    BUSTER_FRAGMENT_EXPECT(43, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(45, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(46, SUBSCRIPT, 44),
+    BUSTER_FRAGMENT_EXPECT(48, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(49, SUBSCRIPT, 47),
+    BUSTER_FRAGMENT_EXPECT(50, ADD),
+    BUSTER_FRAGMENT_EXPECT(51, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(53, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(54, SUBSCRIPT, 52),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_28[] = {
+    BUSTER_FRAGMENT_EXPECT(14, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(15),
+    BUSTER_FRAGMENT_EXPECT_TYPE(18, TYPE_NAME, 16, 18),
+    BUSTER_FRAGMENT_EXPECT(20, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(21, COMPOUND_LITERAL, 19),
+    BUSTER_FRAGMENT_EXPECT_GROUP(22, INITIALIZER, 12),
+    BUSTER_FRAGMENT_EXPECT(25, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(27, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(28, SUBSCRIPT, 26),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_29[] = {
+    BUSTER_FRAGMENT_EXPECT(9, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(10),
+    BUSTER_FRAGMENT_EXPECT(11, STRING_SEQUENCE),
+    BUSTER_FRAGMENT_EXPECT(12, STRING_SEQUENCE),
+    BUSTER_FRAGMENT_EXPECT(13, STRING),
+    BUSTER_FRAGMENT_EXPECT_GROUP(14, INITIALIZER, 7),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_30[] = {
+    BUSTER_FRAGMENT_EXPECT(20, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_BRIDGE(24),
+    BUSTER_FRAGMENT_EXPECT(28, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(29, ADD),
+    BUSTER_FRAGMENT_EXPECT(30, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(34, INITIALIZER, 15),
+    BUSTER_FRAGMENT_EXPECT(37, IDENTIFIER),
+    BUSTER_FRAGMENT_EXPECT(39, NUMBER),
+    BUSTER_FRAGMENT_EXPECT_GROUP(40, SUBSCRIPT, 38),
+};
+static const CFragmentCoverageFixtureNode c_fragment_coverage_fixture_31[] = {
+    BUSTER_FRAGMENT_EXPECT_TYPE(10, CAST, 8, 9),
+    BUSTER_FRAGMENT_EXPECT(12, IDENTIFIER),
+};
 
 #undef BUSTER_FRAGMENT_EXPECT
 #undef BUSTER_FRAGMENT_EXPECT_GROUP
 #undef BUSTER_FRAGMENT_EXPECT_TYPE
 #undef BUSTER_FRAGMENT_EXPECT_TERNARY
+#undef BUSTER_FRAGMENT_EXPECT_BRIDGE
 
 static bool c_fragment_coverage_fixture_matches(const CFragmentSink* sink, const CFragmentCoverageFixtureNode* expected, uint32_t length, uint32_t base)
 {
     uint32_t emitted = 0;
+    uint32_t bridges = 0;
+    uint32_t required = 0;
     bool result = sink->expression_count != 0;
+    for (uint32_t k = 0; k < length; k += 1)
+    {
+        required += expected[k].kind != C_FRAGMENT_KIND_COUNT;
+    }
     for (uint32_t token = 0; token < sink->token_count; token += 1)
     {
         emitted += sink->syntax[token].emitted;
+        bridges += sink->syntax[token].bridge;
     }
-    result &= emitted == length;
+    result &= emitted == required && bridges == length - required;
     for (uint32_t k = 0; result && k < length; k += 1)
     {
         const CFragmentCoverageFixtureNode* wanted = &expected[k];
@@ -851,8 +950,15 @@ static bool c_fragment_coverage_fixture_matches(const CFragmentSink* sink, const
             const CFragmentSyntax* actual = &sink->syntax[token];
             const uint32_t type = wanted->type_root == UINT8_MAX ? BUSTER_C_FRAGMENT_NONE : base + wanted->type_root;
             const uint32_t auxiliary = wanted->auxiliary == UINT8_MAX ? BUSTER_C_FRAGMENT_NONE : base + wanted->auxiliary;
-            result = actual->emitted && sink->kinds[token] == wanted->kind && actual->source == base + wanted->source &&
-                     actual->type_root == type && actual->auxiliary == auxiliary;
+            if (wanted->kind == C_FRAGMENT_KIND_COUNT)
+            {
+                result = actual->bridge && !actual->emitted && !actual->transparent;
+            }
+            else
+            {
+                result = actual->emitted && !actual->bridge && sink->kinds[token] == wanted->kind && actual->source == base + wanted->source &&
+                         actual->type_root == type && actual->auxiliary == auxiliary;
+            }
         }
     }
     return result;
@@ -890,9 +996,14 @@ static bool c_fragment_test_coverage_fixture(const Parser* parser, const CFragme
         BUSTER_FRAGMENT_FIXTURE(21),
         { 0, 0 },
         BUSTER_FRAGMENT_FIXTURE(23),
-        { 0, 0 },
-        { 0, 0 },
+        BUSTER_FRAGMENT_FIXTURE(24),
+        BUSTER_FRAGMENT_FIXTURE(25),
         BUSTER_FRAGMENT_FIXTURE(26),
+        BUSTER_FRAGMENT_FIXTURE(27),
+        BUSTER_FRAGMENT_FIXTURE(28),
+        BUSTER_FRAGMENT_FIXTURE(29),
+        BUSTER_FRAGMENT_FIXTURE(30),
+        BUSTER_FRAGMENT_FIXTURE(31),
 #undef BUSTER_FRAGMENT_FIXTURE
     };
     bool result = true;
@@ -910,7 +1021,7 @@ static bool c_fragment_test_coverage_fixture(const Parser* parser, const CFragme
         const CFragmentCoverageFixtureNode* expected = fixtures[fixture].nodes;
         const uint32_t length = fixtures[fixture].count;
         result = base != BUSTER_C_FRAGMENT_NONE && c_fragment_coverage_fixture_matches(sink, expected, length, base);
-        // Negative controls run on copies: an empty stream, an all-false emitted set, and each whole node omitted.
+        // Negative controls run on copies: an empty stream, an all-false set, and each required node/bridge omitted.
         // Keeping the real expression_count in the latter cases prevents that count alone from detecting the fault.
         CFragmentSyntax changed[128];
         result &= sink->token_count <= sizeof(changed) / sizeof(changed[0]);
@@ -926,13 +1037,20 @@ static bool c_fragment_test_coverage_fixture(const Parser* parser, const CFragme
             for (uint32_t k = 0; result && k < length; k += 1)
             {
                 memcpy(changed, sink->syntax, (uint64_t)sink->token_count * sizeof(*changed));
-                changed[base + expected[k].token].emitted = false;
+                if (expected[k].kind == C_FRAGMENT_KIND_COUNT)
+                {
+                    changed[base + expected[k].token].bridge = false;
+                }
+                else
+                {
+                    changed[base + expected[k].token].emitted = false;
+                }
                 result = !c_fragment_coverage_fixture_matches(&altered, expected, length, base);
             }
         }
         if (!result)
         {
-            fprintf(stderr, "fragment exact coverage fixture %d failed (base=%u expected_nodes=%u)\n", fixture, base, length);
+            fprintf(stderr, "fragment exact coverage fixture %d failed (base=%u expected_entries=%u)\n", fixture, base, length);
         }
     }
     // Corpus/generated cases and newer fixtures still receive the full independent ordinary-tree coverage pass.

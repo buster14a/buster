@@ -916,11 +916,13 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
     {
         CFragmentSyntax* node = &sink->syntax[token];
         uint8_t kind = sink->kinds[token];
-        if (parent < sink->token_count && sink->kinds[parent] == C_FRAGMENT_CAST && kind == C_FRAGMENT_KIND_COUNT && !node->bridge && node->role != PARSE_ROLE_LEAF_RIGHT &&
+        if (parent < sink->token_count && sink->kinds[parent] == C_FRAGMENT_CAST && sink->syntax[parent].group < token && token < parent &&
+            kind == C_FRAGMENT_KIND_COUNT && !node->bridge && node->role != PARSE_ROLE_LEAF_RIGHT &&
             !(node->role >= PARSE_ROLE_OPEN_GROUP && node->role <= PARSE_ROLE_OPEN_CASE))
         {
             // CLOSE_CAST also owns the operand to its right. Retain the actual type child's postorder subtree,
-            // rather than mislabeling the closer's larger subtree as a type name.
+            // rather than mislabeling the closer's larger subtree as a type name. A grouped operand also reduces
+            // into this closer, but lies outside the type parentheses and must not replace their type root.
             sink->syntax[parent].type_root = token;
         }
         // A keyword's type arguments and offsetof's designator stay postorder subtrees, explicitly named as leaves.

@@ -576,6 +576,7 @@ static uint32_t c_fragment_test_fixtures(const char* directory, CFragmentTestTot
         "int f(int x) { int a[]={ [0] (int){x} }; return a[0]; }\n",
         "const char *a[]={ [0] \"a\" \"b\" \"c\" };\n",
         "int f(int x,int y) { int a[]={ [(((0)))] (((x+y))) }; return a[0]; }\n",
+        "int f(int x) { return (int)(x); }\n",
     };
     static const char* const invalid[] = {
         "int f(void) { return +; }\n",
