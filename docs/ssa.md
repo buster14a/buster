@@ -5,10 +5,12 @@ It takes a completed CFG and a view of the local accesses in its instruction
 columns. It returns read replacements and phis without prescribing the rest of
 the IR. `ssa_build` is the vector path; `ssa_build_scalar` is its independent
 predecessor-reading twin. Both are included in the existing compiler executable.
+`ssa_ir.c` connects the core to #131's `IrFunction`, including the all-memory
+functions produced by `ir_lower.c` from Tier 0's typed stream.
 
-This implements the SSA construction kernel. It does **not** yet complete
-#134's source-corpus, interpreter or Tier 1 acceptance: the integration work at
-the end of this guide remains necessary.
+The construction core and IR adapter have local semantic tests. #134's complete
+source-corpus, general interpreter and Tier 1 acceptance still requires the
+integration work at the end of this guide.
 
 ## Input and handoff
 
@@ -130,6 +132,43 @@ Only phis reachable from original promoted reads survive compaction. Every
 exposed read and phi operand is resolved again after cleanup, including aliases
 changed by an inner component.
 
+## Shared IR adapter
+
+`ssa_ir_promote` and `ssa_ir_promote_scalar` take an `IrFunction`, distinct
+output and scratch arenas, and a separate output `IrFunction`. They return an `IrCheck`
+and publish the result only on success. The input is immutable; scratch is
+restored and output allocation is rolled back on failure.
+
+The adapter uses the shared IR's deduplicated CFG and value-use descriptions.
+A typed slot is eligible when every use of its STACK_ADDR definitions is the
+address operand of a full-type, nonvolatile LOAD or STORE. Address escapes,
+computed addresses, mismatched access types, volatile accesses and excluded
+slot flags keep the entire slot in memory. Untyped storage stays in memory;
+typed temporary slots can promote. Eligibility relies on the supplied IR
+metadata; the source producer is responsible for marking volatility and
+address-taking correctly.
+
+Block 0 must have no incoming edge. The current typed-stream adapter already
+provides a parameter/slot preheader, and sends source-entry backedges to the
+following block. A different producer must provide the same precondition.
+
+The result has compact reachable blocks and retained stack slots. Promoted
+LOADs, STOREs and their unused STACK_ADDR definitions disappear; typed UNDEFs
+and new phi prefixes represent reaching definitions. Existing phis are also
+rewritten and lose operands from removed predecessor blocks. All direct value
+operands, branch targets, call arguments, switch targets and phi pairs are
+remapped. Variable-operand slices are rebuilt separately, so input slices may
+share storage without a value rewrite corrupting a block ID or metadata.
+Existing IR phis are preserved even if dead-edge removal makes them trivial;
+the core's trivial/SCC cleanup applies to the newly constructed local phis.
+
+The adapter checks reachable input uses against actual dominators and verifies
+the rebuilt function with both shared IR verifiers and dominance intervals.
+Slot size and alignment are preserved for retained storage; final frame offsets
+remain the backend's responsibility. The implementation is tested against the
+published IR in PR #322, commit
+`7a6ed05745a6b522209005d2423103caedb6c99a`, without changing IR-owned files.
+
 ## Verification and tests
 
 `ssa_verify` validates promotion, reachability, exact predecessor multiplicity,
@@ -141,6 +180,7 @@ same-type, dominating substitutions which a structural verifier alone accepts.
 ```sh
 ./build/compiler test-ssa
 ./build/compiler test-ssa --seed 7439 --count 150
+./build/compiler test-ssa-ir
 ```
 
 The test interpreter compares all-in-memory local execution with each SSA form
@@ -167,6 +207,32 @@ installed sanitizer runtimes supplied the link because Clang's archives were
 absent. Leak checking was disabled in the sandbox; address and undefined-behavior
 checks remained enabled. These checks are not target-performance acceptance.
 
+`test-ssa-ir` compares generated Tier 0 execution, its all-memory shared IR,
+and both promoted IR forms, including return bits and global memory. Its
+test-only executor reuses the typed-IR arithmetic model and adds simultaneous
+phi entry, switches and symbolic indirect calls. Execution coverage is limited
+to that model's values of at most 64 bits; wider IR types still have structural
+and promotion-contract tests, and require the general interpreter for full
+execution acceptance.
+
+The adapter suite passed 2,038 checks in optimized Clang 23 and ASan/UBSan
+builds: seed 134/count 16 for the optimized run, seed 7439/count 16 for the
+sanitizer run, each covering 128 generated functions. The latter run covers
+92,844 input and 83,260 output instructions, 2,566 input and 868 retained slots,
+and 586 constructed phis. These are coverage counts, not performance results.
+Hand fixtures check escapes, volatile and mismatched accesses, typed temporaries,
+untyped storage, typed undef, existing phis with dead predecessors, indirect
+calls, all value/block operand forms, overlapping variable slices, hidden
+non-dominating uses and transactional failures.
+
+The combined compiler also built at `-O3` with Clang 23.1.1 on the cloud host.
+Its integrated SSA and adapter commands passed 3,447 and 2,038 checks; the IR
+and lowering commands passed 5,733 and 1,566 checks. The whole-program
+no-recursion gate checked 32 translation units, 16,771 functions and 92,143
+calls with no unapproved cycle. The cloud-only compiler invocation added
+`-mmwaitx` because the VM hides that feature; no production build flag changed
+and lane waits were not executed there.
+
 ## Benchmark
 
 ```sh
@@ -187,18 +253,35 @@ The inputs are explicitly synthetic: small diamonds, natural loops, an
 irreducible CFG and a large random stress graph. The last can produce many more
 phis than original instructions, so compare its printed output size alongside
 input-normalized time. These are not SQLite functions or whole-compiler results.
+The shared-IR adapter and its full-IR verification are outside this kernel
+benchmark.
 
 Run target measurements through the shared 9700X lock, pinned to one permitted
-CPU, with the ownership variables from AGENTS.md. CI includes `test-ssa` and
-the synthetic benchmark in its existing 9700X job. No Zen 5 performance result
-or vector/scalar crossover is claimed by this change.
+CPU, with the ownership variables from AGENTS.md. CI includes `test-ssa`,
+`test-ssa-ir` and the synthetic benchmark in its existing 9700X job.
+
+The construction core passed the complete protected
+[9700X workflow](https://github.com/buster14a/buster/actions/runs/39933567015)
+on October 23, 2026, with Clang 23.1.1. The tested merge was
+`ec87ae397768b599a3a8e4d3c40caeaafaf0640f` (SSA head `655ee3b`, main base
+`635434f`). Its default SSA suite passed 2,847 checks. The kernel benchmark
+reported these medians, with the same phi counts for both constructors:
+
+| Synthetic input | Scalar ns/instruction | Vector ns/instruction | Scalar cycles/instruction | Vector cycles/instruction | Phis |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 32-block diamond | 16.628 | 12.325 | 91.912 | 68.214 | 31 |
+| 256-block loop | 65.456 | 37.945 | 362.873 | 210.192 | 580 |
+| 513-block irreducible | 52.367 | 41.117 | 290.171 | 227.879 | 3,420 |
+| 1,025-block random stress | 860.625 | 736.558 | 4,768.951 | 4,081.660 | 197,087 |
+
+The [retained measurement record](measurements/ssa-2026-10-23/9700x-core.txt)
+contains source hashes, build/run conditions, output sizes, sample ranges and
+verbatim log excerpts. This is one target run of four synthetic inputs, before
+adding the IR adapter. It establishes neither SQLite throughput nor a general
+scalar/vector crossover; the unchanged kernel source hashes identify its scope.
 
 ## Integration still required for #134
 
-- Map #131's IR local-slot loads/stores and address escapes into the input view;
-  rebuild the general IR with replacements and `(predecessor, value)` phi pairs,
-  and run its scalar/vector verifier after promotion. Stack-slot size/alignment
-  and actual frame offsets remain the IR/backend's responsibility.
 - Connect #133's complete typed-stream lowering, including volatility, aggregate
   and address-taking metadata, so actual source functions reach this pass.
 - Use #174's shared dominance/frontier analysis instead of private preparation.
@@ -206,9 +289,9 @@ or vector/scalar crossover is claimed by this change.
 - Run the source corpora and random C control flow, then measure cycles per IR
   instruction and phi counts on SQLite's functions under the locked 9700X.
 
-The local-event interpreter proves the promotion contract on its inputs; it is
-not a replacement for these whole-IR and source-program checks. Keep #134 open
-until those requirements are demonstrated.
+The local-event and typed-IR interpreters check their supported inputs. They do
+not provide the complete source-program and downstream-code acceptance above.
+Keep #134 open until those requirements are demonstrated.
 
 ## Algorithm references
 

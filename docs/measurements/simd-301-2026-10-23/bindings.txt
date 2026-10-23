@@ -1,0 +1,210 @@
+
+=== buster-bindings-old-sort-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  sort: 10.403 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-old-sort-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  sort: 10.314 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-old-sort-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  sort: 10.743 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-new-sort-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  sort: 7.562 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-new-sort-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  sort: 7.865 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-new-sort-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  sort: 8.567 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-old-batch-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  batch: 25.641 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-old-batch-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  batch: 26.156 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-old-batch-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  batch: 30.136 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-new-batch-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  batch: 22.511 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-new-batch-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  batch: 23.645 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-new-batch-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 0 ms
+  batch: 27.809 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-old-names2-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 2 names, 21 passes, after-scalar 0 ms
+  scalar: 3.431 ns/identifier, cycles unavailable
+  batch: 18.339 ns/identifier, cycles unavailable
+  sort: 6.984 ns/identifier, cycles unavailable
+  walks 126399, walked uses 20564, fallback uses 11988; outputs identical
+
+=== buster-bindings-old-names2-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 2 names, 21 passes, after-scalar 0 ms
+  scalar: 3.429 ns/identifier, cycles unavailable
+  batch: 18.673 ns/identifier, cycles unavailable
+  sort: 7.220 ns/identifier, cycles unavailable
+  walks 126399, walked uses 20564, fallback uses 11988; outputs identical
+
+=== buster-bindings-old-names2-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 2 names, 21 passes, after-scalar 0 ms
+  scalar: 3.508 ns/identifier, cycles unavailable
+  batch: 18.496 ns/identifier, cycles unavailable
+  sort: 7.338 ns/identifier, cycles unavailable
+  walks 126399, walked uses 20564, fallback uses 11988; outputs identical
+
+=== buster-bindings-old-names256-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 256 names, 21 passes, after-scalar 0 ms
+  scalar: 3.789 ns/identifier, cycles unavailable
+  batch: 34.332 ns/identifier, cycles unavailable
+  sort: 10.109 ns/identifier, cycles unavailable
+  walks 1010999, walked uses 156858, fallback uses 101309; outputs identical
+
+=== buster-bindings-old-names256-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 256 names, 21 passes, after-scalar 0 ms
+  scalar: 3.499 ns/identifier, cycles unavailable
+  batch: 31.792 ns/identifier, cycles unavailable
+  sort: 9.737 ns/identifier, cycles unavailable
+  walks 1010999, walked uses 156858, fallback uses 101309; outputs identical
+
+=== buster-bindings-old-names256-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 256 names, 21 passes, after-scalar 0 ms
+  scalar: 3.596 ns/identifier, cycles unavailable
+  batch: 28.465 ns/identifier, cycles unavailable
+  sort: 9.139 ns/identifier, cycles unavailable
+  walks 1010999, walked uses 156858, fallback uses 101309; outputs identical
+
+=== buster-bindings-old-names1000000-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 1000000 names, 21 passes, after-scalar 0 ms
+  scalar: 9.167 ns/identifier, cycles unavailable
+  batch: 24.211 ns/identifier, cycles unavailable
+  sort: 13.139 ns/identifier, cycles unavailable
+  walks 5366, walked uses 5266, fallback uses 0; outputs identical
+
+=== buster-bindings-old-names1000000-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 1000000 names, 21 passes, after-scalar 0 ms
+  scalar: 6.528 ns/identifier, cycles unavailable
+  batch: 19.709 ns/identifier, cycles unavailable
+  sort: 11.886 ns/identifier, cycles unavailable
+  walks 5366, walked uses 5266, fallback uses 0; outputs identical
+
+=== buster-bindings-old-names1000000-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 1000000 names, 21 passes, after-scalar 0 ms
+  scalar: 8.444 ns/identifier, cycles unavailable
+  batch: 22.940 ns/identifier, cycles unavailable
+  sort: 12.927 ns/identifier, cycles unavailable
+  walks 5366, walked uses 5266, fallback uses 0; outputs identical
+
+=== buster-bindings-new-names2-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 2 names, 21 passes, after-scalar 0 ms
+  scalar: 3.533 ns/identifier, cycles unavailable
+  batch: 12.674 ns/identifier, cycles unavailable
+  sort: 1.052 ns/identifier, cycles unavailable
+  walks 126399, walked uses 20564, fallback uses 11988; outputs identical
+
+=== buster-bindings-new-names2-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 2 names, 21 passes, after-scalar 0 ms
+  scalar: 3.466 ns/identifier, cycles unavailable
+  batch: 12.120 ns/identifier, cycles unavailable
+  sort: 1.053 ns/identifier, cycles unavailable
+  walks 126399, walked uses 20564, fallback uses 11988; outputs identical
+
+=== buster-bindings-new-names2-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 2 names, 21 passes, after-scalar 0 ms
+  scalar: 3.577 ns/identifier, cycles unavailable
+  batch: 13.448 ns/identifier, cycles unavailable
+  sort: 1.054 ns/identifier, cycles unavailable
+  walks 126399, walked uses 20564, fallback uses 11988; outputs identical
+
+=== buster-bindings-new-names256-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 256 names, 21 passes, after-scalar 0 ms
+  scalar: 3.573 ns/identifier, cycles unavailable
+  batch: 26.234 ns/identifier, cycles unavailable
+  sort: 4.660 ns/identifier, cycles unavailable
+  walks 1010999, walked uses 156858, fallback uses 101309; outputs identical
+
+=== buster-bindings-new-names256-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 256 names, 21 passes, after-scalar 0 ms
+  scalar: 3.662 ns/identifier, cycles unavailable
+  batch: 27.812 ns/identifier, cycles unavailable
+  sort: 5.066 ns/identifier, cycles unavailable
+  walks 1010999, walked uses 156858, fallback uses 101309; outputs identical
+
+=== buster-bindings-new-names256-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 256 names, 21 passes, after-scalar 0 ms
+  scalar: 3.565 ns/identifier, cycles unavailable
+  batch: 24.522 ns/identifier, cycles unavailable
+  sort: 4.621 ns/identifier, cycles unavailable
+  walks 1010999, walked uses 156858, fallback uses 101309; outputs identical
+
+=== buster-bindings-new-names1000000-1.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 1000000 names, 21 passes, after-scalar 0 ms
+  scalar: 5.899 ns/identifier, cycles unavailable
+  batch: 18.014 ns/identifier, cycles unavailable
+  sort: 10.600 ns/identifier, cycles unavailable
+  walks 5366, walked uses 5266, fallback uses 0; outputs identical
+
+=== buster-bindings-new-names1000000-2.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 1000000 names, 21 passes, after-scalar 0 ms
+  scalar: 6.823 ns/identifier, cycles unavailable
+  batch: 17.932 ns/identifier, cycles unavailable
+  sort: 10.555 ns/identifier, cycles unavailable
+  walks 5366, walked uses 5266, fallback uses 0; outputs identical
+
+=== buster-bindings-new-names1000000-3.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 1000000 names, 21 passes, after-scalar 0 ms
+  scalar: 9.330 ns/identifier, cycles unavailable
+  batch: 21.360 ns/identifier, cycles unavailable
+  sort: 11.291 ns/identifier, cycles unavailable
+  walks 5366, walked uses 5266, fallback uses 0; outputs identical
+
+=== buster-bindings-old-tiny.log ===
+bindings synthetic: 14 identifiers, 5 declarations, 8 names, 21 passes, after-scalar 0 ms
+  scalar: 3.571 ns/identifier, cycles unavailable
+  batch: 38.643 ns/identifier, cycles unavailable
+  sort: 34.286 ns/identifier, cycles unavailable
+  walks 0, walked uses 0, fallback uses 0; outputs identical
+
+=== buster-bindings-old-conditioned.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 100 ms
+  batch: 38.802 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical
+
+=== buster-bindings-new-tiny.log ===
+bindings synthetic: 14 identifiers, 5 declarations, 8 names, 21 passes, after-scalar 0 ms
+  scalar: 3.571 ns/identifier, cycles unavailable
+  batch: 15.000 ns/identifier, cycles unavailable
+  sort: 11.429 ns/identifier, cycles unavailable
+  walks 0, walked uses 0, fallback uses 0; outputs identical
+
+=== buster-bindings-new-conditioned.log ===
+bindings synthetic: 246065 identifiers, 57727 declarations, 8192 names, 21 passes, after-scalar 100 ms
+  batch: 28.789 ns/identifier, cycles unavailable
+  walks 592254, walked uses 155194, fallback uses 8352; outputs identical

@@ -1,0 +1,70 @@
+Assembly and retained-diff review
+
+Artifacts inspected:
+  baseline: /workspace/scratch/61c60105fb18/pp-ablation/00-baseline/benchmark
+  retained: /workspace/scratch/61c60105fb18/pp-ablation/02-flat-literal/benchmark
+  source: /workspace/scratch/61c60105fb18/buster/src/buster/compiler/c_preprocessor.c
+The current retained preprocessor source byte-matched the 02-literal.c snapshot when reviewed.
+All addresses below are linked ELF virtual offsets in these exact binaries, not runtime ASLR addresses.
+Disassembly is from GNU objdump -d -Mintel; source mappings were checked with addr2line -f -i.
+
+1. Argument collection skips the dependent prefix kernel as intended.
+Source: pp_collect_arguments, c_preprocessor.c:6183-6210; pp_prefix_sum_bytes is the existing nested-event fallback.
+The compiler inlined pp_collect_arguments through pp_invoke into pp_expand_current.
+Baseline pp_expand_current starts at 0xb6810. After the bounded kind load and character masks, every processed block
+executes six dependent vpermb stages at 0xb8114, 0xb8126, 0xb8138, 0xb814a, 0xb815c and 0xb816f, with their
+interleaved byte sums and lane clearing, before it derives top-level separator masks.
+Retained pp_expand_current starts at 0xb6bb0. The depth-zero/no-earlier-opener tests are at 0xb84ac-0xb84b7.
+The accepted flat path computes the comma mask at 0xb84b9-0xb84c1 and jumps from 0xb84c4 to 0xb8592.
+This skips the complete prefix sequence whose six vpermb instructions are at 0xb84eb, 0xb84fd, 0xb850f,
+0xb8521, 0xb8533 and 0xb8546. The no-parenthesis case at nonzero depth tests opens|closes at 0xb84c9-0xb84cf
+and jumps to 0xb858c, where both result masks become zero before joining the same continuation.
+The input load remains masked: vmovdqu8 zmm17{k2}{z} at 0xb8471. The existing nested-event prefix path remains.
+The fast path still pays shared mask creation and compiler-hoisted prefix-index setup; it does not remove every
+vector setup instruction. Clang lowered the source blsmsk expression to lea/xor/shr/cmov in these binaries.
+See baseline-argument-prefix-excerpt.txt and retained-argument-prefix-excerpt.txt.
+
+2. Literal substitution consumes the recipe field instead of scanning the following items.
+Source: pp_substitute, c_preprocessor.c:5538-5546.
+Baseline pp_substitute starts at 0xaf330. Its literal scan at 0xafe40-0xafe6b checks the next item against count,
+the optional-content bound, PP_ITEM_TOKEN kind, and consecutive source token index, then branches back to 0xafe40.
+Retained pp_substitute starts at 0xaf650. At 0xb0145 it loads the 16-bit parameter field with
+  movzx eax, WORD PTR [r10+r13*8+0x2]
+and adds the current index at 0xb0153. Comparisons and cmova/cmovbe at 0xb015d-0xb016a retain the active VA_OPT
+bound. It loads only the selected endpoint token at 0xb017e, then enters the existing bounded file-token copy.
+There is no next-item scan loop in this retained literal selection sequence. The scalar branch is still present.
+See baseline-literal-consumer-excerpt.txt and retained-literal-consumer-excerpt.txt.
+
+3. The producer cost is present and was charged by the benchmarks.
+Source: pp_compile_macro, c_preprocessor.c:4416-4429.
+Retained pp_compile_macro starts at 0x88dd0. Its backward suffix loop begins at 0x8985f, loads the next 16-bit suffix
+at 0x898ce, increments at 0x898d4, clamps with cmp/cmov at 0x89890-0x89897, and stores a word at 0x8989b.
+Clang also emits an eight-item unrolled body for this loop. No extra PPItem allocation or record width is introduced.
+The benchmark initializes and preprocesses each translation unit from scratch, so constructing these suffixes is
+inside each measured pass, rather than hidden in an untimed preparation phase.
+See retained-literal-producer-excerpt.txt and retained-pp_compile_macro-lines.txt.
+
+Code placement/measurement limits:
+These are Clang 18 -O3 -march=native cloud builds (AMD EPYC 9V74 host), not the target Zen 5 build or its full driver binary.
+Clang specialized many accesses to the benchmark's static Preprocessor and inlined several helpers. Function sizes:
+  pp_compile_macro: baseline 0x15e8 bytes -> retained 0x1908 (+800 bytes)
+  pp_expand_current: baseline 0x27ce bytes -> retained 0x27f7 (+41 bytes)
+  pp_substitute: baseline 0x3cd4 bytes -> retained 0x3d54 (+128 bytes)
+Removing a source loop therefore does not imply smaller total function code; register allocation, unrolling and
+placement changed. Disassembly establishes the intended operation removal, not a target-host speedup or an exact
+instruction-count saving. The three-process real-workload ranges overlap, as screen-summary.txt records.
+
+Retained source/tests/docs review:
+No blocking correctness issue found in the retained preprocessor diff, c_preprocessor_batch_test.c,
+c_preprocessor_test.c integration, or the producer/consumer documentation in docs/c-preprocessor.md.
+The literal field remains kind-specific; the backward pass runs only while recipe compilation succeeds; it caps
+following-token counts at 65535, giving at most 65536 tokens per copy. Adjacent recipe and source token indices are
+both required, preserving the removed VA_OPT closing-token boundary, with an additional runtime optional-end clamp.
+The flat condition ignores openers after the first closer, where collection already ends, and no-parenthesis blocks
+inside nested arguments neither change depth nor introduce separators. Original fallback and separator limits stay.
+The generated cases cover empty arguments, all closing lanes through 129 tokens, nested/file/buffer/variadic cases,
+newlines, and comma behavior in braces/brackets. Adjacent macro calls also place later openers after an earlier close
+within a block. Literal tests cross the 65535 field cap on both sides of VA_OPT, with present and absent contents.
+The optional content deliberately has 65 tokens, keeping its existing uint16 content-length limit out of this task.
+The test helper compares vector/scalar streams and expansion history; the removed copy-specific tests are appropriate
+because the SIMD copying change was rejected. This review did not rerun tests or inspect the separate history patch.

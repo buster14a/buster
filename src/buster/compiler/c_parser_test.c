@@ -304,6 +304,12 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "[[deprecated]] int x; int y [[maybe_unused]];\n", "", 0 },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     { "int x = (int){1}; int a[3] = { [1 ... 2] = 0 };\n", "", 0 },
+    // GNU's single array designator may omit '=', including a range, a prefix operand and a braced initializer.
+    { "int a[] = { [0] 1, [3] 4, [4] -1, [5] (int)2 };\n", "", 0 },
+    { "int a[2] = { [0 ... 1] +1 }; int b[1][2] = { [0] { 1, 2 } };\n", "", "c17" },
+    // GNU's old-style field designator uses ':' in place of '.member =', including a typedef-shadowing member.
+    { "struct p { int x, y; }; struct p q = { y: 2, x: 1 };\n", "", 0 },
+    { "typedef int T; struct p { int T, x; }; struct p q = { T: 1, x: 2 };\n", "", "c17" },
     { "void f(int x) { asm volatile (\"\" : [r] \"=r\" (x) : \"r\" (x) : \"memory\"); }\n", "", 0 },
     { "int f(a, b) int a; char b; { return a + b; }\n", "", 0 },
     { "int x = 1 ? : 2;\n", "", 0 },
@@ -412,6 +418,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void (f(void)) {}\nint (*g(void))[3] { return 0; }\n", "", 0 },
     { "int (q)(int x) { return x; }\nint *(r)(void) { return 0; }\n", "", 0 },
     { "int (*p)(int) { return 0; }\n", "1:14: expected ';' after top level declarator", 0 },
+    // A function's typedef declaration cannot carry a body, even though the declarator is a function's.
+    { "typedef int f(int x) { return x; }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "typedef int f(int x) { return x; }\nint g(void) { return f(1); }\n", "1:1: function definition declared 'typedef'", 0 },
+    { "int typedef f(void) { return 0; }\n", "1:5: function definition declared 'typedef'", 0 },
     { "int f(int a), g(int b) { return b; }\n", "1:23: expected ';' after top level declarator", 0 },
     { "int (*f(void)) x\n", "1:16: expected function body after function declarator", 0 },
     // The end of an identifier is where its spelling ends: a UCN and a line splice make it longer than its bytes.
@@ -444,6 +454,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     // An initializer's designators take `.`, never `->`.
     { "struct S { int a; } s = { ->a = 1 };\n", "1:27: expected expression", 0 },
     { "struct S { struct { int b; } a; } s = { .a->b = 1 };\n", "1:43: expected '=' or another designator", 0 },
+    // Only a single array subscript allows GNU's missing '='; field and chained designators still require it.
+    { "struct S { int a; } s = { .a 1 };\n", "1:30: expected '=' or another designator", 0 },
+    { "int a[1][2] = { [0][1] 1 };\n", "1:24: expected '=' or another designator", 0 },
+    { "struct S { int a[1]; } s = { .a[0] 1 };\n", "1:36: expected '=' or another designator", 0 },
     // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
     { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
     { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
@@ -1151,6 +1165,55 @@ static uint32_t parse_test_kernel_differs(const Parser* parser, Preprocessor* pp
         result = 1;
     }
     return result;
+}
+
+// Every role/kind refinement, with either typed state and with both in one block, against the scalar classifier.
+// Unused virtual kinds preserve the original role and its typed variant.
+static uint32_t parse_test_check_k6_tables(void)
+{
+    parse_tables_initialize();
+    uint32_t failures = 0;
+    for (uint32_t r = 0; r < PARSE_ROLE_COUNT; r += 1)
+    {
+        const __m512i roles = _mm512_set1_epi8((char)r);
+        const __m512i role_bits = parse_table8(parse_check_vector.role_bits, roles);
+        for (uint32_t first = 0; first < 128; first += 64)
+        {
+            uint8_t kinds[64];
+            for (uint32_t lane = 0; lane < 64; lane += 1)
+            {
+                kinds[lane] = (uint8_t)(first + lane);
+            }
+            for (uint32_t state = 0; state < 3; state += 1)
+            {
+                const __mmask64 typed = state == 0 ? 0 : state == 1 ? ~(__mmask64)0 : 0xaaaaaaaaaaaaaaaaull;
+                uint8_t expected[64];
+                for (uint32_t lane = 0; lane < 64; lane += 1)
+                {
+                    const bool is_typed = ((typed >> lane) & 1) != 0;
+                    uint8_t value = (uint8_t)r;
+                    if (kinds[lane] < BUSTER_PARSE_VKINDS)
+                    {
+                        value = parse_check_class((uint8_t)r, kinds[lane], 0, is_typed);
+                    }
+                    else if (is_typed)
+                    {
+                        value = r == PARSE_ROLE_SPECIFIER ? PARSE_CLASS_TYPED : r == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ? PARSE_CLASS_TYPED_ATTRIBUTE : (uint8_t)r;
+                    }
+                    expected[lane] = value;
+                }
+                const __m512i actual = parse_check_classes_avx512(roles, _mm512_loadu_si512(kinds), role_bits, typed);
+                const uint64_t different = _mm512_cmpneq_epi8_mask(actual, _mm512_loadu_si512(expected));
+                if (different != 0)
+                {
+                    parse_test_report("K6 refinement differs: role %u, kind %u, typed state %u\n", r, first + (uint32_t)__builtin_ctzll(different), state);
+                    failures += 1;
+                }
+            }
+        }
+    }
+    printf("K6 compact tables: %u failures\n", failures);
+    return failures;
 }
 
 // K5 in AVX-512 against the twin, from the parents K4 left in kernels->parents: the same verdict, and when it is true,
@@ -2793,6 +2856,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     else
     {
         failures += parse_test_check_postorder_self(&arena);
+        failures += parse_test_check_k6_tables();
         failures += parse_test_check_snippets(directory, clang);
         failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
         failures += parse_test_check_fixtures(directory);

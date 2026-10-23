@@ -1,0 +1,32 @@
+[
+  {
+    "measurement": "tier0-2000/size_encode",
+    "p": "2",
+    "reason": "incomplete stdout"
+  },
+  {
+    "measurement": "tier0-40/size_encode",
+    "p": "4",
+    "reason": "incomplete stdout"
+  },
+  {
+    "measurement": "tier0-mix/size_branches",
+    "p": "1",
+    "reason": "incomplete stdout"
+  },
+  {
+    "measurement": "tier0-mix/size_branches",
+    "p": "5",
+    "reason": "incomplete stdout"
+  },
+  {
+    "measurement": "scaling-1",
+    "p": "5",
+    "reason": "incomplete stdout"
+  },
+  {
+    "measurement": "scaling-2",
+    "p": "2",
+    "reason": "incomplete stdout"
+  }
+]
