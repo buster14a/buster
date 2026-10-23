@@ -1,0 +1,43 @@
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -66,0 +67 @@
++#define BUSTER_REFINE_PREFETCH_BATCHES 2
+@@ -512,2 +513,3 @@
+-// intern_bucket_matches', from a compare without its mask. No branch depends on the outcome: without a match, the id
+-// read (the first slot's first dword, tzcnt's 32 masked to 0) is discarded.
++// intern_bucket_matches', from a compare without its mask. Compress the matching id dwords from the already loaded
++// bucket: the lowest lane is the first match's id, or zero when no prefix matches. This needs no dependent scalar
++// load, outcome branch or sentinel read on a miss.
+@@ -516,6 +518,5 @@
+-    const uint32_t matches = (_mm512_cmpeq_epi32_mask(_mm512_load_si512(bucket), intern_bucket_key(key)) + 0x1111) & 0x8888;
+-    IdentId id = intern_slot_id(bucket, _tzcnt_u32(matches) & 15);
+-    // A select after the load, not a branch around it, which Clang makes of a plain `?:` (with the matches' zero as the
+-    // result): a branch on the outcome would mispredict for every new spelling.
+-    __asm__("" : "+r"(id));
+-    return id & (uint32_t)-(int32_t)(matches != 0);
++    const __m512i slots = _mm512_load_si512(bucket);
++    const __mmask16 equal = _mm512_cmpeq_epi32_mask(slots, intern_bucket_key(key));
++    const __mmask16 matches = _kand_mask16(_kadd_mask16(equal, 0x1111), 0x8888);
++    const __m512i ids = _mm512_maskz_compress_epi32(matches, slots);
++    return (IdentId)_mm_cvtsi128_si32(_mm512_castsi512_si128(ids));
+@@ -755 +756 @@
+-    RefineHashes hashes[2];
++    RefineHashes hashes[BUSTER_REFINE_PREFETCH_BATCHES + 1];
+@@ -758 +759 @@
+-    if (total != 0)
++    for (uint32_t primed = 0; primed < BUSTER_REFINE_PREFETCH_BATCHES && primed * batch < total; primed += 1)
+@@ -760 +761,2 @@
+-        refine_hash_batch(table, source, identifiers->starts, identifiers->lengths, total < batch ? total : batch, &hashes[0], trigraphs);
++        const uint32_t at = primed * batch;
++        refine_hash_batch(table, source, identifiers->starts + at, identifiers->lengths + at, total - at < batch ? total - at : batch, &hashes[primed], trigraphs);
+@@ -823 +825,2 @@
+-        const uint32_t next = first + count;
++        const uint32_t ahead = BUSTER_REFINE_PREFETCH_BATCHES * batch;
++        const uint32_t next = first + ahead;
+@@ -826 +829,2 @@
+-            refine_hash_batch(table, source, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1], trigraphs);
++            const uint32_t next_slot = parity == 0 ? BUSTER_REFINE_PREFETCH_BATCHES : parity - 1;
++            refine_hash_batch(table, source, starts + ahead, lengths + ahead, total - next < batch ? total - next : batch, &hashes[next_slot], trigraphs);
+@@ -857 +861 @@
+-        parity ^= 1;
++        parity = parity == BUSTER_REFINE_PREFETCH_BATCHES ? 0 : parity + 1;

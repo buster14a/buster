@@ -33,8 +33,10 @@
 // from cancelling: a fold of the lanes as they are is linear, so flipping a bit in one lane and the same bit in another
 // would leave it as it was, and after one round a flipped bit's change still depends on its byte alone. Chunks after
 // the first are chained with an AES round (the state's round, XORed with the chunk's fold), so that equal or swapped
-// chunks don't cancel either. The hash is the low qword of the state. intern_hash_bytes computes
-// it 64 bytes at a time, and intern_hash_vector from a spelling of up to 64 bytes that one masked load read (zero past
+// chunks don't cancel either. A final AES round mixes the complete folded state before its high qword is discarded:
+// without it, sparse changes in two lanes can cancel in the low qword alone. The hash is the low qword of that round.
+// intern_hash_bytes computes it 64 bytes at a time, and intern_hash_vector from a spelling of up to 64 bytes that one
+// masked load read (zero past
 // its end), as c_refine.c does: all three must agree on every spelling (test-refinement checks it).
 //
 // main.c includes this file after c_lexer.c (BUSTER_INLINE) and lane.c (Arena); every function is static. Layout, in
@@ -497,7 +499,7 @@ BUSTER_INLINE __m128i intern_chain(__m128i state, __m128i folded)
 // The hash of a spelling of any length, a 16-byte lane at a time: the plain definition, which test-refinement checks
 // intern_hash_bytes and intern_hash_vector against. Each chunk has four lanes, zero past the spelling's end (a spelling
 // of no bytes is one chunk of zeros, as the masked loads give them), and the length is XORed into the first lane's low
-// qword. The hash is the low qword of the state.
+// qword. A final AES round mixes the complete state, whose low qword is the hash.
 static __attribute__((unused)) uint64_t intern_hash_bytes_scalar(const uint8_t* bytes, uint64_t length)
 {
     __m128i state = _mm_setzero_si128();
@@ -522,7 +524,7 @@ static __attribute__((unused)) uint64_t intern_hash_bytes_scalar(const uint8_t* 
         }
         state = chunk == 0 ? folded : intern_chain(state, folded);
     }
-    return (uint64_t)_mm_cvtsi128_si64(state);
+    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(state, _mm_setzero_si128()));
 }
 
 // The fold of a 64-byte chunk: its four lanes whitened and through two AES rounds at once (a vpxorq and two vaesenc of
@@ -542,10 +544,10 @@ BUSTER_INLINE __m512i intern_with_length(__m512i chunk, uint64_t length)
     return _mm512_xor_si512(chunk, _mm512_zextsi128_si512(_mm_cvtsi64_si128((long long)length)));
 }
 
-// The hash of a spelling of up to 64 bytes in `v`, zero past its length: one chunk.
+// The hash of a spelling of up to 64 bytes in `v`, zero past its length: one chunk, then the final mixing round.
 BUSTER_INLINE uint64_t intern_hash_vector(__m512i v, uint64_t length)
 {
-    return (uint64_t)_mm_cvtsi128_si64(intern_fold(intern_with_length(v, length)));
+    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(intern_fold(intern_with_length(v, length)), _mm_setzero_si128()));
 }
 
 // What a spelling's lanes 2 and 3 add to its chunk's fold when they are zero (it has at most 32 bytes): their rounds of
@@ -560,9 +562,9 @@ BUSTER_INLINE __m512i intern_hash_zero_lanes(void)
 // `lengths` has spelling i's length in dword 4i and zeros elsewhere. The spellings' two 16-byte lanes are transposed (two
 // lane shuffles), so that one vector holds the four first lanes and another the four second ones: each is whitened with
 // its lane's constants (the first with the lengths too) and goes through its two AES rounds, and the four folds are one
-// three-way XOR, with `zero_lanes` (intern_hash_zero_lanes) for the zero lanes 2 and 3. That replaces a fold's four
-// shuffles and XORs per spelling, and half the rounds. `*firsts` gets the first lanes: spelling i's first 16 bytes in
-// lane i.
+// three-way XOR, with `zero_lanes` (intern_hash_zero_lanes) for the zero lanes 2 and 3. A final AES round mixes the four
+// folds before their low qwords are used. This replaces a fold's four shuffles and XORs per spelling, and half the
+// per-lane rounds. `*firsts` gets the first lanes: spelling i's first 16 bytes in lane i.
 BUSTER_INLINE __m512i intern_hash_vectors4_short(__m512i ab, __m512i cd, __m512i lengths, __m512i zero_lanes, __m512i* firsts)
 {
     const __m512i zero = _mm512_setzero_si512();
@@ -573,7 +575,7 @@ BUSTER_INLINE __m512i intern_hash_vectors4_short(__m512i ab, __m512i cd, __m512i
     *firsts = first_lanes;
     const __m512i lane0 = _mm512_aesenc_epi128(_mm512_aesenc_epi128(_mm512_ternarylogic_epi64(first_lanes, lengths, whitening0, 0x96), zero), zero);
     const __m512i lane1 = _mm512_aesenc_epi128(_mm512_aesenc_epi128(_mm512_xor_si512(second_lanes, whitening1), zero), zero);
-    return _mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96);
+    return _mm512_aesenc_epi128(_mm512_ternarylogic_epi64(lane0, lane1, zero_lanes, 0x96), zero);
 }
 
 // The state after the chunks past a spelling's first 64 bytes, chained onto the first's (`state`): out of line, since
@@ -590,7 +592,7 @@ static __attribute__((noinline)) __m128i intern_chain_chunks(const uint8_t* byte
 }
 
 // The hash of a spelling of any length: its first 64 bytes (a masked load, which never reads past it) folded, then any
-// later chunks chained.
+// later chunks chained, then one mixing round before keeping the low qword.
 static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
 {
     const __mmask64 mask = length >= BUSTER_INTERN_VECTOR_BYTES ? ~0ull : _bzhi_u64(~0ull, (uint32_t)length);
@@ -599,7 +601,7 @@ static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
     {
         state = intern_chain_chunks(bytes, length, state);
     }
-    return (uint64_t)_mm_cvtsi128_si64(state);
+    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(state, _mm_setzero_si128()));
 }
 
 // A key for intern_bucket_matches: the spelling's first 16 bytes (zero past its end) in each 128-bit lane.

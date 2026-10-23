@@ -1,0 +1,22 @@
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -737,0 +738,10 @@
++static __attribute__((noinline)) void refine_hash_plain(const InternTable* table, const uint8_t* source, const uint32_t* starts, const uint32_t* lengths, uint32_t count, RefineHashes* hashes)
++{
++    refine_hash_batch(table, source, starts, lengths, count, hashes, false);
++}
++
++static __attribute__((noinline)) void refine_hash_trigraphs(const InternTable* table, const uint8_t* source, const uint32_t* starts, const uint32_t* lengths, uint32_t count, RefineHashes* hashes)
++{
++    refine_hash_batch(table, source, starts, lengths, count, hashes, true);
++}
++
+@@ -760 +770 @@
+-        refine_hash_batch(table, source, identifiers->starts, identifiers->lengths, total < batch ? total : batch, &hashes[0], trigraphs);
++        (trigraphs ? refine_hash_trigraphs : refine_hash_plain)(table, source, identifiers->starts, identifiers->lengths, total < batch ? total : batch, &hashes[0]);
+@@ -772 +782 @@
+-            refine_hash_batch(table, source, starts, lengths, count, current, trigraphs);
++            (trigraphs ? refine_hash_trigraphs : refine_hash_plain)(table, source, starts, lengths, count, current);
+@@ -826 +836 @@
+-            refine_hash_batch(table, source, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1], trigraphs);
++            (trigraphs ? refine_hash_trigraphs : refine_hash_plain)(table, source, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1]);
