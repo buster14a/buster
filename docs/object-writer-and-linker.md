@@ -4463,3 +4463,105 @@ The 64-bit variants:
 The `Elf64_Rela` writers fill 24-byte records from four 32-bit columns
 (offset, symbol, type, addend): scalar, or three `vpermt2q` and three masked
 `vpermq` per eight records.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Pinned sources:
+[Link](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/link.c#L4),
+[object writer](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/object_writer.c#L4),
+[import](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/import.c#L4),
+[foreign resolution](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/foreign.c#L4),
+[foreign handoff](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/foreign_link.c#L4),
+[snapshot](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/snapshot.c#L4),
+[dynamic inputs](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/dynamic.c#L4),
+[executable](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/executable.c#L4).
+
+| Producer → consumer | Implemented handoff and other readers |
+| --- | --- |
+| Tier 0/assembler/test records → encoding/fixup ends → `link_add_code_fixups` | Code atom bytes plus symbolic references become offset-sorted, nonoverlapping fixups. Marked-instruction order, field kind and source addend survive. Object and direct writers both consume them. |
+| Checked scalar definitions → `check_data_input`/`check_data_emit` → Link | Canonical object-to-symbol IDs, atom bytes and address fixups; current supported scalar subset only. Tests write objects and execute linked fixtures; the checker CLI dumps this output. |
+| Frontend/import/generator names → Link names → binding/object/string tables | Counted spelling, NUL for ELF, length and retained u64 `link_hash`. Names are not automatically interned; the producer supplies one ID per spelling where required. |
+| ELF bytes → `import_object`/archive/library/script readers → Runtime or Foreign | Checked section/symbol/relocation columns and input-index mappings. Eight-record vector paths decline to exact readers; archive indices support lazy member loading. |
+| File search/import → `runtime_import*` → snapshot → `runtime_open*` → binding | Counted runtime pieces, global-name index/filter, archive refs/COMDAT and library versions. Mapped snapshot pointers/deltas avoid rebuilding columns; directory validation precedes use, piece hashes are checked when consumed. |
+| `foreign_run` parse → exchange/resolve → archive frontier → winners/COMDAT | Stable input/member positions, hashed name partitions and selected definitions. Count/place/fill phases have collective proceed decisions; a round ends only when no new member/library reference loads. |
+| Foreign winners → `foreign_link_build*` → canonical Link/dynamic inputs | Reuses resolved names and selected members; input-local symbol maps and original input order preserve references and initialization order. No second name resolution. |
+| Program Link + runtime pieces → binding → `dynamic_*_inputs` → `executable_write` | Canonical symbol bindings, imports/exports, library/version arrays, TLS/runtime metadata. Bind before selection is the intended source integration; current generators/foreign inputs exercise consumers. |
+| Link → `object_prepare`/`object_map_symbols` → `object_build`/`object_write_units` | Group units/classes, count/place exact ELF ranges, fill once. One lane owns an entire object, with its own symbol-map/scratch. Other linkers and `import_object` are output readers. |
+| Link + options → executable symbol classes/count/place → resolve | Class/alignment buckets and prefix offsets, dynamic symbol/GOT/relocation metadata, atom addresses and symbol references. Ordered init/fini/unwind classes preserve required order. |
+| Final layout/references → chunk patch/hash/write → loader/debug readers | Disjoint chunk work and collective barriers; patched bytes, build ID and published file. Native debug/source-event producers and actual compilation overlap remain [#88](https://github.com/buster14a/buster/issues/88). |
+
+### Memory, ownership and ordering
+
+Link uses u32 IDs (zero absent) and counted SoA tables. Atom sizes/addresses and
+name hashes are wide; fixups use u32 offset/target/addend and a byte kind
+(13 logical bytes per fixup). Wide addends are indexed in a side table and
+accessed through `link_fixup_addend`; a consumer must not interpret the index
+as the addend. Every atom's fixups form one contiguous sorted range; fields
+cannot overlap or extend outside its bytes. A capacity failure is sticky and
+an add returns zero. `link_check` validates whole-representation invariants
+including local-unit and TLS/reference-kind constraints.
+
+Tables/name arenas and atom bytes have different owners. Object writing reads
+atom bytes. Executable patching **writes them in place**, as well as its owned
+address/reference/GOT/dynamic-index columns. Source-generated bytes and private
+foreign mappings must remain writable and alive until writing finishes.
+`foreign_link_build` borrows `Foreign` mappings; its failure may leave partial
+caller-owned output. Restore/rebuild pristine inputs before comparing a second
+writer variant. It is not the static-data emitter's transactional contract.
+Do not run object writing concurrently with executable mutation of the same
+bytes or reuse scratch as retained atoms.
+
+Import reads untrusted counted bytes with checked offset arithmetic and
+`memcpy` field loads; no input alignment/padding is assumed. Snapshot regions
+are 64-byte aligned and layout/version/executable-identity checked; that format
+is not a blanket permission for a new consumer to vector-read outside a region.
+Record kernels use bounded masks/tails or their explicit internal allocations;
+encoder output slack must not be counted as atom bytes. A serialized object is
+one exactly sized buffer. Zero-fill atoms have no byte payload, and empty units
+still have object-output semantics.
+
+`ExecutableDynamic` borrows counted library/version arrays. Library indices are
+u32, version indices are unique 2..0x7fff and grouped by library; required
+unversioned libraries are not inferred only from version use. Preserve selected
+input order. Binding/resolve completion precedes final layout and relocation
+patching. Archive rounds, COMDAT choice, init/fini priorities and version
+numbering are semantic boundaries; arbitrary reordering for batch fullness is
+invalid. Lanes reserve once, fill disjoint ranges, synchronize and make the same
+failure decision. Independent complete objects/functions can be distributed;
+one ELF record's 8/16/64-lane kernel width is not the whole-link batch size.
+
+### Waste, alternatives and disposition
+
+The encoded-to-Link boundary already retains field kinds, addends and targets;
+re-disassembly would lose useful producer knowledge. Reusing canonical foreign
+winners already removes repeated global resolution. Snapshot loading already
+avoids reparsing unchanged runtime objects. Exact ET_REL construction already
+avoids per-symbol allocations and buffer growth. These are retained designs,
+not new optimizations in the audit.
+
+Remaining observable passes include unit/class grouping for ET_REL, executable
+class/relocation counting and patch/hash/write, input-index remaps, and cold
+snapshot/file checks. Each serves a different consumer or publication boundary;
+removing it requires proving its data unused or available earlier. Compare
+producer-supplied counts/order with current count/place/fill, or bounded streamed
+publication with materialization, charging metadata maintenance, synchronization,
+bytes, file layout and every reader. Existing measurements rejected an isolated
+ELF relocation transpose; stores and the full object path matter.
+
+Disposition: retain the current shared Link and writer protocols. `test-link`,
+object/import/bind/snapshot tests, native dynamic/static/foreign tests and
+lane/determinism tests exercise scalar/exact/vector, poisoned output, invalid
+metadata, capacities, guarded inputs, schedule changes and external ELF/runtime
+oracles. Existing `benchmark-link` includes runtime opening, binding and writing
+for generated programs; it excludes real C production. Object/foreign kernel
+results and separate phase rows are not full compiler measurements.
+
+The active linker owner retains [#80](https://github.com/buster14a/buster/issues/80)/[#85](https://github.com/buster14a/buster/issues/85)/[#86](https://github.com/buster14a/buster/issues/86)/[#87](https://github.com/buster14a/buster/issues/87)/[#88](https://github.com/buster14a/buster/issues/88) and [#145](https://github.com/buster14a/buster/issues/145)'s output boundary.
+Pending [#316](https://github.com/buster14a/buster/pull/316)/[#328](https://github.com/buster14a/buster/pull/328)/[#329](https://github.com/buster14a/buster/pull/329)/[#332](https://github.com/buster14a/buster/pull/332) and the owner's GC/symbol/unwind/streaming work are
+not silently included at this pin. Missing source-generated symbols/CFI, general
+foreign qualification, shared dynamic TLS and true compilation/output overlap
+remain linked acceptance work. Completion requires matched small/large actual
+inputs and complete producer + conversion + writer costs, bytes/s and ns/cycles,
+live/scratch memory, allocations, bytes moved, fallback and lane occupancy,
+plus identical output/execution and debugger/profiler consumers where relevant.

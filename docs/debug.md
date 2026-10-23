@@ -194,16 +194,18 @@ exports only instruction records, branch columns, symbolic references and
 status. It does not export source-entry-to-record locations, the frame
 description or the record ends of the saves, stack adjustments and restores.
 
-The integration needs the Tier 0 producer to retain those facts while it has
-them: source row to instruction-record mapping, plus stack and saved-register
-events at the instruction ends. After branch sizing, convert record positions
-to byte offsets once; feed source rows here and frame events to the unwind
-template producer. Do not guess prologues by rescanning encoded instructions.
-The Tier 0 producer is not changed by this slice.
+Source-row integration still needs the Tier 0 producer to retain source-entry
+to instruction-record locations, then convert those positions to byte offsets
+after branch sizing. The separate [native unwind adapter](unwind.md) derives
+bounded fixed-frame events from valid, finalized Tier0 instruction records.
+It is opt-in and does not decode emitted bytes or repeat the producer's generic
+validation. Its additional effects/control-flow scan is charged in the
+backend-chain benchmark. The producer itself is unchanged.
 
 Main already merges `.eh_frame` and indexes it with `.eh_frame_hdr`, including
-scalar/vector validation and runtime unwind tests. Native function FDE
-production remains pending the producer interface above. Data-first segment
+scalar/vector validation and runtime unwind tests. The native unwind module
+supplies per-function CIE/FDE contributions for that existing path; its guide
+records validation and measurement status. Data-first segment
 ordering, writing while compilation is in progress, its gdb/perf checks and
 the comparison against writing at the end remain separate work. Issue #88
 remains open for these integration and measurement requirements.

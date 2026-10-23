@@ -218,6 +218,11 @@ end-to-end performance. The initial boundary audit is tracked in
 [#298](https://github.com/buster14a/buster/issues/298); adding this rule does
 not establish that existing interfaces already satisfy it.
 
+The pinned implementation inventory and its measured/blocked dispositions are
+in the [SIMD boundary audit](simd-boundary-audit.md). Its stage-guide sections
+record actual consumers; it does not replace this rule or imply that pending
+compiler integrations are complete.
+
 ## Correctness, diagnostics, and dependencies
 
 - Invalid C input should produce diagnostics, not assertions. Assertions are

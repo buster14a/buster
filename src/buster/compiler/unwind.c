@@ -1,0 +1,507 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Native fixed-frame unwind descriptions (#88). The producer proves an ordered subset of six pushes, an optional
+// fixed allocation, its matching release and reverse pops, and supplies their instruction-end PCs after branch sizing.
+// unwind_write consumes that trusted description; unwind_check is the separate diagnostic boundary. No instruction
+// bytes, typed nodes or source rows are inspected here. Initialize once before concurrent readers use the tables.
+//
+// Each function gets its own eight-byte-aligned CIE/FDE pair: version 1, zR, code alignment 1, data alignment -8 and
+// pcrel sdata4 addresses. locations[i] names the zero initial-location field for a Link PC32 relocation with addend 0.
+// A pair begins BUSTER_UNWIND_LOCATION bytes before that field and ends at the next pair or output.size. Keep pairs
+// separate as EH_FRAME atoms for function ownership and the native indexer's bounded CIE walk. No terminator is added.
+//
+// The exact writer independently appends the CIE and CFI. The vector path gathers eight descriptors, forms their CFA
+// ULEBs and shape indices in lanes, then expands original templates with byte permutations. Fourteen PC deltas, the
+// function range and five CFA bytes are the only holes. Neither inputs nor outputs need padding; masked tails touch
+// only their slices. Input, byte output and location output must be disjoint. Output sizes and every representability
+// limit are checked before stores. CAPACITY publishes the required size but preserves bytes/locations; other errors
+// preserve the output descriptor too. Empty batches need no byte or location storage.
+//
+// The encodings are format facts from DWARF call-frame instructions and the AMD64 .eh_frame convention. These
+// templates and both writers are original; no external implementation is included.
+
+#define BUSTER_UNWIND_EVENTS 14
+#define BUSTER_UNWIND_SAVED 6
+#define BUSTER_UNWIND_CIE_BYTES 40
+#define BUSTER_UNWIND_LOCATION 48
+#define BUSTER_UNWIND_PAIR_MIN 64
+#define BUSTER_UNWIND_TEMPLATE_BYTES 192
+#define BUSTER_UNWIND_SHAPE_WIDTHS 6
+#define BUSTER_UNWIND_SHAPES (64 * BUSTER_UNWIND_SHAPE_WIDTHS)
+#define BUSTER_UNWIND_BATCH 8
+
+typedef struct UnwindFunction UnwindFunction;
+struct UnwindFunction
+{
+    uint32_t size;
+    uint32_t frame_size;
+    uint32_t offsets[BUSTER_UNWIND_EVENTS];
+    uint8_t saved;
+    uint8_t event_count;
+    uint16_t reserved;
+};
+
+typedef enum UnwindError
+{
+    UNWIND_OK,
+    UNWIND_ERROR_INVALID,
+    UNWIND_ERROR_UNSUPPORTED,
+    UNWIND_ERROR_CAPACITY,
+    UNWIND_ERROR_LIMIT,
+} UnwindError;
+
+typedef struct UnwindOutput UnwindOutput;
+struct UnwindOutput
+{
+    uint8_t* bytes;
+    uint64_t capacity;
+    uint64_t size;
+    uint32_t* locations;
+    uint32_t location_capacity;
+};
+
+// Mask order is the producer's RBX, RBP, R12, R13, R14, R15. These are DWARF numbers, not encoder register numbers.
+static const uint8_t unwind_registers[BUSTER_UNWIND_SAVED] = { 3, 6, 12, 13, 14, 15 };
+
+static __attribute__((unused)) bool unwind_initialize(void);
+static __attribute__((unused)) UnwindError unwind_check(const UnwindFunction* functions, uint32_t count);
+static __attribute__((unused)) UnwindError unwind_write(const UnwindFunction* functions, uint32_t count, UnwindOutput* output, bool exact);
+
+// The checker is intentionally outside the trusted writer's hot path. Function ranges use signed four-byte FDE
+// fields, and this producer's positive stack allocation is a signed immediate. Each transition precedes the final RET.
+static UnwindError unwind_check(const UnwindFunction* functions, uint32_t count)
+{
+    UnwindError result = count != 0 && functions == 0 ? UNWIND_ERROR_INVALID : UNWIND_OK;
+    for (uint32_t i = 0; result == UNWIND_OK && i < count; i += 1)
+    {
+        const UnwindFunction* function = &functions[i];
+        const uint32_t events = 2 * (uint32_t)__builtin_popcount(function->saved) + 2 * (function->frame_size != 0);
+        if (function->size == 0 || function->saved >= 64 || function->reserved != 0 || function->event_count != events)
+        {
+            result = UNWIND_ERROR_INVALID;
+        }
+        else if (function->size > INT32_MAX || function->frame_size > INT32_MAX)
+        {
+            result = UNWIND_ERROR_LIMIT;
+        }
+        uint32_t previous = 0;
+        for (uint32_t event = 0; result == UNWIND_OK && event < BUSTER_UNWIND_EVENTS; event += 1)
+        {
+            const uint32_t offset = function->offsets[event];
+            if (event < events)
+            {
+                result = offset > previous && offset < function->size ? UNWIND_OK : UNWIND_ERROR_INVALID;
+                previous = offset;
+            }
+            else if (offset != 0)
+            {
+                result = UNWIND_ERROR_INVALID;
+            }
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Independent scalar emission
+
+typedef struct UnwindWriter UnwindWriter;
+struct UnwindWriter
+{
+    uint8_t* bytes;
+    uint64_t size;
+};
+
+static void unwind_integer(UnwindWriter* writer, uint32_t value, uint32_t bytes)
+{
+    memcpy(writer->bytes + writer->size, &value, bytes);
+    writer->size += bytes;
+}
+
+static void unwind_uleb(UnwindWriter* writer, uint32_t value)
+{
+    do
+    {
+        const uint32_t byte = (value & 0x7f) | (value > 0x7f ? 0x80 : 0);
+        unwind_integer(writer, byte, 1);
+        value >>= 7;
+    } while (value != 0);
+}
+
+static uint32_t unwind_uleb_size(uint32_t value)
+{
+    uint32_t size = 1;
+    while (value > 0x7f)
+    {
+        value >>= 7;
+        size += 1;
+    }
+    return size;
+}
+
+static void unwind_advance(UnwindWriter* writer, uint32_t offset, uint32_t* previous)
+{
+    unwind_integer(writer, 4, 1); // DW_CFA_advance_loc4
+    unwind_integer(writer, offset - *previous, 4);
+    *previous = offset;
+}
+
+static void unwind_function_scalar(UnwindWriter* writer, const UnwindFunction* function)
+{
+    const uint64_t begin = writer->size;
+    unwind_integer(writer, BUSTER_UNWIND_CIE_BYTES - 4, 4);
+    unwind_integer(writer, 0, 4); // CIE id
+    unwind_integer(writer, 1, 1); // version
+    unwind_integer(writer, 'z', 1);
+    unwind_integer(writer, 'R', 1);
+    unwind_integer(writer, 0, 1);
+    unwind_uleb(writer, 1); // code alignment
+    unwind_integer(writer, 0x78, 1); // SLEB128(-8)
+    unwind_integer(writer, 16, 1); // return-address register, RIP
+    unwind_uleb(writer, 1); // augmentation data length
+    unwind_integer(writer, 0x1b, 1); // DW_EH_PE_pcrel | DW_EH_PE_sdata4
+    unwind_integer(writer, 0x0c, 1); // DW_CFA_def_cfa
+    unwind_uleb(writer, 7); // RSP
+    unwind_uleb(writer, 8);
+    unwind_integer(writer, 0x90, 1); // DW_CFA_offset RIP
+    unwind_uleb(writer, 1);
+    for (uint32_t reg = 0; reg < BUSTER_UNWIND_SAVED; reg += 1)
+    {
+        unwind_integer(writer, 0x08, 1); // DW_CFA_same_value
+        unwind_uleb(writer, unwind_registers[reg]);
+    }
+    while (writer->size < begin + BUSTER_UNWIND_CIE_BYTES)
+    {
+        unwind_integer(writer, 0, 1); // DW_CFA_nop
+    }
+    const uint64_t fde = writer->size;
+    unwind_integer(writer, 0, 4); // patched record length
+    unwind_integer(writer, (uint32_t)(fde + 4 - begin), 4); // backward CIE pointer, from this field
+    unwind_integer(writer, 0, 4); // relocated initial location
+    unwind_integer(writer, function->size, 4);
+    unwind_uleb(writer, 0); // FDE augmentation data length
+    uint32_t cfa = 8;
+    uint32_t previous = 0;
+    uint32_t event = 0;
+    for (uint32_t reg = 0; reg < BUSTER_UNWIND_SAVED; reg += 1)
+    {
+        if ((function->saved & (1u << reg)) != 0)
+        {
+            unwind_advance(writer, function->offsets[event], &previous);
+            event += 1;
+            cfa += 8;
+            unwind_integer(writer, 0x0e, 1); // DW_CFA_def_cfa_offset
+            unwind_uleb(writer, cfa);
+            unwind_integer(writer, 0x80 | unwind_registers[reg], 1); // DW_CFA_offset
+            unwind_uleb(writer, cfa / 8);
+        }
+    }
+    if (function->frame_size != 0)
+    {
+        unwind_advance(writer, function->offsets[event], &previous);
+        event += 1;
+        unwind_integer(writer, 0x0e, 1);
+        unwind_uleb(writer, cfa + function->frame_size);
+        unwind_advance(writer, function->offsets[event], &previous);
+        event += 1;
+        unwind_integer(writer, 0x0e, 1);
+        unwind_uleb(writer, cfa);
+    }
+    for (uint32_t reg = BUSTER_UNWIND_SAVED; reg > 0; reg -= 1)
+    {
+        if ((function->saved & (1u << (reg - 1))) != 0)
+        {
+            unwind_advance(writer, function->offsets[event], &previous);
+            event += 1;
+            cfa -= 8;
+            unwind_integer(writer, 0x0e, 1);
+            unwind_uleb(writer, cfa);
+            unwind_integer(writer, 0xc0 | unwind_registers[reg - 1], 1); // DW_CFA_restore, to the CIE's same_value
+        }
+    }
+    while ((writer->size & 7) != 0)
+    {
+        unwind_integer(writer, 0, 1);
+    }
+    const uint32_t length = (uint32_t)(writer->size - fde - 4);
+    memcpy(writer->bytes + fde, &length, 4);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Original template construction, once before the batch writers
+
+static uint8_t unwind_templates[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
+static uint8_t unwind_indices[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
+static uint64_t unwind_patches[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES / 64];
+static uint32_t unwind_sizes[BUSTER_UNWIND_SHAPES];
+static bool unwind_ready;
+
+typedef struct UnwindTemplateBuilder UnwindTemplateBuilder;
+struct UnwindTemplateBuilder
+{
+    uint32_t shape;
+    uint32_t size;
+    bool valid;
+};
+
+static void unwind_template_byte(UnwindTemplateBuilder* builder, uint8_t value, uint32_t source)
+{
+    const uint32_t at = builder->size;
+    if (at >= BUSTER_UNWIND_TEMPLATE_BYTES)
+    {
+        builder->valid = false;
+    }
+    else
+    {
+        unwind_templates[builder->shape][at] = value;
+        if (source < 128)
+        {
+            unwind_indices[builder->shape][at] = (uint8_t)source;
+            unwind_patches[builder->shape][at / 64] |= 1ull << (at & 63);
+        }
+    }
+    builder->size += 1;
+}
+
+static void unwind_template_advance(UnwindTemplateBuilder* builder, uint32_t event)
+{
+    unwind_template_byte(builder, 4, 128);
+    for (uint32_t byte = 0; byte < 4; byte += 1)
+    {
+        unwind_template_byte(builder, 0, 4 * event + byte);
+    }
+}
+
+static bool unwind_initialize(void)
+{
+    // The same CIE the scalar writer constructs field by field. Six trailing nops align its successor to eight bytes.
+    static const uint8_t cie[BUSTER_UNWIND_CIE_BYTES] = {
+        36, 0, 0, 0, 0, 0, 0, 0, 1, 'z', 'R', 0, 1, 0x78, 16, 1,
+        0x1b, 0x0c, 7, 8, 0x90, 1, 0x08, 3, 0x08, 6, 0x08, 12, 0x08, 13, 0x08, 14,
+        0x08, 15, 0, 0, 0, 0, 0, 0,
+    };
+    memset(unwind_templates, 0, sizeof(unwind_templates));
+    memset(unwind_indices, 0, sizeof(unwind_indices));
+    memset(unwind_patches, 0, sizeof(unwind_patches));
+    bool valid = true;
+    for (uint32_t saved = 0; saved < 64; saved += 1)
+    {
+        for (uint32_t width = 0; width < BUSTER_UNWIND_SHAPE_WIDTHS; width += 1)
+        {
+            UnwindTemplateBuilder builder = {
+                .shape = saved * BUSTER_UNWIND_SHAPE_WIDTHS + width,
+                .valid = true,
+            };
+            for (uint32_t byte = 0; byte < BUSTER_UNWIND_CIE_BYTES; byte += 1)
+            {
+                unwind_template_byte(&builder, cie[byte], 128);
+            }
+            // FDE length, backward CIE pointer, relocated initial PC, range, and zero augmentation length.
+            for (uint32_t byte = 0; byte < 17; byte += 1)
+            {
+                const uint8_t value = byte == 4 ? BUSTER_UNWIND_CIE_BYTES + 4 : 0;
+                unwind_template_byte(&builder, value, byte >= 12 && byte < 16 ? 56 + byte - 12 : 128);
+            }
+            uint32_t cfa = 8;
+            uint32_t event = 0;
+            for (uint32_t reg = 0; reg < BUSTER_UNWIND_SAVED; reg += 1)
+            {
+                if ((saved & (1u << reg)) != 0)
+                {
+                    unwind_template_advance(&builder, event);
+                    event += 1;
+                    cfa += 8;
+                    unwind_template_byte(&builder, 0x0e, 128);
+                    unwind_template_byte(&builder, (uint8_t)cfa, 128);
+                    unwind_template_byte(&builder, (uint8_t)(0x80 | unwind_registers[reg]), 128);
+                    unwind_template_byte(&builder, (uint8_t)(cfa / 8), 128);
+                }
+            }
+            if (width != 0)
+            {
+                unwind_template_advance(&builder, event);
+                event += 1;
+                unwind_template_byte(&builder, 0x0e, 128);
+                for (uint32_t byte = 0; byte < width; byte += 1)
+                {
+                    unwind_template_byte(&builder, 0, 60 + byte);
+                }
+                unwind_template_advance(&builder, event);
+                event += 1;
+                unwind_template_byte(&builder, 0x0e, 128);
+                unwind_template_byte(&builder, (uint8_t)cfa, 128);
+            }
+            for (uint32_t reg = BUSTER_UNWIND_SAVED; reg > 0; reg -= 1)
+            {
+                if ((saved & (1u << (reg - 1))) != 0)
+                {
+                    unwind_template_advance(&builder, event);
+                    event += 1;
+                    cfa -= 8;
+                    unwind_template_byte(&builder, 0x0e, 128);
+                    unwind_template_byte(&builder, (uint8_t)cfa, 128);
+                    unwind_template_byte(&builder, (uint8_t)(0xc0 | unwind_registers[reg - 1]), 128);
+                }
+            }
+            while ((builder.size & 7) != 0)
+            {
+                unwind_template_byte(&builder, 0, 128);
+            }
+            const uint32_t length = builder.size - BUSTER_UNWIND_CIE_BYTES - 4;
+            memcpy(unwind_templates[builder.shape] + BUSTER_UNWIND_CIE_BYTES, &length, 4);
+            unwind_sizes[builder.shape] = builder.size;
+            valid = valid && builder.valid && event <= BUSTER_UNWIND_EVENTS;
+        }
+    }
+    unwind_ready = valid;
+    return valid;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Eight-descriptor classification and bounded byte-template expansion
+
+typedef struct UnwindBatch UnwindBatch;
+struct UnwindBatch
+{
+    uint32_t shapes[BUSTER_UNWIND_BATCH];
+    uint32_t sizes[BUSTER_UNWIND_BATCH];
+    uint64_t lebs[BUSTER_UNWIND_BATCH];
+    uint32_t bytes;
+    bool limited;
+};
+
+static UnwindBatch unwind_batch(const UnwindFunction* functions, uint32_t count)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __mmask8 lanes = (__mmask8)((1u << count) - 1);
+    const uint32_t stride = sizeof(UnwindFunction);
+    const __m256i positions = _mm256_setr_epi32(0, stride, 2 * stride, 3 * stride, 4 * stride, 5 * stride, 6 * stride, 7 * stride);
+    const __m512i heads = _mm512_mask_i32gather_epi64(zero, lanes, positions, functions, 1);
+    const __m512i metadata_positions = _mm512_add_epi32(_mm512_castsi256_si512(positions), _mm512_set1_epi32(offsetof(UnwindFunction, saved)));
+    const __m512i metadata = _mm512_mask_i32gather_epi32(zero, lanes, metadata_positions, functions, 1);
+    const __m512i saved = _mm512_and_si512(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(metadata)), _mm512_set1_epi64(63));
+    const __m512i frame = _mm512_srli_epi64(heads, 32);
+    const __m512i range = _mm512_and_si512(heads, _mm512_set1_epi64(UINT32_MAX));
+    const __m512i cfa = _mm512_add_epi64(frame, _mm512_add_epi64(_mm512_set1_epi64(8), _mm512_slli_epi64(_mm512_popcnt_epi64(saved), 3)));
+    __m512i width = _mm512_set1_epi64(1);
+    for (uint32_t bits = 7; bits <= 28; bits += 7)
+    {
+        width = _mm512_mask_add_epi64(width, _mm512_cmpgt_epu64_mask(cfa, _mm512_set1_epi64((1ull << bits) - 1)), width, _mm512_set1_epi64(1));
+    }
+    width = _mm512_maskz_mov_epi64(_mm512_cmpneq_epi64_mask(frame, zero), width);
+    const __m512i shapes = _mm512_add_epi64(_mm512_mullo_epi64(saved, _mm512_set1_epi64(BUSTER_UNWIND_SHAPE_WIDTHS)), width);
+    const __m256i shape_indices = _mm512_cvtepi64_epi32(shapes);
+    const __m512i sizes = _mm512_mask_i32gather_epi32(zero, lanes, _mm512_castsi256_si512(shape_indices), unwind_sizes, 4);
+    const __m512i byte_positions = _mm512_set1_epi64(0x0706050403020100ull);
+    const __m512i widths = _mm512_mullo_epi64(width, _mm512_set1_epi64(0x0101010101010101ull));
+    const __mmask64 continuation = _mm512_cmplt_epu8_mask(_mm512_add_epi8(byte_positions, _mm512_set1_epi8(1)), widths);
+    __m512i groups = _mm512_and_si512(_mm512_multishift_epi64_epi8(_mm512_set1_epi64(0x312a231c150e0700ull), cfa), _mm512_set1_epi8(0x7f));
+    groups = _mm512_or_si512(groups, _mm512_maskz_set1_epi8(continuation, (char)0x80));
+    UnwindBatch batch;
+    _mm256_storeu_si256((__m256i*)batch.shapes, shape_indices);
+    _mm256_storeu_si256((__m256i*)batch.sizes, _mm512_castsi512_si256(sizes));
+    _mm512_storeu_si512(batch.lebs, groups);
+    batch.bytes = (uint32_t)_mm512_reduce_add_epi32(sizes);
+    batch.limited = ((_mm512_cmpgt_epu64_mask(range, _mm512_set1_epi64(INT32_MAX)) |
+                      _mm512_cmpgt_epu64_mask(frame, _mm512_set1_epi64(INT32_MAX))) & lanes) != 0;
+    return batch;
+}
+
+static void unwind_function_vector(uint8_t* output, const UnwindFunction* function, uint32_t shape, uint64_t leb)
+{
+    const __m512i offsets = _mm512_maskz_loadu_epi32(0x3fff, function->offsets);
+    const __m512i before = _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14), offsets);
+    __m512i holes = _mm512_sub_epi32(offsets, before);
+    holes = _mm512_mask_set1_epi32(holes, 0x4000, (int32_t)function->size);
+    holes = _mm512_mask_set1_epi32(holes, 0x8000, (int32_t)leb);
+    const __m512i high = _mm512_maskz_set1_epi32(1, (int32_t)(leb >> 32));
+    const uint32_t length = unwind_sizes[shape];
+    for (uint32_t at = 0; at < length; at += 64)
+    {
+        const __m512i bytes = _mm512_load_si512(unwind_templates[shape] + at);
+        const __m512i indices = _mm512_load_si512(unwind_indices[shape] + at);
+        const __m512i values = _mm512_permutex2var_epi8(holes, indices, high);
+        const __m512i complete = _mm512_mask_mov_epi8(bytes, unwind_patches[shape][at / 64], values);
+        const uint32_t remaining = length - at;
+        const __mmask64 lanes = remaining >= 64 ? (__mmask64)UINT64_MAX : (__mmask64)((1ull << remaining) - 1);
+        _mm512_mask_storeu_epi8(output + at, lanes, complete);
+    }
+}
+
+// Descriptors satisfy unwind_check, and tables are initialized. Only limits and output capacities are checked here;
+// the producer's per-event proof is not repeated. A size query is a normal CAPACITY result when storage is absent.
+static UnwindError unwind_write(const UnwindFunction* functions, uint32_t count, UnwindOutput* output, bool exact)
+{
+    UnwindError result = output == 0 || (count != 0 && functions == 0) || !unwind_ready ? UNWIND_ERROR_INVALID : UNWIND_OK;
+    if (result == UNWIND_OK && count > UINT32_MAX / BUSTER_UNWIND_PAIR_MIN)
+    {
+        result = UNWIND_ERROR_LIMIT;
+    }
+    uint64_t required = 0;
+    for (uint32_t first = 0; result == UNWIND_OK && first < count;)
+    {
+        const uint32_t remaining = count - first;
+        const uint32_t lanes = exact ? 1 : remaining < BUSTER_UNWIND_BATCH ? remaining : BUSTER_UNWIND_BATCH;
+        if (exact)
+        {
+            const UnwindFunction* function = &functions[first];
+            const uint32_t saved = (uint32_t)__builtin_popcount(function->saved);
+            if (function->size > INT32_MAX || function->frame_size > INT32_MAX)
+            {
+                result = UNWIND_ERROR_LIMIT;
+            }
+            else
+            {
+                const uint32_t cfa = 8 + 8 * saved + function->frame_size;
+                const uint32_t bytes = 57 + 17 * saved + (function->frame_size != 0 ? 13 + unwind_uleb_size(cfa) : 0);
+                required += (bytes + 7) & ~7u;
+            }
+        }
+        else
+        {
+            const UnwindBatch batch = unwind_batch(functions + first, lanes);
+            required += batch.bytes;
+            result = batch.limited ? UNWIND_ERROR_LIMIT : UNWIND_OK;
+        }
+        result = required > UINT32_MAX ? UNWIND_ERROR_LIMIT : result;
+        first += lanes;
+    }
+    if (result == UNWIND_OK)
+    {
+        output->size = required;
+        if (required > output->capacity || count > output->location_capacity ||
+            (required != 0 && output->bytes == 0) || (count != 0 && output->locations == 0))
+        {
+            result = UNWIND_ERROR_CAPACITY;
+        }
+    }
+    if (result == UNWIND_OK)
+    {
+        UnwindWriter writer = {
+            .bytes = output->bytes,
+        };
+        for (uint32_t first = 0; first < count;)
+        {
+            const uint32_t remaining = count - first;
+            const uint32_t lanes = exact ? 1 : remaining < BUSTER_UNWIND_BATCH ? remaining : BUSTER_UNWIND_BATCH;
+            if (exact)
+            {
+                output->locations[first] = (uint32_t)(writer.size + BUSTER_UNWIND_LOCATION);
+                unwind_function_scalar(&writer, &functions[first]);
+            }
+            else
+            {
+                const UnwindBatch batch = unwind_batch(functions + first, lanes);
+                for (uint32_t lane = 0; lane < lanes; lane += 1)
+                {
+                    output->locations[first + lane] = (uint32_t)(writer.size + BUSTER_UNWIND_LOCATION);
+                    unwind_function_vector(writer.bytes + writer.size, &functions[first + lane], batch.shapes[lane], batch.lebs[lane]);
+                    writer.size += batch.sizes[lane];
+                }
+            }
+            first += lanes;
+        }
+    }
+    return result;
+}

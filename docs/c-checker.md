@@ -499,3 +499,56 @@ and reproduction commands are retained in
 [the measurement directory](measurements/c-checker-2026-10-23/README.md).
 Whole-corpus semantics, multicore scaling and the runtime backend consumer
 remain acceptance work even when these bounded fixtures pass.
+
+## Boundary audit #298
+
+Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
+[scope and evidence](simd-boundary-audit.md). Actual sources:
+[reader](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_check_input.c#L4),
+[graph/stream](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_checker.c#L4),
+[static selection](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_check_data_input.c#L4),
+[static emission](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7fe9bc84b0ce6126/src/buster/compiler/c_check_data.c#L4).
+
+| Producer → consumer | Status and boundary |
+| --- | --- |
+| Full parser tree/postorder and PP spelling → `check_input` | Implemented supported-source reader; declarations/types are elaborated in source order, expressions in postorder. Parser/PP source IDs are retained. |
+| Declaration elaboration → binding event resolver → expression graph | Implemented checker-side events and exact declaration/type columns; [#336](https://github.com/buster14a/buster/issues/336) tracks reuse of pending parser metadata without replacing typed elaboration. |
+| Literal spelling → `c_check_literals.c` → leaf `CheckValue` | Counted physical/logical spelling is decoded once for its graph value; invalid/unsupported literals are errors. Macro occurrence remains the diagnostic identity. |
+| `CheckGraph` → dependency scheduler → `check_actions` / scalar actions | Implemented earlier-node operands, call argument slices, source tokens and contexts; actual operand heights define readiness. Type-interning actions form ordered barriers. |
+| Actions/constants/conversions → `CheckStream` → typed dump/diagnostics/static selection | Implemented node-indexed values, explicit operand/store/argument conversions and stable source-ordered reports. Faults in unevaluated branches remain conditional as described above. |
+| Source declaration/object columns + stream → `check_data_input` → `check_data_emit` → Link | Implemented scalar static-data subset. Canonical object IDs and latest composite types select one definition, without reparsing or name lookup in the emitter. |
+| Graph/stream → executable typed functions / SSA | Missing at this pin. Graph nodes plus conversions are not an evaluation-order function stream or CFG; [#133](https://github.com/buster14a/buster/issues/133)/[#136](https://github.com/buster14a/buster/issues/136)/[#131](https://github.com/buster14a/buster/issues/131)/[#134](https://github.com/buster14a/buster/issues/134)/[#145](https://github.com/buster14a/buster/issues/145) own the bridge. |
+
+The detailed storage contract above applies: natural alignment, explicit
+node/argument count and capacity, no readable padding, disjoint live graph,
+output and scratch regions. Optional columns remain optional only as documented.
+Node identity survives grouping. Every partial ready-level batch flushes at its
+region/level end; logical size 1..16 is independent of the eight arithmetic
+lanes. Singleton and exceptional actions run exactly; changing legal batch
+partitions must preserve fresh-table TypeIds, values, conversions and reports.
+A successful run can contain semantic reports; consumers check both status
+and report count. Output rollback does not roll back valid appended types.
+
+Static data reads immutable counted `CheckDataObject` records (four u32 fields)
+and an object-to-symbol map. It plans counts/bytes before publication, rolls
+back failed emission, and owns emitted bytes in a distinct arena that outlives
+object writing/linking. Scratch is restored. Forward-reference definitions
+must be in the same batch or already published; arbitrary independent batches
+are not valid. Aggregate/string/TLS emission remains outside this implementation.
+
+Observed extra work: source reader's event construction/replay, operand-height
+construction/grouping, and scans over declaration columns to select objects.
+The first has [#336](https://github.com/buster14a/buster/issues/336). Heights are semantic dependencies, so parser depth cannot
+replace them. Retaining heights/selected-definition lists is a candidate only
+if producer maintenance and downstream savings beat the existing complete
+path; future selective emission must include real body references ([#129](https://github.com/buster14a/buster/issues/129)).
+Builtin folding ([#148](https://github.com/buster14a/buster/issues/148)), source-point environments ([#113](https://github.com/buster14a/buster/issues/113)) and executable
+function lowering are explicit integration obligations, not hidden consumers.
+
+Disposition: retain the checked graph and transactional scalar-data path.
+`test-checker` covers independent actions, guarded graphs, partition sizes,
+source/Clang diagnostics, source binding identity and data-to-object execution
+fixtures. Existing synthetic checker rates exclude source adaptation and are
+not end-to-end evidence. [#133](https://github.com/buster14a/buster/issues/133) owns supported-source/corpus completion and the
+whole source/check/data costs, allocations, memory and occupancy; [#145](https://github.com/buster14a/buster/issues/145)/[#138](https://github.com/buster14a/buster/issues/138)
+own the eventual complete compiler/program-quality evidence.
