@@ -209,6 +209,9 @@ jobs:
           ./build.sh check-call-graph
           == Test the runner
           ./build/compiler test-parallel
+          == Test the IR and typed-stream lowering
+          ./build/compiler test-ir
+          ./build/compiler test-ir-lowering
           == Test the preprocessor's cases against clang
           # --clang also preprocesses each case with clang -E and compares the tokens.
           ./build/compiler test-preprocessor --clang
@@ -748,3 +751,15 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
+
+      - name: Benchmark the IR verifier and derived arrays
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir
+          taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
+
+      - name: Benchmark typed-stream lowering through IR verification
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
+          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
