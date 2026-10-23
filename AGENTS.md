@@ -3193,16 +3193,38 @@ changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
 ## Preprocessor benchmark
 
+The exact commands, pinned inputs and raw reports for the #117 acceptance
+refresh are in `docs/measurements/preprocessor-117-2026-10-23/README.md`.
+Its invocation scripts take a separate normal shared-host lock for each command.
+
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
 [--read-limit N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
-and time (read, lex, refine, directive tables, main loop), the release after the
+and time (read, lex, refine, directive tables, main loop/setup), the release after the
 run (the files' mappings among it), `-E -P`'s throughput with its printing
 (input bytes and output tokens per second, #124) and what a run did
 (directives, runs, expansions, invocations, pastes, the `#if` lines and their
 lengths, and the inclusions skipped by guards and by `#pragma once`).
+It also reports explicit file-probe `open`/`fstat` attempts, including failed
+opens and uncached aliases, the subset made by include searches, and the
+`stat` attempts for embed lookup and search-directory setup. Repeated cached
+include hits and misses make no file-probe calls. These are the preprocessor's
+explicit calls, excluding the benchmark harness and libc's directory
+enumeration internals. Include lookup time includes path construction, cache
+lookup and first byte acquisition; embed lookup time includes its search and
+`stat` calls. Both are inclusive intervals that overlap the phase breakdown;
+never add them to it or subtract them again. Preparation and execution of the
+found header are outside include lookup. The main-loop remainder also contains
+initialization, as it did before this label made that boundary explicit.
+The final-output copy shares count file runs, buffer runs and direct
+object-like copies only when they write to the final stream; intermediate
+captures do not enter the numerator. Their denominator is the final output's
+tokens, including pragma records and one record per embed resource. The
+remaining tokens are emitted individually or lifted from captured pragmas.
+The older per-pass run totals still include intermediate captures and must
+not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
