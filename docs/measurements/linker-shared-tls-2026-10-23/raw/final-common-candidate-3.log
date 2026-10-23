@@ -1,0 +1,26 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T13:59:18+00:00 codex-linker-streaming88: clang -O3 -g -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -Wno-unused-function -Wno-unused-variable tools/linker-streaming-control.c -o streaming-control
+  title: Build matched streaming control befbec5
+  link: https://github.com/buster14a/buster/issues/88
+1 workers, bound against the shared library's runtime and written as a shared library: 93 atoms, 117 fixups, 795 bytes of code, 12 dynamic symbols, 14 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 2 stubs, a 7016-byte file in 1 chunks, 1 lane:
+  replace          8.7 us ( 0.80 GB/s): count 1.0 layout 0.8 symbols 0.4 dynamic 0.3 open 1.9 chunks 2.1 finish 2.1
+  new file         7.2 us ( 0.97 GB/s): count 1.0 layout 0.8 symbols 0.4 dynamic 0.3 open 1.6 chunks 2.0 finish 1.1
+  in place         0.6 us (10.95 GB/s): the floor, one pwrite
+  new file         1.6 us ( 4.52 GB/s): the floor, one pwrite
+64 workers, bound against the shared library's runtime and written as a shared library: 156 atoms, 936 fixups, 12066 bytes of code, 75 dynamic symbols, 138 relocations in .rela.dyn (0 relative) and 44 in 14 words of .relr.dyn, 42 stubs, a 28872-byte file in 1 chunks, 1 lane:
+  replace         13.9 us ( 2.08 GB/s): count 2.1 layout 0.9 symbols 0.6 dynamic 0.8 open 1.9 chunks 4.7 finish 2.7
+  new file        11.8 us ( 2.44 GB/s): count 2.1 layout 0.9 symbols 0.6 dynamic 0.8 open 1.5 chunks 4.6 finish 1.1
+  in place         1.1 us (26.68 GB/s): the floor, one pwrite
+  new file         2.7 us (10.56 GB/s): the floor, one pwrite
+2000 workers, bound against the shared library's runtime and written as a shared library: 2112 atoms, 26105 fixups, 360079 bytes of code, 2011 dynamic symbols, 3745 relocations in .rela.dyn (0 relative) and 45 in 14 words of .relr.dyn, 1273 stubs, a 701776-byte file in 3 chunks, 1 lane:
+  replace        183.4 us ( 3.83 GB/s): count 41.9 layout 6.4 symbols 5.4 dynamic 18.1 open 2.7 chunks 90.9 finish 17.3
+  new file       165.7 us ( 4.24 GB/s): count 41.9 layout 6.4 symbols 5.4 dynamic 18.2 open 2.1 chunks 89.8 finish 1.7
+  in place        17.8 us (39.42 GB/s): the floor, one pwrite
+  new file        42.6 us (16.49 GB/s): the floor, one pwrite
+180000 workers, bound against the shared library's runtime and written as a shared library: 185452 atoms, 2342790 fixups, 32370098 bytes of code, 180011 dynamic symbols, 335635 relocations in .rela.dyn (0 relative) and 2730 in 57 words of .relr.dyn, 113884 stubs, a 63181112-byte file in 242 chunks, 1 lane:
+  replace      21492.6 us ( 2.94 GB/s): count 4264.2 layout 724.0 symbols 639.1 dynamic 2166.8 open 74.3 chunks 11941.4 finish 1702.4
+  new file     19540.4 us ( 3.23 GB/s): count 4271.1 layout 727.4 symbols 643.5 dynamic 2182.8 open 71.4 chunks 11648.3 finish 13.1
+  in place      4485.8 us (14.08 GB/s): the floor, one pwrite
+  new file      8090.4 us ( 7.81 GB/s): the floor, one pwrite
+peak_rss_kib 255272
+user_seconds 0.428115
+system_seconds 0.408050

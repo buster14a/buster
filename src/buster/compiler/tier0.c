@@ -650,6 +650,12 @@ static Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
 
 static uint64_t tier0_slot_words[BUSTER_TIER0_SLOT_WORDS];
 static uint64_t tier0_template_words[BUSTER_TIER0_TEMPLATE_CAPACITY];
+// Per form, what x86_choice_instruction does with it as a chosen form: its immediate's bytes, and whether it takes no
+// operands (the accumulator's and push's forms) or its destination twice (a zero idiom, test r, r).
+#define BUSTER_TIER0_SHAPE_BYTES 0x0f
+#define BUSTER_TIER0_SHAPE_CLEAR 0x10
+#define BUSTER_TIER0_SHAPE_TWICE 0x20
+static uint8_t tier0_choice_shapes[X86_FORM_COUNT];
 // Per template: its compiled records' hole mask, for emission.
 static uint64_t tier0_masks[BUSTER_TIER0_TEMPLATE_CAPACITY];
 static uint16_t tier0_slot_bases[BUSTER_TYPED_KIND_LIMIT * BUSTER_TYPED_CLASS_LIMIT];
@@ -670,6 +676,7 @@ static Tier0Builder tier0_builder;
 static void tier0_build_windows(void);
 static bool tier0_build_vector_tables(void);
 static bool tier0_build_words(void);
+static bool tier0_build_choice_shapes(void);
 
 static Tier0RecordSpec tier0_spec(uint32_t form)
 {
@@ -1919,7 +1926,7 @@ static bool tier0_initialize(void)
                 }
             }
         }
-        tier0_initialized = tier0_builder.valid && tier0_build_vector_tables() && tier0_build_words();
+        tier0_initialized = tier0_builder.valid && tier0_build_vector_tables() && tier0_build_words() && tier0_build_choice_shapes();
     }
     return tier0_initialized;
 }
@@ -2408,13 +2415,128 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
     }
 }
 
+// The locals by references, most first and by index among equals: an insertion sort, since a function's locals are few.
+// The vector path's twin, tier0_assign_registers_vector, ranks the locals instead.
+static void tier0_order_locals(uint32_t locals, const uint32_t* references, uint32_t* order)
+{
+    for (uint32_t l = 0; l < locals; l += 1)
+    {
+        order[l] = l;
+    }
+    for (uint32_t a = 1; a < locals; a += 1)
+    {
+        const uint32_t local = order[a];
+        uint32_t b = a;
+        while (b > 0 && references[order[b - 1]] < references[local])
+        {
+            order[b] = order[b - 1];
+            b -= 1;
+        }
+        order[b] = local;
+    }
+}
+
+// The greedy loop of tier0_assign_homes for the vector path, for up to 64 locals, without the order: the loop gives the
+// k-th local that takes a register (not in one yet, its address not taken, referenced), counted among its kind's by
+// references and then index, the k-th free register of its kind: an integer one the caller-saved registers in depth
+// order, then the callee-saved ones if it is referenced twice or more (those come first in the order), and a floating
+// one the XMM registers. So each eligible local's rank among its kind's (by vector compares, 16 locals at a time
+// against each eligible local) gives its register (vpermd of the free registers' list), and its home is a masked
+// store. Returns the callee-saved registers taken (Tier0Frame.saved's bits).
+static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint32_t taken)
+{
+    const uint32_t locals = function->local_count;
+    // The free registers in the order the loop takes them: caller-saved then callee-saved, and XMM.
+    uint32_t general[16] = { 0 };
+    uint32_t callee[BUSTER_TIER0_CALLEE_SAVED + 1] = { 0 };
+    uint32_t xmm[16] = { 0 };
+    uint32_t callers = 0;
+    uint32_t callees = 0;
+    uint32_t xmms = 0;
+    for (uint32_t d = 0; d < BUSTER_TIER0_CALLER_SAVED_DEPTHS; d += 1)
+    {
+        const uint32_t reg = tier0_integer_depths[d];
+        general[callers] = reg;
+        callers += (taken >> reg & 1) == 0 ? 1 : 0;
+    }
+    for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    {
+        const uint32_t reg = tier0_callee_saved[c];
+        general[callers + callees] = reg;
+        // The callee-saved registers the first n locals past the caller-saved ones take, as Tier0Frame.saved's bits.
+        callee[callees + 1] = callee[callees] | 1u << c;
+        callees += (taken >> reg & 1) == 0 ? 1 : 0;
+    }
+    for (uint32_t x = 0; x < 16; x += 1)
+    {
+        xmm[xmms] = x;
+        xmms += (taken >> BUSTER_TIER0_XMM(x) & 1) == 0 ? 1 : 0;
+    }
+    // Which locals take a register, and of which kind.
+    const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
+    uint64_t integers = 0;
+    uint64_t floatings = 0;
+    for (uint32_t first = 0; first < locals; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)tier0_lanes(first, locals);
+        const __m512i homes_low = _mm512_maskz_loadu_epi64((__mmask8)lanes, homes + first);
+        const __m512i homes_high = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), homes + first + 8);
+        const __mmask16 in_register = _mm512_kunpackb(_mm512_test_epi64_mask(homes_high, is_register), _mm512_test_epi64_mask(homes_low, is_register));
+        const __m512i counts = _mm512_maskz_loadu_epi32(lanes, references + first);
+        const __m128i flags = _mm_maskz_loadu_epi8(lanes, function->local_flags + first);
+        const __m128i classes = _mm_maskz_loadu_epi8(lanes, function->local_classes + first);
+        const __mmask16 taken_address = _mm_test_epi8_mask(flags, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+        const __mmask16 floating = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8(BUSTER_TYPED_CLASS_F32)) | _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8(BUSTER_TYPED_CLASS_F64));
+        const uint64_t eligible = lanes & _mm512_test_epi32_mask(counts, counts) & ~in_register & ~taken_address;
+        integers |= (eligible & ~(uint64_t)floating) << first;
+        floatings |= (eligible & floating) << first;
+    }
+    const __m512i list = _mm512_loadu_si512(general);
+    const __m512i xmm_list = _mm512_loadu_si512(xmm);
+    const __m512i one = _mm512_set1_epi32(1);
+    uint32_t callee_taken = 0;
+    for (uint32_t first = 0; first < locals; first += 16)
+    {
+        const __mmask16 integer_lanes = (__mmask16)(integers >> first);
+        const __mmask16 floating_lanes = (__mmask16)(floatings >> first);
+        const __m512i counts = _mm512_maskz_loadu_epi32((__mmask16)tier0_lanes(first, locals), references + first);
+        const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
+        __m512i rank = _mm512_setzero_si512();
+        uint64_t others = integers | floatings;
+        while (others != 0)
+        {
+            const uint32_t other = (uint32_t)__builtin_ctzll(others);
+            others &= others - 1;
+            const __m512i key = _mm512_set1_epi32((int32_t)references[other]);
+            const __mmask16 same = (floatings >> other & 1) != 0 ? floating_lanes : integer_lanes;
+            const __mmask16 ahead = _mm512_cmpgt_epu32_mask(key, counts) | (_mm512_cmpeq_epi32_mask(key, counts) & _mm512_cmpgt_epu32_mask(index, _mm512_set1_epi32((int32_t)other)));
+            rank = _mm512_mask_add_epi32(rank, same & ahead, rank, one);
+        }
+        // Integer locals: a caller-saved register below `callers`, a callee-saved one below `callers + callees` when
+        // referenced twice; floating ones an XMM register below `xmms`.
+        const __mmask16 caller_lanes = integer_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)callers));
+        const __mmask16 callee_lanes = integer_lanes & ~caller_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)(callers + callees))) &
+                                       _mm512_cmpge_epu32_mask(counts, _mm512_set1_epi32(2));
+        const __mmask16 xmm_lanes = floating_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)xmms));
+        const __mmask16 assigned = caller_lanes | callee_lanes | xmm_lanes;
+        callee_taken += (uint32_t)__builtin_popcount(callee_lanes);
+        const __m512i reg = _mm512_mask_permutexvar_epi32(_mm512_permutexvar_epi32(rank, list), xmm_lanes, rank, xmm_list);
+        // A home in a register: reg in byte 4, is_register in byte 6.
+        const __m512i low = _mm512_or_si512(_mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(reg)), 32), _mm512_set1_epi64(1ll << 48));
+        const __m512i high = _mm512_or_si512(_mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(reg, 1)), 32), _mm512_set1_epi64(1ll << 48));
+        _mm512_mask_storeu_epi64(homes + first, (__mmask8)assigned, low);
+        _mm512_mask_storeu_epi64(homes + first + 8, (__mmask8)(assigned >> 8), high);
+    }
+    return callee[callee_taken];
+}
+
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
 // locals, most referenced first (by index among equals), take the free caller-saved registers, then (referenced at
 // least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
 // every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot, unless it takes
 // a register, which the prologue loads from that slot. `references` (local_count) holds each local's references, and
-// `order` (local_count) is scratch.
-static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order)
+// `order` (local_count) is scratch for the locals by them (tier0_order_locals).
+static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order, bool vector)
 {
     const uint32_t locals = function->local_count;
     // The registers parameters arrive in: no other local takes one, so the prologue's moves never overwrite a source.
@@ -2432,7 +2554,6 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     for (uint32_t l = 0; l < locals; l += 1)
     {
         homes[l] = (Tier0Home){ 0, 0, 0, 0, 0 };
-        order[l] = l;
     }
     // Parameters that stay where they arrive.
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -2450,19 +2571,18 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             }
         }
     }
-    // The rest by references, most first: an insertion sort, since a function's locals are few.
-    for (uint32_t a = 1; a < locals; a += 1)
+    // The rest by references, most first (`order`, tier0_order_locals'); for the vector path and up to 64 locals, by their
+    // ranks (tier0_assign_registers_vector).
+    const bool ranked = vector && locals <= 64;
+    if (ranked)
     {
-        const uint32_t local = order[a];
-        uint32_t b = a;
-        while (b > 0 && references[order[b - 1]] < references[local])
-        {
-            order[b] = order[b - 1];
-            b -= 1;
-        }
-        order[b] = local;
+        frame->saved |= tier0_assign_registers_vector(function, homes, references, taken);
     }
-    for (uint32_t k = 0; k < locals; k += 1)
+    else
+    {
+        tier0_order_locals(locals, references, order);
+    }
+    for (uint32_t k = 0; k < locals && !ranked; k += 1)
     {
         const uint32_t local = order[k];
         const bool address_taken = (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
@@ -2520,7 +2640,42 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
 // save area, the fixed slots and a slot per local in memory (8 bytes each: every class fits). A parameter that arrives
 // on the stack keeps its incoming slot, above the return address.
-static void tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references)
+// tier0_layout_frame's slots for the vector path, 16 locals at a time: the mask of those that need one (not in a
+// register, referenced or address-taken, not a parameter on the stack) from the homes, the references and the flags,
+// then a slot for each set bit, in order. Returns the offset past them.
+static uint32_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint32_t offset)
+{
+    const uint32_t locals = function->local_count;
+    const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
+    for (uint32_t first = 0; first < locals; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)tier0_lanes(first, locals);
+        const __m512i homes_low = _mm512_maskz_loadu_epi64((__mmask8)lanes, homes + first);
+        const __m512i homes_high = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), homes + first + 8);
+        const __mmask16 in_register = _mm512_kunpackb(_mm512_test_epi64_mask(homes_high, is_register), _mm512_test_epi64_mask(homes_low, is_register));
+        const __m512i counts = _mm512_maskz_loadu_epi32(lanes, references + first);
+        const __m128i flags = _mm_maskz_loadu_epi8(lanes, function->local_flags + first);
+        const __mmask16 needed = _mm512_test_epi32_mask(counts, counts) | _mm_test_epi8_mask(flags, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+        uint32_t on_stack = 0;
+        for (uint32_t p = first; p < function->parameter_count && p < first + 16; p += 1)
+        {
+            on_stack |= function->parameters[p].kind == BUSTER_ABI_LOCATION_STACK ? 1u << (p - first) : 0;
+        }
+        uint32_t slots = lanes & needed & ~in_register & ~on_stack;
+        while (slots != 0)
+        {
+            const uint32_t local = first + (uint32_t)__builtin_ctz(slots);
+            slots &= slots - 1;
+            homes[local].displacement = (int32_t)offset;
+            homes[local].reg = X86_REGISTER_RSP;
+            homes[local].mode = BUSTER_X86_MEMORY_BASE;
+            offset += 8;
+        }
+    }
+    return offset;
+}
+
+static void tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
 {
     uint32_t outgoing = 0;
     for (uint32_t c = 0; c < function->call_count; c += 1)
@@ -2532,7 +2687,7 @@ static void tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     offset += 8 * frame->save_slots;
     frame->fixed_area = offset;
     offset += 8 * frame->fixed_slots;
-    for (uint32_t l = 0; l < function->local_count; l += 1)
+    for (uint32_t l = 0; l < function->local_count && !vector; l += 1)
     {
         const bool address_taken = (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
         const bool on_stack = l < function->parameter_count && function->parameters[l].kind == BUSTER_ABI_LOCATION_STACK;
@@ -2544,6 +2699,7 @@ static void tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
             offset += 8;
         }
     }
+    offset = vector ? tier0_frame_slots_vector(function, homes, references, offset) : offset;
     // With the pushes and the return address, a multiple of 16 at every call.
     const uint32_t above = 8 * frame->pushes + 8;
     if (frame->calls)
@@ -2761,49 +2917,51 @@ static void tier0_move(Tier0Writer* writer, uint32_t to, uint32_t from)
     tier0_put(writer, tier0_instruction(xmm ? X86_FORM_MOVAPS_X_XM : X86_FORM_MOV_R64_RM64, (uint8_t)(to & 15), (uint8_t)(from & 15), 0, 0, 0));
 }
 
-// Moves `count` registers at once (to[k] <- from[k], each in the register set's numbering: XMM registers from 16): the
-// moves whose destination no other move still reads go first; a cycle of general registers breaks with an xchg. The
-// destinations are distinct, and so are the sources. `to` and `from` are changed.
-static void tier0_parallel_moves(Tier0Writer* writer, uint8_t* to, uint8_t* from, uint32_t count)
+// The argument moves at once: each destination register gets its source's value, every register below 32. The sources
+// are distinct, as are the destinations, so the moves form paths and cycles (of general registers alone: a call's
+// floating arguments only move down, and xchg has no XMM form), on bitmasks: a move whose destination no
+// other move still reads goes first (the lowest such register); when none is left, the rest are cycles, and an xchg of
+// the lowest destination with its source settles that move, the move that read the destination reading the source
+// instead. A path's move takes a record, and a cycle of n moves n - 1 (its last move becomes a register's own).
+static void tier0_parallel_moves(Tier0Writer* writer, const uint8_t* to, const uint8_t* from, uint32_t count)
 {
-    uint32_t pending = count;
+    uint8_t source_of[32];
+    uint8_t reader_of[32];
+    uint32_t pending = 0;
+    uint32_t sources = 0;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        if (to[k] != from[k])
+        {
+            source_of[to[k]] = from[k];
+            reader_of[from[k]] = to[k];
+            pending |= 1u << to[k];
+            sources |= 1u << from[k];
+        }
+    }
     while (pending != 0)
     {
-        bool progress = false;
-        for (uint32_t k = 0; k < pending; k += 1)
+        const uint32_t ready = pending & ~sources;
+        const uint32_t destination = (uint32_t)__builtin_ctz(ready != 0 ? ready : pending);
+        const uint32_t source = source_of[destination];
+        pending &= ~(1u << destination);
+        if (ready != 0)
         {
-            bool read = false;
-            for (uint32_t j = 0; j < pending; j += 1)
-            {
-                read |= j != k && from[j] == to[k];
-            }
-            if (!read)
-            {
-                if (to[k] != from[k])
-                {
-                    tier0_move(writer, to[k], from[k]);
-                }
-                to[k] = to[pending - 1];
-                from[k] = from[pending - 1];
-                pending -= 1;
-                progress = true;
-                k = pending;
-            }
+            tier0_move(writer, destination, source);
+            sources &= ~(1u << source);
         }
-        if (!progress)
+        else
         {
-            // Every destination is another move's source: a cycle (or several). xchg the first move's two registers:
-            // its destination is then done, and the move that read its destination reads its source instead.
-            const uint32_t a = to[0];
-            const uint32_t b = from[0];
-            tier0_put(writer, tier0_instruction(X86_FORM_XCHG_RM64_R64, (uint8_t)b, (uint8_t)a, 0, 0, 0));
-            for (uint32_t j = 1; j < pending; j += 1)
+            tier0_put(writer, tier0_instruction(X86_FORM_XCHG_RM64_R64, (uint8_t)source, (uint8_t)destination, 0, 0, 0));
+            const uint32_t reader = reader_of[destination];
+            source_of[reader] = (uint8_t)source;
+            reader_of[source] = (uint8_t)reader;
+            sources &= ~(1u << destination);
+            if (reader == source)
             {
-                from[j] = from[j] == a ? (uint8_t)b : from[j];
+                pending &= ~(1u << source);
+                sources &= ~(1u << source);
             }
-            to[0] = to[pending - 1];
-            from[0] = from[pending - 1];
-            pending -= 1;
         }
     }
 }
@@ -3043,80 +3201,64 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
         const uint32_t call = (uint32_t)function->values[i];
         const uint32_t first = function->call_first[call];
         const uint32_t arguments = function->call_argument_counts[call];
-        uint32_t integer_arguments = 0;
-        uint32_t floating_arguments = 0;
-        for (uint32_t a = 0; a < arguments; a += 1)
-        {
-            const bool floating = tier0_class_floating(function->argument_classes[first + a]);
-            integer_arguments += floating ? 0 : 1;
-            floating_arguments += floating ? 1 : 0;
-        }
-        const uint32_t below = entries->depths[i] - integer_arguments;
-        const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
-        const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
-        count += 2 * (saved + floating_below);
+        // One pass from the last argument back: an argument's register is its stack's depth less the arguments of its
+        // stack after it, so the counts before it aren't needed first.
         uint8_t to[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
         uint8_t from[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
         uint32_t moves = 0;
-        uint32_t integer = 0;
-        uint32_t floating = 0;
-        for (uint32_t a = 0; a < arguments; a += 1)
+        uint32_t integer_after = 0;
+        uint32_t floating_after = 0;
+        const uint32_t depth = entries->depths[i];
+        const uint32_t floating_depth = entries->floating_depths[i];
+        for (uint32_t a = arguments; a > 0; a -= 1)
         {
-            const uint32_t class = function->argument_classes[first + a];
-            const AbiLocation location = function->argument_locations[first + a];
+            const uint32_t class = function->argument_classes[first + a - 1];
+            const AbiLocation location = function->argument_locations[first + a - 1];
             const bool is_floating = tier0_class_floating(class);
-            const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[below + integer];
-            integer += is_floating ? 0 : 1;
-            floating += is_floating ? 1 : 0;
+            const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_depth - 1 - floating_after) : tier0_integer_depths[depth - 1 - integer_after];
+            integer_after += is_floating ? 0 : 1;
+            floating_after += is_floating ? 1 : 0;
             count += tier0_class_integer(class) && tier0_class_bytes(class) < 4 ? 1 : 0;
-            if (location.kind == BUSTER_ABI_LOCATION_STACK)
-            {
-                count += 1;
-            }
-            else
-            {
-                const uint8_t reg = location.registers[0];
-                const uint8_t destination = (uint8_t)((reg & BUSTER_ABI_REGISTER_VECTOR) != 0 ? BUSTER_TIER0_XMM(reg & 0x1f) : reg);
-                if (destination != source)
-                {
-                    to[moves] = destination;
-                    from[moves] = (uint8_t)source;
-                    moves += 1;
-                }
-            }
+            const uint8_t reg = location.registers[0];
+            const uint8_t destination = (uint8_t)((reg & BUSTER_ABI_REGISTER_VECTOR) != 0 ? BUSTER_TIER0_XMM(reg & 0x1f) : reg);
+            const bool stack = location.kind == BUSTER_ABI_LOCATION_STACK;
+            const bool move = !stack && destination != source;
+            to[moves] = destination;
+            from[moves] = (uint8_t)source;
+            moves += move ? 1 : 0;
+            count += stack ? 1 : 0;
         }
-        // The cycles among the moves: following each move's source to the move that writes it comes back to the move.
-        _Static_assert(BUSTER_TIER0_MAX_CALL_ARGUMENTS <= 64, "a move is a bit of the seen set");
-        uint32_t cycles = 0;
-        uint64_t seen = 0;
+        const uint32_t below = depth - integer_after;
+        const uint32_t floating_below = floating_depth - floating_after;
+        const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+        count += 2 * (saved + floating_below);
+        // The cycles among the moves, as tier0_parallel_moves finds them: the paths' moves taken away, what is left.
+        uint8_t source_of[32];
+        uint32_t pending = 0;
+        uint32_t sources = 0;
         for (uint32_t k = 0; k < moves; k += 1)
         {
-            uint32_t at = k;
-            uint32_t steps = 0;
-            bool open = (seen >> k & 1) == 0;
-            while (open && steps <= moves)
+            source_of[to[k]] = from[k];
+            pending |= 1u << to[k];
+            sources |= 1u << from[k];
+        }
+        uint32_t ready = pending & ~sources;
+        while (ready != 0)
+        {
+            const uint32_t destination = (uint32_t)__builtin_ctz(ready);
+            pending &= ~(1u << destination);
+            sources &= ~(1u << source_of[destination]);
+            ready = pending & ~sources;
+        }
+        uint32_t cycles = 0;
+        while (pending != 0)
+        {
+            uint32_t at = (uint32_t)__builtin_ctz(pending);
+            cycles += 1;
+            while ((pending >> at & 1) != 0)
             {
-                seen |= 1ull << at;
-                uint32_t writer = moves;
-                for (uint32_t j = 0; j < moves; j += 1)
-                {
-                    writer = to[j] == from[at] ? j : writer;
-                }
-                steps += 1;
-                if (writer == moves)
-                {
-                    open = false;
-                }
-                else if (writer == k)
-                {
-                    cycles += 1;
-                    open = false;
-                }
-                else
-                {
-                    open = (seen >> writer & 1) == 0;
-                    at = writer;
-                }
+                pending &= ~(1u << at);
+                at = source_of[at];
             }
         }
         count += moves - cycles;
@@ -3196,6 +3338,23 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
 }
 
 // The epilogue: the frame released, the saved registers popped, ret.
+// How many records tier0_emit_prologue writes, without writing them: the pushes, the frame's sub, and each parameter's
+// move, store or load into its home. The epilogue's are the sub's add, the pops and the ret.
+static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
+{
+    uint32_t count = frame->pushes + (frame->size != 0 ? 1 : 0);
+    for (uint32_t p = 0; p < function->parameter_count; p += 1)
+    {
+        const AbiLocation location = function->parameters[p];
+        const bool address_taken = (function->local_flags[p] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
+        const bool arrives = location.kind == BUSTER_ABI_LOCATION_REGISTERS && (references[p] != 0 || address_taken);
+        const bool stays = homes[p].is_register && homes[p].reg == (location.registers[0] & 0x1f);
+        count += location.kind == BUSTER_ABI_LOCATION_STACK && homes[p].is_register ? 1 : 0;
+        count += arrives && !stays ? 1 : 0;
+    }
+    return count;
+}
+
 static void tier0_emit_epilogue(const Tier0Frame* frame, Tier0Writer* writer)
 {
     if (frame->size != 0)
@@ -3403,6 +3562,23 @@ static void tier0_apply_choice(X86Instruction* record, uint32_t form, int64_t va
     }
 }
 
+// Every form's shape (BUSTER_TIER0_SHAPE_*). Returns false for an immediate past 8 bytes.
+static bool tier0_build_choice_shapes(void)
+{
+    bool valid = true;
+    for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+    {
+        const X86FormDescription* description = x86_form_description(form);
+        const uint32_t syntax = description->syntax;
+        valid &= description->immediate_bytes <= 8;
+        uint32_t shape = description->immediate_bytes & BUSTER_TIER0_SHAPE_BYTES;
+        shape |= syntax == X86_SYNTAX_ACC_IMM || syntax == X86_SYNTAX_IMM ? BUSTER_TIER0_SHAPE_CLEAR : 0;
+        shape |= syntax == X86_SYNTAX_RM_REG ? BUSTER_TIER0_SHAPE_TWICE : 0;
+        tier0_choice_shapes[form] = (uint8_t)shape;
+    }
+    return valid;
+}
+
 // The immediates' choice requests, gathered by emission: each CHOICE record's index, row, value and context.
 typedef struct Tier0Choices Tier0Choices;
 struct Tier0Choices
@@ -3504,6 +3680,48 @@ static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entr
 static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
                               Tier0Code* code, Tier0Choices* choices);
 
+// tier0_apply_choice for every request, for the vector path: each chosen form's record from its shape (one byte) rather
+// than its description, on the record's two 8-byte halves (the immediate and the displacement; the operands, the form,
+// vvvv and the decorations) rather than its fields, without a branch: the form with the fixup flag kept, the operands
+// cleared or the destination taken twice, and the immediate's field (and a 64-bit immediate's high half in the
+// displacement); a request whose form is X86_FORM_NONE keeps its record.
+static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choices* choices)
+{
+    _Static_assert(offsetof(X86Instruction, displacement) == 4 && offsetof(X86Instruction, reg) == 8 && offsetof(X86Instruction, form) == 12,
+                   "a record's halves: immediate and displacement; reg, rm, index, mode, form, vvvv and decorations");
+    const uint32_t* indices = choices->records;
+    const uint16_t* forms = choices->forms;
+    const int64_t* values = choices->values;
+    const uint32_t count = choices->count;
+    uint8_t* bytes_of = (uint8_t*)records;
+    for (uint32_t q = 0; q < count; q += 1)
+    {
+        uint8_t* record = bytes_of + (uint64_t)indices[q] * sizeof(X86Instruction);
+        uint64_t low = 0;
+        uint64_t high = 0;
+        memcpy(&low, record, sizeof(low));
+        memcpy(&high, record + 8, sizeof(high));
+        const uint32_t form = forms[q];
+        const uint32_t shape = tier0_choice_shapes[form];
+        const uint64_t value = (uint64_t)values[q];
+        const uint32_t bytes = shape & BUSTER_TIER0_SHAPE_BYTES;
+        const bool clear = (shape & BUSTER_TIER0_SHAPE_CLEAR) != 0;
+        const bool twice = (shape & BUSTER_TIER0_SHAPE_TWICE) != 0;
+        const uint32_t shift = (bytes >= 4 ? 32 : 64 - 8 * bytes) & 63;
+        const uint64_t immediate = bytes == 0 ? 0 : (uint32_t)((int64_t)(value << shift) >> shift);
+        const uint64_t displacement = bytes == 8 ? value >> 32 : clear ? 0 : low >> 32;
+        const uint64_t operands = high & 0xffffffffull;
+        const uint64_t chosen_operands = clear ? 0 : twice ? (operands & ~0xffull) | (operands >> 8 & 0xff) : operands;
+        const uint64_t chosen_form = form | (high >> 32 & BUSTER_X86_FORM_FIXUP);
+        const uint64_t chosen_low = immediate | displacement << 32;
+        const uint64_t chosen_high = chosen_operands | chosen_form << 32 | (high & 0xffff000000000000ull);
+        low = form == X86_FORM_NONE ? low : chosen_low;
+        high = form == X86_FORM_NONE ? high : chosen_high;
+        memcpy(record, &low, sizeof(low));
+        memcpy(record + 8, &high, sizeof(high));
+    }
+}
+
 // What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
 // selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
@@ -3538,23 +3756,25 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         {
             tier0_count_references(function, references);
         }
-        tier0_assign_homes(function, &frame, homes, references, order);
-        tier0_layout_frame(function, &frame, homes, references);
-        Tier0Writer counter = { 0, 0, 0, 0 };
-        tier0_emit_prologue(function, &frame, homes, references, &counter);
-        const uint32_t prologue = counter.count;
+        tier0_assign_homes(function, &frame, homes, references, order, vector);
+        tier0_layout_frame(function, &frame, homes, references, vector);
         Tier0Counts counts;
+        uint32_t epilogue = 0;
         if (vector)
         {
-            counts = tier0_measure_vector(function, entries, homes, prologue);
+            counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references));
+            epilogue = (frame.size != 0 ? 1 : 0) + frame.pushes + 1;
         }
         else
         {
+            Tier0Writer counter = { 0, 0, 0, 0 };
+            tier0_emit_prologue(function, &frame, homes, references, &counter);
             counts = tier0_measure(function, entries, &frame, homes);
-            tier0_positions_scalar(function, entries, prologue);
+            tier0_positions_scalar(function, entries, counter.count);
+            counter.count = 0;
+            tier0_emit_epilogue(&frame, &counter);
+            epilogue = counter.count;
         }
-        counter.count = 0;
-        tier0_emit_epilogue(&frame, &counter);
         // The requests' columns have room for the vector path's last compressed store of 8.
         choices.records = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, counts.choices + 8);
         choices.rows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
@@ -3562,7 +3782,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
-        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + counter.count, counts))
+        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts))
         {
             error = TIER0_ERROR_MEMORY;
         }
@@ -3579,9 +3799,16 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
             tier0_emit_body(function, entries, &frame, homes, references, code, &choices);
             x86_choose_forms_scalar(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
-        for (uint32_t q = 0; q < choices.count; q += 1)
+        if (vector)
         {
-            tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
+            tier0_apply_choices_vector(code->records, &choices);
+        }
+        else
+        {
+            for (uint32_t q = 0; q < choices.count; q += 1)
+            {
+                tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
+            }
         }
     }
     return error;
@@ -4749,7 +4976,9 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
     uint32_t unsupported = count;
     __m512i integer_top = _mm512_set1_epi64(-1);
     __m512i floating_top = _mm512_set1_epi64(-1);
-    bool rdx = false;
+    // The kept templates' words ORed together (for CLOBBERS_RDX), and the lanes with an unsupported entry in any block.
+    __m512i kept_words = _mm512_setzero_si512();
+    __mmask8 any_unsupported = 0;
     int32_t deferred_integer_top = -1;
     int32_t deferred_floating_top = -1;
     uint32_t clobbers = 0;
@@ -4783,12 +5012,8 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
         const __mmask8 floating_reaches = kept & _mm512_test_epi64_mask(floating_reach, floating_reach);
         integer_top = _mm512_mask_max_epi64(integer_top, reaches, integer_top, _mm512_sub_epi64(_mm512_add_epi64(depth, integer_reach), three));
         floating_top = _mm512_mask_max_epi64(floating_top, floating_reaches, floating_top, _mm512_sub_epi64(_mm512_add_epi64(floating, floating_reach), three));
-        rdx |= (kept & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CLOBBERS_RDX))) != 0;
-        const __mmask8 bad = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_UNSUPPORTED));
-        if (bad != 0 && unsupported == count)
-        {
-            unsupported = first + (uint32_t)__builtin_ctz(bad);
-        }
+        kept_words = _mm512_mask_or_epi64(kept_words, kept, kept_words, word);
+        any_unsupported |= lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_UNSUPPORTED));
         // The deferred entries' touches, as the scalar selection has them.
         uint32_t deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
         while (deferred != 0)
@@ -4827,6 +5052,12 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
             }
         }
     }
+    // The first unsupported entry, rare: a compile that fails.
+    for (uint32_t i = 0; i < count && any_unsupported != 0 && unsupported == count; i += 1)
+    {
+        unsupported = (words[i] & BUSTER_TIER0_WORD_UNSUPPORTED) != 0 ? i : count;
+    }
+    const bool rdx = (_mm512_reduce_or_epi64(kept_words) & BUSTER_TIER0_WORD_CLOBBERS_RDX) != 0;
     const int64_t vector_integer_top = _mm512_reduce_max_epi64(integer_top);
     const int64_t vector_floating_top = _mm512_reduce_max_epi64(floating_top);
     const int32_t integer_reached = vector_integer_top > deferred_integer_top ? (int32_t)vector_integer_top : deferred_integer_top;
@@ -4862,6 +5093,16 @@ static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entr
     const __m512i seven = _mm512_set1_epi64(7);
     const __m512i zero = _mm512_setzero_si512();
     const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
+    // Up to 64 locals, which of them are in registers as one mask: a lane's case is then a shift of it.
+    const bool few = function->local_count <= 64;
+    uint64_t registers = 0;
+    for (uint32_t first = 0; first < function->local_count && few; first += 8)
+    {
+        const __m512i eight = _mm512_maskz_loadu_epi64((__mmask8)tier0_lanes(first, function->local_count), homes + first);
+        registers |= (uint64_t)_mm512_test_epi64_mask(eight, is_register) << first;
+    }
+    const __m512i register_bits = _mm512_set1_epi64((int64_t)registers);
+    const __m512i one = _mm512_set1_epi64(1);
     __m512i carry = _mm512_set1_epi64(prologue);
     __m512i previous = zero;
     for (uint32_t first = 0; first < count; first += 8)
@@ -4877,10 +5118,22 @@ static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entr
             const __m512i b_offset = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_B_SHIFT), seven);
             const __mmask8 a_valid = dependent & _mm512_cmpneq_epi64_mask(a_offset, seven);
             const __mmask8 b_valid = dependent & _mm512_cmpneq_epi64_mask(b_offset, seven);
-            const __m512i a_home = tier0_home_lookup(&table, tier0_value_back(previous, current, a_offset), a_valid);
-            const __m512i b_home = tier0_home_lookup(&table, tier0_value_back(previous, current, b_offset), b_valid);
-            __m512i cases = _mm512_maskz_mov_epi64(_mm512_test_epi64_mask(a_home, is_register), _mm512_set1_epi64(1));
-            cases = _mm512_mask_add_epi64(cases, _mm512_test_epi64_mask(b_home, is_register), cases, _mm512_set1_epi64(2));
+            const __m512i a_local = tier0_value_back(previous, current, a_offset);
+            const __m512i b_local = tier0_value_back(previous, current, b_offset);
+            __mmask8 a_register = 0;
+            __mmask8 b_register = 0;
+            if (few)
+            {
+                a_register = a_valid & _mm512_test_epi64_mask(_mm512_srlv_epi64(register_bits, a_local), one);
+                b_register = b_valid & _mm512_test_epi64_mask(_mm512_srlv_epi64(register_bits, b_local), one);
+            }
+            else
+            {
+                a_register = _mm512_test_epi64_mask(tier0_home_lookup(&table, a_local, a_valid), is_register);
+                b_register = _mm512_test_epi64_mask(tier0_home_lookup(&table, b_local, b_valid), is_register);
+            }
+            __m512i cases = _mm512_maskz_mov_epi64(a_register, one);
+            cases = _mm512_mask_add_epi64(cases, b_register, cases, _mm512_set1_epi64(2));
             const __mmask8 uniform = dependent & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_HOME_UNIFORM));
             const __mmask8 gathered = dependent & ~uniform;
             word = _mm512_mask_add_epi64(word, uniform, word, cases);
