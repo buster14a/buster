@@ -286,18 +286,24 @@ a NaN's sign and payload to the implementation, and clang folds a constant 0.0 /
 
 ## Measurements
 
-The 9700X, CPU 2, `benchmark-backend`: generated programs' 2,216 functions, 262,894 typed entries, 292,738 records
-(1.11 per entry) and 1,107,677 bytes. 3.7% of entries are deferred, most of them calls. Medians of 21 passes, with
-the builds before and after vectorizing the passes after fusion run in turn, twice each (the generator's programs
-before it gained stack parameters and pointer arithmetic):
+The 9700X, CPU 2, `benchmark-backend`, medians of 21 passes. Before and after vectorizing the passes after fusion,
+the two builds run in turn, twice each, on the generator's programs before it gained stack parameters and pointer
+arithmetic: 2,216 functions, 262,894 typed entries, 292,738 records (1.11 per entry) and 1,107,677 bytes, 3.7% of
+the entries deferred, most of them calls:
 
 | Variant | ns per entry | Cycles per entry | Instructions per entry | Cycles per record | IPC |
 | --- | --- | --- | --- | --- | --- |
 | Vector path | 15.5 | 85.7 | 189.4 | 77.0 | 2.21 |
 | Vector path, before | 25.7 | 142.4 | 308.6 | 127.9 | 2.17 |
 | Scalar path | 40.7 | 225.7 | 571.9 | 202.7 | 2.54 |
-| `size_branches` | | | | 7.4 | 3.0 |
-| `x86_encode` | | | | 4.9 | 3.6 |
+| `size_branches` | | | | 6.6 | 3.0 |
+| `x86_encode` | | | | 4.4 | 3.6 |
+
+On the current generator's programs (2,008 functions, 262,874 typed entries, 303,116 records, 1.15 per entry, 3.6%
+deferred), the 9700X job measured #303's head at 89.2 cycles per entry for the vector path (77.4 per record, 196.7
+instructions per entry) and 233.2 for the scalar one (202.2 per record), with `size_branches` at 6.5 and `x86_encode`
+at 4.3 cycles per record. The power cap's count (#199) was 2.5 per record for the vector path, against the scalar
+path's 11.1.
 
 - **The passes after fusion:** vectorizing selection, measuring and emission, and counting calls without emitting
   them, took the vector path from 142.4 to 85.7 cycles per entry (1.66 times as fast), and 2.63 times as fast as the
@@ -311,8 +317,8 @@ before it gained stack parameters and pointer arithmetic):
 
 **Generated code against clang -O0** (60 cross-checked programs on the 9700X):
 
-- **Run time:** 0.89 of clang's (0.71 to 0.85 on the 7940HS).
-- **Code size:** 1.13 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
+- **Run time:** 0.79 of clang's (0.70 to 0.78 on the 7940HS, over 1,310 programs of six seeds).
+- **Code size:** 1.11 of clang's `.text`. These programs are full of floating constants, which Tier 0 materializes
   through a general register (up to 15 bytes) where clang loads them from `.rodata` (not counted in its `.text`).
   They are also full of constant arithmetic, which #133 will fold before Tier 0 sees it.
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
