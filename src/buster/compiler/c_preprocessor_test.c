@@ -296,7 +296,11 @@ static bool pp_same_directive_tables(const Preprocessor* a, const Preprocessor* 
     {
         const PPFileData* x = &a->datas[f];
         const PPFileData* y = &b->datas[f];
-        result = x->prepared == y->prepared && x->directive_count == y->directive_count && x->guard == y->guard;
+        result = x->prepared == y->prepared && x->directive_count == y->directive_count && x->guard == y->guard && x->raw_error_count == y->raw_error_count;
+        for (uint32_t e = 0; result && e < x->raw_error_count; e += 1)
+        {
+            result = x->raw_errors[e].token == y->raw_errors[e].token && x->raw_errors[e].offset == y->raw_errors[e].offset && x->raw_errors[e].kind == y->raw_errors[e].kind;
+        }
         for (uint32_t d = 0; result && x->prepared && d < x->directive_count; d += 1)
         {
             result = x->directive_hash[d] == y->directive_hash[d] && x->directive_end[d] == y->directive_end[d] &&
@@ -350,7 +354,31 @@ static char* pp_test_print(Preprocessor* pp, bool vector, bool markers, size_t* 
     return result;
 }
 
-// The text -E prints for a run, which must lex into the stream's spellings; the vectorized printer's must be the scalar
+// An unterminated raw token runs to EOF when printed text is lexed again, taking the printer's final newline into
+// its spelling. Use the stream's known last-token boundary only when every original byte matches and EXACTLY one
+// final newline follows. Internal whitespace, missing/changed bytes and extra trailing text must still fail. Restore
+// the comparison view afterward so line-marker comparisons retain the complete printed token on both sides.
+static bool pp_compare_printed_spellings(Preprocessor* pp, const PPSpellings* ours, PPSpellings* theirs, const char* name, const char* their_name)
+{
+    const uint64_t last = ours->count != 0 ? ours->count - 1 : 0;
+    const uint32_t length = ours->count != 0 ? ours->lengths[last] : 0;
+    const bool tail = ours->count != 0 && ours->count == theirs->count && ours->kinds[last] == C_TOKEN_UNKNOWN && theirs->kinds[last] == C_TOKEN_UNKNOWN &&
+                      pp_raw_string_start(ours->bytes + ours->offsets[last], length) && theirs->lengths[last] == (uint64_t)length + 1 &&
+                      memcmp(ours->bytes + ours->offsets[last], theirs->bytes + theirs->offsets[last], length) == 0 &&
+                      theirs->bytes[theirs->offsets[last] + length] == '\n';
+    if (tail)
+    {
+        theirs->lengths[last] -= 1;
+    }
+    const bool result = pp_compare_spellings(pp, ours, theirs, name, their_name);
+    if (tail)
+    {
+        theirs->lengths[last] += 1;
+    }
+    return result;
+}
+
+// The text -E prints for a run, which must lex into the stream's spellings (with the EOF boundary above); the vectorized printer's must be the scalar
 // printer's byte for byte, with line markers and without.
 static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name)
 {
@@ -382,7 +410,7 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
     {
         char label[256];
         snprintf(label, sizeof(label), "%s (printed)", name);
-        result = pp_compare_spellings(pp, ours, &printed, label, "-E");
+        result = pp_compare_printed_spellings(pp, ours, &printed, label, "-E");
     }
     arena_release(&printed.arena);
     free(text);
@@ -1082,8 +1110,7 @@ static const PPTestCase pp_test_cases[] = {
     // too; their spellings as written after the opening quote (line splices and trigraphs kept), pasted, stringized
     // (line breaks as \n), as _Pragma's operand (the body) and #line's and a line marker's file name (the body);
     // neither a header name nor (from a string) __has_warning's name, but its body; after '$' where '$' is punctuation;
-    // and -E's lines, which count the line breaks in an unknown token (a raw string literal's invalid delimiter: clang
-    // also reports an error, which buster doesn't yet) and in no other.
+    // and -E's lines, which count the line breaks in an unknown token (including an invalid raw delimiter) and in no other.
     { "raw string literals in a GNU mode", "#define R RR\n#define LR LRR\n#define u8R u8RR\n#define uR uRR\n#define UR URR\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" R(h) xR\"(i)\" 1R\"(j)\"\nafter\n", 0, "gnu17", "R\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR\"(i)\" 1R\"(j)\"\nafter\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n\n\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR \"(i)\" 1R\"(j)\"\n\nafter\n" },
     { "raw string literals in gnu99", "#define uR uRR\n#define UR URR\n#define u8R u8RR\nR\"(a)\" LR\"(b)\" uR\"(c)\" UR\"(d)\" u8R\"(e)\"\n", 0, "gnu99", "R\"(a)\" LR\"(b)\" uRR \"(c)\" URR \"(d)\" u8RR \"(e)\"\n", false, 0, 0, 0 },
     { "no raw string literals in an ISO mode", "#define R RR\n#define LR LRR\nR\"(a)\" LR\"(b)\"\n", 0, "c17", "RR \"(a)\" LRR \"(b)\"\n", false, 0, 0, 0 },
@@ -1098,9 +1125,22 @@ static const PPTestCase pp_test_cases[] = {
     { "a raw string literal isn't an #include's header name", "#include R\"(other.h)\"\n", "x\n", "gnu17", "", true, 0, 0, 0 },
     { "raw string literals after '$' as punctuation", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
     { "raw string literals after '$' in assembly", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", false, 0, "-x assembler-with-cpp", 0 },
-    { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
-    { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", false, 0, 0, 0,
+    { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", true, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
+    { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", true, 0, 0, 0,
       "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
+    { .name = "invalid raw delimiters at active file scope", .source = "R\"bad space\" LR\"bad)\" uR\"bad\\\" UR\"abcdefghijklmnopq\" u8R\"bad\n\"\n",
+      .standard = "gnu17", .expected = "R\"bad space\" LR\"bad)\" uR\"bad\\\" UR\"abcdefghijklmnopq\" u8R\"bad\n\"\n", .fails = true, .errors = 5 },
+    { .name = "unterminated raw literal", .source = "before R\"tag(body\n", .standard = "gnu17", .expected = "before R\"tag(body\n", .fails = true, .errors = 1 },
+    { .name = "invalid raw prefix with phase two splice", .source = "L\\\nR\"bad space\"\n", .standard = "gnu17", .expected = "LR\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "unused invalid raw macro diagnoses once", .source = "#define BAD R\"bad space\"\nBAD BAD\n", .standard = "gnu17", .expected = "R\"bad space\" R\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "unused invalid raw macro argument diagnoses", .source = "#define DROP(x) kept\nDROP(R\"bad space\")\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
+    { .name = "invalid raw in a condition diagnoses after expansion", .source = "#define DROP(x) 1\n#if DROP(R\"bad space\")\nkept\n#endif\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
+    { .name = "skipped invalid raw literals suppress diagnostics", .source = "#if 0\nR\"bad space\"\n#define BAD LR\"bad)\"\n#endif\nkept\n", .standard = "gnu17", .expected = "kept\n" },
+    { .name = "an untaken elif still diagnoses invalid raw literals", .source = "#if 1\nkept\n#elif R\"bad space\"\n#endif\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
+    { .name = "invalid raw syntax is ordinary text with raw disabled", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-fno-raw-string-literals", .expected = "R \"bad space\"\n" },
+    { .name = "invalid raw syntax with forced C89 raw literals", .source = "R\"bad space\"\n", .standard = "c89", .options = "-fraw-string-literals", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "invalid raw syntax in assembly", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-x assembler-with-cpp", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
+    { .name = "opaque raw-looking query with no lexical overlap", .source = "#define HI __has_include\n#if HI(<R\"bad\"x>)\nbad\n#endif\nafter\n", .standard = "gnu17", .expected = "after\n" },
     { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     { "raw strings resume after an opaque direct header", "#include <R\"(x> R\"(a\nb)\"\nafter\n", 0, "gnu17", "header\nafter\n", false, 1, "-I%d", pp_test_files_opaque_raw },
     { "escaped greater in a raw-looking direct header", "#include <a\\>R\"(x>\nafter\n", 0, "gnu17", "escaped_header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
@@ -2214,7 +2254,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
             result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
-                     pp_compare_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
+                     pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
         }
@@ -2287,6 +2327,418 @@ static bool pp_test_embed_lookups(const char* directory, bool with_clang)
     printf("embed lookups: %u of %lu fail%s\n", result ? failures : (uint32_t)BUSTER_ARRAY_LENGTH(cases), (unsigned long)BUSTER_ARRAY_LENGTH(cases),
            result ? "" : " (the files or the working directory couldn't be set up)");
     return result && back && failures == 0;
+}
+
+// Each fresh candidate's expected open/fstat/read counts, independently of the counters themselves. Repeat hits and
+// misses first in one unit, then through a second unit's empty path table sharing the first unit's cache. The alias
+// has the same identity as value.h: it still needs open/fstat, but no second read. A directory needs fstat too; the
+// symlink loop's failed open does not. None of these searches prepares or executes a file.
+static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_root)
+{
+    static const struct
+    {
+        const char* name;
+        bool found;
+        uint32_t opens;
+        uint32_t fstats;
+        uint32_t reads;
+    } cases[] = {
+        { "absent.h", false, 2, 0, 0 },
+        { "absent.h", false, 0, 0, 0 },
+        { "value.h", true, 2, 1, 1 },
+        { "value.h", true, 0, 0, 0 },
+        { "alias.h", true, 2, 1, 0 },
+        { "folder.h", false, 2, 1, 0 },
+        { "folder.h", false, 0, 0, 0 },
+        { "loop.h", false, 2, 0, 0 },
+        { "loop.h", false, 0, 0, 0 },
+    };
+    static InternTable table;
+    static Preprocessor units[2];
+    units[0] = (Preprocessor){ 0 };
+    units[1] = (Preprocessor){ 0 };
+    bool result = intern_initialize(&table);
+    for (uint32_t u = 0; result && u < 2; u += 1)
+    {
+        PPOptions options = *base;
+        options.files = u == 0 ? 0 : units[0].cache;
+        Preprocessor* pp = &units[u];
+        result = pp_initialize(pp, &options, &table);
+        uint64_t expected_opens = 0;
+        uint64_t expected_fstats = 0;
+        uint64_t expected_reads = 0;
+        uint64_t expected_found = 0;
+        for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+        {
+            uint32_t found_in = BUSTER_PP_NONE;
+            const uint32_t file = pp_find_include(pp, (const uint8_t*)cases[c].name, (uint32_t)strlen(cases[c].name), true, false, BUSTER_PP_NONE,
+                                                   BUSTER_PP_NONE, &found_in, BUSTER_PP_NONE);
+            expected_opens += u == 0 ? cases[c].opens : 0;
+            expected_fstats += u == 0 ? cases[c].fstats : 0;
+            expected_reads += u == 0 ? cases[c].reads : 0;
+            expected_found += cases[c].found;
+            result = (file != BUSTER_PP_NONE) == cases[c].found && found_in == (cases[c].found ? 1u : BUSTER_PP_NONE) &&
+                     pp->probes.opens == expected_opens && pp->probes.fstats == expected_fstats && pp->probes.reads == expected_reads && pp->probes.maps == 0 &&
+                     pp->statistics.include_searches == c + 1 && pp->statistics.include_found == expected_found &&
+                     pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
+            if (!result)
+            {
+                printf("lookup accounting: unit %u case %u (%s): opens %lu/%lu, fstats %lu/%lu, reads %lu/%lu, found %u\n", u, c, cases[c].name,
+                       (unsigned long)pp->probes.opens, (unsigned long)expected_opens, (unsigned long)pp->probes.fstats, (unsigned long)expected_fstats,
+                       (unsigned long)pp->probes.reads, (unsigned long)expected_reads, file != BUSTER_PP_NONE);
+            }
+        }
+        if (result)
+        {
+            // Too long for any candidate: no system call, even though the search itself is counted.
+            uint8_t long_name[PATH_MAX];
+            memset(long_name, 'a', sizeof(long_name));
+            uint32_t found_in = BUSTER_PP_NONE;
+            const uint32_t long_file = pp_find_include(pp, long_name, sizeof(long_name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in, BUSTER_PP_NONE);
+            result = long_file == BUSTER_PP_NONE && pp->probes.opens == expected_opens && pp->probes.fstats == expected_fstats &&
+                     pp->statistics.include_searches == BUSTER_ARRAY_LENGTH(cases) + 1 && pp->statistics.include_ticks != 0 && pp->input_tokens == 0 &&
+                     pp->cache->prepared_records == 0 && pp->ticks[PP_PHASE_LEX] == 0 && pp->ticks[PP_PHASE_REFINE] == 0 && pp->ticks[PP_PHASE_DIRECTIVES] == 0;
+            // A missing main-file path keeps ENOENT and has no fstat, whether first probed or cached by the other unit.
+            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_USER_FILE);
+            result = result && root != BUSTER_PP_NONE && pp->files[root].data == BUSTER_PP_NONE && pp->files[root].error == ENOENT &&
+                     pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats &&
+                     pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
+            // The cached ELOOP is fatal for a reported search (#include or __has_include), without new I/O. The
+            // unreported searches above deliberately treated it as unavailable.
+            const uint32_t loop = pp_find_include(pp, (const uint8_t*)"loop.h", 6, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found_in, 0);
+            result = result && loop == BUSTER_PP_NONE && pp->fatal && pp->errors == 1 &&
+                     pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats;
+        }
+    }
+    pp_release(&units[1]);
+    pp_release(&units[0]);
+    intern_release(&table);
+    return result;
+}
+
+// Real directive/query dispatch must produce the same tokens, locations, history and tables with vector/scalar
+// kernels and with timing disabled. The independent fixture counts include failed and repeated cached searches,
+// stat calls for every embed query (there is no embed path cache), and setup stats for duplicate/missing directories.
+static bool pp_test_lookup_accounting(const char* directory)
+{
+    char first[4200];
+    char second[4200];
+    char missing[4200];
+    char path[4200];
+    char header[4300];
+    char alias[4300];
+    char folder[4300];
+    char loop[4300];
+    char bytes[4300];
+    char missing_root[4300];
+    snprintf(first, sizeof(first), "%s/account-first", directory);
+    snprintf(second, sizeof(second), "%s/account-second", directory);
+    snprintf(missing, sizeof(missing), "%s/account-missing", directory);
+    snprintf(path, sizeof(path), "%s/account.c", directory);
+    snprintf(header, sizeof(header), "%s/value.h", second);
+    snprintf(alias, sizeof(alias), "%s/alias.h", second);
+    snprintf(folder, sizeof(folder), "%s/folder.h", first);
+    snprintf(loop, sizeof(loop), "%s/loop.h", first);
+    snprintf(bytes, sizeof(bytes), "%s/data.bin", second);
+    snprintf(missing_root, sizeof(missing_root), "%s/root.c", missing);
+    const char* const directories[] = { first, second, first, missing };
+    PPOptions options = {
+        .language = {
+            .standard = 2023,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
+        .embed_directories = directories,
+        .embed_directory_count = 2,
+        .timing = true,
+        .expansion_starts = true,
+        .quiet = true,
+    };
+    static const char source[] =
+        "#if __has_include(<absent.h>) || __has_include(<absent.h>)\n#error unexpected header\n#endif\n"
+        "#if __has_include(<value.h>)\n#include <value.h>\n#include <value.h>\n#endif\n"
+        "#if __has_include(<folder.h>) || __has_include(<other-absent.h>)\n#error unexpected header\n#endif\n"
+        "#if __has_embed(<absent.bin>) || __has_embed(<absent.bin>)\n#error unexpected resource\n#endif\n"
+        "#if __has_embed(<data.bin>) != 1 || __has_embed(<data.bin>) != 1\n#error missing resource\n#endif\n"
+        "#embed <data.bin>\n";
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(folder, 0700) == 0 && symlink("loop.h", loop) == 0 &&
+                  pp_test_write_file(path, source) && pp_test_write_file(header, "#ifndef ACCOUNTED_H\n#define ACCOUNTED_H\n#define ACCOUNTED 7\nint accounted = ACCOUNTED;\n#endif\n") &&
+                  link(header, alias) == 0 && pp_test_write_file(bytes, "AB");
+    result = result && pp_test_lookup_probes(&options, missing_root);
+    // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
+    // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
+    options.quiet = false;
+    static InternTable tables[3];
+    static Preprocessor runs[3];
+    for (uint32_t k = 0; result && k < 3; k += 1)
+    {
+        options.scalar = k == 1;
+        options.timing = k != 2;
+        Preprocessor* pp = &runs[k];
+        result = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]) && pp_run(pp, path);
+        const PPStatistics* stats = &pp->statistics;
+        // Ten file open attempts: the unit, eight include candidates, and the embed's bytes. Four reach fstat: the
+        // unit, header, directory and resource. The three files' nonempty bytes are read once each.
+        result = result && pp->probes.opens == 10 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0;
+        if (options.timing)
+        {
+            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
+                     stats->include_fstats == 2 && stats->include_ticks != 0 && stats->embed_searches == 5 && stats->embed_found == 3 && stats->embed_stats == 10 &&
+                     stats->embed_ticks != 0;
+        }
+        else
+        {
+            result = result && stats->directory_stats == 0 && stats->include_searches == 0 && stats->include_found == 0 && stats->include_opens == 0 &&
+                     stats->include_fstats == 0 && stats->include_ticks == 0 && stats->embed_searches == 0 && stats->embed_found == 0 && stats->embed_stats == 0 &&
+                     stats->embed_ticks == 0;
+            for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
+            {
+                result = result && pp->ticks[phase] == 0;
+            }
+        }
+        if (!result)
+        {
+            printf("lookup accounting: run %u: file open/fstat/read %lu/%lu/%lu, include search/found/open/fstat %lu/%lu/%lu/%lu, "
+                   "embed search/found/stat %lu/%lu/%lu, setup stat %lu, errors %u\n", k,
+                   (unsigned long)pp->probes.opens, (unsigned long)pp->probes.fstats, (unsigned long)pp->probes.reads,
+                   (unsigned long)stats->include_searches, (unsigned long)stats->include_found, (unsigned long)stats->include_opens,
+                   (unsigned long)stats->include_fstats, (unsigned long)stats->embed_searches, (unsigned long)stats->embed_found,
+                   (unsigned long)stats->embed_stats, (unsigned long)stats->directory_stats, pp->errors);
+        }
+        if (result && k != 0)
+        {
+            result = pp_same_streams(&runs[0], pp, "lookup accounting") && pp_same_directive_tables(&runs[0], pp, "lookup accounting");
+        }
+    }
+    if (result)
+    {
+        static const char expected[] = "int accounted = 7; 65, 66";
+        PPSpellings ours = { 0 };
+        PPSpellings wanted = { 0 };
+        result = pp_stream_spellings(&runs[0], &ours) &&
+                 pp_text_spellings((const uint8_t*)expected, sizeof(expected) - 1, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &wanted) &&
+                 pp_compare_spellings(&runs[0], &ours, &wanted, "lookup accounting", "wanted");
+        arena_release(&ours.arena);
+        arena_release(&wanted.arena);
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        pp_release(&runs[k]);
+        intern_release(&tables[k]);
+    }
+    unlink(path);
+    unlink(header);
+    unlink(alias);
+    unlink(loop);
+    unlink(bytes);
+    rmdir(folder);
+    rmdir(first);
+    rmdir(second);
+    printf("lookup accounting: %s (file and metadata attempts, unit/shared caches, scalar/vector and timing off)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// Prescanning ID's argument and expanding #if's operand copy O's body into captures, never into the final output.
+// Of the nine final tokens, plain/ok are file runs, standalone O is a direct object copy, ID(O) is a buffer run, and
+// __LINE__ is the one individually emitted token. O expands directly three times, but only its standalone use copies
+// to the final output. The second source has one direct expansion into a capture and no output at all.
+// In both sources, pp_start_condition copies O == 3 to the arguments buffer and pp_start_capture runs that buffer.
+// After O expands, pp_step_buffer copies the two remaining tokens (== and 3) into the condition capture, which
+// pp_finish_condition discards. Thus aggregate buffer work must exceed final buffer copies by at least two tokens.
+static bool pp_test_final_copy_accounting(void)
+{
+    static const char* const sources[] = {
+        "plain\n#define O 1 + 2\nO\n#define ID(x) x\nID(O)\n#if O == 3\nok\n#endif\n__LINE__\n",
+        "#define O 1 + 2\n#if O == 3\n#endif\n",
+    };
+    static InternTable tables[3];
+    static Preprocessor runs[3];
+    bool result = true;
+    for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        for (uint32_t k = 0; result && k < 3; k += 1)
+        {
+            const PPOptions options = {
+                .language = {
+                    .standard = 2017,
+                    .gnu = true,
+                },
+                .scalar = k == 1,
+                .no_standard_includes = true,
+                .timing = k != 2,
+                .expansion_starts = true,
+                .quiet = true,
+            };
+            Preprocessor* pp = &runs[k];
+            result = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]) &&
+                     pp_run_source(pp, "copy-accounting.c", (const uint8_t*)sources[s], (uint32_t)strlen(sources[s]));
+            const PPStatistics* stats = &pp->statistics;
+            const bool counted = s == 0 && options.timing;
+            const uint64_t direct_expansions = options.timing ? (s == 0 ? 3u : 1u) : 0;
+            const bool buffer_work = options.timing ? stats->buffer_run_tokens >= stats->final_buffer_run_tokens + 2 : stats->buffer_run_tokens == 0;
+            const uint64_t copied = stats->final_file_run_tokens + stats->final_buffer_run_tokens + stats->final_direct_object_tokens;
+            result = result && pp->output.count == (s == 0 ? 9u : 0u) && stats->final_file_run_tokens == (counted ? 2u : 0u) &&
+                     stats->final_buffer_run_tokens == (counted ? 3u : 0u) && stats->final_direct_object_tokens == (counted ? 3u : 0u) &&
+                     copied <= pp->output.count && stats->direct_expansions == direct_expansions && buffer_work &&
+                     (!counted || pp->output.count - copied == 1);
+            if (!result)
+            {
+                printf("final copy accounting: source %u run %u: output %u, file/buffer/object copies %lu/%lu/%lu, direct expansions %lu/%lu, buffer work %lu\n", s, k, pp->output.count,
+                       (unsigned long)stats->final_file_run_tokens, (unsigned long)stats->final_buffer_run_tokens,
+                       (unsigned long)stats->final_direct_object_tokens, (unsigned long)stats->direct_expansions, (unsigned long)direct_expansions,
+                       (unsigned long)stats->buffer_run_tokens);
+            }
+            if (result && k != 0)
+            {
+                result = pp_same_streams(&runs[0], pp, "final copy accounting") && pp_same_directive_tables(&runs[0], pp, "final copy accounting");
+            }
+        }
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            pp_release(&runs[k]);
+            intern_release(&tables[k]);
+        }
+    }
+    printf("final copy accounting: %s (captures excluded, direct objects, empty output, scalar/vector and timing off)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
+// macros, then make every known name's bit disagree with macro_of before each use file. Repeating this after undef
+// and redefine prevents their normal bit updates from hiding a lookup through the cache. The third run selects the
+// scalar kernel directly, as the benchmarks do, without changing PPOptions.scalar.
+static bool pp_test_scalar_reference(const char* directory)
+{
+    static const char* const names[] =
+    {
+        "scalar-definitions.c",
+        "scalar-use.c",
+        "scalar-changed.c",
+    };
+    static const char* const sources[] =
+    {
+        "#define A 7\n#define ALIAS A\n#define ID(x) x\n#define SELF SELF\n#define F(x) x + F(x)\n"
+        "#define PLAIN ordinary\n#define ATTR noreturn\n#define CHANGE 1\n#define GONE 2\n#define EMPTY\n"
+        "#define POISONED bad\n#pragma GCC poison bad\n",
+        "ordinary A ALIAS ID(A) ID(SELF) F(A) PLAIN\n__COUNTER__ __LINE__\n"
+        "#if defined(A) && !defined(ordinary) && __has_attribute(ATTR)\ncondition\n#endif\nPOISONED\n"
+        "#undef GONE\n#undef CHANGE\n#define CHANGE 3\n#define NEW 4\nGONE CHANGE NEW\n"
+        "#embed <scalar-reference.bin> limit(1) prefix(A,) suffix(,ID(CHANGE))\n",
+        "A ALIAS ID(CHANGE) GONE NEW SELF __COUNTER__\n#if !defined(GONE) && defined(CHANGE)\nchanged\n#endif\n"
+        "#pragma GCC poison later\n__has_c_attribute(x EMPTY)\nbad later\n",
+    };
+    static const char expected[] =
+        "ordinary 7 7 7 SELF 7 + F(7) ordinary 0 2 condition bad GONE 3 4 7, 65, 3\n"
+        "7 7 3 GONE 4 SELF 1 changed 0 bad later\n";
+    char bytes[4096];
+    snprintf(bytes, sizeof(bytes), "%s/scalar-reference.bin", directory);
+    const char* directories[] =
+    {
+        directory,
+    };
+    static InternTable tables[3];
+    static Preprocessor runs[3];
+    char* diagnostics[3] = { 0 };
+    bool result = pp_test_write_file(bytes, "AB");
+    for (uint32_t k = 0; result && k < 3; k += 1)
+    {
+        size_t length = 0;
+        FILE* stream = open_memstream(&diagnostics[k], &length);
+        const PPOptions options =
+        {
+            .language =
+            {
+                .standard = 2023,
+                .gnu = true,
+            },
+            .scalar = k == 1,
+            .no_standard_includes = true,
+            .clang_features = true,
+            .embed_directories = directories,
+            .embed_directory_count = BUSTER_ARRAY_LENGTH(directories),
+            .expansion_starts = true,
+            .diagnostics = stream,
+        };
+        Preprocessor* pp = &runs[k];
+        result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+        uint32_t files[BUSTER_ARRAY_LENGTH(sources)];
+        if (result)
+        {
+            pp->vectorized = k == 0;
+        }
+        for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+        {
+            files[s] = pp_virtual_file(pp, names[s], sources[s], (uint32_t)strlen(sources[s]), BUSTER_PP_USER_FILE);
+            result = files[s] != BUSTER_PP_NONE && pp_prepare_data(pp, &pp->datas[pp->files[files[s]].data], names[s]);
+        }
+        result = result && pp_run_prelude(pp);
+        if (result)
+        {
+            pp_run_file(pp, files[0]);
+            result = pp->errors == 0 && pp->warnings == 0 && !pp->fatal;
+        }
+        for (uint32_t s = 1; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+        {
+            if (!pp->vectorized)
+            {
+                for (IdentId id = 0; id < pp->table->count; id += 1)
+                {
+                    const uint64_t bit = 1ull << (id % 64);
+                    if (pp->macro_of[id] != 0)
+                    {
+                        pp->is_macro[id / 64] &= ~bit;
+                    }
+                    else
+                    {
+                        pp->is_macro[id / 64] |= bit;
+                    }
+                }
+            }
+            const bool ran = pp_run_main(pp, files[s]);
+            // EMPTY must remain unexpanded after the scoped query's first name, making its operand invalid. The
+            // preexisting poisoned sentinel `bad` and newly poisoned `later` each diagnose one use on the last line.
+            result = ran == (s == 1) && pp->errors == (s == 1 ? 0u : 3u) && pp->warnings == 0 && !pp->fatal;
+            if (!result)
+            {
+                printf("scalar reference: run %u file %u: ran %u, errors %u, warnings %u, fatal %u\n", k, s, ran, pp->errors, pp->warnings, pp->fatal);
+            }
+        }
+        if (stream != 0)
+        {
+            fclose(stream);
+        }
+        result = result && diagnostics[k] != 0 && strstr(diagnostics[k], "builtin feature check macro requires a parenthesized identifier") != 0 &&
+                 strstr(diagnostics[k], "attempt to use a poisoned identifier") != 0;
+        if (result && k != 0)
+        {
+            result = pp_same_streams(&runs[0], pp, "scalar reference") && pp_same_directive_tables(&runs[0], pp, "scalar reference") &&
+                     strcmp(diagnostics[0], diagnostics[k]) == 0;
+        }
+    }
+    if (result)
+    {
+        PPSpellings ours = { 0 };
+        PPSpellings wanted = { 0 };
+        result = pp_stream_spellings(&runs[0], &ours) &&
+                 pp_text_spellings((const uint8_t*)expected, sizeof(expected) - 1, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &wanted) &&
+                 pp_compare_spellings(&runs[0], &ours, &wanted, "scalar reference", "wanted");
+        arena_release(&ours.arena);
+        arena_release(&wanted.arena);
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        if (!result && diagnostics[k] != 0)
+        {
+            printf("scalar reference run %u diagnostics:\n%s", k, diagnostics[k]);
+        }
+        free(diagnostics[k]);
+        pp_release(&runs[k]);
+        intern_release(&tables[k]);
+    }
+    unlink(bytes);
+    printf("scalar reference: %s (inverted macro-name bits, definitions, captures, builtins, poison and kernel override)\n", result ? "as expected" : "WRONG");
+    return result;
 }
 
 // c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
@@ -2608,7 +3060,7 @@ static bool pp_test_replace(char** text, size_t* length, const char* from, size_
 static bool pp_test_resource_names(char** text, size_t* length, const char* links)
 {
     char resource[PATH_MAX];
-    const bool found = pp_clang_resource_directory(resource, sizeof(resource));
+    const bool found = pp_clang_resource_directory(resource, sizeof(resource), 0);
     const size_t links_length = strlen(links);
     const size_t resource_length = found ? strlen(resource) : 0;
     char* names = found && links_length != 0 ? malloc(4 * (links_length + resource_length)) : 0;
@@ -3214,78 +3666,85 @@ static bool pp_test_raw_query_views(const char* directory)
     return result;
 }
 
-// Capacity is a Buster resource bound, separate from the Clang-equivalence cases. Eight confirmed repairs succeed;
-// a ninth reports the capacity and leaves the run failed/fatal, rather than returning a successful truncated stream.
-static bool pp_test_raw_query_capacity(const char* directory)
+// Cross both former repair limits and the old uint8_t counter's wrap. Definitions between repairs retain old data
+// indexes: their final expansions must still agree with Clang after every later private view has been prepared.
+static bool pp_test_raw_query_capacity(const char* directory, bool with_clang)
 {
-    char source[8192] = { 0 };
-    PPTestCase test = { .name = "raw query capacity", .source = source, .standard = "gnu17", .options = "-I%d", .files = pp_test_files_raw_query };
-    char path[4096];
-    bool result = pp_test_write_case(&test, directory, path, sizeof(path));
-    char text[16384];
-    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
-    const int count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
-    Arena arena = arena_reserve(1ull << 20);
-    PPOptions options;
-    const char* input;
-    const char* output;
-    bool markers;
-    result = result && pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
-    static InternTable table;
-    static Preprocessor run;
+    char source[65536];
+    char expected[16384];
+    PPTestCase test = { .name = "unlimited opaque recovery", .source = source, .standard = "gnu17", .expected = expected, .options = "-I%d", .files = pp_test_files_raw_query };
+    static const uint32_t counts[] = { 8, 9, 64, 65, 257 };
+    bool result = true;
     for (uint32_t family = 0; result && family < 2; family += 1)
     {
-        const uint32_t capacity = family == 0 ? BUSTER_PP_MAX_QUERY_REPAIRS : BUSTER_PP_MAX_DIRECT_REPAIRS;
-        const uint32_t ordinary = family == 0 ? 0 : capacity + 1;
-        char message[128];
-        snprintf(message, sizeof(message), "%s recovery capacity exceeded (%u repairs per inclusion)", family == 0 ? "header query" : "opaque directive", capacity);
-        for (uint32_t repairs = capacity; result && repairs <= capacity + 1; repairs += 1)
+        for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
         {
+            const uint32_t repairs = counts[c];
             uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define RAW_QUERY __has_include\n");
-            for (uint32_t i = 0; family != 0 && i <= capacity; i += 1)
+            uint32_t wanted = 0;
+            for (uint32_t i = 0; i < repairs; i += 1)
             {
-                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#include <raw-plain.h>\n");
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "#define SNAP_%u %u\n", i, i);
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, family == 0 ? "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n" : "#include <R\"(x>\n");
+                wanted += (uint32_t)snprintf(expected + wanted, sizeof(expected) - wanted, family == 0 ? "hit " : "header ");
             }
             for (uint32_t i = 0; i < repairs; i += 1)
             {
-                length += (uint32_t)snprintf(source + length, sizeof(source) - length, family == 0 ? "#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n" : "#include <R\"(x>\n");
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "SNAP_%u ", i);
+                wanted += (uint32_t)snprintf(expected + wanted, sizeof(expected) - wanted, "%u ", i);
             }
             snprintf(source + length, sizeof(source) - length, "tail\n");
-            result = pp_test_write_file(path, source);
-            for (uint32_t kernel = 0; result && kernel < 2; kernel += 1)
-            {
-                options.scalar = kernel != 0;
-                FILE* caught = 0;
-                const int saved = pp_test_catch_stderr(&caught);
-                const bool ran = saved >= 0 && pp_test_run(&run, &table, &options, path);
-                char messages[2048];
-                pp_test_release_stderr(saved, caught, messages, sizeof(messages));
-                uint32_t views = 0;
-                for (uint32_t d = 0; d < run.data_count; d += 1)
-                {
-                    views += run.datas[d].lexical_bytes != 0;
-                }
-                const bool exceeded = repairs > capacity;
-                result = saved >= 0 && ran != exceeded && run.fatal == exceeded && run.errors == (uint32_t)exceeded && views == capacity;
-                if (exceeded)
-                {
-                    result = result && strstr(messages, message) != 0;
-                }
-                else
-                {
-                    const uint32_t last = run.output.count != 0 ? run.output.count - 1 : 0;
-                    const IdentId name = run.output.count != 0 ? run.output.values[last] : 0;
-                    result = result && messages[0] == 0 && run.output.count == repairs + ordinary + 1 && run.output.kinds[last] == C_TOKEN_RAW_IDENTIFIER &&
-                             intern_length(&table, name) == 4 && memcmp(intern_bytes(&table, name), "tail", 4) == 0;
-                }
-                pp_release(&run);
-                intern_release(&table);
-            }
+            snprintf(expected + wanted, sizeof(expected) - wanted, "tail\n");
+            result = pp_test_case(&test, directory, with_clang);
         }
     }
-    arena_release(&arena);
-    pp_test_remove_case(&test, directory);
-    printf("opaque recovery capacity: %s (8/9 queries, 64/65 direct repairs, ordinary directives uncharged, both kernels)\n", result ? "pass" : "FAIL");
+    printf("opaque recovery: %s (8/9/64/65/257 queries and direct repairs, macro snapshots, both kernels)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
+// The count limit is gone, but real allocation/index exhaustion and an unchanged mask still fail closed. Restore
+// injected capacities before release; no failed repair may publish a new data index or overwrite a canonical view.
+static bool pp_test_raw_recovery_failures(void)
+{
+    static const uint8_t source[] = "#warning /*\ntail\n";
+    bool result = true;
+    for (uint32_t fault = 0; result && fault < 3; fault += 1)
+    {
+        static InternTable table;
+        static Preprocessor pp;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true };
+        const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        result = initialized && pp_run_source(&pp, "recovery-failure.c", source, sizeof(source) - 1);
+        const uint32_t count = pp.data_count;
+        const uint64_t capacity = pp.arena.capacity;
+        if (result)
+        {
+            const uint32_t canonical = pp.files[pp.main_file].data;
+            const uint32_t view = count - 1;
+            uint32_t range = 0;
+            while (range < pp.range_count && pp.ranges[range].file != pp.main_file)
+            {
+                range += 1;
+            }
+            result = range < pp.range_count && pp.datas[view].lexical_bytes != 0;
+            if (result)
+            {
+                pp.context_count = 1;
+                pp.contexts[0] = (PPContext){ .kind = BUSTER_PP_CONTEXT_FILE, .file = pp.main_file, .data = fault == 0 ? canonical : view, .range = range };
+                pp.arena.capacity = fault == 0 ? pp.arena.length : capacity;
+                pp.data_count = fault == 1 ? BUSTER_PP_MAX_FILES : count;
+                const bool recovered = pp_recover_opaque_span(&pp, 0, 0, 9, 11);
+                result = !recovered && pp.fatal && pp.errors == 1 && pp.contexts[0].data == (fault == 0 ? canonical : view) &&
+                         pp.data_count == (fault == 1 ? BUSTER_PP_MAX_FILES : count) && pp.datas[canonical].lexical_bytes == 0 &&
+                         memcmp(pp.datas[canonical].bytes, source, sizeof(source) - 1) == 0;
+            }
+        }
+        pp.arena.capacity = capacity;
+        pp.data_count = count;
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    printf("opaque recovery failure guards: %s (allocation, data indexes, progress)\n", result ? "pass" : "FAIL");
     return result;
 }
 
@@ -4378,7 +4837,7 @@ static bool pp_test_header_beside(void)
         char resource[PATH_MAX];
         char includer_path[PATH_MAX];
         result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) &&
-                 pp_clang_resource_directory(resource, sizeof(resource)) && (size_t)snprintf(includer_path, sizeof(includer_path), "%s/immintrin.h", resource) < sizeof(includer_path);
+                 pp_clang_resource_directory(resource, sizeof(resource), 0) && (size_t)snprintf(includer_path, sizeof(includer_path), "%s/immintrin.h", resource) < sizeof(includer_path);
         // The search directory clang's headers are in: the fallback, or the resource directory.
         uint32_t search = BUSTER_PP_NONE;
         for (uint32_t i = 0; result && i < pp.directory_count; i += 1)
@@ -4428,7 +4887,7 @@ static uint32_t pp_test_header_duplicates(const char* directory, uint32_t* count
     char unit[4200];
     snprintf(link, sizeof(link), "%s/resource-link", directory);
     snprintf(unit, sizeof(unit), "%s/header-duplicates.c", directory);
-    const bool found = pp_clang_resource_directory(resource, sizeof(resource)) && pp_buster_headers_directory(ours, sizeof(ours));
+    const bool found = pp_clang_resource_directory(resource, sizeof(resource), 0) && pp_buster_headers_directory(ours, sizeof(ours), 0);
     const char* last = found ? strrchr(resource, '/') : 0;
     const bool written = last != 0 && symlink(resource, link) == 0 &&
                          pp_test_write_file(unit, "#include <stdint.h>\n#include <stdatomic.h>\n#if __STDC_HOSTED__\n#include <inttypes.h>\n#endif\n"
@@ -4642,7 +5101,7 @@ static bool pp_test_headers(const char* directory)
 {
     static const char* const modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
     char ours[PATH_MAX];
-    bool result = pp_buster_headers_directory(ours, sizeof(ours));
+    bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
     {
         printf("headers: no src/buster/include beside the executable's build directory\n");
@@ -5302,11 +5761,15 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);
+        passed_all &= pp_test_lookup_accounting(directory);
+        passed_all &= pp_test_final_copy_accounting();
+        passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
         passed_all &= pp_test_raw_query_views(directory);
-        passed_all &= pp_test_raw_query_capacity(directory);
+        passed_all &= pp_test_raw_query_capacity(directory, with_clang);
+        passed_all &= pp_test_raw_recovery_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {

@@ -2405,6 +2405,8 @@ static void check_test_target_options(CheckTest* test)
 
 #include "c_check_graph_test.c"
 #include "c_check_binding_test.c"
+#include "c_check_body_bindings_test.c"
+#include "c_check_environment_test.c"
 #include "c_check_source_test.c"
 #include "c_check_data_test.c"
 #include "c_check_data_source_test.c"
@@ -2470,6 +2472,9 @@ static int run_checker_tests(int argc, char** argv)
             check_test_type_capacity(&test);
             check_test_target_options(&test);
             check_test_bindings(&test);
+            check_test_environments(&test);
+            check_test_body_binding_guards(&test);
+            check_test_body_binding_exit_points(&test);
             check_test_data(&test, &types.table, clang);
             check_test_data_sources(&test);
         }

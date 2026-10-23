@@ -160,6 +160,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/c_gnu.c` retains bounded GNU attribute groups/arguments
+  and declarator asm labels when `ParseOptions.extension_metadata` is enabled.
+  `test-gnu --clang` checks exact records, scalar/vector agreement and guarded
+  capacities; `benchmark-gnu [-E's options] file.c` measures collection,
+  allocation and the parser handoff. `test-types` also checks GNU machine-mode
+  type actions. [The GNU extension guide](docs/c-gnu-extensions.md) records
+  the source-checker/lowering work still required before #147 can close.
+
 - `test-differential-harness` validates the Csmith/YARPGen harness with original
   fixtures. `test-differential` requires explicit compiler/tier configuration
   and preserves generators, commands, artifacts and failures. Missing tools or
@@ -249,7 +257,7 @@ designs and the compilers already built this way.
   with exit status 0 for a unit without errors and 1 otherwise. Nothing is
   written yet. With no file it prints its usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as eight translation units: `main.c` itself, the driver's unit, and each
+  it as ten translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -429,6 +437,24 @@ designs and the compilers already built this way.
   included by `dynamic_test.c`, checks high library indices, foreign imports,
   malformed metadata and exact/vector identity at 1/2/3/8 lanes. Missing import
   version definitions are refused in the existing symbol pass before output.
+- `src/buster/compiler/debug.c` emits bounded DWARF 5 function names, ranges
+  and source lines with scalar/vector twins and explicit late address slots.
+  `ExecutableOptions.debug` attaches one contribution at final TEXT addresses,
+  with nonallocated debug sections and a regular function symbol table.
+  `test-debug --cross-check` checks original fixtures with readelf, GDB and
+  perf; `benchmark-debug` measures validation through address finalization.
+  [The debug guide](docs/debug.md) records the contract and the source-row
+  production and streaming integration still pending.
+- `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
+  from valid Tier 0 records after branch sizing; `unwind.c` emits original
+  CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
+  the producer unchanged and does not repeat generic instruction validation.
+  `test-unwind --cross-check` checks independent frame-state oracles, protected
+  tails and actual Tier 0 code with native GDB/perf consumers. `benchmark-unwind`
+  charges analysis/emission to the existing Tier 0, sizing and encoding chain,
+  including per-function arena cleanup. [The unwind guide](docs/unwind.md)
+  records the trusted private-slot contract, Link fixups and pending target-host
+  qualification. Use the shared 9700X lock per command and CPU 2 for timing.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
   part, and step 6's for the other kinds): what `runtime_import` (or
   `runtime_import_static`, `runtime_import_static_pie` or
@@ -868,6 +894,9 @@ second's counts after the first's. The inputs:
 `--raw-strings` enables C11's raw prefixes in C; `--raw-strings-c99`
 enables `R` and `LR`. Raw literals and near misses are checked around
 chunk and page boundaries. Both modes run in the 9700X workflow.
+The separate raw-error query is checked on invalid/unterminated literals and
+every truncated prefix against a protected page; diagnostic offsets are
+physical bytes even when a prefix has line splices.
 `--no-digraphs` and `--no-line-comments` tokenize C without digraphs and without
 `//` comments (`C_TOKENIZER_NO_DIGRAPHS` and `C_TOKENIZER_NO_LINE_COMMENTS`), as
 the preprocessor lexes `-std=c89` (both), C94 (the second) and `-fno-digraphs`
@@ -2974,6 +3003,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     pasted and stringized too, and `-f[no-]digraphs` in four modes (#288);
   - each difference from clang that #109's fuzzing found, minimized, and the
     ones probing around it found;
+  - raw-string errors in active text, definitions and unused macro arguments,
+    suppressed in excluded group bodies and opaque headers/messages (an
+    untaken `#elif` line still diagnoses); exact Clang
+    diagnostic/location comparisons; contextual recovery beyond 8/64/256
+    repairs with earlier macro snapshots retained, and failure injection for
+    allocation, data-index exhaustion and an unchanged recovery mask (#285);
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
@@ -3167,16 +3202,38 @@ changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
 ## Preprocessor benchmark
 
+The exact commands, pinned inputs and raw reports for the #117 acceptance
+refresh are in `docs/measurements/preprocessor-117-2026-10-23/README.md`.
+Its invocation scripts take a separate normal shared-host lock for each command.
+
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
 [--read-limit N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
-and time (read, lex, refine, directive tables, main loop), the release after the
+and time (read, lex, refine, directive tables, main loop/setup), the release after the
 run (the files' mappings among it), `-E -P`'s throughput with its printing
 (input bytes and output tokens per second, #124) and what a run did
 (directives, runs, expansions, invocations, pastes, the `#if` lines and their
 lengths, and the inclusions skipped by guards and by `#pragma once`).
+It also reports explicit file-probe `open`/`fstat` attempts, including failed
+opens and uncached aliases, the subset made by include searches, and the
+`stat` attempts for embed lookup and search-directory setup. Repeated cached
+include hits and misses make no file-probe calls. These are the preprocessor's
+explicit calls, excluding the benchmark harness and libc's directory
+enumeration internals. Include lookup time includes path construction, cache
+lookup and first byte acquisition; embed lookup time includes its search and
+`stat` calls. Both are inclusive intervals that overlap the phase breakdown;
+never add them to it or subtract them again. Preparation and execution of the
+found header are outside include lookup. The main-loop remainder also contains
+initialization, as it did before this label made that boundary explicit.
+The final-output copy shares count file runs, buffer runs and direct
+object-like copies only when they write to the final stream; intermediate
+captures do not enter the numerator. Their denominator is the final output's
+tokens, including pragma records and one record per embed resource. The
+remaining tokens are emitted individually or lifted from captured pragmas.
+The older per-pass run totals still include intermediate captures and must
+not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output.
@@ -3412,15 +3469,66 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
+## Fragment experiment tests
+
+The test-only expression-fragment experiment is described in
+[docs/c-parser-fragments.md](docs/c-parser-fragments.md).
+`./build/compiler test-fragment-interleave [--seed N]` compares scalar and
+AVX-512 byte routing, including exhaustive short masks and exact protected-page
+boundaries. `./build/compiler test-fragments` checks the scalar recognizer's
+experimental sink, compiled separately in `main_unit_fragments.c`; production
+parser units have no fragment sink. These checks do not establish semantic or
+SSA IR identity. The complete #107 comparison still requires the shared
+semantic consumer and its actual output.
+
 ## Scoped binding kernels
+
+`test-environments [--seed N]` checks the immutable file-scope position index,
+tag-completion positions and parser-role body ranges for #113, including
+guarded tails and queries on 1, 2, 3 and 8 lanes. `benchmark-environments`
+measures the synthetic index/query handoff and completeness checks; use
+`--only full-vector [--after-scalar 100]` for its vector states, under the
+9700X's per-run lock and pinned to CPU 2. `check_input` publishes the real
+source reader's retained events, declaration types, tag completion positions
+and body slots through `c_check_environment.c`; `test-checker` checks their
+scratch lifetime and scalar/vector replay. Actual deferred body/effect
+checking and corpus acceptance are still pending.
+[docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
+`c_check_body_bindings.c` supplies the next independent name-resolution
+consumer: private per-body views/replay, source-position file fallbacks and
+stable declaration identities. `test-checker` compares both kernels on
+reversed one/eight-lane body schedules and guarded columns.
+[docs/c-body-bindings.md](docs/c-body-bindings.md) records its contract and the
+semantic/type/effect/corpus integration still required for #113.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
 binding kernels: stack replay and the vector batch against an independent
 scope oracle, 100,000-level nesting, protected-page tails and allocation
 failure. `benchmark-bindings [--events N] [--names N] [--only scalar|batch|sort]
 [--after-scalar MS]` measures synthetic events under the 9700X lock, pinned to
-CPU 2. The parser adapter and corpus acceptance for #128 remain pending;
-[docs/c-bindings.md](docs/c-bindings.md) describes the contract and boundaries.
+CPU 2. `test-parser-bindings [--clang [PATH]] [--seed N] [--count N]
+[preprocessor options] [file or directory...]` checks real-source declaration
+identities, both parser schedules and both resolvers. Without files it runs
+scope fixtures, generated programs, K3 fallback checks and allocation failure
+tests. `benchmark-parser-bindings [--passes N] [--only
+prepare|scalar|batch|sort|source-scalar|source-batch] [--after-scalar MS]
+[preprocessor options] file...` measures source-event production, resolution
+and the combined parser/adapter/consumer path. Run benchmarks on the locked
+9700X, pinned to CPU 2. [docs/c-bindings.md](docs/c-bindings.md) describes the
+opt-in adapter, the declaration-token columns, corpus provenance and the
+explicit cost of its scalar grammar replay. The syntax-only driver does not
+request these columns.
+
+## Selective lowering
+
+`./build/compiler test-lowering --clang` compares selective function/object
+emission planning with an independent graph oracle and Clang object symbols
+on original, manually modeled C fixtures. `benchmark-lowering` measures
+synthetic graph preparation and vector/scalar selection; use the shared 9700X
+lock and pin timings to CPU 2. [The lowering guide](docs/c-lowering.md) records
+the semantic producer contract and the source/checker/backend integration
+still required for #129. These commands do not establish corpus lowering or
+whole-compiler savings.
 
 ## Type tests
 
