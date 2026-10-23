@@ -5,6 +5,8 @@
 // checks, clock and median helpers. This harness additionally includes parsing in every timed call. Compile this
 // identical file against the pre-handoff and candidate trees; BUSTER_MEASURE_ENVIRONMENT enables only candidate
 // metadata and optional file-position query consumption. It does not remove publication from the candidate.
+#include <stdbool.h>
+static __attribute__((unused)) int main_command(int argc, char** argv, bool* found);
 #define main environment_measure_previous_main
 #include "../c-checker-2026-10-23/checker_source_measure.c"
 #undef main
