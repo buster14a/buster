@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Local promotion over a completed CFG, independent of the pending general IR (#131). SsaInput is a view of the
+// Local promotion over a completed CFG. SsaInput is a view of the
 // caller's instruction columns, not a second IR: VALUE hides every operation unrelated to local promotion. Original
 // instruction ids stay stable. The caller rewrites its operands through replacements, removes promoted READ/WRITE
 // instructions, inserts the returned phis at block entry, and discards unreachable blocks. The caller's full IR
@@ -10,7 +10,7 @@
 // ssa_build places pruned phis with liveness and dominance-frontier bitsets, then renames through nearest dominating
 // definitions. ssa_build_scalar reads variables through predecessors with an explicit stack (Braun et al., CC 2013).
 // Both remove trivial phis and redundant phi cycles without recursion. No implementation from the papers is copied.
-// Include after lane.c and dataflow.c. All temporary/output memory belongs to the two caller-supplied arenas.
+// Include after lane.c, dataflow.c and dominators.c. All temporary/output memory belongs to the caller's arenas.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -126,12 +126,11 @@ struct SsaWork
     Arena* scratch;
     SsaResult result;
     Dataflow flow;
+    Dominators dominators;
     uint32_t promoted_count;
     uint32_t* dense;
     uint32_t* local_ids;
     uint32_t* instruction_blocks;
-    uint32_t* idom;
-    uint32_t* rank;
     uint32_t* last;
     uint32_t* entry;
     uint32_t phi_capacity;
@@ -167,8 +166,15 @@ static uint32_t ssa_undefined(const SsaWork* work, uint32_t local)
     return work->input->instruction_count + local;
 }
 
-// This is a memory budget, not a measured scalar/vector crossover. #174 will supply shared dominance analysis.
+// This is a memory budget, not a measured scalar/vector crossover. The shared analyzer's retained frontier
+// reservation and temporary dominator matrix occupy distinct regions, so their combined payload is bounded here.
 #define BUSTER_SSA_DOMINANCE_BYTES (16ull << 20)
+
+static bool ssa_vector_fits(uint32_t blocks)
+{
+    const uint64_t row_bytes = ((uint64_t)blocks + BUSTER_DOMINATOR_VECTOR_BITS - 1) / BUSTER_DOMINATOR_VECTOR_BITS * BUSTER_DOMINATOR_VECTOR_BYTES;
+    return ((uint64_t)blocks * 2 + 1) * row_bytes <= BUSTER_SSA_DOMINANCE_BYTES;
+}
 
 static void* ssa_allocate(Arena* arena, uint64_t count, uint64_t bytes)
 {
@@ -309,161 +315,72 @@ static void ssa_promote(SsaWork* work, bool vector)
     }
 }
 
-static uint32_t ssa_intersect(const SsaWork* work, uint32_t a, uint32_t b)
+// The shared analyzer needs two disjoint arenas, including when ssa_verify has only one caller scratch arena.
+// Reserve its exact tree/frontier output extent at the current tail, then lend the remaining tail as temporary
+// scratch. Both are non-owning views: the parent arena alone owns their mapping and restores the whole phase.
+// The output layout is seven u32 columns (tree_offsets has one extra element), followed by an optional aligned
+// frontier matrix. No loops are requested. This bound follows dominators.c's published column/storage contract.
+static SsaError ssa_analyze(SsaWork* work, bool vector)
 {
-    while (a != b)
+    Arena* scratch = work->scratch;
+    const SsaInput* input = work->input;
+    const uint64_t saved = scratch->length;
+    const uint32_t blocks = input->block_count;
+    const uint64_t row_bytes = ((uint64_t)blocks + BUSTER_DOMINATOR_VECTOR_BITS - 1) / BUSTER_DOMINATOR_VECTOR_BITS * BUSTER_DOMINATOR_VECTOR_BYTES;
+    uint64_t capacity = blocks == 0 ? 0 : ((uint64_t)blocks * 7 + 1) * sizeof(uint32_t);
+    if (vector && blocks != 0)
     {
-        if (work->rank[a] > work->rank[b])
+        capacity = ((capacity + BUSTER_DOMINATOR_VECTOR_BYTES - 1) & ~(uint64_t)(BUSTER_DOMINATOR_VECTOR_BYTES - 1)) + (uint64_t)blocks * row_bytes;
+    }
+    uint8_t* storage = arena_push(scratch, capacity, BUSTER_DOMINATOR_VECTOR_BYTES);
+    SsaError error = storage != 0 ? SSA_OK : SSA_ERROR_MEMORY;
+    if (error == SSA_OK)
+    {
+        const uint64_t output_start = scratch->length - capacity;
+        Arena output = {
+            .base = storage,
+            .capacity = capacity,
+        };
+        Arena temporary = {
+            .base = scratch->base + scratch->length,
+            .capacity = scratch->capacity - scratch->length,
+        };
+        const DominatorCfg cfg = {
+            .block_count = blocks,
+            .edge_count = input->edge_count,
+            .entry = blocks == 0 ? BUSTER_DOMINATOR_NONE : 0,
+            .successor_offsets = input->successor_offsets,
+            .successors = input->successors,
+            .predecessor_offsets = work->result.predecessor_offsets,
+            .predecessors = work->result.predecessors,
+        };
+        const DominatorOptions options = {
+            .path = vector ? DOMINATOR_VECTOR : DOMINATOR_SCALAR,
+            .outputs = vector ? BUSTER_DOMINATOR_FRONTIERS : 0,
+            .max_matrix_bytes = BUSTER_SSA_DOMINANCE_BYTES,
+        };
+        const DominatorStatus status = dominators_analyze(&output, &temporary, &cfg, options, &work->dominators);
+        if (status == DOMINATOR_OK)
         {
-            a = work->idom[a];
+            // Temporary pointers never escape the analyzer. All retained pointers precede output.length, so any
+            // unused reservation/alignment slack can immediately return to the parent's ordinary scratch tail.
+            arena_pop_to(scratch, output_start + output.length);
         }
         else
         {
-            b = work->idom[b];
+            error = status == DOMINATOR_NO_MEMORY ? SSA_ERROR_MEMORY : status == DOMINATOR_MATRIX_LIMIT ? SSA_ERROR_LIMIT : SSA_ERROR_INVALID;
         }
     }
-    return a;
-}
-
-static void ssa_dominators_scalar(SsaWork* work)
-{
-    const uint32_t blocks = work->input->block_count;
-    if (blocks != 0)
+    if (error != SSA_OK)
     {
-        work->idom[0] = 0;
+        arena_pop_to(scratch, saved);
     }
-    bool changed = true;
-    while (changed)
-    {
-        changed = false;
-        for (uint32_t order = blocks; order != 0; order -= 1)
-        {
-            const uint32_t block = work->flow.postorder[order - 1];
-            if (block != 0 && work->result.reachable[block] != 0)
-            {
-                uint32_t idom = BUSTER_SSA_NONE;
-                for (uint32_t edge = work->result.predecessor_offsets[block]; edge < work->result.predecessor_offsets[block + 1]; edge += 1)
-                {
-                    const uint32_t predecessor = work->result.predecessors[edge];
-                    if (work->idom[predecessor] != BUSTER_SSA_NONE)
-                    {
-                        idom = idom == BUSTER_SSA_NONE ? predecessor : ssa_intersect(work, idom, predecessor);
-                    }
-                }
-                if (idom != work->idom[block])
-                {
-                    work->idom[block] = idom;
-                    changed = true;
-                }
-            }
-        }
-    }
-}
-
-static SsaError ssa_dominators_vector(SsaWork* work)
-{
-    const uint32_t blocks = work->input->block_count;
-    const uint64_t words = ((uint64_t)blocks + 511) / 512 * 8;
-    const uint64_t saved = work->scratch->length;
-    uint64_t* sets = ssa_allocate(work->scratch, (uint64_t)blocks * words, sizeof(uint64_t));
-    uint64_t* all = ssa_allocate(work->scratch, words, sizeof(uint64_t));
-    uint64_t* row = ssa_allocate(work->scratch, words, sizeof(uint64_t));
-    SsaError error = sets != 0 && all != 0 && row != 0 ? SSA_OK : SSA_ERROR_MEMORY;
-    if (error == SSA_OK)
-    {
-        memset(all, 0, words * sizeof(uint64_t));
-        for (uint32_t block = 0; block < blocks; block += 1)
-        {
-            if (work->result.reachable[block] != 0)
-            {
-                all[block / 64] |= 1ull << (block % 64);
-            }
-        }
-        for (uint32_t block = 0; block < blocks; block += 1)
-        {
-            uint64_t* set = sets + (uint64_t)block * words;
-            if (block == 0 || work->result.reachable[block] == 0)
-            {
-                memset(set, 0, words * sizeof(uint64_t));
-                set[block / 64] |= 1ull << (block % 64);
-            }
-            else
-            {
-                memcpy(set, all, words * sizeof(uint64_t));
-            }
-        }
-        bool changed = true;
-        while (changed)
-        {
-            changed = false;
-            for (uint32_t order = blocks; order != 0; order -= 1)
-            {
-                const uint32_t block = work->flow.postorder[order - 1];
-                if (block != 0 && work->result.reachable[block] != 0)
-                {
-                    const uint32_t begin = work->result.predecessor_offsets[block];
-                    const uint32_t end = work->result.predecessor_offsets[block + 1];
-                    memcpy(row, sets + (uint64_t)work->result.predecessors[begin] * words, words * sizeof(uint64_t));
-                    for (uint32_t edge = begin + 1; edge < end; edge += 1)
-                    {
-                        const uint64_t* predecessor = sets + (uint64_t)work->result.predecessors[edge] * words;
-                        for (uint64_t word = 0; word < words; word += 8)
-                        {
-                            const __m512i intersection = _mm512_and_si512(_mm512_load_si512(row + word), _mm512_load_si512(predecessor + word));
-                            _mm512_store_si512(row + word, intersection);
-                        }
-                    }
-                    row[block / 64] |= 1ull << (block % 64);
-                    uint64_t* destination = sets + (uint64_t)block * words;
-                    for (uint64_t word = 0; word < words; word += 8)
-                    {
-                        const __m512i next = _mm512_load_si512(row + word);
-                        const __m512i different = _mm512_xor_si512(next, _mm512_load_si512(destination + word));
-                        changed |= _mm512_test_epi64_mask(different, different) != 0;
-                        _mm512_store_si512(destination + word, next);
-                    }
-                }
-            }
-        }
-        for (uint32_t block = 0; block < blocks; block += 1)
-        {
-            if (work->result.reachable[block] != 0)
-            {
-                uint32_t nearest = 0;
-                const uint64_t* set = sets + (uint64_t)block * words;
-                for (uint64_t word = 0; word < words; word += 1)
-                {
-                    uint64_t bits = set[word];
-                    while (bits != 0)
-                    {
-                        const uint32_t dominator = (uint32_t)(word * 64 + __builtin_ctzll(bits));
-                        if (dominator != block && work->rank[dominator] > work->rank[nearest])
-                        {
-                            nearest = dominator;
-                        }
-                        bits &= bits - 1;
-                    }
-                }
-                work->idom[block] = nearest;
-            }
-        }
-    }
-    arena_pop_to(work->scratch, saved);
     return error;
 }
 
 static bool ssa_dominates(const SsaWork* work, uint32_t definition, uint32_t use)
 {
-    bool result = definition < work->input->block_count && use < work->input->block_count && work->result.reachable[definition] != 0 && work->result.reachable[use] != 0;
-    if (result)
-    {
-        while (work->rank[use] > work->rank[definition])
-        {
-            use = work->idom[use];
-        }
-        result = definition == use;
-    }
-    return result;
+    return dominators_dominates(&work->dominators, definition, use);
 }
 
 static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch, bool vector)
@@ -481,24 +398,20 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
         work->dense = ssa_allocate(scratch, input->local_count, sizeof(uint32_t));
         work->local_ids = ssa_allocate(scratch, input->local_count, sizeof(uint32_t));
         work->instruction_blocks = ssa_allocate(scratch, input->instruction_count, sizeof(uint32_t));
-        work->idom = ssa_allocate(scratch, input->block_count, sizeof(uint32_t));
-        work->rank = ssa_allocate(scratch, input->block_count, sizeof(uint32_t));
         work->result.predecessor_offsets = ssa_allocate(scratch, (uint64_t)input->block_count + 1, sizeof(uint32_t));
         work->result.predecessors = ssa_allocate(scratch, input->edge_count, sizeof(uint32_t));
         work->result.predecessor_edges = ssa_allocate(scratch, input->edge_count, sizeof(uint32_t));
-        if (work->result.promoted == 0 || work->result.reachable == 0 || work->dense == 0 || work->local_ids == 0 || work->instruction_blocks == 0 || work->idom == 0 || work->rank == 0 || work->result.predecessor_offsets == 0 || work->result.predecessors == 0 || work->result.predecessor_edges == 0)
+        if (work->result.promoted == 0 || work->result.reachable == 0 || work->dense == 0 || work->local_ids == 0 || work->instruction_blocks == 0 || work->result.predecessor_offsets == 0 || work->result.predecessors == 0 || work->result.predecessor_edges == 0)
         {
             error = SSA_ERROR_MEMORY;
         }
     }
-    uint32_t* stack = 0;
     uint32_t* cursor = 0;
     if (error == SSA_OK)
     {
         ssa_promote(work, vector);
-        stack = ssa_allocate(scratch, input->block_count, sizeof(uint32_t));
         cursor = ssa_allocate(scratch, input->block_count, sizeof(uint32_t));
-        if (stack == 0 || cursor == 0 || !dataflow_create(scratch, input->block_count, work->promoted_count, input->edge_count, &work->flow))
+        if (cursor == 0 || !dataflow_create(scratch, input->block_count, work->promoted_count, input->edge_count, &work->flow))
         {
             error = SSA_ERROR_MEMORY;
         }
@@ -517,37 +430,17 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
     }
     if (error == SSA_OK)
     {
-        memset(work->result.reachable, 0, input->block_count);
-        memset(work->idom, 0xff, (uint64_t)input->block_count * sizeof(uint32_t));
-        memset(work->rank, 0xff, (uint64_t)input->block_count * sizeof(uint32_t));
+        // Shared validation compares the complete edge multisets. Retain every predecessor, including repeated
+        // edges and edges from unreachable sources, until analysis has finished borrowing these columns.
         memset(work->result.predecessor_offsets, 0, ((uint64_t)input->block_count + 1) * sizeof(uint32_t));
-        uint32_t depth = 0;
-        if (input->block_count != 0)
+        for (uint32_t edge = 0; edge < input->edge_count; edge += 1)
         {
-            work->result.reachable[0] = 1;
-            stack[depth++] = 0;
+            work->result.predecessor_offsets[input->successors[edge] + 1] += 1;
         }
-        while (depth != 0)
+        for (uint32_t block = 0; block < input->block_count; block += 1)
         {
-            const uint32_t block = stack[--depth];
-            for (uint32_t edge = input->successor_offsets[block]; edge < input->successor_offsets[block + 1]; edge += 1)
-            {
-                const uint32_t successor = input->successors[edge];
-                if (work->result.reachable[successor] == 0)
-                {
-                    work->result.reachable[successor] = 1;
-                    stack[depth++] = successor;
-                }
-            }
-        }
-        uint32_t rank = 0;
-        for (uint32_t order = input->block_count; order != 0; order -= 1)
-        {
-            const uint32_t block = work->flow.postorder[order - 1];
-            if (work->result.reachable[block] != 0)
-            {
-                work->rank[block] = rank++;
-            }
+            work->result.predecessor_offsets[block + 1] += work->result.predecessor_offsets[block];
+            cursor[block] = work->result.predecessor_offsets[block];
         }
         for (uint32_t block = 0; block < input->block_count; block += 1)
         {
@@ -555,40 +448,43 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
             {
                 work->instruction_blocks[i] = block;
             }
-            if (work->result.reachable[block] != 0)
+            for (uint32_t edge = input->successor_offsets[block]; edge < input->successor_offsets[block + 1]; edge += 1)
             {
-                for (uint32_t edge = input->successor_offsets[block]; edge < input->successor_offsets[block + 1]; edge += 1)
-                {
-                    work->result.predecessor_offsets[input->successors[edge] + 1] += 1;
-                }
+                const uint32_t slot = cursor[input->successors[edge]]++;
+                work->result.predecessors[slot] = block;
+                work->result.predecessor_edges[slot] = edge;
             }
         }
+        error = ssa_analyze(work, vector);
+    }
+    if (error == SSA_OK)
+    {
         for (uint32_t block = 0; block < input->block_count; block += 1)
         {
-            work->result.predecessor_offsets[block + 1] += work->result.predecessor_offsets[block];
-            cursor[block] = work->result.predecessor_offsets[block];
+            work->result.reachable[block] = work->dominators.rpo_index[block] != BUSTER_DOMINATOR_NONE;
         }
-        work->result.reachable_edge_count = work->result.predecessor_offsets[input->block_count];
+        // The analysis owns no input pointers. Stable in-place compaction now gives SSA only incoming edges from
+        // reachable sources, preserving its original source-block/successor-position order and multiplicities.
+        uint32_t first = 0;
+        uint32_t retained = 0;
         for (uint32_t block = 0; block < input->block_count; block += 1)
         {
-            if (work->result.reachable[block] != 0)
+            const uint32_t end = work->result.predecessor_offsets[block + 1];
+            work->result.predecessor_offsets[block] = retained;
+            for (uint32_t edge = first; edge < end; edge += 1)
             {
-                for (uint32_t edge = input->successor_offsets[block]; edge < input->successor_offsets[block + 1]; edge += 1)
+                const uint32_t predecessor = work->result.predecessors[edge];
+                if (work->result.reachable[predecessor] != 0)
                 {
-                    const uint32_t slot = cursor[input->successors[edge]]++;
-                    work->result.predecessors[slot] = block;
-                    work->result.predecessor_edges[slot] = edge;
+                    work->result.predecessors[retained] = predecessor;
+                    work->result.predecessor_edges[retained] = work->result.predecessor_edges[edge];
+                    retained += 1;
                 }
             }
+            first = end;
         }
-        if (vector && input->block_count != 0)
-        {
-            error = ssa_dominators_vector(work);
-        }
-        else
-        {
-            ssa_dominators_scalar(work);
-        }
+        work->result.predecessor_offsets[input->block_count] = retained;
+        work->result.reachable_edge_count = retained;
     }
     for (uint32_t i = 0; error == SSA_OK && i < input->instruction_count; i += 1)
     {
@@ -798,33 +694,15 @@ static SsaError ssa_construct_scalar(SsaWork* work)
 static SsaError ssa_place_phis(SsaWork* work)
 {
     const uint32_t blocks = work->input->block_count;
-    const uint64_t words = ((uint64_t)blocks + 511) / 512 * 8;
-    uint64_t* frontiers = ssa_allocate(work->scratch, (uint64_t)blocks * words, sizeof(uint64_t));
+    const uint64_t words = work->dominators.row_words;
+    const uint64_t* frontiers = work->dominators.frontiers;
     uint64_t* active = ssa_allocate(work->scratch, words, sizeof(uint64_t));
     uint64_t* next = ssa_allocate(work->scratch, words, sizeof(uint64_t));
     uint64_t* live = ssa_allocate(work->scratch, words, sizeof(uint64_t));
     uint64_t* placed = ssa_allocate(work->scratch, words, sizeof(uint64_t));
-    SsaError error = frontiers != 0 && active != 0 && next != 0 && live != 0 && placed != 0 ? SSA_OK : SSA_ERROR_MEMORY;
+    SsaError error = (blocks == 0 || frontiers != 0) && active != 0 && next != 0 && live != 0 && placed != 0 ? SSA_OK : SSA_ERROR_MEMORY;
     if (error == SSA_OK)
     {
-        memset(frontiers, 0, (uint64_t)blocks * words * sizeof(uint64_t));
-        for (uint32_t block = 1; block < blocks; block += 1)
-        {
-            const uint32_t begin = work->result.predecessor_offsets[block];
-            const uint32_t end = work->result.predecessor_offsets[block + 1];
-            if (end - begin >= 2)
-            {
-                for (uint32_t edge = begin; edge < end; edge += 1)
-                {
-                    uint32_t runner = work->result.predecessors[edge];
-                    while (runner != work->idom[block])
-                    {
-                        frontiers[(uint64_t)runner * words + block / 64] |= 1ull << (block % 64);
-                        runner = work->idom[runner];
-                    }
-                }
-            }
-        }
         dataflow_liveness_vector(&work->flow);
         for (uint32_t dense = 0; dense < work->promoted_count; dense += 1)
         {
@@ -946,7 +824,7 @@ static SsaError ssa_entry_definitions(SsaWork* work)
         {
             const uint64_t cell = (uint64_t)block * work->promoted_count + dense;
             const bool own = work->last[cell] != BUSTER_SSA_NONE || work->entry[cell] != BUSTER_SSA_NONE;
-            up[block] = own || work->result.reachable[block] == 0 ? block : work->idom[block];
+            up[block] = own || work->result.reachable[block] == 0 ? block : work->dominators.idom[block];
         }
         ssa_jump_definitions(up, next, blocks);
         for (uint32_t block = 0; block < blocks; block += 1)
@@ -957,7 +835,7 @@ static SsaError ssa_entry_definitions(SsaWork* work)
                 uint32_t value = ssa_undefined(work, work->local_ids[dense]);
                 if (block != 0 && work->result.reachable[block] != 0)
                 {
-                    const uint32_t owner = up[work->idom[block]];
+                    const uint32_t owner = up[work->dominators.idom[block]];
                     const uint64_t source = (uint64_t)owner * work->promoted_count + dense;
                     if (work->last[source] != BUSTER_SSA_NONE)
                     {
@@ -1467,8 +1345,7 @@ static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scra
     SsaWork work = { 0 };
     if (error == SSA_OK)
     {
-        const uint64_t words = ((uint64_t)input->block_count + 511) / 512 * 8;
-        vector = vector && (uint64_t)input->block_count * words * sizeof(uint64_t) <= BUSTER_SSA_DOMINANCE_BYTES;
+        vector = vector && ssa_vector_fits(input->block_count);
         error = ssa_prepare(&work, input, scratch, vector);
     }
     if (error == SSA_OK)

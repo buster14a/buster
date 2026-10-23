@@ -18,11 +18,11 @@ converged optimistic analysis.
 
 The input is immutable and structurally verified. Its reachable uses must
 satisfy SSA dominance; valid unreachable regions are permitted. Entry-block
-phis are explicitly unsupported and return `IR_ERROR_PHI` at instruction zero
-before transformation: the shared IR verifier accepts them, but the value on
-initial invocation is not specified. Removing their unreachable predecessors
-must not produce a zero-input phi or invent an `undef`. Typed-stream IR
-lowering creates an entry preheader, so its ordinary output avoids this case.
+phis are forbidden by the shared IR contract and return `IR_ERROR_PHI` from
+the shared verifier before transformation: initial function entry has no
+predecessor value. Removing their unreachable predecessors must not produce a
+zero-input phi or invent an `undef`. Typed-stream IR lowering creates an entry
+preheader, so its ordinary output avoids this case.
 The output is
 a fresh `IrFunction` in `result.function`. The output and scratch arenas must
 be distinct, disjoint and own none of the input columns. Failure preserves
@@ -135,8 +135,9 @@ oracle for these fixtures, not the complete interpreter tracked by #176.
 complete public calls on frozen small/large arithmetic DAGs, a phi diamond,
 a loop and a jump chain. It includes input validation, CFG/use/dominator
 construction, analysis, allocation, compaction and final SSA verification.
-It checks exact output agreement before timing. Each calibrated sample covers
-at least 2 ms; default samples alternate which path runs first. `--only`
+It checks exact output agreement before timing. Repetitions are calibrated
+once per path to target 2 ms; later samples can be shorter as execution
+conditions change. Default samples alternate which path runs first. `--only`
 isolates one path, and `--after-scalar` runs lighter scalar work before every
 vector sample. The benchmark shares the original test fixture builders and
 is included after `ir_optimize_test.c`.
@@ -164,6 +165,10 @@ against the shared IR, with local verifier and independent execution checks:
 - [Private-field scalar replacement](ir-scalar-replacement.md) splits
   nonescaping, disjoint constant-offset fields. Tests compose its output with
   both upstream #134 promotion paths, including conditional stores and loops.
+- [Bounded inlining](ir-inlining.md) processes acyclic call-graph components
+  from callees to callers, expands small single-block leaf bodies, and preserves
+  recursive calls and explicit growth limits. Vector cost admission has a
+  scalar twin; rewriting preserves caller control flow and ordered effects.
 - The [additional pass-cost harness](ir-optimization-measurements.md) measures
   complete GVN, LICM and field-splitting calls on frozen inputs. Its local
   sanitizer smoke checks provide no target performance claim.
@@ -173,8 +178,9 @@ These slices do not complete #139. The following work remains tracked:
 - Floating numeric evaluation needs an explicit environment contract.
 - CFG cleanup still needs nonempty single-predecessor merging and metadata
   compaction where measurements justify its cost.
-- Translation-unit inlining ordered by call-graph components, with recursive
-  components left alone and bounded code growth, remains a separate slice.
+- Inlining still needs general callee CFG and stack-object cloning, measured
+  profitability, complete translation-unit driver integration and vector
+  operand rebasing beyond the current vector cost-admission sweep.
 - The aggregate-size limit, motion profitability, pass order and repetitions
   require measurement. Conservative operation and alias exclusions are
   documented by each implemented stage.

@@ -32,8 +32,6 @@ struct SsaIrWork
     uint32_t* operands;
     uint8_t* local_types;
     uint8_t* local_flags;
-    uint32_t* enter;
-    uint32_t* leave;
     uint8_t* keep;
     uint32_t* blocks;
     uint32_t* values;
@@ -166,58 +164,6 @@ static IrError ssa_ir_classify(SsaIrWork* work)
     return error;
 }
 
-// Convert the private immediate-dominator tree to the shared verifier's half-open intervals. The iterative walk
-// visits only reachable blocks. Removing the other blocks leaves this tree and all reachable dominance unchanged.
-static IrError ssa_ir_intervals(SsaIrWork* work)
-{
-    const uint32_t count = work->input->block_count;
-    work->enter = ssa_allocate(work->scratch, count, 4);
-    work->leave = ssa_allocate(work->scratch, count, 4);
-    uint32_t* heads = ssa_allocate(work->scratch, count, 4);
-    uint32_t* next = ssa_allocate(work->scratch, count, 4);
-    uint32_t* stack = ssa_allocate(work->scratch, count, 4);
-    IrError error = work->enter != 0 && work->leave != 0 && heads != 0 && next != 0 && stack != 0 ? IR_OK : IR_ERROR_MEMORY;
-    if (error == IR_OK)
-    {
-        memset(work->enter, 0, (uint64_t)count * 4);
-        memset(work->leave, 0, (uint64_t)count * 4);
-        memset(heads, 0xff, (uint64_t)count * 4);
-        for (uint32_t block = 1; block < count; block += 1)
-        {
-            if (work->work.result.reachable[block] != 0)
-            {
-                const uint32_t parent = work->work.idom[block];
-                next[block] = heads[parent];
-                heads[parent] = block;
-            }
-        }
-        uint32_t depth = 0;
-        uint32_t clock = 0;
-        if (count != 0)
-        {
-            work->enter[0] = clock++;
-            stack[depth++] = 0;
-        }
-        while (depth != 0)
-        {
-            const uint32_t block = stack[depth - 1];
-            const uint32_t child = heads[block];
-            if (child != BUSTER_IR_NONE)
-            {
-                heads[block] = next[child];
-                work->enter[child] = clock++;
-                stack[depth++] = child;
-            }
-            else
-            {
-                work->leave[block] = clock;
-                depth -= 1;
-            }
-        }
-    }
-    return error;
-}
-
 static IrCheck ssa_ir_check_dominance(SsaIrWork* work)
 {
     const IrFunction* f = work->input;
@@ -236,7 +182,7 @@ static IrCheck ssa_ir_check_dominance(SsaIrWork* work)
                 if (work->work.result.reachable[operand.block] != 0)
                 {
                     const uint32_t origin = work->cfg.instruction_blocks[operand.value];
-                    if (work->enter[origin] == work->leave[origin] || work->enter[origin] > work->enter[operand.block] || work->leave[origin] < work->leave[operand.block])
+                    if (!ssa_dominates(&work->work, origin, operand.block))
                     {
                         check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
                     }
@@ -566,8 +512,8 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
         {
             if (work->blocks[block] != BUSTER_IR_NONE)
             {
-                enter[work->blocks[block]] = work->enter[block];
-                leave[work->blocks[block]] = work->leave[block];
+                enter[work->blocks[block]] = work->work.dominators.preorder[block];
+                leave[work->blocks[block]] = work->work.dominators.subtree_end[block];
             }
         }
         const IrDominance dominance = {
@@ -620,17 +566,12 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        // Match ssa_build_path's bounded quadratic dominance/frontier storage exactly. This is a memory cap,
+        // Match the builder's combined reserved-frontier/temporary-matrix cap. This is a memory bound,
         // not a measured performance crossover; larger graphs use the independent scalar constructor.
-        const uint64_t words = ((uint64_t)input->block_count + 511) / 512 * 8;
-        vector = vector && (uint64_t)input->block_count * words * sizeof(uint64_t) <= BUSTER_SSA_DOMINANCE_BYTES;
+        vector = vector && ssa_vector_fits(input->block_count);
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
         check.error = ssa_ir_error(ssa_prepare(&work.work, &work.source, scratch, vector));
-    }
-    if (check.error == IR_OK)
-    {
-        check.error = ssa_ir_intervals(&work);
     }
     if (check.error == IR_OK)
     {

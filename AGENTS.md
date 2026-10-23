@@ -170,8 +170,9 @@ designs and the compilers already built this way.
   for supported inputs and the complete C-source acceptance still pending.
 
 - The shared IR optimizers provide SCCP, dead-code/CFG cleanup, value numbering
-  and conservative loop-invariant motion. `test-ir-optimize`, `test-ir-gvn`,
-  `test-ir-licm` and `test-ir-sroa` verify transformations against independent
+  and conservative loop-invariant motion, private-field replacement and bounded
+  translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
+  `test-ir-sroa` and `test-ir-inline` verify transformations against independent
   semantic fixtures and the upstream SSA promoter. `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
   [The optimization guide](docs/ir-optimization.md) records supported inputs
@@ -336,7 +337,7 @@ designs and the compilers already built this way.
   provides `benchmark-dataflow`.
   `docs/dataflow.md` records the contracts and 9700X measurements.
 - `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
-  pruned frontier bitsets and segmented SIMD renaming, with a nonrecursive
+  shared dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
   predecessor-reading scalar twin and redundant-phi SCC cleanup. `test-ssa`
   checks both against an all-in-memory path interpreter and the SSA verifier;
   `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic

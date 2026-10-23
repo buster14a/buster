@@ -31,7 +31,8 @@ and dominance construction, analysis, rewriting and final verification.
 The SROA timing is the field-splitting public call; subsequent SSA promotion
 is deliberately a separate stage and is not included in that number.
 
-Each sample is calibrated to at least 2 ms. The default 21 samples alternate
+Repetitions are calibrated once per path to target 2 ms; later samples can be
+shorter as execution conditions change. The default 21 samples alternate
 which path runs first. `--only` measures one path, while `--after-scalar`
 performs scalar stage work before each vector sample. The scalar label refers
 to the scalar algorithm option; shared verification and other infrastructure

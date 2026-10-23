@@ -3,8 +3,9 @@
 //
 // Tier 1's per-function IR. Include after lane.c. ir_create allocates exact-sized columns in a function arena;
 // producers write those columns directly, in batches, and publish only a complete function. Value IDs are instruction
-// indices, blocks are contiguous nonempty ranges, and BUSTER_IR_NONE is never a value. The four byte columns and three
-// u32 operand columns cost 16 bytes/instruction. Constants, calls, addresses and variable operands have sparse tables.
+// indices, blocks are contiguous nonempty ranges, block zero is entry and has no phis, and BUSTER_IR_NONE is never a
+// value. The four byte columns and three u32 operand columns cost 16 bytes/instruction. Constants, calls, addresses
+// and variable operands have sparse tables.
 // No column has readable padding: ir_verify uses masked tails and scalar indexed byte loads, never a gather of four
 // bytes from a one-byte type. Rewrites build new columns; CFG and use lists are explicitly rebuilt when needed.
 //
@@ -1314,7 +1315,9 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
         {
             if (f->op[i] == IR_PHI)
             {
-                if (past_phis || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
+                // Initial function entry has no predecessor from which a phi can select a value. A producer needing
+                // a loop at entry must add a real preheader with an explicit initial value before introducing phis.
+                if (b == 0 || past_phis || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
                 {
                     check = ir_check(IR_ERROR_PHI, i, 0);
                 }

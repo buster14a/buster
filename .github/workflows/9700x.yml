@@ -306,6 +306,7 @@ jobs:
           ./build/compiler test-ir-gvn
           ./build/compiler test-ir-licm
           ./build/compiler test-ir-sroa
+          ./build/compiler test-ir-inline
           == Test Tier 1 selection, liveness and native fragments
           ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
           ./build/compiler test-tier1-liveness
@@ -351,12 +352,12 @@ jobs:
           ./build/compiler test-link
           == Test dataflow bitsets
           ./build/compiler test-dataflow
+          == Test dominators, frontiers and natural loops
+          ./build/compiler test-dominators
           == Test local SSA construction and its memory interpreter
           ./build/compiler test-ssa
           == Test shared IR local promotion and typed-stream semantics
           ./build/compiler test-ssa-ir
-          == Test dominators, frontiers and natural loops
-          ./build/compiler test-dominators
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS

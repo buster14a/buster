@@ -7,6 +7,9 @@ the IR. `ssa_build` is the vector path; `ssa_build_scalar` is its independent
 predecessor-reading twin. Both are included in the existing compiler executable.
 `ssa_ir.c` connects the core to #131's `IrFunction`, including the all-memory
 functions produced by `ir_lower.c` from Tier 0's typed stream.
+Both constructors use #174's shared `dominators_analyze` interface; the vector
+constructor consumes its frontier rows and the IR adapter uses its subtree
+intervals directly.
 
 The construction core and IR adapter have local semantic tests. #134's complete
 source-corpus, general interpreter and Tier 1 acceptance still requires the
@@ -81,9 +84,11 @@ exhaustion and ID-space exhaustion return errors instead of truncating data.
 ### Vector path
 
 1. Classify promotion eligibility and discover addresses 64 entries at a time.
-2. Build reachable predecessors and reverse postorder with explicit stacks.
-   Dominator sets use aligned 512-bit intersections and change masks. Extract
-   immediate dominators, then build dominance-frontier bitsets.
+2. Build a complete predecessor CSR, preserving duplicate edges, and run the
+   shared dominator analysis. Its vector solver uses aligned 512-bit
+   intersections and change masks, then supplies immediate dominators,
+   reachability, subtree intervals and dominance-frontier bitsets. Compact
+   unreachable-source edges out of the SSA predecessor result afterward.
 3. Collect each block's final writes and upward-exposed reads. Reuse
    `dataflow.c`'s AVX-512 liveness equations over dense promoted-local IDs.
 4. For each local, expand iterated dominance frontiers with 512-bit ORs,
@@ -102,12 +107,22 @@ placement and indexed loads above the 64-block register-table limit. Their
 costs need measurement on the 9700X before claiming that any particular
 placement or batch size is optimal.
 
-The dense dominator/frontier matrix has a 16 MiB per-matrix budget. Above it,
-`ssa_build` uses the scalar constructor and scalar immediate dominators. This
-is a bound on quadratic storage, **not a measured performance crossover**.
-The shared dominator analysis from #174 should replace this private setup when
-its interface is available. Current-definition tables are dense in
-`blocks × promoted locals`; the caller's arena bounds that remaining storage.
+SSA reserves at most 16 MiB for the combined quadratic regions needed by the
+shared analysis: its frontier output span, temporary dominator matrix and one
+temporary reachable row. With `row_bytes` rounded to a 512-bit boundary, the
+vector path requires `(2 * blocks + 1) * row_bytes <= 16 MiB`. Above this bound,
+`ssa_build` uses the scalar constructor and requests only the shared scalar
+dominator tree. It does not request frontier or loop matrices on that path.
+This is a storage policy, **not a measured performance crossover**.
+
+The shared analyzer requires distinct output and temporary arenas. SSA carves
+two disjoint, bounded views from its existing scratch tail: a size-derived
+span for retained analysis columns, followed by temporary storage. The views
+own no mappings, and only the completed analysis output remains after the
+call. This preserves the public SSA APIs without per-function memory mappings.
+Linear analysis columns and alignment remain bounded by scratch capacity.
+Current-definition tables are dense in `blocks × promoted locals`; the caller's
+arena also bounds that remaining storage.
 
 ### Scalar path
 
@@ -162,12 +177,16 @@ share storage without a value rewrite corrupting a block ID or metadata.
 Existing IR phis are preserved even if dead-edge removal makes them trivial;
 the core's trivial/SCC cleanup applies to the newly constructed local phis.
 
-The adapter checks reachable input uses against actual dominators and verifies
-the rebuilt function with both shared IR verifiers and dominance intervals.
+The adapter checks reachable input uses against the shared dominator tree and
+verifies the rebuilt function with both shared IR verifiers. It borrows the
+analysis's `preorder` and `subtree_end` intervals for input checks and remaps
+them to the compact output block IDs for verification.
 Slot size and alignment are preserved for retained storage; final frame offsets
 remain the backend's responsibility. The implementation is tested against the
 published IR in PR #322, commit
 `7a6ed05745a6b522209005d2423103caedb6c99a`, without changing IR-owned files.
+Shared dominance comes from PR #327, commit
+`8f75a585aeaddd58e614a64c0afc6a914e99bd15`, without changing its implementation.
 
 ## Verification and tests
 
@@ -200,11 +219,13 @@ batch boundaries. Invalid inputs, damaged result columns and allocation failures
 must fail with intact caller state. Deliberately swapped phi operands and wrong
 dominating read values must fail both the verifier and the interpreter.
 
-Local qualification used Clang 19 on a cloud AVX-512 AMD EPYC 9V74. The final
-optimized and ASan/UBSan suites each passed 3,447 checks with seed 7439 and 150
-random programs. Clang compiled and instrumented the sanitizer build; GCC's
-installed sanitizer runtimes supplied the link because Clang's archives were
-absent. Leak checking was disabled in the sandbox; address and undefined-behavior
+After shared-dominator integration, local qualification used Clang 23.1.1 on a
+cloud AVX-512 AMD EPYC 9V74. The optimized and ASan/UBSan core suites each passed
+3,471 checks with seed 7439 and 150 random programs. The added handoff regression
+checks the 8,191/8,192-block memory boundary, successful construction and
+tree-only verification above it with an 8 MiB scratch arena, nonzero arena
+prefixes and input immutability. Clang's bundled sanitizer runtimes were used.
+Leak checking was disabled in the sandbox; address and undefined-behavior
 checks remained enabled. These checks are not target-performance acceptance.
 
 `test-ssa-ir` compares generated Tier 0 execution, its all-memory shared IR,
@@ -216,8 +237,8 @@ and promotion-contract tests, and require the general interpreter for full
 execution acceptance.
 
 The adapter suite passed 2,038 checks in optimized Clang 23 and ASan/UBSan
-builds: seed 134/count 16 for the optimized run, seed 7439/count 16 for the
-sanitizer run, each covering 128 generated functions. The latter run covers
+builds after shared-dominator integration, both with seed 7439/count 16 and
+128 generated functions. Each run covers
 92,844 input and 83,260 output instructions, 2,566 input and 868 retained slots,
 and 586 constructed phis. These are coverage counts, not performance results.
 Hand fixtures check escapes, volatile and mismatched accesses, typed temporaries,
@@ -226,9 +247,10 @@ calls, all value/block operand forms, overlapping variable slices, hidden
 non-dominating uses and transactional failures.
 
 The combined compiler also built at `-O3` with Clang 23.1.1 on the cloud host.
-Its integrated SSA and adapter commands passed 3,447 and 2,038 checks; the IR
-and lowering commands passed 5,733 and 1,566 checks. The whole-program
-no-recursion gate checked 32 translation units, 16,771 functions and 92,143
+Its integrated SSA and adapter commands passed 3,471 and 2,038 checks. The
+shared dominator suite passed 9,345,990 checks with seed 7439/count 4.
+The whole-program no-recursion gate checked 33 translation units,
+16,859 functions and 92,557
 calls with no unapproved cycle. The cloud-only compiler invocation added
 `-mmwaitx` because the VM hides that feature; no production build flag changed
 and lane waits were not executed there.
@@ -282,15 +304,26 @@ reported these medians, with the same phi counts for both constructors:
 
 The [retained measurement record](measurements/ssa-2026-10-23/9700x-core.txt)
 contains source hashes, build/run conditions, output sizes, sample ranges and
-verbatim log excerpts. This is one target run of four synthetic inputs, before
-adding the IR adapter. It establishes neither SQLite throughput nor a general
-scalar/vector crossover; the unchanged kernel source hashes identify its scope.
+verbatim log excerpts. This historical target run covers four synthetic inputs
+before the IR adapter and shared-dominator integration. Its timings apply to
+the recorded core revision, not the revised analysis path. It establishes
+neither SQLite throughput nor a general scalar/vector crossover.
+
+The later published IR-adapter head `9c6ccfb` also passed the complete protected
+[9700X workflow](https://github.com/buster14a/buster/actions/runs/39936586492).
+That run tested merge `9f138c89690e9dbbd2ca2f039805d2ca12cab1a2` against IR base
+`7a6ed05745a6b522209005d2423103caedb6c99a`: 2,847 core checks and 2,038 adapter
+checks passed. The default benchmark and three independent processes each for
+scalar, vector and vector after 200 ms of scalar work completed successfully.
+The [adapter target record](measurements/ssa-2026-10-23/9700x-ir-adapter.txt)
+retains the complete SSA benchmark step, source hashes and qualification
+excerpts. It precedes shared-dominator adoption; the revised analysis path
+requires its own protected target result.
 
 ## Integration still required for #134
 
 - Connect #133's complete typed-stream lowering, including volatility, aggregate
   and address-taking metadata, so actual source functions reach this pass.
-- Use #174's shared dominance/frontier analysis instead of private preparation.
 - Compare full IR execution through #176 and Tier 1 generated code through #138.
 - Run the source corpora and random C control flow, then measure cycles per IR
   instruction and phi counts on SQLite's functions under the locked 9700X.

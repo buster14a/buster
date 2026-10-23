@@ -818,7 +818,8 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_instruction(&f, 1, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        ir_optimize_test_expect(test, ir_verify(&f, scratch, 0).error == IR_OK, "shared IR accepts phi with unreachable entry predecessor");
+        const IrCheck verified = ir_verify(&f, scratch, 0);
+        ir_optimize_test_expect(test, verified.error == IR_ERROR_PHI && verified.instruction == 0, "shared IR rejects phi with unreachable entry predecessor");
         for (uint32_t passes = 0; passes < 8; passes += 1)
         {
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
