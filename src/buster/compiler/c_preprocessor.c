@@ -4728,6 +4728,7 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                         length += 1;
                     }
                     pp_diagnose(pp, PP_SEVERITY_ERROR, location, "raw string missing terminating delimiter )%.*s\"", (int)length, data->bytes + position);
+                    pp->unterminated += 1;
                     break;
                 }
                 case C_RAW_STRING_OK:
@@ -10496,7 +10497,8 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
     {
         pp_read_directive_comment(pp, context, d);
         const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
-        if (!text)
+        const bool skipped_elif = kind == PP_DIRECTIVE_ELIF && group != 0 && group->taken;
+        if (!text && !skipped_elif)
         {
             pp_read_raw_errors(pp, context, hash, end);
         }
