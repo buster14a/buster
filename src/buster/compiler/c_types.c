@@ -5105,7 +5105,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             "preserve_none",
         };
         const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
-        if ((uint32_t)abi < BUSTER_ARRAY_LENGTH(spellings))
+        if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]))
         {
             type_print_text(printer, " __attribute__((");
             type_print_text(printer, spellings[abi]);

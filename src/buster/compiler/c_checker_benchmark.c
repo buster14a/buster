@@ -30,6 +30,10 @@ struct String8
 
 #include "buster/compiler/lane.c"
 #include "buster/compiler/c_types.c"
+// The builtin lookups, vector member decoding and overload declaration serve the source reader and their own tests;
+// the synthetic graphs use only the checker's graph API.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
 #include "buster/compiler/c_builtin_intrinsic_catalog.c"
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_check_actions.c"
@@ -46,6 +50,7 @@ struct String8
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
 #include "buster/compiler/c_checker.c"
+#pragma clang diagnostic pop
 
 #define BUSTER_CHECK_BENCHMARK_PASSES 21u
 

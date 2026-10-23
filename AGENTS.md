@@ -251,11 +251,15 @@ designs and the compilers already built this way.
   [docs/assembler.md](docs/assembler.md). `.S` uses the shared preprocessor's
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
 - `src/buster/compiler/main.c` is the executable entry point: its commands, and
-  for anything else the driver (`run_parse_command`, in `c_parser.c`):
-  `./build/compiler [-fsyntax-only] [-E's options] [--scalar] file.c`
-  preprocesses and parses the file and prints the diagnostics as clang does,
-  with exit status 0 for a unit without errors and 1 otherwise. Nothing is
-  written yet. With no file it prints its usage and exits with status 1. It
+  for anything else the semantic driver (`run_check_command`, in
+  `c_checker_driver.c`): `./build/compiler [--scalar] -fsyntax-only [-E's
+  options] file.c` preprocesses, parses and checks the file and prints the
+  diagnostics as clang does, with exit status 0 for a unit without errors and
+  1 otherwise; `-c [-o file.o]` also writes the supported static data as an
+  object ([the checker guide](docs/c-checker.md)). `./build/compiler parse
+  [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
+  alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
+  usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
   it as ten translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
@@ -574,8 +578,12 @@ designs and the compilers already built this way.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
   `c_check_binding.c` resolves its source events through the batch or independent
   scalar kernel. `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
-  opts into it. Unsupported
-  syntax is diagnosed. The normal syntax driver still uses the parser.
+  and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
+  keeps the parser's driver alone. Unsupported syntax is diagnosed.
+  `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
+  check the driver and inline assembly against Clang; `test-checker-corpus`
+  compares a corpus's acceptance and first diagnostics with Clang, and
+  `benchmark-checker-source` measures checking of real source bodies.
   `test-checker [--seed N] [--clang PATH]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang. `c_check_data.c`
   and `c_check_data_input.c` turn selected static scalar definitions into real
@@ -702,7 +710,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ```sh
 ./build.sh
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
-./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler parse -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
 ./build/compiler test-profile
