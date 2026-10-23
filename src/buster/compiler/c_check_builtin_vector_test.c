@@ -414,11 +414,20 @@ static void check_builtin_vector_test_memory(CheckBuiltinVectorTest* test, TypeT
     check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && (result.warnings & BUSTER_CHECK_BUILTIN_VECTOR_WARN_QUALIFIERS) != 0 &&
         (result.warning_operands & 1) != 0, "ordinary pointer-valued store initialization retains qualifier-discard warnings");
     values[0] = check_builtin_vector_test_value(BUSTER_TYPE_COMPLEX_DOUBLE);
-    values[1].type = type_pointer(table, extended);
+    values[1].type = type_pointer(table, BUSTER_TYPE_COMPLEX_DOUBLE);
     result = check_builtin_vector_test_action(table, CBUILTIN_NONTEMPORAL_STORE, values, 2);
-    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.store_conversion == CHECK_BUILTIN_VECTOR_STORE_SPLAT &&
-        (result.unsupported & BUSTER_CHECK_BUILTIN_VECTOR_UNSUPPORTED_CONVERSION) != 0,
-        "complex scalar splat remains typed with an explicit unrepresented conversion requirement");
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.memory_type == BUSTER_TYPE_COMPLEX_DOUBLE &&
+        result.writes_memory && (result.unsupported & BUSTER_CHECK_BUILTIN_VECTOR_UNSUPPORTED_MEMORY_PAYLOAD) != 0,
+        "matching complex nontemporal store remains valid with an explicit payload representation gap");
+    const TypeId complex_vector_destinations[] = { integer, floating, extended, type_vector(table, BUSTER_TYPE_FLOAT, 4, true),
+        type_vector(table, BUSTER_TYPE_BOOL, 4, true) };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(complex_vector_destinations); i += 1)
+    {
+        values[1].type = type_pointer(table, complex_vector_destinations[i]);
+        result = check_builtin_vector_test_action(table, CBUILTIN_NONTEMPORAL_STORE, values, 2);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 0,
+            "Clang's implicit-conversion diagnostic rejects complex scalars stored into integer, floating and bool vectors");
+    }
     values[0] = check_builtin_vector_test_value(type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
     values[0].category = CHECK_LVALUE;
     values[0].flags = BUSTER_CHECK_SIDE_EFFECT;
@@ -632,7 +641,8 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
 {
     const char* preamble = "typedef int vi __attribute__((vector_size(16))); typedef float vf __attribute__((vector_size(16)));\n"
         "typedef short vs __attribute__((vector_size(16))); typedef int ei __attribute__((ext_vector_type(4)));\n"
-        "typedef _Bool eb __attribute__((ext_vector_type(4))); typedef signed char ec __attribute__((ext_vector_type(4)));\n";
+        "typedef _Bool eb __attribute__((ext_vector_type(4))); typedef signed char ec __attribute__((ext_vector_type(4)));\n"
+        "typedef float ef __attribute__((ext_vector_type(4)));\n";
     char directory[] = "/tmp/buster-check-builtin-vector-XXXXXX";
     const bool created = mkdtemp(directory) != NULL;
     bool ready = created;
@@ -724,7 +734,7 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
         { "void f(const volatile int*p){ (void)__builtin_nontemporal_load(p); __builtin_nontemporal_store(1,p); }", NULL, false },
         { "#pragma clang diagnostic error \"-Wincompatible-pointer-types-discards-qualifiers\"\nvoid f(int**p,const int*x){ __builtin_nontemporal_store(x,p); }", NULL, true },
         { "enum E{A}; void f(enum E*p){ (void)__builtin_nontemporal_load(p); }", NULL, false },
-        { "void f(double _Complex*p){ (void)__builtin_nontemporal_load(p); }", NULL, false },
+        { "void f(double _Complex*p,double _Complex a){ (void)__builtin_nontemporal_load(p); __builtin_nontemporal_store(a,p); }", NULL, false },
         { "void f(_Atomic(int)*p){ (void)__builtin_nontemporal_load(p); }", NULL, true },
         { "void f(void*p){ (void)__builtin_nontemporal_load(p); }", NULL, true },
         { "void f(int(*p)[2]){ (void)__builtin_nontemporal_load(p); }", NULL, true },
@@ -735,13 +745,14 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
         { "void f(vi*p,vs a){ __builtin_nontemporal_store(a,p); }", "-flax-vector-conversions=integer", false },
         { "void f(ei*p){ __builtin_nontemporal_store((_Bool)1,p); }", "-flax-vector-conversions=none", false },
         { "void f(eb*p,ei a){ __builtin_nontemporal_store(a,p); }", "-flax-vector-conversions=none", false },
-        { "void f(ei*p,double _Complex a){ __builtin_nontemporal_store(a,p); }", NULL, false },
+        { "void f(ei*p,double _Complex a){ __builtin_nontemporal_store(a,p); }", NULL, true },
         { "enum E{A}; void f(enum E a){ (void)__builtin_nondeterministic_value(a); }", NULL, true },
         { "void f(int*p){ (void)__builtin_nondeterministic_value(p); }", NULL, true },
         { "void f(_BitInt(17) a){ (void)__builtin_nondeterministic_value(a); }", NULL, true },
         { "void f(double _Complex a){ (void)__builtin_nondeterministic_value(a); }", NULL, true },
         { "enum E{A=-1}; void f(enum E a){ (void)__builtin_elementwise_abs(a); (void)__builtin_elementwise_popcount(a); }", NULL, false },
         { "enum E{A=-1}; void f(enum E a){ (void)__builtin_elementwise_min(a,a); }", NULL, true },
+        { "void f(ef*p,double _Complex a){ __builtin_nontemporal_store(a,p); }", NULL, true },
     };
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {

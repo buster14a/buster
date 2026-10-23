@@ -489,7 +489,12 @@ static void check_builtin_vector_store(TypeTable* table, const CheckBuiltinVecto
     const bool source_vector = check_builtin_vector_is_vector(table, source);
     bool accepted = source == destination;
     output->store_conversion = CHECK_BUILTIN_VECTOR_STORE_ASSIGNMENT;
-    if (!accepted && check_action_kind(table, destination) == BUSTER_TYPE_KIND_EXT_VECTOR)
+    if (destination_vector && check_action_kind(table, source) == BUSTER_TYPE_KIND_COMPLEX)
+    {
+        // Clang's later CheckImplicitConversion rejects complex-to-vector conversion even after assignment builds a splat.
+        accepted = false;
+    }
+    else if (!accepted && check_action_kind(table, destination) == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         if (check_action_kind(table, source) == BUSTER_TYPE_KIND_EXT_VECTOR)
         {
@@ -504,8 +509,7 @@ static void check_builtin_vector_store(TypeTable* table, const CheckBuiltinVecto
             output->store_conversion = CHECK_BUILTIN_VECTOR_STORE_SPLAT;
             output->bool_splat_signed_true = source == BUSTER_TYPE_BOOL &&
                 check_builtin_vector_plain(table, check_builtin_vector_element(table, destination)) != BUSTER_TYPE_BOOL;
-            if (check_action_kind(table, source) == BUSTER_TYPE_KIND_COMPLEX ||
-                (check_action_kind(table, source) == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, source)))
+            if (check_action_kind(table, source) == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, source))
             {
                 output->unsupported |= BUSTER_CHECK_BUILTIN_VECTOR_UNSUPPORTED_CONVERSION;
             }
