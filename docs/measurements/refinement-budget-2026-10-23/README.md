@@ -105,3 +105,61 @@ runs those tests with seed 116 on the 9700X. The screen rotates three processes
 per input, and also measures the refinement kernel back to back and after
 100 ms of scalar work. Separate cycle profiles are diagnostic and excluded from
 the comparison. The user confirmed that the 1.5 ms target remains required.
+
+[Run 39950101933](https://github.com/buster14a/buster/actions/runs/39950101933)
+passed the required job on head `28afc09b9ef19b1224b23cadba7e643e62aa9565`.
+Its tested merge was `1b91ac6e70693e7da1567f74f3341ebc844f66cb`.
+The [54-process comparison](screen-second-9700x.txt), [summary](screen-second-9700x.tsv),
+[36-process kernel comparison](kernels-second-9700x.txt) and
+[cycle-profile symbol shares](profile-second-symbols.txt) are retained.
+All proposed variants passed the target seed-116 checks, including the four
+fixed hash cases. Both comparison commands reported zero failed processes.
+
+| SQLite 3.53.4 | Refine range, ms | Median, ms | Whole-run range, ms |
+| --- | ---: | ---: | ---: |
+| Original hash/refinement | 1.695–1.715 | 1.711 | 11.842–11.855 |
+| Hash fix alone | 1.724–1.734 | 1.732 | 11.877–11.924 |
+| Hash fix + compress | 1.680–1.692 | 1.687 | 11.813–11.882 |
+| Hash fix + batch4 | 1.679–1.694 | 1.688 | 11.825–11.856 |
+| Hash fix + ahead2 | 1.637–1.654 | 1.647 | 11.770–11.818 |
+| Hash fix + ahead4 | 1.661–1.668 | 1.666 | 11.784–11.909 |
+
+Ahead2 also reduced the refine phase on SQLite 3.53.2 (1.633–1.638 ms versus
+1.699–1.724) and main.c (3.454–3.474 versus 3.585–3.605), although main.c's
+whole-run ranges overlap. It is the comparison candidate for further work;
+the budget remains unmet, even before charging the previously moved arena fault.
+Its warm raw-SQLite kernel is 1.338–1.344 ms, so its principal advantage here
+is in the actual cold preparation path. The hash fix alone costs about 0.02 ms
+on the SQLite refine phase in this screen.
+
+The separate cycle profiles locate samples at the vector-to-scalar transfers
+used to form prefetch addresses, as well as at the probes. They motivate a
+follow-up comparison that reads the stored offsets after hashing, and larger
+token blocks to amortize the prefetch pipeline's startup. These are hypotheses,
+not established gains. A separate local prototype preserves refinement state
+across blocks and passes the full corpus suite plus 3,072 guarded boundary
+cases under ASan/UBSan. No lexer/preprocessor interface change has been made.
+
+## Third screen
+
+The next comparison keeps the original control and ahead2, and screens:
+
+- prefetchloop1/2: prefetch the stored offsets after hashing the batch, with
+  one/two batches of lookahead;
+- block2k/4k/8k: ahead2 with 2,048/4,096/8,192 tokens per dense block;
+- loop2block2k: the prefetch loop with two-batch lookahead and 2,048-token blocks;
+- prefix28: two 32-byte slots per cache line, each holding 28 prefix bytes and
+  the ID, with twice as many initial buckets to preserve capacity. The public
+  16-byte `intern_first_bytes` helper stays intact for shared-file preparation.
+
+Every variant passed the full local seed-116 refinement suite over repository
+sources, SQLite and Zig libc. Prefix28 also passed `test-files --seed 116
+--id-order 19`, including shared placement/growth, different lane counts,
+reordered IDs and allocation failures. Its guarded probe test enumerates all
+32,768 low/high-ID prefix patterns for the two wider slots.
+
+The separate setup control measures fresh table initialization as well as the
+refine phase and whole preprocessing run. A wider table's extra setup cost must
+be charged to the budget; a lower refine time alone is insufficient. Target
+comparison and shared-file validation are pending. The profiles from the second
+screen are retained [with their annotated assembly](profile-second-9700x.txt).
