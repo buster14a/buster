@@ -474,3 +474,43 @@ budget, including the historical charge, and main.c refinement regresses to
 the current compiler-source workload crosses two growth thresholds with this
 capacity. The next screen tests compact spans with higher capacity, the more
 selective splice handoff, their combination and sixteen-ID probe publication.
+
+## Eleventh screen: selective splice reuse
+
+The [target output](screen-eleventh-9700x.txt),
+[summary](screen-eleventh-9700x.tsv), [orchestration](eleventh-run.sh) and
+[overlay hashes](eleventh-overlay-sha256.txt) retain 54 preprocessing processes
+and six setup processes. All four new variants pass the target refinement
+suite on 9,171 files (115,706,051 bytes). The combined variant also passes
+shared-file checks, 57,408 guarded preparation cases, both SQLite inputs,
+main.c, allocation failures and
+[local preparation sanitizers](compactsplices-preparation-sanitizers-local.txt).
+These overlays apply to frozen `b1cb4be`, as do screens five through ten.
+
+`lexsplices` marks regions only inside the lexer's existing possible-splice
+branch. `probe16` publishes sixteen probe IDs with one vector store.
+`prefix28compact` raises the scaled wide-prefix table's capacity and derives
+record lengths from compact offsets. `compactsplices` combines that layout
+with selective splice reuse.
+
+| SQLite 3.53.4 | Refine range, ms | Lex median, ms | Whole-run range, ms |
+| --- | ---: | ---: | ---: |
+| 128 KiB original-table control | 1.534–1.546 | 2.414 | 11.589–11.617 |
+| Scaled wide-prefix control | 1.489–1.504 | 2.410 | 11.534–11.638 |
+| Sixteen-ID probe publication | 1.534–1.542 | 2.423 | 11.592–11.663 |
+| Selective splice reuse | 1.473–1.483 | 2.419 | 11.509–11.581 |
+| Compact wide-prefix table | 1.491–1.514 | 2.408 | 11.570–11.602 |
+| Compact table and splice reuse | 1.444–1.454 | 2.429 | 11.521–11.600 |
+
+Selective splice reuse improves both SQLite inputs: SQLite 3.53.2 refinement
+takes 1.470–1.483 ms and the whole run 11.513–11.546 ms. It preserves main.c's
+whole-run median (36.486 ms versus 36.494 ms). Counting the historical arena
+charge and its small extra lexing cost still puts it slightly above 1.5 ms.
+It is promising, but does not yet establish acceptance.
+
+The compact wide-prefix combination's smaller raw SQLite number does not make
+it a suitable implementation: main.c takes 37.410–37.547 ms, versus the
+original table's 36.419–36.948 ms. Increasing capacity did not cure the
+wide-table regression. The next experiment keeps the original table, records
+precise splice regions, and restores the leading-space allocation to the
+permanent arena so refinement directly measures its first-touch cost.
