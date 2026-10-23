@@ -1,0 +1,23 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:49:08+00:00 codex-linker-debug88: taskset -c 2 perf record -q -m 16M -e cycles:u -c 1000000 --call-graph dwarf -o /tmp/buster-debug-0Wj05y/perf-bounded.data -- /tmp/buster-debug-0Wj05y/fixture
+  title: Linker-DWARF-88-perf-buffer-check
+  link: https://github.com/buster14a/buster/issues/88
+chunk hash: 46117 checks, 0 failed
+  the defaults: 135 atoms, 921 fixups, 128 loads and calls relaxed, 7 GOT slots, 74 FDEs, 20120 bytes in 1 chunks: ran
+  the smallest: 16 atoms, 59 fixups, 2 loads and calls relaxed, 3 GOT slots, 5 FDEs, 3072 bytes in 1 chunks: ran
+  many units: 455 atoms, 4027 fixups, 600 loads and calls relaxed, 18 GOT slots, 318 FDEs, 87816 bytes in 1 chunks: ran
+  without absolute addresses: 135 atoms, 912 fixups, 128 loads and calls relaxed, 10 GOT slots, 74 FDEs, 19816 bytes in 1 chunks: ran
+  --functions workers, without sizes: 2079 atoms, 26086 fixups, 4000 loads and calls relaxed, 9 GOT slots, 2010 FDEs, 652856 bytes in 3 chunks: ran
+  calling libc: refused, write
+  calling libc, many units, without sizes: refused, write
+  many chunks: 51095 atoms, 650816 fixups, 100000 loads and calls relaxed, 9 GOT slots, 50010 FDEs, 12377016 bytes in 48 chunks: ran
+programs: 354 checks, 0 failed
+chunks: 337 checks, 0 failed
+files: 42 checks, 0 failed
+limits: 56 checks, 0 failed
+  3120 atoms: 339 the vector path takes, 502 only the walk, 2279 refused
+unwind scanner: 18721 checks, 0 failed
+unwind sort: 4969 checks, 0 failed
+  functions out of their FDEs' order: 41 FDEs in 12 atoms, sorted
+unwind links: 24 checks, 0 failed
+blocks: 192 checks, 0 failed
+patch kernel: 3201 checks, 0 failed

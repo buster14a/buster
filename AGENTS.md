@@ -415,10 +415,15 @@ designs and the compilers already built this way.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
+  General-dynamic TLS uses a separate two-word GOT pair per symbol and
+  local-dynamic TLS one module pair, preserving `__tls_get_addr` calls;
+  DTPMOD64/DTPOFF64 relocations and module offsets are emitted as appropriate.
   Regular shared-library outputs use a new file and rename, preserving any
   old inode that a process still maps.
-  Local-exec and general/local-dynamic TLS accesses in shared libraries are
-  refused; their implementations remain a later part of #85.
+  Local-exec accesses and undefined DTPOFF32 module offsets in shared
+  libraries are refused. Distinct general-/initial-exec slot columns allow
+  both models to reference the same symbol. TLSGD target bitsets are reduced
+  by whole symbol words, then expanded into slots with an exact scalar twin.
   `dynamic.c` gives it what a PIE needs from the C runtime and from
   binding (`dynamic_inputs`), what a static executable with the C runtime
   needs (`dynamic_static_inputs`) and what a static PIE needs
@@ -490,6 +495,18 @@ designs and the compilers already built this way.
   `foreign_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-foreign` runs them) and `foreign_benchmark.c`
   provides `benchmark-foreign`.
+- `src/buster/compiler/foreign_unwind.c` and `foreign_unwind_link.c` prune
+  losing COMDAT FDEs and unused CIEs before canonical foreign symbols hide
+  their original ownership. They retain matching CFI/personality/LSDA
+  records and map symbols into compact unwind bytes; compatible live-CIE
+  deduplication is separate. `test-foreign --cross-check` includes their
+  malformed/rollback tests and original C++ throw/catch/cleanup fixture.
+  `benchmark-foreign-unwind [--runs N] [--fdes N] [--profile mixed|all|none]`
+  measures full pruning with exact/vector parity and independent expected
+  bytes/maps. Run each measurement under the shared 9700X lock on CPU 2;
+  these synthetic phase results are not whole-link acceptance. The linker
+  guide's "Foreign COMDAT unwind pruning" documents the supported encodings,
+  incoming-reference restrictions and benchmark memory/timing boundaries.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone

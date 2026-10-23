@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #148's unevaluated constant/object-size query actions. Include after c_check_builtin_query.c and c_checker_test.c.
+// #148's source/runtime constant and object-size query actions. Include after c_check_builtin_query.c and c_checker_test.c.
 // Fixtures state the expected constants and producer metadata independently; no source object is dereferenced.
 // Guarded batches compare individual actions and legal partitions. Original C source assertions and constraints
 // additionally run through the existing external Clang subprocess helper, without claiming source integration here.
@@ -31,7 +31,11 @@ static void check_builtin_query_test_expect(CheckBuiltinQueryTest* test, bool co
 static bool check_builtin_query_test_equal(const CheckBuiltinQueryResult* a, const CheckBuiltinQueryResult* b)
 {
     bool equal = check_test_action_equal(&a->action, &b->action) && check_test_value_equal(&a->runtime_value, &b->runtime_value) && a->evaluated_operands == b->evaluated_operands &&
-        a->warnings == b->warnings && a->warning_operands == b->warning_operands && a->mode == b->mode && a->known == b->known && a->constraint == b->constraint;
+        a->warnings == b->warnings && a->warning_operands == b->warning_operands && a->mode == b->mode && a->known == b->known && a->constraint == b->constraint &&
+        a->source_proof == b->source_proof && a->runtime_plan == b->runtime_plan && a->unsupported == b->unsupported &&
+        a->runtime_effects.flags == b->runtime_effects.flags && a->runtime_effects.fault == b->runtime_effects.fault &&
+        a->runtime_effects.fault_node == b->runtime_effects.fault_node && a->runtime_effects.reads_fp_environment == b->runtime_effects.reads_fp_environment &&
+        a->runtime_effects.may_raise_fp_exceptions == b->runtime_effects.may_raise_fp_exceptions;
     for (uint32_t i = 0; i < 2; i += 1)
     {
         equal &= a->argument_conversions[i].type == b->argument_conversions[i].type && a->argument_conversions[i].flags == b->argument_conversions[i].flags;
@@ -377,6 +381,171 @@ static void check_builtin_query_test_constraints(CheckBuiltinQueryTest* test, Ty
     }
 }
 
+static void check_builtin_query_test_plans(CheckBuiltinQueryTest* test, TypeTable* table)
+{
+    CheckValue argument = check_test_float(BUSTER_TYPE_DOUBLE, 0.25L);
+    // These conservative source columns may include an unchosen syntactic call/fault. Explicit whole-expression
+    // proof and the separate context-pruned runtime summary are authoritative; neither is inferred from this value.
+    argument.flags |= BUSTER_CHECK_SIDE_EFFECT;
+    argument.fault = CHECK_FAULT_SHIFT_COUNT;
+    argument.fault_node = 99;
+    CheckBuiltinQueryAction input = { .id = CBUILTIN_CONSTANT_P, .arguments = &argument, .argument_count = 1, .constant_p_context_sensitive = true };
+    CheckBuiltinQueryResult result;
+    // Original105-row exact23.1.1 baseline-O0 probe, source cae6a6f4 and target log ff539be9. All four ON rounding
+    // controls gave the same query classifications; FP work raised MXCSR inexact0x20 and all user counters stayed0.
+    const struct
+    {
+        CheckBuiltinQueryProof source;
+        CheckBuiltinQueryRuntimePlan plan;
+        uint8_t bit;
+        bool fp_effects;
+    } observed[] =
+    {
+        { CHECK_BUILTIN_QUERY_PROOF_ONE, CHECK_BUILTIN_QUERY_RUNTIME_SKIP, 1, false }, // ON exact1/2.
+        { CHECK_BUILTIN_QUERY_PROOF_ONE, CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN, 0, true }, // ON1/3.
+        { CHECK_BUILTIN_QUERY_PROOF_ZERO, CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN, 0, true }, // ON dynamic global.
+        { CHECK_BUILTIN_QUERY_PROOF_ONE, CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN, 1, true }, // ON nested query.
+        { CHECK_BUILTIN_QUERY_PROOF_ONE, CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN, 1, true }, // ON nested query+1.
+        { CHECK_BUILTIN_QUERY_PROOF_ONE, CHECK_BUILTIN_QUERY_RUNTIME_SKIP, 0, false }, // ON unchosen call,1/3.
+        { CHECK_BUILTIN_QUERY_PROOF_ONE, CHECK_BUILTIN_QUERY_RUNTIME_SKIP, 0, false }, // ON unchosen increment,1/3.
+        { CHECK_BUILTIN_QUERY_PROOF_ONE, CHECK_BUILTIN_QUERY_RUNTIME_SKIP, 1, false }, // OFF default1/3.
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(observed); i += 1)
+    {
+        input.constant_p_source_proof = observed[i].source;
+        input.constant_p_runtime_plan = observed[i].plan;
+        input.constant_p_runtime_result = observed[i].bit;
+        input.constant_p_runtime_effects = (CheckBuiltinQueryEffects){ .reads_fp_environment = observed[i].fp_effects, .may_raise_fp_exceptions = observed[i].fp_effects };
+        check_builtin_query_one(table, &input, &result);
+        check_builtin_query_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.source_proof == observed[i].source && result.known &&
+            result.action.value.type == BUSTER_TYPE_INT && result.action.value.constant_kind == CHECK_CONSTANT_INTEGER &&
+            result.action.value.integer == (observed[i].source == CHECK_BUILTIN_QUERY_PROOF_ONE) && result.action.value.flags == BUSTER_CHECK_ICE &&
+            result.action.value.fault == CHECK_FAULT_NONE && result.action.value.fault_node == 0 && result.runtime_plan == observed[i].plan &&
+            result.runtime_value.type == BUSTER_TYPE_INT && result.runtime_value.constant_kind == CHECK_CONSTANT_INTEGER && result.runtime_value.integer == observed[i].bit &&
+            result.evaluated_operands == (observed[i].fp_effects ? 1u : 0u) && result.runtime_value.flags == (observed[i].fp_effects ? BUSTER_CHECK_SIDE_EFFECT : 0u) &&
+            result.runtime_effects.reads_fp_environment == observed[i].fp_effects && result.runtime_effects.may_raise_fp_exceptions == observed[i].fp_effects && result.unsupported == 0,
+            "exact target observations retain independent clean source proof, runtime answer and nested FP effects");
+    }
+    for (uint32_t source = CHECK_BUILTIN_QUERY_PROOF_ZERO; source <= CHECK_BUILTIN_QUERY_PROOF_DEFERRED; source += 1)
+    {
+        for (uint32_t plan = CHECK_BUILTIN_QUERY_RUNTIME_SKIP; plan <= CHECK_BUILTIN_QUERY_RUNTIME_UNRESOLVED; plan += 1)
+        {
+            input.constant_p_source_proof = (CheckBuiltinQueryProof)source;
+            input.constant_p_runtime_plan = (CheckBuiltinQueryRuntimePlan)plan;
+            const bool runtime_known = plan == CHECK_BUILTIN_QUERY_RUNTIME_SKIP || plan == CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN;
+            input.constant_p_runtime_result = runtime_known ? 1 : 0;
+            input.constant_p_runtime_effects = (CheckBuiltinQueryEffects){ .flags = BUSTER_CHECK_SIDE_EFFECT, .fault = CHECK_FAULT_DIVIDE_BY_ZERO, .fault_node = 73,
+                .reads_fp_environment = true, .may_raise_fp_exceptions = true };
+            check_builtin_query_one(table, &input, &result);
+            const bool source_known = source != CHECK_BUILTIN_QUERY_PROOF_DEFERRED;
+            const bool evaluate = plan == CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN || plan == CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_DEFERRED;
+            const bool skip = plan == CHECK_BUILTIN_QUERY_RUNTIME_SKIP;
+            const uint32_t unsupported = (source_known ? 0 : BUSTER_CHECK_BUILTIN_QUERY_UNSUPPORTED_SOURCE_PROOF) |
+                (plan == CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_DEFERRED ? BUSTER_CHECK_BUILTIN_QUERY_UNSUPPORTED_CONSTANT_TEST :
+                 plan == CHECK_BUILTIN_QUERY_RUNTIME_UNRESOLVED ? BUSTER_CHECK_BUILTIN_QUERY_UNSUPPORTED_RUNTIME_PLAN : 0);
+            check_builtin_query_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.known == source_known &&
+                result.action.value.constant_kind == (source_known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE) &&
+                result.action.value.flags == (source_known ? BUSTER_CHECK_ICE : 0u) && result.action.value.fault == CHECK_FAULT_NONE &&
+                result.runtime_value.constant_kind == (runtime_known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE) &&
+                result.runtime_value.integer == (runtime_known ? 1u : 0u) && result.evaluated_operands == (evaluate ? 1u : 0u) &&
+                result.runtime_value.flags == (skip ? 0u : BUSTER_CHECK_SIDE_EFFECT) && result.runtime_value.fault == (skip ? CHECK_FAULT_NONE : CHECK_FAULT_DIVIDE_BY_ZERO) &&
+                result.runtime_value.fault_node == (skip ? 0u : 73u) && result.runtime_effects.reads_fp_environment == !skip &&
+                result.runtime_effects.may_raise_fp_exceptions == !skip && result.unsupported == unsupported,
+                "independent proof/plan matrix suppresses SKIP effects and retains known/deferred/unresolved runtime requirements");
+        }
+    }
+    input.constant_p_source_proof = CHECK_BUILTIN_QUERY_PROOF_ONE;
+    input.constant_p_runtime_plan = CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN;
+    input.constant_p_runtime_result = 1;
+    input.constant_p_runtime_effects = (CheckBuiltinQueryEffects){ .reads_fp_environment = true, .may_raise_fp_exceptions = true };
+    CheckBuiltinQueryResult inner;
+    check_builtin_query_one(table, &input, &inner);
+    argument = inner.action.value;
+    input.constant_p_runtime_effects = inner.runtime_effects;
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, result.runtime_value.integer == 1 && result.evaluated_operands == 1 &&
+        result.runtime_effects.reads_fp_environment && result.runtime_effects.may_raise_fp_exceptions,
+        "nested source-clean queries retain inner runtime FP work through a known outer answer");
+    input.constant_p_runtime_plan = CHECK_BUILTIN_QUERY_RUNTIME_SKIP;
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, result.runtime_effects.flags == 0 && result.runtime_effects.fault == CHECK_FAULT_NONE && result.runtime_effects.fault_node == 0 &&
+        !result.runtime_effects.reads_fp_environment && !result.runtime_effects.may_raise_fp_exceptions && result.evaluated_operands == 0 && result.runtime_value.flags == 0,
+        "an outer SKIP plan prunes nested runtime effects instead of evaluating its operand");
+    for (uint32_t supplied = 0; supplied < 4; supplied += 1)
+    {
+        input = (CheckBuiltinQueryAction){ .id = CBUILTIN_CONSTANT_P, .arguments = &argument, .argument_count = 1, .constant_p_context_sensitive = true,
+            .constant_p_source_proof = (supplied & 1) != 0 ? CHECK_BUILTIN_QUERY_PROOF_ONE : CHECK_BUILTIN_QUERY_PROOF_INFER,
+            .constant_p_runtime_plan = (supplied & 2) != 0 ? CHECK_BUILTIN_QUERY_RUNTIME_SKIP : CHECK_BUILTIN_QUERY_RUNTIME_INFER };
+        check_builtin_query_one(table, &input, &result);
+        check_builtin_query_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE &&
+            result.runtime_plan == (supplied == 3 ? CHECK_BUILTIN_QUERY_RUNTIME_SKIP : CHECK_BUILTIN_QUERY_RUNTIME_UNRESOLVED) &&
+            result.known == ((supplied & 1) != 0) &&
+            ((result.unsupported & BUSTER_CHECK_BUILTIN_QUERY_UNSUPPORTED_RUNTIME_PLAN) != 0) == (supplied != 3),
+            "context-sensitive queries require independent explicit source proof and runtime plan");
+    }
+    for (uint32_t invalid = 0; invalid < 9; invalid += 1)
+    {
+        input = (CheckBuiltinQueryAction){ .id = CBUILTIN_CONSTANT_P, .arguments = &argument, .argument_count = 1,
+            .constant_p_source_proof = CHECK_BUILTIN_QUERY_PROOF_ONE, .constant_p_runtime_plan = CHECK_BUILTIN_QUERY_RUNTIME_SKIP };
+        if (invalid == 0)
+        {
+            input.constant_p_source_proof = (CheckBuiltinQueryProof)UINT32_MAX;
+        }
+        else if (invalid == 1)
+        {
+            input.constant_p_runtime_plan = (CheckBuiltinQueryRuntimePlan)UINT32_MAX;
+        }
+        else if (invalid == 2)
+        {
+            input.constant_p_runtime_result = 2;
+        }
+        else if (invalid < 6)
+        {
+            input.constant_p_runtime_plan = invalid == 3 ? CHECK_BUILTIN_QUERY_RUNTIME_INFER :
+                invalid == 4 ? CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_DEFERRED : CHECK_BUILTIN_QUERY_RUNTIME_UNRESOLVED;
+            input.constant_p_runtime_result = 1;
+        }
+        else if (invalid == 6)
+        {
+            input.constant_p_runtime_effects.flags = BUSTER_CHECK_ICE;
+        }
+        else if (invalid == 7)
+        {
+            input.constant_p_runtime_effects.fault = (CheckFault)UINT32_MAX;
+        }
+        else
+        {
+            input.constant_p_runtime_effects.fault_node = 9;
+        }
+        check_builtin_query_one(table, &input, &result);
+        check_builtin_query_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE && result.runtime_value.constant_kind == CHECK_CONSTANT_NONE,
+            "invalid proof/plan enums, known bits and effect-summary shapes fail closed");
+    }
+    argument = (CheckValue){ .type = type_vector(table, BUSTER_TYPE_INT, 4, false), .category = CHECK_RVALUE };
+    input = (CheckBuiltinQueryAction){ .id = CBUILTIN_CONSTANT_P, .arguments = &argument, .argument_count = 1,
+        .constant_p_source_proof = CHECK_BUILTIN_QUERY_PROOF_ONE, .constant_p_runtime_plan = CHECK_BUILTIN_QUERY_RUNTIME_SKIP };
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE,
+        "an explicit ONE certificate cannot invent Clang source folding for an excluded vector type");
+    input.constant_p_source_proof = CHECK_BUILTIN_QUERY_PROOF_ZERO;
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_constant(&result, BUSTER_TYPE_INT, 0),
+        "an excluded constant_p folding type remains valid source with a ZERO proof");
+    CheckValue object_arguments[2] = { check_builtin_query_test_pointer(type_pointer(table, BUSTER_TYPE_CHAR), 3, 0), check_test_integer(BUSTER_TYPE_INT, 1) };
+    input = (CheckBuiltinQueryAction){ .id = CBUILTIN_OBJECT_SIZE, .arguments = object_arguments, .argument_count = 2 };
+    CheckBuiltinQueryResult object_before;
+    check_builtin_query_one(table, &input, &object_before);
+    input.constant_p_context_sensitive = true;
+    input.constant_p_source_proof = (CheckBuiltinQueryProof)UINT32_MAX;
+    input.constant_p_runtime_plan = (CheckBuiltinQueryRuntimePlan)UINT32_MAX;
+    input.constant_p_runtime_result = UINT8_MAX;
+    input.constant_p_runtime_effects = (CheckBuiltinQueryEffects){ .flags = UINT32_MAX, .fault_node = 99 };
+    check_builtin_query_one(table, &input, &result);
+    check_builtin_query_test_expect(test, check_builtin_query_test_equal(&object_before, &result) && result.source_proof == CHECK_BUILTIN_QUERY_PROOF_INFER &&
+        result.runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_INFER && result.unsupported == 0,
+        "constant_p-only metadata cannot change any object_size result or bound/sentinel semantics");
+}
+
 static void check_builtin_query_test_pages(CheckBuiltinQueryTest* test, TypeTable* table)
 {
     const long page_value = sysconf(_SC_PAGESIZE);
@@ -396,6 +565,7 @@ static void check_builtin_query_test_pages(CheckBuiltinQueryTest* test, TypeTabl
     }
     check_builtin_query_test_expect(test, ready, "guarded query action/result/argument slices allocated");
     const TypeId pointer = type_pointer(table, BUSTER_TYPE_CHAR);
+    check_builtin_query(NULL, NULL, NULL, 0);
     for (uint32_t count = 0; ready && count <= BUSTER_CHECK_BUILTIN_QUERY_TEST_BATCH; count += 1)
     {
         const uint32_t argument_count = count + count / 2;
@@ -426,6 +596,15 @@ static void check_builtin_query_test_pages(CheckBuiltinQueryTest* test, TypeTabl
                 .object_size_source_constant = { true, true, true, true },
                 .object_sizes = { 64, 8, 32, 4 },
             };
+            if (!object && i % 4 == 2)
+            {
+                const uint32_t variant = (i / 4) % 4;
+                actions[i].constant_p_context_sensitive = true;
+                actions[i].constant_p_source_proof = variant == 1 ? CHECK_BUILTIN_QUERY_PROOF_DEFERRED : CHECK_BUILTIN_QUERY_PROOF_ONE;
+                actions[i].constant_p_runtime_plan = variant == 0 ? CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN :
+                    variant == 1 ? CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_DEFERRED : variant == 2 ? CHECK_BUILTIN_QUERY_RUNTIME_INFER : CHECK_BUILTIN_QUERY_RUNTIME_SKIP;
+                actions[i].constant_p_runtime_effects = (CheckBuiltinQueryEffects){ .reads_fp_environment = true, .may_raise_fp_exceptions = true };
+            }
             check_builtin_query_one(table, actions + i, expected + i);
             cursor += object ? 2 : 1;
         }
@@ -454,6 +633,19 @@ static void check_builtin_query_test_pages(CheckBuiltinQueryTest* test, TypeTabl
     }
     if (ready)
     {
+        CheckValue* last_argument = (CheckValue*)argument_end - 1;
+        *last_argument = check_test_integer(BUSTER_TYPE_INT, 1);
+        CheckBuiltinQueryAction tail = { .id = CBUILTIN_CONSTANT_P, .arguments = last_argument, .argument_count = 1, .constant_p_context_sensitive = true,
+            .constant_p_source_proof = CHECK_BUILTIN_QUERY_PROOF_ONE, .constant_p_runtime_plan = CHECK_BUILTIN_QUERY_RUNTIME_EVALUATE_KNOWN,
+            .constant_p_runtime_result = 1, .constant_p_runtime_effects = { .reads_fp_environment = true, .may_raise_fp_exceptions = true } };
+        CheckBuiltinQueryResult tail_result;
+        check_builtin_query_one(table, &tail, &tail_result);
+        check_builtin_query_test_expect(test, tail_result.action.diagnostic == CHECK_DIAG_NONE && tail_result.evaluated_operands == 1 && tail_result.runtime_value.integer == 1 &&
+            tail_result.runtime_value.flags == BUSTER_CHECK_SIDE_EFFECT, "one explicit runtime operand ends exactly at a protected page");
+        tail.arguments = (const CheckValue*)argument_end;
+        tail.constant_p_source_proof = (CheckBuiltinQueryProof)UINT32_MAX;
+        check_builtin_query_one(table, &tail, &tail_result);
+        check_builtin_query_test_expect(test, tail_result.action.diagnostic == CHECK_DIAG_INVALID_TYPE, "malformed query proof is rejected before an inaccessible operand read");
         const CBuiltinId ids[] = { CBUILTIN_CONSTANT_P, CBUILTIN_OBJECT_SIZE };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ids); i += 1)
         {
@@ -512,9 +704,21 @@ static void check_builtin_query_test_clang(CheckBuiltinQueryTest* test, const ch
         { "char a[4]; int i; _Static_assert(__builtin_object_size((i++,a),0)==4, \"known despite effects\");\n", false },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p); }\n", true },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p,0,1); }\n", true },
+        { "_Static_assert(__clang_major__==23 && __clang_minor__==1 && __clang_patchlevel__==1,\"exact Clang23.1.1\");\n"
+          "#pragma STDC FENV_ACCESS ON\n"
+          "extern double call(void); extern double dynamic; extern int n;\n"
+          "_Static_assert(__builtin_constant_p(1.0/2.0)==1,\"source exact\");\n"
+          "_Static_assert(__builtin_constant_p(1.0/3.0)==1,\"source inexact\");\n"
+          "_Static_assert(__builtin_constant_p(1?1.0/3.0:call())==1,\"fold before syntactic call\");\n"
+          "_Static_assert(__builtin_constant_p(1?7:n++)==1,\"fold before unchosen increment\");\n"
+          "_Static_assert(__builtin_constant_p(__builtin_constant_p(1.0/3.0))==1,\"nested source proof\");\n"
+          "_Static_assert(__builtin_constant_p((n++,1.0/3.0))==0,\"chosen increment\");\n"
+          "_Static_assert(__builtin_constant_p(call())==0,\"source call\");\n"
+          "_Static_assert(__builtin_constant_p(dynamic+1.0/3.0)==0,\"source dynamic\");\n", false },
     };
     char directory[] = "/tmp/buster-check-builtin-query-XXXXXX";
-    bool ready = mkdtemp(directory) != NULL;
+    const bool created = mkdtemp(directory) != NULL;
+    bool ready = created;
     char paths[BUSTER_ARRAY_LENGTH(cases)][160];
     char* pointers[BUSTER_ARRAY_LENGTH(cases)];
     ParseTestClang results[BUSTER_ARRAY_LENGTH(cases)];
@@ -537,12 +741,15 @@ static void check_builtin_query_test_clang(CheckBuiltinQueryTest* test, const ch
         }
         check_builtin_query_test_expect(test, results[i].rejected == cases[i].rejected, "Clang agrees with original query source fixture");
     }
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    for (uint32_t i = 0; created && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
         unlink(paths[i]);
     }
-    rmdir(directory);
+    if (created)
+    {
+        rmdir(directory);
+    }
 }
 
 static int run_check_builtin_query_tests(int argc, char** argv)
@@ -573,6 +780,7 @@ static int run_check_builtin_query_tests(int argc, char** argv)
         {
             check_builtin_query_test_values(&test, &types.table);
             check_builtin_query_test_constraints(&test, &types.table);
+            check_builtin_query_test_plans(&test, &types.table);
             check_builtin_query_test_pages(&test, &types.table);
         }
         check_test_types_close(&types);
