@@ -71,6 +71,21 @@ the bit-operation and overflow families; invalid rows do not require a scalar
 fallback. Every load and store has a bounded tail mask. The scalar action remains
 callable independently, including for tiny batches and testing.
 
+Within the bit-operation family, a 32-entry table keeps the parameter-width
+shift and operation flags together. One `vpermi2d` classifies the eight rows,
+replacing repeated width comparisons and operation-range tests. The input IDs
+are widened to qwords already, so each high dword selects the zero descriptor
+at index zero; the result has one complete descriptor per qword without another
+conversion. The permute uses only five index bits. Every operation still uses
+the supported-family mask computed from the full ID, so unsupported IDs that
+alias a valid descriptor remain unsupported.
+
+This is a fixed 128-byte lookup table, not another per-row representation. The
+input columns, output columns and producer's IDs are unchanged; no sorting,
+allocation, copying or extra pass is added. Any legal partition of the rows,
+including a partial flush before the next eight-row batch, produces identical
+results in original order.
+
 ## Integration still required
 
 The checker must own argument count/type checking, constant-expression rules,
@@ -111,6 +126,12 @@ rows, invalid descriptors and undefined inputs. Guard pages follow every
 column for counts 0 through 33, and follow every recognized name. Compile-time
 assertions also exercise Clang's folding of fixed bit-operation fixtures.
 These are action-level comparisons, not C programs compiled by Buster.
+
+The descriptor-lookup regressions put invalid IDs with every low five-bit
+index beside valid operations, at every lane position, and compare all outputs
+with Clang's oracle. Partition checks split the same mixed rows into batches
+of 1 through 17 across counts around the vector boundaries and a 257-row input;
+they require the scalar result and unchanged memory beyond the logical output.
 
 `./build/compiler benchmark-builtins [--only scalar|vector]
 [--after-scalar MS]` times 16,384-row bit, overflow, and mixed batches, including
@@ -173,6 +194,61 @@ The required [PR 9700X workflow](https://github.com/buster14a/buster/actions/run
 passed on this head, including the existing compiler suite and the new builtin
 tests. These receipts establish the integer actions' validation; the source
 language and selector acceptance listed above remains outstanding.
+
+### Descriptor lookup: cloud measurements, October 23, 2026 (#301)
+
+The descriptor change was compared with `c_builtin.c` from
+`1f1e116ad358bed8d5a97824b916908d7cb44e96` using the existing
+`c_builtin_benchmark.c` through a standalone entry point that calls
+`run_builtin_benchmark`. Both binaries used Ubuntu Clang 18.1.3 with
+`-O3 -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall
+-Werror -g`, on a cloud AMD EPYC 9V74, pinned to CPU 4. Adding the full
+compiler build's `-mmwaitx -Wno-bitwise-instead-of-logical` switches produced
+byte-identical `.text` sections for both binaries. This host is not the 9700X;
+these measurements qualify the change for target-host measurement and do not
+replace it or measure complete C compilation.
+
+Three independently started processes of each binary ran each configuration,
+alternating baseline and candidate. Every process held the common experiment
+lock for its own run. Each reports the existing benchmark's 21 calibrated
+samples over 16,384 rows, including complete result stores and scalar-output
+comparison. The [18 original process logs](measurements/simd-301-2026-10-23/builtins.txt)
+and [standalone benchmark entry point](measurements/simd-301-2026-10-23/builtin-benchmark.c)
+are checked in with the measurement record. The table gives the median of the
+three process medians in ns/row, with their minimum and maximum in brackets:
+
+| Workload | State | Before | Descriptor lookup |
+| --- | --- | ---: | ---: |
+| Bit operations | interleaved | 1.452 [1.432, 1.496] | 1.086 [1.062, 1.096] |
+| Bit operations | vector alone | 1.414 [1.412, 1.448] | 1.074 [1.050, 1.101] |
+| Bit operations | after 100 ms scalar | 1.438 [1.412, 1.529] | 1.109 [1.066, 1.154] |
+| Overflow | interleaved | 2.847 [2.843, 2.873] | 2.923 [2.856, 2.932] |
+| Overflow | vector alone | 2.813 [2.811, 2.857] | 2.880 [2.808, 3.100] |
+| Overflow | after 100 ms scalar | 2.951 [2.773, 3.013] | 2.834 [2.774, 2.861] |
+| Mixed | interleaved | 2.388 [2.331, 2.440] | 2.090 [2.060, 2.101] |
+| Mixed | vector alone | 2.398 [2.369, 2.459] | 2.069 [2.062, 2.155] |
+| Mixed | after 100 ms scalar | 2.363 [2.362, 2.422] | 2.094 [2.049, 2.129] |
+
+The bit-operation time falls by 23–25%, and the mixed time by 11–14%.
+Overflow does not use the descriptor lookup; its ranges overlap and no
+improvement is claimed. Small-count checks over 64 independent calls at batch
+counts 1, 7, 8, 9 and 16 also compare complete outputs with the scalar twin.
+Across three processes, their median throughput ratios are 1.31–1.46 for bit
+operations and 1.08–1.31 for mixed valid/invalid rows. Overflow remains near
+parity, with overlapping process ranges at the two counts whose medians were
+about 3% slower. The [six small-count process logs](measurements/simd-301-2026-10-23/builtin-tiny.txt)
+and their [standalone harness](measurements/simd-301-2026-10-23/builtin-tiny.c)
+retain the tested workload and calibration. Both standalone harnesses select
+the baseline or candidate source through `-I<checkout>/src`. No tiny-batch
+dispatch threshold was introduced.
+
+The standalone optimized `cbuiltin_fold` shrinks from 1,417 to 1,307 bytes.
+Its assembly has the intended `vpermi2d`, with no gathers, scatters or vector
+spills. Both binaries retain the same two scalar input-pointer spill/reload
+slots in the overflow branch; the bit-operation branch has none. The original
+guarded-tail, 221,184 boundary-row and 1,019,519
+generated-row tests pass, together with 8,224 alias-index oracle rows and
+the partition checks. The scalar implementation is unchanged.
 
 ## Behavioral references and provenance
 

@@ -24,6 +24,8 @@
 // the cache of a run on one lane, and counts the files the walk prepared that no unit entered, with their tokens and
 // bytes, and the largest of them. Run it under the 9700X's lock without taskset: it pins its lanes itself. The exit
 // status is 1 if the arguments are invalid or a run fails.
+// The command starts one fixed lane team before its warm-ups and reuses it for every run, including the final
+// single-lane cache. As before, the reported run starts inside the entry after its warm-up sync, excluding startup.
 //
 // Layout: the clock, a run (files_benchmark_lane, files_benchmark_run), the unused files (files_benchmark_unused), and
 // run_files_benchmark.
@@ -466,14 +468,29 @@ int run_files_benchmark(int argc, char** argv)
     static FilesBenchmarkSample samples[BUSTER_FILES_BENCHMARK_MAX_RUNS];
     static uint64_t values[BUSTER_FILES_BENCHMARK_MAX_RUNS];
     bool result = valid;
+    uint32_t capacity = 1;
+    for (uint32_t l = 0; valid && l < lane_count; l += 1)
+    {
+        capacity = lanes[l] > capacity ? lanes[l] : capacity;
+    }
+    LaneTeam team = { 0 };
+    if (result)
+    {
+        result = lane_team_start(&team, capacity, cpus);
+        if (!result)
+        {
+            fprintf(stderr, "benchmark-files: can't start or pin the command's %u lanes\n", capacity);
+        }
+    }
     if (result)
     {
         printf("benchmark-files: %u roots%s, %u runs per lane count, lanes on CPUs", sources.count, flat ? " (flat: their includes not followed)" : "", runs);
-        for (uint32_t c = 0; c < cpu_count && c < lanes[lane_count - 1]; c += 1)
+        for (uint32_t c = 0; c < capacity; c += 1)
         {
             printf(" %u", cpus[c]);
         }
         printf(", %u ms of spinning before each run\n", spin);
+        printf("one command team, reused across runs; run times exclude thread startup and shutdown\n");
         printf("lanes  run ms  speedup  roots ms  Mtokens/s  prepare  lookup  exchange  add  rewrite  requests  search  alone   wait  (ms, most of a lane)  busy\n");
     }
     double first_run = 0.0;
@@ -543,6 +560,7 @@ int run_files_benchmark(int argc, char** argv)
         file_cache_release(&cache);
         intern_release(&table);
     }
+    lane_team_stop(&team);
     arena_release(&arena);
     arena_release(&sources.arena);
     free(passed);
