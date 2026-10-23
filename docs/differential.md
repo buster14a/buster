@@ -52,6 +52,11 @@ one program per generator. `--tiers 0` explicitly selects an early Tier 0-only
 campaign; its records contain zero Tier 1 passes. Seed 0 is rejected because
 YARPGen treats it as a request for a random seed. Seed-range overflow, unknown
 options, missing values and excessive argument counts are rejected.
+The saved per-case configuration must occupy less than 128 KiB, including its
+format header, arguments and NUL terminators. The same serializer checks this
+limit before tools run and before a case is saved, so every saved configuration
+fits the replay reader. Resolved tool paths and the largest requested seed are
+included in that check.
 
 `--buster-arg ARG`, `--clang-arg ARG`, `--tier0-arg ARG`, `--tier1-arg ARG`,
 `--csmith-arg ARG` and `--yarpgen-arg ARG` are repeatable. Each occurrence adds
@@ -122,7 +127,8 @@ not overwrite one another. Each case is named by generator and seed and retains:
   content fingerprints. Fingerprints detect accidental changes; they are not
   cryptographic authentication.
 - `replay.args`: a versioned, bounded, NUL-separated copy of the configuration,
-  including every custom argument. It is data, not a shell script.
+  including the exact bytes of every custom argument. It is data, not a shell
+  script.
 - One JSON command record per version probe, generation, compilation and
   execution: exact argument array and working directory, limits, outcome,
   exit code/signal/error, elapsed milliseconds, observed capture sizes,
@@ -141,6 +147,13 @@ runtime/header installation with the results; its contents are not vendored or
 copied into the repository by the harness. Environment-dependent tool behavior
 must be controlled by the campaign operator; the tool records do not claim to
 capture an entire machine image or a complete environment.
+
+JSON text preserves valid UTF-8. Each invalid UTF-8 byte is displayed as U+FFFD
+so the document remains valid Unicode. Command records also contain `cwd_hex`
+and `argv_hex`: lowercase hexadecimal encodings of the original directory and
+argument bytes, without terminating NULs. Use those fields or `replay.args` when
+exact bytes matter; a displayed replacement character cannot reconstruct an
+invalid filename or argument.
 
 Sources are passed directly to all compilers in C11 mode. Standard output is
 compared byte-for-byte at its complete length; prefix equality after truncation
@@ -232,6 +245,13 @@ failure signature distinguishes tool/mode/stage and failure class; inspect the
 recorded numeric exit/signal and diagnostics before accepting a reduction.
 Generator failures cannot be reduced by replaying C input.
 
+Only recorded Buster compile/run failures or output mismatches are accepted as
+original reducer targets. Oracle, generator, artifact, system-error and
+interruption failures are refused before tools run. A retained trial marked
+`reduction:reference-rejected` is also refused, even when a later trial has that
+same signature. Successful reference validation is an independent requirement
+for interestingness and is recorded as `reference_accepted` on reducer cases.
+
 Before committing a regression, inspect its C semantics, reduce it to the
 essential behavior, record the expected output, and establish its rights and
 required notices. Retain the original seed/options/tool revisions and the
@@ -259,12 +279,15 @@ signal, timeout, missing compiler output, empty output, capture truncation,
 detached descendants, interruption, executable lookup failure, literal argv,
 fresh artifact directories, multifile generation, replay/candidate selection,
 option limits, missing tools, missing tier selection and compiler substitution.
+It also checks the saved-configuration size boundary and exact byte round trip,
+Unicode command records, and refusal of rejected reference runs as reducer targets.
 Its artifacts always state `fixture=true` and zero compiler campaign passes.
 Run it from the repository root, or supply `--fixture-source PATH`; `--clang`
 selects the fixture-building compiler. Its temporary evidence is retained and
-the command prints the directory.
-Set `TMPDIR` to on-disk workspace storage for local diagnostics; the fixture
-directory honors it and otherwise uses the system temporary directory.
+the command prints the directory. `TMPDIR` selects an existing writable directory
+(default `/tmp`); relative values are resolved from the caller's working directory
+before creating the fixture workspace. Child tools inherit that absolute `TMPDIR`,
+and all tool and artifact paths are absolute.
 
 The pinned real generators were also invoked through the new harness with
 seed 138, producing the expected source files and recording versions/options.

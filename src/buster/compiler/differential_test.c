@@ -47,7 +47,7 @@ static DifferentialOptions differential_test_options(const char* output, const c
     differential_add(arguments, "--scenario");
     differential_add(arguments, scenario);
     // This is one argv entry. A shell implementation would expand or split it; the manifest must retain it literally.
-    differential_add(arguments, "literal space ' quote \" dollar $() ; *");
+    differential_add(arguments, "literal space ' quote \" dollar $() ; * utf8 \xc3\xa9 byte \xff");
     return options;
 }
 
@@ -65,6 +65,10 @@ static void differential_test_processes(DifferentialTests* tests, const char* di
         differential_test_check(tests, result.kind == kinds[i], labels[i]);
         differential_test_check(tests, result.cleanup_complete, "subreaper reaped complete process tree");
         differential_test_check(tests, result.elapsed_ms < 2000, "process deadline bounded");
+        if (i == 0)
+        {
+            differential_test_check(tests, differential_contains(directory, "process-tree.json", "\"argv_hex\":[") && differential_contains(directory, "process-tree.json", "\"2d2d74726565\"") && differential_contains(directory, "process-tree.json", "\"cwd_hex\":"), "command records retain exact argv and working-directory bytes");
+        }
         if (i < 2)
         {
             char path[PATH_MAX];
@@ -183,6 +187,7 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
     char first_directory[PATH_MAX] = {0};
     char passing_case[PATH_MAX] = {0};
     char failing_case[PATH_MAX] = {0};
+    char execution_failure[PATH_MAX] = {0};
     for (unsigned i = 0; i < sizeof(scenarios) / sizeof(scenarios[0]); ++i)
     {
         DifferentialOptions options = differential_test_options(directory, fixture, scenarios[i], 0);
@@ -193,6 +198,8 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
         differential_test_check(tests, strcmp(summary.signature, signatures[i]) == 0, "failure class retained");
         differential_test_check(tests, differential_contains(summary.directory, "summary.json", "\"campaign_passed\":0"), "fixtures cannot become compiler evidence");
         differential_test_check(tests, differential_contains(summary.last_case, "generate.json", "literal space ' quote \\\" dollar $() ; *"), "argv quoting preserved");
+        differential_test_check(tests, differential_contains(summary.last_case, "generate.json", "utf8 \xc3\xa9 byte \\ufffd"), "executed Unicode arguments remain valid JSON text");
+        differential_test_check(tests, differential_contains(summary.last_case, "generate.json", "7574663820c3a9206279746520ff\""), "executed invalid argument bytes retained in hex");
         differential_test_check(tests, differential_contains(summary.last_case, "result.json", "\"fixture\":true"), "case artifact labelled as fixture");
         if (i == 0)
         {
@@ -202,6 +209,10 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
         if (i == 1)
         {
             snprintf(failing_case, sizeof(failing_case), "%s", summary.last_case);
+        }
+        if (strcmp(scenarios[i], "run-error") == 0)
+        {
+            snprintf(execution_failure, sizeof(execution_failure), "%s", summary.last_case);
         }
         if (i == 0 || i == 1)
         {
@@ -220,6 +231,12 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
                 const int replay_result = differential_campaign(&replay, &replayed);
                 differential_test_check(tests, replay_result == result && strcmp(replayed.signature, summary.signature) == 0, "replay preserves pass/failure without generation");
                 differential_test_check(tests, replayed.generated == 1, "replay retained source input");
+                if (replay.interesting)
+                {
+                    differential_test_check(tests, replayed.reference_accepted && differential_interesting_result(replay_result, &replayed, summary.signature), "matching Buster failure with accepted references is interesting");
+                    replayed.reference_accepted = false;
+                    differential_test_check(tests, !differential_interesting_result(replay_result, &replayed, summary.signature), "matching Buster signature alone cannot bypass reference validation");
+                }
             }
             free(storage);
         }
@@ -273,6 +290,18 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
         candidate.output = directory;
         DifferentialSummary reduced = {0};
         differential_test_check(tests, differential_campaign(&candidate, &reduced) == 0 && reduced.signature[0] == 0, "reduction reads candidate sources from supplied directory");
+        // Make the fixture reference modes fail too. A retained reference rejection must never become a reducer target.
+        candidate.source_directory = execution_failure;
+        differential_add(&candidate.clang_args, "--fixture-buster");
+        differential_add(&candidate.clang_args, "--fixture-tier1");
+        DifferentialSummary rejected = {0};
+        const int rejected_result = differential_campaign(&candidate, &rejected);
+        differential_test_check(tests, rejected_result == 1 && !rejected.reference_accepted && strcmp(rejected.signature, "reduction:reference-rejected") == 0, "failed references reject reduction");
+        differential_test_check(tests, !differential_interesting_result(rejected_result, &rejected, rejected.signature), "matching reference rejection is never interesting");
+        char refused_output[PATH_MAX];
+        const bool refused_path = differential_path(refused_output, sizeof(refused_output), directory, "refused-reduction-output");
+        char* arguments[] = {"--interesting", rejected.last_case, "--output", refused_output};
+        differential_test_check(tests, refused_path && run_differential_command(4, arguments) == 1 && access(refused_output, F_OK) < 0 && errno == ENOENT, "rejected original refused before creating a campaign");
     }
     free(storage);
 }
@@ -306,6 +335,121 @@ static void differential_test_parsing(DifferentialTests* tests)
         valid = differential_add(&arguments, "argument") && valid;
     }
     differential_test_check(tests, valid && !differential_add(&arguments, "overflow") && arguments.values[arguments.count] == 0, "argv capacity and terminator");
+    const char* const failures[] =
+    {
+        "buster-tier0:mismatch",
+        "buster-tier1-compile:no-executable",
+        "buster-tier1-run:signal",
+        "buster-tier0-compile:timeout",
+        "reduction:reference-rejected",
+        "clang-o2:mismatch",
+        "generate:signal",
+        "artifact:result-write",
+        "buster-tier1-run:system-error",
+        "buster-tier1-run:interrupted",
+        "buster-tier1-run:signal:extra",
+        "buster-tier10:mismatch",
+        "",
+    };
+    for (unsigned i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i)
+    {
+        differential_test_check(tests, differential_buster_failure(failures[i]) == (i < 4), "reducer originals restricted to Buster failure classes");
+    }
+}
+
+static void differential_test_json(DifferentialTests* tests)
+{
+    static const char* const inputs[] =
+    {
+        "quote\" slash\\ line\n",
+        "\xc3\xa9/\xe2\x82\xac/\xf0\x9f\x98\x80",
+        "\xc2\x80\xdf\xbf\xe0\xa0\x80\xed\x9f\xbf\xee\x80\x80\xf4\x8f\xbf\xbf",
+        "\xc0\x80",
+        "\xed\xa0\x80",
+        "\xf4\x90\x80\x80",
+        "\xf0\x9f\x92",
+        "\xff",
+        "\xc2",
+    };
+    static const char* const expected[] =
+    {
+        "\"quote\\\" slash\\\\ line\\u000a\"",
+        "\"\xc3\xa9/\xe2\x82\xac/\xf0\x9f\x98\x80\"",
+        "\"\xc2\x80\xdf\xbf\xe0\xa0\x80\xed\x9f\xbf\xee\x80\x80\xf4\x8f\xbf\xbf\"",
+        "\"\\ufffd\\ufffd\"",
+        "\"\\ufffd\\ufffd\\ufffd\"",
+        "\"\\ufffd\\ufffd\\ufffd\\ufffd\"",
+        "\"\\ufffd\\ufffd\\ufffd\"",
+        "\"\\ufffd\"",
+        "\"\\ufffd\"",
+    };
+    for (unsigned i = 0; i < sizeof(inputs) / sizeof(inputs[0]); ++i)
+    {
+        char* text = 0;
+        size_t size = 0;
+        FILE* file = open_memstream(&text, &size);
+        bool valid = file && differential_json_string(file, inputs[i]);
+        if (file)
+        {
+            valid = fclose(file) == 0 && valid;
+        }
+        differential_test_check(tests, valid && size == strlen(expected[i]) && memcmp(text, expected[i], size) == 0, "JSON preserves UTF-8 and explicitly replaces invalid bytes");
+        free(text);
+    }
+    char* text = 0;
+    size_t size = 0;
+    FILE* file = open_memstream(&text, &size);
+    bool valid = file && differential_json_hex(file, "\xc3\xa9\xff\\\n");
+    if (file)
+    {
+        valid = fclose(file) == 0 && valid;
+    }
+    differential_test_check(tests, valid && strcmp(text, "\"c3a9ff5c0a\"") == 0, "command byte encoding preserves invalid and escaped bytes");
+    free(text);
+}
+
+static void differential_test_config(DifferentialTests* tests, const char* directory, const char* fixture)
+{
+    char* argument = malloc(BUSTER_DIFFERENTIAL_CONFIG_BYTES);
+    char* storage = malloc(BUSTER_DIFFERENTIAL_CONFIG_BYTES);
+    bool valid = argument && storage;
+    differential_test_check(tests, valid, "allocate boundary configuration");
+    if (valid)
+    {
+        argument[0] = 0;
+        DifferentialOptions options = differential_test_options(directory, fixture, "pass", 0);
+        options.seed = UINT64_MAX;
+        differential_add(&options.buster_args, argument);
+        size_t size = 0;
+        valid = differential_config_contents(0, &options, 0, options.seed, &size) && size + 4 < BUSTER_DIFFERENTIAL_CONFIG_BYTES;
+        differential_test_check(tests, valid, "measure exact serialized configuration");
+        if (valid)
+        {
+            const size_t length = BUSTER_DIFFERENTIAL_CONFIG_BYTES - size - 1;
+            memset(argument, 'x', length + 1);
+            memcpy(argument, "\xc3\xa9\xff", 3);
+            argument[length] = 0;
+            char boundary[PATH_MAX];
+            valid = differential_path(boundary, sizeof(boundary), directory, "config-boundary") && mkdir(boundary, 0700) == 0;
+            valid = valid && differential_config_contents(0, &options, 0, options.seed, &size) && size == BUSTER_DIFFERENTIAL_CONFIG_BYTES - 1 && differential_config_valid(&options) && differential_save_config(boundary, &options, 0, options.seed);
+            DifferentialOptions loaded = differential_defaults();
+            valid = valid && differential_load_config(boundary, storage, BUSTER_DIFFERENTIAL_CONFIG_BYTES, &loaded);
+            differential_test_check(tests, valid && loaded.seed == UINT64_MAX && loaded.buster_args.count == 2 && strcmp(loaded.buster_args.values[1], argument) == 0, "maximum-size configuration round trips exact argument bytes");
+            argument[length] = 'x';
+            argument[length + 1] = 0;
+            char rejected[PATH_MAX];
+            char config[PATH_MAX];
+            const bool created = differential_path(rejected, sizeof(rejected), directory, "config-too-large") && mkdir(rejected, 0700) == 0 && differential_path(config, sizeof(config), rejected, "replay.args");
+            differential_test_check(tests, created && !differential_config_valid(&options) && !differential_save_config(rejected, &options, 0, options.seed) && access(config, F_OK) < 0 && errno == ENOENT, "oversized configuration rejected before saving an unreplayable case");
+            DifferentialSummary refused = {0};
+            const int result = differential_campaign(&options, &refused);
+            differential_test_check(tests, result == 2 && refused.generated == 0 && refused.failed == 0 && strcmp(refused.signature, "unavailable:configuration-too-large") == 0, "oversized configuration cannot start a compiler campaign");
+            char version[PATH_MAX];
+            differential_test_check(tests, differential_path(version, sizeof(version), refused.directory, "version-buster.stdout") && access(version, F_OK) < 0 && errno == ENOENT, "size rejection occurs before invoking tools");
+        }
+    }
+    free(storage);
+    free(argument);
 }
 
 static int run_differential_tests(int argc, char** argv)
@@ -328,16 +472,21 @@ static int run_differential_tests(int argc, char** argv)
             valid = false;
         }
     }
-    char directory[PATH_MAX];
+    char directory[PATH_MAX] = {0};
     const char* temporary = getenv("TMPDIR");
     if (!temporary || !*temporary)
     {
         temporary = "/tmp";
     }
+    char temporary_directory[PATH_MAX];
+    struct stat temporary_metadata;
     char compiler[PATH_MAX];
     char fixture_source[PATH_MAX];
     char fixture[PATH_MAX];
-    valid = valid && differential_path(directory, sizeof(directory), temporary, "buster differential '$;-XXXXXX") && differential_resolve(clang, compiler) && realpath(source, fixture_source) != 0 && mkdtemp(directory) != 0 && differential_path(fixture, sizeof(fixture), directory, "fixture tool '$;.exe");
+    valid = valid && realpath(temporary, temporary_directory) != 0 && stat(temporary_directory, &temporary_metadata) == 0 && S_ISDIR(temporary_metadata.st_mode) && access(temporary_directory, W_OK | X_OK) == 0;
+    // Child tools change working directory; their own temporary-file lookup needs the same absolute base.
+    valid = valid && setenv("TMPDIR", temporary_directory, 1) == 0;
+    valid = valid && differential_path(directory, sizeof(directory), temporary_directory, "buster differential '$;-XXXXXX") && differential_resolve(clang, compiler) && realpath(source, fixture_source) != 0 && mkdtemp(directory) != 0 && differential_path(fixture, sizeof(fixture), directory, "fixture tool '$;.exe");
     DifferentialTests tests = {0};
     if (valid)
     {
@@ -359,12 +508,14 @@ static int run_differential_tests(int argc, char** argv)
     if (valid)
     {
         differential_test_parsing(&tests);
+        differential_test_json(&tests);
+        differential_test_config(&tests, directory, fixture);
         differential_test_processes(&tests, directory, fixture);
         differential_test_campaigns(&tests, directory, fixture);
     }
     else
     {
-        fprintf(stderr, "test-differential-harness requires clang and tests/differential/tool.c; [--clang PATH] [--fixture-source PATH]\n");
+        fprintf(stderr, "test-differential-harness requires clang, tests/differential/tool.c and an existing writable TMPDIR (default /tmp); [--clang PATH] [--fixture-source PATH]\n");
     }
     fprintf(stderr, "differential harness: %llu checks, %llu failures; compiler campaigns=0; artifacts=%s\n", (unsigned long long)tests.checks, (unsigned long long)tests.failures, directory);
     const int result = valid ? tests.failures ? 1 : 0 : 2;

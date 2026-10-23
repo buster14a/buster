@@ -102,6 +102,7 @@ struct DifferentialSummary
     uint64_t passed_by_generator[2];
     uint64_t failed_by_generator[2];
     bool unavailable;
+    bool reference_accepted;
 };
 
 static volatile sig_atomic_t differential_stop_signal;
@@ -195,23 +196,68 @@ static bool differential_append(DifferentialArguments* arguments, const Differen
     return valid;
 }
 
+static unsigned differential_utf8_width(const unsigned char* bytes)
+{
+    unsigned width = bytes[0] >= 0xc2 && bytes[0] <= 0xdf ? 2 : bytes[0] >= 0xe0 && bytes[0] <= 0xef ? 3 : bytes[0] >= 0xf0 && bytes[0] <= 0xf4 ? 4 : 0;
+    uint32_t value = width ? bytes[0] & (0x7fu >> width) : 0;
+    bool valid = width != 0;
+    for (unsigned i = 1; valid && i < width; ++i)
+    {
+        // A zero byte ends the string, so no later continuation byte may be read after one fails this check.
+        valid = (bytes[i] & 0xc0) == 0x80;
+        value = (value << 6) | (bytes[i] & 0x3f);
+    }
+    const uint32_t minimum = width == 2 ? 0x80 : width == 3 ? 0x800 : 0x10000;
+    valid = valid && value >= minimum && value <= 0x10ffff && (value < 0xd800 || value > 0xdfff);
+    width = valid ? width : 0;
+    return width;
+}
+
 static bool differential_json_string(FILE* file, const char* string)
 {
     bool valid = fputc('"', file) != EOF;
-    for (const unsigned char* cursor = (const unsigned char*)string; valid && *cursor; ++cursor)
+    for (const unsigned char* cursor = (const unsigned char*)string; valid && *cursor;)
     {
+        unsigned width = 1;
         if (*cursor == '"' || *cursor == '\\')
         {
             valid = fputc('\\', file) != EOF && fputc(*cursor, file) != EOF;
         }
-        else if (*cursor < 32 || *cursor >= 127)
+        else if (*cursor < 32 || *cursor == 127)
         {
             valid = fprintf(file, "\\u%04x", *cursor) > 0;
+        }
+        else if (*cursor >= 128)
+        {
+            const unsigned encoded = differential_utf8_width(cursor);
+            if (encoded)
+            {
+                width = encoded;
+                valid = fwrite(cursor, 1, width, file) == width;
+            }
+            else
+            {
+                // JSON text remains valid Unicode. Command hex fields and replay.args preserve the original byte.
+                valid = fputs("\\ufffd", file) >= 0;
+            }
         }
         else
         {
             valid = fputc(*cursor, file) != EOF;
         }
+        cursor += width;
+    }
+    valid = fputc('"', file) != EOF && valid;
+    return valid;
+}
+
+static bool differential_json_hex(FILE* file, const char* string)
+{
+    static const char digits[] = "0123456789abcdef";
+    bool valid = fputc('"', file) != EOF;
+    for (const unsigned char* cursor = (const unsigned char*)string; valid && *cursor; ++cursor)
+    {
+        valid = fputc(digits[*cursor >> 4], file) != EOF && fputc(digits[*cursor & 15], file) != EOF;
     }
     valid = fputc('"', file) != EOF && valid;
     return valid;
@@ -580,6 +626,11 @@ static DifferentialProcess differential_process(const char* directory, const cha
         {
             recorded = (i == 0 || fputc(',', file) != EOF) && differential_json_string(file, arguments->values[i]) && recorded;
         }
+        recorded = fputs("],\"cwd_hex\":", file) >= 0 && differential_json_hex(file, directory) && fputs(",\"argv_hex\":[", file) >= 0 && recorded;
+        for (uint32_t i = 0; i < arguments->count; ++i)
+        {
+            recorded = (i == 0 || fputc(',', file) != EOF) && differential_json_hex(file, arguments->values[i]) && recorded;
+        }
         recorded = fprintf(file, "],\"timeout_ms\":%u,\"stdout_limit\":%llu,\"stderr_limit\":%llu,\"file_limit\":%llu,\"status\":\"%s\",\"exit_code\":%d,\"signal\":%d,\"errno\":%d,\"elapsed_ms\":%llu,\"stdout_bytes\":%llu,\"stderr_bytes\":%llu,\"stdout_truncated\":%s,\"stderr_truncated\":%s,\"cleanup_complete\":%s}\n", timeout_ms, (unsigned long long)output_limit, (unsigned long long)diagnostic_limit, (unsigned long long)file_limit, differential_process_name(result.kind), result.exit_code, result.signal_number, result.error_number, (unsigned long long)result.elapsed_ms, (unsigned long long)result.output_bytes[0], (unsigned long long)result.output_bytes[1], result.truncated[0] ? "true" : "false", result.truncated[1] ? "true" : "false", result.cleanup_complete ? "true" : "false") > 0 && recorded;
         recorded = fclose(file) == 0 && recorded;
     }
@@ -916,50 +967,87 @@ static bool differential_options(int argc, char** argv, DifferentialOptions* opt
     return valid;
 }
 
-static bool differential_config_pair(FILE* file, const char* option, const char* value)
+static bool differential_config_token(FILE* file, size_t* size, const char* text, bool terminated)
 {
-    const bool valid = fwrite(option, 1, strlen(option) + 1, file) == strlen(option) + 1 && fwrite(value, 1, strlen(value) + 1, file) == strlen(value) + 1;
+    const size_t length = strlen(text) + terminated;
+    // The loader needs a byte beyond the serialized data to distinguish complete input from its size limit.
+    bool valid = length < BUSTER_DIFFERENTIAL_CONFIG_BYTES - *size;
+    if (valid)
+    {
+        *size += length;
+        valid = !file || fwrite(text, 1, length, file) == length;
+    }
+    return valid;
+}
+
+static bool differential_config_pair(FILE* file, size_t* size, const char* option, const char* value)
+{
+    const bool valid = differential_config_token(file, size, option, true) && differential_config_token(file, size, value, true);
+    return valid;
+}
+
+// A null file validates exactly the same bytes that saving writes, including all custom arguments and terminators.
+static bool differential_config_contents(FILE* file, const DifferentialOptions* options, unsigned generator, uint64_t seed, size_t* size)
+{
+    *size = 0;
+    bool valid = differential_config_token(file, size, "BUSTER_DIFFERENTIAL_V1\n", false);
+    const char* const names[] = {"--buster", "--clang", "--csmith", "--yarpgen", "--csmith-include", "--revision", "--generator-revision"};
+    const char* const values[] = {options->buster, options->clang, options->csmith, options->yarpgen, options->csmith_include, options->revision, options->generator_revision};
+    for (unsigned i = 0; valid && i < sizeof(names) / sizeof(names[0]); ++i)
+    {
+        if (values[i])
+        {
+            valid = differential_config_pair(file, size, names[i], values[i]);
+        }
+    }
+    const char* const extra_names[] = {"--buster-arg", "--clang-arg", "--tier0-arg", "--tier1-arg", "--csmith-arg", "--yarpgen-arg"};
+    const DifferentialArguments* const extra[] = {&options->buster_args, &options->clang_args, &options->tier0_args, &options->tier1_args, &options->csmith_args, &options->yarpgen_args};
+    for (unsigned i = 0; valid && i < sizeof(extra) / sizeof(extra[0]); ++i)
+    {
+        for (uint32_t j = 0; valid && j < extra[i]->count; ++j)
+        {
+            valid = differential_config_pair(file, size, extra_names[i], extra[i]->values[j]);
+        }
+    }
+    const char* const numeric_names[] = {"--seed", "--timeout-ms", "--output-limit", "--source-limit"};
+    const uint64_t numeric_values[] = {seed, options->timeout_ms, options->output_limit, options->source_limit};
+    for (unsigned i = 0; valid && i < sizeof(numeric_values) / sizeof(numeric_values[0]); ++i)
+    {
+        char value[32];
+        snprintf(value, sizeof(value), "%llu", (unsigned long long)numeric_values[i]);
+        valid = differential_config_pair(file, size, numeric_names[i], value);
+    }
+    valid = valid && differential_config_pair(file, size, "--generator", generator == 0 ? "csmith" : "yarpgen") && differential_config_pair(file, size, "--tiers", options->tier1 ? "both" : "0");
+    if (valid && options->tier0_default)
+    {
+        valid = differential_config_token(file, size, "--tier0-default", true);
+    }
+    return valid;
+}
+
+static bool differential_config_valid(const DifferentialOptions* options)
+{
+    bool valid = options->count != 0 && options->count - 1 <= UINT64_MAX - options->seed;
+    for (unsigned generator = 0; valid && generator < 2; ++generator)
+    {
+        if (options->generator_mask & (1u << generator))
+        {
+            size_t size = 0;
+            valid = differential_config_contents(0, options, generator, options->seed + options->count - 1, &size);
+        }
+    }
     return valid;
 }
 
 static bool differential_save_config(const char* directory, const DifferentialOptions* options, unsigned generator, uint64_t seed)
 {
-    FILE* file = differential_new_file(directory, "replay.args");
-    bool valid = file != 0;
+    size_t size = 0;
+    bool valid = differential_config_contents(0, options, generator, seed, &size);
+    FILE* file = valid ? differential_new_file(directory, "replay.args") : 0;
+    valid = valid && file;
     if (file)
     {
-        valid = fputs("BUSTER_DIFFERENTIAL_V1\n", file) >= 0;
-        const char* const names[] = {"--buster", "--clang", "--csmith", "--yarpgen", "--csmith-include", "--revision", "--generator-revision"};
-        const char* const values[] = {options->buster, options->clang, options->csmith, options->yarpgen, options->csmith_include, options->revision, options->generator_revision};
-        for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
-        {
-            if (values[i])
-            {
-                valid = differential_config_pair(file, names[i], values[i]) && valid;
-            }
-        }
-        const char* const extra_names[] = {"--buster-arg", "--clang-arg", "--tier0-arg", "--tier1-arg", "--csmith-arg", "--yarpgen-arg"};
-        const DifferentialArguments* const extra[] = {&options->buster_args, &options->clang_args, &options->tier0_args, &options->tier1_args, &options->csmith_args, &options->yarpgen_args};
-        for (unsigned i = 0; i < sizeof(extra) / sizeof(extra[0]); ++i)
-        {
-            for (uint32_t j = 0; j < extra[i]->count; ++j)
-            {
-                valid = differential_config_pair(file, extra_names[i], extra[i]->values[j]) && valid;
-            }
-        }
-        const char* const numeric_names[] = {"--seed", "--timeout-ms", "--output-limit", "--source-limit"};
-        const uint64_t numeric_values[] = {seed, options->timeout_ms, options->output_limit, options->source_limit};
-        for (unsigned i = 0; i < sizeof(numeric_values) / sizeof(numeric_values[0]); ++i)
-        {
-            char value[32];
-            snprintf(value, sizeof(value), "%llu", (unsigned long long)numeric_values[i]);
-            valid = differential_config_pair(file, numeric_names[i], value) && valid;
-        }
-        valid = differential_config_pair(file, "--generator", generator == 0 ? "csmith" : "yarpgen") && differential_config_pair(file, "--tiers", options->tier1 ? "both" : "0") && valid;
-        if (options->tier0_default)
-        {
-            valid = fwrite("--tier0-default", 1, sizeof("--tier0-default"), file) == sizeof("--tier0-default") && valid;
-        }
+        valid = differential_config_contents(file, options, generator, seed, &size);
         valid = fclose(file) == 0 && valid;
     }
     return valid;
@@ -1078,7 +1166,39 @@ static void differential_failure(char signature[128], const char* label, const c
     }
 }
 
-static bool differential_compilers(const char* directory, const DifferentialOptions* options, unsigned generator, bool probe, char signature[128])
+static bool differential_buster_failure(const char* signature)
+{
+    static const char* const suffixes[] =
+    {
+        ":mismatch",
+        "-compile:exit",
+        "-compile:signal",
+        "-compile:timeout",
+        "-compile:output-limit",
+        "-compile:no-executable",
+        "-run:exit",
+        "-run:signal",
+        "-run:timeout",
+        "-run:output-limit",
+        "-run:empty-output",
+    };
+    const size_t prefix = sizeof("buster-tier0") - 1;
+    const bool buster = strncmp(signature, "buster-tier0", prefix) == 0 || strncmp(signature, "buster-tier1", prefix) == 0;
+    bool valid = false;
+    for (unsigned i = 0; buster && !valid && i < sizeof(suffixes) / sizeof(suffixes[0]); ++i)
+    {
+        valid = strcmp(signature + prefix, suffixes[i]) == 0;
+    }
+    return valid;
+}
+
+static bool differential_interesting_result(int result, const DifferentialSummary* summary, const char* previous_signature)
+{
+    const bool valid = result == 1 && summary->generated == 1 && summary->failed == 1 && summary->reference_accepted && differential_buster_failure(previous_signature) && strcmp(summary->signature, previous_signature) == 0;
+    return valid;
+}
+
+static bool differential_compilers(const char* directory, const DifferentialOptions* options, unsigned generator, bool probe, char signature[128], bool* references)
 {
     static const char* const modes[] = {"clang-o0", "clang-o2", "buster-tier0", "buster-tier1"};
     bool successful[4] = {false};
@@ -1128,6 +1248,10 @@ static bool differential_compilers(const char* directory, const DifferentialOpti
     for (unsigned mode = 0; mode < count; ++mode)
     {
         valid = successful[mode] && valid;
+    }
+    if (references)
+    {
+        *references = successful[0] && successful[1] && differential_equal_files(directory, "clang-o0-run.stdout", "clang-o2-run.stdout");
     }
     if (valid)
     {
@@ -1216,16 +1340,15 @@ static bool differential_case(const char* directory, const DifferentialOptions* 
     summary->generated += generated;
     summary->generated_by_generator[generator] += generated;
     valid = generated && valid;
+    bool references = false;
     if (valid && !options->generate_only)
     {
-        valid = differential_compilers(directory, options, generator, false, signature);
+        valid = differential_compilers(directory, options, generator, false, signature, &references);
     }
     // Reductions must keep the successful reference executions and their agreement. A second invalid candidate
     // that merely fails the same compiler is not interesting. UBSan is a useful filter, not a proof of defined C.
     if (options->interesting && signature[0])
     {
-        bool references = differential_equal_files(directory, "clang-o0-run.stdout", "clang-o2-run.stdout");
-        references = references && differential_contains(directory, "clang-o0-run.json", "\"status\":\"ok\"") && differential_contains(directory, "clang-o2-run.json", "\"status\":\"ok\"");
         char executable[PATH_MAX];
         DifferentialArguments arguments = {0};
         references = references && differential_path(executable, sizeof(executable), directory, "clang-ubsan.exe") && differential_compile_arguments(&arguments, options, 0, generator, executable, false, true);
@@ -1245,6 +1368,7 @@ static bool differential_case(const char* directory, const DifferentialOptions* 
         {
             snprintf(signature, sizeof(signature), "reduction:reference-rejected");
         }
+        summary->reference_accepted = references;
     }
     const bool passed = valid && !options->generate_only;
     const bool failed = !valid;
@@ -1261,7 +1385,7 @@ static bool differential_case(const char* directory, const DifferentialOptions* 
     bool recorded = file != 0 && recorded_signature;
     if (file)
     {
-        recorded = fprintf(file, "{\"status\":\"%s\",\"campaign_pass\":%s,\"fixture\":%s,\"tiers\":\"%s\",\"signature\":", failed ? "failed" : options->generate_only ? "generated-only" : "passed", passed && !options->fixture ? "true" : "false", options->fixture ? "true" : "false", options->tier1 ? "0,1" : "0") > 0 && differential_json_string(file, signature) && fputs("}\n", file) >= 0 && recorded;
+        recorded = fprintf(file, "{\"status\":\"%s\",\"campaign_pass\":%s,\"fixture\":%s,\"tiers\":\"%s\",\"reference_accepted\":%s,\"signature\":", failed ? "failed" : options->generate_only ? "generated-only" : "passed", passed && !options->fixture ? "true" : "false", options->fixture ? "true" : "false", options->tier1 ? "0,1" : "0", options->interesting && references ? "true" : "false") > 0 && differential_json_string(file, signature) && fputs("}\n", file) >= 0 && recorded;
         recorded = fclose(file) == 0 && recorded;
     }
     if (!recorded)
@@ -1436,6 +1560,11 @@ static int differential_campaign(const DifferentialOptions* configuration, Diffe
         available = available && stat(options.buster, &buster_metadata) == 0 && stat(options.clang, &clang_metadata) == 0;
         available = available && (options.fixture || buster_metadata.st_dev != clang_metadata.st_dev || buster_metadata.st_ino != clang_metadata.st_ino);
     }
+    if (available && !differential_config_valid(&options))
+    {
+        available = false;
+        snprintf(summary->signature, sizeof(summary->signature), "unavailable:configuration-too-large");
+    }
     if (available)
     {
         available = differential_provenance(summary->directory, &options);
@@ -1463,7 +1592,7 @@ static int differential_campaign(const DifferentialOptions* configuration, Diffe
         available = available && differential_text_file(probe, "probe.c", "#include <stdio.h>\nint main(void)\n{\n    puts(\"buster differential preflight\");\n    return 0;\n}\n");
         if (available)
         {
-            available = differential_compilers(probe, &options, 0, true, summary->signature);
+            available = differential_compilers(probe, &options, 0, true, summary->signature, 0);
         }
     }
     summary->unavailable = valid && (!available || options.generate_only);
@@ -1547,9 +1676,10 @@ static int run_differential_command(int argc, char** argv)
             if (file)
             {
                 const size_t length = fread(previous_signature, 1, sizeof(previous_signature) - 1, file);
-                valid = length > 0 && !ferror(file) && feof(file);
+                valid = length > 0 && !ferror(file) && feof(file) && memchr(previous_signature, 0, length) == 0;
                 previous_signature[length] = 0;
                 valid = fclose(file) == 0 && valid;
+                valid = valid && differential_buster_failure(previous_signature);
             }
         }
     }
@@ -1557,6 +1687,7 @@ static int run_differential_command(int argc, char** argv)
     {
         valid = false;
     }
+    valid = valid && differential_config_valid(&options);
     if (valid)
     {
         DifferentialSummary summary = {0};
@@ -1564,7 +1695,7 @@ static int run_differential_command(int argc, char** argv)
         fprintf(stderr, "differential: %s; generated=%llu passed=%llu failed=%llu tiers=%s artifacts=%s%s%s\n", result == 0 ? "passed" : result == 1 ? "failed" : "unavailable", (unsigned long long)summary.generated, (unsigned long long)summary.passed, (unsigned long long)summary.failed, options.tier1 ? "0,1" : "0", summary.directory, summary.signature[0] ? " reason=" : "", summary.signature);
         if (options.interesting)
         {
-            result = result == 1 && strcmp(summary.signature, previous_signature) == 0 ? 0 : 1;
+            result = differential_interesting_result(result, &summary, previous_signature) ? 0 : 1;
         }
     }
     else
