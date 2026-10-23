@@ -263,8 +263,8 @@ pointer and value expression must still execute once even when the helper
 does not inspect its numeric order.
 
 The producer must establish natural alignment at least `required_alignment`.
-Unknown or insufficient alignment, packed objects, wider objects and formats
-outside the selected helper need another real fallback. A helper must not make unaligned
+Unknown or insufficient alignment, wider objects and formats outside the
+selected helper need another real fallback. A helper must not make unaligned
 ordinary MOV appear atomic. The semantic result retains alignment evidence
 and unsupported requirements without turning valid source into fake success.
 
@@ -276,16 +276,18 @@ writes and explicit runtime format. Checking never reads or folds a source
 memory object. GNU pointer add/sub converts the delta to LP64 `ptrdiff_t`
 (`long`) and uses bytes without element-size scaling. Legacy pointer
 operations convert their fixed values to the pointer value type before raw
-address-bit operations. GNU `_BitInt` pointees are rejected; legacy
-power-of-two bit widths retain a distinct sub-byte representation gap.
+address-bit operations. GNU `_BitInt` pointees are rejected. Legacy `_BitInt`
+accepts power-of-two bit widths; widths below eight retain a distinct
+sub-byte representation gap.
 
 GNU calls require exact arity. Every fixed operand, including dynamic weak
-and order expressions, evaluates exactly once. Legacy protected-variable
-tails are checked for prior source diagnostics but never evaluated or passed
-to a helper; their effects and evaluation faults do not propagate. Known
-orders remain separate from source ICE witnesses after ordinary conversion.
-Only witnessed invalid orders acquire Clang's order warning; dynamic orders
-remain valid. Clang 23.1.1 also permits failure orders stronger than success.
+and order expressions, evaluates exactly once. The source producer retains
+prior diagnostics within legacy protected-variable tails. Those tails are
+never evaluated or passed to a helper; their effects and evaluation faults
+do not propagate. Known orders remain separate from source ICE witnesses
+after ordinary conversion. Only witnessed invalid orders acquire Clang's
+order warning; dynamic orders remain valid. Clang 23.1.1 also permits failure
+orders stronger than success.
 The consumer must retain all these evaluation and warning distinctions even
 when the machine implementation strengthens the ordering.
 
@@ -394,10 +396,9 @@ On the approved 9700X, through a separate shared-host lock for each command:
 The tests distinguish typed constraints and fold metadata from native execution
 of the emitted recipes. Scalar/vector agreement is supplemented with Clang's
 builtin behavior, boundary inputs, real destination writes and guarded-capacity
-checks. The CI workflow registers the new suites alongside the existing
-integer-action suite. Results and full source/two-tier acceptance must be
-reported for the exact tested revision; this document makes no throughput
-claim.
+checks. Command/workflow registration, results and full source/two-tier
+acceptance must be reported for the exact tested revision; this document
+makes no throughput claim.
 
 ## Provenance
 
