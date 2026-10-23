@@ -88,6 +88,12 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
 
+// Local promotion over a completed CFG: vector SSA construction, its nonrecursive scalar twin and semantic tests.
+#include "buster/compiler/ssa.c"
+#include "buster/compiler/ssa_program.c"
+#include "buster/compiler/ssa_test.c"
+#include "buster/compiler/ssa_benchmark.c"
+
 // The preprocessor's fuzz tooling (#109): the generator, the clang oracle, the comparison and the minimizer, and their
 // self-tests, for the test-preprocessor-fuzz command. test-preprocessor --fuzz runs the preprocessor against them
 // (c_preprocessor_fuzz.c).
@@ -275,7 +281,15 @@ static int main_command(int argc, char** argv, bool* found)
 {
     int result = 0;
     *found = true;
-    if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
+    if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa") == 0)
+    {
+        result = run_ssa_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ssa") == 0)
+    {
+        result = run_ssa_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
     {
         result = run_diagnostic_tests();
     }
