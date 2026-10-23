@@ -46,6 +46,10 @@ bodies for Tier 0 or IR lowering; an object producer maps them to checked
 initializers and link definitions. Discovery order never becomes emission
 order. Diagnostic checking is independent: default compilation still checks
 every body, as #155 requires.
+Checked inline-only bodies must also remain available to a future Tier 1
+inliner. If inlining introduces local emission dependencies, that producer
+must publish them; this out-of-line selection is not a list of checked bodies
+that may be discarded.
 
 ## Graph preparation and traversal
 
@@ -117,3 +121,30 @@ These measurements describe the planner, not backend lowering or a complete
 compiler. The required SQLite/libc/c-testsuite emission comparison and
 `main.c` counts and time saved require the source producer and downstream
 lowering path described above.
+
+## Existing source handoff and remaining integration
+
+The checker implementation from [PR #312](https://github.com/buster14a/buster/pull/312),
+inspected at `991f9ba756800c4b78b47bc983ae3ec7416000e4`, already has a real
+source-to-static-data path. `CheckInput` retains resolved declaration uses,
+stable object identities across redeclarations, types, linkage, static storage
+duration, definition/tentative flags and checked initializer nodes.
+`check_data_input` coalesces object definitions and initializers;
+`check_data_emit` produces link atoms and fixups. That path currently selects
+every static object definition, including block statics. Static storage
+duration alone does not make an object an emission root.
+
+An adapter must map those token-derived identities to dense definition IDs in
+source order and map the selected IDs back to the emitter's object records.
+Checked address constants already identify initializer targets. Supported
+typed body expressions also retain object references, but the graph does not
+yet publish their containing definition or the evaluated-emission dependencies.
+Persistent inline policy and retention/alias metadata, complete body dependency
+selection, and the function bridge to Tier 0 remain missing. Filtering objects
+while dropping those body references would be unsound.
+
+A separately scoped data-only adapter could accept successfully checked units
+with no function definitions and derive edges from checked address initializers.
+It would not establish #129's function/body or corpus acceptance. Wiring any
+selection into the active checker's data path requires coordination with its
+owner; this planner leaves that path unchanged.
