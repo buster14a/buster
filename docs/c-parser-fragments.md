@@ -91,15 +91,49 @@ are read iteratively through windows of at most 64 positions.
 Every record also has a separate cold identity column for this experiment.
 Its entries identify parser tokens; `ParseTokens.sources` maps them to
 expanded-token occurrences, including deliberate many-to-one normalization.
-Repeated operators therefore remain distinguishable. The current test reader
-uses this identity data to obtain leaf kinds. A production forward leaf cursor
-and the locations/type metadata that the actual semantic consumer requires
-remain part of #106's integration and must be costed in #107.
+Repeated operators therefore remain distinguishable. The original producer
+oracle uses this identity data to obtain leaf kinds. The independent readers
+below obtain leaf kinds and payload handles from source order instead. Their
+current source index and operator locations remain experimental storage that
+the complete consumer comparison must include.
 
 Hot payload copies, linked-index bytes, occupancy and peak live records must be
 reported separately from debug identities and per-token oracle metadata. The
 compact record size alone is not the retained memory cost of a complete
 consumer-ready representation.
+
+## Independent prefix readers
+
+`c_fragment_reader.c` implements flat prefix and direct fragment reading for
+the test command. Both use one iterative scheduler with entry, reference,
+completed-child, reduction, exit and root-attachment events. Fixed arities and
+list-end markers determine framing. Literal-mode wrappers specialize the flat,
+scalar-direct and vector-direct paths; the scheduler uses no reader callback.
+
+Leaves come from a forward source-token cursor for each published expression.
+The cursor maps parser tokens to expanded-token payload handles and does not
+read fragment leaf identities, virtual-leaf identities or `store.leaf_kinds`.
+Flat construction retains locations for operators only. Tests poison flat
+leaf-location slots and compare all four combinations of flat/direct and
+scalar/vector decoding against an ordinary-tree event oracle. Reversing root
+publication order checks that each expression has an independent source cursor.
+
+The source index currently derives ownership and subtree intervals from the
+recognizer's kind classifications and ordinary parents/postorder. It retains
+25 bytes per token plus alignment and needs 13 temporary bytes per token.
+This is an explicitly costed preparation step, not a replacement for ordinary
+syntax storage. Tests report its arena deltas, borrowed syntax/source columns,
+preparation inputs, flat bytes and location backing, pending frames, visit
+state and test-event allocations separately. A root and token ledger rejects
+duplicate visits; bounded continuation helpers save and restore leaf cursors
+within retained opaque subtrees.
+
+These are syntax events. A reference retains a type or block subtree identity,
+and attachment retains the raw root envelope. The readers do not yet perform
+context-sensitive semantic entry, transparent-alias publication or the tagged
+mixed postorder/prefix continuation dispatch required by #106. Connecting those
+transitions to the shared checker and comparing complete IR and diagnostics
+remain required before semantic or end-to-end performance claims.
 
 Occupancy and fragments per expression count physical records. Virtual
 single-leaf expressions require no record and do not enter the occupancy
@@ -109,6 +143,41 @@ logical next-field assignments, including initialization, reclamation and
 boundary merges; they are not a hardware memory-traffic measurement. Backing
 array sizes and the inclusive experiment arena are allocation accounting,
 not process resident memory.
+
+## Native corpus storage results
+
+The frozen producer at `de9c34bd10b7066cd62cea10e2be1d866155360e` passed
+the independent structure, coverage and source-identity checks on the locked
+9700X with Clang 23.1.1, pinned to CPU 2. SQLite contributed one file,
+706,586 parser tokens and 53,349 expressions. The explicit libc manifest
+contributed all 733 files, 3,867,223 parser tokens and 24,764 expressions.
+Every payload size passed with zero failures. The
+[qualification report](https://github.com/buster14a/buster/pull/315#issuecomment-6364241816)
+records input and binary hashes, options, complete counters and validation
+status. These observations are correctness and storage accounting, not timings.
+
+| Corpus | Operator payload | Fragments/expression | Position occupancy | Operator occupancy | Operator bytes copied/reduction | Next-field bytes written/reduction | Peak live hot bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SQLite | 16 | 0.895987 | 0.112381 | 0.217869 | 1.333084 | 5.947366 | 1,529,632 |
+| SQLite | 32 | 0.876736 | 0.114849 | 0.111326 | 1.682394 | 5.934927 | 2,245,152 |
+| SQLite | 48 | 0.873887 | 0.115223 | 0.074459 | 1.932311 | 5.932525 | 2,983,808 |
+| libc | 16 | 0.433815 | 0.138981 | 0.277937 | 1.414002 | 5.073985 | 16,864 |
+| libc | 32 | 0.400380 | 0.150588 | 0.150574 | 2.126465 | 5.052193 | 25,104 |
+| libc | 48 | 0.396665 | 0.151998 | 0.101323 | 2.610765 | 5.047708 | 33,472 |
+
+Position occupancy uses 64 physical positions per record; operator occupancy
+uses the selected payload capacity. A virtual singleton contributes an
+expression but no allocated record. Reductions count emitted expression nodes,
+including leaves. Peak values are maxima for one translation unit, not corpus
+sums. The hot-byte column excludes cold identities, source metadata, unused
+backing capacity and the oracle; the linked report accounts for each separately.
+
+Start subsequent consumer experiments with the 16-byte payload. Against 48
+bytes it uses 48.74% less peak live hot storage on SQLite and 49.62% less on
+libc, with 31.01% and 45.84% fewer copied operator bytes. It needs 2.53% and
+9.37% more records respectively. Retain all three capacities in differential
+tests: long synthetic chains can favor larger payloads, and only the complete
+consumer measurements can determine a production choice.
 
 ## Running the correctness experiment
 
