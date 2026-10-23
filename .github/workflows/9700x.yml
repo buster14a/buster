@@ -330,6 +330,7 @@ jobs:
           ./build/compiler test-builtins
           ./build/compiler test-builtin-intrinsic-types
           ./build/compiler test-builtin-intrinsic-features
+          ./build/compiler test-check-builtins-x86
           ./build/compiler test-check-builtins
           ./build/compiler test-builtin-lowering
           ./build/compiler test-check-varargs

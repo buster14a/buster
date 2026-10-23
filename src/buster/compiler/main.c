@@ -241,6 +241,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
 #include "buster/compiler/c_check_actions.c"
+#include "buster/compiler/c_check_builtin_x86.c"
 #include "buster/compiler/c_check_builtin.c"
 #include "buster/compiler/c_check_varargs.c"
 #include "buster/compiler/c_check_builtin_misc.c"
@@ -259,6 +260,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_checker_test.c"
 #include "buster/compiler/c_builtin_intrinsic_types_test.c"
 #include "buster/compiler/c_builtin_intrinsic_features_test.c"
+#include "buster/compiler/c_check_builtin_x86_test.c"
 #include "buster/compiler/c_check_builtin_test.c"
 #include "buster/compiler/c_check_varargs_test.c"
 #include "buster/compiler/c_check_builtin_misc_test.c"
@@ -620,6 +622,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtin-intrinsic-features") == 0)
     {
         result = run_builtin_intrinsic_features_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-check-builtins-x86") == 0)
+    {
+        result = run_check_builtin_x86_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) && argc >= 2 && strcmp(argv[1], "test-builtins") == 0)
     {

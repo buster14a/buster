@@ -340,6 +340,20 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
+`c_check_builtin_x86.c` adds the 185 audited SemaX86 constraint facts for the
+183 affected names in the frozen 1,457-name own-main target-builtin scope.
+The producer attests exact catalogue membership and successful ordinary
+prototype checking, and supplies both the generated required-ICE bitmap and
+independent source ICE witnesses. Existing ordinary-call diagnostics remain
+first. Generated ICEs precede hard rounding/SAE sets and cumulative direct
+ranges; both rules for each `rndscale` spelling are retained.
+
+Direct range failures are deferred diagnostic events of warning class with
+default error severity. Source constant-evaluated context skips only these
+ranges. Runtime suppression and proven call reachability independently select
+ready, deferred or suppressed events. Unknown reachability cannot silently
+discard one. These checks establish no target-feature or runtime capability.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -348,6 +362,7 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtins
 ./build/compiler test-builtin-intrinsic-types
 ./build/compiler test-builtin-intrinsic-features
+./build/compiler test-check-builtins-x86
 ./build/compiler test-check-builtins
 ./build/compiler test-builtin-lowering
 ./build/compiler test-check-varargs
