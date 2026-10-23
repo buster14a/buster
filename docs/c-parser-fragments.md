@@ -110,6 +110,25 @@ completed-child, reduction, exit and root-attachment events. Fixed arities and
 list-end markers determine framing. Literal-mode wrappers specialize the flat,
 scalar-direct and vector-direct paths; the scheduler uses no reader callback.
 
+The scheduler can yield one event at a time. Its cursor retains the source-leaf
+position, pending-frame position and the current direct-decoder window, so a
+caller can suspend at a type or block reference and resume after another root
+finishes. Each active cursor borrows immutable source/fragment columns and
+exclusive pending-frame storage; nested cursors may share the root/token visit
+ledger, but only the root at the top of that ledger may advance. Moving a
+cursor preserves its state, provided its borrowed storage remains valid.
+`peak_cursor_bytes` reports the size of one active cursor, separately from its
+borrowed frames and ledger. A nested traversal retains one cursor per active
+root; the test harness's relocation copies are not a production allocation.
+
+Successive calls return one event, end, or an error. End remains stable after
+the root claim is released; errors are sticky until a fresh cursor is created.
+Both outcomes clear the entire output event. A failed cursor's partial visit
+and frame state cannot be reused. The compatibility collectors use this same
+iterator and report event-buffer exhaustion explicitly. These contracts cover
+syntax scheduling; shared semantic state and mixed continuation frames remain
+part of the checker integration described below.
+
 Leaves come from a forward source-token cursor for each published expression.
 The cursor maps parser tokens to expanded-token payload handles and does not
 read fragment leaf identities, virtual-leaf identities or `store.leaf_kinds`.

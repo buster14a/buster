@@ -3771,6 +3771,8 @@ static bool executable_test_kernel(uint64_t seed)
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
+#include "buster/compiler/executable_symbols_test.c"
+
 static bool executable_test_parse_u64(const char* text, uint64_t* value)
 {
     char* end = 0;
@@ -3849,6 +3851,7 @@ static int run_executable_tests(int argc, char** argv)
         passed = executable_test_unwind_links(&directory) && passed;
         passed = executable_test_blocks(&directory, seed) && passed;
         passed = executable_test_kernel(seed) && passed;
+        passed = executable_test_symbols(&directory) && passed;
         result = passed ? 0 : 1;
         if (keep)
         {

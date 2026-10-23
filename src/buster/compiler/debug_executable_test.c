@@ -36,6 +36,84 @@ static bool debug_native_write(Link* link, SymbolId entry, String8 path, const E
     return ran && write.succeeded;
 }
 
+// An explicit symbol selection owns only .symtab/.strtab. Empty and singleton selections must leave all five
+// already finalized DWARF sections unchanged even though their address-table function set is larger.
+static bool debug_native_symbol_override(Link* link, SymbolId entry, String8 path, const ExecutableDebug* debug, const uint8_t* atoms,
+                                         String8 reference, Arena* arena, ExecutableTestTally* tally)
+{
+    static const char* const names[] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
+    const ExecutableTestImage original = executable_test_image(reference);
+    const SymbolId one = debug->functions[0];
+    bool valid = original.valid;
+    for (uint32_t count = 0; valid && count <= 1; count += 1)
+    {
+        const ExecutableSymbols symbols = {
+            .ids = count != 0 ? &one : 0,
+            .count = count,
+        };
+        String8 first = { 0 };
+        for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+        {
+            for (uint32_t l = 0; valid && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+            {
+                const uint32_t lanes = executable_test_lane_counts[l];
+                ExecutableTestWrite write = {
+                    .link = link,
+                    .options = {
+                        .path = path,
+                        .entry = entry,
+                        .debug = debug,
+                        .symbols = &symbols,
+                        .exact = exact != 0,
+                    },
+                };
+                const bool poisoned = executable_test_reset(link, path.pointer);
+                executable_test_restore(link, atoms);
+                const bool succeeded = poisoned && lane_run(lanes, executable_test_lane_main, &write, 0) && write.succeeded;
+                const String8 file = succeeded ? executable_test_read(arena, path.pointer) : (String8){ 0 };
+                const ExecutableTestImage image = executable_test_image(file);
+                bool unchanged = image.valid;
+                for (uint32_t section = 0; unchanged && section < BUSTER_ARRAY_LENGTH(names); section += 1)
+                {
+                    const Elf64_Shdr* before = executable_test_section(&original, names[section]);
+                    const Elf64_Shdr* after = executable_test_section(&image, names[section]);
+                    unchanged = before != 0 && after != 0 && before->sh_size == after->sh_size &&
+                                before->sh_offset <= reference.length && before->sh_size <= reference.length - before->sh_offset &&
+                                after->sh_offset <= file.length && after->sh_size <= file.length - after->sh_offset &&
+                                memcmp(reference.pointer + before->sh_offset, file.pointer + after->sh_offset, after->sh_size) == 0;
+                }
+                const Elf64_Shdr* table = image.valid ? executable_test_section(&image, ".symtab") : 0;
+                const Elf64_Shdr* strings = image.valid ? executable_test_section(&image, ".strtab") : 0;
+                const NameId name = link->symbols.name[one];
+                const uint64_t length = link->names.length[name];
+                bool selected = table != 0 && strings != 0 && table->sh_size == (1ull + count) * sizeof(Elf64_Sym) &&
+                                strings->sh_size == (count != 0 ? 2 + length : 1) && table->sh_offset <= file.length &&
+                                table->sh_size <= file.length - table->sh_offset && strings->sh_offset <= file.length &&
+                                strings->sh_size <= file.length - strings->sh_offset;
+                if (selected && count != 0)
+                {
+                    Elf64_Sym symbol;
+                    memcpy(&symbol, file.pointer + table->sh_offset + sizeof(symbol), sizeof(symbol));
+                    selected = symbol.st_name == 1 && symbol.st_size == link->symbols.size[one] &&
+                               symbol.st_value == BUSTER_EXECUTABLE_BASE + link->atoms.address[link->symbols.atom[one]] + link->symbols.value[one] &&
+                               memcmp(file.pointer + strings->sh_offset + 1, link->names.bytes[name], length) == 0 &&
+                               file.pointer[strings->sh_offset + 1 + length] == 0;
+                }
+                first = first.pointer == 0 ? file : first;
+                const bool same = file.pointer != 0 && first.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0;
+                valid = succeeded && unchanged && selected && same;
+                executable_test_expect(tally, valid, "explicit empty/single symbol table preserves all DWARF slots", 100 * count + 10 * exact + lanes);
+            }
+        }
+    }
+    const bool reset = valid && executable_test_reset(link, path.pointer);
+    executable_test_restore(link, atoms);
+    ExecutableResult written = { 0 };
+    valid = reset && debug_native_write(link, entry, path, debug, 3, false, &written) && executable_test_same_file(arena, path.pointer, reference);
+    executable_test_expect(tally, valid, "restore debug function selection for external consumers", 0);
+    return valid;
+}
+
 static bool debug_native_unchanged(const DebugUnit* unit, const DebugOutput* output, const String8* saved, const uint32_t* positions)
 {
     bool result = true;
@@ -337,6 +415,7 @@ static bool debug_test_native_write(const char* object_path, const char* executa
         ready = restored && executable_test_same_file(&arena, executable_path, first);
         executable_test_expect(&tally, ready, "restore global consumer fixture byte for byte", 0);
     }
+    ready = ready && debug_native_symbol_override(&link, entry, path, &debug, atoms, first, &arena, &tally);
     AtomId frame_atom = 0;
     for (AtomId atom = 1; ready && atom < link.atoms.count; atom += 1)
     {

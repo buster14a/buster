@@ -1,0 +1,33 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:20:41+00:00 CI job of buster14a/buster (run 39977071335, worker 3557350)
+  title: 9700X test / test: #325: Add selective function and object emission planner (#129)
+  link: https://github.com/buster14a/buster/actions/runs/39977071335/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/325
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:23:48+00:00 CI job of buster14a/buster (run 39977794567, worker 3593109)
+  title: 9700X test / test: #349: Prune foreign unwind records with discarded COMDAT code
+  link: https://github.com/buster14a/buster/actions/runs/39977794567/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/349
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:26:55+00:00 CI job of buster14a/buster (run 39977855398, worker 3628763)
+  title: 9700X test / test: #350: Reject unsupported executable-stack requests from selected foreign objects
+  link: https://github.com/buster14a/buster/actions/runs/39977855398/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/350
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:30:02+00:00 CI job of buster14a/buster (run 39978650065, worker 3664741)
+  title: 9700X test / test: Add selective function and object emission planner (#325)
+  link: https://github.com/buster14a/buster/actions/runs/39978650065/attempts/1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:36:38+00:00 CI job of buster14a/buster (run 39978173038, worker 3722391)
+  title: 9700X test / test: #328: Add transactional pooling for eligible foreign string sections
+  link: https://github.com/buster14a/buster/actions/runs/39978173038/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/328
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:39:45+00:00 CI job of buster14a/buster (run 39978053699, worker 3758984)
+  title: 9700X test / test: #339: Add builtin semantic actions and baseline runtime adapters
+  link: https://github.com/buster14a/buster/actions/runs/39978053699/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/339
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:42:57+00:00 CI job of buster14a/buster (run 39979944885, worker 3797657)
+  title: 9700X test / test: #351: Add optional regular symbol tables to native executable output
+  link: https://github.com/buster14a/buster/actions/runs/39979944885/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/351
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:46:05+00:00 CI job of buster14a/buster (run 39980966110, worker 3834100)
+  title: 9700X test / test: Add builtin semantic actions and baseline runtime adapters (#339)
+  link: https://github.com/buster14a/buster/actions/runs/39980966110/attempts/1
+exclusive.sh: waiting for the 9700X, held by:
+6df821a68f3070fe7870be010e489873b843985ce31ba57168e0af977766ed96  /home/david/buster-fast-bench/codex-116/fifth-earlyrecords

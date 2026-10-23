@@ -1,0 +1,940 @@
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:04:34+00:00 CI job of buster14a/buster (run 39975082619, worker 3443054)
+  title: 9700X test / test: #323: Complete preprocessor lookup accounting and independent scalar reference
+  link: https://github.com/buster14a/buster/actions/runs/39975082619/attempts/1
+  pull request: https://github.com/buster14a/buster/pull/323
+exclusive.sh: a CI job is waiting for the 9700X, or may be about to, so it goes first
+exclusive.sh: waiting for the 9700X, held by:
+fa0bf77f257094985d338a05a84c0eac613d26dee0a2c9c302bde8f0522644cc  /home/david/buster-fast-bench/codex-116/seventh-window64
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:08:08+00:00 codex-linker-foreign86: rsync --server -logDtpre.iLsfxCIvu . /home/david/buster-fast-bench/codex-linker-foreign86-stack-final/
+  title: Stage isolated GNU stack source
+  link: https://github.com/buster14a/buster/issues/86
+a4231288e0239771d39ab8df56066b2c63b63144414aa249956220bbf77878b3  /home/david/buster-fast-bench/codex-116/seventh-window128
+a3bb160b3d329b59bffac640b69cd3323ebdccf4bd5ee67bf081a39ab20be17c  /home/david/buster-fast-bench/codex-116/seventh-block512
+9442c7bd469bd16889684aca2aab31cefa92ed43691c233b391d08dcd0a9f58a  /home/david/buster-fast-bench/codex-116/seventh-block2048
+d29c5b0ed264839e67874d107396ddf367615739b385c3ff898a1e2e72b43088  /home/david/buster-fast-bench/codex-116/seventh-batch32
+b62a4be7f87ebae798a5230044574742a9e49e4efb66f75cf03a65bd60e02ad3  /home/david/buster-fast-bench/codex-116/seventh-ahead1
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:09:09+00:00 codex-linker-foreign86: sh -c cd /home/david/buster-fast-bench/codex-linker-foreign86-unwind-final && exec ./build.sh
+3800b46faf12241419644afeb97ad4504f01c41b5cafd1eb455ab6bed5b70e5e  /home/david/buster-fast-bench/codex-116/seventh-prefix28hot
+Test: window64
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:09:45+00:00 codex-linker-foreign86: sh -c cd /home/david/buster-fast-bench/codex-linker-foreign86-stack-final && exec ./build.sh
+  title: Build isolated GNU stack branch
+  link: https://github.com/buster14a/buster/issues/86
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (689058 ids in use)
+Test: window128
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:10:16+00:00 codex-linker-tls85: perf stat -e cycles,instructions -x, -o final-general-exact-conditioned-1lane-1-counters.csv ./tls85-measure taskset -c 2 ./build/compiler benchmark-executable --only shared --tls general --functions 64,180000 --exact --after-scalar 100
+  title: final-general-exact-conditioned-1lane-1
+  link: https://github.com/buster14a/buster/pull/316
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (689058 ids in use)
+Test: block512
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:10:58+00:00 codex-linker-tls85: perf stat -e cycles,instructions -x, -o final-local-vector-conditioned-1lane-1-counters.csv ./tls85-measure taskset -c 2 ./build/compiler benchmark-executable --only shared --tls local --functions 64,180000 --after-scalar 100
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (689058 ids in use)
+Test: block2048
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:11:14+00:00 codex-linker-80: sh -c cd "$HOME/buster-fast-bench/linker-symbols86/build2" && exec ./build/compiler test-debug --cross-check --keep
+  title: Independent regular-symbol and DWARF coexistence checks
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (689058 ids in use)
+Test: batch32
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (689058 ids in use)
+Test: ahead1
+probe: 0 failures in 8192 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 131072 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (689058 ids in use)
+Test: prefix28hot
+probe: 0 failures in 32768 guarded bucket patterns
+hash: 0 differences in 200000 spellings of 0 to 200 bytes
+structured hashes: 0 equal hashes and 0 differences in 88064 spellings of repeated, swapped and paired parts
+aligned flips: 0 of 14861 hashes unchanged and 0 differences
+fold mixing: 0 failures in 4 paired keys
+names: 0 of 210 predefined names are wrong, 0 of 3165 keyword answers (every name in 15 modes), and 0 of 24 spellings chosen apart
+table: 0 failures in 300000 spellings (275327 ids, 262144 buckets)
+batch growth: 0 failures in 8 boundary cases
+fixtures: 0 of 22 fail (each at 64 misalignments)
+spellings: 0 of 50570 inputs fail (identifiers of 1 to 130 bytes, a splice or a UCN at every position)
+random: 0 of 2000 inputs differ (51614 ids in use)
+page edges: 0 of 9600 inputs differ
+files: 9171 files, 115706051 bytes (689058 ids in use)
+Fri Oct 23 15:11:19 UTC 2026
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.623 ms   41.43 cycles/input token   72.87 cycles/output token  130.76 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.8%  refine 13.3%  directives 2.6%  main loop 57.7%
+               read 0.655 ms  lex 2.412 ms  refine 1.547 ms  directives 0.305 ms  main loop 6.697 ms
+             then the release 0.416 ms
+             -E -P with printing 16.000 ms (printing 4.365 ms): 645 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.767 ms   42.08 cycles/input token   74.01 cycles/output token  131.75 instructions/input token  IPC 3.13
+               read 5.6%  lex 21.0%  refine 13.1%  directives 2.6%  main loop 57.7%
+               read 0.658 ms  lex 2.469 ms  refine 1.535 ms  directives 0.305 ms  main loop 6.785 ms
+             then the release 0.420 ms
+             -E -P with printing 16.130 ms (printing 4.355 ms): 639 MB/s of input (10312758 bytes), 43.8 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.693 ms   41.82 cycles/input token   73.56 cycles/output token  131.01 instructions/input token  IPC 3.13
+               read 5.6%  lex 20.7%  refine 13.2%  directives 2.6%  main loop 57.9%
+               read 0.652 ms  lex 2.419 ms  refine 1.543 ms  directives 0.304 ms  main loop 6.754 ms
+             then the release 0.417 ms
+             -E -P with printing 16.072 ms (printing 4.370 ms): 642 MB/s of input (10312758 bytes), 44.0 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.676 ms   41.67 cycles/input token   73.28 cycles/output token  131.05 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.7%  refine 13.7%  directives 2.6%  main loop 57.5%
+               read 0.655 ms  lex 2.409 ms  refine 1.593 ms  directives 0.306 ms  main loop 6.702 ms
+             then the release 0.415 ms
+             -E -P with printing 16.048 ms (printing 4.368 ms): 643 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.631 ms   41.42 cycles/input token   72.86 cycles/output token  130.63 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.8%  refine 13.3%  directives 2.6%  main loop 57.7%
+               read 0.654 ms  lex 2.414 ms  refine 1.545 ms  directives 0.306 ms  main loop 6.698 ms
+             then the release 0.422 ms
+             -E -P with printing 16.012 ms (printing 4.373 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.863 ms   42.42 cycles/input token   74.62 cycles/output token  131.51 instructions/input token  IPC 3.10
+               read 5.6%  lex 20.3%  refine 14.4%  directives 2.6%  main loop 57.1%
+               read 0.663 ms  lex 2.412 ms  refine 1.711 ms  directives 0.306 ms  main loop 6.766 ms
+             then the release 0.418 ms
+             -E -P with printing 16.237 ms (printing 4.365 ms): 635 MB/s of input (10312758 bytes), 43.6 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.655 ms   41.59 cycles/input token   73.15 cycles/output token  130.70 instructions/input token  IPC 3.14
+               read 5.6%  lex 20.7%  refine 13.5%  directives 2.6%  main loop 57.5%
+               read 0.654 ms  lex 2.409 ms  refine 1.577 ms  directives 0.307 ms  main loop 6.702 ms
+             then the release 0.416 ms
+             -E -P with printing 16.019 ms (printing 4.373 ms): 644 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.648 ms   41.12 cycles/input token   72.32 cycles/output token  130.10 instructions/input token  IPC 3.16
+               read 5.7%  lex 20.7%  refine 12.6%  directives 2.6%  main loop 58.3%
+               read 0.665 ms  lex 2.411 ms  refine 1.471 ms  directives 0.306 ms  main loop 6.794 ms
+             then the release 0.418 ms
+             -E -P with printing 16.015 ms (printing 4.349 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.594 ms   41.29 cycles/input token   72.62 cycles/output token  130.98 instructions/input token  IPC 3.17
+               read 5.7%  lex 20.8%  refine 13.3%  directives 2.6%  main loop 57.6%
+               read 0.655 ms  lex 2.409 ms  refine 1.539 ms  directives 0.304 ms  main loop 6.667 ms
+             then the release 0.419 ms
+             -E -P with printing 15.948 ms (printing 4.343 ms): 646 MB/s of input (10304454 bytes), 44.3 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.616 ms   41.49 cycles/input token   72.97 cycles/output token  131.68 instructions/input token  IPC 3.17
+               read 5.6%  lex 21.2%  refine 13.2%  directives 2.6%  main loop 57.3%
+               read 0.651 ms  lex 2.462 ms  refine 1.534 ms  directives 0.304 ms  main loop 6.647 ms
+             then the release 0.420 ms
+             -E -P with printing 15.952 ms (printing 4.329 ms): 646 MB/s of input (10304454 bytes), 44.3 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.555 ms   41.29 cycles/input token   72.62 cycles/output token  130.99 instructions/input token  IPC 3.17
+               read 5.6%  lex 20.9%  refine 13.3%  directives 2.6%  main loop 57.5%
+               read 0.649 ms  lex 2.420 ms  refine 1.531 ms  directives 0.306 ms  main loop 6.648 ms
+             then the release 0.428 ms
+             -E -P with printing 15.945 ms (printing 4.368 ms): 646 MB/s of input (10304454 bytes), 44.3 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.705 ms   41.78 cycles/input token   73.49 cycles/output token  131.28 instructions/input token  IPC 3.14
+               read 5.6%  lex 20.6%  refine 13.5%  directives 2.6%  main loop 57.7%
+               read 0.656 ms  lex 2.410 ms  refine 1.579 ms  directives 0.304 ms  main loop 6.745 ms
+             then the release 0.434 ms
+             -E -P with printing 16.056 ms (printing 4.336 ms): 642 MB/s of input (10304454 bytes), 44.0 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.559 ms   41.18 cycles/input token   72.42 cycles/output token  130.84 instructions/input token  IPC 3.18
+               read 5.7%  lex 20.9%  refine 13.3%  directives 2.6%  main loop 57.5%
+               read 0.653 ms  lex 2.417 ms  refine 1.532 ms  directives 0.304 ms  main loop 6.646 ms
+             then the release 0.425 ms
+             -E -P with printing 15.914 ms (printing 4.337 ms): 648 MB/s of input (10304454 bytes), 44.4 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.782 ms   42.10 cycles/input token   74.04 cycles/output token  131.74 instructions/input token  IPC 3.13
+               read 5.6%  lex 20.6%  refine 14.5%  directives 2.6%  main loop 56.8%
+               read 0.654 ms  lex 2.418 ms  refine 1.705 ms  directives 0.305 ms  main loop 6.674 ms
+             then the release 0.429 ms
+             -E -P with printing 16.129 ms (printing 4.337 ms): 639 MB/s of input (10304454 bytes), 43.8 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.655 ms   41.54 cycles/input token   73.07 cycles/output token  130.92 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.8%  refine 13.5%  directives 2.6%  main loop 57.6%
+               read 0.650 ms  lex 2.418 ms  refine 1.566 ms  directives 0.305 ms  main loop 6.700 ms
+             then the release 0.421 ms
+             -E -P with printing 16.017 ms (printing 4.358 ms): 643 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.704 ms   41.37 cycles/input token   72.75 cycles/output token  130.32 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.6%  refine 12.5%  directives 2.6%  main loop 58.6%
+               read 0.658 ms  lex 2.412 ms  refine 1.463 ms  directives 0.306 ms  main loop 6.843 ms
+             then the release 0.430 ms
+             -E -P with printing 16.016 ms (printing 4.328 ms): 643 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.722 ms   80.19 cycles/input token   67.40 cycles/output token  303.36 instructions/input token  IPC 3.78
+               read 5.8%  lex 10.0%  refine 9.5%  directives 0.8%  main loop 73.8%
+               read 2.119 ms  lex 3.686 ms  refine 3.498 ms  directives 0.295 ms  main loop 27.091 ms
+             then the release 0.941 ms
+             -E -P with printing 52.174 ms (printing 15.467 ms): 302 MB/s of input (15744180 bytes), 48.1 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.444 ms   79.45 cycles/input token   66.78 cycles/output token  303.84 instructions/input token  IPC 3.82
+               read 5.8%  lex 10.4%  refine 9.6%  directives 0.8%  main loop 73.4%
+               read 2.131 ms  lex 3.776 ms  refine 3.481 ms  directives 0.299 ms  main loop 26.745 ms
+             then the release 0.950 ms
+             -E -P with printing 51.954 ms (printing 15.527 ms): 303 MB/s of input (15744180 bytes), 48.3 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.444 ms   79.55 cycles/input token   66.87 cycles/output token  303.74 instructions/input token  IPC 3.82
+               read 5.9%  lex 10.2%  refine 9.6%  directives 0.8%  main loop 73.5%
+               read 2.133 ms  lex 3.726 ms  refine 3.488 ms  directives 0.295 ms  main loop 26.800 ms
+             then the release 0.954 ms
+             -E -P with printing 51.940 ms (printing 15.488 ms): 303 MB/s of input (15744180 bytes), 48.3 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.774 ms   80.39 cycles/input token   67.57 cycles/output token  303.63 instructions/input token  IPC 3.78
+               read 5.8%  lex 10.1%  refine 9.7%  directives 0.8%  main loop 73.6%
+               read 2.133 ms  lex 3.699 ms  refine 3.571 ms  directives 0.298 ms  main loop 27.057 ms
+             then the release 0.946 ms
+             -E -P with printing 52.246 ms (printing 15.444 ms): 301 MB/s of input (15744180 bytes), 48.0 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:11:30+00:00 codex-linker-foreign86: sh -c cd /home/david/buster-fast-bench/codex-linker-foreign86-unwind-final && exec build/compiler test-foreign --cross-check --keep
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.673 ms   80.04 cycles/input token   67.28 cycles/output token  303.23 instructions/input token  IPC 3.79
+               read 5.9%  lex 10.1%  refine 9.5%  directives 0.8%  main loop 73.7%
+               read 2.153 ms  lex 3.705 ms  refine 3.481 ms  directives 0.294 ms  main loop 27.047 ms
+             then the release 0.943 ms
+             -E -P with printing 52.185 ms (printing 15.480 ms): 302 MB/s of input (15744180 bytes), 48.1 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+exclusive.sh: waiting for the 9700X, held by:
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.736 ms   80.18 cycles/input token   67.40 cycles/output token  303.47 instructions/input token  IPC 3.78
+               read 6.0%  lex 10.0%  refine 9.6%  directives 0.8%  main loop 73.6%
+               read 2.193 ms  lex 3.674 ms  refine 3.522 ms  directives 0.298 ms  main loop 27.030 ms
+             then the release 0.958 ms
+             -E -P with printing 52.354 ms (printing 15.642 ms): 301 MB/s of input (15744180 bytes), 47.9 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+exclusive.sh: waiting for the 9700X, held by: 2026-10-23T15:11:39+00:00 codex-linker-foreign86: sh -c cd /home/david/buster-fast-bench/codex-linker-foreign86-stack-final && exec build/compiler test-import --cross-check
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.580 ms   79.86 cycles/input token   67.12 cycles/output token  303.29 instructions/input token  IPC 3.80
+               read 6.0%  lex 10.0%  refine 9.7%  directives 0.8%  main loop 73.5%
+               read 2.184 ms  lex 3.667 ms  refine 3.530 ms  directives 0.298 ms  main loop 26.899 ms
+             then the release 0.938 ms
+             -E -P with printing 52.171 ms (printing 15.577 ms): 302 MB/s of input (15744180 bytes), 48.1 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.810 ms   80.35 cycles/input token   67.53 cycles/output token  302.30 instructions/input token  IPC 3.76
+               read 5.8%  lex 10.0%  refine 10.0%  directives 0.8%  main loop 73.5%
+               read 2.128 ms  lex 3.679 ms  refine 3.667 ms  directives 0.299 ms  main loop 27.036 ms
+             then the release 0.955 ms
+             -E -P with printing 52.121 ms (printing 15.306 ms): 302 MB/s of input (15744180 bytes), 48.2 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.717 ms   41.78 cycles/input token   73.49 cycles/output token  131.75 instructions/input token  IPC 3.15
+               read 5.6%  lex 21.1%  refine 13.2%  directives 2.6%  main loop 57.5%
+               read 0.654 ms  lex 2.464 ms  refine 1.542 ms  directives 0.304 ms  main loop 6.728 ms
+             then the release 0.417 ms
+             -E -P with printing 16.063 ms (printing 4.354 ms): 642 MB/s of input (10312758 bytes), 44.0 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.583 ms   41.32 cycles/input token   72.67 cycles/output token  131.01 instructions/input token  IPC 3.17
+               read 5.6%  lex 20.8%  refine 13.3%  directives 2.6%  main loop 57.7%
+               read 0.649 ms  lex 2.411 ms  refine 1.535 ms  directives 0.304 ms  main loop 6.678 ms
+             then the release 0.409 ms
+             -E -P with printing 15.950 ms (printing 4.358 ms): 647 MB/s of input (10312758 bytes), 44.3 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.654 ms   41.61 cycles/input token   73.19 cycles/output token  131.05 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.6%  refine 13.6%  directives 2.6%  main loop 57.5%
+               read 0.655 ms  lex 2.405 ms  refine 1.589 ms  directives 0.305 ms  main loop 6.699 ms
+             then the release 0.418 ms
+             -E -P with printing 16.029 ms (printing 4.363 ms): 643 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.599 ms   41.25 cycles/input token   72.56 cycles/output token  130.63 instructions/input token  IPC 3.17
+               read 5.6%  lex 20.7%  refine 13.3%  directives 2.6%  main loop 57.7%
+               read 0.651 ms  lex 2.406 ms  refine 1.545 ms  directives 0.307 ms  main loop 6.695 ms
+             then the release 0.420 ms
+             -E -P with printing 15.972 ms (printing 4.370 ms): 646 MB/s of input (10312758 bytes), 44.3 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.877 ms   42.51 cycles/input token   74.76 cycles/output token  131.51 instructions/input token  IPC 3.09
+               read 5.6%  lex 20.4%  refine 14.4%  directives 2.6%  main loop 57.0%
+               read 0.662 ms  lex 2.417 ms  refine 1.713 ms  directives 0.305 ms  main loop 6.766 ms
+             then the release 0.420 ms
+             -E -P with printing 16.241 ms (printing 4.359 ms): 635 MB/s of input (10312758 bytes), 43.5 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.657 ms   41.54 cycles/input token   73.06 cycles/output token  130.70 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.7%  refine 13.5%  directives 2.6%  main loop 57.5%
+               read 0.655 ms  lex 2.416 ms  refine 1.571 ms  directives 0.305 ms  main loop 6.699 ms
+             then the release 0.413 ms
+             -E -P with printing 16.062 ms (printing 4.375 ms): 642 MB/s of input (10312758 bytes), 44.0 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.629 ms   41.01 cycles/input token   72.14 cycles/output token  130.10 instructions/input token  IPC 3.17
+               read 5.7%  lex 20.7%  refine 12.6%  directives 2.6%  main loop 58.4%
+               read 0.664 ms  lex 2.401 ms  refine 1.468 ms  directives 0.307 ms  main loop 6.785 ms
+             then the release 0.418 ms
+             -E -P with printing 16.002 ms (printing 4.351 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.643 ms   41.44 cycles/input token   72.88 cycles/output token  130.76 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.7%  refine 13.3%  directives 2.6%  main loop 57.7%
+               read 0.657 ms  lex 2.408 ms  refine 1.546 ms  directives 0.306 ms  main loop 6.715 ms
+             then the release 0.419 ms
+             -E -P with printing 16.025 ms (printing 4.374 ms): 644 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.687 ms   41.85 cycles/input token   73.60 cycles/output token  131.68 instructions/input token  IPC 3.15
+               read 5.6%  lex 21.0%  refine 13.1%  directives 2.6%  main loop 57.7%
+               read 0.648 ms  lex 2.457 ms  refine 1.530 ms  directives 0.304 ms  main loop 6.737 ms
+             then the release 0.426 ms
+             -E -P with printing 16.018 ms (printing 4.343 ms): 643 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.543 ms   41.21 cycles/input token   72.48 cycles/output token  130.99 instructions/input token  IPC 3.18
+               read 5.6%  lex 20.9%  refine 13.3%  directives 2.6%  main loop 57.5%
+               read 0.650 ms  lex 2.410 ms  refine 1.532 ms  directives 0.304 ms  main loop 6.632 ms
+             then the release 0.421 ms
+             -E -P with printing 15.881 ms (printing 4.324 ms): 649 MB/s of input (10304454 bytes), 44.5 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.666 ms   41.57 cycles/input token   73.11 cycles/output token  131.28 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.6%  refine 13.6%  directives 2.6%  main loop 57.5%
+               read 0.655 ms  lex 2.402 ms  refine 1.582 ms  directives 0.305 ms  main loop 6.693 ms
+             then the release 0.425 ms
+             -E -P with printing 16.038 ms (printing 4.366 ms): 643 MB/s of input (10304454 bytes), 44.0 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.585 ms   41.26 cycles/input token   72.57 cycles/output token  130.84 instructions/input token  IPC 3.17
+               read 5.7%  lex 20.9%  refine 13.3%  directives 2.6%  main loop 57.5%
+               read 0.655 ms  lex 2.419 ms  refine 1.532 ms  directives 0.304 ms  main loop 6.648 ms
+             then the release 0.436 ms
+             -E -P with printing 15.934 ms (printing 4.335 ms): 647 MB/s of input (10304454 bytes), 44.3 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.832 ms   42.37 cycles/input token   74.51 cycles/output token  131.74 instructions/input token  IPC 3.11
+               read 5.5%  lex 20.4%  refine 14.4%  directives 2.6%  main loop 57.1%
+               read 0.655 ms  lex 2.416 ms  refine 1.699 ms  directives 0.306 ms  main loop 6.745 ms
+             then the release 0.423 ms
+             -E -P with printing 16.183 ms (printing 4.346 ms): 637 MB/s of input (10304454 bytes), 43.6 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.667 ms   41.59 cycles/input token   73.15 cycles/output token  130.92 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.7%  refine 13.4%  directives 2.6%  main loop 57.6%
+               read 0.654 ms  lex 2.417 ms  refine 1.562 ms  directives 0.304 ms  main loop 6.715 ms
+             then the release 0.429 ms
+             -E -P with printing 16.016 ms (printing 4.357 ms): 643 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.634 ms   41.05 cycles/input token   72.20 cycles/output token  130.32 instructions/input token  IPC 3.17
+               read 5.7%  lex 20.7%  refine 12.6%  directives 2.6%  main loop 58.4%
+               read 0.659 ms  lex 2.406 ms  refine 1.462 ms  directives 0.306 ms  main loop 6.787 ms
+             then the release 0.422 ms
+             -E -P with printing 15.976 ms (printing 4.330 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.649 ms   41.52 cycles/input token   73.02 cycles/output token  130.98 instructions/input token  IPC 3.15
+               read 5.6%  lex 20.8%  refine 13.1%  directives 2.6%  main loop 57.8%
+               read 0.655 ms  lex 2.417 ms  refine 1.530 ms  directives 0.305 ms  main loop 6.733 ms
+             then the release 0.433 ms
+             -E -P with printing 16.004 ms (printing 4.340 ms): 644 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.733 ms   80.27 cycles/input token   67.47 cycles/output token  303.84 instructions/input token  IPC 3.79
+               read 5.9%  lex 10.3%  refine 9.4%  directives 0.8%  main loop 73.5%
+               read 2.179 ms  lex 3.780 ms  refine 3.472 ms  directives 0.300 ms  main loop 27.006 ms
+             then the release 0.936 ms
+             -E -P with printing 52.284 ms (printing 15.573 ms): 301 MB/s of input (15744180 bytes), 48.0 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.757 ms   80.38 cycles/input token   67.56 cycles/output token  303.74 instructions/input token  IPC 3.78
+               read 5.9%  lex 10.1%  refine 9.4%  directives 0.8%  main loop 73.8%
+               read 2.162 ms  lex 3.711 ms  refine 3.440 ms  directives 0.300 ms  main loop 27.136 ms
+             then the release 0.956 ms
+             -E -P with printing 52.334 ms (printing 15.576 ms): 301 MB/s of input (15744180 bytes), 48.0 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.578 ms   79.82 cycles/input token   67.09 cycles/output token  303.63 instructions/input token  IPC 3.80
+               read 5.8%  lex 10.1%  refine 9.8%  directives 0.8%  main loop 73.4%
+               read 2.138 ms  lex 3.685 ms  refine 3.592 ms  directives 0.299 ms  main loop 26.869 ms
+             then the release 0.951 ms
+             -E -P with printing 52.041 ms (printing 15.461 ms): 303 MB/s of input (15744180 bytes), 48.2 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.525 ms   79.67 cycles/input token   66.97 cycles/output token  303.23 instructions/input token  IPC 3.81
+               read 5.8%  lex 10.1%  refine 9.5%  directives 0.8%  main loop 73.8%
+               read 2.129 ms  lex 3.681 ms  refine 3.455 ms  directives 0.297 ms  main loop 26.942 ms
+             then the release 0.956 ms
+             -E -P with printing 52.012 ms (printing 15.510 ms): 303 MB/s of input (15744180 bytes), 48.3 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.639 ms   80.02 cycles/input token   67.26 cycles/output token  303.47 instructions/input token  IPC 3.79
+               read 5.8%  lex 10.1%  refine 9.7%  directives 0.8%  main loop 73.6%
+               read 2.136 ms  lex 3.691 ms  refine 3.552 ms  directives 0.294 ms  main loop 26.946 ms
+             then the release 0.954 ms
+             -E -P with printing 52.184 ms (printing 15.556 ms): 302 MB/s of input (15744180 bytes), 48.1 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   37.509 ms   82.34 cycles/input token   69.21 cycles/output token  303.29 instructions/input token  IPC 3.68
+               read 5.7%  lex 9.8%  refine 9.5%  directives 0.8%  main loop 74.2%
+               read 2.135 ms  lex 3.691 ms  refine 3.568 ms  directives 0.294 ms  main loop 27.818 ms
+             then the release 0.957 ms
+             -E -P with printing 52.999 ms (printing 15.500 ms): 297 MB/s of input (15744180 bytes), 47.4 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.895 ms   80.47 cycles/input token   67.64 cycles/output token  302.30 instructions/input token  IPC 3.76
+               read 5.8%  lex 10.0%  refine 10.0%  directives 0.8%  main loop 73.4%
+               read 2.142 ms  lex 3.688 ms  refine 3.698 ms  directives 0.299 ms  main loop 27.089 ms
+             then the release 0.953 ms
+             -E -P with printing 52.218 ms (printing 15.315 ms): 302 MB/s of input (15744180 bytes), 48.1 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.447 ms   79.48 cycles/input token   66.81 cycles/output token  303.36 instructions/input token  IPC 3.82
+               read 5.9%  lex 10.1%  refine 9.6%  directives 0.8%  main loop 73.6%
+               read 2.133 ms  lex 3.683 ms  refine 3.499 ms  directives 0.295 ms  main loop 26.837 ms
+             then the release 0.954 ms
+             -E -P with printing 51.932 ms (printing 15.498 ms): 303 MB/s of input (15744180 bytes), 48.3 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.620 ms   41.40 cycles/input token   72.83 cycles/output token  131.01 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.8%  refine 13.2%  directives 2.6%  main loop 57.7%
+               read 0.650 ms  lex 2.418 ms  refine 1.536 ms  directives 0.305 ms  main loop 6.690 ms
+             then the release 0.419 ms
+             -E -P with printing 15.956 ms (printing 4.356 ms): 646 MB/s of input (10312758 bytes), 44.3 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.789 ms   42.10 cycles/input token   74.05 cycles/output token  131.05 instructions/input token  IPC 3.11
+               read 5.6%  lex 20.4%  refine 13.5%  directives 2.6%  main loop 57.9%
+               read 0.656 ms  lex 2.409 ms  refine 1.592 ms  directives 0.308 ms  main loop 6.821 ms
+             then the release 0.431 ms
+             -E -P with printing 16.172 ms (printing 4.361 ms): 638 MB/s of input (10312758 bytes), 43.7 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.648 ms   41.42 cycles/input token   72.86 cycles/output token  130.63 instructions/input token  IPC 3.15
+               read 5.7%  lex 20.8%  refine 13.3%  directives 2.6%  main loop 57.7%
+               read 0.656 ms  lex 2.412 ms  refine 1.544 ms  directives 0.307 ms  main loop 6.697 ms
+             then the release 0.427 ms
+             -E -P with printing 16.008 ms (printing 4.362 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.922 ms   42.62 cycles/input token   74.96 cycles/output token  131.51 instructions/input token  IPC 3.09
+               read 5.6%  lex 20.3%  refine 14.4%  directives 2.6%  main loop 57.2%
+               read 0.661 ms  lex 2.415 ms  refine 1.712 ms  directives 0.305 ms  main loop 6.806 ms
+             then the release 0.422 ms
+             -E -P with printing 16.291 ms (printing 4.370 ms): 633 MB/s of input (10312758 bytes), 43.4 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.704 ms   41.75 cycles/input token   73.44 cycles/output token  130.70 instructions/input token  IPC 3.13
+               read 5.6%  lex 20.7%  refine 13.5%  directives 2.6%  main loop 57.6%
+               read 0.651 ms  lex 2.418 ms  refine 1.579 ms  directives 0.305 ms  main loop 6.734 ms
+             then the release 0.417 ms
+             -E -P with printing 16.096 ms (printing 4.393 ms): 641 MB/s of input (10312758 bytes), 43.9 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.643 ms   41.15 cycles/input token   72.37 cycles/output token  130.10 instructions/input token  IPC 3.16
+               read 5.7%  lex 20.8%  refine 12.6%  directives 2.6%  main loop 58.3%
+               read 0.659 ms  lex 2.417 ms  refine 1.472 ms  directives 0.308 ms  main loop 6.787 ms
+             then the release 0.431 ms
+             -E -P with printing 16.011 ms (printing 4.368 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.642 ms   41.40 cycles/input token   72.82 cycles/output token  130.76 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.7%  refine 13.3%  directives 2.6%  main loop 57.7%
+               read 0.654 ms  lex 2.409 ms  refine 1.544 ms  directives 0.304 ms  main loop 6.710 ms
+             then the release 0.425 ms
+             -E -P with printing 16.014 ms (printing 4.378 ms): 644 MB/s of input (10312758 bytes), 44.2 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+1 files, 1243784 input tokens, 707153 output tokens; 21 passes, medians:
+  vectorized   11.637 ms   41.52 cycles/input token   73.03 cycles/output token  131.75 instructions/input token  IPC 3.17
+               read 5.7%  lex 21.2%  refine 13.2%  directives 2.6%  main loop 57.3%
+               read 0.658 ms  lex 2.464 ms  refine 1.538 ms  directives 0.305 ms  main loop 6.657 ms
+             then the release 0.420 ms
+             -E -P with printing 16.023 ms (printing 4.398 ms): 644 MB/s of input (10312758 bytes), 44.1 million output tokens/s
+             history: 2935416 bytes total, 2935416.0 bytes/TU mean, 2935416 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55570 expansions, 44284 argument runs, 3573 generated tokens, 88448 output runs
+  per pass: 16752 directives, 31626 file runs (560742 tokens), 44701 buffer runs (120690 tokens), 28196 object-like expansions copied out and 3391 buffered, 21755 invocations (42978 arguments, 3383 expanded first), 3312 pastes, 2228 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1738 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.606 ms   41.45 cycles/input token   72.91 cycles/output token  130.99 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.8%  refine 13.4%  directives 2.7%  main loop 57.6%
+               read 0.646 ms  lex 2.416 ms  refine 1.549 ms  directives 0.308 ms  main loop 6.671 ms
+             then the release 0.417 ms
+             -E -P with printing 15.970 ms (printing 4.349 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.699 ms   41.75 cycles/input token   73.43 cycles/output token  131.28 instructions/input token  IPC 3.14
+               read 5.6%  lex 20.7%  refine 13.6%  directives 2.6%  main loop 57.5%
+               read 0.649 ms  lex 2.412 ms  refine 1.585 ms  directives 0.306 ms  main loop 6.711 ms
+             then the release 0.418 ms
+             -E -P with printing 16.052 ms (printing 4.345 ms): 642 MB/s of input (10304454 bytes), 44.0 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.590 ms   41.34 cycles/input token   72.71 cycles/output token  130.84 instructions/input token  IPC 3.17
+               read 5.7%  lex 20.9%  refine 13.2%  directives 2.7%  main loop 57.6%
+               read 0.655 ms  lex 2.416 ms  refine 1.533 ms  directives 0.308 ms  main loop 6.674 ms
+             then the release 0.427 ms
+             -E -P with printing 15.930 ms (printing 4.337 ms): 647 MB/s of input (10304454 bytes), 44.3 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.801 ms   42.13 cycles/input token   74.10 cycles/output token  131.74 instructions/input token  IPC 3.13
+               read 5.6%  lex 20.5%  refine 14.4%  directives 2.6%  main loop 56.9%
+               read 0.661 ms  lex 2.418 ms  refine 1.695 ms  directives 0.306 ms  main loop 6.701 ms
+             then the release 0.433 ms
+             -E -P with printing 16.163 ms (printing 4.355 ms): 638 MB/s of input (10304454 bytes), 43.7 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.610 ms   41.44 cycles/input token   72.88 cycles/output token  130.92 instructions/input token  IPC 3.16
+               read 5.6%  lex 20.8%  refine 13.5%  directives 2.6%  main loop 57.5%
+               read 0.651 ms  lex 2.410 ms  refine 1.563 ms  directives 0.305 ms  main loop 6.681 ms
+             then the release 0.427 ms
+             -E -P with printing 15.962 ms (printing 4.331 ms): 646 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.660 ms   41.19 cycles/input token   72.44 cycles/output token  130.32 instructions/input token  IPC 3.16
+               read 5.7%  lex 20.7%  refine 12.6%  directives 2.6%  main loop 58.4%
+               read 0.663 ms  lex 2.405 ms  refine 1.464 ms  directives 0.307 ms  main loop 6.804 ms
+             then the release 0.431 ms
+             -E -P with printing 16.014 ms (printing 4.337 ms): 643 MB/s of input (10304454 bytes), 44.1 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.631 ms   41.52 cycles/input token   73.01 cycles/output token  130.98 instructions/input token  IPC 3.15
+               read 5.7%  lex 20.8%  refine 13.2%  directives 2.6%  main loop 57.8%
+               read 0.660 ms  lex 2.417 ms  refine 1.536 ms  directives 0.304 ms  main loop 6.719 ms
+             then the release 0.432 ms
+             -E -P with printing 15.981 ms (printing 4.344 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized /home/david/buster-fast-bench/codex-116/inputs/sqlite-new.c]
+1 files, 1242091 input tokens, 706237 output tokens; 21 passes, medians:
+  vectorized   11.618 ms   41.57 cycles/input token   73.11 cycles/output token  131.68 instructions/input token  IPC 3.17
+               read 5.6%  lex 21.2%  refine 13.3%  directives 2.6%  main loop 57.4%
+               read 0.650 ms  lex 2.458 ms  refine 1.540 ms  directives 0.305 ms  main loop 6.662 ms
+             then the release 0.419 ms
+             -E -P with printing 15.984 ms (printing 4.335 ms): 645 MB/s of input (10304454 bytes), 44.2 million output tokens/s
+             history: 2933916 bytes total, 2933916.0 bytes/TU mean, 2933916 bytes/TU maximum; temporary origins peak 2004 bytes/TU
+             records: 55537 expansions, 44280 argument runs, 3573 generated tokens, 88382 output runs
+  per pass: 16743 directives, 31605 file runs (559953 tokens), 44670 buffer runs (120597 tokens), 28179 object-like expansions copied out and 3388 buffered, 21744 invocations (42967 arguments, 3383 expanded first), 3312 pastes, 2226 builtins, 98 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1737 lines of 5.3 tokens on average after expansion, 34 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-window128 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.738 ms   80.37 cycles/input token   67.56 cycles/output token  303.74 instructions/input token  IPC 3.78
+               read 5.9%  lex 10.1%  refine 9.4%  directives 0.8%  main loop 73.8%
+               read 2.165 ms  lex 3.715 ms  refine 3.439 ms  directives 0.299 ms  main loop 27.115 ms
+             then the release 0.964 ms
+             -E -P with printing 52.323 ms (printing 15.565 ms): 301 MB/s of input (15744180 bytes), 48.0 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-block512 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.932 ms   80.67 cycles/input token   67.81 cycles/output token  303.63 instructions/input token  IPC 3.76
+               read 5.8%  lex 10.0%  refine 9.7%  directives 0.8%  main loop 73.8%
+               read 2.130 ms  lex 3.676 ms  refine 3.585 ms  directives 0.298 ms  main loop 27.227 ms
+             then the release 0.936 ms
+             -E -P with printing 52.438 ms (printing 15.490 ms): 300 MB/s of input (15744180 bytes), 47.9 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-block2048 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.534 ms   79.78 cycles/input token   67.06 cycles/output token  303.23 instructions/input token  IPC 3.80
+               read 5.8%  lex 10.1%  refine 9.5%  directives 0.8%  main loop 73.8%
+               read 2.135 ms  lex 3.688 ms  refine 3.460 ms  directives 0.295 ms  main loop 26.948 ms
+             then the release 0.955 ms
+             -E -P with printing 51.979 ms (printing 15.445 ms): 303 MB/s of input (15744180 bytes), 48.3 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-batch32 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.418 ms   79.46 cycles/input token   66.79 cycles/output token  303.47 instructions/input token  IPC 3.82
+               read 5.9%  lex 10.1%  refine 9.7%  directives 0.8%  main loop 73.5%
+               read 2.149 ms  lex 3.679 ms  refine 3.532 ms  directives 0.294 ms  main loop 26.765 ms
+             then the release 0.952 ms
+             -E -P with printing 51.918 ms (printing 15.487 ms): 303 MB/s of input (15744180 bytes), 48.3 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-ahead1 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.627 ms   79.98 cycles/input token   67.23 cycles/output token  303.29 instructions/input token  IPC 3.79
+               read 5.8%  lex 10.1%  refine 9.8%  directives 0.8%  main loop 73.6%
+               read 2.110 ms  lex 3.689 ms  refine 3.581 ms  directives 0.294 ms  main loop 26.946 ms
+             then the release 0.955 ms
+             -E -P with printing 52.094 ms (printing 15.470 ms): 302 MB/s of input (15744180 bytes), 48.2 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   37.054 ms   80.94 cycles/input token   68.03 cycles/output token  302.30 instructions/input token  IPC 3.73
+               read 5.8%  lex 10.0%  refine 10.0%  directives 0.8%  main loop 73.5%
+               read 2.143 ms  lex 3.690 ms  refine 3.692 ms  directives 0.298 ms  main loop 27.239 ms
+             then the release 0.941 ms
+             -E -P with printing 52.365 ms (printing 15.308 ms): 301 MB/s of input (15744180 bytes), 47.9 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-chunksnopref config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.874 ms   80.63 cycles/input token   67.77 cycles/output token  303.36 instructions/input token  IPC 3.76
+               read 5.8%  lex 10.0%  refine 9.5%  directives 0.8%  main loop 73.9%
+               read 2.136 ms  lex 3.692 ms  refine 3.494 ms  directives 0.296 ms  main loop 27.248 ms
+             then the release 0.944 ms
+             -E -P with printing 52.383 ms (printing 15.478 ms): 301 MB/s of input (15744180 bytes), 47.9 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-window64 config [--only vectorized -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c]
+1 files, 2109907 input tokens, 2510152 output tokens; 21 passes, medians:
+  vectorized   36.451 ms   79.53 cycles/input token   66.85 cycles/output token  303.84 instructions/input token  IPC 3.82
+               read 5.9%  lex 10.4%  refine 9.6%  directives 0.8%  main loop 73.4%
+               read 2.135 ms  lex 3.779 ms  refine 3.495 ms  directives 0.297 ms  main loop 26.744 ms
+             then the release 0.953 ms
+             -E -P with printing 51.904 ms (printing 15.443 ms): 303 MB/s of input (15744180 bytes), 48.4 million output tokens/s
+             history: 19146904 bytes total, 19146904.0 bytes/TU mean, 19146904 bytes/TU maximum; temporary origins peak 230640 bytes/TU
+             records: 221696 expansions, 292414 argument runs, 118641 generated tokens, 594292 output runs
+  per pass: 22764 directives, 51125 file runs (1684946 tokens), 255890 buffer runs (622089 tokens), 125630 object-like expansions copied out and 39446 buffered, 54416 invocations (272947 arguments, 14453 expanded first), 109734 pastes, 2204 builtins, 879 includes skipped by their guards and 0 by #pragma once
+  #if and #elif: 1252 lines of 7.2 tokens on average after expansion, 47 of more than 32, the longest 105
+ab: done, 0 failed runs
+== round 1 tree /home/david/buster-fast-bench/codex-116/fifth-maskprobe config [--setup /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+21 passes, min/median/max ms: setup 0.064420/0.070612/0.078166 refine 1.635366/1.645785/1.718489 whole 11.681139/11.772359/12.032545
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 1 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--setup /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+21 passes, min/median/max ms: setup 0.129332/0.132298/0.138158 refine 1.469662/1.478834/1.527162 whole 11.553760/11.609805/11.914936
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 2097152
+== round 2 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--setup /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+21 passes, min/median/max ms: setup 0.125595/0.131656/0.135583 refine 1.460348/1.469452/1.523450 whole 11.432885/11.489941/11.654760
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 2097152
+== round 2 tree /home/david/buster-fast-bench/codex-116/fifth-maskprobe config [--setup /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+21 passes, min/median/max ms: setup 0.061145/0.071284/0.075611 refine 1.629745/1.638762/1.789979 whole 11.615697/11.669246/11.798960
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 3 tree /home/david/buster-fast-bench/codex-116/fifth-maskprobe config [--setup /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+21 passes, min/median/max ms: setup 0.068287/0.069049/0.072616 refine 1.632915/1.641958/1.734968 whole 11.555092/11.606128/11.712086
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 1048576
+== round 3 tree /home/david/buster-fast-bench/codex-116/seventh-prefix28hot config [--setup /home/david/buster-fast-bench/codex-116/inputs/sqlite3.c]
+21 passes, min/median/max ms: setup 0.121988/0.131827/0.136586 refine 1.463620/1.473892/1.550234 whole 11.531850/11.600148/11.791626
+input 1243784 output 706586 digest 7440582a3db0cf0d bucket bytes 2097152
+ab: done, 0 failed runs

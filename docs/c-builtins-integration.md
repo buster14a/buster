@@ -134,12 +134,14 @@ plans cover ordinary integer/pointer and F32/F64 register or stack slots;
 aggregates, high-half plans and wider classes are explicit refusals.
 
 The ordinary Tier 0 live-value spill area is not a SysV variadic register-save
-area. Incoming variadic callee support must reserve and populate that separate
-area before overwriting argument registers and provide genuine frame
-addresses. An addressable local `va_list` needs 24 bytes, beyond the ordinary
-eight-byte scalar local slot. Tests consuming a host-created list establish
-the expansion contract only; a Clang caller invoking a generated variadic
-callee is still required for source-level acceptance.
+area. The optional [incoming variadic frame](tier0.md#incoming-variadic-frames)
+reserves and populates a separate 176-byte area before parameter moves and
+exposes genuine save/overflow anchors through address-only locals. A `VA_LIST`
+local reserves 24 bytes, beyond the ordinary eight-byte scalar local slot.
+`test-tier0-variadic-frame` supplies real native callers of generated callees;
+exact-revision target qualification and source/Tier 1 integration remain
+separate acceptance requirements. Host-created-list tests alone establish
+only the recipe expansion contract.
 
 ## Hints, memory and frame checking
 
@@ -219,6 +221,34 @@ ICE eligibility; `runtime_value` separately carries the real bound or fallback
 (`ULONG_MAX` for unknown modes 0/1, zero for 2/3). A runtime fallback must not
 become a static initializer or an evaluated ICE. Mode conversion to `int`
 precedes the 0..3 range check, while original ICE provenance remains required.
+
+## Type-first bit casts
+
+`c_check_builtin_bit_cast.c` checks the separately parsed destination type and
+one raw value operand. It preserves the source type without array/function
+decay, atomic loading or half promotion. Complete, equally sized, trivially
+copyable C object types are required; valid aggregate, vector and complex
+types retain explicit payload/runtime gaps when this representation model
+cannot carry them. The one operand's evaluation and effects remain visible.
+
+Known representation bytes do not establish source constant proof. The
+producer supplies that proof separately as NONE, CONSTANT or ICE, and optional
+bounded object-representation bytes must match the exact type size. Integer
+bits are reinterpreted without numeric conversion. Raw floating results stay
+in the result's byte payload; the checker never reads or constructs a host
+floating value, including for signaling NaNs. A representation-aware consumer
+can use proven bytes while retaining the explicit CheckValue payload gap.
+Wider, padding-sensitive and invalid-representation cases remain explicit;
+missing runtime lowering does not by itself make otherwise valid source types
+incompatible. The existing generated `bit_cast` parser-gap row remains a gap
+in ordinary prototype decoding, independent of this type-first action.
+
+Qualified array destination spellings can collapse into one canonical TypeId
+while Clang retains different result qualifiers. Those cases report the
+explicit `RESULT_TYPE` gap and an unknown result TypeId (zero), retaining
+`representation_type` for object constraints. Consumers must check the gap
+before using the result type. Unqualified arrays and scalar half types do
+not have that ambiguity.
 
 ## Floating checking
 
@@ -481,8 +511,10 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtin-lowering
 ./build/compiler test-check-varargs
 ./build/compiler test-builtin-varargs
+./build/compiler test-tier0-variadic-frame
 ./build/compiler test-check-builtins-misc
 ./build/compiler test-check-builtins-query
+./build/compiler test-check-builtins-bit-cast
 ./build/compiler test-check-builtins-float
 ./build/compiler test-builtin-misc-lowering
 ./build/compiler test-builtin-float-lowering

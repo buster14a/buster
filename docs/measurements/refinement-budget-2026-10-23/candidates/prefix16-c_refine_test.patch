@@ -1,0 +1,15 @@
+--- a/src/buster/compiler/c_refine_test.c
++++ b/src/buster/compiler/c_refine_test.c
+@@ -1383,2 +1383,2 @@
+-                    const uint32_t matches = (pattern >> (3 * slot)) & 7;
+-                    for (uint32_t word = 0; word < 3; word += 1)
++                    const uint32_t matches = (pattern >> (4 * slot)) & 15;
++                    for (uint32_t word = 0; word < 4; word += 1)
+@@ -1386 +1386 @@
+-                        bucket[4 * slot + word] = prefix[word] ^ (uint32_t)(((matches >> word) & 1) == 0);
++                        bucket[5 * slot + word] = prefix[word] ^ (uint32_t)(((matches >> word) & 1) == 0);
+@@ -1389,2 +1389,2 @@
+-                    bucket[4 * slot + 3] = id;
+-                    if (expected == 0 && matches == 7)
++                    bucket[5 * slot + 4] = id;
++                    if (expected == 0 && matches == 15)
