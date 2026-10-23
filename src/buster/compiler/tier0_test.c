@@ -504,6 +504,10 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
         case BUSTER_TYPED_DISCARD:
             top -= 1;
             break;
+        case BUSTER_TYPED_COPY:
+            top -= 2;
+            memmove((void*)(uintptr_t)stack[top], (const void*)(uintptr_t)stack[top + 1], value);
+            break;
         case BUSTER_TYPED_BRANCH_FALSE:
         case BUSTER_TYPED_BRANCH_TRUE:
             top -= 1;
@@ -1057,8 +1061,10 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
             {
                 char command[4096];
                 char line[512];
-                snprintf(command, sizeof(command), "%s -O0 -fwrapv -w -c %s -o %s.o 2>&1 && %s -O0 -w -o %s %s %s.o %s 2>&1", clang, source, source, clang, executable, harness, source,
-                         object);
+                // -fwrapv and -fno-strict-aliasing, this repository's own dialect: signed arithmetic wraps, as Tier 0's
+                // does, and the objects' checksums read floating parts' bits through integer lvalues.
+                snprintf(command, sizeof(command), "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && %s -O0 -w -o %s %s %s.o %s 2>&1", clang, source,
+                         source, clang, executable, harness, source, object);
                 ok = tier0_test_expect(tally, tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
                                        program_seed, directory);
                 snprintf(command, sizeof(command), "size -A %s.o", source);
@@ -1518,8 +1524,63 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             arena_pop_to(&arena, mark);
         }
     }
-    // Random frames: up to 24 locals, objects of 1 to 300 bytes at every alignment to 16, and 8-byte values, some
-    // address-taken, all of them address-taken ones read by a LOCAL_ADDRESS each, its lea's displacement its place.
+    // A copy's rules: between two objects of 256 bytes, all of them, then each way to break them.
+    for (uint32_t way = 0; way < 6; way += 1)
+    {
+        for (uint32_t l = 0; l < 2; l += 1)
+        {
+            local_classes[l] = BUSTER_TYPED_CLASS_VOID;
+            local_flags[l] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+            local_sizes[l] = BUSTER_TIER0_MAX_COPY_BYTES;
+            local_alignments[l] = 3;
+        }
+        static const uint8_t copy_kinds[4] = { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_COPY, BUSTER_TYPED_RETURN };
+        static const uint8_t copy_classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID };
+        static const uint64_t copy_values[4] = { 0, 1, BUSTER_TIER0_MAX_COPY_BYTES, 0 };
+        memcpy(kinds, copy_kinds, sizeof(copy_kinds));
+        memcpy(classes, copy_classes, sizeof(copy_classes));
+        memcpy(values, copy_values, sizeof(copy_values));
+        static const char* const ways[6] = { "kept", "of no bytes", "past BUSTER_TIER0_MAX_COPY_BYTES", "of a class", "from a constant", "to a constant" };
+        switch (way)
+        {
+        case 1:
+            values[2] = 0;
+            break;
+        case 2:
+            values[2] = BUSTER_TIER0_MAX_COPY_BYTES + 1;
+            break;
+        case 3:
+            classes[2] = BUSTER_TYPED_CLASS_U64;
+            break;
+        case 4:
+            kinds[1] = BUSTER_TYPED_CONST;
+            classes[1] = BUSTER_TYPED_CLASS_I64;
+            break;
+        case 5:
+            kinds[0] = BUSTER_TYPED_CONST;
+            classes[0] = BUSTER_TYPED_CLASS_I64;
+            break;
+        default:
+            break;
+        }
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 4;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_sizes = local_sizes;
+        function.local_alignments = local_alignments;
+        function.local_count = 2;
+        const Tier0Check check = tier0_validate(&function);
+        tier0_test_expect(tally, (check.error == TIER0_OK) == (way == 0) && (way == 0 || check.node == 2), "objects", "a copy %s: tier0_validate says %s at %u (%s)",
+                          ways[way], check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
+    }
+    // Random frames: up to 24 locals, objects of 1 to 300 bytes at every alignment to 16, 8-byte values, some
+    // address-taken, and VA_LISTs of 24 bytes, all of them address-taken ones read by a LOCAL_ADDRESS each, its lea's
+    // displacement its place.
     uint64_t random = seed ^ 0x6f626a656374ull;
     for (uint32_t round = 0; round < 2000; round += 1)
     {
@@ -1529,10 +1590,12 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         for (uint32_t l = 0; l < locals; l += 1)
         {
             const bool object = tier0_generate_chance(&random, 60);
+            const bool va_list = !object && tier0_generate_chance(&random, 20);
             local_sizes[l] = object ? 1 + tier0_generate_below(&random, 300) : 0;
             local_alignments[l] = object ? (uint8_t)tier0_generate_below(&random, BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 + 1) : 0;
-            local_classes[l] = object ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_I64;
+            local_classes[l] = object ? BUSTER_TYPED_CLASS_VOID : va_list ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_I64;
             local_flags[l] = object || tier0_generate_chance(&random, 50) ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+            local_flags[l] = va_list ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VA_LIST : local_flags[l];
             sixteen |= object && local_alignments[l] == 4;
             if (local_flags[l] != 0)
             {
@@ -1582,22 +1645,134 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
                 lea += 1;
             }
         }
+        // An object's bytes are its size, at its alignment; a VA_LIST's are an AbiVaList's, and a value's 8, each at 8.
+        uint32_t extents[locals_capacity];
+        for (uint32_t l = 0; l < locals; l += 1)
+        {
+            extents[l] = local_sizes[l] != 0 ? local_sizes[l] : (local_flags[l] & BUSTER_TYPED_LOCAL_VA_LIST) != 0 ? (uint32_t)sizeof(AbiVaList) : 8;
+        }
         for (uint32_t l = 0; l < locals && laid; l += 1)
         {
             if (local_flags[l] != 0)
             {
-                const uint32_t bytes = local_sizes[l] != 0 ? local_sizes[l] : 8;
-                laid &= places[l] % (1u << local_alignments[l]) == 0 && places[l] + bytes <= size;
+                const uint32_t alignment = local_sizes[l] != 0 ? 1u << local_alignments[l] : 8;
+                laid &= places[l] % alignment == 0 && places[l] + extents[l] <= size;
                 for (uint32_t other = 0; other < l; other += 1)
                 {
-                    const uint32_t other_bytes = local_sizes[other] != 0 ? local_sizes[other] : 8;
-                    laid &= local_flags[other] == 0 || places[l] + bytes <= places[other] || places[other] + other_bytes <= places[l];
+                    laid &= local_flags[other] == 0 || places[l] + extents[l] <= places[other] || places[other] + extents[other] <= places[l];
                 }
             }
         }
         laid &= !sixteen || (size + 8) % 16 == 0;
         tier0_test_expect(tally, laid, "objects", "round %u: %u locals, a frame of %u bytes: the paths disagree, or a local is misplaced", round, locals, size);
         arena_pop_to(&arena, mark);
+    }
+    arena_release(&arena);
+}
+
+// A copy's scratch register, its stacks' first free one (an XMM one from 16 bytes, a general one below), must be in
+// the frame's clobbers after either selection, so that no local makes it its home; past the tables, the function is
+// refused as too deep. On copies above every count of integer and floating values, of each size class, with both
+// paths' code compared.
+static void tier0_test_copies(Tier0TestTally* tally)
+{
+    enum
+    {
+        capacity = 64,
+    };
+    uint8_t kinds[capacity];
+    uint8_t classes[capacity];
+    uint64_t values[capacity];
+    uint8_t local_classes[2] = { BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID };
+    uint8_t local_flags[2] = { BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    uint32_t local_sizes[2] = { BUSTER_TIER0_MAX_COPY_BYTES, BUSTER_TIER0_MAX_COPY_BYTES };
+    uint8_t local_alignments[2] = { 4, 4 };
+    static const uint32_t sizes[] = { 1, 3, 8, 15, 16, 40, 256 };
+    Arena arena = arena_reserve(1ull << 28);
+    for (uint32_t integers = 0; integers <= 13; integers += 1)
+    {
+        for (uint32_t floatings = 0; floatings <= 16; floatings += 1)
+        {
+            for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+            {
+                // The values, the copy between the objects, then the values discarded, the last pushed first.
+                uint32_t count = 0;
+                for (uint32_t k = 0; k < integers + floatings; k += 1)
+                {
+                    kinds[count] = BUSTER_TYPED_CONST;
+                    classes[count] = k < integers ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64;
+                    values[count] = k + 1;
+                    count += 1;
+                }
+                kinds[count] = BUSTER_TYPED_LOCAL_ADDRESS;
+                classes[count] = BUSTER_TYPED_CLASS_U64;
+                values[count] = 0;
+                kinds[count + 1] = BUSTER_TYPED_LOCAL_ADDRESS;
+                classes[count + 1] = BUSTER_TYPED_CLASS_U64;
+                values[count + 1] = 1;
+                kinds[count + 2] = BUSTER_TYPED_COPY;
+                classes[count + 2] = BUSTER_TYPED_CLASS_VOID;
+                values[count + 2] = sizes[s];
+                const uint32_t copy = count + 2;
+                count += 3;
+                for (uint32_t k = integers + floatings; k > 0; k -= 1)
+                {
+                    kinds[count] = BUSTER_TYPED_DISCARD;
+                    classes[count] = k - 1 < integers ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64;
+                    values[count] = 0;
+                    count += 1;
+                }
+                kinds[count] = BUSTER_TYPED_RETURN;
+                classes[count] = BUSTER_TYPED_CLASS_VOID;
+                values[count] = 0;
+                count += 1;
+                Tier0Function function;
+                memset(&function, 0, sizeof(function));
+                function.kinds = kinds;
+                function.classes = classes;
+                function.values = values;
+                function.count = count;
+                function.local_classes = local_classes;
+                function.local_flags = local_flags;
+                function.local_sizes = local_sizes;
+                function.local_alignments = local_alignments;
+                function.local_count = 2;
+                const uint64_t mark = arena.length;
+                // The selections, from the scalar fusion's and depths' columns, which both paths compute alike.
+                Tier0Entries entries;
+                uint64_t* labels = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, count / 64 + 2);
+                bool ready = labels != 0 && tier0_push_entries(&entries, &arena, count);
+                Tier0Frame frames[2];
+                Tier0Error errors[2] = { TIER0_OK, TIER0_OK };
+                memset(frames, 0, sizeof(frames));
+                if (ready)
+                {
+                    memset(labels, 0, (count / 64 + 2) * sizeof(uint64_t));
+                    tier0_labels(&function, labels);
+                    tier0_fuse_scalar(&function, labels, &entries);
+                    tier0_depths_scalar(&function, &entries);
+                    (void)tier0_select(&function, &entries, &frames[0], &errors[0]);
+                    (void)tier0_select_vector(&function, &entries, &frames[1], &errors[1]);
+                }
+                const bool wide = sizes[s] >= 16;
+                const uint32_t depth = ready ? entries.depths[copy] : 0;
+                const uint32_t floating = ready ? entries.floating_depths[copy] : 0;
+                const bool too_deep = wide ? floating >= BUSTER_TIER0_FLOATING_DEPTHS : depth >= BUSTER_TIER0_INTEGER_DEPTHS;
+                const uint32_t scratch = too_deep ? 0 : wide ? 1u << BUSTER_TIER0_XMM(floating) : 1u << tier0_integer_depths[depth];
+                bool counted = ready;
+                for (uint32_t path = 0; path < 2 && ready; path += 1)
+                {
+                    counted &= too_deep ? errors[path] == TIER0_ERROR_DEPTH : errors[path] == TIER0_OK && (frames[path].clobbers & scratch) != 0;
+                }
+                const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+                const Tier0Code vector = tier0_compile(&function, &arena);
+                const bool compiled = too_deep ? scalar.error == TIER0_ERROR_DEPTH && vector.error == TIER0_ERROR_DEPTH
+                                               : scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
+                tier0_test_expect(tally, counted && compiled, "copies", "a copy of %u bytes over %u integers and %u floating values: its scratch %s", sizes[s], integers,
+                                  floatings, counted ? "counted, but the paths differ" : "not in a selection's clobbers");
+                arena_pop_to(&arena, mark);
+            }
+        }
     }
     arena_release(&arena);
 }
@@ -1693,6 +1868,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_objects(&tally, seed);
                 tier0_test_report("objects", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_copies(&tally);
+                tier0_test_report("copies", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

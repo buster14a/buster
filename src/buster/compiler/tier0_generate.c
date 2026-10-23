@@ -122,6 +122,8 @@ struct Tier0Program
     uint32_t global_value_count;
     uint32_t global_first_value[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
     uint32_t global_count;
+    // The global the objects' bytes are folded into (UINT32_MAX without objects).
+    uint32_t sink;
     Tier0GeneratedFunction functions[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
     uint32_t function_count;
     char* text;
@@ -322,7 +324,7 @@ struct Tier0Expression
 
 // An object of a function: a local array (`elements` of class classes[0], a power of two) or a struct (`members`, at
 // their offsets), and its alignment in bytes (`aligned` when it is _Alignas(16) in C: an array's declaration's, or a
-// struct's member's).
+// struct's member's). Objects of one `layout` (a twin and the object it copies) can be copied into one another.
 typedef struct Tier0Object Tier0Object;
 struct Tier0Object
 {
@@ -334,6 +336,7 @@ struct Tier0Object
     uint32_t offsets[BUSTER_TIER0_GENERATE_MAX_MEMBERS];
     uint32_t alignment;
     uint32_t size;
+    uint32_t layout;
 };
 
 // What a function's expressions can read: its locals by class (pointer locals and their pointees apart), its objects,
@@ -1091,14 +1094,20 @@ static void tier0_scope_add(Tier0Scope* scope, uint32_t local, uint32_t class)
 
 // A new object of the current function (which has fewer than BUSTER_TIER0_GENERATE_MAX_OBJECTS): a local array of 2 to
 // 16 elements of a class, or a struct of 2 to 5 members laid out as C lays them out, each now and then aligned to 16
-// (an array's declaration, a struct's member). Its local is of class VOID, address-taken, with its size and alignment.
-// Returns false when the columns are full.
+// (an array's declaration, a struct's member), or a twin of the object before. Its local is of class VOID,
+// address-taken, with its size and alignment. Returns false when the columns are full.
 static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* state, uint64_t* random, bool floating)
 {
     Tier0Object object;
     memset(&object, 0, sizeof(object));
-    const bool array = tier0_generate_chance(random, 55);
-    if (array)
+    // A twin, now and then, of the object before: its layout, as a second object of one type.
+    const bool twin = state->scope.object_count != 0 && tier0_generate_chance(random, 40);
+    const bool array = !twin && tier0_generate_chance(random, 55);
+    if (twin)
+    {
+        object = state->scope.objects[state->scope.object_count - 1];
+    }
+    else if (array)
     {
         object.elements = 2u << tier0_generate_below(random, 4);
         object.members = 0;
@@ -1106,6 +1115,7 @@ static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* sta
         object.aligned[0] = tier0_generate_chance(random, 30);
         object.alignment = object.aligned[0] ? 16 : tier0_class_bytes(object.classes[0]);
         object.size = object.elements * tier0_class_bytes(object.classes[0]);
+        object.layout = state->scope.object_count;
     }
     else
     {
@@ -1123,6 +1133,7 @@ static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* sta
             object.alignment = alignment > object.alignment ? alignment : object.alignment;
         }
         object.size = (offset + object.alignment - 1) & ~(object.alignment - 1);
+        object.layout = state->scope.object_count;
     }
     const uint32_t local = tier0_generate_local(program, state, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN);
     const bool made = local != UINT32_MAX;
@@ -1134,6 +1145,46 @@ static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* sta
         object.local = local;
         state->scope.objects[state->scope.object_count] = object;
         state->scope.object_count += 1;
+    }
+    return made;
+}
+
+// Whether the function has two objects of one layout.
+static bool tier0_has_twins(const Tier0Scope* scope)
+{
+    bool twins = false;
+    for (uint32_t o = 1; o < scope->object_count; o += 1)
+    {
+        twins |= scope->objects[o].layout == scope->objects[o - 1].layout;
+    }
+    return twins;
+}
+
+// A copy between two objects of one layout, if the function has them: all of the bytes or a random prefix of them,
+// into the stream (COPY) and as C (memcpy, as an expression). Returns false without such objects.
+static bool tier0_generate_copy(Tier0Program* program, const Tier0Scope* scope, uint64_t* random)
+{
+    uint32_t pairs[BUSTER_TIER0_GENERATE_MAX_OBJECTS * BUSTER_TIER0_GENERATE_MAX_OBJECTS];
+    uint32_t pair_count = 0;
+    for (uint32_t a = 0; a < scope->object_count; a += 1)
+    {
+        for (uint32_t b = 0; b < scope->object_count; b += 1)
+        {
+            pairs[pair_count] = a << 8 | b;
+            pair_count += a != b && scope->objects[a].layout == scope->objects[b].layout ? 1 : 0;
+        }
+    }
+    const bool made = pair_count != 0;
+    if (made)
+    {
+        const uint32_t pair = pairs[tier0_generate_below(random, pair_count)];
+        const Tier0Object* destination = &scope->objects[pair >> 8];
+        const Tier0Object* source = &scope->objects[pair & 0xff];
+        const uint32_t size = tier0_generate_chance(random, 60) ? destination->size : 1 + tier0_generate_below(random, destination->size);
+        tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, destination->local);
+        tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, source->local);
+        tier0_emit(program, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
+        tier0_text(program, "__builtin_memcpy(&v%u, &v%u, %u)", destination->local, source->local, size);
     }
     return made;
 }
@@ -1174,6 +1225,40 @@ static void tier0_object_address(Tier0Program* program, const Tier0Object* objec
     else
     {
         tier0_text(program, "v%u.m%u", object->local, part);
+    }
+}
+
+// Every object's bytes folded into the program's sink, an element or a member at a time as the unsigned integer of
+// its size (its bits, a floating one's too) XORed in: as C, sink ^= *(unsigned T*)&part, which the cross-check
+// compiles with -fno-strict-aliasing, as this repository's build is compiled (a floating part's bits read through an
+// integer lvalue). Padding, which C leaves undefined, isn't read.
+static void tier0_generate_checksum(Tier0Program* program, const Tier0Scope* scope, const char* prefix)
+{
+    static const uint8_t raw_classes[9] = {
+        [1] = BUSTER_TYPED_CLASS_U8,
+        [2] = BUSTER_TYPED_CLASS_U16,
+        [4] = BUSTER_TYPED_CLASS_U32,
+        [8] = BUSTER_TYPED_CLASS_U64,
+    };
+    for (uint32_t o = 0; o < scope->object_count && program->sink != UINT32_MAX; o += 1)
+    {
+        const Tier0Object* object = &scope->objects[o];
+        const uint32_t parts = object->elements != 0 ? object->elements : object->members;
+        for (uint32_t part = 0; part < parts; part += 1)
+        {
+            const uint32_t raw = raw_classes[tier0_class_bytes(object->classes[object->elements != 0 ? 0 : part])];
+            tier0_emit(program, BUSTER_TYPED_GLOBAL, BUSTER_TYPED_CLASS_U64, program->sink + 1);
+            tier0_text(program, "    %sg%u ^= (unsigned long)*(%s*)&", prefix, program->sink, tier0_c_type(raw));
+            tier0_object_address(program, object, part);
+            tier0_text(program, ";\n");
+            tier0_emit(program, BUSTER_TYPED_LOAD, raw, 0);
+            if (raw != BUSTER_TYPED_CLASS_U64)
+            {
+                tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_GLOBAL, BUSTER_TYPED_CLASS_U64, program->sink + 1);
+        }
     }
 }
 
@@ -1445,8 +1530,17 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
                 program->argument_classes[program->argument_count] = (uint8_t)class;
                 program->argument_count += 1;
                 tier0_text(program, p == 0 ? "" : ", ");
+                // Now and then a copy between twins first, as a comma expression: a COPY above the values before it.
+                const bool copied = state->scope.object_count > 1 && tier0_generate_chance(random, 10) && tier0_has_twins(&state->scope);
+                if (copied)
+                {
+                    tier0_text(program, "(");
+                    tier0_generate_copy(program, &state->scope, random);
+                    tier0_text(program, ", ");
+                }
                 tier0_generate_value_of(program, function, &state->scope, random, class, 1 + tier0_generate_below(random, options->expression_nodes / 2 + 1),
                                         options->floating, state->prefix, p + (indirect ? 1 : 0));
+                tier0_text(program, copied ? ")" : "");
             }
             tier0_text(program, ");\n");
             tier0_emit(program, BUSTER_TYPED_CALL, result, call);
@@ -1601,10 +1695,13 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
     }
     else if (choice < 54 && state->scope.object_count != 0)
     {
-        // An object's element (plainly or op=, the address computed once) or member.
+        // A copy between twins, or an object's element (plainly or op=, the address computed once) or member.
         const Tier0Object* object = &state->scope.objects[tier0_generate_below(random, state->scope.object_count)];
         tier0_indent(program, state);
-        if (object->elements != 0)
+        if (tier0_generate_chance(random, 25) && tier0_generate_copy(program, &state->scope, random))
+        {
+        }
+        else if (object->elements != 0)
         {
             const uint32_t class = object->classes[0];
             const bool compound = tier0_is_arithmetic(class) && tier0_generate_chance(random, 40);
@@ -2019,6 +2116,8 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
             tier0_generate_statement(program, &state, random, options, &left);
         }
     }
+    // The objects' bytes, into the sink, as the function ends.
+    tier0_generate_checksum(program, &state.scope, prefix);
     // The entry calls every function, folding their results into a local it returns with its own.
     if (entry)
     {
@@ -2171,6 +2270,20 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
                 tier0_text_constant(program, class, value);
             }
             tier0_text(program, array ? " };\n" : ";\n");
+        }
+        // With objects, a global the functions fold their objects' bytes into before they return, so that a byte a
+        // copy or a store puts wrong anywhere in them shows in the globals.
+        program->sink = UINT32_MAX;
+        if (options.objects && program->global_count < BUSTER_TIER0_GENERATE_MAX_GLOBALS)
+        {
+            program->sink = program->global_count;
+            program->global_classes[program->sink] = BUSTER_TYPED_CLASS_U64;
+            program->global_elements[program->sink] = 1;
+            program->global_first_value[program->sink] = program->global_value_count;
+            program->global_values[program->global_value_count] = 0;
+            program->global_value_count += 1;
+            program->global_count += 1;
+            tier0_text(program, "unsigned long %sg%u = 0;\n", prefix, program->sink);
         }
         tier0_text(program, "\n");
         for (uint32_t f = 0; f < functions && !program->overflow; f += 1)

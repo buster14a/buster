@@ -129,6 +129,9 @@
 //     value's && and ||, whose value the entry `value` finds on the stack as the arm after it leaves its own.
 //   - RETURN: returns the operand (of `class`), or nothing when `class` is VOID; at statement level (with nothing else
 //     on the stacks).
+//   - COPY: copies `value` bytes (1 to BUSTER_TIER0_MAX_COPY_BYTES) to the address the first operand (U64) holds from
+//     the one the last (U64) holds, and pushes nothing (`class` VOID): a struct's assignment. The two ranges are the
+//     same or apart. A front end copies more through memcpy, as clang -O0 does past this many bytes.
 // A target `value` is an entry's index, or the entry count for the function's end. Every target is the start of a
 // statement or of an arm, and the stacks there must hold the same values whichever way control arrives (as in a
 // WebAssembly validator): tier0_validate checks it.
@@ -173,7 +176,8 @@
 #define BUSTER_TYPED_JUMP 38
 #define BUSTER_TYPED_JUMP_VALUE 39
 #define BUSTER_TYPED_RETURN 40
-#define BUSTER_TYPED_KINDS 41
+#define BUSTER_TYPED_COPY 41
+#define BUSTER_TYPED_KINDS 42
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 
@@ -193,6 +197,8 @@
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS 64
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
 #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 4
+// A COPY's bytes, at most: 16 stores of 16 bytes, the most LLVM expands a memcpy into at -O0.
+#define BUSTER_TIER0_MAX_COPY_BYTES 256
 
 // A function, as the front end hands it to Tier 0: the body's columns, the locals (parameters first, in order) with
 // their classes and flags, the parameters' locations at entry and the result's (abi_assign of the function's own type),
@@ -1683,6 +1689,8 @@ static void tier0_define_templates(void)
     tier0_begin();
     tier0_end(BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_LAST, 0);
     tier0_defer(BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
+    // COPY: tier0_emit_deferred's, its moves by its size.
+    tier0_defer(BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
     {
@@ -2066,6 +2074,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_JUMP] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
     [BUSTER_TYPED_JUMP_VALUE] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_RETURN] = BUSTER_TIER0_SINK,
+    [BUSTER_TYPED_COPY] = { BUSTER_TIER0_STACK_INTEGER, BUSTER_TIER0_STACK_OPERAND, BUSTER_TIER0_STACK_NONE },
 };
 
 // The per-entry columns both paths fill, which the tests compare: each entry's key (its template's kind, class and
@@ -3351,6 +3360,42 @@ static void tier0_emit_shift(const Tier0Entries* entries, const Tier0Frame* fram
     }
 }
 
+// A copy of `value` bytes, from the address at depth − 1 to the one at depth − 2, through its stacks' first free
+// register: from 16 bytes, 16 at a time in an XMM register (movups), the last 16 ending at the end, overlapping the ones
+// before; below 16, two pieces of a general register's 8, 4, 2 or 1 bytes, the second ending at the end (one when
+// that is the whole). The ranges are the same or apart, so overlapping pieces copy what they would apart.
+static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t size = (uint32_t)function->values[i];
+    const uint32_t depth = entries->depths[i];
+    const uint8_t destination = tier0_integer_depths[depth - 2];
+    const uint8_t source = tier0_integer_depths[depth - 1];
+    if (size >= 16)
+    {
+        const uint8_t scratch = entries->floating_depths[i];
+        for (uint32_t offset = 0; offset < size; offset += 16)
+        {
+            const int32_t at = (int32_t)(offset + 16 <= size ? offset : size - 16);
+            tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_X_XM, scratch, source, BUSTER_X86_MEMORY_BASE, at, 0));
+            tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, scratch, destination, BUSTER_X86_MEMORY_BASE, at, 0));
+        }
+    }
+    else
+    {
+        const uint8_t scratch = tier0_integer_depths[depth];
+        const uint32_t piece = size >= 8 ? 8 : size >= 4 ? 4 : size >= 2 ? 2 : 1;
+        const uint32_t load = piece == 8 ? X86_FORM_MOV_R64_RM64 : piece == 4 ? X86_FORM_MOV_R32_RM32 : piece == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+        const uint32_t store = piece == 8 ? X86_FORM_MOV_RM64_R64 : piece == 4 ? X86_FORM_MOV_RM32_R32 : piece == 2 ? X86_FORM_MOV_RM16_R16 : X86_FORM_MOV_RM8_R8;
+        tier0_put(writer, tier0_instruction(load, scratch, source, BUSTER_X86_MEMORY_BASE, 0, 0));
+        tier0_put(writer, tier0_instruction(store, scratch, destination, BUSTER_X86_MEMORY_BASE, 0, 0));
+        if (size > piece)
+        {
+            tier0_put(writer, tier0_instruction(load, scratch, source, BUSTER_X86_MEMORY_BASE, (int32_t)(size - piece), 0));
+            tier0_put(writer, tier0_instruction(store, scratch, destination, BUSTER_X86_MEMORY_BASE, (int32_t)(size - piece), 0));
+        }
+    }
+}
+
 // The records of a deferred entry (into `writer`, which counts them when it has no records).
 static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
                                 Tier0Writer* writer)
@@ -3363,6 +3408,10 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
         tier0_emit_division(function, entries, frame, homes, i, writer);
+    }
+    else if (kind == BUSTER_TYPED_COPY)
+    {
+        tier0_emit_copy(function, entries, i, writer);
     }
     else
     {
@@ -3467,6 +3516,13 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
         const bool save_rax = depth > 0 && dividend != X86_REGISTER_RAX;
         const bool save_rdx = depth > 2 && dividend != X86_REGISTER_RDX;
         count = 2 * ((save_rax ? 1u : 0u) + (save_rdx ? 1u : 0u)) + (dividend != X86_REGISTER_RAX ? 1 : 0) + 2 + (dividend != result ? 1 : 0);
+    }
+    else if (kind == BUSTER_TYPED_COPY)
+    {
+        // A load and a store per 16 bytes or part of them; below 16, per piece, one or two.
+        const uint32_t size = (uint32_t)function->values[i];
+        const uint32_t piece = size >= 8 ? 8 : size >= 4 ? 4 : size >= 2 ? 2 : 1;
+        count = size >= 16 ? 2 * ((size + 15) / 16) : size > piece ? 4 : 2;
     }
     else
     {
@@ -3653,6 +3709,13 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
                     floating_top = result == 2 && floating_below > floating_top ? floating_below : floating_top;
                     clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
                     calls = true;
+                }
+                else if (function->kinds[i] == BUSTER_TYPED_COPY)
+                {
+                    // A copy's scratch, its stacks' first free register: an XMM one from 16 bytes, a general one below.
+                    const bool wide = function->values[i] >= 16;
+                    integer_top = !wide && depth > integer_top ? depth : integer_top;
+                    floating_top = wide && floating > floating_top ? floating : floating_top;
                 }
                 else
                 {
@@ -4434,6 +4497,17 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 return_class = class;
                 validator.reachable = false;
                 break;
+            case BUSTER_TYPED_COPY:
+            {
+                const uint32_t source = tier0_pop(&validator, i);
+                const uint32_t destination = tier0_pop(&validator, i);
+                if (source != BUSTER_TYPED_CLASS_U64 || destination != BUSTER_TYPED_CLASS_U64 || class != BUSTER_TYPED_CLASS_VOID || value == 0 ||
+                    value > BUSTER_TIER0_MAX_COPY_BYTES)
+                {
+                    tier0_reject(&validator, i, "a copy's addresses, class or size");
+                }
+                break;
+            }
             default:
             {
                 // The binary operations and the compares.
@@ -5283,6 +5357,12 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
                 deferred_floating_top = result == 2 && floating_below > deferred_floating_top ? floating_below : deferred_floating_top;
                 clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
                 calls = true;
+            }
+            else if (function->kinds[i] == BUSTER_TYPED_COPY)
+            {
+                const bool wide = function->values[i] >= 16;
+                deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
+                deferred_floating_top = wide && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
             }
             else
             {

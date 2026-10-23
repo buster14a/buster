@@ -3796,25 +3796,29 @@ arguments, past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
-into, each address's remainder by its alignment a value. Before them it checks
+into, copied (twins' bytes, all or a prefix, in statements and inside call
+arguments), each address's remainder by its alignment a value, and every
+object's bits folded into a global at its function's end. Before them it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
 cycles of every length) run on a register file, the vector path's application
 of chosen forms against the scalar path's on random records, that both paths
 refuse unsupported entries and expressions past the depths alike, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
-frames of objects and values whose places both paths must give alike, aligned,
-inside the frame and apart. Every function must pass `tier0_validate`,
-both paths must compile it to the same records, branch columns and references,
-and the records must pass `x86_validate` and the branch columns
-`branch_sizing_validate`. Each program is then sized, encoded, loaded into
+frames of objects, values and `VA_LIST`s whose places both paths must give
+alike, aligned, inside the frame and apart; and copies: their rules, and a copy
+of each size class above every count of values, whose scratch register both
+selections must count among the frame's clobbers. Every function must pass
+`tier0_validate`, both paths must compile it to the same records, branch
+columns and references, and the records must pass `x86_validate` and the branch
+columns `branch_sizing_validate`. Each program is then sized, encoded, loaded into
 fresh pages and run in a child process on eight inputs (stopped by an alarm
 after 10 s), and its result and every global's bytes must equal what the test's
 interpreter of the typed stream gives (the interpreter converts floating values
 to integers as cvttsd2si does).
 
 With `--cross-check`, which needs clang (`--clang PATH`) and `size`, each of
-`--cross-count` (60) programs of the larger shape, keeping to what C defines,
-is written as Tier 0's object (the link representation and the object writer)
+`--cross-count` (60) programs of the larger shape, keeping to what C defines
+(with `-fwrapv` and `-fno-strict-aliasing`, as the repository builds), is written as Tier 0's object (the link representation and the object writer)
 and as C, which clang -O0 compiles; a generated harness links both, runs them
 on the same inputs and compares the results and every global (a floating
 one's NaNs alike whatever their bits, as C leaves them), then times both.
