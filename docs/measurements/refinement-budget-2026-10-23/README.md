@@ -415,3 +415,62 @@ probes eight buckets with vector gathers; `noscan`, `gapgather` and `gapinline`
 replace the source scan with gap checks; `compact75`/`compact87` start the
 original layout with fewer buckets and higher occupancy. They passed the local
 refinement suite but regressed diagnostic timings and have no target result.
+
+## Ninth screen: reuse lexer backslash detection
+
+The #117 owner released its completed source claim after PR #323 and main CI
+passed. The open-PR inventory had no other lexer/refinement/intern edits. This
+bounded experiment adds an optional internal bitmap output to the lexer chunk
+loop; public `c_tokenize` behavior is unchanged, and its existing wrappers pass
+no bitmap. C modes with and without raw strings/digit separators have separate
+specializations. Skipped comments and scalar declines conservatively mark all
+covered regions, and overlapping/restarted prefixes only add bits. Other modes
+retain the existing source scan. Initialization and lexer costs are measured.
+
+The [target output](screen-ninth-9700x.txt),
+[summary](screen-ninth-9700x.tsv) and [orchestration](ninth-run.sh) record the
+full refinement suite, 57,408 guarded preparation cases, both SQLite inputs,
+main.c and allocation failures passing, plus 18 successful preprocessing
+processes. [Local preparation sanitizers](lexgap-preparation-sanitizers-local.txt)
+also pass. The initial local prototype did not enable the no-digit-separator
+mode used by the SQLite benchmark; the archived variant and target screen
+include that mode explicitly.
+
+SQLite 3.53.4 refinement falls from 1.532–1.539 ms to 1.507–1.511 ms, but
+lexing rises from a 2.409 ms median to 2.442 ms. Whole time rises from
+11.559–11.591 ms to 11.600–11.631 ms. The shifted work defeats acceptance.
+The next prototype marks only the lexer's existing possible-splice path,
+avoiding a per-chunk bitmap check and irrelevant literal backslashes.
+
+## Tenth screen: finalization, flag reuse and intermediate table size
+
+The [target output](screen-tenth-9700x.txt),
+[summary](screen-tenth-9700x.tsv) and [orchestration](tenth-run.sh) record three
+new variants passing the full target refinement suite, scaled-bucket shared
+placement/growth checks, 36 preprocessing processes and six setup processes.
+`foldxor` folds the high and low qwords after the two AES rounds instead of
+adding the final AES round. It passes the fixed regressions and the
+[local 128-seed sweep](foldxor-hash-seeds-local.txt), but loses on timing.
+`hashflags` carries length classifications from hashing into probing, avoiding
+a repeated length load; it also loses on timing.
+
+`prefix28scaled` uses 24,576 two-slot buckets with multiplicative hash mapping
+and explicit probe wrap, intermediate between the earlier 16K and 32K layouts.
+All scalar/vector/shared consumers use the same mapping. Its
+[local shared-file suite](prefix28scaled-shared-local.txt) passes too.
+
+| SQLite 3.53.4 | Refine range, ms | Whole-run range, ms |
+| --- | ---: | ---: |
+| 128 KiB original-table control | 1.529–1.541 | 11.598–11.619 |
+| 24K wide-prefix buckets | 1.503–1.505 | 11.538–11.696 |
+| XOR finalization | 1.552–1.557 | 11.599–11.634 |
+| Reused length flags | 1.557–1.563 | 11.591–11.621 |
+
+The intermediate table initializes in 0.053–0.054 ms versus 0.061–0.063 ms
+for the control, so it avoids the former setup penalty. It still exceeds the
+budget, including the historical charge, and main.c refinement regresses to
+4.301–4.321 ms from 3.427–3.487 ms; whole time rises to 36.989–37.258 ms from
+36.394–36.687 ms. It is not selected. A local footprint diagnostic shows that
+the current compiler-source workload crosses two growth thresholds with this
+capacity. The next screen tests compact spans with higher capacity, the more
+selective splice handoff, their combination and sixteen-ID probe publication.
