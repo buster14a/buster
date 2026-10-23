@@ -177,6 +177,8 @@ jobs:
           ./build/compiler test-gnu --clang
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
+          == Test selective lowering against its independent oracle and Clang symbols
+          ./build/compiler test-lowering --clang
           == Test deferred-body source-position environments
           ./build/compiler test-environments
           == Test C-source binding identities and scope semantics
@@ -654,6 +656,13 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Benchmark selective lowering on synthetic graphs
+        # Includes independent result checks. These unconditioned single-operation samples are informational;
+        # source-corpus lowering and conditioned multi-process measurements remain separate acceptance work.
+        run: |
+          cpu="$(awk '/Cpus_allowed_list/ {split($2,a,/[-,]/); print a[1]}' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-lowering
 
       - name: Benchmark GNU syntax metadata and parser handoff
         run: |
