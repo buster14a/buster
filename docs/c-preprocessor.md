@@ -2324,18 +2324,41 @@ fresh transcript cache to each candidate batch. It preserves token locations,
 complete expansion history and macro effects, and falls back for unsupported
 state. The general compiler driver in #152 is still a separate integration gap.
 
-The initial three-process-round 9700X screen found **no gain**. On 1,315 musl
-static-libc C units, original process medians were 382.443–384.119 ms per batch;
-fresh transcript caches took 388.716–391.637 ms (1.60–1.96% slower). Lua's
-34-unit batch was 17.96–20.37% slower. Musl peak process memory rose from
-36.8 to 127.0 MiB. These sampled totals include transcript construction and
-destruction with a warm file cache; their exact boundary and observed spread
-are recorded in the linked experiment.
+The decision is **reject**. The initial three-round 9700X screen was
+1.60–1.96% slower on 1,315 Makefile-selected musl static-libc C units and
+17.96–20.37% slower on Lua's 34 units. A second layout implements separate
+identifier/definition columns, discards temporary location metadata, and cuts
+musl's retained transcripts from 96,150,694 to 84,930,294 bytes. It still loses
+when charging fresh file-cache/intern-table/transcript lifetimes, release and
+the common output consumer inside one contiguous batch interval:
 
-Headers accounted for about 95.6% of musl's main preprocessing interval, which
-itself was only about 154–156 ms of the 382–384 ms total. Replacing header
-execution alone did not repay the complete transcript's validation, recording
-and copying costs. The candidate does not earn retention from these results.
-Wider target equivalence checks, per-header accounting and additional timing
-boundaries remain pending; #111 remains open until the final evidence and
-decision are complete. No production transcript cache is enabled.
+| Three process rounds on the 9700X | Original median range | Fresh replay median range | Replay cost |
+| --- | ---: | ---: | ---: |
+| musl, 1,315 selected C units | 405.610–415.382 ms | 426.641–431.124 ms | +3.17–5.18% |
+| Lua 5.4.8, 34 C units | 29.943–30.318 ms | 36.379–36.791 ms | +20.30–21.89% |
+
+All selected musl original observations span 404.967–416.687 ms, while replay
+spans 426.138–433.009 ms: no speedup beyond run-to-run spread. Musl peak process
+RSS rises from about 32.6 to 116.8–117.0 MiB. These are multi-unit preprocessing
+batches, excluding process startup and option parsing; the selected musl C
+inputs use x86-64 replacement rules, mallocng and common static-libc flags,
+rather than constituting a complete musl build.
+
+Headers accounted for about 95.6% of musl's original main preprocessing
+interval, itself only about 154–156 ms of the initial screen's 382–384 ms
+sampled total. Replacing that execution does not repay read-set validation,
+complete provenance copying and first-batch recording. Musl's fresh cache
+retains 1,100 transcripts and performs 1,908 replays, 1,163 eligible misses and
+2,374,363 identity checks per batch.
+
+Native equivalence passed for all token/provenance columns, diagnostics,
+macro dumps and both printers: three passes over the musl/Lua units, all
+8,983 libc C/header inputs, and 500 generated programs each in C17/C23.
+The new vector kernels also pass their scalar/protected-page checks. The
+supplemental parser/100 ms conditioning matrix ended after the primary gate
+failed, withdrawing the last unacquired request; it supplies no complete-matrix
+or full-compilation claim. The linked report retains raw timings, ranges,
+memory, source identities
+and the exact comparison boundaries. Per-header distributions are separately
+labelled local diagnostics. This closes #111 through its measured
+negative-result alternative. No production cache or dormant hooks are retained.

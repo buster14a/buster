@@ -1,4 +1,4 @@
-# Compact read-set columns: pending target qualification
+# Compact read-set columns: qualified and rejected
 
 The first experiment retained 32-byte `ReplayRead` records containing names,
 keys and source-span metadata, although validation only needs names and keys.
@@ -39,6 +39,11 @@ Local musl retention is 84,930,294 bytes, with the same 1,100 transcripts;
 the initial layout retained 96,150,694 bytes. This is a storage observation,
 not a speed result. Local logs are under [raw/local-columns](../raw/local-columns/).
 
-The native 9700X build, guard/state checks, full corpus qualification, per-header
-statistics and whole-batch performance remain pending. No speedup or final
-acceptance is inferred from these local diagnostics, and #111 remains open.
+The native 9700X build, guarded tails, state/include-boundary cases and complete
+corpus equivalence checks passed. The native libc comparison covers 26,949 unit
+runs / 36,297,048 output tokens; its environment differs from the local logs.
+The [main report](../README.md) records every native corpus count and the
+fresh whole-batch timings. Musl slows by 3.17–5.18% and Lua by 20.30–21.89%
+across three process rounds, while peak process memory rises substantially.
+The smaller columns preserve correctness and reduce retention, but still fail
+the performance gate. This variant is rejected with the original layout.

@@ -1,0 +1,1 @@
+units=1315 transcripts=1100 hits=1908 misses=1163 checks=2374363 reads=565716 writes=318205 rejected=63 retained=84930294

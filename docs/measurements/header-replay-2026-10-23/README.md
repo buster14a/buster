@@ -3,9 +3,127 @@
 This is the isolated experiment for [#111](https://github.com/buster14a/buster/issues/111).
 The measured source is Buster `635434f2a4d153c6de1dd2f1149055c4507c6f46`.
 No transcript cache is enabled in the production compiler by this snapshot.
-The initial locked 9700X screen completed on 2026-10-23 at 11:43:21 UTC and
-found no total-time improvement. Wider target qualification remains pending;
-the local checks below are diagnostic evidence, not target acceptance.
+The locked 9700X comparisons reject both the initial layout and the refined
+read-column layout: neither repays recording, validation and complete
+provenance replay. Native corpus equivalence passed, but the refined layout
+slows the musl batch by 3.17–5.18% and Lua by 20.30–21.89%. Retain this
+reproducible negative result and leave the production preprocessor unchanged.
+
+## Final 9700X decision
+
+The [compact read-column variant](soa/README.md) implements the proposed
+separate identifier and exact-definition columns. Compared with the first
+layout it removes cold location metadata from validation and reduces musl's
+retained transcript storage from 96,150,694 to 84,930,294 bytes. This improvement
+still does not make replay worthwhile.
+
+The final boundary is one contiguous interval per batch. Every pass constructs
+and releases a fresh file cache and intern table; candidate odd passes also
+construct, populate and release an initially empty transcript cache. It charges
+the common token-digest consumer. OS page caches are not flushed. Startup,
+option parsing and once-per-process discovery remain outside the timer; this
+is a multi-unit preprocessing comparison, not a full compiler invocation.
+
+| Input / process round | Original ms | Hooks, replay off ms | Fresh replay ms | Replay versus original |
+| --- | ---: | ---: | ---: | ---: |
+| musl / 1 | 412.759 | 416.971 | 431.124 | +4.45% |
+| musl / 2 | 415.382 | 417.655 | 428.558 | +3.17% |
+| musl / 3 | 405.610 | 414.171 | 426.641 | +5.18% |
+| Lua / 1 | 30.318 | 30.857 | 36.791 | +21.35% |
+| Lua / 2 | 29.943 | 30.818 | 36.497 | +21.89% |
+| Lua / 3 | 30.242 | 31.158 | 36.379 | +20.30% |
+
+The three rounds alternate process order. Each process has eight passes;
+original medians use passes 1–7, hooks-off use 2/4/6, and fresh-replay medians
+use 1/3/5/7. The median of an even count averages its middle two values.
+Across all musl observations used for those medians, original batches span
+404.967–416.687 ms and replay batches 426.138–433.009 ms. Lua spans
+29.414–31.802 ms and 35.885–37.212 ms, respectively. There is no gain beyond
+spread: all replay observations are slower. The
+[process medians and ranges](final-process-medians.tsv) and
+[native logs](raw/final-target/) retain the full observations.
+
+Musl's process peak RSS increases from about 32.6 MiB to 116.8–117.0 MiB;
+Lua increases from about 33.0 MiB to 43.1 MiB. Musl still retains 1,100
+transcripts, with 1,908 hits, 1,163 eligible misses, 2,374,363 identity checks,
+565,716 recorded reads and 318,205 writes per fresh candidate batch. Lua has
+165 transcripts, 1,520 hits, 569 eligible misses, 43,336 checks and 4,244,642
+retained bytes. Header-guard skips are not counted as replay attempts.
+
+The primary preprocessing gate is sufficient to reject the candidate under
+#111's stated alternative: document numbers showing that reuse is not worth
+retaining. The supplemental parser/100 ms conditioning matrix was stopped
+after this failure, withdrawing its final still-unacquired Lua parser request;
+completed supplemental logs are retained,
+but there is no claim of a complete matrix, power-state qualification or
+successful full compilation. No acquired command was interrupted and CI
+retained priority. A future design needs new end-to-end evidence rather than
+inheriting an acceptance claim from this correct but slower prototype.
+
+## Per-header diagnostics and input identity
+
+The final distribution pass is explicitly **local diagnostic evidence**, from
+the Ryzen 9 7940HS with Clang 23.1.3 and the same frozen source/selected inputs.
+It uses `-O1 -g -march=native -fwrapv -funsigned-char -fno-strict-aliasing
+-Wall -Werror`, one CPU at niceness 19 with idle I/O priority, a 30-second
+per-command bound, and no timing observations. See the complete
+[musl CSV](raw/local-metrics/musl.csv) and [Lua CSV](raw/local-metrics/lua.csv).
+
+| Diagnostic input | Transcripts | Header path spellings | Maximum variants per file-cache record | Read-set min / median / 90th percentile / max |
+| --- | ---: | ---: | ---: | ---: |
+| musl | 1,100 | 184 | 64 | 0 / 283 / 1,083 / 5,280 |
+| Lua | 165 | 76 | 7 | 1 / 9 / 176 / 1,160 |
+
+The CSV's `variants` counts the file-cache record, including alternate path
+spellings; the path-spelling count is not a count of distinct physical files.
+The 90th percentile is the nearest rank. Rows retain each transcript's read,
+write, output, range, scratch and provenance sizes. Musl's aggregate hits,
+misses, reads, writes, checks and retained bytes match the native fresh-batch
+observations exactly. Local Lua records 11,366 reads, 6,458 writes and
+4,244,514 retained bytes, versus the native 11,368 / 6,460 / 4,244,642; installed
+headers differ, so those local distributions are not target qualification.
+
+Continuous CI arrivals delayed the optional target metadata pass, which was
+withdrawn along with the unacquired supplemental parser command. Native
+performance and corpus qualification were already complete. The native
+`status.txt` / `controller.status` therefore record intentional exit 143 from
+that waiter; this is not a failed acquired correctness or performance run.
+No target command or CI job was interrupted while holding the host lock.
+
+The [musl input hashes](raw/final-target/musl-inputs.sha256) and
+[Lua input hashes](raw/final-target/lua-inputs.sha256) identify all 1,564 / 199
+resolved path spellings from the original native first-round file graphs.
+All original/candidate initial path sets match across the three rounds.
+They were captured after the experiment as low-priority file reads, using each
+corpus's working directory. They are not a completed final graph comparison.
+The abandoned hash attempt from the experiment root could not resolve relative
+paths and was discarded; `input-hash-note.txt` records the corrected capture.
+
+## Native equivalence qualification
+
+The compact layout was built on the 9700X with Clang 23.1.1, `-O3 -g
+-march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror`.
+Each build, check and measurement acquired its own shared lock; timings were
+pinned to CPU 2. Frozen source identities, binary hashes and build dependencies
+are retained with the native logs.
+
+| Native input, three passes each | Unit runs | Output tokens |
+| --- | ---: | ---: |
+| musl, selected static-libc C units | 3,945 | 15,013,785 |
+| Lua 5.4.8 | 102 | 1,764,198 |
+| Zig 0.14.1 libc, all 8,983 C/header inputs in groups of 512 | 26,949 | 36,297,048 |
+| #109 seed 111, 500 C17 programs | 1,500 | 152,619 |
+| #109 seed 111, 500 C23 programs | 1,500 | 151,446 |
+| Location-copy scalar twin, same C17 set | 1,500 | 152,619 |
+
+All comparisons passed for the four output columns, complete provenance
+arrays and runs, expansion starts, diagnostics, macro dumps, and both output
+printers. Equally rejected malformed or foreign-target inputs count as
+equivalence, not as valid C or independent Clang acceptance. Native checks also
+passed 8,580 guarded location-copy cases, 131 read-column scalar/tail cases,
+45 macro/guard/include-boundary unit runs and 12 virtual-source identity cases.
+The local token totals below belong to separate diagnostic environments;
+they are not substituted for the target's corpus results.
 
 ## Initial 9700X observations
 
@@ -55,17 +173,9 @@ bytes (91.7 MiB). Process peak RSS rises from 36.8 to 127.0 MiB. Lua retains
 are not replay attempts, so these hit/miss counts do not describe all includes.
 The resource helper reports Linux `wait4` observations for the whole process.
 
-The measured candidate does not earn retention: replay replaces substantial
-header execution but its validation, copying and first-batch recording costs
-repay none of the total time and increase memory. This rejects this prototype;
-it does not prove that every future inclusion-cache design must lose. The
-complete target corpus checks, per-header diagnostics and additional timing
-boundaries remain pending before the issue's final disposition.
-
-A [compact read-column variant](soa/README.md) removes cold location metadata
-from validation and reduces retained read-set storage. It has passed local
-diagnostic comparisons, while its target build and performance remain queued.
-The initial result above therefore does not yet close the wider idea.
+This initial screen completed at 11:43:21 UTC. It rejects the first layout;
+the final experiment above also rejects the smaller read-column layout.
+Neither result proves that every possible future inclusion cache must lose.
 
 ## Compared paths
 
@@ -105,9 +215,10 @@ timing instructions on both paths. `__rdtsc` values are TSC ticks, not measured
 core cycles.
 
 The controlled runner pins measurements to CPU 2 and alternates original and
-candidate process order across three rounds. Its initial screen uses no added
-conditioning; its wider matrix also supports work after 100 ms of dependent
-scalar conditioning and the parser consumer. Each build, test or
+candidate process order across three rounds. The completed primary comparisons
+use no added conditioning. The adapter also supports work after 100 ms of
+dependent scalar conditioning and a parser consumer; that supplemental matrix
+was ended early as described above. Each build, test or
 measurement separately takes the shared 9700X lock with CI priority. Never put
 an outer lock around this runner.
 
@@ -196,14 +307,26 @@ with no replay implementation. The initial wrong-path build failed its unused
 function checks and produced no accepted reference result. Setup failure logs
 are retained separately from successful observations.
 
-`run-9700x.sh` records exact commands, host identity, executable fingerprints,
-raw per-process results and resolved input-file lists. Its `source.sha256`
-manifest covers `tree/src` and the compiled primary overlay sources before the builds. The musl and Lua
-inputs are runtime corpora, not vendored files. Generated programs use this
-repository's original #109 generator, seed 111 and case ids 0 through 499 in
-each language mode. The final acceptance record must retain the resolved input
-hashes, original process observations, memory usage, cache statistics and the
-decision, rather than substituting medians without their spread.
+`run-9700x.sh` is the initial runner and records the x86-64 musl selection,
+commands, host identity, executable fingerprints, raw process results and
+resolved input-file lists. Its `source.sha256` covers `tree/src` and the
+compiled primary overlays before the builds; `soa.sha256` identifies the final
+column variant. Final commands and successful completion times are under
+`raw/final-target/`, reusing the initial `musl-units.txt` / `lua-units.txt`.
+Both campaigns set `SOURCE_DATE_EPOCH=1767225600` and clear `CPATH`,
+`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH` and `OBJC_INCLUDE_PATH`. The reference
+`cold-batch.c` wrapper, like `probe.c`, must be outside the candidate overlay.
+
+The musl and Lua inputs are runtime corpora, not vendored files. The independent
+musl copy reports version 1.2.5; its resolved source/header hashes identify the
+actual measured bytes. The libc qualification uses
+`/var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc`: the frozen Zig
+0.14.1 snapshot, whose documented C/header subset is 8,983 files / 93,836,361
+bytes. Its musl portion includes Zig's patches, and is distinct from the
+selected standalone musl batch. Generated programs use this repository's
+original #109 generator, seed 111 and case ids 0 through 499 in each language
+mode. The record preserves original observations, memory use, source identity
+and the decision alongside the reduced medians and their spread.
 
 `metrics.c` is a separate, untimed diagnostic that includes the same frozen
 cache and harness. It first warms the file cache without replay, then starts a
@@ -216,11 +339,11 @@ for their measurements.
 
 `measure-run.c` replaces the unavailable `/usr/bin/time` for external process
 resource observations. It does not replace the benchmark's timing intervals.
-`cold-batch.c` adds a separate boundary that constructs and releases the file
+`cold-batch.c` supplies the final boundary that constructs and releases the file
 cache and intern table inside each contiguous whole-batch interval, charging
-the common output-digest consumer too. It uses the frozen kernels and is not
-yet built or measured in this record; warm-file-cache observations must not
-be presented as those fresh whole-batch results. Process startup, option parsing
+the common output-digest consumer too. It uses the frozen kernels and the
+compact-layout patches for the candidate. Initial warm-file-cache observations
+must not be presented as fresh whole-batch results. Process startup, option parsing
 and once-per-process discovery are outside the new batch timer; file-cache,
 intern-table and transcript-cache setup/release are inside it.
 
@@ -232,5 +355,6 @@ at the recorded revision and retains its existing notices. musl, Lua, the libc
 corpus and installed Clang headers are external runtime inputs; their source
 files and implementations are not imported by this evidence package.
 
-#111 remains open until controlled target measurements support the final
-retain/reject decision and that decision is recorded in `docs/c-preprocessor.md`.
+The final decision is to reject this cache and close #111 with the measurements
+recorded here and in `docs/c-preprocessor.md`. The production implementation,
+driver interface and preprocessing options gain no cache or dormant hooks.
