@@ -330,6 +330,9 @@ jobs:
           ./build/compiler test-builtins
           ./build/compiler test-check-builtins
           ./build/compiler test-builtin-lowering
+          ./build/compiler test-check-varargs
+          ./build/compiler test-builtin-varargs
+          ./build/compiler test-check-builtins-misc
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the per-file jobs on the repository's sources, flat

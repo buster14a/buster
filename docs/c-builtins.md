@@ -106,18 +106,20 @@ generated-code ISA. An AVX-512 host fold grants no ISA feature to emitted code;
 baseline x86-64 bit operations need baseline sequences where `lzcnt`, `tzcnt`,
 or `popcnt` are unavailable. Execution fixtures must cover both selectors.
 
-`__has_builtin` is not wired to this list. The current preprocessing-only
-command retains its Clang-oracle feature table from #117/#154. Recognition or
-constant folding alone is insufficient evidence for advertising source support.
-When the C compile path exists, #148 still needs a capability inventory that
-reports only builtins with checking and both required lowering paths, plus tests
-of that inventory. Do not substitute this module's 21 recognized names for it.
+The normal `__has_builtin` mode consults the shared capability inventory in
+`c_builtin_catalog.c`; its integer entries currently advertise folding only.
+The separate Clang-oracle feature table from #117/#154 remains available for
+preprocessor comparisons. Recognition or constant folding alone is insufficient
+evidence for advertising source support. Source capabilities require checking
+and both required lowering paths. Do not substitute this module's 21 recognized
+names for that acceptance evidence.
 
-The other #148 families remain unimplemented here: varargs (using #137's ABI
+The other #148 families are outside this fold kernel: varargs (using #137's ABI
 plans), `offsetof`, hints/traps, compile-time queries, floating point, memory and
 strings, atomics, and frame/return addresses. Wider overflow operand types also
-remain. Their actions should consume the actual typed stream and selector
-interfaces as those become available.
+remain outside its supported contract. Companion typed actions and runtime
+expansion are described in [the integration guide](c-builtins-integration.md);
+their validation is separate from full source and two-tier acceptance.
 
 ## Validation and measurements
 

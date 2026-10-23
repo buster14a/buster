@@ -1,4 +1,4 @@
-# Typed integer builtins and runtime expansion
+# Typed builtin checking and runtime expansion
 
 The integer portion of [#148](https://github.com/buster14a/buster/issues/148)
 has three consumers of one resolved `CBuiltinId`: the original independent
@@ -21,6 +21,13 @@ stable node identity. It validates arity and real `TypeId` constraints before
 forming the integer descriptors used by the fold kernel. Ordinary unary
 builtins perform their declared parameter conversion. Generic overflow instead
 retains each input's original integer width and signedness.
+
+The optional `tag_completions`, `tag_completion_count` and `source_position`
+fields retain the source-time completion boundary. The checker must not treat
+an enum as complete merely because a later declaration completed its table
+entry. Node identities are diagnostic locations, not source positions. A null
+completion slice deliberately selects the current-table contract for direct
+action callers. The extension mask travels with each action.
 
 The result contains the ordinary `CheckActionResult`, a separate destination
 and stored value, the fold status and an explicit store requirement. A valid
@@ -94,6 +101,63 @@ pointer operations, fixed shifts and 32/64-bit memory accesses. Narrow stores,
 signed widening and other unsupported shapes must remain explicit refusals;
 Tier 0 execution cannot establish two-tier acceptance.
 
+## Shared names and feature queries
+
+`c_builtin_catalog.c` supplies exact bounded-name resolution and stable IDs
+for the integer actions and the remaining source families. The original
+integer IDs and their sentinel retain their values. Each catalog entry keeps
+folding, source checking, source constant evaluation, Tier 0 and Tier 1
+capabilities separate. A standalone checker or runtime test must not set the
+source capability. Source availability requires the source path and both
+runtime consumers; constexpr additionally requires source constant evaluation.
+
+The preprocessor uses this inventory in its normal implemented mode and keeps
+its separate Clang compatibility mode. Until source and two-tier acceptance
+are established, these new entries remain unavailable to `__has_builtin`.
+`test-preprocessor` checks the exact catalog and the advertised list, including
+raw macro names, unknown bounded names and guarded input boundaries.
+
+## Varargs contracts
+
+`c_check_varargs.c` takes the canonical target `va_list` type and explicit
+function context. It checks the source-time type of `va_arg`, pointer decay and
+qualifiers, C17/C23 spelling and argument rules, and the last named parameter.
+Its evaluated-operand mask excludes `va_start`'s last-parameter expression.
+Warnings, list lifetime effects and list mutation are separate metadata.
+
+`c_builtin_varargs_lower.c` expands scalar SysV plans into the existing typed
+stream. `va_start` requires real producer-supplied register-save-area and
+overflow-argument addresses, plus the named prefix's GP/FP offsets. `va_arg`
+advances exactly the selected cursor, `va_copy` copies exactly 24 bytes after
+snapshotting its source, and `va_end` needs no machine operation. The supported
+plans cover ordinary integer/pointer and F32/F64 register or stack slots;
+aggregates, high-half plans and wider classes are explicit refusals.
+
+The ordinary Tier 0 live-value spill area is not a SysV variadic register-save
+area. Incoming variadic callee support must reserve and populate that separate
+area before overwriting argument registers and provide genuine frame
+addresses. An addressable local `va_list` needs 24 bytes, beyond the ordinary
+eight-byte scalar local slot. Tests consuming a host-created list establish
+the expansion contract only; a Clang caller invoking a generated variadic
+callee is still required for source-level acceptance.
+
+## Hints, memory and frame checking
+
+`c_check_builtin_misc.c` checks hints, memory/string builtins and frame queries
+without reading source memory. The result records converted arguments,
+evaluation masks, warnings, terminal effects, memory effects and explicit
+unsupported requirements. `__builtin_expect` converts both runtime arguments
+to `long` and evaluates each once. Its separate `constant_value` and
+`constant_evaluated_operands` describe the source constant evaluator's first
+argument only; using that folded value must not erase the second runtime
+argument's effects. Neither argument has a general ICE requirement.
+
+Prefetch hints retain default promotions and bounded constant constraints;
+alignment hints retain the original pointer, requested alignment and optional
+converted offset. Frame levels require an integer constant expression.
+Nonzero levels and unsupported wide/complex cases remain explicit metadata,
+not fabricated frame addresses or successful generated code.
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -102,12 +166,15 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtins
 ./build/compiler test-check-builtins
 ./build/compiler test-builtin-lowering
+./build/compiler test-check-varargs
+./build/compiler test-builtin-varargs
+./build/compiler test-check-builtins-misc
 ```
 
 The tests distinguish typed constraints and fold metadata from native execution
 of the emitted recipes. Scalar/vector agreement is supplemented with Clang's
 builtin behavior, boundary inputs, real destination writes and guarded-capacity
-checks. The CI workflow registers both new suites alongside the existing
+checks. The CI workflow registers the new suites alongside the existing
 integer-action suite. Results and full source/two-tier acceptance must be
 reported for the exact tested revision; this document makes no throughput
 claim.

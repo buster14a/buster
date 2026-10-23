@@ -206,6 +206,15 @@ designs and the compilers already built this way.
   the API and the checking, C selector, feature-query and corpus integration
   still required before #148 can close.
 
+- The companion [builtin integration guide](docs/c-builtins-integration.md)
+  records the shared capability catalog, typed integer/varargs/misc actions and
+  existing-stream runtime expansion. `test-check-builtins`,
+  `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
+  `test-builtin-varargs` distinguish semantic constraints from emitted execution.
+  Source hooks belong to the active #133 owner. Incoming variadic frame setup,
+  full Tier 1 coverage and corpus acceptance remain separate requirements.
+  Every build/test/measurement uses the approved 9700X lock per run.
+
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
   observation table and scalar/AVX-512 cost-column lookups. `test-x86-zen5`
   checks unknowns, guard-page tails and generated microbenchmark loops;
