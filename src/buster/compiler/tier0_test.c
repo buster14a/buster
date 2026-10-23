@@ -1337,6 +1337,61 @@ static void tier0_test_errors(Tier0TestTally* tally)
                           "%u values at once: the scalar path's error %d, the vector path's %d, %d expected", deep, scalar.error, vector.error, expected);
         arena_pop_to(&arena, mark);
     }
+    {
+        // Past 32 locals, emission gathers each lane's homes; an absorbed constant's lane, whose value is no local,
+        // must look none up (a huge value read homes far past their end, which faulted).
+        enum
+        {
+            locals = 40,
+        };
+        uint8_t local_classes[locals];
+        uint8_t local_flags[locals];
+        uint32_t count = 0;
+        for (uint32_t l = 0; l < locals; l += 1)
+        {
+            local_classes[l] = BUSTER_TYPED_CLASS_I64;
+            local_flags[l] = 0;
+            kinds[count] = BUSTER_TYPED_CONST;
+            classes[count] = BUSTER_TYPED_CLASS_I64;
+            // Each fits the store's imm32 (sign-extended), so that SET_LOCAL absorbs it: as an index, 2^31 homes before
+            // them, below the scratch arena (an index as far after them lands in its reserved range, and reads zeros).
+            values[count] = (uint64_t)(int64_t)(INT32_MIN + (int32_t)l);
+            kinds[count + 1] = BUSTER_TYPED_SET_LOCAL;
+            classes[count + 1] = BUSTER_TYPED_CLASS_I64;
+            values[count + 1] = l;
+            count += 2;
+        }
+        for (uint32_t l = 0; l < locals; l += 1)
+        {
+            kinds[count] = BUSTER_TYPED_LOCAL;
+            classes[count] = BUSTER_TYPED_CLASS_I64;
+            values[count] = l;
+            kinds[count + 1] = l == 0 ? BUSTER_TYPED_NONE : BUSTER_TYPED_ADD;
+            classes[count + 1] = BUSTER_TYPED_CLASS_I64;
+            values[count + 1] = 0;
+            count += l == 0 ? 1 : 2;
+        }
+        kinds[count] = BUSTER_TYPED_RETURN;
+        classes[count] = BUSTER_TYPED_CLASS_I64;
+        values[count] = 0;
+        count += 1;
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = count;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = locals;
+        const uint64_t mark = arena.length;
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "errors",
+                          "%u locals set from constants: the paths' errors %d and %d, or their code differs", (uint32_t)locals, scalar.error, vector.error);
+        arena_pop_to(&arena, mark);
+    }
     arena_release(&arena);
 }
 

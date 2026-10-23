@@ -660,6 +660,12 @@ static Tier0Compiled tier0_compiled[BUSTER_TIER0_TEMPLATE_CAPACITY];
 #define BUSTER_TIER0_WORD_A_SHIFT 50
 #define BUSTER_TIER0_WORD_B_SHIFT 53
 #define BUSTER_TIER0_WORD_NO_OFFSET 7ull
+// A word without holes (an absorbed entry's, a deferred slot's), whose lane emission expands and later records
+// overwrite: no K or its scale, and no A or B, so that the lane looks no home up by a value that isn't a local's (with
+// more than 32 locals, a gather from the homes at that value).
+#define BUSTER_TIER0_WORD_NO_HOLES \
+    (BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_K_SHIFT | BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_K_SCALE_SHIFT | \
+     BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_A_SHIFT | BUSTER_TIER0_WORD_NO_OFFSET << BUSTER_TIER0_WORD_B_SHIFT)
 #define BUSTER_TIER0_WORD_HOME_UNIFORM (1ull << 56)
 #define BUSTER_TIER0_WORD_ABSORBED (1ull << 57)
 #define BUSTER_TIER0_WORD_ROW_SHIFT 58
@@ -5002,7 +5008,7 @@ static bool tier0_build_words(void)
                 uint64_t word = BUSTER_TIER0_WORD_UNSUPPORTED;
                 if (slot == BUSTER_TIER0_SLOT_DEFERRED)
                 {
-                    word = BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ANY_DEPTH << BUSTER_TIER0_WORD_DEPTH_SHIFT;
+                    word = BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_NO_HOLES | BUSTER_TIER0_WORD_ANY_DEPTH << BUSTER_TIER0_WORD_DEPTH_SHIFT;
                 }
                 else if (slot != BUSTER_TIER0_SLOT_UNSUPPORTED)
                 {
@@ -5113,7 +5119,7 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
         const __m256i slot = _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(kind, 9), _mm256_slli_epi32(class, 5)), variant);
         const __m128i taken = _mm_maskz_loadu_epi8(lanes, absorbed + first);
         const __mmask8 own = lanes & (__mmask8)_mm_testn_epi8_mask(taken, taken);
-        __m512i word = _mm512_mask_i32gather_epi64(_mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_ABSORBED), own, slot, tier0_slot_words, 8);
+        __m512i word = _mm512_mask_i32gather_epi64(_mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_NO_HOLES)), own, slot, tier0_slot_words, 8);
         const __m512i depth = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, depths + first));
         const __m512i floating = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, floating_depths + first));
         const __m512i required = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_DEPTH_SHIFT), fifteen);
