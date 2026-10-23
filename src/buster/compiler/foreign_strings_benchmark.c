@@ -322,7 +322,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
                 const bool ran = executable_test_runs(path, (const uint8_t*)&input.expected, sizeof(input.expected));
                 foreign_test_expect(&tally, ran, "every literal address and byte matches independent checksum", detail);
                 const String8 bytes = foreign_test_read(arena, path);
-                const uint32_t state = variant->merge ? 1 : 0;
+                const uint32_t state = variant->merge && duplicate && count > 8 ? 1 : 0;
                 const bool same = bytes.pointer != 0 && (reference[state].pointer == 0 ||
                                   (bytes.length == reference[state].length && memcmp(bytes.pointer, reference[state].pointer, bytes.length) == 0));
                 foreign_test_expect(&tally, same, "complete bytes agree within each merge state across paths and repeats", detail);
@@ -331,7 +331,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
                 valid = ran && same && applied == expected_merge;
             }
             arena_pop_to(arena, validation);
-            const uint32_t state = variant->merge ? 1 : 0;
+            const uint32_t state = variant->merge && duplicate && count > 8 ? 1 : 0;
             if (valid && reference[state].pointer == 0)
             {
                 reference[state] = foreign_test_read(arena, path);
