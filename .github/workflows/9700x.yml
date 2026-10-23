@@ -312,6 +312,8 @@ jobs:
           ./build/compiler test-link
           == Test dataflow bitsets
           ./build/compiler test-dataflow
+          == Test local SSA construction and its memory interpreter
+          ./build/compiler test-ssa
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
@@ -376,6 +378,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-dataflow
+
+      - name: Benchmark local SSA construction on synthetic CFGs
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ssa
 
       - name: Benchmark the preprocessor fuzz harness
         run: |
