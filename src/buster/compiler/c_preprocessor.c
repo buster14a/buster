@@ -2417,6 +2417,7 @@ static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFile
             }
         }
     }
+    const uint64_t mark = arena->length;
     data->raw_errors = unknowns != 0 ? arena_push_array(arena, unknowns, sizeof(PPRawError), _Alignof(PPRawError)) : 0;
     const bool result = unknowns == 0 || data->raw_errors != 0;
     for (uint32_t t = 0; result && unknowns != 0 && t < data->token_count; t += 1)
@@ -2424,13 +2425,21 @@ static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFile
         if ((data->kinds[t] & 0x7F) == C_TOKEN_UNKNOWN)
         {
             uint64_t offset;
-            const CRawStringError error = c_raw_string_error(data->bytes + data->starts[t], data->values[t] - data->starts[t], prepare->refine_flags, &offset);
+            const CRawStringError error = c_raw_string_error(data->bytes + data->starts[t], data->length - data->starts[t], prepare->refine_flags, &offset);
             if (error != C_RAW_STRING_OK)
             {
                 data->raw_errors[data->raw_error_count] = (PPRawError){ .token = t, .offset = data->starts[t] + (uint32_t)offset, .kind = error };
                 data->raw_error_count += 1;
             }
         }
+    }
+    if (result && unknowns != 0)
+    {
+        // Unknown punctuation (notably assembly '$') isn't a raw error. Keep only the records actually written,
+        // before any other allocation in this arena; unused capacity hasn't been touched.
+        const uint64_t keep = data->raw_error_count != 0 ? (uint64_t)((uint8_t*)data->raw_errors - arena->base) + (uint64_t)data->raw_error_count * sizeof(PPRawError) : mark;
+        arena_pop_to(arena, keep);
+        data->raw_errors = data->raw_error_count != 0 ? data->raw_errors : 0;
     }
     return result;
 }

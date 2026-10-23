@@ -912,6 +912,7 @@ static bool check_raw_errors(void)
         bool utf;
     } cases[] = {
         { "R\"bad space\"", C_RAW_STRING_DELIMITER_CHARACTER, 5, false },
+        { "R\"a\"b c\n", C_RAW_STRING_DELIMITER_CHARACTER, 5, false },
         { "LR\"bad)\"", C_RAW_STRING_DELIMITER_CHARACTER, 6, false },
         { "R\"x\n\"", C_RAW_STRING_DELIMITER_NEWLINE, 3, false },
         { "R\"abcdefghijklmnopq\"", C_RAW_STRING_DELIMITER_LENGTH, 18, false },

@@ -677,6 +677,7 @@ struct PPDirectiveTestStructure
 // Original raw-string inputs; Clang is an external diagnostic/location oracle, including suppressed contexts.
 static const PPDirectiveTestStructure pp_directive_test_raw_errors[] = {
     { "invalid delimiter character", "R\"bad space\"\n", 0, "gnu17" },
+    { "delimiter lookahead past the salvaged token", "R\"a\"b c\n", 0, "gnu17" },
     { "delimiter newline", "LR\"bad\n\"\n", 0, "gnu17" },
     { "delimiter too long", "u8R\"abcdefghijklmnopq\"\n", 0, "gnu17" },
     { "unterminated", "R\"tag(body\n", 0, "gnu17" },
