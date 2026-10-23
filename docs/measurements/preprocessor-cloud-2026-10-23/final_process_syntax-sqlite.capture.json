@@ -1,0 +1,19 @@
+{
+  "name": "syntax-sqlite",
+  "command": "SOURCE_DATE_EPOCH=1792454400 PATH=/usr/lib/llvm-18/bin:$PATH '/workspace/scratch/61c60105fb18/measurement/paired_measure' '--rounds' '31' '--warmup' '3' '--cpu' '2' '--' '/workspace/scratch/61c60105fb18/baseline/build/compiler' '-fsyntax-only' '--clang-features' '--predefines' '/workspace/scratch/61c60105fb18/measurement/clang18-gnu17-native-predefines.h' '-std=gnu17' '-march=native' '-nostdinc' '-isystem' '/usr/lib/llvm-18/lib/clang/18/include' '-isystem' '/usr/include/x86_64-linux-gnu' '-isystem' '/usr/include' '/workspace/scratch/61c60105fb18/measurement/sqlite-amalgamation-3540100/sqlite3.c' '--' '/workspace/scratch/61c60105fb18/measurement/final-compiler' '-fsyntax-only' '--clang-features' '--predefines' '/workspace/scratch/61c60105fb18/measurement/clang18-gnu17-native-predefines.h' '-std=gnu17' '-march=native' '-nostdinc' '-isystem' '/usr/lib/llvm-18/lib/clang/18/include' '-isystem' '/usr/include/x86_64-linux-gnu' '-isystem' '/usr/include' '/workspace/scratch/61c60105fb18/measurement/sqlite-amalgamation-3540100/sqlite3.c' 2>'/workspace/scratch/61c60105fb18/measurement/final_process_syntax-sqlite.stderr'",
+  "cwd": "/workspace/scratch/61c60105fb18/buster",
+  "exit_code": 0,
+  "measured_pairs": 31,
+  "warmup_pairs": 3,
+  "csv_rows": 68,
+  "raw_capture_bytes": 4191,
+  "csv_bytes": 4191,
+  "stderr_separate": true,
+  "header_reconstructed": false,
+  "observation": "All numeric CSV fields were captured intact; no numeric data were reconstructed.",
+  "sha256": {
+    "capture": "f257e2c368abd888b2748a96554bd482077530b89fa9e85c7a7bcaa4641a9f29",
+    "csv": "f257e2c368abd888b2748a96554bd482077530b89fa9e85c7a7bcaa4641a9f29",
+    "metadata": "e3a514f6675bc142adec53186cc68126be8429a1d0c7d90c2a78a789a2f1dfff"
+  }
+}
