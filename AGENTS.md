@@ -340,6 +340,13 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+  It reports how long the compiles took, and the three that took longest.
+  `BUSTER_DEBUG_INFO=0` builds without `-g`, which took a fifth of the build's
+  time; the 9700X job builds so, since nothing there reads it (clang's code
+  then differs in a few functions' stack slots). The checker's unit takes
+  longest, and splitting it doesn't help: `check` and the default driver,
+  `test-checker`, and its other commands each reach the whole compiler, so a
+  unit for any one of them took 84 to 88% of its time (clang 18, locally).
   The executable is linked at a fixed address (`-no-pie`), from the same code:
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
@@ -981,16 +988,23 @@ there at a time, so everything takes one lock:
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
 - Every pull request's job queues behind every other's, so keep the job short.
-  A benchmark's plain run, which checks its paths against their scalar twins,
-  runs on every pull request; its isolated and after-scalar samples
-  (`--only`, `--after-scalar`, repeated processes), which cost about 200 ms
-  before each of 21 samples per case, go in a step of their own that runs where
-  the `changes` job's output for the module isn't `false`: on the daily
-  scheduled run, dispatched runs and pull requests that change the module's
-  sources (its pattern in `changes`). The same holds for the linkers'
-  baselines and floors and mold's and wild's foreign phases. A push to main
-  runs what a pull request that changes none of them runs: its pull request's
-  run measured what it changes, and the full set took the job past its 10
+  A pull request runs a benchmark's plain run, which checks its paths against
+  their scalar twins, where it changes what the benchmark measures (the
+  `changes` job's `measure`): a file that the benchmark's translation unit
+  includes, for one built as a unit of its own (`build.sh`'s `*_benchmark.c`),
+  or one that its entry in `changes`' `benchmarks` names, for one in `main.c`'s
+  units (the files that define the functions it calls); or the benchmark's own
+  step. A change to `build.sh` runs every one, and so does a push to main, so
+  that main has each benchmark's numbers at every commit. A new benchmark's
+  step gets an entry in `benchmarks` and an `if:` on `MEASURE`, as the others
+  have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
+  repeated processes), which cost about 200 ms before each of 21 samples per
+  case, go in a step of their own that runs where the `changes` job's output
+  for the module isn't `false`: on the daily scheduled run, dispatched runs and
+  pull requests that change the module's sources (its pattern in `changes`).
+  The same holds for the linkers' baselines and floors and mold's and wild's
+  foreign phases. A push to main runs none of them: its pull request's run
+  measured what it changes, and the full set took the job past its 10
   minutes. The daily and dispatched runs have 25 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
@@ -3741,7 +3755,8 @@ files in the directory the command makes under `$TMPDIR` (or `/tmp`). On the
 9700X, `sqlite3.c`, the 733 files of the libc corpus that clang accepts and the
 repository's translation units pass with `--clang`, and so does Lua 5.4.8
 locally; `docs/c-parser.md` has the corpora and the mutations' counts. The 9700X job runs
-it without files and on the repository's translation units, both with `--clang`.
+it without files with `--clang`, and on the repository's translation units without:
+the build has compiled each with clang, with `-Wall -Werror`, so clang accepts them.
 
 ## Parser benchmark
 
