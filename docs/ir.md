@@ -302,6 +302,15 @@ slots' sizes, alignments and flags checked; and `COPY` of every size from 1 to
 the copy's, with one load and one store per piece. A copy whose pieces were one
 size too wide, and an object's slot rounded down to 8 bytes, each fail the
 command (checked by mutation when this was added).
+
+Every lowered function of both sets is then promoted by both of `ssa_ir.c`'s
+paths, which must accept it with real dominance checking, pass both verifiers,
+and keep each object's slot (a `void` slot that isn't a temporary) with its
+size, alignment and flags, in order: promotion compacts the slots it removes
+and must never take an object's. The two paths may order their output
+differently, so their columns aren't compared here; `test-ssa-ir` checks their
+semantics by execution. A promotion that shrank an object's slot by a byte
+fails this check.
 The current generator can still produce out-of-range floating-to-integer
 conversions with its `defined` option. For those undefined results only, the
 test executor chooses the existing Tier 0 interpreter's CVTT convention; its
@@ -320,7 +329,10 @@ actual core/CFG/use arena charges. TSC ticks are not core cycles.
 `benchmark-ir-lowering` measures the available producer, handoff and consumer
 together: input validation, planning, classification, count/emission and output
 verification. Its units are typed entries, not source tokens, and its inputs
-are generated programs, not SQLite. Target conclusions require the optimized
+are generated programs, not SQLite. Its small and larger cases are value-only
+programs, as before #136's frame objects, so they stay comparable with earlier
+runs; a third case, reported apart, is the larger shape with the generator's
+objects and copies. Target conclusions require the optimized
 repository build on the approved 9700X, pinned to one CPU and under the shared
 lock; cloud correctness runs do not establish Zen 5 throughput.
 

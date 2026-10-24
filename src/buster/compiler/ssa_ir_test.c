@@ -520,7 +520,10 @@ static bool ssa_ir_test_promote(SsaIrTestTally* tally, const IrFunction* input, 
     return ok;
 }
 
-static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t count)
+// Generated programs executed as typed streams, all-memory IR and both promoted forms. With `objects`, the generator
+// adds frame objects (arrays and structs, some of twin layouts) and COPY between them, which stay memory through
+// promotion while the locals around them are promoted.
+static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t count, bool objects)
 {
     Tier0Tables tables = {0};
     Arena input = arena_reserve(1ull << 30);
@@ -556,6 +559,7 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
             .floating = true,
             .pointers = true,
             .defined = true,
+            .objects = objects,
         };
         bool ok = program != 0 && sources != 0 && memory != 0 && promoted != 0 && twin != 0 && globals != 0 && expected_globals != 0;
         ok = ok && tier0_generate_program(program, &input, tally->seed, options, "ssa_ir_") && tier0_program_functions(program, &tables, &input, sources);
@@ -616,7 +620,8 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
         arena_pop_to(&twin_output, 0);
     }
     ssa_ir_test_expect(tally, functions_seen == (uint64_t)count * 8 && slots_after < slots_before && phis != 0, "generated path actually promotes locals and constructs phis");
-    printf("SSA IR generated programs: %" PRIu64 " functions, instructions %" PRIu64 " -> %" PRIu64 ", slots %" PRIu64 " -> %" PRIu64 ", %" PRIu64 " phis\n", functions_seen, before, after, slots_before, slots_after, phis);
+    printf("SSA IR generated programs%s: %" PRIu64 " functions, instructions %" PRIu64 " -> %" PRIu64 ", slots %" PRIu64 " -> %" PRIu64 ", %" PRIu64 " phis\n", objects ? " with objects" : "", functions_seen, before, after,
+           slots_before, slots_after, phis);
     tier0_tables_close(&tables);
     arena_release(&input);
     arena_release(&lowered);
@@ -1492,7 +1497,8 @@ static int run_ssa_ir_tests(int argc, char** argv)
         ssa_ir_test_memory(&tally);
         ssa_ir_test_variable_operands(&tally);
         ssa_ir_test_failures(&tally);
-        ssa_ir_test_programs(&tally, seed, count);
+        ssa_ir_test_programs(&tally, seed, count, false);
+        ssa_ir_test_programs(&tally, seed, count, true);
         printf("test-ssa-ir: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;
     }
