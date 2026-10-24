@@ -1,15 +1,18 @@
 # Linker lanes and filesystem writes
 
 This records the frozen 9700X measurements for [#87](https://github.com/buster14a/buster/issues/87),
-taken on 2026-10-23. It adds independently controlled filesystem factors and
-bounded runs to `benchmark-floors`; it does not change the production writer.
+taken on 2026-10-23, and the complete foreign links' of 2026-10-24. It adds
+independently controlled filesystem factors and bounded runs to
+`benchmark-floors`; it does not change the production writer.
 
 The large direct pipeline reaches a broad plateau around 3–4 physical lanes
 on this host. Adding its available SMT siblings does not improve the total.
-Foreign exchange stops helping earlier than resolution. Some individual
-phases still improve at the maximum 15 online logical CPUs, so universal
-phase saturation is not established. Issue #87 remains open for those
-phase limits. Production retains pwrite after the filesystem comparisons below.
+Foreign exchange stops helping earlier than resolution. The complete foreign
+link, its conversion on lanes too, is fastest on 7 lanes, twice as fast as on
+one, and every phase of it has a measured limit ("Complete foreign links"):
+the few still fastest at the machine's 15 online logical CPUs are bounded by
+them, past which lanes only lose, and `link-foreign` runs at most a lane per
+CPU. Production retains pwrite after the filesystem comparisons below.
 
 ## Frozen inputs and host
 
@@ -275,6 +278,119 @@ against their model and repeated build IDs matched outside timing. The
 original 1/2/3/8-lane byte-identity tests remain the exact-byte evidence;
 these timing runs do not add a cross-lane byte comparison at 10/12/15 lanes.
 
+## Complete foreign links, 2026-10-24
+
+The sweeps above time `foreign_run` alone, on a baseline from before the output
+bridge. With `link-foreign` (#86) and the conversion on lanes
+(`foreign_link_lanes.c`: the global names' symbols, the objects' maps, the
+relocations and `link_check_lanes`), the whole foreign link runs on lanes, and
+`--time` reports every phase: the resolution's on its slowest lane, the
+conversion's and the writer's on lane 0, whose syncs end each pass after every
+lane's part.
+
+`link-foreign --time` linked synth's shape, `benchmark-link`'s 512 objects
+(96 MB) of 102,400 workers, into a 49 MB dynamic PIE with #86's command line,
+11 times at each lane count in each of three rounds: in the orders 1 to 15, 15
+to 1, and 4, 1, 8, 2, 12, 3, 7, 15, 5, 10, 6, each round under its own lock
+acquisition. N lanes ran on the first N CPUs of 2, 0, 1, 3, 4, 5, 6, 7, one per
+core, then their SMT siblings 8, 9, 11, 12, 13, 14 and 15. The tree was #87's
+`37dbecb`, before the cap below, which changes nothing here: every run had a CPU
+per lane. Medians of the 33 links, in ms, the fastest in bold
+([the record](https://github.com/buster14a/buster-performance/tree/d46536bfd7954ba539a29d23bf3db4f99cdf1445/docs/measurements/foreign-lanes-2026-10-24)):
+
+| Phase | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10 | 12 | 15 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| The whole link | 54.18 | 37.26 | 31.36 | 29.00 | 27.94 | 27.73 | **27.55** | 28.12 | 31.19 | 32.57 | 34.72 |
+| Resolution | 21.25 | 13.32 | 11.12 | 10.13 | 9.65 | 9.74 | **9.64** | 9.92 | 11.42 | 12.09 | 13.38 |
+| resolution: open | 1.38 | 0.996 | 0.852 | 0.768 | **0.747** | 0.748 | 0.760 | 0.771 | 0.856 | 0.890 | 0.955 |
+| resolution: indices | **0.114** | 0.155 | 0.198 | 0.246 | 0.304 | 0.312 | 0.318 | 0.354 | 0.330 | 0.341 | 0.356 |
+| resolution: headers | 0.494 | 0.248 | 0.152 | 0.125 | 0.114 | 0.101 | 0.089 | 0.084 | 0.083 | 0.071 | **0.064** |
+| resolution: symbols | 6.65 | 4.32 | 3.38 | 3.04 | 2.97 | **2.85** | 2.91 | 2.87 | 3.24 | 3.56 | 4.15 |
+| resolution: exchange | 2.35 | 1.85 | 1.79 | 1.79 | **1.76** | 1.83 | 1.94 | 2.11 | 2.54 | 2.87 | 3.36 |
+| resolution: resolve | 7.14 | 3.79 | 2.89 | 2.43 | 2.02 | 1.99 | 1.68 | 1.74 | 1.99 | 1.91 | **1.28** |
+| resolution: groups | 0.622 | 0.544 | 0.551 | 0.539 | 0.402 | 0.466 | 0.261 | 0.257 | 0.273 | 0.322 | **0.159** |
+| resolution: winners | 2.47 | 1.41 | 1.15 | **1.07** | 1.15 | 1.18 | 1.41 | 1.53 | 1.79 | 1.73 | 2.58 |
+| Conversion | 20.32 | 14.78 | 11.59 | 10.19 | 9.46 | 9.05 | 8.85 | **8.81** | 9.81 | 9.95 | 10.20 |
+| conversion: sections | 1.29 | 1.29 | **1.26** | 1.27 | 1.32 | 1.28 | 1.33 | 1.36 | 1.53 | 1.61 | 1.55 |
+| conversion: names | 7.10 | 3.61 | 2.60 | 2.14 | 1.91 | 1.74 | 1.70 | **1.65** | 1.92 | 1.99 | 2.15 |
+| conversion: maps | 0.586 | 0.381 | 0.299 | 0.256 | 0.237 | 0.220 | 0.212 | **0.208** | 0.258 | 0.256 | 0.286 |
+| conversion: relocations | 5.97 | 4.44 | 3.69 | 3.43 | **3.26** | 3.31 | 3.29 | 3.43 | 3.65 | 3.84 | 4.15 |
+| conversion: copies | **0.348** | 0.348 | 0.348 | 0.348 | 0.348 | 0.348 | 0.352 | 0.352 | 0.360 | 0.361 | 0.363 |
+| conversion: check | 4.89 | 4.58 | 3.24 | 2.59 | 2.20 | 1.95 | 1.78 | 1.63 | 1.90 | 1.70 | **1.47** |
+| conversion: exports | **0.119** | 0.125 | 0.126 | 0.125 | 0.128 | 0.130 | 0.128 | 0.130 | 0.149 | 0.158 | 0.175 |
+| Write | 9.66 | 6.23 | 5.70 | **5.62** | 5.66 | 5.77 | 5.90 | 6.00 | 6.70 | 7.26 | 7.84 |
+| write: lanes and symbols | **0.045** | 0.050 | 0.051 | 0.052 | 0.056 | 0.067 | 0.073 | 0.082 | 0.113 | 0.130 | 0.151 |
+| write: count | 1.45 | 0.821 | 0.603 | 0.511 | 0.459 | 0.425 | 0.412 | **0.405** | 0.509 | 0.504 | 0.512 |
+| write: dynamic | 0.882 | 0.504 | 0.411 | 0.362 | 0.338 | 0.323 | 0.317 | **0.311** | 0.377 | 0.388 | 0.358 |
+| write: chunks | 7.03 | 4.64 | **4.42** | 4.47 | 4.56 | 4.68 | 4.74 | 4.88 | 5.30 | 5.72 | 6.30 |
+| Release | 2.83 | **2.77** | 2.79 | 2.89 | 2.92 | 2.89 | 2.88 | 3.00 | 3.00 | 2.96 | 3.00 |
+
+Each phase's limit, where more lanes stop helping: its fastest lane count, and
+the fewest lanes within 3% of that time.
+
+| Phase | 1 lane | Fastest | Within 3% from |
+| --- | ---: | ---: | ---: |
+| The whole link | 54.18 ms | 27.55 ms on 7 | 5 |
+| Resolution | 21.25 ms | 9.64 ms on 7 | 5 |
+| resolution: open | 1.38 ms | 0.747 ms on 5 | 4 |
+| resolution: indices | 0.114 ms | 0.114 ms on 1 | 1 |
+| resolution: headers | 0.494 ms | 0.064 ms on 15 | 15 |
+| resolution: symbols | 6.65 ms | 2.85 ms on 6 | 6 |
+| resolution: exchange | 2.35 ms | 1.76 ms on 5 | 3 |
+| resolution: resolve | 7.14 ms | 1.28 ms on 15 | 15 |
+| resolution: groups | 0.622 ms | 0.159 ms on 15 | 15 |
+| resolution: winners | 2.47 ms | 1.07 ms on 4 | 4 |
+| Conversion | 20.32 ms | 8.81 ms on 8 | 6 |
+| conversion: sections | 1.29 ms | not on lanes | 1 |
+| conversion: names | 7.10 ms | 1.65 ms on 8 | 8 |
+| conversion: maps | 0.586 ms | 0.208 ms on 8 | 7 |
+| conversion: relocations | 5.97 ms | 3.26 ms on 5 | 5 |
+| conversion: copies | 0.348 ms | not on lanes | 1 |
+| conversion: check | 4.89 ms | 1.47 ms on 15 | 15 |
+| conversion: exports | 0.119 ms | not on lanes | 1 |
+| Write | 9.66 ms | 5.62 ms on 4 | 3 |
+| write: lanes and symbols | 0.045 ms | 0.045 ms on 1 | 1 |
+| write: count | 1.45 ms | 0.405 ms on 8 | 7 |
+| write: dynamic | 0.882 ms | 0.311 ms on 8 | 7 |
+| write: chunks | 7.03 ms | 4.42 ms on 3 | 3 |
+| Release | 2.83 ms | not on lanes | 1 |
+
+- **The whole link** is fastest on 7 lanes, 27.5 ms against 54.2 on one (2.0
+  times), and within 3% of that from 5; the SMT siblings make it slower (34.7
+  ms on 15). What doesn't run on lanes takes 4.7 ms at every count: the
+  conversion's sections (1.3), copies (0.35) and exports (0.12), the writer's
+  layout (0.08) and the release (2.8).
+- **The conversion** takes 8.8 ms on 8 lanes against 20.3 on one: its names'
+  symbols 1.65 against 7.10 (4.3 times), its relocations 3.26 on 5 against 5.97.
+- **The writer's chunks** stop at 3 lanes (4.42 ms against 7.03): the page
+  cache's copy bounds them, as the floors below found for `pwrite`.
+- **The resolution's indices** are fastest on one lane (0.11 ms, 0.35 on 8):
+  lane 0 lists the inputs and sets up the first round alone, the link's few
+  archives leave the lanes little to read between, and its two syncs cost more
+  with more lanes.
+- **Four phases are still fastest on 15 lanes,** every CPU this machine has:
+  the resolution's headers (0.064 ms), resolve (1.28) and groups (0.16), and the
+  conversion's check (1.47). Their limit is past this machine's CPUs, and on it
+  15: past its CPUs, lanes share them, and each sync waits for a lane the
+  scheduler has set aside. Measured past them, on the tree before the cap: 16
+  lanes on the 15 CPUs took 80.3 ms and 20 took 90.0, against 34.5 on 15;
+  each sync waited about a slice, 1 ms (the writer's layout, symbols and open,
+  0.03 to 0.10 ms on 15 lanes, took 1.0 each on 16), the conversion's check
+  took 5.95 ms and the resolution's groups 2.16. The resolution's headers and
+  resolve, whose timers end before their syncs, still read 0.064 and 1.22 ms
+  on 16, their waits landing in the phases after them. `link-foreign` now runs
+  at most a lane per CPU it may run on, and `--time` names the lanes it ran
+  on.
+- **Small links want one lane:** the appendix's hello world took 0.60, 0.89,
+  1.18, 1.24 and 1.76 ms on 1, 2, 3, 4 and 8 lanes, and tcc 1.09, 1.31, 1.47,
+  1.72 and 2.18 (`timeit`, output on tmpfs); each lane's thread costs more than
+  its share of the work.
+
+The lane path makes the exact path's link. `test-foreign` compares the output of
+1, 2, 3 and 8 lanes byte for byte, and `test-foreign-corpus` links each corpus
+program on eight lanes as on one: on the 9700X, with SQLite's shell, Lua and
+this compiler, 174 checks passed, and the job's 68 test commands passed.
+
 ## Filesystem floors
 
 The updated benchmark separates plain mapping, mapping with `fallocate`,
@@ -441,6 +557,8 @@ completed with status 0.
 The reservation candidate also passed `test-executable`, including that
 many-chunks byte comparison. Its log is `test-executable-mmap-reserved.log`.
 
-The committed result is better measurement and reproducible evidence. It
-does not establish saturation beyond eight physical cores, universal phase
-thresholds, a production mmap policy, or post-change hosted CI success.
+The committed result is better measurement and reproducible evidence. With
+the complete foreign links' sweep, every phase has a measured limit on this
+machine, those still fastest at 15 lanes bounded by its CPUs. It does not
+establish scaling past this machine's eight physical cores, or a production mmap
+policy: the writer keeps pwrite.
