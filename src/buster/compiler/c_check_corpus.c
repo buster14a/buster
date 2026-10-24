@@ -1422,8 +1422,8 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->nodes = paths[0].stream.count;
     outcome->scalar_nodes = paths[1].stream.statistics.scalar_nodes;
     outcome->vector_nodes = paths[1].stream.statistics.vector_nodes;
-    outcome->binding_uses = paths[1].input.parser_binding_statistics.walked_uses;
-    outcome->binding_fallback_uses = paths[1].input.parser_binding_statistics.fallback_uses;
+    outcome->binding_uses = paths[1].input.binding_statistics.walked_uses;
+    outcome->binding_fallback_uses = paths[1].input.binding_statistics.fallback_uses;
     outcome->phase = prepared ? paths[0].phase : "preprocess";
     memcpy(outcome->file, paths[0].file, sizeof(outcome->file));
     memcpy(outcome->message, paths[0].message, sizeof(outcome->message));

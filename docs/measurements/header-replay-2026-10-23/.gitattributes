@@ -1,3 +1,0 @@
-# Frozen observations and unified patches retain their original whitespace.
-raw/** -whitespace
-*.patch -whitespace

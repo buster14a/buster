@@ -1,7 +1,0 @@
-tree	input	rounds	refine_min_ms	refine_median_ms	refine_max_ms	lex_min_ms	lex_median_ms	lex_max_ms	directives_median_ms	whole_min_ms	whole_median_ms	whole_max_ms
-/home/david/buster-fast-bench/codex-116/fifth-ahead2	sqlite3.c	3	1.653	1.659	1.661	2.402	2.419	2.428	0.293	11.756	11.762	11.830
-/home/david/buster-fast-bench/codex-116/fifth-maskprobe	sqlite3.c	3	1.638	1.640	1.640	2.425	2.429	2.431	0.294	11.687	11.717	11.803
-/home/david/buster-fast-bench/codex-116/fifth-prefix16	sqlite3.c	3	1.705	1.726	1.728	2.421	2.422	2.425	0.290	11.782	11.876	11.962
-/home/david/buster-fast-bench/codex-116/fifth-prefix28tight	sqlite3.c	3	1.766	1.779	1.785	2.399	2.399	2.436	0.289	11.895	11.899	11.918
-/home/david/buster-fast-bench/codex-116/fifth-prefix16chunks	sqlite3.c	3	1.634	1.635	1.642	2.388	2.389	2.396	0.307	11.733	11.745	11.757
-/home/david/buster-fast-bench/codex-116/fifth-prefix28tightchunks	sqlite3.c	3	1.704	1.710	1.711	2.390	2.396	2.403	0.307	11.762	11.832	11.875

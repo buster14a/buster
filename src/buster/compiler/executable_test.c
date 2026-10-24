@@ -318,6 +318,24 @@ static bool executable_test_write_exact(Link* link, SymbolId entry, String8 path
     return ran && write.succeeded;
 }
 
+// Writes the link to `path` with a group of `lanes` lanes, each chunk staged in a lane's buffer (ExecutableOptions.stage):
+// whether executable_write succeeded, and its result.
+static bool executable_test_write_staged(Link* link, SymbolId entry, String8 path, uint32_t lanes, ExecutableResult* result)
+{
+    ExecutableTestWrite write = {
+        .link = link,
+        .options = {
+            .path = path,
+            .entry = entry,
+            .stage = true,
+        },
+        .succeeded = false,
+    };
+    const bool ran = lane_run(lanes, executable_test_lane_main, &write, 0);
+    *result = write.result;
+    return ran && write.succeeded;
+}
+
 // Undoes what a write left, so that the next write has all of it to do again: every fixup's field in the atoms' bytes
 // back to zeros, as the generator leaves them, and the output, if it exists, overwritten with 0x5a over its whole
 // length, so that a write in place over it must write every byte. Returns whether the output could be overwritten.
@@ -1530,6 +1548,28 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
             executable_test_expect(&tally, file.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0 &&
                                                result.fdes == first_result.fdes && result.fdes_in_order == first_result.fdes_in_order,
                                    "the exact twins write the same file", i * 10 + exact_lanes[l]);
+        }
+        // Staged, every lane count writes the same file from the atoms' bytes, which it only reads: they stay as they
+        // were, every byte of every atom.
+        const bool reset = generated && !libc && first.pointer != 0 && executable_test_reset(&program.link, path.pointer);
+        uint8_t* before = reset ? executable_test_save(&program.link, scratch.arena) : 0;
+        for (uint32_t l = 0; before != 0 && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+        {
+            const uint32_t lanes = executable_test_lane_counts[l];
+            ExecutableResult result;
+            const bool written = executable_test_reset(&program.link, path.pointer) && executable_test_write_staged(&program.link, program.entry, path, lanes, &result);
+            const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+            executable_test_expect(&tally, file.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0 &&
+                                               memcmp(result.build_id, first_result.build_id, BUSTER_EXECUTABLE_BUILD_ID_BYTES) == 0,
+                                   "staged chunks write the same file", i * 10 + lanes);
+            // executable_test_reset zeroed the fields, as the save had them: a staged write changes no byte.
+            const uint8_t* after = executable_test_save(&program.link, scratch.arena);
+            uint64_t total = 0;
+            for (AtomId atom = 1; atom < program.link.atoms.count; atom += 1)
+            {
+                total += program.link.atoms.bytes[atom] != 0 ? program.link.atoms.size[atom] : 0;
+            }
+            executable_test_expect(&tally, after != 0 && memcmp(after, before, total) == 0, "a staged write leaves the atoms' bytes as they were", i * 10 + lanes);
         }
         // buster_globals' first pointer, 8 bytes off: the program must print something else.
         if (generated && i == 0)

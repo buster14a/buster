@@ -393,9 +393,41 @@ static bool check_driver_dump_static(const CheckInput* input, const CheckStream*
     return valid;
 }
 
+// Why check_program_emit failed, at its token: an unsupported construct names the feature it needs (#145), and the
+// others are the compiler's own failures, with what the backend reported.
+static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp, const CheckProgramCode* code)
+{
+    char message[256];
+    if (code->status == CHECK_PROGRAM_RESOURCE)
+    {
+        snprintf(message, sizeof(message), "code output capacity exhausted");
+    }
+    else if (code->status == CHECK_PROGRAM_UNSUPPORTED)
+    {
+        snprintf(message, sizeof(message), "unsupported: %s", code->reason != NULL ? code->reason : "this C type or operation");
+    }
+    else if (code->status == CHECK_PROGRAM_INVALID && code->reason != NULL)
+    {
+        snprintf(message, sizeof(message), "internal compiler error: the lowered function breaks a rule of Tier 0's (%s) at entry %u", code->reason, code->backend_node);
+    }
+    else if (code->status == CHECK_PROGRAM_BACKEND && code->reason != NULL)
+    {
+        snprintf(message, sizeof(message), "%s", code->reason);
+    }
+    else if (code->status == CHECK_PROGRAM_BACKEND)
+    {
+        snprintf(message, sizeof(message), "internal compiler error: Tier 0 failed (error %u) at entry %u", (uint32_t)code->backend_error, code->backend_node);
+    }
+    else
+    {
+        snprintf(message, sizeof(message), "internal compiler error: the checked program could not be emitted");
+    }
+    check_driver_diagnose(parser, pp, code->token, message);
+}
+
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, bool dump_static, Arena* scratch)
+                                 bool scalar, bool verify, bool dump_static, Arena* scratch)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
@@ -403,13 +435,10 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch);
+                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, verify);
     if (!valid)
     {
-        const char* message = code.status == CHECK_PROGRAM_RESOURCE ? "code output capacity exhausted" :
-                              code.status == CHECK_PROGRAM_UNSUPPORTED ? "checked C type or operation is not supported by this backend" :
-                              "checked program could not be emitted";
-        check_driver_diagnose(parser, pp, code.token, message);
+        check_driver_emission_failed(parser, pp, &code);
     }
     if (valid)
     {
@@ -446,6 +475,230 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     return valid;
 }
 
+// executable_write's passes are a lane group's collectives: an executable is written by a group of one lane.
+typedef struct CheckDriverWrite CheckDriverWrite;
+struct CheckDriverWrite
+{
+    Link* link;
+    ExecutableOptions options;
+    ExecutableResult result;
+    bool succeeded;
+};
+
+static void check_driver_write_main(void* argument)
+{
+    CheckDriverWrite* write = argument;
+    write->succeeded = executable_write(write->link, &write->options, &write->result);
+}
+
+// A binding's failure, about the name `name` (empty for none).
+static void check_driver_bind_failed(BindError error, const char* name)
+{
+    if (error == BIND_ERROR_UNDEFINED)
+    {
+        fprintf(stderr, "error: undefined reference to '%s'\n", name);
+    }
+    else if (error == BIND_ERROR_DUPLICATE)
+    {
+        fprintf(stderr, "error: duplicate definition of '%s': the C runtime defines it too\n", name);
+    }
+    else if (error == BIND_ERROR_SYMBOLS)
+    {
+        fprintf(stderr, "error: two global symbols are named '%s'\n", name);
+    }
+    else if (error == BIND_ERROR_DISCARDED)
+    {
+        fprintf(stderr, "error: a reference to '%s', a symbol of a discarded COMDAT group\n", name);
+    }
+    else if (error == BIND_ERROR_SNAPSHOT)
+    {
+        fprintf(stderr, "error: the C runtime's snapshot is damaged\n");
+    }
+    else
+    {
+        fprintf(stderr, "fatal error: binding capacity exhausted\n");
+    }
+}
+
+// Whether the link's name `name` is a symbol of the program's whose declaration a system header wrote: an undefined one
+// is then a library's function that the C library doesn't have (libm's sin, linked by -lm).
+static bool check_driver_system_declared(const CheckProgram* program, const Parser* parser, const Preprocessor* pp, const Link* link, NameId name)
+{
+    bool system = false;
+    for (uint32_t s = 0; name != 0 && s < program->symbol_count && s + 1 < link->symbols.count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+        if (link->symbols.name[s + 1] == name && declaration < parser->tokens.count)
+        {
+            system = check_lazy_system(pp, parser->tokens.sources[declaration]);
+        }
+    }
+    return system;
+}
+
+// A name of the link's, for a diagnostic, as a string in `buffer`.
+static const char* check_driver_link_name(const Link* link, NameId name, char* buffer, uint64_t capacity)
+{
+    buffer[0] = 0;
+    if (name != 0 && name < link->names.count)
+    {
+        snprintf(buffer, capacity, "%.*s", (int)link->names.length[name], (const char*)link->names.bytes[name]);
+    }
+    return buffer;
+}
+
+// Links the checked program straight into an executable at `output_path` (#157's direct path, #145's slice): a dynamic
+// PIE against the system's C runtime, which comes from its snapshot in the cache directory (imported and written there
+// when it is missing or stale) and which binding joins between the program's symbols and its atoms. A binding that finds
+// a piece of the snapshot damaged (BIND_ERROR_SNAPSHOT) discards the snapshot and emits once more from a fresh import.
+static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
+                                     Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, Arena* scratch)
+{
+    char cache[PATH_MAX];
+    const bool cached = snapshot_directory(cache, sizeof(cache));
+    bool valid = false;
+    bool again = true;
+    for (uint32_t attempt = 0; again && attempt < 2; attempt += 1)
+    {
+        again = false;
+        Runtime runtime;
+        const SnapshotResult opened = runtime_open(&runtime, cached ? cache : NULL);
+        Arena output = arena_reserve(UINT64_C(1) << 34);
+        Arena bytes = arena_reserve(UINT64_C(1) << 34);
+        Arena arena = arena_reserve(UINT64_C(1) << 32);
+        const uint64_t mark = scratch->length;
+        Bind bind = { 0 };
+        CheckProgramBinding binding = {
+            .runtime = &runtime,
+            .bind = &bind,
+            .path = scalar ? BIND_PATH_EXACT : BIND_PATH_VECTOR,
+            .arena = &arena,
+            .data_objects = data->objects,
+            .data_count = data->count,
+        };
+        CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
+        CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
+        char name[256] = { 0 };
+        valid = opened.error == RUNTIME_ERROR_NONE && output.base != 0 && bytes.base != 0 && arena.base != 0;
+        if (opened.error != RUNTIME_ERROR_NONE)
+        {
+            fprintf(stderr, "error: can't import the C runtime%s%s\n", runtime.failed_file[0] != 0 ? ": " : "", runtime.failed_file);
+        }
+        else if (!valid)
+        {
+            fprintf(stderr, "fatal error: can't reserve linker memory\n");
+        }
+        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, verify))
+        {
+            valid = false;
+            again = bind.error == BIND_ERROR_SNAPSHOT;
+            if (bind.error != BIND_ERROR_NONE && !again)
+            {
+                check_driver_bind_failed(bind.error, binding.failed_name);
+            }
+            else if (!again)
+            {
+                check_driver_emission_failed(parser, pp, &code);
+            }
+        }
+        if (valid)
+        {
+            valid = check_data_publish(data, types, program->stream, program->object_symbols, program->object_count, &code.link, 0, &bytes, scratch, &emission);
+            if (!valid)
+            {
+                check_driver_diagnose(parser, pp, emission.failed_token, "checked static data could not be emitted");
+            }
+        }
+        if (valid)
+        {
+            valid = bind_end(&bind, &code.link);
+            again = !valid && bind.error == BIND_ERROR_SNAPSHOT;
+            if (!valid && !again)
+            {
+                check_driver_link_name(&code.link, bind.name, name, sizeof(name));
+                if (bind.error == BIND_ERROR_UNDEFINED && check_driver_system_declared(program, parser, pp, &code.link, bind.name))
+                {
+                    fprintf(stderr, "error: unsupported: libraries other than the C library: '%s', which a system header declares, isn't in "
+                                    "libc.so.6, and the direct path links no other library yet (-c and a system linker with its -l take it)\n", name);
+                }
+                else
+                {
+                    check_driver_bind_failed(bind.error, name);
+                }
+            }
+        }
+        ExecutableDynamic dynamic = { 0 };
+        if (valid)
+        {
+            const LinkError checked = link_check(&code.link);
+            valid = checked == LINK_ERROR_NONE && dynamic_inputs(&dynamic, &runtime, &bind, &arena);
+            // An import the code reaches other than through the GOT, by a call or from data: Tier 0 reads and writes
+            // globals RIP-relatively, which reaches a shared library's data only by a copy relocation, and the direct
+            // path makes none (#84).
+            SymbolId direct = 0;
+            for (FixupId f = 1; checked == LINK_ERROR_BINDING && direct == 0 && f < code.link.fixups.count; f += 1)
+            {
+                const SymbolId target = code.link.fixups.target[f];
+                const uint8_t kind = code.link.fixups.kind[f] & BUSTER_LINK_FIXUP_KIND;
+                if (target != 0 && code.link.symbols.source[target] == BUSTER_LINK_SOURCE_RUNTIME_SHARED && kind != BUSTER_LINK_FIXUP_CALL &&
+                    kind != BUSTER_LINK_FIXUP_CALL_GOT && kind != BUSTER_LINK_FIXUP_LOAD_GOT && kind != BUSTER_LINK_FIXUP_GOTPCREL && kind != BUSTER_LINK_FIXUP_ABS64)
+                {
+                    direct = target;
+                }
+            }
+            if (direct != 0)
+            {
+                fprintf(stderr, "error: unsupported: '%s', the C library's variable, read or written directly: the direct path reaches a shared "
+                                "library's data through the GOT, which Tier 0 doesn't use yet (-c and a system linker take it)\n",
+                        check_driver_link_name(&code.link, code.link.symbols.name[direct], name, sizeof(name)));
+            }
+            else if (!valid)
+            {
+                fprintf(stderr, "internal compiler error: the bound link isn't valid (link error %u)\n", (uint32_t)checked);
+            }
+        }
+        if (valid)
+        {
+            CheckDriverWrite write = {
+                .link = &code.link,
+                .options = {
+                    .path = { .pointer = (char*)output_path, .length = strlen(output_path) },
+                    .entry = dynamic_global(&runtime, &bind, "_start"),
+                    .dynamic = &dynamic,
+                    .exact = scalar,
+                },
+            };
+            valid = lane_run(1, check_driver_write_main, &write, 0) && write.succeeded;
+            const ExecutableError error = write.result.error;
+            if (!valid && error == EXECUTABLE_ERROR_UNDEFINED && write.result.symbol < code.link.symbols.count)
+            {
+                fprintf(stderr, "error: undefined reference to '%s'\n",
+                        check_driver_link_name(&code.link, code.link.symbols.name[write.result.symbol], name, sizeof(name)));
+            }
+            else if (!valid && error == EXECUTABLE_ERROR_FILE)
+            {
+                fprintf(stderr, "error: can't write %s: %s: %s\n", output_path, write.result.call != NULL ? write.result.call : "write",
+                        strerror(write.result.system_error));
+            }
+            else if (!valid)
+            {
+                fprintf(stderr, "error: can't link %s (executable error %u)\n", output_path, (uint32_t)error);
+            }
+        }
+        if (again && cached)
+        {
+            snapshot_discard(cache, RUNTIME_KIND_DYNAMIC);
+        }
+        arena_pop_to(scratch, mark);
+        arena_release(&arena);
+        arena_release(&bytes);
+        arena_release(&output);
+        runtime_release(&runtime);
+    }
+    return valid;
+}
+
 static const char* check_driver_object_name(Arena* arena, const char* source)
 {
     const char* slash = strrchr(source, '/');
@@ -461,7 +714,9 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
     return result;
 }
 
-static int run_check_command(int count, char** arguments)
+// The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
+// (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
+static int run_check_command(int count, char** arguments, bool executable)
 {
     int result = 1;
     Arena arena = arena_reserve(1ull << 36);
@@ -472,16 +727,23 @@ static int run_check_command(int count, char** arguments)
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
     uint32_t filtered_count = 0;
     bool scalar = false;
+    // --verify checks every function's records with x86_validate (the c-testsuite harness passes it).
+    bool verify = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
+    bool syntax_only = false;
     bool quiet = false;
     bool lazy_system_headers = false;
     for (int i = 0; filtered != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
         quiet |= strcmp(arguments[i], "-w") == 0;
-        if (strcmp(arguments[i], "-flazy-system-headers") == 0)
+        if (strcmp(arguments[i], "--verify") == 0)
+        {
+            verify = true;
+        }
+        else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
         {
             lazy_system_headers = true;
         }
@@ -492,6 +754,10 @@ static int run_check_command(int count, char** arguments)
         else if (strcmp(arguments[i], "-c") == 0)
         {
             emit_object = true;
+        }
+        else if (strcmp(arguments[i], "-fsyntax-only") == 0)
+        {
+            syntax_only = true;
         }
         else if (strcmp(arguments[i], "--dump-typed") == 0)
         {
@@ -506,6 +772,8 @@ static int run_check_command(int count, char** arguments)
             filtered[filtered_count++] = arguments[i];
         }
     }
+    // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
+    const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     PPOptions options;
     const char* path = 0;
     const char* output = 0;
@@ -514,7 +782,8 @@ static int run_check_command(int count, char** arguments)
     options.semantic_pragmas = true;
     if (!parsed)
     {
-        fprintf(stderr, "usage: compiler check [--scalar] [--dump-typed] [--dump-static] [-flazy-system-headers] [-c [-o file.o]] [preprocessor options] file.c\n");
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--dump-typed] [--dump-static] [-flazy-system-headers] [-fsyntax-only | -c] [-o file] "
+                        "[preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -726,7 +995,7 @@ static int run_check_command(int count, char** arguments)
                         result = ready && expression_valid && additional_count == 0 && !repairing && pp.errors == 0 ? 0 : 1;
                         CheckProgram program;
                         CheckDataPrepared data = { 0 };
-                        if (result == 0 && emit_object && !prefix_only && !check_data_prepare(&data, &input, &stream, &initializers, &types, &output_arena, &scratch))
+                        if (result == 0 && (emit_object || link) && !prefix_only && !check_data_prepare(&data, &input, &stream, &initializers, &types, &output_arena, &scratch))
                         {
                             check_driver_diagnose(checking, &pp, data.token, "static-data preparation failed");
                             result = 1;
@@ -753,7 +1022,21 @@ static int run_check_command(int count, char** arguments)
                             {
                                 const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
                                 result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
-                                                                               object_path, scalar, dump_static, &scratch) ? 0 : 1;
+                                                                               object_path, scalar, verify, dump_static, &scratch) ? 0 : 1;
+                            }
+                            else
+                            {
+                                check_driver_diagnose(checking, &pp, selected.token, "checked definition selection failed");
+                                result = 1;
+                            }
+                        }
+                        if (result == 0 && link && !prefix_only)
+                        {
+                            CheckProgramSelection selected;
+                            if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
+                            {
+                                result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types,
+                                                                 output != 0 ? output : "a.out", scalar, verify, &scratch) ? 0 : 1;
                             }
                             else
                             {

@@ -118,10 +118,14 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_CLASS_COUNT 14
 // An atom's alignment is at most 2^this: 4 GB.
 #define BUSTER_LINK_MAX_ALIGNMENT_LOG2 32
+// The unit of an atom that merges several units' input sections (a foreign link's section of a name that __start_ and
+// __stop_ bound): its locals may be referred to from any unit, and it may refer to any unit's.
+#define BUSTER_LINK_UNIT_SHARED UINT32_MAX
 
 // Symbol flags, laid out so that an Elf64_Sym's st_info is flags & BUSTER_LINK_SYMBOL_INFO and its st_other is
 // flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT: the type (STT_*) in bits 0 to 3, the binding (STB_*) in bits 4 and 5
-// and the visibility (STV_*) in bits 6 and 7. The object writer makes the section and file symbols itself.
+// and the visibility (STV_*) in bits 6 and 7, but for BUSTER_LINK_SYMBOL_UNIQUE, which an Elf64_Sym writes as
+// STB_GNU_UNIQUE (link_symbol_elf_info). The object writer makes the section and file symbols itself.
 #define BUSTER_LINK_SYMBOL_TYPE 0x0f
 #define BUSTER_LINK_SYMBOL_NOTYPE 0x00
 #define BUSTER_LINK_SYMBOL_OBJECT 0x01
@@ -134,6 +138,9 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_LOCAL 0x00
 #define BUSTER_LINK_SYMBOL_GLOBAL 0x10
 #define BUSTER_LINK_SYMBOL_WEAK 0x20
+// STB_GNU_UNIQUE, which GCC gives C++'s inline variables and the static data of templates and inline functions: a
+// definition that binds as a global one does, kept unique in the process by the loader, and written back as it came.
+#define BUSTER_LINK_SYMBOL_UNIQUE 0x30
 #define BUSTER_LINK_SYMBOL_VISIBILITY 0xc0
 #define BUSTER_LINK_SYMBOL_DEFAULT 0x00
 #define BUSTER_LINK_SYMBOL_INTERNAL 0x40
@@ -531,6 +538,10 @@ static __attribute__((unused)) bool link_add_code_fixups(Link* link, AtomId atom
 // Checks what only the whole representation shows (see the rules above) and returns the first problem, which it also
 // records in link->error, or LINK_ERROR_NONE.
 static __attribute__((unused)) LinkError link_check(Link* link);
+// link_check by every lane of the calling thread's group (lane.c), each a range of the symbols and of the atoms, with
+// the same result on every lane. A link without a problem passes in a lane's share of the time; a link with one is
+// checked again by link_check on lane 0, whose first problem it returns, and records in link->error.
+static __attribute__((unused)) LinkError link_check_lanes(Link* link);
 
 // Records the link's first failure.
 static void link_fail(Link* link, LinkError error)
@@ -873,13 +884,19 @@ static AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, u
     return result;
 }
 
-// Flags whose type is one the representation has and whose binding exists.
+// Flags whose type is one the representation has: each of its bindings exists.
 static bool link_symbol_flags_are_valid(uint8_t flags)
 {
     const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
-    const bool type_valid = type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
-                            type == BUSTER_LINK_SYMBOL_IFUNC;
-    return type_valid && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_BINDING;
+    return type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
+           type == BUSTER_LINK_SYMBOL_IFUNC;
+}
+
+// An Elf64_Sym's st_info for symbol flags: their type and binding, BUSTER_LINK_SYMBOL_UNIQUE's STB_GNU_UNIQUE (10).
+static __attribute__((unused)) uint8_t link_symbol_elf_info(uint8_t flags)
+{
+    const bool unique = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE;
+    return (uint8_t)(unique ? 10u << 4 | (flags & BUSTER_LINK_SYMBOL_TYPE) : flags & BUSTER_LINK_SYMBOL_INFO);
 }
 
 // Whether a symbol with `flags` can be defined in `atom`, which exists, at `value` with `size`: within the atom, and a
@@ -1216,9 +1233,34 @@ static bool link_check_fixups(const Link* link, AtomId atom, uint64_t* owned)
     return result;
 }
 
+// link_check_fixups for link_check_lanes, whose lanes mark `owned` at once: a fixup that another atom marked first fails.
+static bool link_check_fixups_shared(const Link* link, AtomId atom, uint64_t* owned)
+{
+    const LinkFixups* fixups = &link->fixups;
+    const FixupId begin = link->atoms.fixup_begin[atom];
+    const uint32_t count = link->atoms.fixup_count[atom];
+    bool result = count == 0 || (begin != 0 && begin <= fixups->count && count <= fixups->count - begin && link->atoms.bytes[atom] != 0);
+    uint64_t next = 0;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        const FixupId fixup = begin + i;
+        const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+        const bool wide = (fixups->kind[fixup] & BUSTER_LINK_FIXUP_WIDE) != 0;
+        const uint64_t offset = fixups->offset[fixup];
+        const uint64_t bit = 1ull << (fixup % 64);
+        result = kind != BUSTER_LINK_FIXUP_NONE && kind < BUSTER_LINK_FIXUP_KINDS && fixups->target[fixup] != 0 && fixups->target[fixup] < link->symbols.count &&
+                 (!wide || ((uint32_t)fixups->addend[fixup] != 0 && (uint32_t)fixups->addend[fixup] < fixups->wide_count)) && offset >= next &&
+                 offset + link_fixup_kinds[kind].width <= link->atoms.size[atom];
+        result = result && (__atomic_fetch_or(&owned[fixup / 64], bit, __ATOMIC_RELAXED) & bit) == 0;
+        next = offset + link_fixup_kinds[kind].width;
+    }
+    return result;
+}
+
 // Whether a fixup of `kind` in `atom` can refer to `target`: a TLS kind to a TLS symbol and no other kind to one (but
 // a size of either), a local symbol only from its own unit (or an absolute one or an interned STRINGS pool at unit
-// zero, which are shared across units), and a shared library's
+// zero, which are shared across units), except that terminal EH_FRAME pools at unit zero can refer to the locals of
+// their combined units, and a shared library's
 // symbol only through the GOT, by its absolute address (which the executable relocates when it loads), or for a function
 // by a call (through a stub).
 static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, SymbolId target)
@@ -1236,8 +1278,12 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     const bool call = kind == BUSTER_LINK_FIXUP_CALL && (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
     const bool reaches_shared = through_got || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_ABS64 || call;
     const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
+    // Only a terminal EH pool as the source gains this allowance; targets in EH pools retain the ordinary rule.
+    const bool unwind_pool = link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME && link->atoms.unit[atom] == 0;
     const bool pooled = target_atom != 0 && link->atoms.class[target_atom] == BUSTER_LINK_CLASS_STRINGS && link->atoms.unit[target_atom] == 0;
-    return (size_kind || tls_kind == tls_target) && (!local || absolute || pooled || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) &&
+    const bool merged = link->atoms.unit[atom] == BUSTER_LINK_UNIT_SHARED || (target_atom != 0 && link->atoms.unit[target_atom] == BUSTER_LINK_UNIT_SHARED);
+    return (size_kind || tls_kind == tls_target) &&
+           (!local || absolute || pooled || merged || (target_atom != 0 && (unwind_pool || link->atoms.unit[target_atom] == link->atoms.unit[atom]))) &&
            (!shared || reaches_shared);
 }
 
@@ -1320,5 +1366,106 @@ static LinkError link_check(Link* link)
     {
         link_fail(link, result);
     }
+    return result;
+}
+
+// Whether symbol `symbol` passes link_check's rules for a symbol.
+static bool link_check_symbol(const Link* link, SymbolId symbol)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const uint8_t source = symbols->source[symbol];
+    const AtomId atom = symbols->atom[symbol];
+    const bool in_atom_source = source == BUSTER_LINK_SOURCE_PROGRAM || source == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE || source == BUSTER_LINK_SOURCE_FOREIGN_OBJECT;
+    const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
+    const bool local = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+    bool result = symbols->name[symbol] < link->names.count && atom < link->atoms.count && source < BUSTER_LINK_SOURCE_COUNT;
+    result = result && !((source == BUSTER_LINK_SOURCE_PROGRAM && atom == 0) || (!in_atom_source && atom != 0) || (local && !in_atom_source && !absolute));
+    result = result && !((atom != 0 && !link_symbol_fits(link, atom, symbols->value[symbol], symbols->size[symbol], symbols->flags[symbol])) ||
+                         (absolute && !link_absolute_fits(atom, symbols->flags[symbol])));
+    return result;
+}
+
+// What link_check_lanes's lanes share: the fixups' ownership marks, each lane's count of fixups in its atoms, and whether
+// any lane found a problem.
+typedef struct LinkCheckLanes LinkCheckLanes;
+struct LinkCheckLanes
+{
+    uint64_t* owned;
+    uint64_t fixups[BUSTER_LANE_MAX_COUNT];
+    bool failed[BUSTER_LANE_MAX_COUNT];
+};
+
+static LinkError link_check_lanes(Link* link)
+{
+    const uint32_t lane = lane_index();
+    const uint32_t lanes = lane_count();
+    const uint64_t words = link->fixups.count / 64 + 1;
+    Scratch scratch = scratch_begin(0);
+    LinkCheckLanes* shared = 0;
+    if (lane == 0)
+    {
+        shared = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, LinkCheckLanes, 1);
+        uint64_t* owned = shared != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, words) : 0;
+        shared = owned != 0 ? shared : 0;
+        if (shared != 0)
+        {
+            shared->owned = owned;
+        }
+    }
+    shared = (LinkCheckLanes*)(uintptr_t)lane_broadcast((uint64_t)(uintptr_t)shared, 0);
+    bool failed = shared == 0;
+    if (shared != 0)
+    {
+        const Range64 marks = lane_range(words);
+        memset(shared->owned + marks.begin, 0, (marks.end - marks.begin) * sizeof(uint64_t));
+    }
+    lane_sync();
+    if (shared != 0)
+    {
+        const Range64 symbols = lane_range(link->symbols.count > 0 ? link->symbols.count - 1 : 0);
+        for (uint64_t symbol = symbols.begin + 1; !failed && symbol < symbols.end + 1; symbol += 1)
+        {
+            failed = !link_check_symbol(link, (SymbolId)symbol);
+        }
+        const Range64 atoms = lane_range(link->atoms.count > 0 ? link->atoms.count - 1 : 0);
+        uint64_t fixups = 0;
+        for (uint64_t atom = atoms.begin + 1; !failed && atom < atoms.end + 1; atom += 1)
+        {
+            failed = !link_check_fixups_shared(link, (AtomId)atom, shared->owned);
+            const FixupId begin = link->atoms.fixup_begin[atom];
+            for (uint32_t i = 0; !failed && i < link->atoms.fixup_count[atom]; i += 1)
+            {
+                const FixupId fixup = begin + i;
+                failed = !link_check_target(link, (AtomId)atom, link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND, link->fixups.target[fixup]);
+            }
+            fixups += link->atoms.fixup_count[atom];
+        }
+        shared->fixups[lane] = fixups;
+        shared->failed[lane] = failed;
+    }
+    lane_sync();
+    LinkError result = LINK_ERROR_NONE;
+    if (lane == 0)
+    {
+        // The priorities, few, and the fixups in no atom's range; then, with a problem anywhere, or without the lanes'
+        // marks, link_check's own answer: the first problem in its order, or none.
+        uint64_t fixups = 0;
+        bool any = shared == 0;
+        for (uint32_t other = 0; shared != 0 && other < lanes; other += 1)
+        {
+            fixups += shared->fixups[other];
+            any = any || shared->failed[other];
+        }
+        const LinkPriorities* priorities = &link->priorities;
+        for (uint32_t entry = 1; !any && entry < priorities->count; entry += 1)
+        {
+            const AtomId atom = priorities->atom[entry];
+            any = atom == 0 || atom >= link->atoms.count || !link_class_is_array(link->atoms.class[atom]) || (entry > 1 && priorities->atom[entry - 1] >= atom);
+        }
+        any = any || fixups + 1 != link->fixups.count;
+        result = any ? link_check(link) : LINK_ERROR_NONE;
+    }
+    result = (LinkError)lane_broadcast((uint64_t)result, 0);
+    scratch_end(scratch);
     return result;
 }

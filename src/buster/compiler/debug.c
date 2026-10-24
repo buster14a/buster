@@ -18,6 +18,8 @@
 // required section sizes but changes no output bytes or address-offset entries. Other errors change nothing.
 // line_addresses has one uint32_t per function and records the operand offsets in .debug_line. Its capacity is
 // explicit. debug_finalize takes a successful, unmodified output and checks every address before patching any.
+// A unit written after others gives DebugOutput.bases, its contributions' places in the file's sections: its header's
+// abbreviation offset and its DIE's line program, address base and range lists point there, so units concatenate.
 // Constants and encodings follow DWARF 5 (2017), sections 3.1, 3.3, 6.2, 7.5, 7.27 and 7.28; no upstream code copied.
 
 #define BUSTER_DEBUG_SECTIONS 5
@@ -79,6 +81,9 @@ struct DebugOutput
     DebugSection sections[BUSTER_DEBUG_SECTIONS];
     uint32_t* line_addresses;
     uint32_t address_capacity;
+    // Where the unit's contribution starts in each section of the file, for a unit after others: the unit's header and
+    // DIE point at its own abbreviations, line program, address table and range lists there. Zero for a unit alone.
+    uint64_t bases[BUSTER_DEBUG_SECTIONS];
 };
 
 typedef struct DebugWriter DebugWriter;
@@ -259,7 +264,7 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
     debug_length(writer, 0, writer->size - 4);
 }
 
-static void debug_sections(const DebugUnit* unit, DebugWriter* writers, uint32_t* addresses, bool exact)
+static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWriter* writers, uint32_t* addresses, bool exact)
 {
     // compile_unit: name/string, comp_dir/string, producer/string, language/data2, stmt_list/sec_offset,
     // addr_base/sec_offset, ranges/sec_offset; subprogram: name/string, low_pc/addrx, high_pc/data4,
@@ -274,15 +279,15 @@ static void debug_sections(const DebugUnit* unit, DebugWriter* writers, uint32_t
     debug_integer(info, 5, 2);
     debug_integer(info, 1, 1); // DW_UT_compile
     debug_integer(info, 8, 1);
-    debug_integer(info, 0, 4);
+    debug_integer(info, bases[DEBUG_SECTION_ABBREV], 4);
     debug_uleb(info, 1);
     debug_string(info, unit->file_count != 0 ? unit->files[0] : BUSTER_S8(""));
     debug_string(info, unit->directory);
     debug_string(info, BUSTER_S8("buster"));
     debug_integer(info, 0x1d, 2); // DW_LANG_C11
-    debug_integer(info, 0, 4);
-    debug_integer(info, 8, 4);
-    debug_integer(info, 12, 4);
+    debug_integer(info, bases[DEBUG_SECTION_LINE], 4);
+    debug_integer(info, bases[DEBUG_SECTION_ADDR] + 8, 4);
+    debug_integer(info, bases[DEBUG_SECTION_RNGLISTS] + 12, 4);
     DebugWriter* addr = &writers[DEBUG_SECTION_ADDR];
     debug_integer(addr, 4 + 8ull * unit->function_count, 4);
     debug_integer(addr, 5, 2);
@@ -356,10 +361,11 @@ static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool e
     DebugWriter measured[BUSTER_DEBUG_SECTIONS] = { 0 };
     if (result == DEBUG_OK)
     {
-        debug_sections(unit, measured, 0, exact);
+        debug_sections(unit, output->bases, measured, 0, exact);
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
-            if (measured[section].size >= BUSTER_DEBUG_DWARF32_LIMIT)
+            // The contribution ends within DWARF32's offsets, from its base.
+            if (measured[section].size >= BUSTER_DEBUG_DWARF32_LIMIT || output->bases[section] >= BUSTER_DEBUG_DWARF32_LIMIT - measured[section].size)
             {
                 result = DEBUG_ERROR_LIMIT;
             }
@@ -387,7 +393,7 @@ static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool e
         {
             writers[section].bytes = output->sections[section].bytes;
         }
-        debug_sections(unit, writers, output->line_addresses, exact);
+        debug_sections(unit, output->bases, writers, output->line_addresses, exact);
     }
     return result;
 }

@@ -1171,7 +1171,7 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         const uint8_t flags = symbol_flags[symbol];
         *entry = (Elf64_Sym){
             .st_name = name_bytes_with_nul != 0 || labelled ? (uint32_t)name : 0,
-            .st_info = flags & BUSTER_LINK_SYMBOL_INFO,
+            .st_info = link_symbol_elf_info(flags),
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
             .st_shndx = object_symbol_section_index(section),
             .st_value = atom_offset[atom] + symbol_values[symbol],

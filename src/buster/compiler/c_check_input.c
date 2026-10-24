@@ -3647,7 +3647,7 @@ static void check_input_system_tokens(CheckInputReader* reader, const Preprocess
 }
 
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
-                            bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
+                            bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode)
 {
     *input = (CheckInput){ 0 };
     const uint32_t count = parser->tokens.count;
@@ -4084,7 +4084,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         if (!input->resource && reader.bindings.valid)
         {
-            check_input_bindings(&reader, parser->options.scalar);
+            check_input_bindings(&reader, binding_mode);
             for (uint32_t report = 0; report < input->report_count; report += 1)
             {
                 const uint32_t token = input->reports[report].token;
@@ -4196,7 +4196,15 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT);
+}
+
+// check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
+// publish the same columns, reports and history as the default one.
+static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
+                                                              Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
+{
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -4205,14 +4213,14 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -4220,5 +4228,5 @@ static bool check_input_prefix(CheckInput* input, const Parser* parser, Preproce
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT);
 }

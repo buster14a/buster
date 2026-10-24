@@ -111,7 +111,7 @@ isolated kernel suite.
 Two retained decisions have useful whole-path evidence: the syntax driver's
 [tree-only comparison](c-parser.md#driver-measurements-2026-10-23), which includes
 startup, preprocessing, parsing and cleanup on frozen inputs, and the
-[length-only sizing qualification](measurements/x86-lengths-2026-10-23/refinement.md),
+[length-only sizing qualification](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/refinement.md),
 whose complete sizing/encoding controls are distinguished from the initial
 isolated/cloud screens. These are historical comparisons at their recorded
 revisions, not a new comparison of the audit commit.

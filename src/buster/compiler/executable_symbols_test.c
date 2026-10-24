@@ -138,14 +138,15 @@ static bool executable_symbols_test_dynamic_table(String8 file, const Executable
     const Elf64_Shdr* text = executable_test_section(image, ".text");
     const Elf64_Shdr* tdata = executable_test_section(image, ".tdata");
     bool valid = image->valid && table != 0 && strings != 0 && text != 0 && tdata != 0 && table->sh_type == SHT_SYMTAB &&
-                 table->sh_size == 7 * sizeof(Elf64_Sym) && table->sh_entsize == sizeof(Elf64_Sym) && table->sh_info == 2 &&
+                 table->sh_size == 7 * sizeof(Elf64_Sym) && table->sh_entsize == sizeof(Elf64_Sym) && table->sh_info == 3 &&
                  table->sh_link == (uint64_t)(strings - image->section_headers) && table->sh_flags == 0 && table->sh_addr == 0 &&
                  strings->sh_type == SHT_STRTAB && strings->sh_flags == 0 && strings->sh_addr == 0 &&
                  table->sh_offset <= file.length && table->sh_size <= file.length - table->sh_offset &&
                  strings->sh_offset <= file.length && strings->sh_size <= file.length - strings->sh_offset;
-    const char* names[] = { "", "own_tls", "_start", "buster_library_main", "getpid", "errno", "_end" };
-    const uint64_t sizes[] = { 0, 4, 14, 31, 0, 0, 0 };
-    const uint8_t info[] = { 0, STT_TLS, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+    // The hidden _start goes among the locals, as GNU ld's and lld's tables have a hidden definition, in id order.
+    const char* names[] = { "", "_start", "own_tls", "buster_library_main", "getpid", "errno", "_end" };
+    const uint64_t sizes[] = { 0, 14, 4, 31, 0, 0, 0 };
+    const uint8_t info[] = { 0, STT_FUNC, STT_TLS, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
                             ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), ELF64_ST_INFO(STB_GLOBAL, STT_TLS), ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE) };
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(names); i += 1)
     {
@@ -155,11 +156,11 @@ static bool executable_symbols_test_dynamic_table(String8 file, const Executable
         valid = symbol.st_name < strings->sh_size && length < strings->sh_size - symbol.st_name &&
                 memcmp(file.pointer + strings->sh_offset + symbol.st_name, names[i], length + 1) == 0 &&
                 symbol.st_size == sizes[i] && symbol.st_info == info[i] && symbol.st_other == (i == 1 || i == 2 ? STV_HIDDEN : STV_DEFAULT);
-        if (valid && i == 1)
+        if (valid && i == 2)
         {
             valid = symbol.st_value == 4 && symbol.st_shndx == (uint64_t)(tdata - image->section_headers);
         }
-        else if (valid && (i == 2 || i == 3))
+        else if (valid && (i == 1 || i == 3))
         {
             valid = symbol.st_value == text->sh_addr + (i == 3 ? 16 : 0) && symbol.st_shndx == (uint64_t)(text - image->section_headers);
         }

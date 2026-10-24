@@ -280,7 +280,7 @@ The same CI run's `main.c` parser measurement covered 2,291,368 tokens in
 13.391 ms, 5.844 ns/token, 32.329 cycles/token and 60.913 instructions/token.
 Its fallback covered 58 top-level declarations and 33,911 tokens (1.480%).
 The environment numbers above are synthetic per-query costs. The additional
-[source measurement harness](measurements/c-environments-2026-10-23/README.md)
+[source measurement harness](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-environments-2026-10-23/README.md)
 includes parsing, the production reader, publication and expression checking.
 Its controlled small/large measurements are now recorded with frozen inputs,
 matching output fingerprints and three independent processes per configuration.

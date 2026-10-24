@@ -6,9 +6,10 @@
 transitions to those kernels; `c_parser_bindings.c` exposes the source adapter
 and declaration-token columns. K3 now classifies block-scope typedef names
 using per-identifier activation stacks. The syntax-only driver does not need
-name-resolution output and does not run the optional adapter. The checker can
-request it explicitly; the separately owned checker adapter in #312 is not
-modified by this work.
+name-resolution output and does not run the optional adapter. The checker
+records and resolves its own events while elaborating, and uses the adapter
+only as an oracle and a measured alternative
+([the checker's binding handoff](c-check-bindings.md), #336).
 
 ## Event contract
 
@@ -176,7 +177,7 @@ all four varying bytes and every subset of constant middle bytes.
 The expanded suite passes 4,255,777 checks, including AddressSanitizer and
 UndefinedBehaviorSanitizer with leak detection disabled because the sandbox
 blocks LeakSanitizer's process inspection. The
-[measurement record](measurements/simd-301-2026-10-23/README.md) preserves
+[measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/README.md) preserves
 raw process output, source and executable identities, commands, and limits.
 9700X qualification remains separate.
 
@@ -320,7 +321,7 @@ the resolver only. Preprocessing is outside all these measurements.
 
 The protected 9700X workflow runs the source fixtures and main/SQLite
 comparisons, then measures `main.c` and the existing frozen SQLite corpus.
-On pushes to main, dispatched runs and pull requests that change the parser
+On the daily and dispatched runs and on pull requests that change the parser
 or the binding modules, it also isolates SQLite's scalar and batch paths and
 runs the batch after 200 ms of scalar work. The runner acquires the repository's shared host lock;
 manual runs must acquire it separately and pin to CPU 2. A batch path that
@@ -343,7 +344,7 @@ The main input has 2,295,937 tokens and 466,590 source identifier tokens.
 SQLite is the workflow's frozen `preprocessor-391e729af658` corpus, verified
 against its pinned manifests and headers; it has 705,670 tokens and 143,019
 source identifier tokens. This differs from the cloud SQLite 3.53.4 input
-above. The [captured commands and output](measurements/parser-bindings-128-2026-10-23/9700x-source-bindings.log)
+above. The [captured commands and output](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/parser-bindings-128-2026-10-23/9700x-source-bindings.log)
 preserve the exact flags and timings.
 
 | Path | main.c cycles/identifier | SQLite cycles/identifier | main.c ms/unit | SQLite ms/unit |
@@ -418,12 +419,14 @@ stream or an explicitly retained initial environment is needed: arbitrary
 independent event slices lose earlier declarations/restores. Reset reuses heads
 across units without clearing every process-wide name.
 
-The current checker constructs and resolves its own binding events. Integrating
-the pending parser's retained columns would create duplicate syntactic event
-production unless the two consumers share a contract. Sorting/mapping also
-costs work relative to reusable stacks. [#336](https://github.com/buster14a/buster/issues/336) requires
-joint parser + typed elaboration + resolution + checking measurements before
-choosing retained columns or another resolver. It preserves [#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)/[#113](https://github.com/buster14a/buster/issues/113)
+The current checker constructs its own binding events. After #320 it also
+replayed the parser's grammar for the adapter's columns and mapped them onto its
+uses, a duplicate syntactic producer.
+[#336](https://github.com/buster14a/buster/issues/336) measured the whole reader
+with each handoff and made the reader's retained answers (each use's `previous`)
+the column, with the stack replay as `--scalar`'s twin; the parser's replay and
+the batch sort cost more on every measured input
+([the checker's binding handoff](c-check-bindings.md)). It preserves [#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)/[#113](https://github.com/buster14a/buster/issues/113)
 owners; synthetic batch timings are not a source acceptance result.
 Disposition: retain the integrated checker path at the pin. `test-bindings`
 and checker source tests cover scope order, guard tails, capacities, independent

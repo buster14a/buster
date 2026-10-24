@@ -183,5 +183,5 @@ Retain source and executable SHA-256s, CPU/microcode/compiler/governor metadata,
 lock ownership, all process rows, complete input/output manifests and generated
 code hashes. Compare repeatability, dependency behavior and four/eight-stream
 differences before proposing any observation. The original
-[2026-10-22 measurements](measurements/x86-zen5-2026-10-22/README.md) remain
+[2026-10-22 measurements](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-zen5-2026-10-22/README.md) remain
 unchanged. Issue #181 remains open.

@@ -1,5 +1,0 @@
-chunk preparation: 57408 guarded cases, pass
-preparation corpus work/inputs/sqlite3.c: pass
-preparation corpus work/inputs/sqlite-new.c: pass
-preparation corpus work/buster/src/buster/compiler/main.c: pass
-preparation allocation failures: pass

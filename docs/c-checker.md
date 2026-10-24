@@ -10,7 +10,19 @@ the semantic driver:
 ./build/compiler check [--scalar] [--dump-typed] [--dump-static] [preprocessor options] file.c
 ./build/compiler [--scalar] -fsyntax-only [preprocessor options] file.c
 ./build/compiler [--scalar] -c [-o file.o] [preprocessor options] file.c
+./build/compiler [--scalar] [--verify] [-o a.out] [preprocessor options] file.c
 ```
+
+The last form compiles and links an executable by the direct path (#145): the
+checked program lowered to Tier 0, bound against the C runtime's snapshot
+(`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
+(`executable_write`). A binding that finds the snapshot damaged discards it and
+links once more from a fresh import. `--verify` also checks every function's
+records with `x86_validate`, as the c-testsuite harness asks
+([the c-testsuite guide](c-testsuite.md)). The direct path links `libc.so.6`
+and its loader alone: a call of a function that a system header declares and
+the C library lacks (libm's) and a read or write of the C library's data (which
+needs the GOT) are refused by name; `-c` and a system linker take both.
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check
@@ -69,11 +81,13 @@ assertions receive semantic checks. Assembly operands/constraints and source
 attribute applicability have separate bounded consumers.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
-order, including the scope of a name in its own initializer. The adapter consumes
-#128's parser declaration-resolution column and retains declare/use/restore
-history for source-dependent semantic environments. `c_check_binding.c`
-validates this handoff; `--scalar` uses its independent scalar oracle. Every
-ordinary use retains its exact declaration identity. It also retains the
+order, including the scope of a name in its own initializer. The reader
+records declare/use/restore events as it elaborates, and each use's event
+retains the declaration it sees; `c_check_binding.c` publishes those answers
+directly, and `--scalar` replays the events independently
+([the binding handoff](c-check-bindings.md), #336). The events are also the
+history for source-dependent semantic environments. Every ordinary use retains
+its exact declaration identity. It also retains the
 composite declaration types, canonical object identities, linkage, storage
 duration, actual and tentative definitions, and each selected initializer node.
 Linked declarations also retain translation-unit identity across closed blocks.
@@ -157,8 +171,8 @@ its temporary scratch allocations before returning. `CheckInput.resource`
 distinguishes capacity failure from the adapter's ordinary diagnostics. A false
 adapter result is not a usable, successfully checked graph.
 
-`CheckInput.binding_event_count` and `binding_statistics` describe the actual
-resolver path. Its declaration, type, object, linkage, definition, tentative
+`CheckInput.binding_event_count` and `binding_statistics` describe the
+reader's events in every binding mode; only the batch sort counts walks. Its declaration, type, object, linkage, definition, tentative
 definition and initializer-node columns all have `token_count` entries. Only
 declaration tokens (`declarations[token] == token`) define objects; uses map to
 those tokens. An object identity is nonzero and stable across compatible
@@ -414,6 +428,55 @@ classes. `c_check_program_emit.c` compiles those functions, resolves shared
 symbols and publishes code/data together. Backend machine classes never
 replace the full semantic `TypeId` in the checked stream.
 
+What the lowering covers past scalars (#145's programs):
+
+- **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
+  of their own size and alignment (up to 16 bytes, 1 GB), reached through
+  `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+- **Copies.** Struct and union assignment and initialization are `COPY`s of
+  at most 256 bytes each, the source's address kept in a temporary between
+  them; a statement's assignment leaves no address to discard.
+- **Initializers.** A local object's plan is applied in order: the object is
+  cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
+  128 bytes) unless its first part clears it whole, then each part's zeros,
+  bytes or value is stored, an aggregate's copied.
+- **Calls.** A call through a pointer is indirect (callee 0, the address pushed
+  before the arguments), its callee evaluated first.
+- **Bit-fields.** A bit-field is read and written through the bytes that hold
+  its bits and no other member's (C11 makes those other memory locations), as
+  pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
+  its bits to the top and back, sign- or zero-extending them as its type says;
+  a store clears its bits and puts the value's in, and its value is the field's
+  as it now reads. `++`, `--` and compound assignment read, operate and store
+  the same way, and so do initializer parts with a bit width. A field whose bits
+  are spread over more than 8 bytes (a packed one) is refused.
+- **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The control stream puts a `STACK_SAVE` before each block's first array, an
+  `ALLOCATE` at each array's declaration (after its bounds) and a
+  `STACK_RESTORE` at the block's end and before every `break`, `continue` or
+  `goto` that leaves the arrays' scope, restoring the outermost block it
+  leaves; a `return` needs none. The lowering keeps the saved position and each
+  array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
+  `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
+  set once where they were declared, times its constant dimensions and its
+  element's size, and the same extents give `sizeof` and the strides of
+  pointer arithmetic over a pointer to a variable-length array. An array
+  declared in a `for` statement's clause or directly in a statement
+  expression's block, one aligned past 16 and one initialized (C23's `= {}`)
+  are refused by name. The source reader doesn't yet take a bound whose
+  statement expression holds more than expression statements (a declaration,
+  an `if` or a jump: `invalid or unsupported declaration`); the control stream
+  already puts such a jump out of a block's first array's bounds before the
+  block's `STACK_SAVE`, where it needs no restore.
+- **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
+  no compares of those classes.
+
+Everything else the lowering can't express is refused with
+`error: unsupported: FEATURE`, naming the feature: aggregates passed or
+returned by value, variadic definitions, `long double`,
+`_Complex`, thread-locals, inline assembly and so on. The c-testsuite harness
+counts such a test as unsupported, not failed.
+
 Builtin module results retain exact argument conversions, runtime operation
 identities and effect requirements. Native helpers are ordinary calls with real
 symbols and fixups. Missing backend representations or runtime requirements
@@ -575,7 +638,7 @@ acceptance differences explicitly.
 
 The source producer/binding/checker measurement harness, frozen input hashes,
 and reproduction commands are retained in
-[the measurement directory](measurements/c-checker-2026-10-23/README.md).
+[the measurement directory](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-checker-2026-10-23/README.md).
 Whole-corpus semantics, multicore scaling and the runtime backend consumer
 remain acceptance work even when these bounded fixtures pass.
 
@@ -591,7 +654,7 @@ Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
 | Producer → consumer | Status and boundary |
 | --- | --- |
 | Full parser tree/postorder and PP spelling → `check_input` | Implemented supported-source reader; declarations/types are elaborated in source order, expressions in postorder. Parser/PP source IDs are retained. |
-| Declaration elaboration → binding event resolver → expression graph | Implemented checker-side events and exact declaration/type columns; [#336](https://github.com/buster14a/buster/issues/336) tracks reuse of pending parser metadata without replacing typed elaboration. |
+| Declaration elaboration → binding event resolver → expression graph | Implemented checker-side events and exact declaration/type columns. Since [#336](https://github.com/buster14a/buster/issues/336), each use's retained answer is published directly, without the parser's second grammar replay ([the binding handoff](c-check-bindings.md)). |
 | Literal spelling → `c_check_literals.c` → leaf `CheckValue` | Counted physical/logical spelling is decoded once for its graph value; invalid/unsupported literals are errors. Macro occurrence remains the diagnostic identity. |
 | `CheckGraph` → dependency scheduler → `check_actions` / scalar actions | Implemented earlier-node operands, call argument slices, source tokens and contexts; actual operand heights define readiness. Type-interning actions form ordered barriers. |
 | Actions/constants/conversions → `CheckStream` → typed dump/diagnostics/static selection | Implemented node-indexed values, explicit operand/store/argument conversions and stable source-ordered reports. Faults in unevaluated branches remain conditional as described above. |
@@ -617,7 +680,8 @@ are not valid. Aggregate/string/TLS emission remains outside this implementation
 
 Observed extra work: source reader's event construction/replay, operand-height
 construction/grouping, and scans over declaration columns to select objects.
-The first has [#336](https://github.com/buster14a/buster/issues/336). Heights are semantic dependencies, so parser depth cannot
+[#336](https://github.com/buster14a/buster/issues/336) removed the replay: the
+reader's events are the one producer, and their retained answers the column. Heights are semantic dependencies, so parser depth cannot
 replace them. Retaining heights/selected-definition lists is a candidate only
 if producer maintenance and downstream savings beat the existing complete
 path; future selective emission must include real body references ([#129](https://github.com/buster14a/buster/issues/129)).

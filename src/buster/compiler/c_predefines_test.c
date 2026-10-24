@@ -1068,6 +1068,10 @@ static const char* const predefines_test_option_sets[] = {
     "-fcf-protection=bogus -fcf-protection", "-fgnuc-version=1.2.3.4 -fgnuc-version=5", "-Obogus -O2", "-O2 -Obogus", "-mabi=ms -mabi=sysv", "-mabi=sysv -mabi=ms",
     "--target=bogus --target=x86_64-linux-gnu", "-std=bogus -std=c17", "-std=c17 -std=bogus", "-ffp-model=bogus -ffp-model=fast",
     "-ffp-eval-method=bogus -ffp-eval-method=source", "-mapx-features=bogus -mapx-features=egpr",
+    // -Ofast as the last -O ignores every -ffp-model= but aggressive without reading its value (#109's seed 1101).
+    "-Ofast -ffp-model=bogus", "-ffp-model=bogus -Ofast", "-O2 -Ofast -ffp-model=bogus", "-Ofast -O2 -ffp-model=bogus", "-Ofast -ffp-model=bogus -fno-fast-math",
+    "-ffp-model=bogus -Ofast -ffp-model=precise", "-ffp-model=bogus -Ofast -O3",
+    "-march=sierraforest -fPIE -O2 -Ofast -mfsgsbase -mno-rdrnd -ffp-model=bogus -ffp-model=fast -mno-usermsr -mno-kl -mno-avx10.2",
     // -fveclib=: ArmPL and SLEEF turn math errno off where they come, whatever follows; the last is checked.
     "-fveclib=SLEEF -fveclib=none", "-fveclib=none -fveclib=SLEEF", "-fveclib=ArmPL -fmath-errno -fveclib=SVML", "-fveclib=bogus", "-fveclib=bogus -fveclib=none",
     "-fveclib=SVML", "-fveclib=libmvec", "-fveclib=AMDLIBM", "-fveclib=Darwin_libsystem_m",
