@@ -843,6 +843,16 @@ static const PPTestFile pp_test_files_renamed[] = {
     { 0, 0 },
 };
 
+static const PPTestFile pp_test_files_collecting_exit[] = {
+    { "outer.h", "#include \"other.h\"\n" },
+    { 0, 0 },
+};
+
+static const PPTestFile pp_test_files_collecting_return[] = {
+    { "outer.h", "#include \"other.h\"\nb)\nouter_after\n" },
+    { 0, 0 },
+};
+
 static const PPTestFile pp_test_files_stack[] = {
     { "a.h", "a_token\n#include \"b.h\"\na_after\n" },
     { "b.h", "b_token\n" },
@@ -1269,6 +1279,42 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
     { "#include among a macro's arguments", "#define F(x) [x]\nF(a\n#include \"other.h\"\nb)\nafter\n",
       "inside\n", "c17", "[a b]\nafter\n", true, 0, 0, 0 },
+    // Clang's flag for a macro's arguments is one flag, not a depth: an invocation with arguments in a directive among
+    // them clears it, and #pragma and #include are taken after it, the arguments going on past the included file's end
+    // (#109's seed 2106).
+    // #370: FileChanged leaves a header while arguments are collected, before the expansion reaches the printer.
+    // Keep the expansion's presumed line, in the file the callback selected, without changing the actual origins.
+    { "line markers: an invocation crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n[a b]\nafter\n" },
+    { "line markers: an invocation after output crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nbefore F(a", "c17", "before [a b] after", false, 0, 0, 0 },
+    { "line markers: argument collection exits two included files", "#include \"outer.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, pp_test_files_collecting_exit },
+    { "line markers: argument collection returns to an included file", "#include \"outer.h\"\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] outer_after after", false, 0, 0, pp_test_files_collecting_return },
+    { "line markers: crossed files keep builtin and presumed locations", "#line 100 \"logical.c\"\n#include \"other.h\"\n__LINE__ __FILE__)\nafter\n",
+      "#define F(x) [x]\n#line 80 \"logical.h\"\nF(__LINE__ __FILE__\n", "c17", "[80 \"logical.h\" 101 \"logical.c\"] after", false, 0, 0, 0 },
+    { "line markers: an empty expansion crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x)\nF(a\n", "c17", "after", false, 0, 0, 0 },
+    { "line markers: an empty expansion crossing an include leaves no output", "#include \"other.h\"\nb)\n",
+      "#define F(x)\nF(a\n", "c17", "", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n" },
+    { "line markers: a system include ends while collecting arguments", "#include <other.h>\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, "-isystem %d", 0 },
+    { "line markers: a crossed invocation spans printer batches", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x\nF(a\n",
+      "c17", "a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b after", false, 0, 0, 0 },
+    { "an invocation in a #if among a macro's arguments clears clang's flag", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#pragma omp parallel\n#include \"other.h\"\nb)\nafter\n",
+      "inside\n", "c17", "#pragma omp parallel\n[a inside b]\nafter\n", false, 0, 0, 0 },
+    { "an object-like macro in a #if among a macro's arguments keeps clang's flag", "#define F(x) [x]\n#define G 1\nF(a\n#if G\n#endif\n#pragma omp parallel\nb)\nafter\n",
+      0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
+    { "#pragma lines among a macro's arguments after an invocation in a #if", "#define f(x) x\n#define g() 1\n#define h(y) y\nf(a\n#if g()\n#endif\nh(\n#pragma foo\n)\n#pragma bar\nb)\n",
+      0, "c17", "#pragma foo\n#pragma bar\na b\n", false, 0, 0, 0 },
+    { "a file twice by #include among a macro's arguments", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#include \"other.h\"\n#include \"other.h\"\nb)\nafter\n",
+      "inside\n", "c17", "[a inside inside b]\nafter\n", false, 0, 0, 0 },
+    { "fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif", "#\tdefine ppf_190642_b(\\\n ) \n#define ppf_190642_h( )   \n ppf_190642_h       \f (   \\\n     \n#if   \\\n   ( ppf_190642_f ) \\\n!=  \\\nppf_g1\n#endif\n/**/#ifdef\\\n     \t    \t  /**/  /* c */   ppf_190642_bppf_190642_h\n#elif   \\\n  _Pragma(\"ppf_if\") ppf_190642_e\\\n\?       \f /* c */ppf_190642_b(/*\n*/ ) \\\n ppf_190642_d: ( /**/  (ppf_190642_h ) )>/* c */__has_c_attribute(gnu::unused)\\\n \?/**/ppf_190642_a/* c */:__STDC__\n#pragma          \n#if (\f 1u/**/)\n#endif\n#endif /* c */  \n     ) /**/ \n",
+      0, "c23", "#pragma ppf_if\n#pragma\n", false, 0, 0, 0 },
     { "trigraphs in the ISO modes before C23", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
       0, "c17", "1 [ ]\n\"#\" \"[\"\n", false, 0, 0, 0 },
     { "trigraphs ignored in the GNU modes", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
@@ -2602,6 +2648,75 @@ static bool pp_test_final_copy_accounting(void)
     }
     printf("final copy accounting: %s (captures excluded, direct objects, empty output, scalar/vector and timing off)\n", result ? "as expected" : "WRONG");
     return result;
+}
+
+// An unterminated literal that ends in a line splice is spelled as clang cleans it (pp_trailing_splice): with the
+// character after the splice, the newline that ends the literal, or at the file's end the NUL that ends clang's buffer
+// (#109's seed 3110). Each source's last token, by both kernels, must be clang's spelling, byte for byte (clang 23's
+// -E); the last two keep their own.
+static bool pp_test_trailing_splices(void)
+{
+    typedef struct PPTrailingSplice
+    {
+        const char* source;
+        const char* spelling;
+        uint32_t length;
+    } PPTrailingSplice;
+    static const PPTrailingSplice cases[] = {
+        { "'\\\n", "'\0", 2 },
+        { "'a\\\n", "'a\0", 3 },
+        { "'\\\\\n", "'\\\0", 3 },
+        { "'\\ \n", "'\0", 2 },
+        { "'\\\r\n", "'\0", 2 },
+        { "\"a\\\n\\\n", "\"a\0", 3 },
+        { "u8\"\\\n", "u8\"\0", 4 },
+        { "x '\\\\\n\\\n", "'\\\0", 3 },
+        { "'\\\n\n", "'\n", 2 },
+        { "'\\\nx\n", "'x", 2 },
+        { "'\\", "'\\", 2 },
+    };
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    uint32_t failures = 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const PPOptions options = {
+                .language = {
+                    .standard = 2017,
+                    .gnu = true,
+                },
+                .scalar = k == 1,
+                .no_standard_includes = true,
+                .quiet = true,
+            };
+            Preprocessor* pp = &runs[k];
+            const bool ran = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+            if (ran)
+            {
+                pp_run_source(pp, "trailing-splice.c", (const uint8_t*)cases[c].source, (uint32_t)strlen(cases[c].source));
+            }
+            const PPTokens* out = &pp->output;
+            uint8_t buffer[16];
+            const uint8_t* spelling = 0;
+            const uint32_t last = ran && out->count != 0 ? out->count - 1 : 0;
+            const bool fits = ran && out->count != 0 && out->kinds[last] == C_TOKEN_UNKNOWN && out->values[last] - out->locations[last] < sizeof(buffer);
+            const uint32_t length = fits ? pp_spelling(pp, out->kinds[last], out->values[last], out->locations[last], buffer, &spelling) : 0;
+            if (!fits || length != cases[c].length || memcmp(spelling, cases[c].spelling, length) != 0)
+            {
+                printf("trailing splices: case %u, %s kernels: spelled with %u bytes, not clang's %u\n", c, k == 0 ? "vectorized" : "scalar", length, cases[c].length);
+                failures += 1;
+            }
+            if (ran)
+            {
+                pp_release(pp);
+            }
+            intern_release(&tables[k]);
+        }
+    }
+    printf("trailing splices: %u of %lu runs fail\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(cases));
+    return failures == 0;
 }
 
 // The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
@@ -5920,6 +6035,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_embed_lookups(directory, with_clang);
         passed_all &= pp_test_lookup_accounting(directory);
         passed_all &= pp_test_final_copy_accounting();
+        passed_all &= pp_test_trailing_splices();
         passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);

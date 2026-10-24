@@ -433,8 +433,8 @@ struct ForeignTable
 // definition: a global symbol for one in an object, or for a shared library's its export's index in `symbol` and its
 // library in `library`; how many strong definitions it has (two or more are a duplicate, and `second` is the second
 // one's symbol); a common symbol's size and alignment (log2), the largest of its commons'; the most constraining
-// visibility (STV_*) among its symbols; and whether a strong or a weak reference refers to it
-// (BUSTER_FOREIGN_NAME_*).
+// visibility (STV_*) among its symbols; and whether a strong or a weak reference refers to it, and whether a regular
+// object's (or the command line's) does, rather than only a shared library's (BUSTER_FOREIGN_NAME_*).
 typedef struct ForeignNames ForeignNames;
 struct ForeignNames
 {
@@ -455,6 +455,8 @@ struct ForeignNames
 
 #define BUSTER_FOREIGN_NAME_REFERENCED 0x01
 #define BUSTER_FOREIGN_NAME_WEAK_REFERENCED 0x02
+#define BUSTER_FOREIGN_NAME_REGULAR_REFERENCED 0x04
+#define BUSTER_FOREIGN_NAME_REGULAR_WEAK_REFERENCED 0x08
 
 // A round: its objects (ids from first_object to end_object), its global symbols (global ids from first_symbol) and
 // groups, each in columns of the round's own, pushed once their counts are known, so that the link touches no more
@@ -601,10 +603,14 @@ static __attribute__((unused)) uint32_t foreign_find_name(const Foreign* foreign
 #define BUSTER_FOREIGN_NO_POSITION UINT64_MAX
 // Scripts may name scripts this deep.
 #define BUSTER_FOREIGN_MAX_DEPTH 8
-// A record's tag holds an object's id in its bits 8 up.
+// A record's tag holds an object's id in its bits 8 up, its class in bits 0 to 3, its visibility in bits 4 and 5, and in
+// bit 6 whether its object is a shared library's object of references: those load archive members as an object's do,
+// but only a regular object's (or the command line's) references make a library under --as-needed needed or import a
+// name into the output, as lld takes them.
 #define BUSTER_FOREIGN_TAG_OBJECT_SHIFT 8
 #define BUSTER_FOREIGN_TAG_CLASS 0x0f
 #define BUSTER_FOREIGN_TAG_VISIBILITY_SHIFT 4
+#define BUSTER_FOREIGN_TAG_LIBRARY 0x40
 #define BUSTER_FOREIGN_MAX_OBJECTS (1u << (32 - BUSTER_FOREIGN_TAG_OBJECT_SHIFT))
 // The shared arena, from which lane 0 pushes the columns every lane fills; and each lane's own.
 #define BUSTER_FOREIGN_ARENA_BYTES (1ull << 40)
@@ -2225,8 +2231,14 @@ static uint32_t foreign_tag(ForeignClass class, uint8_t other, uint32_t object)
     return (uint32_t)class | (uint32_t)(other & 0x03) << BUSTER_FOREIGN_TAG_VISIBILITY_SHIFT | object << BUSTER_FOREIGN_TAG_OBJECT_SHIFT;
 }
 
+// The tag's bits that its object decides: its id, and BUSTER_FOREIGN_TAG_LIBRARY for a library's object of references.
+static uint32_t foreign_object_tag(const Foreign* foreign, uint32_t object)
+{
+    return object << BUSTER_FOREIGN_TAG_OBJECT_SHIFT | (foreign->objects[object].library != 0 ? BUSTER_FOREIGN_TAG_LIBRARY : 0);
+}
+
 // The record of the round's symbol at place `at`, of `object`: the exact path's.
-static ForeignRecord foreign_symbol_record(const ForeignRound* round, uint32_t at, uint32_t object)
+static ForeignRecord foreign_symbol_record(const Foreign* foreign, const ForeignRound* round, uint32_t at, uint32_t object)
 {
     const ForeignSymbols* symbols = &round->symbols;
     const ForeignRecord result = {
@@ -2234,7 +2246,7 @@ static ForeignRecord foreign_symbol_record(const ForeignRound* round, uint32_t a
         .name = symbols->name[at],
         .length = symbols->length[at],
         .item = at,
-        .tag = foreign_tag(foreign_class(symbols->info[at], symbols->section[at]), symbols->other[at], object),
+        .tag = foreign_tag(foreign_class(symbols->info[at], symbols->section[at]), symbols->other[at], 0) | foreign_object_tag(foreign, object),
         .section = symbols->section[at],
     };
     return result;
@@ -2279,7 +2291,7 @@ static void foreign_records_vector(const Foreign* foreign, const ForeignRound* r
     class = _mm512_mask_mov_epi64(class, (__mmask8)(undefined & ~weak), _mm512_set1_epi64(FOREIGN_CLASS_REFERENCE));
     class = _mm512_mask_mov_epi64(class, (__mmask8)(undefined & weak), _mm512_set1_epi64(FOREIGN_CLASS_WEAK_REFERENCE));
     const __m512i visibility = _mm512_slli_epi64(_mm512_and_si512(other, _mm512_set1_epi64(0x03)), BUSTER_FOREIGN_TAG_VISIBILITY_SHIFT);
-    const __m512i tag = _mm512_or_si512(_mm512_or_si512(class, visibility), _mm512_set1_epi64((long long)object << BUSTER_FOREIGN_TAG_OBJECT_SHIFT));
+    const __m512i tag = _mm512_or_si512(_mm512_or_si512(class, visibility), _mm512_set1_epi64((long long)foreign_object_tag(foreign, object)));
     const __m512i item = _mm512_add_epi64(_mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0), _mm512_set1_epi64(at));
     // The records' third and fourth words: the length below the item, and the tag below the section.
     const __m512i third = _mm512_or_si512(length, _mm512_slli_epi64(item, 32));
@@ -2388,7 +2400,7 @@ static void foreign_exchange_items(const Foreign* foreign, ForeignRound* round, 
         }
         for (; item < stretch; item += 1)
         {
-            const ForeignRecord record = foreign_symbol_record(round, (uint32_t)item, object);
+            const ForeignRecord record = foreign_symbol_record(foreign, round, (uint32_t)item, object);
             foreign_place_record(round->records, next, record, foreign_partition(foreign, record.hash));
         }
         object += 1;
@@ -2471,10 +2483,12 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
 // doesn't stop it: GNU ld loads the member that an archive between the two offers. A weak reference loads nothing.
 // As GNU ld does, a common symbol with no strong definition loads the first member after it, in index order, that
 // defines the name as global data (STB_GLOBAL or GNU_UNIQUE, not a function, not common); lld loads nothing for a
-// common symbol, and mold any member that defines it. A library under --as-needed is needed once a strong reference
-// with default visibility finds the name undefined before it: the first such library after the reference that exports
-// the name, before the name's earliest definition and the member that loads for it, unless a needed library before the
-// reference exports it already (foreign_needed_library, as GNU ld decides it left to right). Each lane lists the members
+// common symbol, and mold any member that defines it. A library under --as-needed is needed once a regular object's
+// strong reference with default visibility finds the name undefined before it: the first such library after the
+// reference that exports the name, before the name's earliest definition and the member that loads for it, unless a
+// needed library before the reference exports it already (foreign_needed_library, as GNU ld decides it left to right).
+// A shared library's own references don't count, as lld takes them and as GNU ld does for a library in the referring
+// one's DT_NEEDED list (libc.so.6's references to the loader that libc.so's script names as needed). Each lane lists the members
 // and libraries it needs; lane 0 marks the members in their archives' bitsets after a sync, and the next round loads
 // those not loaded before and the newly needed libraries' references, in position order. Loading only ever adds: a
 // member a round loaded stays loaded whatever a later round finds.
@@ -2483,7 +2497,8 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
 #define BUSTER_FOREIGN_ENTRY_STRONG_DEFINED 0x02
 #define BUSTER_FOREIGN_ENTRY_WEAK_DEFINED 0x04
 #define BUSTER_FOREIGN_ENTRY_COMMON 0x08
-#define BUSTER_FOREIGN_ENTRY_REFERENCED 0x10
+// A strong reference from a regular object or the command line, not only a shared library's.
+#define BUSTER_FOREIGN_ENTRY_REGULAR_REFERENCED 0x10
 #define BUSTER_FOREIGN_ENTRY_WEAK_REFERENCED 0x20
 #define BUSTER_FOREIGN_ENTRY_DATA_PROBED 0x40
 #define BUSTER_FOREIGN_ENTRY_LIBRARIES_PROBED 0x80
@@ -2653,12 +2668,13 @@ static void foreign_touch(ForeignTable* table, uint32_t e, uint32_t tag, uint64_
         [FOREIGN_CLASS_STRONG] = BUSTER_FOREIGN_ENTRY_STRONG_DEFINED,
         [FOREIGN_CLASS_COMMON] = BUSTER_FOREIGN_ENTRY_COMMON,
         [FOREIGN_CLASS_WEAK] = BUSTER_FOREIGN_ENTRY_WEAK_DEFINED,
-        [FOREIGN_CLASS_REFERENCE] = BUSTER_FOREIGN_ENTRY_REFERENCED,
+        [FOREIGN_CLASS_REFERENCE] = BUSTER_FOREIGN_ENTRY_REGULAR_REFERENCED,
         [FOREIGN_CLASS_WEAK_REFERENCE] = BUSTER_FOREIGN_ENTRY_WEAK_REFERENCED,
         [FOREIGN_CLASS_GROUP] = 0,
     };
+    const uint8_t library = (tag & BUSTER_FOREIGN_TAG_LIBRARY) != 0 ? BUSTER_FOREIGN_ENTRY_REGULAR_REFERENCED : 0;
     entry->visibility = rank > entry->visibility ? rank : entry->visibility;
-    entry->flags |= flags[class];
+    entry->flags |= flags[class] & ~library;
     entry->defined = definition ? foreign_min(entry->defined, position) : entry->defined;
     entry->common = class == FOREIGN_CLASS_COMMON ? foreign_min(entry->common, position) : entry->common;
     entry->reference = class == FOREIGN_CLASS_REFERENCE ? foreign_min(entry->reference, position) : entry->reference;
@@ -2987,7 +3003,7 @@ static void foreign_decide(const Foreign* foreign, ForeignEntry* entry, ForeignL
     // a library before the name's definition and the member that loads for it, if any.
     const uint64_t undefined_until = foreign_min(entry->defined, loading);
     const bool waiting = (foreign->as_needed_waiting != 0) & (foreign->libraries_begin < undefined_until) & (entry->reference != BUSTER_FOREIGN_NO_POSITION) &
-                         (entry->visibility == 0);
+                         (entry->visibility == 0) & ((entry->flags & BUSTER_FOREIGN_ENTRY_REGULAR_REFERENCED) != 0);
     if (waiting)
     {
         const uint32_t library = foreign_needed_library(foreign, entry, undefined_until);
@@ -3330,7 +3346,9 @@ static void foreign_win(ForeignWinner* winner, const Foreign* foreign, const For
     }
     else
     {
+        const bool regular = (record->tag & BUSTER_FOREIGN_TAG_LIBRARY) == 0;
         winner->flags |= class == FOREIGN_CLASS_REFERENCE ? BUSTER_FOREIGN_NAME_REFERENCED : BUSTER_FOREIGN_NAME_WEAK_REFERENCED;
+        winner->flags |= !regular ? 0 : class == FOREIGN_CLASS_REFERENCE ? BUSTER_FOREIGN_NAME_REGULAR_REFERENCED : BUSTER_FOREIGN_NAME_REGULAR_WEAK_REFERENCED;
     }
 }
 
