@@ -15,12 +15,13 @@
 // the program in a directory of its own (some tests write files), with standard input from /dev/null and a timeout.
 //
 // A test passes when its status and output are the expected ones. One that the compiler refuses with a diagnostic that
-// names a feature it doesn't support yet ("unsupported: ...") is unsupported, with that feature. Anything else fails:
-// another compile error, a crash or a timeout of the compiler or the program, a wrong status or output, the two paths
+// names a feature it doesn't support yet ("unsupported: ...") is unsupported, with that feature, when both paths exit as
+// the compiler does for a unit with errors (status 1). Anything else fails: another compile error, a crash or a timeout
+// of the compiler (even after it named a feature) or of the program, a wrong status or output, the two paths
 // disagreeing. With --cross-check (which needs readelf and cc), each test is also compiled with -c, its object listed by
 // readelf, linked by cc with -lm and run, and that program must give the expected output too, whatever the direct path
-// did: wrong code in a test the direct path can't link still fails. -c may refuse a test as unsupported only where the
-// direct path refused it too.
+// did: wrong code in a test the direct path can't link still fails. -c may refuse a test as unsupported, exiting as a
+// refusal does, only where the direct path refused it too.
 //
 // --self-test checks the harness itself, on tests of its own and a stand-in compiler (c_testsuite_self_test).
 //
@@ -64,8 +65,10 @@
 #define BUSTER_C_TESTSUITE_NAME_BYTES 64
 // The most bytes of a file the harness compares or reads a diagnostic from.
 #define BUSTER_C_TESTSUITE_FILE_BYTES (UINT64_C(64) << 20)
-// A compile's time limit; a program's is --timeout.
+// A compile's time limit (CTestsuite.compile_timeout, which the self-test shortens); a program's is --timeout.
 #define BUSTER_C_TESTSUITE_COMPILE_SECONDS 120
+// The compiler's exit status for a unit with errors, a refusal among them.
+#define BUSTER_C_TESTSUITE_REFUSED_STATUS 1
 
 typedef enum CTestsuiteOutcome
 {
@@ -93,7 +96,9 @@ struct CTestsuite
     char compiler[PATH_MAX];
     char (*names)[BUSTER_C_TESTSUITE_NAME_BYTES];
     uint32_t count;
+    // A program's time limit and a compile's, in seconds.
     uint32_t timeout;
+    uint32_t compile_timeout;
     bool cross_check;
     CTestsuiteResult* results;
 };
@@ -251,6 +256,13 @@ static bool c_testsuite_feature(const char* log, char* detail, uint64_t capacity
     return found != 0;
 }
 
+// Whether a compile's wait status is a refusal's: the compiler exited as it does for a unit with errors, not killed by a
+// signal or for its time, whatever its log says.
+static bool c_testsuite_refused(int status, bool timed_out)
+{
+    return !timed_out && status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_C_TESTSUITE_REFUSED_STATUS;
+}
+
 // What a compile's wait status and log say, for a failure: whether it compiled, and if not why, in `detail`.
 static bool c_testsuite_compiled(int status, bool timed_out, const char* log_path, const char* what, char* detail, uint64_t capacity)
 {
@@ -336,13 +348,14 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     char* const readelf[] = { "readelf", "-a", "-W", object, 0 };
     char* const link[] = { "cc", object, "-lm", "-o", program, 0 };
     bool timed_out = false;
-    int status = c_testsuite_run(compile, directory, log, BUSTER_C_TESTSUITE_COMPILE_SECONDS, &timed_out);
-    // A test the compiler refuses has no object to check.
+    int status = c_testsuite_run(compile, directory, log, suite->compile_timeout, &timed_out);
+    // A test the compiler refuses has no object to check. A refusal is one only when -c exits as the compiler does
+    // for a unit with errors: after a signal or a timeout, its log's feature is no excuse.
     bool valid = c_testsuite_compiled(status, timed_out, log, "-c", detail, capacity);
     uint64_t length = 0;
-    char* text = valid ? 0 : c_testsuite_read(log, &length);
+    char* text = !valid && c_testsuite_refused(status, timed_out) ? c_testsuite_read(log, &length) : 0;
     char feature[sizeof(((CTestsuiteResult*)0)->detail)];
-    const bool unsupported = !valid && c_testsuite_feature(text, feature, sizeof(feature));
+    const bool unsupported = text != 0 && c_testsuite_feature(text, feature, sizeof(feature));
     free(text);
     if (unsupported && required)
     {
@@ -350,7 +363,7 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     }
     if (valid)
     {
-        status = c_testsuite_run(readelf, directory, log, BUSTER_C_TESTSUITE_COMPILE_SECONDS, &timed_out);
+        status = c_testsuite_run(readelf, directory, log, suite->compile_timeout, &timed_out);
         text = c_testsuite_read(log, &length);
         valid = status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 && text != 0 && strstr(text, "Warning") == 0 && strstr(text, "Error") == 0;
         free(text);
@@ -361,7 +374,7 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     }
     if (valid)
     {
-        status = c_testsuite_run(link, directory, log, BUSTER_C_TESTSUITE_COMPILE_SECONDS, &timed_out);
+        status = c_testsuite_run(link, directory, log, suite->compile_timeout, &timed_out);
         valid = c_testsuite_compiled(status, timed_out, log, "cross-check: cc", detail, capacity);
     }
     if (valid)
@@ -402,8 +415,8 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     }
     bool timed_out = false;
     bool scalar_timed_out = false;
-    const int status = valid ? c_testsuite_run(vector_arguments, directory, log, BUSTER_C_TESTSUITE_COMPILE_SECONDS, &timed_out) : -1;
-    const int scalar_status = valid ? c_testsuite_run(scalar_arguments, directory, scalar_log, BUSTER_C_TESTSUITE_COMPILE_SECONDS, &scalar_timed_out) : -1;
+    const int status = valid ? c_testsuite_run(vector_arguments, directory, log, suite->compile_timeout, &timed_out) : -1;
+    const int scalar_status = valid ? c_testsuite_run(scalar_arguments, directory, scalar_log, suite->compile_timeout, &scalar_timed_out) : -1;
     const bool compiled = valid && c_testsuite_compiled(status, timed_out, log, "the compiler", result->detail, sizeof(result->detail));
     char scalar_detail[sizeof(result->detail)];
     const bool scalar_compiled = valid && c_testsuite_compiled(scalar_status, scalar_timed_out, scalar_log, "the compiler, --scalar", scalar_detail,
@@ -431,10 +444,18 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     }
     else if (valid)
     {
+        // A refusal that names its feature is unsupported when both paths exited as the compiler does for a unit with
+        // errors. Any other is a failure, its detail as set above: the vector path's, or the scalar path's when only it
+        // was killed by a signal or for its time, though it wrote the same log.
+        const bool refused = c_testsuite_refused(status, timed_out);
+        const bool scalar_refused = c_testsuite_refused(scalar_status, scalar_timed_out);
         uint64_t length = 0;
-        char* text = c_testsuite_read(log, &length);
-        // A refusal that names its feature is unsupported; any other is a failure, its detail as set above.
-        if (c_testsuite_feature(text, result->detail, sizeof(result->detail)))
+        char* text = refused && scalar_refused ? c_testsuite_read(log, &length) : 0;
+        if (refused && !scalar_refused)
+        {
+            snprintf(result->detail, sizeof(result->detail), "%s", scalar_detail);
+        }
+        else if (text != 0 && c_testsuite_feature(text, result->detail, sizeof(result->detail)))
         {
             result->outcome = C_TESTSUITE_UNSUPPORTED;
         }
@@ -687,15 +708,27 @@ static bool c_testsuite_report(const CTestsuite* suite, bool subset)
 
 // The self-test's stand-in for the compiler, a shell script: it "compiles" a test into a script, after checking that the
 // source it was given exists from the test's directory, where it runs. 00001's program prints its expected line, 00002
-// is unsupported, and 00003's program doesn't end; with C_TESTSUITE_REFUSE_OBJECTS set, -c refuses every test as
-// unsupported.
+// is unsupported, and 00003's program doesn't end. With C_TESTSUITE_REFUSE_OBJECTS set, -c refuses every test as
+// unsupported, and set to `kill`, it is then killed by a signal. With C_TESTSUITE_ABNORMAL set, every compile refuses
+// its test, naming a feature, and then ends otherwise than a refusal does but in 00001's vector path: 00001's scalar path
+// and both of 00002's are killed by a signal, and both of 00003's sleep past the compile's time limit.
 static const char c_testsuite_stand_in[] =
     "#!/bin/sh\n"
-    "object=0 source= output=\n"
-    "while [ $# -gt 0 ]; do case \"$1\" in -c) object=1;; -o) output=$2; shift;; -*) ;; *) source=$1;; esac; shift; done\n"
+    "object=0 scalar=0 source= output=\n"
+    "while [ $# -gt 0 ]; do\n"
+    "    case \"$1\" in -c) object=1;; --scalar) scalar=1;; -o) output=$2; shift;; -*) ;; *) source=$1;; esac; shift\n"
+    "done\n"
     "[ -f \"$source\" ] || { echo \"error: no such file: $source\" >&2; exit 1; }\n"
-    "case \"$source\" in *00002.c) echo 'error: unsupported: a stand-in feature' >&2; exit 1;; esac\n"
-    "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_REFUSE_OBJECTS\" ]; then echo 'error: unsupported: a stand-in object' >&2; exit 1; fi\n"
+    "refuse() { echo \"error: unsupported: $1\" >&2; case \"$2\" in kill) kill -KILL $$;; sleep) exec sleep 30;; esac; exit 1; }\n"
+    "if [ -n \"$C_TESTSUITE_ABNORMAL\" ]; then\n"
+    "    case \"$source\" in\n"
+    "        *00001.c) [ $scalar = 1 ] && refuse 'a stand-in feature' kill; refuse 'a stand-in feature';;\n"
+    "        *00002.c) refuse 'a stand-in feature' kill;;\n"
+    "        *00003.c) refuse 'a stand-in feature' sleep;;\n"
+    "    esac\n"
+    "fi\n"
+    "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_REFUSE_OBJECTS\" ]; then refuse 'a stand-in object' \"$C_TESTSUITE_REFUSE_OBJECTS\"; fi\n"
+    "case \"$source\" in *00002.c) refuse 'a stand-in feature';; esac\n"
     "case \"$source\" in *00003.c) body='exec sleep 30';; *) body='echo passed';; esac\n"
     "printf '#!/bin/sh\\n%s\\n' \"$body\" > \"$output\" && chmod +x \"$output\"\n";
 
@@ -738,9 +771,12 @@ static bool c_testsuite_expect(const CTestsuite* suite, const char* scenario, co
     return same;
 }
 
-// The harness on three tests of its own, with the stand-in compiler: from a DIR and a $TMPDIR relative to the current
-// directory; waiting without a pidfd, by polling; and with --cross-check where -c refuses what the direct path compiles,
-// which must fail. Each time 00003's program must be killed at its one-second timeout, long before it would end.
+// The harness on three tests of its own, with the stand-in compiler, in five scenarios: from a DIR and a $TMPDIR relative
+// to the current directory; waiting without a pidfd, by polling; with --cross-check where -c refuses what the direct
+// path compiles, which must fail; with refusals that name their feature but are then killed by a signal or for their
+// time, in one path or both, which must fail, not be unsupported (#377's review); and with --cross-check where -c's
+// refusals are killed, which must fail whether or not the direct path compiled the test. 00003's program, and in the
+// fourth scenario its compiles, must be killed at their one-second timeouts, long before they would end.
 static int c_testsuite_self_test(CTestsuite* suite)
 {
     static const char* const directories[] = { "checkout", "checkout/tests", "checkout/tests/single-exec", "work" };
@@ -752,17 +788,35 @@ static int c_testsuite_self_test(CTestsuite* suite)
         { "checkout/tests/single-exec/00003.c", "int main(void) { for (;;) { } }\n" },
         { "checkout/tests/single-exec/00003.c.expected", "" },
     };
-    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check" };
-    static const CTestsuiteExpectation direct[] = {
-        { C_TESTSUITE_PASSED, "" },
-        { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
-        { C_TESTSUITE_FAILED, "the program: timed out" },
+    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check", "killed refusals", "killed -c refusals" };
+    static const CTestsuiteExpectation expectations[][3] = {
+        {
+            { C_TESTSUITE_PASSED, "" },
+            { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
+            { C_TESTSUITE_FAILED, "the program: timed out" },
+        },
+        {
+            { C_TESTSUITE_PASSED, "" },
+            { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
+            { C_TESTSUITE_FAILED, "the program: timed out" },
+        },
+        {
+            { C_TESTSUITE_FAILED, "cross-check: -c refuses what the direct path compiles: a stand-in object" },
+            { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
+            { C_TESTSUITE_FAILED, "the program: timed out" },
+        },
+        {
+            { C_TESTSUITE_FAILED, "the compiler, --scalar: killed by signal 9" },
+            { C_TESTSUITE_FAILED, "the compiler: killed by signal 9" },
+            { C_TESTSUITE_FAILED, "the compiler: timed out" },
+        },
+        {
+            { C_TESTSUITE_FAILED, "-c: killed by signal 9" },
+            { C_TESTSUITE_FAILED, "-c: killed by signal 9" },
+            { C_TESTSUITE_FAILED, "the program: timed out" },
+        },
     };
-    static const CTestsuiteExpectation crossed[] = {
-        { C_TESTSUITE_FAILED, "cross-check: -c refuses what the direct path compiles: a stand-in object" },
-        { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
-        { C_TESTSUITE_FAILED, "the program: timed out" },
-    };
+    const uint32_t scenario_count = sizeof(scenarios) / sizeof(scenarios[0]);
     char base[PATH_MAX];
     char original[PATH_MAX];
     char path[PATH_MAX];
@@ -787,22 +841,25 @@ static int c_testsuite_self_test(CTestsuite* suite)
     snprintf(suite->compiler, sizeof(suite->compiler), "%s/stand-in.sh", base);
     valid = valid && c_testsuite_write(suite->compiler, c_testsuite_stand_in, 0755);
     suite->timeout = 1;
+    suite->compile_timeout = 1;
     uint32_t failures = valid ? 0 : 1;
-    for (uint32_t scenario = 0; valid && scenario < 3; scenario += 1)
+    for (uint32_t scenario = 0; valid && scenario < scenario_count; scenario += 1)
     {
         const bool relative = scenario == 0;
         c_testsuite_without_pidfd = scenario == 1;
-        suite->cross_check = scenario == 2;
+        suite->cross_check = scenario == 2 || scenario == 4;
         snprintf(path, sizeof(path), "%s/checkout", base);
         valid = !relative || (chdir(base) == 0 && setenv("TMPDIR", "work", 1) == 0);
         valid = valid && (scenario != 2 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "1", 1) == 0);
+        valid = valid && (scenario != 3 || setenv("C_TESTSUITE_ABNORMAL", "1", 1) == 0);
+        valid = valid && (scenario != 4 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "kill", 1) == 0);
         const uint64_t start = c_testsuite_now();
         const bool ran = valid && c_testsuite_execute(suite, relative ? "checkout" : path, 0, 3);
         const uint64_t elapsed = c_testsuite_now() - start;
         unsetenv("C_TESTSUITE_REFUSE_OBJECTS");
+        unsetenv("C_TESTSUITE_ABNORMAL");
         valid = (saved != 0 ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0) && chdir(original) == 0;
-        const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], scenario == 2 ? crossed : direct) &&
-                              elapsed < UINT64_C(20) * 1000000000;
+        const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], expectations[scenario]) && elapsed < UINT64_C(20) * 1000000000;
         if (ran)
         {
             c_testsuite_remove(suite);
@@ -827,7 +884,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
     }
     rmdir(base);
     free(saved);
-    printf("test-c-testsuite: self-test: 3 scenarios, %u failed\n", failures + (valid ? 0 : 1));
+    printf("test-c-testsuite: self-test: %u scenarios, %u failed\n", scenario_count, failures + (valid ? 0 : 1));
     return valid && failures == 0 ? 0 : 1;
 }
 
@@ -845,6 +902,7 @@ static int run_c_testsuite_tests(int argc, char** argv)
     bool self_test = false;
     bool valid = true;
     suite.timeout = 10;
+    suite.compile_timeout = BUSTER_C_TESTSUITE_COMPILE_SECONDS;
     for (int i = 0; valid && i < argc; i += 1)
     {
         char* end = 0;
