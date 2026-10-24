@@ -1347,6 +1347,184 @@ static void bind_test_library_import_cases(BindTestTally* tally, const Runtime* 
     }
 }
 
+// Libraries a needed library refers to (#398's review): libbuster_a.so and libbuster_c.so, made by hand, export a_func
+// and c_func and refer to b_func, which libbuster_b.so exports, without a DT_NEEDED entry for it; linked as
+// -lbuster_a -lbuster_c -lbuster_b. main refers to a_func and c_func. Without a definition of b_func, the link needs all
+// three libraries, and so with a strong reference of main's to it, an import of libbuster_b.so's. With a definition the
+// executable exports (global, weak, protected or absolute), which the loader binds the libraries' references to, as
+// GNU ld and lld link it, the link needs libbuster_a.so and libbuster_c.so alone and exports b_func; with a hidden one,
+// which the loader can't see, all three, and b_func isn't exported. Each by both paths, which must make the same link,
+// and the global definition after 0 to 15 others, so that b_func comes at every lane of the vector path's batches.
+
+typedef enum BindTestDependency
+{
+    BIND_TEST_DEPENDENCY_NONE,
+    BIND_TEST_DEPENDENCY_GLOBAL,
+    BIND_TEST_DEPENDENCY_WEAK,
+    BIND_TEST_DEPENDENCY_PROTECTED,
+    BIND_TEST_DEPENDENCY_HIDDEN,
+    BIND_TEST_DEPENDENCY_ABSOLUTE,
+    BIND_TEST_DEPENDENCY_REFERENCE,
+    BIND_TEST_DEPENDENCIES,
+} BindTestDependency;
+
+// Writes to `path` a shared library made by hand with `soname`, the functions `exports` it defines and the names
+// `references` it refers to strongly, without versions or DT_NEEDED entries: whether it could.
+static bool bind_test_write_library(const char* path, const char* soname, const char* const* exports, uint32_t export_count, const char* const* references,
+                                    uint32_t reference_count, Arena* arena)
+{
+    uint8_t text[16];
+    memset(text, 0xc3, sizeof(text));
+    ImportTestSymbols symbols = { 0 };
+    import_test_add_symbol(&symbols, "", 0, 0, SHN_UNDEF, 0, 0, BUSTER_IMPORT_TEST_NONE, 0);
+    for (uint32_t e = 0; e < export_count; e += 1)
+    {
+        import_test_add_symbol(&symbols, exports[e], ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), 0, 1, e, 1, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 0);
+    }
+    for (uint32_t r = 0; r < reference_count; r += 1)
+    {
+        import_test_add_symbol(&symbols, references[r], ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF, 0, 0, BUSTER_IMPORT_TEST_NONE, 0);
+    }
+    const Elf64_Dyn dynamic[2] = {
+        { .d_tag = DT_SONAME, .d_un.d_val = import_test_string(&symbols.names, soname) },
+        { .d_tag = DT_NULL, .d_un.d_val = 0 },
+    };
+    ImportTestSection sections[5] = { 0 };
+    sections[1] = import_test_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 16, 0, 0, 0, text, sizeof(text));
+    sections[2] = import_test_section(".dynsym", SHT_DYNSYM, SHF_ALLOC, 8, sizeof(Elf64_Sym), 3, 1, symbols.entries, (uint64_t)symbols.count * sizeof(Elf64_Sym));
+    sections[3] = import_test_section(".dynstr", SHT_STRTAB, SHF_ALLOC, 1, 0, 0, 0, symbols.names.bytes, symbols.names.length);
+    sections[4] = import_test_section(".dynamic", SHT_DYNAMIC, SHF_WRITE | SHF_ALLOC, 8, sizeof(Elf64_Dyn), 3, 0, dynamic, sizeof(dynamic));
+    ImportTestFile file;
+    const bool built = import_test_elf(&file, ET_DYN, sections, BUSTER_ARRAY_LENGTH(sections), arena);
+    return built && bind_test_write_file(path, (const char*)file.bytes, file.size);
+}
+
+// The link: main's strong references to a_func and c_func, `fillers` definitions of the program's, then b_func as
+// `dependency` has it, bound by `path` against `libraries`. Returns b_func's symbol (0 for none) in *b_func, and whether
+// the link bound.
+static bool bind_test_dependency_link(BindTestLink* test, const Runtime* runtime, const RuntimeLibraries* libraries, BindTestDependency dependency,
+                                      uint32_t fillers, BindPath path, SymbolId* b_func)
+{
+    static const uint8_t flags[BIND_TEST_DEPENDENCIES] = {
+        [BIND_TEST_DEPENDENCY_GLOBAL] = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION,
+        [BIND_TEST_DEPENDENCY_WEAK] = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION,
+        [BIND_TEST_DEPENDENCY_PROTECTED] = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_PROTECTED,
+        [BIND_TEST_DEPENDENCY_HIDDEN] = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_HIDDEN,
+        [BIND_TEST_DEPENDENCY_ABSOLUTE] = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE,
+        [BIND_TEST_DEPENDENCY_REFERENCE] = BUSTER_LINK_SYMBOL_GLOBAL,
+    };
+    static const uint8_t sources[BIND_TEST_DEPENDENCIES] = {
+        [BIND_TEST_DEPENDENCY_GLOBAL] = BUSTER_LINK_SOURCE_PROGRAM,
+        [BIND_TEST_DEPENDENCY_WEAK] = BUSTER_LINK_SOURCE_PROGRAM,
+        [BIND_TEST_DEPENDENCY_PROTECTED] = BUSTER_LINK_SOURCE_PROGRAM,
+        [BIND_TEST_DEPENDENCY_HIDDEN] = BUSTER_LINK_SOURCE_PROGRAM,
+        [BIND_TEST_DEPENDENCY_ABSOLUTE] = BUSTER_LINK_SOURCE_ABSOLUTE,
+        [BIND_TEST_DEPENDENCY_REFERENCE] = BUSTER_LINK_SOURCE_NONE,
+    };
+    bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
+    const SymbolId main = result ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+    result = main != 0 && bind_test_symbol(test, "a_func", BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) != 0 &&
+             bind_test_symbol(test, "c_func", BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) != 0;
+    SymbolId filler[16] = { 0 };
+    for (uint32_t f = 0; result && f < fillers; f += 1)
+    {
+        char name[32];
+        snprintf(name, sizeof(name), "filler_%u", f);
+        filler[f] = bind_test_symbol(test, name, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_PROGRAM);
+        result = filler[f] != 0;
+    }
+    *b_func = result && dependency != BIND_TEST_DEPENDENCY_NONE ? bind_test_symbol(test, "b_func", flags[dependency], sources[dependency]) : 0;
+    result = result && (dependency == BIND_TEST_DEPENDENCY_NONE || *b_func != 0);
+    if (result && dependency == BIND_TEST_DEPENDENCY_ABSOLUTE)
+    {
+        test->link.symbols.value[*b_func] = 123;
+    }
+    result = result && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena) && bind_test_define(test, main);
+    for (uint32_t f = 0; result && f < fillers; f += 1)
+    {
+        result = bind_test_define(test, filler[f]);
+    }
+    const bool atom = dependency != BIND_TEST_DEPENDENCY_NONE && dependency != BIND_TEST_DEPENDENCY_ABSOLUTE && dependency != BIND_TEST_DEPENDENCY_REFERENCE;
+    result = result && (!atom || bind_test_define(test, *b_func));
+    test->bind.libraries = libraries;
+    return result && bind_end(&test->bind, &test->link);
+}
+
+static void bind_test_dependencies(BindTestTally* tally, const Runtime* runtime, const char* directory)
+{
+    static const char* const a_exports[] = { "a_func" };
+    static const char* const c_exports[] = { "c_func" };
+    static const char* const b_exports[] = { "b_func" };
+    static const char* const references[] = { "b_func" };
+    static const char* const names[] = { "buster_a", "buster_c", "buster_b" };
+    Arena arena = arena_reserve(1u << 20);
+    char paths[3][BUSTER_BIND_TEST_PATH_BYTES];
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(names); l += 1)
+    {
+        snprintf(paths[l], sizeof(paths[l]), "%s/lib%s.so", directory, names[l]);
+    }
+    const bool written = arena.base != 0 && bind_test_write_library(paths[0], "libbuster_a.so", a_exports, 1, references, 1, &arena) &&
+                         bind_test_write_library(paths[1], "libbuster_c.so", c_exports, 1, references, 1, &arena) &&
+                         bind_test_write_library(paths[2], "libbuster_b.so", b_exports, 1, 0, 0, &arena);
+    const String8 directories[] = { { .pointer = (char*)directory, .length = strlen(directory) } };
+    String8 libraries_named[BUSTER_ARRAY_LENGTH(names)];
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(names); l += 1)
+    {
+        libraries_named[l] = (String8){ .pointer = (char*)names[l], .length = strlen(names[l]) };
+    }
+    RuntimeLibraries libraries = { 0 };
+    const RuntimeError imported = written ? runtime_libraries_import(&libraries, runtime, libraries_named, BUSTER_ARRAY_LENGTH(names), directories, 1) : RUNTIME_ERROR_IMPORT;
+    bind_test_expect(tally, written && imported == RUNTIME_ERROR_NONE && libraries.count == 3, "the libraries a needed library refers to imported", 0);
+    struct
+    {
+        const char* name;
+        BindTestDependency dependency;
+        uint32_t needed;
+        bool exported;
+    } const cases[] = {
+        { "no b_func: libbuster_b.so needed for the libraries' references", BIND_TEST_DEPENDENCY_NONE, 7, false },
+        { "b_func main's: the libraries' references satisfied, b_func exported", BIND_TEST_DEPENDENCY_GLOBAL, 3, true },
+        { "b_func weak, main's: satisfied, exported", BIND_TEST_DEPENDENCY_WEAK, 3, true },
+        { "b_func protected, main's: satisfied, exported", BIND_TEST_DEPENDENCY_PROTECTED, 3, true },
+        { "b_func hidden, main's: not satisfied, libbuster_b.so needed, not exported", BIND_TEST_DEPENDENCY_HIDDEN, 7, false },
+        { "b_func absolute, main's: satisfied, exported", BIND_TEST_DEPENDENCY_ABSOLUTE, 3, true },
+        { "b_func a reference of main's: libbuster_b.so needed, an import", BIND_TEST_DEPENDENCY_REFERENCE, 7, false },
+    };
+    for (uint32_t c = 0; imported == RUNTIME_ERROR_NONE && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const uint32_t filler_counts = cases[c].dependency == BIND_TEST_DEPENDENCY_GLOBAL ? 16 : 1;
+        for (uint32_t fillers = 0; fillers < filler_counts; fillers += 1)
+        {
+            BindTestLink vector;
+            BindTestLink exact;
+            SymbolId vector_b = 0;
+            SymbolId exact_b = 0;
+            const bool vector_bound = bind_test_dependency_link(&vector, runtime, &libraries, cases[c].dependency, fillers, BIND_PATH_VECTOR, &vector_b);
+            const bool exact_bound = bind_test_dependency_link(&exact, runtime, &libraries, cases[c].dependency, fillers, BIND_PATH_EXACT, &exact_b);
+            const Bind* bind = &vector.bind;
+            const bool agree = vector_bound && exact_bound && bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind) &&
+                               vector.bind.libraries_needed == exact.bind.libraries_needed;
+            const bool exported = vector_b != 0 && bind_test_listed(bind, vector_b, true);
+            const bool imported_b = vector_b != 0 && bind_test_listed(bind, vector_b, false);
+            const bool expected = cases[c].dependency == BIND_TEST_DEPENDENCY_REFERENCE ? imported_b : !imported_b;
+            if (!agree || bind->libraries_needed != cases[c].needed || exported != cases[c].exported || !expected)
+            {
+                printf("  %s, after %u definitions: bound %d and %d, paths agree %d, needed %#x, exported %d, imported %d\n", cases[c].name, fillers, vector_bound,
+                       exact_bound, agree, bind->libraries_needed, exported, imported_b);
+            }
+            bind_test_expect(tally, agree && bind->libraries_needed == cases[c].needed && exported == cases[c].exported && expected, cases[c].name, fillers);
+            bind_test_link_end(&vector);
+            bind_test_link_end(&exact);
+        }
+    }
+    runtime_libraries_release(&libraries);
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(names); l += 1)
+    {
+        unlink(paths[l]);
+    }
+    arena_release(&arena);
+}
+
 static bool bind_test_libraries(const Runtime* runtime, const char* directory)
 {
     BindTestTally tally = {
@@ -1390,6 +1568,7 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
     }
     runtime_libraries_release(&libraries);
     bind_test_library_import_cases(&tally, runtime, directory);
+    bind_test_dependencies(&tally, runtime, directory);
     return bind_test_report(&tally);
 }
 

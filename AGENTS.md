@@ -2185,6 +2185,15 @@ exports and members:
   not for a name left to `crtendS.o`), a name left to `crtendS.o` with source
   `RUNTIME_ARCHIVE`, and an import a member came to define dropped from the
   imports;
+- libraries named with `-l`: links made by hand bound with this system's libm
+  (`runtime_libraries_import`): references to libm's names imports of libm's
+  at their versions, `ldexp`'s before libc.so.6's, a weak reference alone
+  needing no library, and a definition of a name libm exports exported; the
+  import's refusals and an empty archive; and libraries made by hand, two that
+  refer to `b_func` and one that exports it: without a definition of
+  `b_func`, or with a hidden one or a reference, the link needs all three, and
+  with a global, weak, protected or absolute one, which the executable
+  exports, the two alone (the global one after 0 to 15 other definitions);
 - an atexit program: `main` registers a handler with `atexit` and returns 3,
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`

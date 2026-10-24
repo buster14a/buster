@@ -2565,8 +2565,17 @@ counts too (#398's review: `main` calls `a_func` in libA, which calls `b_func` i
 the round before added, a reference binding to the first named library that exports its name. On this VM, lld
 23.1.5 leaves libB out of such a link, whose program then fails to load, and GNU ld 2.42 counts a library's
 references only against the libraries after it on the line, refusing `-lB -lA`'s link; binding counts them against
-every named library, so that both orders link and run. A weak reference to a library nothing needs is left to
-nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
+every named library, so that both orders link and run. A reference that a definition the executable exports satisfies
+(global or weak, default or protected, in an atom or absolute) needs no library, since the loader binds it to the
+executable's, as both linkers link it (#398's review: `main` defining `b_func` needs libA alone). The rounds record
+the references that lead to another named library, and when there are any, one pass over the link's symbols marks
+those the executable's definitions satisfy and the rounds go again without them: 16 symbols at a time against a
+filter of their names on the vector path, as binding matches the runtime's names, and a symbol at a time on the
+exact one. Such references are rare (libm's lead to none), so a link without them pays nothing more. A hidden
+definition satisfies none, since the loader can't see it: GNU ld 2.42 refuses such a link, lld 23.1.5 refuses it
+without the library that exports the name and leaves that library out of it otherwise (a program that fails to load),
+and binding keeps the library, whose definition the loader binds the reference to. A weak reference to a library nothing
+needs is left to nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
 a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
 library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
 each required exactly when needed, and their versions in `.gnu.version_r`. A library's `DT_NEEDED` name is its
@@ -2594,8 +2603,13 @@ if it matters.
 `test-checker-driver --executable` links a program that calls libm's functions by both paths into the same bytes,
 runs it against this executable's libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whose
 `b_func` libB defines, with libA and libB built by clang: `-lA -lB` and `-lB -lA` must need both, in the line's
-order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running; and links one against a
-library without a soname that a script names by its path, which must be its `DT_NEEDED` entry.
+order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running, and `-lA -lB` for a
+program that defines `b_func` itself libA alone, `a_func` calling `main`'s; and links one against a library without a
+soname that a script names by its path, which must be its `DT_NEEDED` entry. `test-bind`'s libraries check binds, by
+both paths, links against libraries made by hand, two that refer to `b_func` and one that exports it: without a
+definition of `b_func`, or with a hidden one or a reference, the link needs all three; with a global, weak, protected
+or absolute one, the two alone, and exports it; the global one after 0 to 15 other definitions, at every lane of the
+vector path's batches.
 
 #### The unwind tables
 
