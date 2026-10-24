@@ -2298,14 +2298,18 @@ removed at the end unless `--keep`. The 9700X job's test step runs it with
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
 translation units have, by each path, against the dynamic PIE's runtime, a
-static executable's, a static PIE's and a shared library's, and reports
-21-run medians (time,
-cycles, instructions, IPC) of the match (the program's global symbols looked
+static executable's, a static PIE's and a shared library's, and against the
+dynamic PIE's with libm on the line as `-lm` puts it there, which these
+programs don't need (each name looked up in libm's and libmvec's exports too),
+and reports 21-run medians (time,
+cycles, instructions, IPC) of libm's import (`runtime_libraries_import`), the
+match (the program's global symbols looked
 up in the runtime's names, per global symbol), `bind_begin`, the static
 runtimes' closure (the members the link needs, per member) and `bind_end`,
 each run on the same link put back as it was. The paths must make the same
 links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
-5's phases, data-parallel" and "Static links, as built" have the numbers. The
+5's phases, data-parallel", "Static links, as built" and "Libraries named with
+`-l`" have the numbers. The
 default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 

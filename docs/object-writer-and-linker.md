@@ -2569,7 +2569,15 @@ an empty one, as glibc 2.34 and later install `libpthread.a`, `libdl.a` and `lib
 links it. The libraries aren't in the runtime's snapshot: they differ from link to link, so each link reads and
 imports its own (libm.so.6 is 0.9 MB). On the cloud VM (not a 9700X measurement), compiling and linking a hello
 world took a median 22.9 ms with `-lm` and 22.4 ms without it, over 60 interleaved runs each (p10 to p90 about 21 to
-26 ms both ways); the 9700X's numbers wait for `benchmark-link` to take libraries.
+26 ms both ways). `benchmark-bind` times libm's import (`runtime_libraries_import`) and binds its programs against
+the dynamic PIE's runtime with libm on the line by both paths, which these programs don't need: each of their names
+is looked up in libm's and libmvec's exports too, which is what a library costs a link that doesn't use it. The
+libraries' lookups are scalar in both paths (one per name binding resolves, in `bind_resolve_symbol`, and per export
+candidate in `bind_library_exports`), as the per-name resolution around them is. On the cloud VM (not a 9700X
+measurement), libm's import took 316 µs (libm.so.6 and libmvec.so.1, 1,271 exports), and `bind_end` with libm on the
+line 0.03 to 0.11 µs more than without it, by either path, for programs of 1 and 2,000 workers: the lookups are
+noise beside the import, which a snapshot of the named libraries, as the runtime's is kept, would take off the link
+if it matters.
 
 `test-bind`'s "libraries" check binds links made by hand with this system's libm by both paths into the same link
 (the line order, a weak reference alone, the exports) and the import's refusals on files of its own;
