@@ -623,15 +623,19 @@ designs and the compilers already built this way.
   shared 9700X lock and CPU 2 for each measurement process.
 - `src/buster/compiler/foreign_driver.c` supplies `link-foreign`, a raw input
   command using the built-in resolver/converter/writer. The caller supplies
-  startup objects and libraries in order. Static no-libc and dynamic PIE
-  outputs are supported; static runtime, static PIE and shared output remain
-  follow-ups. GC, literal pooling and CIE pooling are off by default. See
-  [the command contract](docs/foreign-driver.md) for search defaults, lifetime,
-  terminal-pooling order and the missing regular-symbol attachment.
-  `foreign_driver_test.c`, `foreign_driver_dedup_test.c` and
-  `foreign_driver_pipeline_test.c` run through
-  `test-foreign --cross-check`; validate each new composition on the shared
-  9700X before treating older frozen snapshots as equivalent evidence.
+  startup objects and libraries in order, as GCC's driver hands them to GNU ld,
+  whose `--build-id`, `--eh-frame-hdr`, `--hash-style=gnu`, `-m elf_x86_64`
+  and `-z now`/`relro`/`noexecstack` it takes as what its output is already.
+  Static no-libc and dynamic PIE outputs are supported, with copy relocations
+  and their aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for
+  libraries' own references and lld's regular symbol table; an IFUNC a fixup
+  reaches is refused, and static libc, static PIE and shared output remain
+  follow-ups. GC, literal pooling and CIE pooling are off by default.
+  [The command contract](docs/foreign-driver.md) has the details. Its tests
+  (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
+  run through `test-foreign --cross-check`, and `test-foreign-corpus`
+  (`foreign_corpus_test.c`) compares it with lld and mold on a corpus
+  ("Foreign corpus test" below).
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
@@ -876,6 +880,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-link
 ./build/compiler benchmark-floors
 ./build/compiler test-foreign --cross-check
+./build/compiler test-foreign-corpus
 ./build/compiler benchmark-foreign --linkers
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
@@ -2737,7 +2742,7 @@ by the direct path and by each linker, and reports medians:
   page faults and how much the peak resident set grew; and the floor, one
   `pwrite` of the output;
 - the objects, each unit's as `-c` writes them, on the same lanes;
-- each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold` and `wild`) linking
+- each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold`, `wild` and `link-foreign`) linking
   them with the appendix's command, the clang driver's with the matched
   options (its `-static` one for a static executable, with
   `--start-group -lgcc -lgcc_eh -lc --end-group`, and its `-static-pie` one
@@ -2752,7 +2757,11 @@ by the direct path and by each linker, and reports medians:
   gives its page faults and peak resident set: a program spawned from the
   benchmark would have the benchmark's peak resident set as its own when that
   was higher, which Linux carries over at `exec`. The helper's own floor, a
-  program that does nothing, is printed first.
+  program that does nothing, is printed first;
+- `link-foreign` (#86), this executable's linker of other compilers' objects,
+  given the same command line as a process of its own, with `--lanes=8` for its
+  threads and `--lanes=1` for one: the dynamic PIEs alone, since its static
+  executables of libc aren't there yet.
 
 Every program written must run and print what its model predicts, but wild's
 static executables and static PIEs of a program whose `.tbss` is more aligned
@@ -2936,6 +2945,55 @@ CPU: with `--linkers` on pushes to main, dispatched runs and pull requests
 that change `foreign_benchmark.c`, since mold's and wild's times don't depend
 on a pull request, and without it on other pull requests. Like the others,
 its measurements are informational.
+
+## Foreign corpus test
+
+`./build/compiler test-foreign-corpus [--sqlite DIR] [--lua DIR] [--self DIR]
+[--compilers LIST] [--linkers LIST] [--directory PATH] [--keep]` is #86's
+differential test of `link-foreign`. Each program of its corpus is compiled by
+each compiler of `--compilers` (gcc and clang) at -O2, their default PIEs, then
+linked from one command line by `link-foreign` (this executable, as a process
+of its own), by lld and by mold (`--linkers`), with GCC's crt objects and
+libraries around the program's objects and archives. The three executables
+must:
+
+- run alike: each run's exit status, output and errors, from directories of
+  the same name, with the same arguments, input and environment;
+- have the same `.symtab` symbols with the same sizes: each named entry's name,
+  binding, type, visibility, size and whether it is defined or absolute, as a
+  multiset, but for `STT_FILE` and `STT_SECTION` entries, the names each linker
+  defines for itself (`foreign_corpus_synthesized`), mold's `$` labels and
+  `__abi_tag`, which the crt object's ABI note holds and `link-foreign` writes
+  as a note of its own;
+- agree on the dynamic section (`DT_NEEDED` in order, `DT_SONAME`, the PIE
+  flag, `DT_INIT`, `DT_FINI` and the arrays' sizes), on `.dynsym`'s names at
+  their versions, and on the dynamic relocations by symbol and class (a GOT
+  slot, `GLOB_DAT` or `JUMP_SLOT`; `COPY`; `R_X86_64_64`; `TPOFF64`;
+  `DTPMOD64`; `DTPOFF64`), with as many relative ones as lld's.
+
+What a reference linker writes as its own valid choice is classified, counted
+and printed as documented ("differs, as documented"), never dropped silently
+(`foreign_corpus_reason`): mold leaves weak undefined names without a version
+out of `.dynsym`, keeps COMDAT groups' signatures as absolute locals, drops
+`__FRAME_END__`, binds a copy's aliases weakly, writes internal visibility as
+hidden and the `__start_`/`__stop_` names local, and keeps a few GOT slots
+that lld relaxes; lld leaves an `R_X86_64_64` to a library's data that it
+scanned before the reference that copies it symbolic, and gives a function
+that code both calls and loads from the GOT a second slot. Any other row one
+side has alone fails the test, and the first 12 are printed.
+
+The corpus is two original programs, always: C, of three translation units
+and an archive (two members that load, one that doesn't), with threads,
+thread-locals, libc's and libm's data and functions, constructors and
+destructors, a weak reference and a `__start_`/`__stop_` registry; and C++,
+of two translation units, with iostream, exceptions across them, RTTI,
+templates in COMDAT groups, inline variables and a thread. With `--sqlite DIR`
+the SQLite amalgamation's shell (`sqlite3.c` and `shell.c`), with `--lua DIR`
+Lua's interpreter (its library as an archive) and with `--self DIR` this
+repository's compiler, built by clang alone, join it, each with runs of its
+own. The files go in a directory under `--directory` (`TMPDIR` or `/tmp`),
+kept with `--keep` or on a failure. The 9700X job's test step runs the
+original programs.
 
 ## Dataflow tests
 
