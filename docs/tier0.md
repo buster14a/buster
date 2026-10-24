@@ -497,7 +497,7 @@ direct globals and the thread-locals of the image's (in `.tdata`), and a shared 
 the ones Tier 0 reaches through the GOT, so that the executable's slots for them are the loader's to fill: `GLOB_DAT`,
 and `TPOFF64` for a thread-local's offset. The library is GNU as source, which `as` and `ld -shared` link in a few
 milliseconds a program, where `clang -shared` of the same data as C took tens: in the 9700X job's test step, `test-tier0
---cross-check` took 5.8 s with clang's libraries, against 4.2 s before it had any.
+--cross-check` took 5.8 s with clang's libraries and 4.6 s with these, against 4.2 s before it had any.
 
 **Robustness:**
 
