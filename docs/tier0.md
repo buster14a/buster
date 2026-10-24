@@ -17,6 +17,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
 - **Indirect calls,** through `r11`.
 - **Block copies** (`COPY`) of up to 256 bytes, a struct's assignment.
+- **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
+  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer.
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **The interfaces to the existing modules:**
@@ -27,9 +29,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
-- **c-testsuite (#145):** 216 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+- **c-testsuite (#145):** 217 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
-  ([the c-testsuite guide](c-testsuite.md)). The other four wait on items 2 and 8 of #136's plan and on libm.
+  ([the c-testsuite guide](c-testsuite.md)). The other three wait on item 2 of #136's plan and on libm.
 
 **Waits for #133, #145 and #146:**
 
@@ -86,6 +88,14 @@ table. The kinds are:
 - `CALL` and `DISCARD`;
 - `COPY`: `value` bytes, 1 to 256, from the address on top to the one under it, the ranges the same or apart (a
   struct's assignment). A front end copies more through `memcpy`, as clang -O0 does past 16 stores of 16 bytes.
+- the stack, for variable-length arrays, each U64 with no value:
+  - `ALLOCA` pops a byte count, rounds it up to 16, takes it from the stack and pushes the allocation's address, a
+    multiple of 16;
+  - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it.
+
+  A producer saves the position into a local before a block's first array, and restores it from there at the block's
+  end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
+  none: the epilogue releases the frame. That a restored position is an earlier save's is the producer's to keep.
 
 **The checker makes explicit** what C leaves implicit:
 
@@ -259,8 +269,8 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
    reached, nor a template's fixed registers, nor anything if the function calls.
 3. Then they take the callee-saved registers, for a local referenced at least twice (a push and a pop).
 4. Floating locals take free XMM registers.
-5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (no frame
-   pointer), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
+5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (rbp-relative with
+   a frame pointer, below), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
    register, which the prologue loads from that slot. No home is a register a parameter arrives in, so the prologue's
    moves and loads never overwrite one another's sources.
 6. Objects come after the slots, in the locals' order:
@@ -274,6 +284,21 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
 
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
+
+**The frame pointer.** A function with any of the stack's kinds has one, which both paths derive from its entries in
+selection:
+
+- the prologue pushes rbp first and sets it to rsp, and rbp leaves the depth table (14 integer depths) and the homes;
+- an allocation moves rsp, so every slot, object and call's save is addressed from rbp (`Tier0Frame.base` and `bias`):
+  the homes' displacements less the frame's size and the pushes after rbp's;
+- a call's stack arguments still go at rsp: the outgoing area is rounded up to 16 and stays below the allocations, so
+  `ALLOCA` is `add r, 15; and r, -16; sub rsp, r; lea r, [rsp + outgoing]` (`mov` without an outgoing area). rsp
+  stays a multiple of 16, at every call too;
+- `STACK_SAVE` and `STACK_RESTORE` are a `mov` from rsp and to it;
+- the epilogue sets rsp back from rbp (`lea rsp, [rbp - 8 * pushes]`, or `mov rsp, rbp`), past whatever the body
+  allocated, before its pops and `pop rbp`.
+
+A function without them keeps the rsp-relative frame, record for record.
 
 **Templates.** A template is up to four records, one per (kind, class, variant). The variant says what the entry
 absorbed (`BUSTER_TIER0_VARIANT_*`); a home-dependent slot holds four templates, one per home case. A pointer
@@ -435,6 +460,17 @@ Before the programs, checks of their own:
     values below make of the result, which must come back right.
 
   Both paths must compile each alike, and each encoder's bytes run in a child.
+- **stack:**
+  - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
+    another class or with a value, and a restore of another class or with a value, and take a save restored.
+  - 14 integer values at once must compile with a frame pointer and without, and 15 only without (rbp, their last
+    depth, is the frame's), by both paths alike.
+  - a function of the test's own (`tier0_test_stack_entry`) allocates 64 KB and up 1,000 times in a loop, each in a
+    scope of its own: the position saved, the allocation's first and last words written, its address modulo 16 added
+    in, a call with stack arguments made (whose outgoing area mustn't overlap the allocation), the words read back and
+    the position restored. Without its restores it would take 64 MB of stack. Both paths must compile it alike, with
+    `push rbp` in its prologue, and it must run in a child on eight inputs with the interpreter's result and the
+    expected one.
 - **access:** `tier0_validate` must refuse a global entry whose symbol is past the access column, and an access past
   the last, and take the last. Then GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant,
   and GLOBAL_ADDRESS, of every class, by each access. Both paths must compile each alike to valid records with one
@@ -464,6 +500,17 @@ Before the programs, checks of their own:
     byte any store or copy puts wrong shows in the globals.
 
   A program without objects is the one the same seed gave before they existed;
+- with the `vlas` option (the shapes everything and larger), now and then a variable-length array of 2, 4 or 8
+  elements of a class, plus a generated value's low two bits: `T v[(e & 3) + n]`, its size kept in a local as
+  `sizeof v` and its address in another:
+  - its first n elements written, read, pointed into and folded into the globals at its scope's end;
+  - in a loop's construct, the stack's position saved before the construct's first array and restored at its end and
+    before every `break` and `continue` out of it, as a producer does; at the function's top, nothing, the return
+    releasing them;
+  - its size (`sizeof v`) and its address modulo 16 as values.
+
+  The interpreter allocates them from an area of its own, 16 bytes at a time, and checks that every restored position
+  is one saved since the frame began. A program without the option is the one the same seed gave before it;
 - with the `indirect` option (the shapes with calls), a third of the calls indirect: through locals that hold an
   earlier function's address (C calls through them), or through the function's address itself:
   - four functions in ten take an earlier function's type, so that a type has several functions;
@@ -553,6 +600,16 @@ milliseconds a program, where `clang -shared` of the same data as C took tens: i
     - the rule left out: the operands check's nine refused streams taken;
     - the class compared with the entry's own, not the entry before's: 120 failed checks, the generated programs'
       streams refused among them.
+  - and on variable-length arrays, 300 programs per shape (on the cloud VM):
+    - `STACK_RESTORE` emitted as a move that leaves rsp: 1, the stack check's run, which overflows the stack;
+    - allocations rounded to 8, not 16: 7 (addresses modulo 16 that are 8);
+    - an allocation's address at rsp, over the outgoing area: 67 (calls' stack arguments written over it);
+    - the homes left rsp-relative with a frame pointer: 549;
+    - the epilogue releasing the frame by its size, not from rbp: 551.
+
+    And on the producer's control stream (`c_check_program.c`), checked by `test-checker`'s programs: no restore at
+    a block's end, none before a jump out of a block, or none before a `goto` back above an array's declaration. In
+    each case the programs whose arrays would then take 80 MB of stack fail, on both paths.
 - **Every stream source against the operands' rule:** a scratch build validated every function each compile path
   took, besides the validations the sources make, and printed every refusal. The sources were:
   - the generator's programs, with and without the cross-check;
@@ -631,10 +688,10 @@ path's 11.1.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - conversions between U64 and floating values;
   - aggregates passed and returned by value (the objects they live in and copies of up to 256 bytes are done);
-  - objects aligned past 16, which need a frame pointer;
+  - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
   - bit-fields;
   - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
-  - variable-length arrays, inline assembly, `setjmp` and atomics;
+  - inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table).
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
   padded for it would take a block's at once, if real code shows them to cost.
@@ -653,7 +710,8 @@ path's 11.1.
   them; `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole compile against
   tcc. c-testsuite (#145) runs.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
-  records, the fixed prologue and epilogue (`docs/unwind.md`).
+  records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
+  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp.
 
 ## Boundary audit #298
 

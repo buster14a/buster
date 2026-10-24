@@ -542,6 +542,36 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){int sum=0;for(int i=1;i<4;i++){typedef int A[n+10+i];sum+=sizeof(A);sum+=sizeof(A);}return sum;}",
         "vla-loop-lifetime-recaptures", clang);
+    // Variable-length arrays' objects: their strides and sizes from the extents their declarations captured, and the
+    // stack they take released at their scopes' ends, by continue, break and goto out of them, and by a goto back before
+    // their declaration. Each loop takes 20,000 arrays of about 4 KB or 10,000 of 8 KB: 80 MB, past the 8 MB stack, if
+    // one release is missing.
+    check_test_program_source(test,
+        "int tested(int n){int m=(n&3)+2;int a[m][m+1];for(int i=0;i<m;i++)for(int j=0;j<=m;j++)a[i][j]=i*10+j;"
+        "int(*p)[m+1]=a;p++;int(*q)[m+1]=a+m-1;q-=1;typedef char T[m*3];m=99;T t;t[0]=(char)(n&63);"
+        "return (int)sizeof a+(int)sizeof a[0]*10+(*p)[1]*100+q[1][m-97]+(int)(q-p)*1000+(int)sizeof t+t[0];}",
+        "vla-objects-strides-and-sizes", clang);
+    check_test_program_source(test,
+        "long sum(int n,int m,int a[n][m]){long s=0;for(int i=0;i<n;i++)for(int j=0;j<m;j++)s+=a[i][j]*(i+1);return s+(long)sizeof(a[0]);}"
+        "int tested(int n){int r=(n&3)+1,c=(n&7)+2;int a[r][c];for(int i=0;i<r;i++)for(int j=0;j<c;j++)a[i][j]=i*c+j-n;"
+        "int x=({int y=0;{int b[c];b[c-1]=n;y=b[c-1]*2;}y;});return (int)sum(r,c,a)+x;}",
+        "vla-parameter-strides", clang);
+    check_test_program_source(test,
+        "int tested(int n){long s=0;for(int i=0;i<20000;i++){int a[1000+(n&7)];a[0]=i;a[999]=n;if(i%3==0)continue;"
+        "s+=a[0]+a[999];if(i==19990)break;}int k=0;while(k<20000){{char c[4000+(n&3)];c[0]=(char)(k&63);k++;if(k&1)goto next;"
+        "s+=c[0];}next:;}do{short d[2000+(n&1)];d[1]=(short)k;s+=d[1];if(--k&1)continue;}while(k>0);"
+        "for(int i=0;i<20000;i++)switch((i+n)&1){case 0:{long e[60];long f[500+(n&3)];e[0]=i;f[0]=n;s+=f[0]+e[0];break;}default:s+=1;}"
+        "return (int)(s%1000003);}",
+        "vla-scope-releases", clang);
+    check_test_program_source(test,
+        "int tested(int n){int k=0;long s=0;again:;int a[2000+(n&3)];a[1999]=k;s+=a[1999];if(++k<10000)goto again;"
+        "return (int)(s%1000003)+(int)sizeof a;}",
+        "vla-backward-goto-releases", clang);
+    check_test_program_source(test,
+        "int tested(int n){long s=0;for(int i=0;i<20000;i++){int g[1000+(n&3)];g[0]=i;"
+        "switch((i+n)&3){case 0:continue;case 1:{int h[(n&7)+1];h[0]=i;s+=h[0];break;}default:break;}s+=g[0];}"
+        "return (int)(s%1000003);}",
+        "vla-continue-through-switch", clang);
     check_test_program_source(test,
         "char a[24]=\"abcdefghijklmnop\";char b[24];int tested(int n){unsigned k=(unsigned)n%12;"
         "__builtin_memset(b,0,24);__builtin_memcpy(b,a,k);__builtin_memmove(b+2,b,k);"
@@ -799,7 +829,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test,
         "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_shufflevector(global,global,0,1,2,3));}",
         "vector-builtin-shuffle-prefix-reference-mask", true, false, 1, 0);
-    check_test_program_boundary(test, "int tested(int n){int values[n+10];return sizeof values;}", "dynamic-frame-machine-boundary", true, false, 0, 0);
+    check_test_program_boundary(test, "int tested(int n){int values[n+10];return sizeof values;}", "variable-length-array-program", true, true, 0, 0);
     check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                 "vla-bound-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",

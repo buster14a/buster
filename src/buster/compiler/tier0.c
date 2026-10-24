@@ -135,6 +135,14 @@
 //   - COPY: copies `value` bytes (1 to BUSTER_TIER0_MAX_COPY_BYTES) to the address the first operand (U64) holds from
 //     the one the last (U64) holds, and pushes nothing (`class` VOID): a struct's assignment. The two ranges are the
 //     same or apart. A front end copies more through memcpy, as clang -O0 does past this many bytes.
+//   - ALLOCA: reserves as many bytes as the operand (U64) says, rounded up to a multiple of 16, on the stack, and
+//     pushes their address (`class` U64, a multiple of 16; `value` 0): a variable-length array's storage. The bytes
+//     stay until a STACK_RESTORE releases them or the function returns.
+//   - STACK_SAVE: pushes the stack's position (`class` U64; `value` 0), which only STACK_RESTORE reads.
+//   - STACK_RESTORE: pops the operand (U64), a position STACK_SAVE pushed in this function, and releases what ALLOCA
+//     has reserved since (`class` U64; `value` 0): the end of a variable-length array's scope.
+// A function with any of the last three has a frame pointer, rbp, which then neither a depth nor a home takes: its
+// integer stack has one depth fewer.
 // A target `value` is an entry's index, or the entry count for the function's end. Every target is the start of a
 // statement or of an arm, and the stacks there must hold the same values whichever way control arrives (as in a
 // WebAssembly validator): tier0_validate checks it.
@@ -180,17 +188,21 @@
 #define BUSTER_TYPED_JUMP_VALUE 39
 #define BUSTER_TYPED_RETURN 40
 #define BUSTER_TYPED_COPY 41
-#define BUSTER_TYPED_KINDS 42
+#define BUSTER_TYPED_ALLOCA 42
+#define BUSTER_TYPED_STACK_SAVE 43
+#define BUSTER_TYPED_STACK_RESTORE 44
+#define BUSTER_TYPED_KINDS 45
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
 // one's first, of a symbol that Tier0Function.symbol_access reaches through its GOT slot, as a thread-local of the image's
 // or as a thread-local through its GOT slot. Fusion keys an entry by them (tier0_access_kind), so that they select
-// templates of their own; no stream has them.
-#define BUSTER_TIER0_KIND_GOT 42
-#define BUSTER_TIER0_KIND_LOCAL_EXEC 46
-#define BUSTER_TIER0_KIND_INITIAL_EXEC 50
-#define BUSTER_TIER0_KINDS 54
+// templates of their own; no stream has them, and a kind the stream gains moves them along.
+#define BUSTER_TIER0_KIND_GOT BUSTER_TYPED_KINDS
+#define BUSTER_TIER0_KIND_LOCAL_EXEC (BUSTER_TIER0_KIND_GOT + 4)
+#define BUSTER_TIER0_KIND_INITIAL_EXEC (BUSTER_TIER0_KIND_LOCAL_EXEC + 4)
+#define BUSTER_TIER0_KINDS (BUSTER_TIER0_KIND_INITIAL_EXEC + 4)
+_Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kinds below the kind tables' limit");
 
 // How the code reaches a symbol that GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL name (Tier0Function's
 // symbol_access):
@@ -407,6 +419,20 @@ static const uint8_t tier0_integer_depths[BUSTER_TIER0_INTEGER_DEPTHS] = {
     X86_REGISTER_R15,
     X86_REGISTER_RBP,
 };
+
+// Whether an entry of this kind moves rsp in the body (ALLOCA, STACK_SAVE and STACK_RESTORE), which gives its function a
+// frame pointer.
+static bool tier0_moves_stack(uint32_t kind)
+{
+    return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE;
+}
+
+// The integer depths a function may reach: the table's, less rbp, its last, in a function with a frame pointer.
+static int32_t tier0_integer_depth_count(bool pointer)
+{
+    _Static_assert(BUSTER_TIER0_INTEGER_DEPTHS == 15, "rbp is the depth table's last register");
+    return pointer ? BUSTER_TIER0_INTEGER_DEPTHS - 1 : BUSTER_TIER0_INTEGER_DEPTHS;
+}
 
 // The callee-saved registers, in the order the prologue pushes them and homes take them.
 #define BUSTER_TIER0_CALLEE_SAVED 6
@@ -1818,6 +1844,10 @@ static void tier0_define_templates(void)
     tier0_defer(BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
     // COPY: tier0_emit_deferred's, its moves by its size.
     tier0_defer(BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
+    // ALLOCA, STACK_SAVE and STACK_RESTORE: tier0_emit_deferred's, which read the frame's outgoing area.
+    tier0_defer(BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
+    tier0_defer(BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
+    tier0_defer(BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
     {
@@ -2202,6 +2232,9 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_JUMP_VALUE] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_RETURN] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_COPY] = { BUSTER_TIER0_STACK_INTEGER, BUSTER_TIER0_STACK_OPERAND, BUSTER_TIER0_STACK_NONE },
+    [BUSTER_TYPED_ALLOCA] = BUSTER_TIER0_UNARY,
+    [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_LEAF,
+    [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_SINK,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 2] = BUSTER_TIER0_UNARY,
@@ -2599,6 +2632,13 @@ _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 // multiple of 16 when the function calls or has an object aligned to 16); `saved` has a bit per tier0_callee_saved
 // register the prologue pushes. `clobbers` is the register set the body touches (BUSTER_TIER0_XMM's layout), and
 // `integer_top` and `floating_top` the highest depth registers in it.
+//
+// A function with ALLOCA, STACK_SAVE or STACK_RESTORE entries (`pointer`) moves rsp in its body, so its frame is
+// addressed from a frame pointer: the prologue pushes rbp first and points it at the push, `pushes` counts it, and the
+// body reaches every place of the frame as [rbp + its offset from rsp + `bias`] (`base` is RBP, where it is RSP
+// otherwise, with no bias), but the outgoing arguments, which stay at rsp. The outgoing area is then a multiple of 16
+// (`outgoing`), so that an allocation (at rsp + `outgoing`) is aligned and ends where the area began, and rsp stays a
+// multiple of 16 at every entry.
 typedef struct Tier0Frame Tier0Frame;
 struct Tier0Frame
 {
@@ -2611,10 +2651,14 @@ struct Tier0Frame
     uint32_t fixed_slots;
     uint32_t variadic_area;
     uint32_t overflow_area;
+    uint32_t outgoing;
     uint32_t clobbers;
     int32_t integer_top;
     int32_t floating_top;
+    int32_t bias;
+    uint8_t base;
     bool calls;
+    bool pointer;
 };
 
 // The registers each depth table's prefix covers, as a register set.
@@ -2809,7 +2853,8 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             arrivals |= (reg & BUSTER_ABI_REGISTER_VECTOR) != 0 ? 1u << BUSTER_TIER0_XMM(reg & 0x1f) : 1u << reg;
         }
     }
-    uint32_t taken = frame->clobbers | arrivals | 1u << X86_REGISTER_RSP;
+    // A frame pointer's rbp is no home either.
+    uint32_t taken = frame->clobbers | arrivals | 1u << X86_REGISTER_RSP | (frame->pointer ? 1u << X86_REGISTER_RBP : 0);
     for (uint32_t l = 0; l < locals; l += 1)
     {
         homes[l] = (Tier0Home){ 0, 0, 0, 0, 0 };
@@ -2888,12 +2933,13 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             }
         }
     }
-    // The callee-saved registers the depths reach are saved too.
+    // The callee-saved registers the depths reach are saved too (never rbp with a frame pointer, whose depth is refused).
     for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
     {
         frame->saved |= (frame->clobbers & 1u << tier0_callee_saved[c]) != 0 ? 1u << c : 0;
     }
-    frame->pushes = (uint32_t)__builtin_popcount(frame->saved);
+    // The frame pointer's push, first, counts with the others.
+    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u);
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
@@ -2982,8 +3028,10 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     {
         outgoing = function->calls[c].stack_bytes > outgoing ? function->calls[c].stack_bytes : outgoing;
     }
-    uint64_t offset = (outgoing + 7) & ~UINT64_C(7);
+    // With a frame pointer, a multiple of 16: where an allocation starts, aligned, above the outgoing arguments.
+    uint64_t offset = frame->pointer ? (outgoing + 15) & ~UINT64_C(15) : (outgoing + 7) & ~UINT64_C(7);
     bool valid = offset <= INT32_MAX;
+    frame->outgoing = valid ? (uint32_t)offset : 0;
     frame->save_area = valid ? (uint32_t)offset : 0;
     offset += 8 * frame->save_slots;
     valid = valid && offset <= INT32_MAX;
@@ -3028,9 +3076,10 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     bool objects = false;
     offset = vector ? tier0_frame_slots_vector(function, homes, references, offset, &objects) : offset;
     offset = vector && objects ? tier0_frame_objects_vector(function, homes, offset, &aligned) : offset;
-    // With the pushes and the return address, a multiple of 16 at every call, and for an object aligned to 16.
+    // With the pushes and the return address, a multiple of 16 at every call, for an object aligned to 16, and with a
+    // frame pointer, under which every allocation keeps it so.
     const uint64_t above = 8 * frame->pushes + 8;
-    if (frame->calls || aligned)
+    if (frame->calls || aligned || frame->pointer)
     {
         offset = (offset + above + 15) / 16 * 16 - above;
     }
@@ -3064,6 +3113,19 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
                 homes[p].reg = X86_REGISTER_RSP;
                 homes[p].mode = BUSTER_X86_MEMORY_BASE;
             }
+        }
+    }
+    // With a frame pointer, every memory home from rbp, which is the frame's size and the pushes after rbp's above rsp:
+    // the homes' displacements less that, each between -2^31 and the displacement it was.
+    frame->base = frame->pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+    valid = valid && (!frame->pointer || offset + 8 * (frame->pushes - 1) <= INT32_MAX);
+    frame->bias = valid && frame->pointer ? (int32_t)-(int64_t)(offset + 8 * (frame->pushes - 1)) : 0;
+    for (uint32_t l = 0; l < function->local_count && frame->pointer; l += 1)
+    {
+        if (!homes[l].is_register && homes[l].reg == X86_REGISTER_RSP && homes[l].mode == BUSTER_X86_MEMORY_BASE)
+        {
+            homes[l].displacement = (int32_t)((int64_t)homes[l].displacement + frame->bias);
+            homes[l].reg = X86_REGISTER_RBP;
         }
     }
     return valid;
@@ -3257,12 +3319,13 @@ static X86Instruction tier0_instruction(uint32_t form, uint8_t reg, uint8_t rm, 
     return record;
 }
 
-// mov [rsp + offset], reg and back, 64-bit (a general register) or as a double (an XMM one, BUSTER_TIER0_XMM's).
-static void tier0_spill(Tier0Writer* writer, uint32_t reg, uint32_t offset, bool load)
+// mov [rsp + offset], reg and back (from rbp with a frame pointer: Tier0Frame's base and bias), 64-bit (a general
+// register) or as a double (an XMM one, BUSTER_TIER0_XMM's).
+static void tier0_spill(Tier0Writer* writer, const Tier0Frame* frame, uint32_t reg, uint32_t offset, bool load)
 {
     const bool xmm = reg >= 16;
     const uint32_t form = xmm ? (load ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOVSD_XM64_X) : (load ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_RM64_R64);
-    tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)offset, 0));
+    tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)((int64_t)offset + frame->bias), 0));
 }
 
 // A register move, general (64-bit) or XMM (movaps).
@@ -3355,11 +3418,11 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
     const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
     for (uint32_t d = 0; d < saved; d += 1)
     {
-        tier0_spill(writer, tier0_integer_depths[d], frame->save_area + 8 * d, false);
+        tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, false);
     }
     for (uint32_t d = 0; d < floating_below; d += 1)
     {
-        tier0_spill(writer, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), false);
+        tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), false);
     }
     uint8_t to[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
     uint8_t from[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
@@ -3429,11 +3492,11 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
     }
     for (uint32_t d = 0; d < saved; d += 1)
     {
-        tier0_spill(writer, tier0_integer_depths[d], frame->save_area + 8 * d, true);
+        tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, true);
     }
     for (uint32_t d = 0; d < floating_below; d += 1)
     {
-        tier0_spill(writer, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), true);
+        tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), true);
     }
 }
 
@@ -3462,11 +3525,11 @@ static void tier0_emit_division(const Tier0Function* function, const Tier0Entrie
     const uint32_t rdx_slot = frame->fixed_area + 8;
     if (save_rax)
     {
-        tier0_spill(writer, X86_REGISTER_RAX, rax_slot, false);
+        tier0_spill(writer, frame, X86_REGISTER_RAX, rax_slot, false);
     }
     if (save_rdx)
     {
-        tier0_spill(writer, X86_REGISTER_RDX, rdx_slot, false);
+        tier0_spill(writer, frame, X86_REGISTER_RDX, rdx_slot, false);
     }
     if (dividend != X86_REGISTER_RAX)
     {
@@ -3491,9 +3554,9 @@ static void tier0_emit_division(const Tier0Function* function, const Tier0Entrie
     }
     else if (divisor == X86_REGISTER_RAX || divisor == X86_REGISTER_RDX)
     {
-        divide.rm = X86_REGISTER_RSP;
+        divide.rm = frame->base;
         divide.mode = BUSTER_X86_MEMORY_BASE;
-        divide.displacement = (int32_t)(divisor == X86_REGISTER_RAX ? rax_slot : rdx_slot);
+        divide.displacement = (int32_t)((int64_t)(divisor == X86_REGISTER_RAX ? rax_slot : rdx_slot) + frame->bias);
     }
     tier0_put(writer, divide);
     const uint32_t result = kind == BUSTER_TYPED_MOD ? X86_REGISTER_RDX : X86_REGISTER_RAX;
@@ -3503,11 +3566,11 @@ static void tier0_emit_division(const Tier0Function* function, const Tier0Entrie
     }
     if (save_rax)
     {
-        tier0_spill(writer, X86_REGISTER_RAX, rax_slot, true);
+        tier0_spill(writer, frame, X86_REGISTER_RAX, rax_slot, true);
     }
     if (save_rdx)
     {
-        tier0_spill(writer, X86_REGISTER_RDX, rdx_slot, true);
+        tier0_spill(writer, frame, X86_REGISTER_RDX, rdx_slot, true);
     }
 }
 
@@ -3533,10 +3596,10 @@ static void tier0_emit_shift(const Tier0Entries* entries, const Tier0Frame* fram
     }
     else
     {
-        tier0_spill(writer, X86_REGISTER_RCX, frame->fixed_area, false);
+        tier0_spill(writer, frame, X86_REGISTER_RCX, frame->fixed_area, false);
         tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_RM32, X86_REGISTER_RCX, (uint8_t)count, 0, 0, 0));
         tier0_put(writer, tier0_instruction(form, 0, (uint8_t)value, 0, 0, 0));
-        tier0_spill(writer, X86_REGISTER_RCX, frame->fixed_area, true);
+        tier0_spill(writer, frame, X86_REGISTER_RCX, frame->fixed_area, true);
     }
 }
 
@@ -3576,6 +3639,42 @@ static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* e
     }
 }
 
+// ALLOCA's records, and STACK_SAVE's and STACK_RESTORE's (tier0_emit_stack's).
+#define BUSTER_TIER0_ALLOCA_RECORDS 4
+#define BUSTER_TIER0_STACK_RECORDS 1
+
+// The entries that move rsp, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 and
+// taken from rsp, and the allocation's address in its register, above the outgoing area (add, and, sub and lea, or mov
+// with no area); STACK_SAVE's rsp into the register at its depth, and STACK_RESTORE's back from the one at depth − 1.
+static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    const uint32_t depth = entries->depths[i];
+    if (kind == BUSTER_TYPED_ALLOCA)
+    {
+        const uint8_t count = tier0_integer_depths[depth - 1];
+        tier0_put(writer, tier0_instruction(X86_FORM_ADD_RM64_IMM8, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, 15));
+        tier0_put(writer, tier0_instruction(X86_FORM_AND_RM64_IMM8, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, -16));
+        tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_R64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        if (frame->outgoing != 0)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, count, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)frame->outgoing, 0));
+        }
+        else
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
+    }
+    else if (kind == BUSTER_TYPED_STACK_SAVE)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, tier0_integer_depths[depth], X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RSP, tier0_integer_depths[depth - 1], BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+}
+
 // The records of a deferred entry (into `writer`, which counts them when it has no records).
 static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
                                 Tier0Writer* writer)
@@ -3593,6 +3692,10 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
     {
         tier0_emit_copy(function, entries, i, writer);
     }
+    else if (tier0_moves_stack(kind))
+    {
+        tier0_emit_stack(entries, frame, i, writer);
+    }
     else
     {
         tier0_emit_shift(entries, frame, i, writer);
@@ -3603,7 +3706,8 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
 // than by running it: the vector path's measuring. Each term mirrors its emitter's step: a call's saves and restores,
 // argument extensions, stack stores, its register moves (one per move but the last of each cycle, which the xchg
 // before it resolves), al, the call and the result's move; division's saves, moves, extension and divide; a shift's
-// swaps or its saved rcx. The scalar path counts by running the emitter, so that the twins check the count.
+// swaps or its saved rcx; the entries that move rsp, their fixed counts. The scalar path counts by running the
+// emitter, so that the twins check the count.
 static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, uint32_t* references)
 {
     const uint32_t kind = entries->key_kinds[i];
@@ -3704,6 +3808,10 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
         const uint32_t piece = size >= 8 ? 8 : size >= 4 ? 4 : size >= 2 ? 2 : 1;
         count = size >= 16 ? 2 * ((size + 15) / 16) : size > piece ? 4 : 2;
     }
+    else if (tier0_moves_stack(kind))
+    {
+        count = kind == BUSTER_TYPED_ALLOCA ? BUSTER_TIER0_ALLOCA_RECORDS : BUSTER_TIER0_STACK_RECORDS;
+    }
     else
     {
         const uint32_t value = tier0_integer_depths[entries->depths[i] - 2];
@@ -3715,10 +3823,16 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
 // ---------------------------------------------------------------------------------------------------------------------
 // The prologue and the epilogue
 
-// The prologue: the callee-saved registers the homes use pushed, the frame reserved, and the parameters moved from where
-// they arrive to their homes (none for one that stays, or that arrives on the stack).
+// The prologue: with a frame pointer, rbp pushed and pointed at the push; the callee-saved registers the homes use
+// pushed, the frame reserved, and the parameters moved from where they arrive to their homes (none for one that stays,
+// or that arrives on the stack).
 static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references, Tier0Writer* writer)
 {
+    if (frame->pointer)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RBP, 0, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
     for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
     {
         if ((frame->saved & 1u << c) != 0)
@@ -3777,13 +3891,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     }
 }
 
-// The epilogue: the frame released, the saved registers popped, ret.
-// How many records tier0_emit_prologue writes, without writing them: the pushes, the frame's sub, and each parameter's
-// move, store or load into its home, after the incoming variadic saves (a store per argument register) when it has them.
-// The epilogue's are the sub's add, the pops and the ret.
+// How many records tier0_emit_prologue writes, without writing them: the pushes, a frame pointer's mov, the frame's sub,
+// and each parameter's move, store or load into its home, after the incoming variadic saves (a store per argument
+// register) when it has them. The epilogue's are tier0_count_epilogue's.
 static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
 {
-    uint32_t count = frame->pushes + (frame->size != 0 ? 1 : 0);
+    uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + (frame->size != 0 ? 1 : 0);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
     {
@@ -3797,9 +3910,17 @@ static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0F
     return count;
 }
 
+// The epilogue: the frame released (with a frame pointer, rsp back from rbp, past what the body allocated), the saved
+// registers popped (and rbp last), ret.
 static void tier0_emit_epilogue(const Tier0Frame* frame, Tier0Writer* writer)
 {
-    if (frame->size != 0)
+    if (frame->pointer)
+    {
+        const int32_t pushed = (int32_t)(8 * (frame->pushes - 1));
+        tier0_put(writer, pushed != 0 ? tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, -pushed, 0)
+                                      : tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else if (frame->size != 0)
     {
         const uint32_t form = frame->size <= 127 ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_ADD_RM64_IMM32;
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
@@ -3811,7 +3932,18 @@ static void tier0_emit_epilogue(const Tier0Frame* frame, Tier0Writer* writer)
             tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, tier0_callee_saved[c - 1], 0, 0, 0));
         }
     }
+    if (frame->pointer)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, X86_REGISTER_RBP, 0, 0, 0));
+    }
     tier0_put(writer, tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0));
+}
+
+// How many records tier0_emit_epilogue writes: the frame's release (an add, or with a frame pointer the lea or mov),
+// the pops and the ret.
+static uint32_t tier0_count_epilogue(const Tier0Frame* frame)
+{
+    return (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes + 1;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3837,6 +3969,7 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
     uint32_t save_slots = 0;
     bool fixed = false;
     bool calls = false;
+    bool pointer = false;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         uint16_t entry = BUSTER_TIER0_ENTRY_ABSORBED;
@@ -3897,6 +4030,13 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
                     integer_top = !wide && depth > integer_top ? depth : integer_top;
                     floating_top = wide && floating > floating_top ? floating : floating_top;
                 }
+                else if (tier0_moves_stack(function->kinds[i]))
+                {
+                    // The frame pointer's; STACK_SAVE's value at its depth (ALLOCA's and STACK_RESTORE's operand is
+                    // the entry before's).
+                    integer_top = function->kinds[i] == BUSTER_TYPED_STACK_SAVE && depth > integer_top ? depth : integer_top;
+                    pointer = true;
+                }
                 else
                 {
                     // Division and shifts by a register: rax, rdx and rcx, saved around them in the fixed slots.
@@ -3907,13 +4047,14 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
         }
         entries->templates[i] = entry;
     }
-    *error = integer_top >= BUSTER_TIER0_INTEGER_DEPTHS || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
+    *error = integer_top >= tier0_integer_depth_count(pointer) || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_top;
     frame->floating_top = floating_top;
     frame->clobbers = clobbers | tier0_depth_registers(integer_top, floating_top);
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
+    frame->pointer = pointer;
     return unsupported;
 }
 
@@ -4215,7 +4356,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         if (vector)
         {
             counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references));
-            epilogue = (frame.size != 0 ? 1 : 0) + frame.pushes + 1;
+            epilogue = tier0_count_epilogue(&frame);
         }
         else
         {
@@ -4701,6 +4842,19 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 }
                 break;
             }
+            case BUSTER_TYPED_ALLOCA:
+            case BUSTER_TYPED_STACK_SAVE:
+            case BUSTER_TYPED_STACK_RESTORE:
+                // A byte count in, an address out; a position out; a position in.
+                if ((kind != BUSTER_TYPED_STACK_SAVE && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64) || class != BUSTER_TYPED_CLASS_U64 || value != 0)
+                {
+                    tier0_reject(&validator, i, "an allocation, or a stack position saved or restored, that isn't U64 or has a value");
+                }
+                if (kind != BUSTER_TYPED_STACK_RESTORE)
+                {
+                    tier0_push(&validator, class);
+                }
+                break;
             default:
             {
                 // The binary operations and the compares.
@@ -5522,6 +5676,7 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
     uint32_t save_slots = 0;
     bool fixed = false;
     bool calls = false;
+    bool pointer = false;
     const __m512i three = _mm512_set1_epi64(3);
     const __m512i fifteen = _mm512_set1_epi64(15);
     const __m512i not_template = _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_UNSUPPORTED));
@@ -5588,6 +5743,12 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
                 deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
                 deferred_floating_top = wide && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
             }
+            else if (tier0_moves_stack(function->kinds[i]))
+            {
+                const bool save = function->kinds[i] == BUSTER_TYPED_STACK_SAVE;
+                deferred_integer_top = save && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
+                pointer = true;
+            }
             else
             {
                 clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
@@ -5606,13 +5767,14 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
     const int32_t integer_reached = vector_integer_top > deferred_integer_top ? (int32_t)vector_integer_top : deferred_integer_top;
     const int32_t floating_reached = vector_floating_top > deferred_floating_top ? (int32_t)vector_floating_top : deferred_floating_top;
     clobbers |= rdx ? 1u << X86_REGISTER_RDX : 0;
-    *error = integer_reached >= BUSTER_TIER0_INTEGER_DEPTHS || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
+    *error = integer_reached >= tier0_integer_depth_count(pointer) || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_reached;
     frame->floating_top = floating_reached;
     frame->clobbers = clobbers | tier0_depth_registers(integer_reached, floating_reached);
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
+    frame->pointer = pointer;
     return unsupported;
 }
 

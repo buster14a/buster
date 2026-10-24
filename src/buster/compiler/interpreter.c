@@ -726,7 +726,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : function->classes[i];
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
-        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || class >= BUSTER_TYPED_CLASSES)
+        // The kinds after COPY (ALLOCA and the stack's positions) aren't interpreted, and would read as binary operations.
+        if (kind == BUSTER_TYPED_NONE || kind > BUSTER_TYPED_COPY || class >= BUSTER_TYPED_CLASSES)
         {
             result->status = INTERPRETER_INVALID;
             break;
