@@ -8074,12 +8074,44 @@ static __attribute__((noinline, cold)) void pp_stream_check(Preprocessor* pp)
     }
 }
 
-// __TIMESTAMP__'s text for a time: "Sun Jan  1 00:00:00 2000" (strftime's "%a %b %e %T %Y" in the C locale).
+// The fixed macro spellings need a four-digit year, valid table indices and bounded numeric fields. Check only
+// fields that the formatters read; libc supplies the calendar's consistency (including leap seconds).
+static bool pp_calendar_valid(const struct tm* calendar)
+{
+    return calendar->tm_year >= -1900 && calendar->tm_year <= 8099 && calendar->tm_mon >= 0 && calendar->tm_mon < 12 &&
+           calendar->tm_wday >= 0 && calendar->tm_wday < 7 && calendar->tm_mday >= 1 && calendar->tm_mday <= 31 &&
+           calendar->tm_hour >= 0 && calendar->tm_hour < 24 && calendar->tm_min >= 0 && calendar->tm_min < 60 &&
+           calendar->tm_sec >= 0 && calendar->tm_sec <= 60;
+}
+
+// Seconds at the environment/stat boundary, before narrowing to libc's time_t. Never inspect a failed conversion's
+// output: gmtime_r/localtime_r may leave it untouched. This cold metadata path is shared by both preprocessing modes.
+static bool pp_calendar(Preprocessor* pp, int64_t seconds, bool utc, uint32_t location, const char* source, struct tm* calendar)
+{
+    const time_t value = (time_t)seconds;
+    bool result = (int64_t)value == seconds;
+    if (result)
+    {
+        result = (utc ? gmtime_r(&value, calendar) : localtime_r(&value, calendar)) != 0;
+    }
+    if (!result)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "can't convert %s to a calendar time", source);
+    }
+    else if (!pp_calendar_valid(calendar))
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "%s is outside the supported calendar range (years 0000 through 9999)", source);
+        result = false;
+    }
+    return result;
+}
+
+// __TIMESTAMP__'s text for a validated calendar: "Sat Jan  1 00:00:00 2000" (C locale).
 static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* calendar)
 {
     static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     static const char days[7][4] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-    snprintf(text, capacity, "%s %s %2d %02d:%02d:%02d %d", days[calendar->tm_wday % 7], months[calendar->tm_mon % 12], calendar->tm_mday, calendar->tm_hour,
+    snprintf(text, capacity, "%s %s %2d %02d:%02d:%02d %04d", days[calendar->tm_wday], months[calendar->tm_mon], calendar->tm_mday, calendar->tm_hour,
              calendar->tm_min, calendar->tm_sec, calendar->tm_year + 1900);
 }
 
@@ -8156,6 +8188,7 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             // macro's expansion is, the file it is expanded in), as clang does: in local time, or ??? for a file the
             // preprocessor made.
             char text[32];
+            bool valid = true;
             const PPContext* file_context = pp_current_file_context(pp);
             const PPFileData* data = file_context != 0 ? &pp->datas[file_context->data] : 0;
             if (pp->has_epoch)
@@ -8164,16 +8197,21 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             }
             else if (data != 0 && data->has_modified)
             {
-                const time_t modified = (time_t)data->modified;
                 struct tm calendar;
-                localtime_r(&modified, &calendar);
-                pp_format_timestamp(text, sizeof(text), &calendar);
+                valid = pp_calendar(pp, data->modified, false, where, "file modification time for __TIMESTAMP__", &calendar);
+                if (valid)
+                {
+                    pp_format_timestamp(text, sizeof(text), &calendar);
+                }
             }
             else
             {
                 snprintf(text, sizeof(text), "??? ??? ?? ??:??:?? ????");
             }
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)text, (uint32_t)strlen(text), flags));
+            if (valid)
+            {
+                pp_emit(pp, pp_string_token(pp, (const uint8_t*)text, (uint32_t)strlen(text), flags));
+            }
             break;
         }
         case PP_BUILTIN_PRAGMA:
@@ -13455,6 +13493,54 @@ static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t
     return result;
 }
 
+// SOURCE_DATE_EPOCH is a complete, nonnegative decimal integer. strtoll handles overflow; the first-byte and end
+// checks reject whitespace, signs, empty values and suffixes rather than silently using a partial timestamp.
+static bool pp_initialize_time(Preprocessor* pp)
+{
+    const char* epoch = getenv("SOURCE_DATE_EPOCH");
+    int64_t seconds = 0;
+    bool result;
+    if (epoch != 0)
+    {
+        char* end;
+        errno = 0;
+        const long long parsed = strtoll(epoch, &end, 10);
+        result = errno == 0 && epoch[0] >= '0' && epoch[0] <= '9' && end != epoch && *end == 0 && parsed >= 0;
+        if (result)
+        {
+            seconds = parsed;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "invalid SOURCE_DATE_EPOCH: expected a nonnegative decimal integer in range");
+        }
+    }
+    else
+    {
+        const time_t now = time(0);
+        result = now != (time_t)-1;
+        if (result)
+        {
+            seconds = (int64_t)now;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the current time for predefined macros");
+        }
+    }
+    struct tm calendar;
+    result = result && pp_calendar(pp, seconds, epoch != 0, 0, epoch != 0 ? "SOURCE_DATE_EPOCH" : "current time", &calendar);
+    if (result)
+    {
+        static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+        snprintf(pp->date, sizeof(pp->date), "%s %2d %04d", months[calendar.tm_mon], calendar.tm_mday, calendar.tm_year + 1900);
+        snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
+        pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
+        pp->has_epoch = epoch != 0;
+    }
+    return result;
+}
+
 static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
 {
     *pp = (Preprocessor){ 0 };
@@ -13661,29 +13747,16 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         }
         // __DATE__ and __TIME__ from SOURCE_DATE_EPOCH if it is set (reproducible builds), else now; __TIMESTAMP__ from
         // SOURCE_DATE_EPOCH too, else each file's modification time (pp_expand_builtin).
-        static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-        const char* epoch = getenv("SOURCE_DATE_EPOCH");
-        const time_t now = epoch != 0 ? (time_t)strtoll(epoch, 0, 10) : time(0);
-        struct tm calendar;
-        if (epoch != 0)
+        if (pp_initialize_time(pp))
         {
-            gmtime_r(&now, &calendar);
-        }
-        else
-        {
-            localtime_r(&now, &calendar);
-        }
-        snprintf(pp->date, sizeof(pp->date), "%s %2d %d", months[calendar.tm_mon % 12], calendar.tm_mday, calendar.tm_year + 1900);
-        snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
-        pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
-        pp->has_epoch = epoch != 0;
-        pp->zero_location = pp_scratch_clean(pp, (const uint8_t*)"0", 1);
-        pp->one_location = pp_scratch_clean(pp, (const uint8_t*)"1", 1);
-        pp->hash_location = pp_scratch_clean(pp, (const uint8_t*)"#", 1);
-        // The output's keyword kinds: a predefined name that is a keyword in this mode, by id (below 128).
-        for (uint32_t id = 0; id < BUSTER_PP_KEYWORD_TABLE; id += 1)
-        {
-            pp->keyword_kinds[id] = id < C_NAME_COUNT && c_name_is_keyword(id, options->language) ? (uint8_t)(BUSTER_PP_KIND_KEYWORD + id - 1) : C_TOKEN_RAW_IDENTIFIER;
+            pp->zero_location = pp_scratch_clean(pp, (const uint8_t*)"0", 1);
+            pp->one_location = pp_scratch_clean(pp, (const uint8_t*)"1", 1);
+            pp->hash_location = pp_scratch_clean(pp, (const uint8_t*)"#", 1);
+            // The output's keyword kinds: a predefined name that is a keyword in this mode, by id (below 128).
+            for (uint32_t id = 0; id < BUSTER_PP_KEYWORD_TABLE; id += 1)
+            {
+                pp->keyword_kinds[id] = id < C_NAME_COUNT && c_name_is_keyword(id, options->language) ? (uint8_t)(BUSTER_PP_KIND_KEYWORD + id - 1) : C_TOKEN_RAW_IDENTIFIER;
+            }
         }
         result = !pp->fatal;
     }

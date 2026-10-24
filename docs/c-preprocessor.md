@@ -1020,6 +1020,15 @@ for token as clang does, and compile with clang.
 `__TIMESTAMP__` is the modification time of the file being read, in local time,
 as clang's is.
 
+`SOURCE_DATE_EPOCH` must contain only decimal digits and fit a nonnegative
+signed 64-bit value; signs, whitespace, empty values and suffixes are fatal
+errors. Its time is UTC. All three macros require a successful libc calendar
+conversion and a year from 0000 through 9999, so their fixed spellings fit
+without truncation. Unrepresentable `time_t` values, a failed current-time read,
+failed calendar conversions and out-of-range calendar fields produce fatal
+preprocessor diagnostics. An invalid file modification time is diagnosed at
+the `__TIMESTAMP__` expansion; an epoch overrides that file time.
+
 `__is_identifier(x)` is 1 when `x` is an identifier that isn't a keyword in the
 language mode (`c_name_is_keyword`, with GNU's keywords as the `-f` options
 below set them), as clang answers. Its operand isn't expanded, so a macro's name
@@ -1897,7 +1906,14 @@ full-corpus reproduction and frozen CI subset.
 - **Timestamps.** `__TIMESTAMP__` in a file and in the header it includes,
   written with modification times of their own, must give each file's time in
   UTC, and `SOURCE_DATE_EPOCH`'s time when that is set, by both kernels and with
-  `--clang` by clang.
+  `--clang` by clang. Epoch zero, leading zeros, 2009 and the last second of
+  9999 also check `__DATE__` and `__TIME__`. #360's error cases check empty,
+  malformed, negative, overflowing and unconvertible epochs, including a
+  libc calendar whose year would overflow the old `tm_year + 1900` expression.
+  Injected extreme file-mtime metadata exercises real builtin expansion,
+  fatal diagnostics with source locations, no emitted token after failure,
+  and the epoch override, in both preprocessing modes. Metadata is injected
+  because file systems can clamp extreme modification times.
 - **Predefines and keywords.** The cases and files under `--clang` give our side
   clang's predefines, so `--clang` checks our built-in ones separately:
   - In ten language modes (`c89` to `gnu23`) and C94 (`iso9899:199409`, and
