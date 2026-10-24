@@ -588,6 +588,7 @@ static void foreign_driver_report(uint32_t lanes, const uint64_t* resolve, const
         "copies",
         "check",
         "exports",
+        "debug",
     };
     static const char* const write_phases[EXECUTABLE_PHASES] = {
         "count",
@@ -693,12 +694,13 @@ static int run_foreign_link(int argc, char** argv)
     ends[FOREIGN_DRIVER_STAGE_RESOLVE] = foreign_driver_now();
     if (succeeded && !driver.help)
     {
-        const ForeignLinkStartup startup = {
+        const ForeignLinkOptions options = {
             .entry = driver.entry,
             .applies_irelative = driver.startup_irelative,
+            .strip_debug = driver.strip_all || driver.strip_debug,
         };
-        ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, startup) :
-                                               foreign_link_build_kind(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, startup);
+        ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, options) :
+                                               foreign_link_build_kind(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, options);
         // The conversion's phases, before section GC replaces the link.
         memcpy(convert, converted.phase_nanoseconds, sizeof(convert));
         if (result.error == FOREIGN_LINK_ERROR_NONE && driver.gc)

@@ -8,14 +8,22 @@
 // A stream is one chain of dependent symbols, each starting where the one before ended, so a stream decompresses in
 // order; streams don't depend on each other, and a caller with several spreads them over its lanes. Within a stream:
 // a 64-bit bit buffer refilled eight bytes at a time while eight remain (the bits above its count are zero or the next
-// byte's own, so that a refill may OR a byte in twice), Huffman codes decoded through a table of their first
-// BUSTER_INFLATE_TABLE_BITS bits, a longer code (rare: lengths past 10 bits) through its canonical counts, and
-// matches copied 16 bytes at a time where the distance and the room after them allow. Every read stays within the
-// input and every write within the output. A stream that doesn't decode into exactly the output's size, ends before
-// its input's last byte, or whose Adler-32 differs is an error; a preset dictionary (FDICT) is refused.
+// byte's own, so that a refill may OR a byte in twice); Huffman codes decoded through a table of their first
+// BUSTER_INFLATE_TABLE_BITS bits whose entries hold what a symbol means (a literal's byte, or a length's or a
+// distance's base and extra bits), a longer code (rare: lengths past 11 bits) through its canonical counts; and a fast
+// loop while a refill takes eight bytes and the output has room for a longest match and a copy's overshoot, whose
+// steps check neither the buffer's count nor the output's room, then a careful one for the rest. Matches are copied 16
+// or 8 bytes at a time where the distance and the room after them allow. Every read stays within the input and every
+// write within the output. A stream that doesn't decode into exactly the output's size, ends before its input's last
+// byte, or whose Adler-32 differs is an error; a preset dictionary (FDICT) is refused.
 
-#define BUSTER_INFLATE_TABLE_BITS 10
+#define BUSTER_INFLATE_TABLE_BITS 11
 #define BUSTER_INFLATE_MAX_BITS 15
+// A table entry's kind (InflateCode).
+#define BUSTER_INFLATE_KIND_LITERAL 0u
+#define BUSTER_INFLATE_KIND_BASE 1u
+#define BUSTER_INFLATE_KIND_END 2u
+#define BUSTER_INFLATE_KIND_INVALID 3u
 
 typedef enum InflateError
 {
@@ -41,15 +49,25 @@ struct InflateBits
     uint32_t count;
 };
 
-// A Huffman code: `table` maps a code's first BUSTER_INFLATE_TABLE_BITS bits, as the stream holds them, to its symbol
-// << 4 | its length, or 0 for a longer code (or none); `counts` and `symbols` are its canonical form, the codes of
-// each length and the symbols in the codes' order, which a longer code's decoding reads.
+// What a code's symbols mean: the code length code's are themselves, the literal/length code's literals, the end of a
+// block and lengths, and the distance code's distances.
+typedef enum InflateAlphabet
+{
+    INFLATE_ALPHABET_PLAIN,
+    INFLATE_ALPHABET_LITERALS,
+    INFLATE_ALPHABET_DISTANCES,
+} InflateAlphabet;
+
+// A Huffman code: `table` maps a code's first BUSTER_INFLATE_TABLE_BITS bits, as the stream holds them, to its entry
+// (inflate_entry), or 0 for a longer code (or none); `counts` and `symbols` are its canonical form, the codes of each
+// length and the symbols in the codes' order, which a longer code's decoding reads.
 typedef struct InflateCode InflateCode;
 struct InflateCode
 {
-    uint16_t table[1u << BUSTER_INFLATE_TABLE_BITS];
+    uint32_t table[1u << BUSTER_INFLATE_TABLE_BITS];
     uint16_t counts[BUSTER_INFLATE_MAX_BITS + 1];
     uint16_t symbols[288];
+    InflateAlphabet alphabet;
 };
 
 static const uint16_t inflate_length_base[29] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
@@ -59,7 +77,23 @@ static const uint8_t inflate_distance_extra[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3
 // The order a dynamic block gives the code length code's lengths in.
 static const uint8_t inflate_length_order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
 
-// Fills the bit buffer to at least 57 bits, or with what the input has left.
+// The entry of symbol `symbol` of `alphabet`, whose code is `length` bits long: the code's length in bits 0 to 3, the
+// symbol's extra bits in 4 to 7, its kind in 8 and 9 (a literal's or a plain code's symbol, a base, the end of a
+// block, or a symbol the alphabet hasn't: 286 and 287, distances 30 and 31) and its value from bit 16 (the literal's
+// byte or the plain symbol, or the length's or the distance's base).
+static uint32_t inflate_entry(InflateAlphabet alphabet, uint32_t symbol, uint32_t length)
+{
+    const bool literal = alphabet == INFLATE_ALPHABET_PLAIN || (alphabet == INFLATE_ALPHABET_LITERALS && symbol < 256);
+    const bool end = alphabet == INFLATE_ALPHABET_LITERALS && symbol == 256;
+    const bool length_symbol = alphabet == INFLATE_ALPHABET_LITERALS && symbol > 256 && symbol - 257 < 29;
+    const bool distance = alphabet == INFLATE_ALPHABET_DISTANCES && symbol < 30;
+    const uint32_t kind = literal ? BUSTER_INFLATE_KIND_LITERAL : end ? BUSTER_INFLATE_KIND_END : length_symbol || distance ? BUSTER_INFLATE_KIND_BASE : BUSTER_INFLATE_KIND_INVALID;
+    const uint32_t extra = length_symbol ? inflate_length_extra[symbol - 257] : distance ? inflate_distance_extra[symbol] : 0;
+    const uint32_t value = literal ? symbol : length_symbol ? inflate_length_base[symbol - 257] : distance ? inflate_distance_base[symbol] : 0;
+    return value << 16 | kind << 8 | extra << 4 | length;
+}
+
+// Fills the bit buffer to at least 56 bits, or with what the input has left.
 static void inflate_refill(InflateBits* in)
 {
     if (in->end - in->next >= 8)
@@ -95,10 +129,11 @@ static bool inflate_take(InflateBits* in, uint32_t n, uint32_t* value)
     return present;
 }
 
-// A code from `lengths`, `count` of them (0 for a symbol without a code). False for an oversubscribed one; an
-// incomplete code is a code, whose missing codes fail to decode.
-static bool inflate_build(InflateCode* code, const uint8_t* lengths, uint32_t count)
+// A code of `alphabet` from `lengths`, `count` of them (0 for a symbol without a code). False for an oversubscribed one;
+// an incomplete code is a code, whose missing codes fail to decode.
+static bool inflate_build(InflateCode* code, InflateAlphabet alphabet, const uint8_t* lengths, uint32_t count)
 {
+    code->alphabet = alphabet;
     memset(code->counts, 0, sizeof(code->counts));
     for (uint32_t i = 0; i < count; i += 1)
     {
@@ -141,7 +176,7 @@ static bool inflate_build(InflateCode* code, const uint8_t* lengths, uint32_t co
             {
                 reversed |= ((value >> bit) & 1) << (length - 1 - bit);
             }
-            const uint16_t entry = (uint16_t)(code->symbols[index] << 4 | length);
+            const uint32_t entry = inflate_entry(alphabet, code->symbols[index], length);
             for (uint32_t fill = reversed; fill < (1u << BUSTER_INFLATE_TABLE_BITS); fill += 1u << length)
             {
                 code->table[fill] = entry;
@@ -154,19 +189,20 @@ static bool inflate_build(InflateCode* code, const uint8_t* lengths, uint32_t co
     return valid;
 }
 
-// The next symbol of `code`, consumed, or -1 when the input has no code of it there (or not enough bits).
-static int32_t inflate_decode(InflateBits* in, const InflateCode* code)
+// The next code of `code`, consumed, as its symbol's entry (inflate_entry), or 0 when the input has no code of it there
+// (or not enough bits).
+static uint32_t inflate_decode(InflateBits* in, const InflateCode* code)
 {
     if (in->count < BUSTER_INFLATE_MAX_BITS)
     {
         inflate_refill(in);
     }
-    const uint16_t entry = code->table[in->bits & ((1u << BUSTER_INFLATE_TABLE_BITS) - 1)];
+    const uint32_t entry = code->table[in->bits & ((1u << BUSTER_INFLATE_TABLE_BITS) - 1)];
     const uint32_t length = entry & 15;
-    int32_t result = -1;
+    uint32_t result = 0;
     if (entry != 0 && length <= in->count)
     {
-        result = entry >> 4;
+        result = entry;
         in->bits >>= length;
         in->count -= length;
     }
@@ -177,13 +213,13 @@ static int32_t inflate_decode(InflateBits* in, const InflateCode* code)
         int32_t value = 0;
         int32_t first = 0;
         int32_t index = 0;
-        for (uint32_t bits = 1; result < 0 && bits <= BUSTER_INFLATE_MAX_BITS && bits <= in->count; bits += 1)
+        for (uint32_t bits = 1; result == 0 && bits <= BUSTER_INFLATE_MAX_BITS && bits <= in->count; bits += 1)
         {
             value |= (int32_t)((in->bits >> (bits - 1)) & 1);
             const int32_t count = code->counts[bits];
             if (value - count < first)
             {
-                result = code->symbols[index + (value - first)];
+                result = inflate_entry(code->alphabet, code->symbols[index + (value - first)], bits);
                 in->bits >>= bits;
                 in->count -= bits;
             }
@@ -195,17 +231,35 @@ static int32_t inflate_decode(InflateBits* in, const InflateCode* code)
     return result;
 }
 
-// Copies a match of `length` bytes from `distance` bytes back to `output + at`: 16 bytes at a time where the match
+// An entry's extra bits, consumed from a buffer that holds them, added to its base.
+static uint32_t inflate_extra(InflateBits* in, uint32_t entry)
+{
+    const uint32_t extra = (entry >> 4) & 15;
+    const uint32_t result = (entry >> 16) + (uint32_t)(in->bits & ((1u << extra) - 1));
+    in->bits >>= extra;
+    in->count -= extra;
+    return result;
+}
+
+// Copies a match of `length` bytes from `distance` bytes back to `output + at`: 16 or 8 bytes at a time where the match
 // doesn't overlap within a step and the output has room for a step's overshoot, which later bytes overwrite.
 static void inflate_copy(uint8_t* output, uint64_t at, uint64_t size, uint32_t length, uint32_t distance)
 {
     uint8_t* to = output + at;
     const uint8_t* from = to - distance;
-    if (distance >= 16 && at + length + 16 <= size)
+    const uint32_t step = distance >= 16 && at + length + 16 <= size ? 16 : distance >= 8 && at + length + 8 <= size ? 8 : 1;
+    if (step == 16)
     {
         for (uint32_t done = 0; done < length; done += 16)
         {
             memcpy(to + done, from + done, 16);
+        }
+    }
+    else if (step == 8)
+    {
+        for (uint32_t done = 0; done < length; done += 8)
+        {
+            memcpy(to + done, from + done, 8);
         }
     }
     else
@@ -225,9 +279,9 @@ static void inflate_fixed(InflateCode* literals, InflateCode* distances)
     memset(lengths + 144, 9, 112);
     memset(lengths + 256, 7, 24);
     memset(lengths + 280, 8, 8);
-    inflate_build(literals, lengths, 288);
+    inflate_build(literals, INFLATE_ALPHABET_LITERALS, lengths, 288);
     memset(lengths, 5, 30);
-    inflate_build(distances, lengths, 30);
+    inflate_build(distances, INFLATE_ALPHABET_DISTANCES, lengths, 30);
 }
 
 // A dynamic block's codes, from its header.
@@ -250,17 +304,18 @@ static InflateError inflate_dynamic(InflateBits* in, InflateCode* literals, Infl
         ordered[inflate_length_order[i]] = (uint8_t)length;
     }
     InflateCode* code_lengths = literals;
-    error = error == INFLATE_ERROR_NONE && !inflate_build(code_lengths, ordered, 19) ? INFLATE_ERROR_DATA : error;
+    error = error == INFLATE_ERROR_NONE && !inflate_build(code_lengths, INFLATE_ALPHABET_PLAIN, ordered, 19) ? INFLATE_ERROR_DATA : error;
     uint8_t lengths[286 + 30] = { 0 };
     // The literal/length and distance codes' lengths, one run: a repeat may cross from one into the other.
     uint32_t filled = 0;
     while (error == INFLATE_ERROR_NONE && filled < literal_count + distance_count)
     {
-        const int32_t symbol = inflate_decode(in, code_lengths);
+        const uint32_t entry = inflate_decode(in, code_lengths);
+        const uint32_t symbol = entry >> 16;
         uint32_t extra = 0;
         uint32_t repeat = 0;
         uint8_t value = 0;
-        if (symbol < 0)
+        if (entry == 0)
         {
             error = INFLATE_ERROR_DATA;
         }
@@ -290,8 +345,8 @@ static InflateError inflate_dynamic(InflateBits* in, InflateCode* literals, Infl
     }
     // A block must be able to end.
     error = error == INFLATE_ERROR_NONE && lengths[256] == 0 ? INFLATE_ERROR_DATA : error;
-    error = error == INFLATE_ERROR_NONE && !inflate_build(literals, lengths, literal_count) ? INFLATE_ERROR_DATA : error;
-    error = error == INFLATE_ERROR_NONE && !inflate_build(distances, lengths + literal_count, distance_count) ? INFLATE_ERROR_DATA : error;
+    error = error == INFLATE_ERROR_NONE && !inflate_build(literals, INFLATE_ALPHABET_LITERALS, lengths, literal_count) ? INFLATE_ERROR_DATA : error;
+    error = error == INFLATE_ERROR_NONE && !inflate_build(distances, INFLATE_ALPHABET_DISTANCES, lengths + literal_count, distance_count) ? INFLATE_ERROR_DATA : error;
     return error;
 }
 
@@ -333,38 +388,68 @@ static InflateError inflate_symbols(InflateBits* in, const InflateCode* literals
 {
     InflateError error = INFLATE_ERROR_NONE;
     bool ended = false;
+    // The fast loop: a refilled buffer (56 bits or more) holds a literal/length code and its extra bits (20 bits at
+    // most) and a distance code and its (28), and the output has room for any match and a copy's overshoot.
+    while (error == INFLATE_ERROR_NONE && !ended && in->end - in->next >= 8 && size - *at >= 258 + 16)
+    {
+        inflate_refill(in);
+        const uint32_t entry = inflate_decode(in, literals);
+        const uint32_t kind = (entry >> 8) & 3;
+        if (entry != 0 && kind == BUSTER_INFLATE_KIND_LITERAL)
+        {
+            output[*at] = (uint8_t)(entry >> 16);
+            *at += 1;
+        }
+        else if (entry != 0 && kind == BUSTER_INFLATE_KIND_BASE)
+        {
+            const uint32_t length = inflate_extra(in, entry);
+            const uint32_t place = inflate_decode(in, distances);
+            const uint32_t distance = inflate_extra(in, place);
+            error = place == 0 || ((place >> 8) & 3) != BUSTER_INFLATE_KIND_BASE || distance > *at ? INFLATE_ERROR_DATA : INFLATE_ERROR_NONE;
+            if (error == INFLATE_ERROR_NONE)
+            {
+                inflate_copy(output, *at, size, length, distance);
+                *at += length;
+            }
+        }
+        else
+        {
+            ended = entry != 0 && kind == BUSTER_INFLATE_KIND_END;
+            error = ended ? INFLATE_ERROR_NONE : INFLATE_ERROR_DATA;
+        }
+    }
+    // The careful loop: each code's bits and the output's room checked.
     while (error == INFLATE_ERROR_NONE && !ended)
     {
-        const int32_t symbol = inflate_decode(in, literals);
-        if (symbol < 0)
+        const uint32_t entry = inflate_decode(in, literals);
+        const uint32_t kind = (entry >> 8) & 3;
+        if (entry == 0 || kind == BUSTER_INFLATE_KIND_INVALID)
         {
             error = INFLATE_ERROR_DATA;
         }
-        else if (symbol < 256)
+        else if (kind == BUSTER_INFLATE_KIND_LITERAL)
         {
             error = *at < size ? INFLATE_ERROR_NONE : INFLATE_ERROR_SIZE;
             if (error == INFLATE_ERROR_NONE)
             {
-                output[*at] = (uint8_t)symbol;
+                output[*at] = (uint8_t)(entry >> 16);
                 *at += 1;
             }
         }
-        else if (symbol == 256)
+        else if (kind == BUSTER_INFLATE_KIND_END)
         {
             ended = true;
         }
         else
         {
-            const uint32_t length_symbol = (uint32_t)symbol - 257;
             uint32_t length_extra = 0;
             uint32_t distance_extra = 0;
-            error = length_symbol >= 29 ? INFLATE_ERROR_DATA : INFLATE_ERROR_NONE;
-            error = error == INFLATE_ERROR_NONE && !inflate_take(in, inflate_length_extra[length_symbol], &length_extra) ? INFLATE_ERROR_TRUNCATED : error;
-            const int32_t distance_symbol = error == INFLATE_ERROR_NONE ? inflate_decode(in, distances) : 0;
-            error = error == INFLATE_ERROR_NONE && (distance_symbol < 0 || distance_symbol >= 30) ? INFLATE_ERROR_DATA : error;
-            error = error == INFLATE_ERROR_NONE && !inflate_take(in, inflate_distance_extra[distance_symbol], &distance_extra) ? INFLATE_ERROR_TRUNCATED : error;
-            const uint32_t length = error == INFLATE_ERROR_NONE ? inflate_length_base[length_symbol] + length_extra : 0;
-            const uint32_t distance = error == INFLATE_ERROR_NONE ? inflate_distance_base[distance_symbol] + distance_extra : 0;
+            error = !inflate_take(in, (entry >> 4) & 15, &length_extra) ? INFLATE_ERROR_TRUNCATED : INFLATE_ERROR_NONE;
+            const uint32_t place = error == INFLATE_ERROR_NONE ? inflate_decode(in, distances) : 0;
+            error = error == INFLATE_ERROR_NONE && (place == 0 || ((place >> 8) & 3) != BUSTER_INFLATE_KIND_BASE) ? INFLATE_ERROR_DATA : error;
+            error = error == INFLATE_ERROR_NONE && !inflate_take(in, (place >> 4) & 15, &distance_extra) ? INFLATE_ERROR_TRUNCATED : error;
+            const uint32_t length = (entry >> 16) + length_extra;
+            const uint32_t distance = (place >> 16) + distance_extra;
             error = error == INFLATE_ERROR_NONE && distance > *at ? INFLATE_ERROR_DATA : error;
             error = error == INFLATE_ERROR_NONE && length > size - *at ? INFLATE_ERROR_SIZE : error;
             if (error == INFLATE_ERROR_NONE)

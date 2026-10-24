@@ -20,9 +20,13 @@
 // for the same inputs, but where lld merges .debug_str's and .debug_line_str's strings: their offsets differ, and the
 // sections are larger.
 //
-// Two passes over the objects in input order: each debug section's place in its output section, then its bytes and
-// relocations, which lane 0 takes on the lane path too: a program's debug sections are a few contributions per
-// object, copied once (or decompressed). foreign_link.c includes this file.
+// A plan, then two passes: the plan (foreign_debug_plan, on the calling thread or lane 0) places each debug section in
+// its output section in input order, and lists the contributions and the relocation sections; the bytes pass copies or
+// decompresses each contribution, and the relocations pass applies each relocation section's, each into its records'
+// own range, which the end compacts in their order (foreign_debug_finish). On the lane path the lanes take each pass's
+// items costliest first (a section of a program like SQLite takes milliseconds to decompress, and one object's
+// sections are as many streams), with a sync between the passes; the calling thread takes them in order. Either way the
+// same bytes and records come out, and the first failure in the items' order. foreign_link.c includes this file.
 
 // The debug section kind of a section's name (its ExecutableDebugSections index), or BUSTER_EXECUTABLE_DEBUG_KINDS for
 // another name.
@@ -171,36 +175,108 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignLink* output, const
     return result;
 }
 
-// The selected objects' debug sections into output->debug (see the file's comment), in the order of `order` (input
-// order), from `arena`. Returns the first failure.
-static ForeignLinkResult foreign_debug_build(ForeignLink* output, const Foreign* foreign, const uint32_t* order, Arena* arena)
+// The plan of the debug sections' build: each kept section's contribution, which the bytes pass copies or decompresses
+// into its place, and each relocation section that relocates one, which the relocations pass applies into its records'
+// own range of the relocations' room (as many as its entries), compacted in their order at the end; with the output
+// sections and each item's cost (its bytes, or its entries), by which the lanes take the items, costliest first.
+typedef struct ForeignDebugContribution ForeignDebugContribution;
+struct ForeignDebugContribution
+{
+    uint32_t object;
+    uint32_t section;
+    uint32_t kind;
+    uint64_t base;
+    uint64_t size;
+};
+
+typedef struct ForeignDebugRelocations ForeignDebugRelocations;
+struct ForeignDebugRelocations
+{
+    uint32_t object;
+    uint32_t section;
+    uint32_t target;
+    uint32_t kind;
+    uint64_t base;
+    uint64_t size;
+    uint64_t first;
+    uint64_t count;
+};
+
+typedef struct ForeignDebugPlan ForeignDebugPlan;
+struct ForeignDebugPlan
+{
+    ForeignDebugContribution* contributions;
+    uint32_t contribution_count;
+    ForeignDebugRelocations* relocations;
+    uint32_t relocation_count;
+    // The items of each pass, costliest first.
+    uint32_t* contribution_order;
+    uint32_t* relocation_order;
+    // Each object's sections' places in their kinds' output sections (UINT64_MAX for one that isn't a kept debug
+    // section), for the objects with debug sections.
+    uint64_t** bases;
+    uint8_t* bytes[BUSTER_EXECUTABLE_DEBUG_KINDS];
+    uint64_t sizes[BUSTER_EXECUTABLE_DEBUG_KINDS];
+    ExecutableDebugRelocation* records;
+    // Each item's failure, which the first in the items' order is reported of.
+    ForeignLinkResult* contribution_results;
+    ForeignLinkResult* relocation_results;
+};
+
+// An item and its cost, which the passes' orders are sorted by: costliest first, then by the item.
+typedef struct ForeignDebugCost ForeignDebugCost;
+struct ForeignDebugCost
+{
+    uint64_t cost;
+    uint32_t item;
+};
+
+static int foreign_debug_compare_costs(const void* a, const void* b)
+{
+    const ForeignDebugCost* left = a;
+    const ForeignDebugCost* right = b;
+    return left->cost != right->cost ? (left->cost < right->cost ? 1 : -1) : (left->item > right->item) - (left->item < right->item);
+}
+
+// An order of `count` items, costliest first, from their costs.
+static void foreign_debug_order(uint32_t* order, ForeignDebugCost* costs, uint32_t count)
+{
+    qsort(costs, count, sizeof(ForeignDebugCost), foreign_debug_compare_costs);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        order[i] = costs[i].item;
+    }
+}
+
+// The plan of the selected objects' debug sections (ForeignDebugPlan), in the order of `order` (input order), from
+// `arena`: the sizing pass. Returns the first failure.
+static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreign* foreign, const uint32_t* order, Arena* arena)
 {
     ForeignLinkResult result = { 0 };
-    output->debug = (ExecutableDebugSections){ 0 };
-    uint64_t sizes[BUSTER_EXECUTABLE_DEBUG_KINDS] = { 0 };
+    *plan = (ForeignDebugPlan){ 0 };
     uint64_t relocation_capacity = 0;
-    // Each object's sections' places, for the objects with debug sections: counted in the first pass, which also sizes
-    // the output sections and the relocations' room.
-    uint64_t** bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t*, foreign->object_count);
-    result.error = bases != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+    uint32_t contribution_capacity = 0;
+    uint32_t relocation_section_capacity = 0;
+    plan->bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t*, foreign->object_count);
+    result.error = plan->bases != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
     for (uint32_t at = 0; result.error == FOREIGN_LINK_ERROR_NONE && at < foreign->object_count; at += 1)
     {
         const uint32_t id = order[at];
         const ForeignObject* input = &foreign->objects[id];
-        bases[id] = 0;
+        plan->bases[id] = 0;
         for (uint32_t section = 1; id != 0 && input->library == 0 && result.error == FOREIGN_LINK_ERROR_NONE && section < input->elf.section_count; section += 1)
         {
             uint32_t kind = 0;
             if (foreign_debug_section(input, section, &kind))
             {
                 const Elf64_Shdr header = import_section_header(&input->elf, section);
-                if (bases[id] == 0)
+                if (plan->bases[id] == 0)
                 {
-                    bases[id] = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, input->elf.section_count);
-                    result.error = bases[id] != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
-                    for (uint32_t s = 0; bases[id] != 0 && s < input->elf.section_count; s += 1)
+                    plan->bases[id] = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, input->elf.section_count);
+                    result.error = plan->bases[id] != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+                    for (uint32_t s = 0; plan->bases[id] != 0 && s < input->elf.section_count; s += 1)
                     {
-                        bases[id][s] = UINT64_MAX;
+                        plan->bases[id][s] = UINT64_MAX;
                     }
                 }
                 uint64_t size = 0;
@@ -219,88 +295,216 @@ static ForeignLinkResult foreign_debug_build(ForeignLink* output, const Foreign*
                 else if (result.error == FOREIGN_LINK_ERROR_NONE)
                 {
                     // Past DWARF32's reach, the output section's size check below refuses it.
-                    const uint64_t place = (sizes[kind] + alignment - 1) & ~(alignment - 1);
-                    bases[id][section] = place;
-                    sizes[kind] = size < 0xfffffff0u ? place + size : 0xfffffff0u;
+                    const uint64_t place = (plan->sizes[kind] + alignment - 1) & ~(alignment - 1);
+                    plan->bases[id][section] = place;
+                    plan->sizes[kind] = size < 0xfffffff0u ? place + size : 0xfffffff0u;
+                    contribution_capacity += 1;
                 }
             }
         }
-        for (uint32_t r = 0; bases[id] != 0 && result.error == FOREIGN_LINK_ERROR_NONE && r < input->relocation_count; r += 1)
+        for (uint32_t r = 0; plan->bases[id] != 0 && result.error == FOREIGN_LINK_ERROR_NONE && r < input->relocation_count; r += 1)
         {
             const Elf64_Shdr header = import_section_header(&input->elf, input->relocations[r]);
-            relocation_capacity += header.sh_info < input->elf.section_count && bases[id][header.sh_info] != UINT64_MAX ? header.sh_size / sizeof(Elf64_Rela) : 0;
+            const bool relocates = header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX;
+            relocation_capacity += relocates ? header.sh_size / sizeof(Elf64_Rela) : 0;
+            relocation_section_capacity += relocates ? 1 : 0;
         }
     }
-    uint8_t* bytes[BUSTER_EXECUTABLE_DEBUG_KINDS] = { 0 };
     for (uint32_t kind = 0; result.error == FOREIGN_LINK_ERROR_NONE && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
     {
         // DWARF32's offsets reach the first 4 GB of a section.
-        result.error = sizes[kind] >= 0xfffffff0u ? FOREIGN_LINK_ERROR_CAPACITY : FOREIGN_LINK_ERROR_NONE;
-        bytes[kind] = result.error == FOREIGN_LINK_ERROR_NONE && sizes[kind] != 0 ? arena_push(arena, sizes[kind], 8) : 0;
-        result.error = result.error == FOREIGN_LINK_ERROR_NONE && sizes[kind] != 0 && bytes[kind] == 0 ? FOREIGN_LINK_ERROR_MEMORY : result.error;
-        if (bytes[kind] != 0)
+        result.error = plan->sizes[kind] >= 0xfffffff0u ? FOREIGN_LINK_ERROR_CAPACITY : FOREIGN_LINK_ERROR_NONE;
+        plan->bytes[kind] = result.error == FOREIGN_LINK_ERROR_NONE && plan->sizes[kind] != 0 ? arena_push(arena, plan->sizes[kind], 8) : 0;
+        result.error = result.error == FOREIGN_LINK_ERROR_NONE && plan->sizes[kind] != 0 && plan->bytes[kind] == 0 ? FOREIGN_LINK_ERROR_MEMORY : result.error;
+        if (plan->bytes[kind] != 0)
         {
             // The padding between contributions.
-            memset(bytes[kind], 0, sizes[kind]);
+            memset(plan->bytes[kind], 0, plan->sizes[kind]);
         }
     }
-    ExecutableDebugRelocation* relocations = result.error == FOREIGN_LINK_ERROR_NONE && relocation_capacity != 0 ?
-                                                 BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableDebugRelocation, relocation_capacity) : 0;
-    result.error = result.error == FOREIGN_LINK_ERROR_NONE && relocation_capacity != 0 && relocations == 0 ? FOREIGN_LINK_ERROR_MEMORY : result.error;
-    uint64_t count = 0;
+    const uint64_t items = (uint64_t)contribution_capacity + relocation_section_capacity + 1;
+    plan->contributions = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugContribution, (uint64_t)contribution_capacity + 1) : 0;
+    plan->relocations = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugRelocations, (uint64_t)relocation_section_capacity + 1) : 0;
+    plan->contribution_order = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)contribution_capacity + 1) : 0;
+    plan->relocation_order = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)relocation_section_capacity + 1) : 0;
+    ForeignDebugCost* costs = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugCost, items) : 0;
+    plan->contribution_results = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignLinkResult, (uint64_t)contribution_capacity + 1) : 0;
+    plan->relocation_results = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignLinkResult, (uint64_t)relocation_section_capacity + 1) : 0;
+    plan->records = result.error == FOREIGN_LINK_ERROR_NONE && relocation_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableDebugRelocation, relocation_capacity) : 0;
+    const bool allocated = plan->contributions != 0 && plan->relocations != 0 && plan->contribution_order != 0 && plan->relocation_order != 0 && costs != 0 &&
+                           plan->contribution_results != 0 && plan->relocation_results != 0 && (relocation_capacity == 0 || plan->records != 0);
+    result.error = result.error == FOREIGN_LINK_ERROR_NONE && !allocated ? FOREIGN_LINK_ERROR_MEMORY : result.error;
+    // The items, in the objects' order.
+    uint64_t first = 0;
     for (uint32_t at = 0; result.error == FOREIGN_LINK_ERROR_NONE && at < foreign->object_count; at += 1)
     {
         const uint32_t id = order[at];
         const ForeignObject* input = &foreign->objects[id];
-        for (uint32_t section = 1; bases[id] != 0 && section < input->elf.section_count; section += 1)
+        for (uint32_t section = 1; plan->bases[id] != 0 && section < input->elf.section_count; section += 1)
         {
             uint32_t kind = 0;
-            if (result.error == FOREIGN_LINK_ERROR_NONE && bases[id][section] != UINT64_MAX && foreign_debug_section(input, section, &kind))
+            if (plan->bases[id][section] != UINT64_MAX && foreign_debug_section(input, section, &kind))
             {
                 const Elf64_Shdr header = import_section_header(&input->elf, section);
                 uint64_t size = 0;
                 uint64_t alignment = 0;
                 String8 stream = { 0 };
                 foreign_debug_extent(input, &header, &size, &alignment, &stream);
-                if ((header.sh_flags & SHF_COMPRESSED) == 0)
-                {
-                    const String8 contents = import_section_bytes(&input->elf, &header);
-                    memcpy(bytes[kind] + bases[id][section], contents.pointer, contents.length);
-                }
-                else if (inflate_zlib((const uint8_t*)stream.pointer, stream.length, bytes[kind] + bases[id][section], size) != INFLATE_ERROR_NONE)
-                {
-                    result.error = FOREIGN_LINK_ERROR_COMPRESSION;
-                    result.object = id;
-                    result.import = import_fail(IMPORT_ERROR_FORMAT, header.sh_offset);
-                    result.import.section = section;
-                    result.import.type = header.sh_type;
-                }
+                const uint32_t item = plan->contribution_count;
+                plan->contributions[item] = (ForeignDebugContribution){ .object = id, .section = section, .kind = kind, .base = plan->bases[id][section], .size = size };
+                // Decompressing costs about four times copying.
+                costs[item] = (ForeignDebugCost){ .cost = (header.sh_flags & SHF_COMPRESSED) != 0 ? 4 * size : size, .item = item };
+                plan->contribution_results[item] = (ForeignLinkResult){ 0 };
+                plan->contribution_count += 1;
             }
         }
-        for (uint32_t r = 0; bases[id] != 0 && result.error == FOREIGN_LINK_ERROR_NONE && r < input->relocation_count; r += 1)
+        for (uint32_t r = 0; plan->bases[id] != 0 && r < input->relocation_count; r += 1)
         {
             const Elf64_Shdr header = import_section_header(&input->elf, input->relocations[r]);
             uint32_t kind = 0;
-            if (header.sh_info < input->elf.section_count && bases[id][header.sh_info] != UINT64_MAX && foreign_debug_section(input, header.sh_info, &kind))
+            if (header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX && foreign_debug_section(input, header.sh_info, &kind))
             {
                 const Elf64_Shdr target = import_section_header(&input->elf, header.sh_info);
-                const uint64_t base = bases[id][header.sh_info];
                 uint64_t size = 0;
                 uint64_t alignment = 0;
                 String8 stream = { 0 };
                 foreign_debug_extent(input, &target, &size, &alignment, &stream);
-                result = foreign_debug_relocate(output, input, id, input->relocations[r], kind, base, bytes[kind] + base, size, bases[id], relocations, &count);
+                const uint32_t item = plan->relocation_count;
+                const uint64_t entries = header.sh_size / sizeof(Elf64_Rela);
+                plan->relocations[item] = (ForeignDebugRelocations){
+                    .object = id,
+                    .section = input->relocations[r],
+                    .target = header.sh_info,
+                    .kind = kind,
+                    .base = plan->bases[id][header.sh_info],
+                    .size = size,
+                    .first = first,
+                };
+                costs[contribution_capacity + item] = (ForeignDebugCost){ .cost = entries, .item = item };
+                plan->relocation_results[item] = (ForeignLinkResult){ 0 };
+                plan->relocation_count += 1;
+                first += entries;
             }
         }
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
-        for (uint32_t kind = 0; kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
-        {
-            output->debug.sections[kind] = (String8){ .pointer = (char*)bytes[kind], .length = sizes[kind] };
-        }
-        output->debug.relocations = relocations;
-        output->debug.relocation_count = count;
+        foreign_debug_order(plan->contribution_order, costs, plan->contribution_count);
+        foreign_debug_order(plan->relocation_order, costs + contribution_capacity, plan->relocation_count);
     }
     return result;
+}
+
+// Contribution `item`'s bytes into its place: copied, or decompressed.
+static void foreign_debug_contribute(ForeignDebugPlan* plan, const Foreign* foreign, uint32_t item)
+{
+    const ForeignDebugContribution* contribution = &plan->contributions[item];
+    const ForeignObject* input = &foreign->objects[contribution->object];
+    const Elf64_Shdr header = import_section_header(&input->elf, contribution->section);
+    uint64_t size = 0;
+    uint64_t alignment = 0;
+    String8 stream = { 0 };
+    foreign_debug_extent(input, &header, &size, &alignment, &stream);
+    uint8_t* place = plan->bytes[contribution->kind] + contribution->base;
+    if ((header.sh_flags & SHF_COMPRESSED) == 0)
+    {
+        const String8 contents = import_section_bytes(&input->elf, &header);
+        memcpy(place, contents.pointer, contents.length);
+    }
+    else if (inflate_zlib((const uint8_t*)stream.pointer, stream.length, place, size) != INFLATE_ERROR_NONE)
+    {
+        ForeignLinkResult* result = &plan->contribution_results[item];
+        result->error = FOREIGN_LINK_ERROR_COMPRESSION;
+        result->object = contribution->object;
+        result->import = import_fail(IMPORT_ERROR_FORMAT, header.sh_offset);
+        result->import.section = contribution->section;
+        result->import.type = header.sh_type;
+    }
+}
+
+// Relocation section `item`'s relocations, into its records' range.
+static void foreign_debug_relocation_section(ForeignDebugPlan* plan, const ForeignLink* output, const Foreign* foreign, uint32_t item)
+{
+    ForeignDebugRelocations* relocations = &plan->relocations[item];
+    const ForeignObject* input = &foreign->objects[relocations->object];
+    uint64_t count = 0;
+    plan->relocation_results[item] = foreign_debug_relocate(output, input, relocations->object, relocations->section, relocations->kind, relocations->base,
+                                                            plan->bytes[relocations->kind] + relocations->base, relocations->size, plan->bases[relocations->object],
+                                                            plan->records + relocations->first, &count);
+    relocations->count = count;
+}
+
+// The first of a pass's failures, in its items' order.
+static ForeignLinkResult foreign_debug_first_failure(const ForeignLinkResult* results, uint32_t count)
+{
+    ForeignLinkResult result = { 0 };
+    for (uint32_t i = 0; result.error == FOREIGN_LINK_ERROR_NONE && i < count; i += 1)
+    {
+        result = results[i];
+    }
+    return result;
+}
+
+// The build's output: the relocations' records compacted, each relocation section's after the one before, and the
+// sections.
+static void foreign_debug_finish(ForeignDebugPlan* plan, ForeignLink* output)
+{
+    uint64_t count = 0;
+    for (uint32_t item = 0; item < plan->relocation_count; item += 1)
+    {
+        const ForeignDebugRelocations* relocations = &plan->relocations[item];
+        if (count != relocations->first && relocations->count != 0)
+        {
+            memmove(plan->records + count, plan->records + relocations->first, relocations->count * sizeof(ExecutableDebugRelocation));
+        }
+        count += relocations->count;
+    }
+    for (uint32_t kind = 0; kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
+    {
+        output->debug.sections[kind] = (String8){ .pointer = (char*)plan->bytes[kind], .length = plan->sizes[kind] };
+    }
+    output->debug.relocations = plan->records;
+    output->debug.relocation_count = count;
+}
+
+// The selected objects' debug sections into output->debug (see the file's comment), in the order of `order` (input
+// order), from `arena`, on the calling thread. Returns the first failure.
+static ForeignLinkResult foreign_debug_build(ForeignLink* output, const Foreign* foreign, const uint32_t* order, Arena* arena)
+{
+    ForeignDebugPlan plan;
+    output->debug = (ExecutableDebugSections){ 0 };
+    ForeignLinkResult result = foreign_debug_plan(&plan, foreign, order, arena);
+    for (uint32_t item = 0; result.error == FOREIGN_LINK_ERROR_NONE && item < plan.contribution_count; item += 1)
+    {
+        foreign_debug_contribute(&plan, foreign, item);
+        result = plan.contribution_results[item];
+    }
+    for (uint32_t item = 0; result.error == FOREIGN_LINK_ERROR_NONE && item < plan.relocation_count; item += 1)
+    {
+        foreign_debug_relocation_section(&plan, output, foreign, item);
+        result = plan.relocation_results[item];
+    }
+    if (result.error == FOREIGN_LINK_ERROR_NONE)
+    {
+        foreign_debug_finish(&plan, output);
+    }
+    return result;
+}
+
+// A lane's part of the bytes pass: the contributions it takes, costliest first.
+static void foreign_debug_contribute_lanes(ForeignDebugPlan* plan, const Foreign* foreign)
+{
+    for (uint64_t taken = lane_take(plan->contribution_count); taken < plan->contribution_count; taken = lane_take(plan->contribution_count))
+    {
+        foreign_debug_contribute(plan, foreign, plan->contribution_order[taken]);
+    }
+}
+
+// A lane's part of the relocations pass.
+static void foreign_debug_relocate_lanes(ForeignDebugPlan* plan, const ForeignLink* output, const Foreign* foreign)
+{
+    for (uint64_t taken = lane_take(plan->relocation_count); taken < plan->relocation_count; taken = lane_take(plan->relocation_count))
+    {
+        foreign_debug_relocation_section(plan, output, foreign, plan->relocation_order[taken]);
+    }
 }
