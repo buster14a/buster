@@ -553,6 +553,29 @@ macro's expansion, an argument being expanded, or a directive's line):
   copied to the output directly, the commonest expansion (a constant: 28,197 of
   `sqlite3.c`'s 31,587). Any other is built in a buffer and pushed as a context,
   with the macro disabled until that context is popped.
+- **A file's text** (#117's budget). When nothing would take a file's tokens
+  elsewhere or count them (no capture, stream, limit, poisoned name, pending
+  flags, `-E` markers or raw-string error), `pp_step_file` copies a run with
+  `pp_copy_file_text_vector`. It writes an object-like macro whose body is one
+  token that names no macro in the name's place in the run's block, and goes on
+  (`sqlite3.c`'s 12,431 of 13,197 such expansions in its text), with the
+  record, history and statistics `pp_expand_file_direct` would leave. At any
+  other name the run stops, and the step tries `pp_expand_file_direct` (a body
+  that names no macro and has no `##`, written into the target), then
+  `pp_invoke_file` (below), then `pp_expand_current`, and goes on with the
+  next run without going back to the main loop.
+- **Simple invocations.** A macro whose body has only tokens and parameters is
+  `BUSTER_PP_MACRO_SIMPLE`. An invocation of one, given as many arguments as it
+  has parameters, none of the used ones naming an enabled macro, is finished at
+  once (`pp_finish_simple`), without the invocation stack. When every name in
+  its expansion is a disabled macro's (painted) or one `pp_expand_file_direct`
+  would write, `pp_emit_simple` writes the expansion into the output, its body's
+  runs and arguments 64 tokens at a time. It leaves the history, statistics and
+  state that the substitution, its buffer, the buffer's steps and its pop would
+  leave. In a file's text, `pp_invoke_file` finds the arguments in the file's
+  tokens (`pp_scan_arguments`) and writes them from there, never copying them
+  into `pp->arguments`. Everything is checked before anything changes, and an
+  invocation that isn't simple goes to `pp_expand_current`.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
@@ -622,6 +645,14 @@ arenas. Popping a context gives its tokens back when they are on top.
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
   with clang's values (unsigned with `-funsigned-char`: "The `-f` options").
+  A line is copied to `pp->arguments` (64 tokens at a time, but for a line of
+  up to three) and expanded through a barrier and a capture. A line whose
+  expansion would only write its tokens into the capture is expanded straight
+  into it by `pp_condition_direct`, with the records and statistics the
+  capture's steps leave. Such a line holds only tokens but names, `defined`
+  with its operand, names of no macro, and names of object-like macros that
+  expand, through bodies of one token each, to a number or a name of no macro.
+  That is `sqlite3.c`'s 1,409 lines of 1,737.
 - **The conditionals' structure** is reported as clang reports it: `#else` and
   `#elif` after `#else`, a directive without `#if` and a group left open, also
   where a skip passes over them (the notes above), and in an included file as
@@ -2212,6 +2243,81 @@ token), the intern table, and the unused part of each arena's last huge page.
 In a process that preprocesses many translation units (#152), that memory is
 cleared once and reused.
 
+## The main loop against #117's budget
+
+#115 budgets 2 ms for `sqlite3.c`'s directive tables and main loop on the 9700X.
+The 2026-10-23 acceptance measured 0.301 and 6.846 ms. The fast paths in "The
+main loop" and "Directives and `#if`" took the main loop down. The figures are
+`benchmark-preprocessor --only vectorized` on the frozen inputs. Main and the
+fast paths ran by turns, four rounds on `sqlite3.c` and three on `main.c`, 21
+passes each, and a range is the rounds' medians ([the record](https://github.com/buster14a/buster-performance/blob/e8843e0b1b07c28159456041779c34a404effe89/docs/measurements/preprocessor-main-loop-117-2026-10-25/README.md)):
+
+| `sqlite3.c` | Whole run | Directive tables | Main loop/setup | Instructions/input token |
+| --- | ---: | ---: | ---: | ---: |
+| main at `d0a61b8` | 11.630-11.700 ms | 0.307-0.310 ms | 6.728-6.798 ms | 134.93 |
+| with the fast paths, `59f805c` | 10.603-10.654 ms | 0.296-0.298 ms | 5.797-5.827 ms | 118.73 |
+
+| `main.c` (frozen at `635434f2`) | Whole run | Directive tables | Main loop/setup | Instructions/input token |
+| --- | ---: | ---: | ---: | ---: |
+| main at `d0a61b8` | 35.176-35.318 ms | 0.281-0.282 ms | 26.209-26.409 ms | 334.03 |
+| with the fast paths, `59f805c` | 34.370-34.732 ms | 0.273-0.277 ms | 25.497-25.821 ms | 326.02 |
+
+The budget isn't met. Where the main loop's time goes on the 9700X. History is
+measured with `--history-cost`; the rest comes from a DWARF call-graph profile
+of the run on CPU 2 and a counting build's census:
+
+- **History: 0.78 ms (13%)**. That is 10.3 million of the run's 148 million
+  instructions, from about 331,000 operations of about 33 instructions each:
+  - 55,500 expansion records;
+  - 40,000 substitutions;
+  - 98,000 origin fills;
+  - 37,700 origin copies;
+  - 74,700 changes of output runs.
+
+  Leaner versions of those operations added 2.7 million instructions:
+  - a one-token fill inline;
+  - runs found 16 origins at a time;
+  - copies without `memmove`;
+  - two changes at once.
+
+  The cost is the number of operations.
+- **Function-like invocations: about 1.85 ms.** Of 21,744 per run:
+  - 8,089 are simple ones in a file's text (`pp_invoke_file`);
+  - 6,604 are simple ones collected first;
+  - 7,051 are general ones.
+
+  The most frequent are:
+  - `assert`, 5,438 of them, whose argument is unused under NDEBUG;
+  - math.h's declarations, about 8,000, with their pastes: `#include
+    <math.h>` alone is 13.3 million instructions for 7,058 output tokens;
+  - `testcase`, 1,148 of them, empty.
+
+  A simple invocation of two arguments in a file's text costs about 1,900
+  instructions, and an empty one about 900.
+- **The output columns' page faults: about 0.45 ms.** Each column ends in a 2
+  MB huge page that the kernel clears whole: 12.25 MB are cleared for 7.07 MB of
+  tokens.
+- **`__LINE__`: 0.1 to 0.35 ms.** `pp_line_of` (3% of the run) counts newlines
+  in bytes that left the caches long before. Counting them per window in
+  `pp_prepare_windows` comes next, agreed with #116.
+- **The rest, about 1.5 ms:** directives, object-like expansions, buffer runs
+  and the context stack. The system headers' share of the main loop is about
+  22%.
+
+What 2 ms would take, each estimated from the numbers above:
+
+| Change | Saves | Needs |
+| --- | ---: | --- |
+| No history in the main loop; a replay records it when a diagnostic or a consumer first needs it | 0.78 ms | A change to #108's contract |
+| The parser's input read from the file cache for file runs, rather than from the output | 0.5-0.8 ms | A change to the output's contract with the parser (#126, #335) |
+| A leaner expansion engine: compiled bodies, one pass over a macro's items rather than three, no origins per token | about 1.2 ms | Large; inside the preprocessor |
+| Line counts per window | 0.1-0.3 ms | After #408, with #116 |
+| Output columns that don't end in a mostly empty huge page | about 0.1 ms | |
+
+With all of them, about 3.2 ms. The rest needs preprocessing on more cores
+(#149), or another budget. On 2026-10-25 the owner chose to go on, history
+replay first.
+
 ## Assembly output spacing
 
 In `-x assembler-with-cpp` mode, the lexer splits `$` from names and
@@ -2298,16 +2404,14 @@ spellings alone would miss this change (#272).
 
 ## Next steps
 
-- **The main loop** costs about 170 cycles per event: a run, an expansion, an
-  invocation, an argument or a paste. On `sqlite3.c`, directives and the main
-  loop take 5.6 ms (31 million cycles at 5.5 GHz) for 176,000 such events.
-  Candidates, each to be measured on the 9700X:
-  - keep the hot fields of `Preprocessor` and `PPTokens` in locals across a
-    step: with `-fno-strict-aliasing`, every byte store reloads them;
-  - resolve chains of object-like aliases without a context each;
-  - reconsider fully rescanned object-macro replay only with evidence of
-    repeated expansion work; #110's cheaper eligibility cache was measured
-    and rejected (see "Object-macro eligibility cache experiment" above).
+- **The main loop**, against #117's 2 ms: "The main loop against #117's budget"
+  above has where the time goes and the plan. Next is history replay: the main
+  loop records no history, and `pp_history_ensure` preprocesses the unit again,
+  with history, when a diagnostic or a consumer first needs it. Then the
+  parser's input for file runs from the file cache (to agree with #126's and
+  #335's owners), and a leaner expansion engine. #110's object-macro
+  eligibility cache was measured and rejected (see "Object-macro eligibility
+  cache experiment" above).
 - **Clearing pages.** In a single run, prefaulting the arenas on another core
   while the first files are lexed would hide most of the 13%. Across many
   translation units, the arenas are reused (#152).
