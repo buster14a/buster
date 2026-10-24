@@ -1456,10 +1456,11 @@ al our caller sets nor the hidden pointer our callee gets back, so those
 checks are the record runs' alone.
 
 On the cloud VM (not the 9700X: Intel, clang 23.1.5, this compiler under
-Intel SDE for its AVX-512), the compiled runs at seed 1 pass: against clang,
-400 signatures of 2,435 arguments, 5,520 checks; against GCC 16's worlds
-(through GCC 13 there, as `-std=gnu2x`), 400 signatures of 2,388 arguments,
-5,412 checks, and both paths' objects were the same bytes.
+Intel SDE for its AVX-512), the compiled runs pass at seeds 1 to 11, with both
+paths' objects the same bytes every time: against clang, 4,400 signatures of
+26,801 arguments, 60,660 checks; against GCC's worlds, compiled there by GCC 13
+(`-std=gnu2x` for `-std=gnu23`), 4,400 signatures of 25,907 arguments, 58,842
+checks.
 
 With the defaults (seed 1), each run has 400 signatures of 2,200 to 2,600
 arguments, and the six runs make about 34,300 checks; on the 9700X the whole
