@@ -2014,11 +2014,11 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   an index of several of the vector path's batches with a member's symbols
   across them, and no members), then malformed ones;
 - a shared library made by hand: version definitions, a name at a default
-  version and at a hidden one, IFUNC, `GNU_UNIQUE`, `COMMON`, TLS and
-  absolute symbols, weak and protected ones, hidden and local ones and one at
-  `VER_NDX_LOCAL`, which aren't exported, references, and a name exported
-  twice (the index finds the first); the same without `.gnu.version`; then
-  malformed ones;
+  version and at a hidden one (kept apart, with its version's index), IFUNC,
+  `GNU_UNIQUE`, `COMMON`, TLS and absolute symbols, weak and protected ones,
+  hidden and local ones and one at `VER_NDX_LOCAL`, which aren't exported,
+  references (with their versions' indices), and a name exported twice (the
+  index finds the first); the same without `.gnu.version`; then malformed ones;
 - linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
   and `OUTPUT_FORMAT`, then each error at its offset;
 - page edges: every prefix of each input made by hand (the object also with

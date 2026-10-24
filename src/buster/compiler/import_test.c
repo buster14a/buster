@@ -313,15 +313,18 @@ static void import_test_paths(ImportTestTally* tally, String8 bytes, ImportTestP
     tally->exact += vector ? 0 : 1;
 }
 
-// Whether two reads of a library are the same: its soname, versions, exports, references and index, column by column.
+// Whether two reads of a library are the same: its soname, versions, exports, references, hidden exports and index,
+// column by column.
 static bool import_test_same_library(const ImportLibrary* a, const ImportLibrary* b)
 {
     const ImportExports* x = &a->exports;
     const ImportExports* y = &b->exports;
     const ImportReferences* p = &a->references;
     const ImportReferences* q = &b->references;
+    const ImportHiddenExports* g = &a->hidden;
+    const ImportHiddenExports* k = &b->hidden;
     bool result = a->soname.pointer == b->soname.pointer && a->soname.length == b->soname.length && a->version_count == b->version_count && x->count == y->count &&
-                  p->count == q->count && a->index.bucket_bits == b->index.bucket_bits && (a->index.start == 0) == (b->index.start == 0);
+                  p->count == q->count && g->count == k->count && a->index.bucket_bits == b->index.bucket_bits && (a->index.start == 0) == (b->index.start == 0);
     for (uint32_t v = 0; result && v < a->version_count; v += 1)
     {
         const ImportVersion* c = &a->versions[v];
@@ -336,7 +339,11 @@ static bool import_test_same_library(const ImportLibrary* a, const ImportLibrary
     }
     for (uint32_t i = 0; result && i < p->count; i += 1)
     {
-        result = p->name[i] == q->name[i] && p->length[i] == q->length[i] && p->hash[i] == q->hash[i] && p->weak[i] == q->weak[i];
+        result = p->name[i] == q->name[i] && p->length[i] == q->length[i] && p->hash[i] == q->hash[i] && p->weak[i] == q->weak[i] && p->version[i] == q->version[i];
+    }
+    for (uint32_t i = 0; result && i < g->count; i += 1)
+    {
+        result = g->name[i] == k->name[i] && g->version[i] == k->version[i];
     }
     const uint64_t buckets = a->index.start != 0 ? (uint64_t)1 << a->index.bucket_bits : 0;
     result = result && (buckets == 0 || memcmp(a->index.start, b->index.start, (buckets + 1) * sizeof(uint32_t)) == 0);
@@ -2337,7 +2344,7 @@ static uint32_t import_test_library_find(const ImportLibrary* library, const cha
 }
 
 // Reads the library made by hand (with .gnu.version or, `versioned` false, as if without it) and checks its soname,
-// versions, exports, the exports' table, and references.
+// versions, exports, the exports' table, references with their versions' indices, and hidden exports.
 static void import_test_library_check(ImportTestTally* tally, const ImportTestLibrary* test, String8 bytes, bool versioned, const char* what, Arena* arena)
 {
     const uint64_t length = arena->length;
@@ -2351,9 +2358,11 @@ static void import_test_library_check(ImportTestTally* tally, const ImportTestLi
         same = import_equal(version->name, import_test_version_names[v]) && version->hash == import_test_elf_hash(import_test_version_names[v]) && version->index == v + 1 &&
                version->base == (v == 0);
     }
-    // The exports in .dynsym's order, each found in the table at its name's first export, and the references.
+    // The exports in .dynsym's order, each found in the table at its name's first export, the references and the hidden
+    // exports.
     uint32_t exports = 0;
     uint32_t references = 0;
+    uint32_t hiddens = 0;
     for (uint32_t i = 1; same && i < s->count; i += 1)
     {
         const Elf64_Sym* entry = &s->entries[i];
@@ -2379,12 +2388,22 @@ static void import_test_library_check(ImportTestTally* tally, const ImportTestLi
         if (s->references[i] != 0)
         {
             const ImportReferences* r = &library.references;
+            const uint16_t version = versioned ? (uint16_t)(s->versions[i] & 0x7fff) : VER_NDX_GLOBAL;
             same = same && references < r->count && import_test_name_is(r->name[references], r->length[references], name) &&
-                   r->hash[references] == link_hash((const uint8_t*)name, strlen(name)) && r->weak[references] == (s->references[i] == 2 ? 1 : 0);
+                   r->hash[references] == link_hash((const uint8_t*)name, strlen(name)) && r->weak[references] == (s->references[i] == 2 ? 1 : 0) &&
+                   r->version[references] == version;
             references += 1;
         }
+        // A definition at a version other than its name's default (old_function@V1), with its version's index.
+        const uint16_t index = (uint16_t)(s->versions[i] & 0x7fff);
+        if (versioned && defined && (s->versions[i] & BUSTER_IMPORT_TEST_HIDDEN_VERSION) != 0 && index > VER_NDX_GLOBAL)
+        {
+            const ImportHiddenExports* h = &library.hidden;
+            same = same && hiddens < h->count && strcmp((const char*)h->name[hiddens], name) == 0 && h->version[hiddens] == index;
+            hiddens += 1;
+        }
     }
-    same = same && library.exports.count == exports && library.references.count == references;
+    same = same && library.exports.count == exports && library.references.count == references && library.hidden.count == hiddens && hiddens == (versioned ? 1 : 0);
     // The first export of a name exported twice, and names that aren't exported.
     same = same && import_test_library_find(&library, "old_function") == (versioned ? 0 : 0) && import_test_library_find(&library, "hidden_function") == UINT32_MAX &&
            import_test_library_find(&library, "local_function") == UINT32_MAX && import_test_library_find(&library, "reference") == UINT32_MAX &&

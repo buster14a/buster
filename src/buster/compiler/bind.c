@@ -1154,9 +1154,9 @@ static uint32_t bind_library_edges(const Bind* bind, uint32_t l, BindLibraryEdge
     {
         uint32_t export = 0;
         const bool strong = !references->weak[r];
-        // The version the reference requires, if any, which only an export at it satisfies (or one without a version), as
-        // the loader matches it: of libc.so.6 or the loader, theirs, unchecked, since the runtime keeps only their
-        // default exports and the loader checks it at load; of another library, a named library's.
+        // The version the reference requires, if any, which only an export at it satisfies, as GNU ld and lld bind it:
+        // of libc.so.6 or the loader, theirs, unchecked, since the runtime keeps only their default exports and the
+        // loader checks it at load; of another library, a named library's.
         const String8 version = libraries->reference_versions[l][r];
         const String8 file = libraries->reference_files[l][r];
         const String8 libc = bind->runtime->libc.soname;
@@ -1203,7 +1203,9 @@ static bool bind_library_dependencies_known(const Bind* bind, uint32_t l)
     return known;
 }
 
-// Marks the edges whose reference names the name of `symbol`, a definition the executable exports.
+// Marks the edges whose reference names the name of `symbol`, a definition the executable exports: but for a reference
+// that requires a version, which the executable's definitions, without one, don't satisfy, as GNU ld and lld refuse
+// them.
 static void bind_library_satisfy(const RuntimeLibraries* libraries, const Link* link, SymbolId symbol, BindLibraryEdges* edges)
 {
     const NameId name = link->symbols.name[symbol];
@@ -1219,7 +1221,7 @@ static void bind_library_satisfy(const RuntimeLibraries* libraries, const Link* 
         const ImportReferences* references = &libraries->libraries[edges->from[e]].references;
         const uint32_t r = edges->reference[e];
         const bool same = edges->index.hash[place] == hash && references->length[r] == length && import_same_bytes(references->name[r], bytes, length);
-        edges->satisfied[e] |= same ? 1 : 0;
+        edges->satisfied[e] |= same && libraries->reference_versions[edges->from[e]][r].length == 0 ? 1 : 0;
     }
 }
 

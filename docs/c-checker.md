@@ -35,12 +35,14 @@ definition the executable exports satisfies, as GNU ld links them
 `DT_NEEDED` lists them before `libc.so.6` (`runtime_libraries_import`, `bind.c`
 and `dynamic.c`). A needed library's strong reference that nothing defines is
 refused, naming the library, as GNU ld and lld refuse it; one that requires a
-symbol version binds to an export at that version, as the loader binds it. An empty archive (glibc's `libpthread.a`, `libdl.a` and
-`librt.a`) adds nothing; one with members is refused by name, since the direct
-path doesn't link archives yet. A call of a function that a system header
-declares and no linked library has gets a named error that points at `-l`
-(`-lm` for libm's). A library's data, the C library's or a named library's,
-is reached through its GOT slot (the access column, below).
+symbol version binds only to an export at that version, as both linkers bind it,
+and version needs that don't read are refused. An empty archive (glibc's
+`libpthread.a`, `libdl.a` and `librt.a`) adds nothing; one with members is
+refused by name, since the direct path doesn't link archives yet. A call of a
+function that a system header declares and no linked library has gets a named
+error that points at `-l` (`-lm` for libm's). A library's data, the C library's
+or a named library's, is reached through its GOT slot (the access column,
+below).
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check
