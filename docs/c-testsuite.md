@@ -78,27 +78,26 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
 ```
 
-`tests/c-testsuite/subset.txt` declares the 216 that must pass. The other four
+`tests/c-testsuite/subset.txt` declares the 217 that must pass. The other three
 are refused by name, each waiting on work of its own:
 
 | Test | Refused as | Waits on |
 | --- | --- | --- |
 | 00140 | variadic function definitions | [#136](https://github.com/buster14a/buster/issues/136)'s item 2 and [#137](https://github.com/buster14a/buster/issues/137) |
 | 00174 | libm's functions (`sin`): the direct path links `libc.so.6` alone | `-l` libraries in the direct path |
-| 00189 | the C library's data (`stdout`) read directly, which needs the GOT | [#136](https://github.com/buster14a/buster/issues/136)'s item 4 |
 | 00204 | structs and unions passed or returned by value | [#136](https://github.com/buster14a/buster/issues/136)'s item 2 and [#137](https://github.com/buster14a/buster/issues/137) |
 
-With `--cross-check`, the two of them that `-c` takes, 00174 and 00189, are
-linked by `cc` and must run right; `-c` refuses the other two as the direct
-path does. A test moves into the subset in the change that makes it pass.
+With `--cross-check`, the one of them that `-c` takes, 00174, is linked by `cc`
+and must run right; `-c` refuses the other two as the direct path does. A test
+moves into the subset in the change that makes it pass.
 
 The 9700X job fetches the commit in a step of its own and runs the self-test
 and the subset with `--cross-check --jobs 4` among its tests at once.
 
 ## Results
 
-On the cloud VM (Intel, clang 23.1.5), not a 9700X measurement: 220 tests, 216
-passed, 4 unsupported, 0 failed; the vector and scalar paths wrote the same
+On the cloud VM (Intel, clang 23.1.5), not a 9700X measurement: 220 tests, 217
+passed, 3 unsupported, 0 failed; the vector and scalar paths wrote the same
 executable for every test that compiles, and `--cross-check` agreed.
 
 This establishes correct programs, not their speed or size: Tier 0's code

@@ -780,7 +780,9 @@ designs and the compilers already built this way.
   reached through their addresses; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry, and so are
   variable-length arrays' allocations and the stack's saved and restored
-  positions, which give their function a frame pointer. The output is
+  positions, which give their function a frame pointer. An optional per-unit
+  access column reaches the symbols a unit doesn't define through their GOT
+  slots, and thread-locals by local-exec or initial-exec. The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
@@ -4098,16 +4100,26 @@ the records must pass `x86_validate` and the branch columns
 fresh pages and run in a child process on eight inputs (stopped by an alarm
 after 10 s), and its result and every global's bytes must equal what the test's
 interpreter of the typed stream gives (the interpreter converts floating values
-to integers as cvttsd2si does).
+to integers as cvttsd2si does). The shapes but one function's also reach
+symbols through the access column: globals through the GOT and thread-locals
+of both TLS models (`_Thread_local` in C), and functions' addresses through the
+GOT. The native run gives each symbol a GOT slot and the thread-locals a block
+of their own, which FS points at for the entry's call alone. An `access` check
+before the programs compiles every global kind of every class by each access:
+both paths alike, with the access's references, and validation's rule.
 
-With `--cross-check`, which needs clang (`--clang PATH`) and `size`, each of
-`--cross-count` (60) programs of the larger shape, keeping to what C defines
+With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
+`ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
 (with `-fwrapv` and `-fno-strict-aliasing`, as the repository builds), is written as Tier 0's object (the link representation and the object writer)
 and as C, which clang -O0 compiles; a generated harness links both, runs them
 on the same inputs and compares the results and every global (a floating
 one's NaNs alike whatever their bits, as C leaves them), then times both.
 It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
-run times. The files go in a directory under `$TMPDIR` (or `/tmp`), kept with
+run times. A shared library generated beside them (GNU as source, which `as`
+and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so
+that the executable's slots for them are the loader's to fill (`GLOB_DAT`, and
+`TPOFF64` for a thread-local's offset). The
+files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 `--keep` or on a failure. The 9700X job's test step runs it with
 `--cross-check`.
 

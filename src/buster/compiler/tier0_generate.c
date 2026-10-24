@@ -17,7 +17,10 @@
 //
 // The C text names functions and globals with a prefix (so that clang's build and Tier 0's can be linked together); the
 // streams refer to globals by SymbolIds 1 to global_count and to functions by call targets global_count + 1 onward,
-// which is the order the tests add them to a link in.
+// which is the order the tests add them to a link in. With the `access` option, each global is reached directly, through
+// the GOT, or as a thread-local (_Thread_local in C) of the image's or through the GOT, and each function's address
+// directly or through the GOT: the access column of Tier0Function (tier0_program_functions builds it), which changes how
+// a symbol is reached and nothing it means.
 //
 // Nothing here recurses: expressions are built top-down from a worklist into node arrays, and emitted (as stream and
 // as C) by walks with explicit stacks of (node, phase); statements are generated with a stack of open constructs.
@@ -76,6 +79,9 @@ struct Tier0ProgramOptions
     bool objects;
     // Calls through pointers to functions: locals that hold a function's address, and a function's address itself.
     bool indirect;
+    // Symbols reached otherwise than directly (Tier0Function.symbol_access): globals through the GOT and thread-locals
+    // of both TLS accesses, and functions' addresses through the GOT.
+    bool access;
     // Variable-length arrays: arrays declared in a block, of a length the program computes, on the stack (ALLOCA)
     // until their scope ends (STACK_SAVE and STACK_RESTORE). A program without them is the same as before they
     // existed, seed for seed.
@@ -133,6 +139,11 @@ struct Tier0Program
     uint32_t global_count;
     // The global the objects' bytes are folded into (UINT32_MAX without objects).
     uint32_t sink;
+    // With the `access` option, how each global and each function's address is reached (BUSTER_TIER0_ACCESS_*: a
+    // thread-local global, _Thread_local in C, by one of the TLS accesses); all direct without it.
+    bool access;
+    uint8_t global_access[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
+    uint8_t function_access[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
     Tier0GeneratedFunction functions[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
     uint32_t function_count;
     char* text;
@@ -187,6 +198,16 @@ static uint32_t tier0_generate_below(uint64_t* state, uint32_t bound)
 static bool tier0_generate_chance(uint64_t* state, uint32_t percent)
 {
     return tier0_generate_below(state, 100) < percent;
+}
+
+// A global's access with the `access` option: two in five direct, one through the GOT, one a thread-local of the image's
+// and one a thread-local through the GOT (BUSTER_TIER0_ACCESS_*).
+static uint32_t tier0_generate_access(uint64_t* state)
+{
+    static const uint8_t accesses[5] = {
+        BUSTER_TIER0_ACCESS_DIRECT, BUSTER_TIER0_ACCESS_DIRECT, BUSTER_TIER0_ACCESS_GOT, BUSTER_TIER0_ACCESS_LOCAL_EXEC, BUSTER_TIER0_ACCESS_INITIAL_EXEC,
+    };
+    return accesses[tier0_generate_below(state, 5)];
 }
 
 // An entry of the current function's stream: its index (for a target to patch), or UINT32_MAX when the columns are full.
@@ -2432,7 +2453,9 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     if (result)
     {
         program->text[0] = 0;
-        // Globals: scalars and arrays of every class.
+        program->access = options.access;
+        // Globals: scalars and arrays of every class, and with `access` two in five direct and the rest through the GOT,
+        // or thread-locals of the image's or through the GOT.
         program->global_count = 4 + tier0_generate_below(&random, 9);
         for (uint32_t g = 0; g < program->global_count; g += 1)
         {
@@ -2441,7 +2464,8 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
             program->global_classes[g] = (uint8_t)class;
             program->global_elements[g] = array ? BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS : 1;
             program->global_first_value[g] = program->global_value_count;
-            tier0_text(program, "%s %sg%u", tier0_c_type(class), prefix, g);
+            program->global_access[g] = (uint8_t)(options.access ? tier0_generate_access(&random) : BUSTER_TIER0_ACCESS_DIRECT);
+            tier0_text(program, "%s%s %sg%u", program->global_access[g] >= BUSTER_TIER0_ACCESS_LOCAL_EXEC ? "_Thread_local " : "", tier0_c_type(class), prefix, g);
             if (array)
             {
                 tier0_text(program, "[%u] = { ", BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS);
@@ -2471,8 +2495,15 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
             program->global_first_value[program->sink] = program->global_value_count;
             program->global_values[program->global_value_count] = 0;
             program->global_value_count += 1;
+            program->global_access[program->sink] = (uint8_t)(options.access ? tier0_generate_access(&random) : BUSTER_TIER0_ACCESS_DIRECT);
             program->global_count += 1;
-            tier0_text(program, "unsigned long %sg%u = 0;\n", prefix, program->sink);
+            tier0_text(program, "%sunsigned long %sg%u = 0;\n", program->global_access[program->sink] >= BUSTER_TIER0_ACCESS_LOCAL_EXEC ? "_Thread_local " : "",
+                       prefix, program->sink);
+        }
+        // With `access`, half the functions' addresses through the GOT.
+        for (uint32_t f = 0; f < functions && options.access; f += 1)
+        {
+            program->function_access[f] = (uint8_t)(tier0_generate_chance(&random, 50) ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT);
         }
         tier0_text(program, "\n");
         for (uint32_t f = 0; f < functions && !program->overflow; f += 1)
@@ -2540,6 +2571,9 @@ struct Tier0Functions
     uint32_t count;
     // SymbolIds: globals 1 to global_count, then the functions.
     SymbolId* call_targets;
+    // With the `access` option, the program's access column by SymbolId (every function's), and 0 without it.
+    uint8_t* symbol_access;
+    uint32_t symbol_count;
     AbiLocation* parameter_locations;
     AbiLocation* argument_locations;
     AbiCall* entries;
@@ -2565,8 +2599,16 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
     AbiCall* calls = BUSTER_ARENA_PUSH_ARRAY(arena, AbiCall, signatures + 1);
     functions->call_targets = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, program->call_count + 1);
     functions->call_variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->call_count + 1);
+    functions->symbol_count = program->access ? program->global_count + function_count + 1 : 0;
+    functions->symbol_access = program->access ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, functions->symbol_count) : 0;
     bool result = results != 0 && counts != 0 && variadic != 0 && types != 0 && locations != 0 && calls != 0 && functions->call_targets != 0 &&
-                  functions->call_variadic != 0;
+                  functions->call_variadic != 0 && (!program->access || functions->symbol_access != 0);
+    if (result && program->access)
+    {
+        functions->symbol_access[0] = BUSTER_TIER0_ACCESS_DIRECT;
+        memcpy(functions->symbol_access + 1, program->global_access, program->global_count);
+        memcpy(functions->symbol_access + 1 + program->global_count, program->function_access, function_count);
+    }
     if (result)
     {
         uint32_t argument = 0;
@@ -2644,6 +2686,8 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
             t->argument_classes = program->argument_classes;
             t->call_count = function->call_count;
             t->argument_count = program->argument_count;
+            t->symbol_access = functions->symbol_access;
+            t->symbol_count = functions->symbol_count;
         }
         functions->count = function_count;
     }
