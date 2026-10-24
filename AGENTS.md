@@ -3170,8 +3170,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   refused, its message naming the option, or taken without one: the `-f`
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
-  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks; and
-  the fuzz batch: its isolation rules checked on small sources (what a case
+  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
+  `-include` files each failed in turn (the arena cut short, the data table full), each
+  a fatal error that stops the prelude and fails the run, beside controls that
+  succeed (no `-include` file made without one); and the fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
   tokens do, and our tokens that don't lex back, as an unterminated literal,

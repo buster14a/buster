@@ -13377,6 +13377,12 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
     return result;
 }
 
+// Why pp_virtual_file couldn't make a file, for a message: the unit's files table is full, or else memory ran out.
+static const char* pp_virtual_file_error(const Preprocessor* pp)
+{
+    return pp->data_count >= BUSTER_PP_MAX_FILES || pp->file_count >= BUSTER_PP_MAX_FILES ? "too many files" : strerror(ENOMEM);
+}
+
 // Runs a file to its end, as the main file or one that runs before it.
 static void pp_run_file(Preprocessor* pp, uint32_t file)
 {
@@ -13858,7 +13864,8 @@ static const char* pp_read_error(const Preprocessor* pp, uint32_t file)
 }
 
 // Runs what comes before the main file: the predefines (or PPOptions.predefines_path's), then the command line's -D,
-// -U and -include. Returns false if the predefines can't be read.
+// -U and -include. Returns false, after a fatal error, if the predefines can't be read, a part of the prelude can't be
+// made (out of memory, or the unit's files table full) or running a part was fatal; the parts after it don't run.
 static bool pp_run_prelude(Preprocessor* pp)
 {
     bool result = true;
@@ -13894,18 +13901,27 @@ static bool pp_run_prelude(Preprocessor* pp)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the predefined macros for these options");
         }
     }
-    // The command line: -municode's UNICODE, then -D and -U in order, then -include.
+    // The command line: -municode's UNICODE, then -D and -U in order, then -include. Each line is at most its option's
+    // bytes and 16 more, and the file's length must fit pp_virtual_file's 32 bits.
     uint64_t room = 32;
+    bool fits = true;
     for (uint32_t i = 0; i < pp->options.macro_count; i += 1)
     {
-        room += strlen(pp->options.macros[i]) + 16;
+        fits &= !__builtin_add_overflow(room, (uint64_t)strlen(pp->options.macros[i]) + 16, &room);
     }
     for (uint32_t i = 0; i < pp->options.include_count; i += 1)
     {
-        room += strlen(pp->options.includes[i]) + 16;
+        fits &= !__builtin_add_overflow(room, (uint64_t)strlen(pp->options.includes[i]) + 16, &room);
     }
-    char* command_line = result ? arena_push(&pp->arena, room, 1) : 0;
-    if (command_line != 0)
+    fits &= room <= UINT32_MAX;
+    result = result && !pp->fatal;
+    char* command_line = result && fits ? arena_push(&pp->arena, room, 1) : 0;
+    if (result && command_line == 0)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, fits ? "out of memory for the command line's -D, -U and -include options" : "the command line's -D, -U and -include options are too long");
+        result = false;
+    }
+    if (result)
     {
         uint64_t length = pp->options.predefines.unicode ? (uint64_t)sprintf(command_line, "#define UNICODE 1\n") : 0;
         for (uint32_t i = 0; i < pp->options.macro_count; i += 1)
@@ -13926,21 +13942,36 @@ static bool pp_run_prelude(Preprocessor* pp)
             }
         }
         const uint32_t file = pp_virtual_file(pp, "<command line>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
-        if (file != BUSTER_PP_NONE)
+        result = file != BUSTER_PP_NONE;
+        if (result)
         {
             pp_run_file(pp, file);
+            result = !pp->fatal;
         }
-        // The -include lines, in a file of their own named as clang's: its forced includes are in its <built-in> buffer,
-        // after the command line's macros, which __BASE_FILE__ in a forced header gives.
-        length = 0;
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -D and -U options: %s", pp_virtual_file_error(pp));
+        }
+    }
+    // The -include lines, in a file of their own named as clang's: its forced includes are in its <built-in> buffer,
+    // after the command line's macros, which __BASE_FILE__ in a forced header gives. Without -include there is no file.
+    if (result && pp->options.include_count != 0)
+    {
+        uint64_t length = 0;
         for (uint32_t i = 0; i < pp->options.include_count; i += 1)
         {
             length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
         }
-        const uint32_t includes = length != 0 ? pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
-        if (includes != BUSTER_PP_NONE)
+        const uint32_t includes = pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
+        result = includes != BUSTER_PP_NONE;
+        if (result)
         {
             pp_run_file(pp, includes);
+            result = !pp->fatal;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -include options: %s", pp_virtual_file_error(pp));
         }
     }
     return result;
