@@ -384,8 +384,28 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
 
+// A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
+// before reading either, and writes nothing.
+static void check_test_program_refused(CheckTest* test)
+{
+    Arena output = arena_reserve(1ull << 16);
+    Arena scratch = arena_reserve(1ull << 16);
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        const CheckProgram program = { .status = CHECK_PROGRAM_INVALID };
+        CheckProgramLowered lowered = { 0 };
+        const bool ready = output.base != 0 && scratch.base != 0;
+        const bool lowered_ok = ready && check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+        check_test_expect(test, ready && !lowered_ok && lowered.status == CHECK_PROGRAM_INVALID && lowered.functions == 0 && output.length == 0 && scratch.length == 0,
+                          "a refused program without its stream or input lowers to nothing");
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_refused(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
