@@ -234,7 +234,10 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
         {
             const AtomId atom = imported->section_atoms[section];
             const uint8_t class = link->atoms.class[atom];
-            if (atom != 0 && link->atoms.size[atom] != 0 && (class == BUSTER_LINK_CLASS_STRINGS || class == BUSTER_LINK_CLASS_RODATA))
+            // A __start_ and __stop_ group's atom (BUSTER_LINK_UNIT_SHARED, foreign_link_bounds_merge) keeps its sections'
+            // bytes as they are, between its bounds.
+            const bool grouped = link->atoms.unit[atom] == BUSTER_LINK_UNIT_SHARED;
+            if (atom != 0 && link->atoms.size[atom] != 0 && !grouped && (class == BUSTER_LINK_CLASS_STRINGS || class == BUSTER_LINK_CLASS_RODATA))
             {
                 const Elf64_Shdr header = import_section_header(&original->elf, section);
                 const bool strings = header.sh_type == SHT_PROGBITS && (header.sh_entsize == 1 || header.sh_entsize == 2 || header.sh_entsize == 4) &&

@@ -331,7 +331,8 @@ static bool import_test_same_library(const ImportLibrary* a, const ImportLibrary
     for (uint32_t i = 0; result && i < x->count; i += 1)
     {
         result = x->name[i] == y->name[i] && x->length[i] == y->length[i] && x->hash[i] == y->hash[i] && x->size[i] == y->size[i] && x->flags[i] == y->flags[i] &&
-                 x->version[i] == y->version[i] && a->index.order[i] == b->index.order[i] && a->index.hash[i] == b->index.hash[i];
+                 x->version[i] == y->version[i] && x->value[i] == y->value[i] && x->section[i] == y->section[i] && a->index.order[i] == b->index.order[i] &&
+                 a->index.hash[i] == b->index.hash[i];
     }
     for (uint32_t i = 0; result && i < p->count; i += 1)
     {

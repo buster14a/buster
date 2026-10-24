@@ -173,6 +173,24 @@ static void preprocessor_fuzz_test_dump(PreprocessorFuzzTestTally* tally, Arena*
                memcmp(spelling.pointer, spellings[i], spelling.length) == 0;
     }
     preprocessor_fuzz_test_expect(tally, same, "clang's token dump read wrong");
+    const String8 pragma_dump = BUSTER_S8("BUSTER_PPF_PRAGMA unknown ''q  ' Loc=<p.c:2:13 <Spelling=p.c:1:11>>\n"
+                                          "identifier 'x' Loc=<p.c:3:1>\n"
+                                          "identifier 'BUSTER_PPF_END_0' Loc=<p.c:4:1>\n"
+                                          "eof '' Loc=<p.c:4:17>\n");
+    PreprocessorFuzzClangTokens pragmas = { 0 };
+    const bool pragma_read = preprocessor_fuzz_clang_dump_read(memory, pragma_dump, true, &pragmas);
+    preprocessor_fuzz_test_expect(tally, pragma_read && pragmas.count == 2 && pragmas.tokens[0].pragma && !pragmas.tokens[1].pragma &&
+                                       pragmas.tokens[0].spelling.length == 4 && memcmp(pragmas.tokens[0].spelling.pointer, "'q  ", 4) == 0,
+                                  "the pragma token oracle lost its tag or trailing literal spaces");
+    PreprocessorFuzzClangTokens ordinary = { 0 };
+    preprocessor_fuzz_test_expect(tally, !preprocessor_fuzz_clang_dump(memory, pragma_dump, &ordinary), "an ordinary Clang dump accepted the oracle's private tag");
+    const String8 pragma_marker = BUSTER_S8("BUSTER_PPF_PRAGMA identifier 'BUSTER_PPF_END_0' Loc=<p.c:4:1>\neof '' Loc=<p.c:4:17>\n");
+    preprocessor_fuzz_test_expect(tally, !preprocessor_fuzz_clang_dump_read(memory, pragma_marker, true, &ordinary), "a pragma operand impersonated the final source marker");
+    preprocessor_fuzz_test_expect(tally, preprocessor_fuzz_clang_same_version(BUSTER_S8("clang version 23.1.3\nTarget: x86_64\n"), BUSTER_S8("clang version 23.1.3\n")) &&
+                                       !preprocessor_fuzz_clang_same_version(BUSTER_S8("clang version 23.1.30\n"), BUSTER_S8("clang version 23.1.3\n")) &&
+                                       !preprocessor_fuzz_clang_same_version(BUSTER_S8("clang version 23.1.1\n"), BUSTER_S8("clang version 23.1.3\n")) &&
+                                       !preprocessor_fuzz_clang_same_version(BUSTER_S8("clang version 23.1.3\n"), BUSTER_S8("clang version 23.1.3\nextra\n")),
+                                  "a mismatched or malformed pragma-oracle version was accepted");
     static const char* const unreadable[] = {
         "unknown          ''a'\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
         "unknown          ''a' Loc=<b'   Loc=<p.c:1:1>\nidentifier       'BUSTER_PPF_END_0'              Loc=<p.c:1:1>\neof              ''     Loc=<p.c:1:9>\n",
@@ -195,6 +213,20 @@ static void preprocessor_fuzz_test_dump(PreprocessorFuzzTestTally* tally, Arena*
     }
     tally->case_id = 0;
     arena_pop_to(memory, mark);
+}
+
+// An unavailable optional oracle must leave no token result and must not consume the caller's arena. /bin/false is
+// an external failing process, so this exercises launch/status handling instead of substituting a comparator result.
+static void preprocessor_fuzz_test_pragma_failure(PreprocessorFuzzTestTally* tally, Arena* memory, const char* clang_path, bool c23)
+{
+    const uint64_t mark = memory->length;
+    const PreprocessorFuzzCase test_case = {
+        .source = BUSTER_S8_INIT("#define Q 'q  \n#pragma omp Q x\n"),
+        .isolated = true,
+    };
+    PreprocessorFuzzClangTokens tokens = { 0 };
+    const bool ran = preprocessor_fuzz_clang_pragma_tokens(memory, clang_path, "/bin/false", c23, &test_case, &tokens);
+    preprocessor_fuzz_test_expect(tally, !ran && tokens.count == 0 && memory->length == mark, "a failed pragma oracle produced a result");
 }
 
 // Check source witnesses as well as the generator's coverage mask. Semantic transport checks below additionally
@@ -882,6 +914,7 @@ static int run_preprocessor_fuzz_tests(int argc, char** argv)
         {
             preprocessor_fuzz_test_comparison(&tally, &memory);
             preprocessor_fuzz_test_dump(&tally, &memory);
+            preprocessor_fuzz_test_pragma_failure(&tally, &memory, clang_path, c23);
             preprocessor_fuzz_test_generation(&tally, &memory, c23);
             preprocessor_fuzz_test_minimizer(&tally, &memory);
             preprocessor_fuzz_test_oracle(&tally, &memory, clang_path, c23);

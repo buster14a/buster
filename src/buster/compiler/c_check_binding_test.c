@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Real-source binding handoff checks. Both source paths must retain the same declaration for every token, and
-// independent occurrence maps pin the declarations selected by shadowing, restoration and redeclaration. Include
-// after the CheckTest helpers in c_checker_test.c; check_test_bindings is called by the checker test command.
+// Real-source binding handoff checks (#336). Both source paths, and every binding mode on fresh type tables, must
+// retain the same declaration, type and reports for every token, and independent occurrence maps pin the
+// declarations selected by shadowing, restoration and redeclaration. #128's parser replay is the independent
+// syntactic oracle. Include after the CheckTest helpers in c_checker_test.c; check_test_bindings is called by the
+// checker test command.
 #ifndef BUSTER_C_CHECK_BINDING_TEST_INCLUDED
 #define BUSTER_C_CHECK_BINDING_TEST_INCLUDED
 
@@ -88,11 +90,20 @@ static void check_test_binding_parser_columns(CheckTest* test, Parser* parser, c
                 .declared_types = types,
                 .ignored = ignored,
             };
-            const bool resolved = check_input_binding_events(&reader, true);
-            check_test_expect(test, resolved, "checker retained semantic history replay");
-            for (uint32_t token = 0; resolved && token < count; token += 1)
+            // The published history has no `previous` column, so DIRECT is not a mode here: both resolvers rebuild
+            // the answers from the retained events alone.
+            for (uint32_t mode = CHECK_INPUT_BINDINGS_STACKS; mode <= CHECK_INPUT_BINDINGS_BATCH; mode += 1)
             {
-                check_test_expect(test, declarations[token] == input->declarations[token], "parser-column consumer differs from semantic history");
+                memcpy(declarations, input->declarations, ((uint64_t)count + 1) * sizeof(uint32_t));
+                memcpy(types, input->declared_types, ((uint64_t)count + 1) * sizeof(TypeId));
+                oracle.report_count = 0;
+                oracle.resource = false;
+                const bool resolved = check_input_binding_events(&reader, (CheckInputBindingMode)mode);
+                check_test_expect(test, resolved, "checker retained semantic history replay");
+                for (uint32_t token = 0; resolved && token < count; token += 1)
+                {
+                    check_test_expect(test, declarations[token] == input->declarations[token], "binding handoff differs from semantic history");
+                }
             }
         }
     }
@@ -123,7 +134,7 @@ static void check_test_binding_parser_capacity(CheckTest* test, const Parser* pa
             };
             arena->capacity = exhausted == 0 ? mark : output_capacity;
             scratch->capacity = exhausted == 1 ? temporary : scratch_capacity;
-            const bool valid = check_input_bindings(&reader, path == 0);
+            const bool valid = check_input_binding_parser(&reader, path == 0);
             check_test_expect(test, !valid && input.resource && declaration == 12345 && arena->length == mark && scratch->length == temporary,
                               "parser binding allocation failure published results or retained temporary memory");
             check_test_expect(test, memcmp(&original, parser, sizeof(Parser)) == 0 && parser_hash == check_test_binding_parser_hash(parser),
@@ -133,6 +144,60 @@ static void check_test_binding_parser_capacity(CheckTest* test, const Parser* pa
     arena->capacity = output_capacity;
     scratch->capacity = scratch_capacity;
 }
+
+// Every explicit binding mode, each on a fresh type table, must give the reference run's acceptance, columns,
+// reports and graph. Only the batch sort walks candidates, and it must fall back on `fallback`'s closed siblings.
+static void check_test_binding_modes(CheckTest* test, const Parser* parser, Preprocessor* pp, const CheckInput* reference, bool accepted, bool fallback)
+{
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t mode = CHECK_INPUT_BINDINGS_DIRECT; reference->declarations != 0 && mode < CHECK_INPUT_BINDING_MODES; mode += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena storage = arena_reserve(UINT64_C(1) << 24);
+        Arena scratch = arena_reserve(UINT64_C(1) << 24);
+        CheckInput input = { 0 };
+        const bool ready = check_test_types_open(&types) && storage.base != 0 && scratch.base != 0;
+        check_test_expect(test, ready, "binding mode fixture initialization");
+        if (ready)
+        {
+            const bool adapted = check_input_bindings_mode(&input, parser, pp, &types.table, &storage, &scratch, (CheckInputBindingMode)mode);
+            const bool parser_mode = mode == CHECK_INPUT_BINDINGS_PARSER_STACKS || mode == CHECK_INPUT_BINDINGS_PARSER_BATCH;
+            char description[128];
+            snprintf(description, sizeof(description), "binding mode %s differs from the default handoff", check_input_binding_mode_names[mode]);
+            bool equal = adapted == accepted && !input.resource && scratch.length == 0 && input.report_count == reference->report_count &&
+                         input.graph.count == reference->graph.count && input.binding_event_count == reference->binding_event_count &&
+                         input.binding_statistics.identifiers == reference->binding_statistics.identifiers &&
+                         input.binding_statistics.declarations == reference->binding_statistics.declarations &&
+                         (input.parser_binding_event_count != 0) == parser_mode;
+            for (uint32_t token = 0; equal && token <= count; token += 1)
+            {
+                equal = input.declarations[token] == reference->declarations[token] && input.declared_types[token] == reference->declared_types[token];
+            }
+            for (uint32_t report = 0; equal && report < input.report_count; report += 1)
+            {
+                equal = input.reports[report].token == reference->reports[report].token && input.reports[report].message == reference->reports[report].message;
+            }
+            check_test_expect(test, equal, description);
+            const CBindingStatistics statistics = parser_mode ? input.parser_binding_statistics : input.binding_statistics;
+            const bool sorted = mode == CHECK_INPUT_BINDINGS_BATCH || mode == CHECK_INPUT_BINDINGS_PARSER_BATCH;
+            if (sorted && fallback)
+            {
+                check_test_expect(test, statistics.walked_uses != 0 && statistics.fallback_uses != 0, "closed sibling scopes did not exercise binding fallback");
+            }
+            if (!sorted)
+            {
+                check_test_expect(test, statistics.walks == 0 && statistics.walked_uses == 0 && statistics.fallback_uses == 0,
+                                  "a binding mode without the sort counted candidate walks");
+            }
+        }
+        arena_release(&scratch);
+        arena_release(&storage);
+        check_test_types_close(&types);
+    }
+}
+
+// In an expected occurrence map: the occurrence is a label, which has no ordinary identity and no report.
+#define BUSTER_CHECK_TEST_BINDING_LABEL (UINT32_MAX - 1)
 
 static void check_test_binding_source(CheckTest* test, const char* source, const char* name, const uint32_t* expected, uint32_t expected_count, bool accepted, bool fallback)
 {
@@ -198,9 +263,19 @@ static void check_test_binding_source(CheckTest* test, const char* source, const
             check_test_expect(test, count == expected_count && count <= BUSTER_ARRAY_LENGTH(occurrences), "source binding occurrence count");
             for (uint32_t i = 0; count == expected_count && count <= BUSTER_ARRAY_LENGTH(occurrences) && i < count; i += 1)
             {
-                const uint32_t declaration = expected[i] == BUSTER_CHECK_NONE ? BUSTER_CHECK_NONE : occurrences[expected[i]];
+                const bool label = expected[i] == BUSTER_CHECK_TEST_BINDING_LABEL;
+                const uint32_t declaration = expected[i] == BUSTER_CHECK_NONE || label ? BUSTER_CHECK_NONE : occurrences[expected[i]];
                 check_test_expect(test, inputs[path].declarations[occurrences[i]] == declaration, "source use bound to the wrong declaration");
-                if (declaration == BUSTER_CHECK_NONE)
+                if (label)
+                {
+                    bool reported = false;
+                    for (uint32_t report = 0; report < inputs[path].report_count; report += 1)
+                    {
+                        reported |= inputs[path].reports[report].token == occurrences[i];
+                    }
+                    check_test_expect(test, !reported, "a label took or lost an ordinary identity");
+                }
+                else if (declaration == BUSTER_CHECK_NONE)
                 {
                     check_test_expect(test, inputs[path].declared_types[occurrences[i]] == 0, "unresolved source use acquired a type");
                     bool reported = false;
@@ -217,11 +292,7 @@ static void check_test_binding_source(CheckTest* test, const char* source, const
                     check_test_expect(test, inputs[path].declared_types[occurrences[i]] == inputs[path].declared_types[declaration], description);
                 }
             }
-            if (path == 1 && fallback)
-            {
-                check_test_expect(test, inputs[path].parser_binding_statistics.walked_uses != 0 && inputs[path].parser_binding_statistics.fallback_uses != 0,
-                                  "closed sibling scopes did not exercise binding fallback");
-            }
+            check_test_binding_modes(test, &parsers[path], &pp, &inputs[path], adapted[path], fallback);
         }
     }
     if (ready && inputs[0].declarations != 0 && inputs[1].declarations != 0)
@@ -240,10 +311,8 @@ static void check_test_binding_source(CheckTest* test, const char* source, const
                                inputs[0].binding_statistics.identifiers == inputs[1].binding_statistics.identifiers &&
                                inputs[0].binding_statistics.declarations == inputs[1].binding_statistics.declarations,
                           "source paths recorded different binding events");
-        check_test_expect(test, inputs[0].parser_binding_event_count == inputs[1].parser_binding_event_count &&
-                               inputs[0].parser_binding_statistics.identifiers == inputs[1].parser_binding_statistics.identifiers &&
-                               inputs[0].parser_binding_statistics.declarations == inputs[1].parser_binding_statistics.declarations,
-                          "source paths consumed different parser binding streams");
+        check_test_expect(test, inputs[0].parser_binding_event_count == 0 && inputs[1].parser_binding_event_count == 0,
+                          "a default source path replayed the parser's grammar for bindings");
         check_test_expect(test, inputs[0].report_count == inputs[1].report_count, "binding source diagnostic counts differ");
         for (uint32_t i = 0; inputs[0].report_count == inputs[1].report_count && i < inputs[0].report_count; i += 1)
         {
@@ -285,12 +354,19 @@ static void check_test_binding_failures(CheckTest* test)
         .tokens = { .count = 4 },
         .tree = { .roles = roles },
     };
-    for (uint32_t path = 0; ready && path < 2; path += 1)
+    for (uint32_t mode = CHECK_INPUT_BINDINGS_DIRECT; ready && mode <= CHECK_INPUT_BINDINGS_BATCH; mode += 1)
     {
-        uint32_t declarations[4] = { 0 };
+        // Token 1 has no elaboration-time capture and takes its declaration's type; token 3's stale capture of a
+        // name whose scope has closed must not survive as a guess.
+        uint32_t declarations[] = {
+            0,
+            BUSTER_CHECK_NONE,
+            0,
+            BUSTER_CHECK_NONE,
+        };
         TypeId types[] = {
             BUSTER_TYPE_INT,
-            BUSTER_TYPE_LONG,
+            0,
             0,
             BUSTER_TYPE_LONG,
         };
@@ -308,8 +384,9 @@ static void check_test_binding_failures(CheckTest* test)
             .bindings = bindings,
             .declared_types = types,
         };
+        const bool direct = mode == CHECK_INPUT_BINDINGS_DIRECT;
         const uint64_t mark = scratch.length;
-        bool valid = check_input_binding_events(&reader, path == 0);
+        bool valid = check_input_binding_events(&reader, (CheckInputBindingMode)mode);
         check_test_expect(test, !valid && !input.resource && input.report_count == 1 && reports[0].token == 3 && reports[0].message == CHECK_INPUT_UNDECLARED,
                           "unresolved binding did not remain a source diagnostic");
         check_test_expect(test, declarations[1] == 0 && types[1] == BUSTER_TYPE_INT && declarations[3] == BUSTER_CHECK_NONE && types[3] == 0,
@@ -321,18 +398,277 @@ static void check_test_binding_failures(CheckTest* test)
         reader.scratch = &exhausted;
         input.report_count = 0;
         declarations[1] = BUSTER_CHECK_NONE;
-        valid = check_input_binding_events(&reader, path == 0);
-        check_test_expect(test, !valid && input.resource && exhausted.length == 0 && declarations[1] == BUSTER_CHECK_NONE,
-                          "binding handoff scratch failure published partial results");
+        types[1] = 0;
+        valid = check_input_binding_events(&reader, (CheckInputBindingMode)mode);
+        if (direct)
+        {
+            check_test_expect(test, !valid && !input.resource && input.report_count == 1 && declarations[1] == 0 && types[1] == BUSTER_TYPE_INT,
+                              "direct binding answers needed scratch storage");
+        }
+        else
+        {
+            check_test_expect(test, !valid && input.resource && exhausted.length == 0 && declarations[1] == BUSTER_CHECK_NONE && types[1] == 0,
+                              "binding handoff scratch failure published partial results");
+        }
         input.resource = false;
+        input.report_count = 0;
         reader.bindings.valid = false;
-        valid = check_input_binding_events(&reader, path == 0);
+        valid = check_input_binding_events(&reader, (CheckInputBindingMode)mode);
         check_test_expect(test, !valid && input.resource && exhausted.length == 0, "invalid binding events escaped failure propagation");
         input.resource = false;
         reader.bindings = (CBindings){ .valid = true };
-        valid = check_input_binding_events(&reader, path == 0);
+        valid = check_input_binding_events(&reader, (CheckInputBindingMode)mode);
         check_test_expect(test, valid && !input.resource && input.binding_event_count == 0 && exhausted.length == 0,
                           "empty binding handoff required scratch storage");
+    }
+    // Answers that no resolver gives: a use seeing itself or a later event, a use's handle naming a use or a
+    // restore, and a declaration outside the tokens. Each must be refused before anything is published.
+    const uint32_t invalid[][4] = {
+        { 0, 2, 0, 0 },
+        { 0, 3, 0, 0 },
+        { 0, 0, 0, 2 },
+        { 0, 0, 0, 3 },
+    };
+    for (uint32_t answers = 0; ready && answers < BUSTER_ARRAY_LENGTH(invalid) + 1; answers += 1)
+    {
+        uint32_t declarations[] = {
+            0,
+            BUSTER_CHECK_NONE,
+            0,
+            BUSTER_CHECK_NONE,
+        };
+        TypeId types[] = {
+            BUSTER_TYPE_INT,
+            0,
+            0,
+            0,
+        };
+        CheckInputReport reports[4];
+        CheckInput input = {
+            .declarations = declarations,
+            .declared_types = types,
+            .reports = reports,
+            .report_capacity = BUSTER_ARRAY_LENGTH(reports),
+        };
+        CBindings events = bindings;
+        uint32_t declared[4];
+        memcpy(declared, bindings.declaration, sizeof(declared));
+        if (answers == BUSTER_ARRAY_LENGTH(invalid))
+        {
+            declared[0] = 4;
+        }
+        events.declaration = declared;
+        CheckInputReader reader = {
+            .output = &input,
+            .parser = &parser,
+            .scratch = &scratch,
+            .bindings = events,
+            .declared_types = types,
+        };
+        const uint32_t* resolved = answers < BUSTER_ARRAY_LENGTH(invalid) ? invalid[answers] : bindings.previous;
+        const bool valid = check_input_binding_answers(&reader, resolved);
+        check_test_expect(test, !valid && input.resource && input.report_count == 0 && declarations[1] == BUSTER_CHECK_NONE && types[1] == 0 &&
+                               input.binding_statistics.identifiers == 0,
+                          "an invalid binding answer published results");
+    }
+    // DECLARE and RESTORE events have no consumed answer. In particular, the producer never initializes a
+    // RESTORE's previous slot. A stream without uses must not read the answer column at all.
+    uint8_t operations[] = {
+        C_BINDING_DECLARE,
+        C_BINDING_RESTORE,
+    };
+    CheckInput no_uses = { 0 };
+    CheckInputReader declaration_only = {
+        .output = &no_uses,
+        .parser = &parser,
+        .bindings = {
+            .operation = operations,
+            .count = BUSTER_ARRAY_LENGTH(operations),
+        },
+    };
+    const bool no_answers = check_input_binding_answers(&declaration_only, 0);
+    check_test_expect(test, no_answers && !no_uses.resource && no_uses.report_count == 0 &&
+                           no_uses.binding_statistics.identifiers == 1 && no_uses.binding_statistics.declarations == 1,
+                      "a binding stream without uses read absent answers");
+    arena_release(&scratch);
+    arena_release(&storage);
+}
+
+// `bytes` that end exactly where a PROT_NONE page starts: a read or write past them faults.
+static void* check_test_binding_guarded(uint8_t** mapping, uint64_t* mapped, uint64_t bytes)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t pages = (bytes + page - 1) / page * page;
+    *mapped = pages + page;
+    *mapping = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = *mapping != MAP_FAILED && mprotect(*mapping + pages, page, PROT_NONE) == 0;
+    *mapping = *mapping != MAP_FAILED ? *mapping : 0;
+    return guarded ? *mapping + pages - bytes : 0;
+}
+
+// Random event streams of 0 to 64 events, one token each, with every column the handoff reads or writes ending at
+// a PROT_NONE page: the three event modes must give the same declarations, types and reports.
+static void check_test_binding_guards(CheckTest* test)
+{
+    Arena storage = arena_reserve(UINT64_C(1) << 20);
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    for (uint32_t count = 0; storage.base != 0 && scratch.base != 0 && count <= 64; count += 1)
+    {
+        arena_pop_to(&storage, 0);
+        CBindings source;
+        bool ready = c_bindings_initialize(&source, &storage, 8, count + 1);
+        for (uint32_t event = 0; ready && event < count; event += 1)
+        {
+            const uint32_t choice = check_test_random(test) % 8;
+            const uint32_t name = 1 + check_test_random(test) % 7;
+            if (choice < 3)
+            {
+                const CBindingKind kinds[] = { C_BINDING_OBJECT, C_BINDING_FUNCTION, C_BINDING_TYPEDEF };
+                ready = c_bindings_declare(&source, C_BINDING_ORDINARY, name, kinds[choice], event, event, 0) != 0;
+            }
+            else if (choice < 7)
+            {
+                ready = c_bindings_use(&source, C_BINDING_ORDINARY, name, event, event) != 0;
+            }
+            else
+            {
+                ready = c_bindings_restore(&source, check_test_random(test) % (c_bindings_mark(&source) + 1), event);
+            }
+        }
+        enum
+        {
+            GUARD_KEY,
+            GUARD_DECLARATION,
+            GUARD_POINT,
+            GUARD_END,
+            GUARD_PREVIOUS,
+            GUARD_DEPTH,
+            GUARD_OPERATION,
+            GUARD_KIND,
+            GUARD_ROLES,
+            GUARD_IGNORED,
+            GUARD_DECLARATIONS,
+            GUARD_TYPES,
+            GUARD_COUNT,
+        };
+        uint8_t* mappings[GUARD_COUNT] = { 0 };
+        uint64_t mapped[GUARD_COUNT] = { 0 };
+        void* columns[GUARD_COUNT] = { 0 };
+        for (uint32_t column = 0; column < GUARD_COUNT; column += 1)
+        {
+            const uint64_t element = column >= GUARD_OPERATION && column <= GUARD_IGNORED ? 1 : 4;
+            columns[column] = check_test_binding_guarded(mappings + column, mapped + column, element * count);
+            ready &= columns[column] != 0;
+        }
+        check_test_expect(test, ready, "guarded binding handoff fixture");
+        uint32_t results[3][64];
+        TypeId types[3][64];
+        uint32_t reports[3][64];
+        uint32_t report_counts[3] = { 0 };
+        bool valid[3] = { 0 };
+        for (uint32_t mode = 0; ready && mode < 3; mode += 1)
+        {
+            CBindings events = source;
+            uint32_t* const sources[] = { source.key, source.declaration, source.point, source.end, source.previous, source.depth };
+            for (uint32_t column = GUARD_KEY; column <= GUARD_DEPTH; column += 1)
+            {
+                memcpy(columns[column], sources[column], (uint64_t)count * 4);
+            }
+            memcpy(columns[GUARD_OPERATION], source.operation, count);
+            memcpy(columns[GUARD_KIND], source.kind, count);
+            events.key = columns[GUARD_KEY];
+            events.declaration = columns[GUARD_DECLARATION];
+            events.point = columns[GUARD_POINT];
+            events.end = columns[GUARD_END];
+            events.previous = columns[GUARD_PREVIOUS];
+            events.depth = columns[GUARD_DEPTH];
+            events.operation = columns[GUARD_OPERATION];
+            events.kind = columns[GUARD_KIND];
+            uint8_t* roles = columns[GUARD_ROLES];
+            uint8_t* ignored = columns[GUARD_IGNORED];
+            uint32_t* declarations = columns[GUARD_DECLARATIONS];
+            TypeId* declared = columns[GUARD_TYPES];
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                roles[token] = PARSE_ROLE_OPERAND;
+                ignored[token] = 0;
+                declarations[token] = BUSTER_CHECK_NONE;
+                declared[token] = source.operation[token] == C_BINDING_DECLARE ? BUSTER_TYPE_INT : 0;
+            }
+            const Parser parser = { .tokens = { .count = count }, .tree = { .roles = roles } };
+            CheckInputReport stored[64];
+            CheckInput input = {
+                .declarations = declarations,
+                .declared_types = declared,
+                .reports = stored,
+                .report_capacity = BUSTER_ARRAY_LENGTH(stored),
+            };
+            CheckInputReader reader = {
+                .output = &input,
+                .parser = &parser,
+                .scratch = &scratch,
+                .bindings = events,
+                .declared_types = declared,
+                .ignored = ignored,
+            };
+            valid[mode] = check_input_binding_events(&reader, (CheckInputBindingMode)(CHECK_INPUT_BINDINGS_DIRECT + mode));
+            check_test_expect(test, !input.resource && scratch.length == 0, "guarded binding handoff failed or kept scratch");
+            memcpy(results[mode], declarations, (uint64_t)count * 4);
+            memcpy(types[mode], declared, (uint64_t)count * 4);
+            report_counts[mode] = input.report_count;
+            for (uint32_t report = 0; report < input.report_count && report < 64; report += 1)
+            {
+                reports[mode][report] = stored[report].token << 8 | stored[report].message;
+            }
+            // Every source-order prefix is a legal partial batch: later declarations and restores cannot
+            // change an earlier use's answer. Reuse the frozen stream, including visibility ends beyond the
+            // prefix, while starting every publication from fresh columns.
+            for (uint32_t prefix = 0; prefix <= count; prefix += 1)
+            {
+                for (uint32_t token = 0; token < count; token += 1)
+                {
+                    declarations[token] = BUSTER_CHECK_NONE;
+                    declared[token] = source.operation[token] == C_BINDING_DECLARE ? BUSTER_TYPE_INT : 0;
+                }
+                reader.bindings.count = prefix;
+                input.report_count = 0;
+                input.resource = false;
+                check_input_binding_events(&reader, (CheckInputBindingMode)(CHECK_INPUT_BINDINGS_DIRECT + mode));
+                bool equal = !input.resource && scratch.length == 0;
+                for (uint32_t token = 0; equal && token < count; token += 1)
+                {
+                    const bool consumed = token < prefix && source.operation[token] == C_BINDING_USE;
+                    const uint32_t expected_declaration = consumed ? results[mode][token] : BUSTER_CHECK_NONE;
+                    const TypeId expected_type = consumed ? types[mode][token] : source.operation[token] == C_BINDING_DECLARE ? BUSTER_TYPE_INT : 0;
+                    equal = declarations[token] == expected_declaration && declared[token] == expected_type;
+                }
+                uint32_t expected_reports = 0;
+                for (uint32_t report = 0; equal && report < report_counts[mode]; report += 1)
+                {
+                    if ((reports[mode][report] >> 8) < prefix)
+                    {
+                        equal = expected_reports < input.report_count &&
+                                (stored[expected_reports].token << 8 | stored[expected_reports].message) == reports[mode][report];
+                        expected_reports += 1;
+                    }
+                }
+                check_test_expect(test, equal && input.report_count == expected_reports, "a partial binding batch changed earlier answers or reports");
+            }
+        }
+        for (uint32_t mode = 1; ready && mode < 3; mode += 1)
+        {
+            const bool equal = valid[mode] == valid[0] && report_counts[mode] == report_counts[0] &&
+                               memcmp(results[mode], results[0], (uint64_t)count * 4) == 0 && memcmp(types[mode], types[0], (uint64_t)count * 4) == 0 &&
+                               memcmp(reports[mode], reports[0], (uint64_t)(report_counts[0] < 64 ? report_counts[0] : 64) * 4) == 0;
+            check_test_expect(test, equal, "guarded binding modes differ");
+        }
+        for (uint32_t column = 0; column < GUARD_COUNT; column += 1)
+        {
+            if (mappings[column] != 0)
+            {
+                munmap(mappings[column], mapped[column]);
+            }
+        }
     }
     arena_release(&scratch);
     arena_release(&storage);
@@ -679,6 +1015,30 @@ static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
     };
     check_test_binding_source(test, "int f(void) { return x; }", "x", absent, BUSTER_ARRAY_LENGTH(absent), false, false);
     check_test_binding_source(test, "int f(void) { x; int y; int y; }", "x", absent, BUSTER_ARRAY_LENGTH(absent), false, false);
+    // A parameter is active in its own prototype (a later parameter's bound) and again in the body.
+    const uint32_t prototype_body[] = {
+        0,
+        0,
+        0,
+    };
+    check_test_binding_source(test, "int f(int n, int a[n]) { return n + a[0]; }", "n", prototype_body, BUSTER_ARRAY_LENGTH(prototype_body), true, false);
+    // A block-scope extern stays linked to the file-scope definition after its block closes.
+    const uint32_t linked_block[] = {
+        0,
+        0,
+        2,
+        2,
+    };
+    check_test_binding_source(test, "int f(void) { { extern int x; x = 1; } return 0; } int x; int g(void) { return x; }", "x", linked_block,
+                              BUSTER_ARRAY_LENGTH(linked_block), true, false);
+    // Labels have a namespace of their own: they neither shadow nor take the ordinary name.
+    const uint32_t labels[] = {
+        0,
+        BUSTER_CHECK_TEST_BINDING_LABEL,
+        BUSTER_CHECK_TEST_BINDING_LABEL,
+        0,
+    };
+    check_test_binding_source(test, "int L; int f(void) { goto L; L: return L; }", "L", labels, BUSTER_ARRAY_LENGTH(labels), true, false);
     const uint32_t widths[] = {
         0,
         1,
@@ -705,6 +1065,7 @@ static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
         check_test_binding_source(test, source, "x", expected, widths[i] + 2, true, widths[i] > BUSTER_C_BINDING_WALK_LIMIT);
     }
     check_test_binding_failures(test);
+    check_test_binding_guards(test);
     check_test_binding_column_failures(test);
     check_test_binding_compatibility_capacity(test);
 }

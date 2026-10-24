@@ -340,6 +340,10 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+  The executable is linked at a fixed address (`-no-pie`), from the same code:
+  as a PIE, its pointer tables' 366,684 relative relocations made every start
+  take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
+  process.
 - `C_TOKENIZER_NO_DIGIT_SEPARATORS` makes both lexer paths end pp-numbers
   before `'`; the preprocessor sets it in modes before C23, including file
   caches, scratch text and pastes. The standalone lexer's default keeps C23
@@ -529,8 +533,10 @@ designs and the compilers already built this way.
   with nonallocated debug sections and a regular function symbol table.
   `test-debug --cross-check` checks original fixtures with readelf, GDB and
   perf; `benchmark-debug` measures validation through address finalization.
-  [The debug guide](docs/debug.md) records the contract and the source-row
-  production and streaming integration still pending.
+  [The debug guide](docs/debug.md) records the contract, units written after
+  others (`DebugOutput.bases`), whose four offsets point at their own
+  contributions, and the source-row production still pending; `streaming.c`
+  makes a unit per 256 functions as they compile.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
@@ -541,6 +547,18 @@ designs and the compilers already built this way.
   including per-function arena cleanup. [The unwind guide](docs/unwind.md)
   records the trusted private-slot contract, Link fixups and pending target-host
   qualification. Use the shared 9700X lock per command and CPU 2 for timing.
+- `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
+  units of Tier 0's generated programs, compiled function by function into a
+  static executable laid out data first (headers, `.data`, `.text`, then the
+  unwind tables in a segment of their own, and `debug.c`'s DWARF with a line
+  per function, in units made as the functions compile), written while they
+  compile (by the
+  compiling lane, or by a writer lane it hands chunks to) or once they have
+  compiled, the same bytes either way; and the same code as a Link through
+  `executable_write`, in lld's order. `streaming_test.c` holds `test-streaming`
+  and `streaming_benchmark.c` `benchmark-streaming` ("Streaming tests" and
+  "Streaming benchmark" below); the design's "Streaming the output" has the
+  measurements.
 - `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
   part, and step 6's for the other kinds): what `runtime_import` (or
   `runtime_import_static`, `runtime_import_static_pie` or
@@ -606,6 +624,55 @@ designs and the compilers already built this way.
   these synthetic phase results are not whole-link acceptance. The linker
   guide's "Foreign COMDAT unwind pruning" documents the supported encodings,
   incoming-reference restrictions and benchmark memory/timing boundaries.
+- `src/buster/compiler/foreign_gc.c` returns stable live atom/symbol/fixup
+  maps, and `foreign_gc_link.c` composes COMDAT and FDE/CIE reachability into
+  a fresh foreign link. Use `foreign_link_build_for_gc` to defer undefined
+  references until collection; ordinary conversion remains eager. The
+  adapter remaps external identities and retains explicit, init/fini,
+  dynamic-export and GNU-retain roots. `test-foreign --cross-check` includes
+  independent closure models, guarded tails, rollback, unwind-aware output
+  and GNU ld/lld runtime checks. `benchmark-foreign-gc [--counts LIST]
+  [--runs N]` measures fresh links with GC on/off and exact/vector paths,
+  including cleanup, against independent maps/CFI and complete output bytes.
+  Its original static leaf fixtures include mixed-dead and all-live controls;
+  these are not corpus or multi-lane evidence. Run tests under the shared
+  9700X lock and pin each benchmark process to CPU 2. The linker guide's
+  "Foreign section garbage collection" documents borrowed lifetimes,
+  terminal-pooling order and complete measurement boundaries.
+- `src/buster/compiler/foreign_unwind_dedup.c` plans bounded terminal CIE
+  pooling, and `foreign_unwind_dedup_link.c` transactionally copies/remaps
+  the foreign link. Run it after COMDAT pruning and optional GC; its result
+  goes only to terminal pooling or executable writing, never ET_REL output
+  or another GC/original-import pass. `test-foreign --cross-check` covers
+  exact/vector plans, rollback, record/endpoint maps, mixed alignments and
+  COMDAT-to-GC-to-pooling C++ throw/catch/destructor behavior.
+  `benchmark-foreign-unwind-dedup [--counts LIST] [--runs N]` measures fresh
+  whole links through cleanup with pooling on/off and duplicate/unique
+  original CFI fixtures. The linker guide's "Foreign terminal CIE pooling"
+  defines the one-CIE pool cap, source-only local-reference allowance,
+  borrowed lifetimes, alignment and pending performance evidence. Use the
+  shared 9700X lock and CPU 2 for each measurement process.
+- `src/buster/compiler/foreign_driver.c` supplies `link-foreign`, a raw input
+  command using the built-in resolver/converter/writer. The caller supplies
+  startup objects and libraries in order, as GCC's driver hands them to GNU ld,
+  whose `--build-id`, `--eh-frame-hdr`, `--hash-style=gnu`, `-m elf_x86_64`
+  and `-z now`/`relro`/`noexecstack` it takes as what its output is already.
+  Static no-libc and dynamic PIE outputs are supported, with copy relocations
+  and their aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for
+  libraries' own references and lld's regular symbol table; an IFUNC a fixup
+  reaches is refused, and static libc, static PIE and shared output remain
+  follow-ups. GC, literal pooling and CIE pooling are off by default.
+  With `--lanes N` past 1 on the vector path, the conversion
+  (`foreign_link.c`) runs its global names, objects' maps, relocations and
+  `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
+  #87), into the exact path's link; the command runs at most a lane per CPU it
+  may run on, and `--time` reports the lanes and the resolution's, the
+  conversion's and the writer's phases.
+  [The command contract](docs/foreign-driver.md) has the details. Its tests
+  (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
+  run through `test-foreign --cross-check`, and `test-foreign-corpus`
+  (`foreign_corpus_test.c`) compares it with lld and mold on a corpus
+  ("Foreign corpus test" below).
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
@@ -663,8 +730,11 @@ designs and the compilers already built this way.
   explicit postorder operand graph either in source order or in stable
   dependency levels, with scalar barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
-  `c_check_binding.c` resolves its source events through the batch or independent
-  scalar kernel. `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
+  `c_check_binding.c` publishes each use's retained answer from those events
+  directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
+  [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
+  including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
+  with each handoff ([the binding handoff](docs/c-check-bindings.md), #336). `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
@@ -854,6 +924,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-link
 ./build/compiler benchmark-floors
 ./build/compiler test-foreign --cross-check
+./build/compiler test-foreign-corpus
 ./build/compiler benchmark-foreign --linkers
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
@@ -2720,7 +2791,7 @@ by the direct path and by each linker, and reports medians:
   page faults and how much the peak resident set grew; and the floor, one
   `pwrite` of the output;
 - the objects, each unit's as `-c` writes them, on the same lanes;
-- each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold` and `wild`) linking
+- each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold`, `wild` and `link-foreign`) linking
   them with the appendix's command, the clang driver's with the matched
   options (its `-static` one for a static executable, with
   `--start-group -lgcc -lgcc_eh -lc --end-group`, and its `-static-pie` one
@@ -2735,7 +2806,11 @@ by the direct path and by each linker, and reports medians:
   gives its page faults and peak resident set: a program spawned from the
   benchmark would have the benchmark's peak resident set as its own when that
   was higher, which Linux carries over at `exec`. The helper's own floor, a
-  program that does nothing, is printed first.
+  program that does nothing, is printed first;
+- `link-foreign` (#86), this executable's linker of other compilers' objects,
+  given the same command line as a process of its own, with `--lanes=8` for its
+  threads and `--lanes=1` for one: the dynamic PIEs alone, since its static
+  executables of libc aren't there yet.
 
 Every program written must run and print what its model predicts, but wild's
 static executables and static PIEs of a program whose `.tbss` is more aligned
@@ -2919,6 +2994,59 @@ CPU: with `--linkers` on pushes to main, dispatched runs and pull requests
 that change `foreign_benchmark.c`, since mold's and wild's times don't depend
 on a pull request, and without it on other pull requests. Like the others,
 its measurements are informational.
+
+## Foreign corpus test
+
+`./build/compiler test-foreign-corpus [--sqlite DIR] [--lua DIR] [--self DIR]
+[--compilers LIST] [--linkers LIST] [--directory PATH] [--keep]` is #86's
+differential test of `link-foreign`. Each program of its corpus is compiled by
+each compiler of `--compilers` (gcc and clang) at -O2, their default PIEs, then
+linked from one command line by `link-foreign` (this executable, as a process
+of its own), by lld and by mold (`--linkers`), with GCC's crt objects and
+libraries around the program's objects and archives. The three executables
+must:
+
+- run alike: each run's exit status, output and errors, from directories of
+  the same name, with the same arguments, input and environment;
+- have the same `.symtab` symbols with the same sizes: each named entry's name,
+  binding, type, visibility, size and whether it is defined or absolute, as a
+  multiset, but for `STT_FILE` and `STT_SECTION` entries, the names each linker
+  defines for itself (`foreign_corpus_synthesized`), mold's `$` labels and
+  `__abi_tag`, which the crt object's ABI note holds and `link-foreign` writes
+  as a note of its own;
+- agree on the dynamic section (`DT_NEEDED` in order, `DT_SONAME`, the PIE
+  flag, `DT_INIT`, `DT_FINI` and the arrays' sizes), on `.dynsym`'s names at
+  their versions, and on the dynamic relocations by symbol and class (a GOT
+  slot, `GLOB_DAT` or `JUMP_SLOT`; `COPY`; `R_X86_64_64`; `TPOFF64`;
+  `DTPMOD64`; `DTPOFF64`), with as many relative ones as lld's.
+
+And `link-foreign`'s program must come out byte for byte the same when it links
+on eight lanes (`--lanes=8`), through the resolution's, the conversion's and
+the writer's lane paths, as on one.
+
+What a reference linker writes as its own valid choice is classified, counted
+and printed as documented ("differs, as documented"), never dropped silently
+(`foreign_corpus_reason`): mold leaves weak undefined names without a version
+out of `.dynsym`, keeps COMDAT groups' signatures as absolute locals, drops
+`__FRAME_END__`, binds a copy's aliases weakly, writes internal visibility as
+hidden and the `__start_`/`__stop_` names local, and keeps a few GOT slots
+that lld relaxes; lld leaves an `R_X86_64_64` to a library's data that it
+scanned before the reference that copies it symbolic, and gives a function
+that code both calls and loads from the GOT a second slot. Any other row one
+side has alone fails the test, and the first 12 are printed.
+
+The corpus is two original programs, always: C, of three translation units
+and an archive (two members that load, one that doesn't), with threads,
+thread-locals, libc's and libm's data and functions, constructors and
+destructors, a weak reference and a `__start_`/`__stop_` registry; and C++,
+of two translation units, with iostream, exceptions across them, RTTI,
+templates in COMDAT groups, inline variables and a thread. With `--sqlite DIR`
+the SQLite amalgamation's shell (`sqlite3.c` and `shell.c`), with `--lua DIR`
+Lua's interpreter (its library as an archive) and with `--self DIR` this
+repository's compiler, built by clang alone, join it, each with runs of its
+own. The files go in a directory under `--directory` (`TMPDIR` or `/tmp`),
+kept with `--keep` or on a failure. The 9700X job's test step runs the
+original programs.
 
 ## Dataflow tests
 
@@ -3192,8 +3320,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   refused, its message naming the option, or taken without one: the `-f`
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
-  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks; and
-  the fuzz batch: its isolation rules checked on small sources (what a case
+  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
+  `-include` files each failed in turn (the arena cut short, the data table full), each
+  a fatal error that stops the prelude and fails the run, beside controls that
+  succeed (no `-include` file made without one); and the fuzz batch: its isolation rules checked on small sources (what a case
   leaves open makes clang read it alone), its comparison on pairs of texts
   (whitespace between tokens doesn't count, a literal's contents and joined
   tokens do, and our tokens that don't lex back, as an unterminated literal,
@@ -3968,6 +4099,56 @@ one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
 each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
+
+## Streaming tests
+
+`./build/compiler test-streaming [--seed N] [--units N] [--cross-check]
+[--keep]` checks `streaming.c` on two programs of generated units (3, and
+`--units`, 40), each in both orders (callees first, as generated, and callers
+first, every call a forward one), with 256 KB and 4 KB chunks, written by the
+three schedules (at the end, streamed, streamed by a writer lane):
+
+- the files must be byte for byte the same, with the build ID their note holds;
+- each must run and print the fold of every unit's entry as Tier 0's tests'
+  interpreter computes it, and so must the direct path's executable of the same
+  code (`executable_write` on 1 and 3 lanes, in lld's order);
+- each read back: the segments in the data-first order (R, RW, RX, R), the entry
+  in `.text`, `.data`'s bytes, `.eh_frame_hdr`'s table as long as the functions,
+  sorted, each FDE at its function;
+- a streamed write with several chunks must have written some before the last
+  function compiled, and forward fields come only in the callers' order.
+
+`--cross-check`, which needs readelf, llvm-dwarfdump, gdb and perf, reads a
+streamed file with `readelf -a` (no warnings) and `llvm-dwarfdump --verify`
+(its DWARF, a unit per 256 functions), stops gdb in every program function and
+checks
+that each stop's backtrace goes through the program's functions to `_start`,
+two of them above `_start` at least once (the unwinder used an FDE), each frame
+at its function's line of `streamed.c` (the DWARF's: function f is line f + 1),
+and that perf's samples with DWARF call graphs name the program's functions,
+reach `_start` and give lines of `streamed.c`. The files go in a directory under `$TMPDIR` (or `/tmp`), removed
+unless `--keep` or a failure. The 9700X job's test step runs it with
+`--cross-check`.
+
+## Streaming benchmark
+
+`./build/compiler benchmark-streaming [--units N] [--functions N] [--seed N]
+[--runs N] [--chunk-bytes N] [--order callees|callers] [--lanes N] [--cpus A,B]
+[--directory PATH] [--keep]` generates one program of `--units` units (400) of
+`--functions` functions (32), checks that every variant's file runs and prints
+the same and that the schedules' files are the same bytes, then times each
+variant `--runs` times (11) in an order that rotates by run, from the write's
+start to the file closed with Tier 0 compiling every function in it: at the
+end, streamed, streamed by a writer lane (on `--cpus`), and the direct path's
+`executable_write` of the same code on one lane and on `--lanes` (8). It
+reports the medians of the whole, the compiling, the Link's building (the
+direct path) and what follows the last function compiled, which for the
+schedules it splits into `.text`'s last chunks, unwind pairs and DWARF units,
+the tail built, the tail written, the headers, and the close. Run it under the
+9700X's lock with `taskset -c 2`, or `taskset -c 2,3` with `--cpus 2,3` for the
+writer lane. The outputs are overwritten in place, as `executable_write`
+overwrites an executable: a file truncated on open and written again is flushed
+when it is closed on btrfs and ext4.
 
 ## IR tests and benchmarks
 
