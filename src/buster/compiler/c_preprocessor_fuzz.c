@@ -644,15 +644,32 @@ static PreprocessorFuzzOutput pp_fuzz_output(Preprocessor* pp, bool accepted, Ar
                 }
                 result.valid = offset + result.text.length <= length && memcmp(text + offset, result.text.pointer, result.text.length) == 0;
                 uint64_t kept = 0;
+                const uint64_t slice_end = offset + result.text.length;
                 for (uint64_t range = 0; result.valid && range < whole_count; range += 1)
                 {
-                    if (whole[range].start >= offset && whole[range].end <= offset + result.text.length)
+                    // A range past the slice's end only by the whitespace its spelling ends with, which the split left
+                    // out, is cut there, and keeps those bytes as its tail (PreprocessorFuzzWhole).
+                    const uint64_t over = whole[range].end > slice_end ? whole[range].end - slice_end : 0;
+                    bool spaces = whole[range].start < slice_end;
+                    for (uint64_t b = 0; spaces && b < over; b += 1)
                     {
+                        spaces = preprocessor_fuzz_clang_space(text[slice_end + b]);
+                    }
+                    char* tail = spaces && over != 0 ? arena_push(arena, over, 1) : 0;
+                    if (whole[range].start >= offset && spaces && (over == 0 || tail != 0))
+                    {
+                        if (over != 0)
+                        {
+                            memcpy(tail, text + slice_end, over);
+                        }
                         whole[kept] = whole[range];
                         whole[kept].start -= (uint32_t)offset;
-                        whole[kept].end -= (uint32_t)offset;
+                        whole[kept].end = (uint32_t)(whole[range].end - over - offset);
+                        whole[kept].tail_length = (uint32_t)over;
+                        whole[kept].tail = tail;
                         kept += 1;
                     }
+                    result.valid = !spaces || over == 0 || tail != 0;
                 }
                 result.whole = whole;
                 result.whole_count = kept;
@@ -727,7 +744,8 @@ static PreprocessorFuzzDifference pp_fuzz_confirm_ends(PreprocessorFuzzOutput ou
                 const PreprocessorFuzzWhole* mine = &ours.whole[w];
                 const uint64_t length = (uint64_t)mine->end - mine->start;
                 const bool same_kind = (mine->kind == C_TOKEN_UNKNOWN) == unknown;
-                const bool same_spelling = token->spelling.length == length && memcmp(token->spelling.pointer, ours.text.pointer + mine->start, length) == 0;
+                const bool same_spelling = token->spelling.length == length + mine->tail_length && memcmp(token->spelling.pointer, ours.text.pointer + mine->start, length) == 0 &&
+                                           (mine->tail_length == 0 || memcmp(token->spelling.pointer + length, mine->tail, mine->tail_length) == 0);
                 result = !same_kind ? BUSTER_PPF_TOKEN_KIND : !same_spelling ? BUSTER_PPF_TOKEN_SPELLING : BUSTER_PPF_EQUAL;
                 w += 1;
                 matched += 1;
@@ -1479,8 +1497,22 @@ struct PPFuzzEndsCase
 
 // One whose literal ends in two spaces, its line's end (#263's second review's), one whose tokens after it its line
 // takes, a broken string, one among a macro's arguments, and one on a pragma's line that a `#pragma omp`, whose tokens
-// are expanded, goes on past (seed 133's case 832692 in C17).
+// are expanded, goes on past (seed 133's case 832692 in C17). Then literals that end the case's text in whitespace,
+// which the case's text leaves out (PreprocessorFuzzWhole.tail): two spaces, the newline after a line splice
+// (pp_trailing_splice), and a space a splice took into the literal (seed 3110's case 84082 in C23).
 static const PPFuzzEndsCase pp_fuzz_ends_cases[] = {
+    {
+        "#define A 'a  \nA\n",
+        false,
+    },
+    {
+        "\\ '\\\n",
+        false,
+    },
+    {
+        "\\ '\\\n#define g \n",
+        false,
+    },
     {
         "#define A 'a  \nA\nx\n",
         false,

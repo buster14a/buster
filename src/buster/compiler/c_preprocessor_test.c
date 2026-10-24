@@ -2617,6 +2617,75 @@ static bool pp_test_final_copy_accounting(void)
     return result;
 }
 
+// An unterminated literal that ends in a line splice is spelled as clang cleans it (pp_trailing_splice): with the
+// character after the splice, the newline that ends the literal, or at the file's end the NUL that ends clang's buffer
+// (#109's seed 3110). Each source's last token, by both kernels, must be clang's spelling, byte for byte (clang 23's
+// -E); the last two keep their own.
+static bool pp_test_trailing_splices(void)
+{
+    typedef struct PPTrailingSplice
+    {
+        const char* source;
+        const char* spelling;
+        uint32_t length;
+    } PPTrailingSplice;
+    static const PPTrailingSplice cases[] = {
+        { "'\\\n", "'\0", 2 },
+        { "'a\\\n", "'a\0", 3 },
+        { "'\\\\\n", "'\\\0", 3 },
+        { "'\\ \n", "'\0", 2 },
+        { "'\\\r\n", "'\0", 2 },
+        { "\"a\\\n\\\n", "\"a\0", 3 },
+        { "u8\"\\\n", "u8\"\0", 4 },
+        { "x '\\\\\n\\\n", "'\\\0", 3 },
+        { "'\\\n\n", "'\n", 2 },
+        { "'\\\nx\n", "'x", 2 },
+        { "'\\", "'\\", 2 },
+    };
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    uint32_t failures = 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const PPOptions options = {
+                .language = {
+                    .standard = 2017,
+                    .gnu = true,
+                },
+                .scalar = k == 1,
+                .no_standard_includes = true,
+                .quiet = true,
+            };
+            Preprocessor* pp = &runs[k];
+            const bool ran = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+            if (ran)
+            {
+                pp_run_source(pp, "trailing-splice.c", (const uint8_t*)cases[c].source, (uint32_t)strlen(cases[c].source));
+            }
+            const PPTokens* out = &pp->output;
+            uint8_t buffer[16];
+            const uint8_t* spelling = 0;
+            const uint32_t last = ran && out->count != 0 ? out->count - 1 : 0;
+            const bool fits = ran && out->count != 0 && out->kinds[last] == C_TOKEN_UNKNOWN && out->values[last] - out->locations[last] < sizeof(buffer);
+            const uint32_t length = fits ? pp_spelling(pp, out->kinds[last], out->values[last], out->locations[last], buffer, &spelling) : 0;
+            if (!fits || length != cases[c].length || memcmp(spelling, cases[c].spelling, length) != 0)
+            {
+                printf("trailing splices: case %u, %s kernels: spelled with %u bytes, not clang's %u\n", c, k == 0 ? "vectorized" : "scalar", length, cases[c].length);
+                failures += 1;
+            }
+            if (ran)
+            {
+                pp_release(pp);
+            }
+            intern_release(&tables[k]);
+        }
+    }
+    printf("trailing splices: %u of %lu runs fail\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(cases));
+    return failures == 0;
+}
+
 // The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
 // macros, then make every known name's bit disagree with macro_of before each use file. Repeating this after undef
 // and redefine prevents their normal bit updates from hiding a lookup through the cache. The third run selects the
@@ -5921,6 +5990,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_embed_lookups(directory, with_clang);
         passed_all &= pp_test_lookup_accounting(directory);
         passed_all &= pp_test_final_copy_accounting();
+        passed_all &= pp_test_trailing_splices();
         passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);

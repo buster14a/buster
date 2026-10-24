@@ -1547,8 +1547,9 @@ static bool pp_raw_string_body(const uint8_t* spelling, uint32_t length, const u
 
 // The spelling of an unknown token at `location` of `length` bytes that ends in a line splice, an unterminated literal's
 // (no other token can): clang's cleaning reads the character after the splice, past the token, which is the newline
-// that ended the literal (Lexer::getSpellingSlow), so its spelling ends with that newline. `spelled` bytes of it are in
-// `buffer`, without the splices (pp_without_splices), which has room for `length`. Returns the length.
+// that ended the literal (Lexer::getSpellingSlow), so its spelling ends with that newline; or, for a literal the file's
+// end ended, the NUL that ends clang's buffer (#109's seed 3110). `spelled` bytes of it are in `buffer`, without the
+// splices (pp_without_splices), which has room for `length`. Returns the length.
 static uint32_t pp_trailing_splice(const Preprocessor* pp, uint32_t location, uint32_t length, uint8_t* buffer, uint32_t spelled)
 {
     uint32_t result = spelled;
@@ -1556,6 +1557,8 @@ static uint32_t pp_trailing_splice(const Preprocessor* pp, uint32_t location, ui
     const PPRange* record = range != BUSTER_PP_NONE ? &pp->ranges[range] : 0;
     if (record != 0 && record->file != BUSTER_PP_NONE && length >= 2 && location - record->base + length < record->length)
     {
+        // A range has a location past its file's bytes (pp_add_range), which holds no byte to read.
+        const bool end = location - record->base + length == record->length - 1;
         const uint8_t* bytes = record->bytes + (location - record->base);
         uint32_t p = length;
         const bool newline = bytes[p - 1] == '\n' || bytes[p - 1] == '\r';
@@ -1566,8 +1569,8 @@ static uint32_t pp_trailing_splice(const Preprocessor* pp, uint32_t location, ui
             p -= 1;
         }
         const bool spliced = newline && p >= 1 && (bytes[p - 1] == '\\' || (pp->options.trigraphs && p >= 3 && bytes[p - 1] == '/' && bytes[p - 2] == '?' && bytes[p - 3] == '?'));
-        const uint8_t next = bytes[length];
-        if (spliced && (next == '\n' || next == '\r') && spelled < length)
+        const uint8_t next = end ? 0 : bytes[length];
+        if (spliced && (end || next == '\n' || next == '\r') && spelled < length)
         {
             buffer[spelled] = next;
             result = spelled + 1;

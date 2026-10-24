@@ -316,11 +316,13 @@ compares the emulation's fixtures with clang in each mode
 the emulation once printed wrong, and those probing around them found, which
 test-preprocessor's cases can't pin, since they compare tokens and line
 markers, not the `-P` text. Then the two probes of #263's second review:
-fourteen sources whose output has a token that clang's text runs on past
+seventeen sources whose output has a token that clang's text runs on past
 (`pp_fuzz_ends_cases`), each of which must agree with clang, confirmed by
 clang's tokens (or unverified on a pragma's line without the adapter), and must differ
 with its first such token one byte shorter, the first source by clang's
-tokens alone (`pp_fuzz_check_ends_cases`). The pragma sources also run through
+tokens alone (`pp_fuzz_check_ends_cases`). Three of them end the case's text
+with such a literal ending in whitespace (two spaces, the newline after a
+splice, a space a splice took in), whose tail clang's tokens must confirm. The pragma sources also run through
 the actual comparison-accounting path and must count as verified with the
 adapter, or unverified with zero verified comparisons without it; and a
 comparison whose tokens don't fit its arena, which must leave its case
@@ -500,7 +502,16 @@ test-preprocessor, and to the harness changes after them:
 - **An unterminated literal that ends in a line splice** is spelled with the
   newline after it: clang's cleaning reads the character after the splice,
   past the token (`Lexer::getSpellingSlow`, `pp_trailing_splice`). Stringized,
-  it leaves that newline in the string.
+  it leaves that newline in the string. At the file's end the character after
+  the splice is the NUL that ends clang's buffer, which its `-E` text then has
+  (`'\` and a newline last in a file prints `'` and a NUL;
+  `pp_test_trailing_splices` pins each form). A case never ends its file
+  (the batch's marker follows it), but its last token can end in whitespace,
+  that newline or a literal's spaces, which the case's text, ending before its
+  trailing whitespace, leaves out: such a whole token keeps those bytes as its
+  tail (`PreprocessorFuzzWhole.tail`), and clang's token must have them too.
+  Seed 3110's case 84082 in C23 was the first, at 9 million cases per mode on
+  the 9700X; before, the comparison dropped the token and failed the case.
 - **A line marker's name and flags** are read expanded after its digits
   (`HandleDigitDirective`'s `Lex`): `# 30 E` with `E` empty is a plain
   `# 30`.
