@@ -863,7 +863,8 @@ struct PPConditional
     bool taken;
     bool seen_else;
     bool skipping;
-    // The opening directive's name, where clang reports the group unterminated.
+    // The opening directive's name, as lexed: clang reports the group unterminated at the first of any line splices
+    // before it (pp_lexed_start).
     uint32_t location;
 };
 
@@ -4903,7 +4904,7 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
         pp_read_file_comment(pp, context, false);
         while (pp->conditional_count > context->conditional_base)
         {
-            pp_diagnose(pp, PP_SEVERITY_ERROR, pp->conditionals[pp->conditional_count - 1].location, "unterminated conditional directive");
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_lexed_start(pp, pp->conditionals[pp->conditional_count - 1].location), "unterminated conditional directive");
             pp->conditional_count -= 1;
             pp->unterminated += 1;
         }
@@ -7134,31 +7135,13 @@ static void pp_substitute_simple(Preprocessor* pp, const PPInvocation* invocatio
     pp->history_current = saved_history;
 }
 
-// Whether a buffer's tokens [begin, end) name no macro but where a painted name does: a rescan copies them all, as they are.
-static bool pp_names_no_macro(const Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end)
-{
-    bool result = true;
-    for (uint32_t p = begin; result && p < end; p += 64)
-    {
-        const __mmask64 valid = _bzhi_u64(~0ull, end - p < 64 ? end - p : 64);
-        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, tokens->kinds + p);
-        const __m512i flags = _mm512_maskz_loadu_epi8(valid, tokens->flags + p);
-        const uint64_t unpainted = _mm512_mask_testn_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_NO_EXPAND));
-        for (uint64_t bits = _mm512_mask_cmpeq_epi8_mask(unpainted, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER)); result && bits != 0; bits &= bits - 1)
-        {
-            result = !pp_is_macro_vector(pp, tokens->values[p + (uint32_t)__builtin_ctzll(bits)]);
-        }
-    }
-    return result;
-}
-
 // Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
 // pp_finish_invocation would, when that is simple: a BUSTER_PP_MACRO_SIMPLE macro given as many arguments as it takes,
 // none of the ones it uses naming an enabled macro (so each is its own expansion), read while no stream or capture
 // with a limit is open. Then it isn't pushed on the invocation stack: its expansion is substituted at once
-// (pp_substitute_simple) and pushed as a buffer, or when no name in it is a macro's, copied to the target at once, as
-// the main loop's step over the buffer and its pop would (pp_step_buffer, pp_pop_context). Returns false, having
-// changed nothing, when the invocation isn't simple.
+// (pp_substitute_simple) and pushed as a buffer. Returns false, having changed nothing, when the invocation isn't
+// simple. (Copying an expansion that names no macro straight to the target, rather than pushing it, saved 75
+// instructions per such expansion on sqlite3.c and cost 80 for the check on every other, a 2 million loss.)
 static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
 {
     const PPMacro* macro = &pp->macros[invocation->macro];
@@ -7204,23 +7187,7 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
         }
         pp->arguments.count = invocation->arguments_begin;
         pp->argument_record_count = invocation->arguments;
-        if (begin < end && pp->context_count < BUSTER_PP_MAX_CONTEXTS && !pp->fatal && pp_names_no_macro(pp, &pp->expansions, begin, end))
-        {
-            // The buffer's step copies it all, and its pop passes its trailing space on.
-            PPTokens* target = pp_target(pp);
-            const uint32_t at = target->count;
-            const uint32_t stop = pp_copy_buffer_run_vector(pp, &pp->expansions, begin, end);
-            pp_history_copy(pp, target, at, &pp->expansions, begin, stop);
-            if (pp->options.timing)
-            {
-                pp->statistics.buffer_runs += 1;
-                pp->statistics.buffer_run_tokens += stop - begin;
-                pp->statistics.final_buffer_run_tokens += target == &pp->output ? stop - begin : 0;
-            }
-            pp->expansions.count = begin;
-            pp->contexts[pp->context_count - 1].pending_flags |= trailing;
-        }
-        else if (begin < end)
+        if (begin < end)
         {
             PPContext* context = pp_push_buffer(pp, &pp->expansions, begin, end, invocation->macro, invocation->expansion_end, false, true);
             if (context != 0)
@@ -8620,6 +8587,48 @@ BUSTER_INLINE uint32_t pp_step_limit(const Preprocessor* pp, uint32_t position, 
     return (pp->stream_count | pp->limit_count) != 0 && limit - position > 1 ? position + 1 : limit;
 }
 
+// The expansion of the object-like macro whose name is the file context's current token, read in the range at `base`,
+// as pp_expand_current and pp_expand_object make it when it goes straight into the target: when its body names no
+// macro and has no ##, and nothing is pending or open that a name read from a file needs (pending flags, a stream,
+// a capture with a limit, expansion starts for -E's markers, poisoned names). Returns false, having changed nothing,
+// otherwise.
+static bool pp_expand_file_direct(Preprocessor* pp, PPContext* context, const PPFileData* data, uint32_t base)
+{
+    const uint32_t position = context->position;
+    const IdentId value = data->values[position];
+    const PPMacroId id = pp->macro_of[value];
+    const PPMacro* macro = &pp->macros[id];
+    const PPFileData* body = &pp->datas[macro->data];
+    PPTokens* target = pp_target(pp);
+    bool result = (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
+                  macro->body_begin < macro->body_end && (pp->stream_count | pp->limit_count | pp->poison_count | context->pending_flags) == 0 &&
+                  !pp->options.expansion_starts && (uint64_t)target->count + (macro->body_end - macro->body_begin) <= target->capacity;
+    for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
+    {
+        result = (body->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[t]);
+    }
+    if (result)
+    {
+        context->position = position + 1;
+        const uint32_t location = base + data->starts[position];
+        const uint32_t saved_history = pp->history_current;
+        pp->history_current = pp_history_expansion(pp, id, location, 0);
+        const uint32_t begin = target->count;
+        pp_append_file_tokens(pp, target, body, macro->base, macro->body_begin, macro->body_end, true);
+        // The name's leading space and line start go to the first token (pp_expand_object).
+        const uint8_t name_flags = (uint8_t)((pp_file_space(data, position) ? BUSTER_PP_SPACE : 0) | ((data->kinds[position] & BUSTER_C_TOKEN_START_OF_LINE) ? BUSTER_PP_START_OF_LINE : 0));
+        uint8_t* flags = &target->flags[begin];
+        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+        if (pp->options.timing)
+        {
+            pp->statistics.direct_expansions += 1;
+            pp->statistics.final_direct_object_tokens += target == &pp->output ? target->count - begin : 0;
+        }
+        pp->history_current = saved_history;
+    }
+    return result;
+}
+
 static void pp_step_file(Preprocessor* pp, PPContext* context)
 {
     const PPFileData* data = &pp->datas[context->data];
@@ -8627,24 +8636,35 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
     if (context->position < limit)
     {
         const uint32_t base = pp->ranges[context->range].base;
-        const uint32_t run_end = pp_step_limit(pp, context->position, limit);
-        const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, run_end) : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
-        pp_read_raw_errors(pp, context, context->position, stop);
-        if (pp->capture_count != 0)
+        // A direct expansion leaves the context as the main loop's next step finds it: that step's run is copied here.
+        bool more = true;
+        while (more)
         {
-            pp_history_fill(pp, &pp->captures, pp->captures.count - (stop - context->position), pp->captures.count, 0);
-        }
-        pp_take_pending_flags(pp, context, stop - context->position);
-        if (pp->options.timing)
-        {
-            pp->statistics.file_runs += 1;
-            pp->statistics.file_run_tokens += stop - context->position;
-            pp->statistics.final_file_run_tokens += pp_target(pp) == &pp->output ? stop - context->position : 0;
-        }
-        context->position = stop;
-        if (stop < run_end && !pp->fatal)
-        {
-            pp_expand_current(pp);
+            const uint32_t run_end = pp_step_limit(pp, context->position, limit);
+            const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, run_end) : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
+            pp_read_raw_errors(pp, context, context->position, stop);
+            if (pp->capture_count != 0)
+            {
+                pp_history_fill(pp, &pp->captures, pp->captures.count - (stop - context->position), pp->captures.count, 0);
+            }
+            pp_take_pending_flags(pp, context, stop - context->position);
+            if (pp->options.timing)
+            {
+                pp->statistics.file_runs += 1;
+                pp->statistics.file_run_tokens += stop - context->position;
+                pp->statistics.final_file_run_tokens += pp_target(pp) == &pp->output ? stop - context->position : 0;
+            }
+            context->position = stop;
+            more = false;
+            if (stop < run_end && !pp->fatal)
+            {
+                more = pp->vectorized && pp_expand_file_direct(pp, context, data, base);
+                if (!more)
+                {
+                    pp_expand_current(pp);
+                }
+                more = more && context->position < limit && !pp->fatal;
+            }
         }
     }
     else if (context->next_directive < data->directive_count)
@@ -9234,7 +9254,7 @@ static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     {
         const PPFileData* data = &pp->datas[context->data];
         context->guard_taken |= d == data->guard_opener && data->guard != 0 && taken;
-        const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
+        const uint32_t name = pp->ranges[context->range].base + data->starts[data->directive_hash[d] + 1];
         if (pp->conditional_count < BUSTER_PP_MAX_CONTEXTS)
         {
             pp->conditionals[pp->conditional_count] = (PPConditional){ .taken = taken, .location = name };
@@ -9330,7 +9350,6 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
     const uint32_t end = data->directive_end[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
-    const uint32_t name = pp_token_location(pp, context, data, hash + 1);
     const bool open = pp->conditional_count > context->conditional_base;
     PPConditional* group = open ? &pp->conditionals[pp->conditional_count - 1] : 0;
     switch (kind)
@@ -9359,16 +9378,16 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
         case PP_DIRECTIVE_ELIFNDEF:
             if (kind != PP_DIRECTIVE_ELIF && pp->options.language.standard < 2023)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, name, "use of a '#%s' directive is a C23 extension", pp_conditional_name(kind));
+                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 1), "use of a '#%s' directive is a C23 extension", pp_conditional_name(kind));
             }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s without #if", pp_conditional_name(kind));
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, hash + 1), "#%s without #if", pp_conditional_name(kind));
                 pp->unterminated += 1;
             }
             else if (group->seen_else)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s after #else", pp_conditional_name(kind));
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, hash + 1), "#%s after #else", pp_conditional_name(kind));
                 pp_skip_group(pp, context, d);
             }
             else if (group->taken)
@@ -9406,14 +9425,14 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, hash + 1), "#else without #if");
                 pp->unterminated += 1;
             }
             else
             {
                 if (group->seen_else)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else after #else");
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, hash + 1), "#else after #else");
                 }
                 if (extra && entering)
                 {
@@ -9436,7 +9455,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#endif without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, hash + 1), "#endif without #if");
                 pp->unterminated += 1;
             }
             else
