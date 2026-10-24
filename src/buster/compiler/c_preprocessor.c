@@ -56,7 +56,8 @@
 //   - API: PPOptions, PPTokens, the flags and internal kinds, PPStatistics, Preprocessor and the entry points.
 //   - Diagnostics, token stacks, location ranges and scratch spellings.
 //   - Files: PPFileData, PPFile, the file cache's records and paths (FileCache), the directive scan
-//     (pp_scan_directives_vector, pp_finish_directives, pp_find_guard), pp_prepare_into, pp_count_lines and pp_line_of,
+//     (pp_scan_directives_vector, pp_finish_directives, pp_find_guard), pp_prepare_into (a file whole, pp_prepare_whole, or
+//     a large one a window at a time, pp_prepare_windows), pp_count_lines and pp_line_of,
 //     the cache's functions (file_cache_lookup_path, file_cache_prepare and the ones they're made of), and a translation
 //     unit's paths (pp_lookup_path) and preparation (pp_prepare_data).
 //   - Include search: pp_include_candidate and pp_find_include (pp_dedupe_directories drops missing and repeated
@@ -2445,31 +2446,39 @@ typedef enum PPPrepareStatus
     PP_PREPARE_NO_MEMORY,
 } PPPrepareStatus;
 
-// Keep only exceptional raw errors, never a per-token diagnostic column. Ordinary files allocate nothing. Both
-// preparation kernels use the same independent scalar delimiter check on the UNKNOWN candidates they produced.
-static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileData* data)
+// The UNKNOWN tokens among `count` kinds, where a raw string literal's error can be (raw strings on, or C++), by the
+// kernels `prepare` picks: 0 otherwise.
+static uint32_t pp_count_raw_candidates(const PPPrepare* prepare, const uint8_t* kinds, uint64_t count)
 {
     uint32_t unknowns = 0;
-    data->raw_error_count = 0;
-    data->raw_errors = 0;
     const bool raw = (prepare->refine_flags & (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_CPLUSPLUS)) != 0;
-    for (uint32_t t = 0; raw && t < data->token_count; t += 64)
+    for (uint64_t t = 0; raw && t < count; t += 64)
     {
-        const uint32_t count = data->token_count - t < 64 ? data->token_count - t : 64;
+        const uint32_t chunk = count - t < 64 ? (uint32_t)(count - t) : 64;
         if (prepare->vectorized)
         {
-            const __mmask64 valid = _bzhi_u64(~0ull, count);
-            const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, data->kinds + t), _mm512_set1_epi8(0x7F));
-            unknowns += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)));
+            const __mmask64 valid = _bzhi_u64(~0ull, chunk);
+            const __m512i chunk_kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
+            unknowns += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(valid, chunk_kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)));
         }
         else
         {
-            for (uint32_t i = 0; i < count; i += 1)
+            for (uint32_t i = 0; i < chunk; i += 1)
             {
-                unknowns += (data->kinds[t + i] & 0x7F) == C_TOKEN_UNKNOWN;
+                unknowns += (kinds[t + i] & 0x7F) == C_TOKEN_UNKNOWN;
             }
         }
     }
+    return unknowns;
+}
+
+// Keep only exceptional raw errors, never a per-token diagnostic column. Ordinary files allocate nothing. Both
+// preparation kernels use the same independent scalar delimiter check on the UNKNOWN candidates they produced, of which
+// the file has `unknowns` (pp_count_raw_candidates).
+static bool pp_record_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileData* data, uint32_t unknowns)
+{
+    data->raw_error_count = 0;
+    data->raw_errors = 0;
     const uint64_t mark = arena->length;
     data->raw_errors = unknowns != 0 ? arena_push_array(arena, unknowns, sizeof(PPRawError), _Alignof(PPRawError)) : 0;
     const bool result = unknowns == 0 || data->raw_errors != 0;
@@ -2547,7 +2556,7 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
         data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
-        bool refined = data->space != 0 && pp_prepare_raw_errors(prepare, arena, data);
+        bool refined = data->space != 0 && pp_record_raw_errors(prepare, arena, data, pp_count_raw_candidates(prepare, data->kinds, data->token_count));
         if (refined && prepare->vectorized)
         {
             refined = refine_tokens(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values, data->space,
@@ -2603,11 +2612,14 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     const bool pushed = data->kinds != 0 && data->starts != 0 && data->values != 0;
     PPPrepareStatus result = !pushed ? PP_PREPARE_NO_COLUMNS : backslash_chunks == 0 || space == 0 ? PP_PREPARE_NO_MEMORY : PP_PREPARE_DONE;
     // The next window starts at `at`, the start of the file or of a token that starts a logical line, and takes `size`
-    // bytes; the tokens before it are kept (`count`), and those before `refined` are refined.
+    // bytes; the tokens before it are kept (`count`), those before `refined` are refined, and those before `counted`
+    // have had their UNKNOWN tokens counted (`unknowns`).
     uint64_t at = 0;
     uint64_t size = window;
     uint64_t count = 0;
     uint64_t refined = 0;
+    uint64_t counted = 0;
+    uint32_t unknowns = 0;
     bool last = false;
     while (result == PP_PREPARE_DONE && !last)
     {
@@ -2649,6 +2661,9 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
             ticks[PP_PHASE_LEX] += now - tick;
             tick = now;
         }
+        // The raw string errors' candidates (pp_record_raw_errors), counted while the window's kinds are in the caches.
+        unknowns += result == PP_PREPARE_DONE ? pp_count_raw_candidates(prepare, data->kinds + counted, count - counted) : 0;
+        counted = count;
         const uint64_t complete = last ? count : count - count % BUSTER_REFINE_BLOCK_TOKENS;
         if (result == PP_PREPARE_DONE && complete > refined)
         {
@@ -2681,7 +2696,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
             memcpy(data->space, space, words * sizeof(uint64_t));
             memset(data->space + words, 0, (count / 64 + 2 - words) * sizeof(uint64_t));
         }
-        result = data->space != 0 && pp_prepare_raw_errors(prepare, arena, data) ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+        result = data->space != 0 && pp_record_raw_errors(prepare, arena, data, unknowns) ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
     }
     scratch_end(scratch);
     if (ticks != 0)

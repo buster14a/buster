@@ -13,8 +13,10 @@
 // it in place.
 //
 // Entry points: refine_tokens (AVX-512) and refine_tokens_scalar (the reference, token by token, which test-refinement
-// compares it with), refine_identifier_key (an identifier's lookup key), refine_identifier_end (an identifier's
-// physical end, which refinement overwrote with its id) and refine_gap_is_splices.
+// compares it with), refine_tokens_blocks (refine_tokens a range of blocks at a time, for a file the preprocessor lexes
+// a window at a time, with a RefineProgress from refine_progress_begin carried from range to range),
+// refine_identifier_key (an identifier's lookup key), refine_identifier_end (an identifier's physical end, which
+// refinement overwrote with its id) and refine_gap_is_splices.
 //
 // refine_tokens works on blocks of BUSTER_REFINE_BLOCK_TOKENS tokens. Before a block, refine_scan_chunks marks the
 // 64-byte chunks of its source bytes that hold a backslash (with trigraphs, a '?' too), 4 KB at a time and just before
@@ -48,7 +50,8 @@
 // refine_tokens_scalar, then the vectorized path (RefineIdentifiers, refine_newlines_before, refine_scan_chunks,
 // refine_chunks_have_backslash, refine_step_splices, refine_pass_a, refine_key, refine_probe, refine_batch_specials,
 // refine_intern_batch_fused (the fused variant's pass B), RefineHashes, refine_hash_batch, refine_pass_b, refine_pass_c,
-// the instantiations, refine_tokens_with, RefineVariant, refine_tokens_variant and refine_tokens).
+// the instantiations, RefineProgress, refine_progress_words, refine_progress_begin, refine_tokens_with,
+// refine_tokens_whole, RefineVariant, refine_tokens_variant, refine_tokens and refine_tokens_blocks).
 
 #include <stdint.h>
 #include <stdbool.h>
