@@ -49,6 +49,11 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_FILL,
     // Frame object `value` cleared whole, `type` bytes, before an initializer's parts: what they don't write is zero.
     CHECK_LOWER_CLEAR,
+    // A bit-field's value from the address of its first byte (check_lower_bit_read), `type` its packed place.
+    CHECK_LOWER_BIT_READ,
+    // The value on the stack stored into a bit-field (check_lower_bit_store): `type` its packed place, `value` the local
+    // that holds the address of its first byte. The field's new value stays unless `discard`.
+    CHECK_LOWER_BIT_STORE,
 } CheckLowerTaskKind;
 
 typedef struct CheckLowerTask CheckLowerTask;
@@ -289,7 +294,8 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
     }
     else if (kind == BUSTER_TYPED_CALL)
     {
-        pop = value < writer->call_count ? writer->call_counts[value] : 0;
+        // An indirect call (callee 0) pops the address it calls too, which the stream pushed before the arguments.
+        pop = value < writer->call_count ? writer->call_counts[value] + (writer->call_targets[value] == 0) : 0;
         push = class != BUSTER_TYPED_CLASS_VOID;
     }
     else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
@@ -445,10 +451,15 @@ static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool
     const CheckProgram* program = writer->program;
     if (node < program->stream->count && program->stream->values[node].overload_head == 0)
     {
-        // A statement's assignment of an aggregate copies the bytes and leaves no address to discard.
+        // A statement's assignment of an aggregate copies the bytes and leaves no address to discard, and one into a
+        // bit-field (an update's too) leaves no value.
         const CheckOp op = program->input->graph.ops[node];
-        const bool discard = !address && target == BUSTER_TYPE_VOID && (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) &&
-                             check_lower_aggregate(program->types, program->stream->values[node].type);
+        const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
+        const uint32_t destination = program->input->graph.operand0[node];
+        const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) &&
+                               destination < program->stream->count && (program->stream->values[destination].flags & BUSTER_CHECK_BIT_FIELD) != 0;
+        const bool discard = !address && target == BUSTER_TYPE_VOID &&
+                             ((store && check_lower_aggregate(program->types, program->stream->values[node].type)) || bit_field);
         if (!address && !discard)
         {
             check_lower_convert(writer, program->stream->values[node].type, target);
@@ -659,6 +670,18 @@ static void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
 // Zeros past this many bytes are written by a loop of 8-byte stores rather than store by store.
 #define BUSTER_CHECK_LOWER_FILL_UNROLLED 128
 
+// The largest access of 8, 4, 2 or 1 bytes that `left` bytes take, and its class: runs of bytes are written (and a
+// bit-field's bytes read) as such pieces, largest first.
+static uint32_t check_lower_piece(uint64_t left)
+{
+    return left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+}
+
+static uint8_t check_lower_piece_class(uint32_t piece)
+{
+    return piece == 8 ? BUSTER_TYPED_CLASS_U64 : piece == 4 ? BUSTER_TYPED_CLASS_U32 : piece == 2 ? BUSTER_TYPED_CLASS_U16 : BUSTER_TYPED_CLASS_U8;
+}
+
 // An initializer's zeros (CHECK_INIT_CLEAR) or bytes (CHECK_INIT_BYTES) written into frame object `object`: stores of 8
 // bytes, then 4, 2 and 1 for the rest, the bytes as constants of the stores' classes (the host's byte order is the
 // target's); past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes, the zeros' words by a loop.
@@ -701,9 +724,8 @@ static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part
         }
         while (offset < size && writer->output->status == CHECK_PROGRAM_OK)
         {
-            const uint64_t left = size - offset;
-            const uint64_t piece = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
-            const uint8_t class = piece == 8 ? BUSTER_TYPED_CLASS_U64 : piece == 4 ? BUSTER_TYPED_CLASS_U32 : piece == 2 ? BUSTER_TYPED_CLASS_U16 : BUSTER_TYPED_CLASS_U8;
+            const uint32_t piece = check_lower_piece(size - offset);
+            const uint8_t class = check_lower_piece_class(piece);
             uint64_t bits = 0;
             if (part->kind == CHECK_INIT_BYTES)
             {
@@ -715,6 +737,228 @@ static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part
             check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
             offset += piece;
         }
+    }
+}
+
+// A bit-field's place: `width` bits, `shift` bits up from the start of the byte its first bit is in, `first` bytes
+// into its record. It is read and written through that byte and the ones after it that hold its bits, never another
+// member's (C11 makes those other memory locations): 1 to 8 bytes, accessed as pieces (check_lower_piece) that make
+// up one little-endian unit. Its value is in `class`, sign-extended from its width when its type is signed (plain int
+// bit-fields are, as in clang and GCC; an enum's are as its underlying type is).
+typedef struct CheckLowerBitField CheckLowerBitField;
+struct CheckLowerBitField
+{
+    uint64_t first;
+    uint32_t shift;
+    uint32_t width;
+    uint8_t class;
+    bool is_signed;
+};
+
+// The place of a bit-field of `width` bits and type `type` at bit `offset`; false for one that has no integer class or
+// whose bits are spread over more than 8 bytes (a packed 64-bit one off a byte boundary).
+static bool check_lower_bit_place(const TypeTable* types, uint64_t offset, uint32_t width, TypeId type, CheckLowerBitField* field)
+{
+    uint32_t bits = 0;
+    bool sign = false;
+    const bool integer = check_action_integer_type(types, type, &bits, &sign);
+    field->first = offset / 8;
+    field->shift = (uint32_t)(offset % 8);
+    field->width = width;
+    field->class = check_lower_class(types, type);
+    field->is_signed = sign && bits != 1;
+    return integer && width != 0 && width <= bits && field->shift + width <= 64 && field->class < BUSTER_TYPED_CLASSES &&
+           field->class != BUSTER_TYPED_CLASS_VOID;
+}
+
+// The place of the bit-field that MEMBER or ARROW node `node` designates.
+static bool check_lower_bit_member(const CheckProgram* program, uint32_t node, CheckLowerBitField* field)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    TypeId record = stream->values[graph->operand0[node]].type;
+    if (graph->ops[node] == CHECK_OP_ARROW)
+    {
+        record = type_element(program->types, stream->conversions[node].operands[0].type);
+    }
+    uint64_t offset = 0;
+    const uint32_t member = type_find_member(program->types, record, graph->members[node], &offset);
+    return member != 0 && check_lower_bit_place(program->types, offset, stream->values[node].bit_width, stream->values[node].type, field);
+}
+
+// The MEMBER or ARROW node of the bit-field that a store's destination `node` designates, through _Generic's
+// selections, or BUSTER_CHECK_NONE.
+static uint32_t check_lower_bit_destination(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t destination = node;
+    while (destination < program->stream->count && graph->ops[destination] == CHECK_OP_SELECT)
+    {
+        destination = graph->operand0[destination];
+    }
+    const bool member = destination < program->stream->count && (graph->ops[destination] == CHECK_OP_MEMBER || graph->ops[destination] == CHECK_OP_ARROW);
+    return member ? destination : BUSTER_CHECK_NONE;
+}
+
+// A place in a task's `type`: the shift in bits 0 to 2, the width less one in bits 3 to 8, the class in bits 9 to 12
+// and the sign in bit 13. Its first byte is in the address the task finds.
+static uint32_t check_lower_bit_pack(const CheckLowerBitField* field)
+{
+    return field->shift | (field->width - 1) << 3 | (uint32_t)field->class << 9 | (uint32_t)field->is_signed << 13;
+}
+
+static CheckLowerBitField check_lower_bit_unpack(uint32_t packed)
+{
+    return (CheckLowerBitField){
+        .shift = packed & 7,
+        .width = (packed >> 3 & 63) + 1,
+        .class = (uint8_t)(packed >> 9 & 15),
+        .is_signed = (packed >> 13 & 1) != 0,
+    };
+}
+
+// A bit-field's unit from the address of its first byte on top of the stack: each of its `bytes` bytes' pieces loaded,
+// widened and put in place, as a U64. More than one piece reads the address from a temporary.
+static void check_lower_bit_unit(CheckLowerWriter* writer, uint32_t bytes)
+{
+    const bool whole = (bytes & (bytes - 1)) == 0;
+    const uint32_t address = whole ? BUSTER_CHECK_NONE : check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    if (!whole)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+    }
+    uint32_t offset = 0;
+    while (offset < bytes && writer->output->status == CHECK_PROGRAM_OK)
+    {
+        const uint32_t piece = check_lower_piece(bytes - offset);
+        const uint8_t class = check_lower_piece_class(piece);
+        if (!whole)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+            check_lower_offset(writer, offset);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_LOAD, class, 0);
+        if (class != BUSTER_TYPED_CLASS_U64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        if (offset != 0)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 8 * offset);
+            check_lower_emit(writer, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        offset += piece;
+    }
+}
+
+// A bit-field's value from the U64 on top of the stack that holds its bits `shift` bits up: the bits moved to the top
+// and back down, which sign- or zero-extends them, then converted to the field's class.
+static void check_lower_bit_extract(CheckLowerWriter* writer, const CheckLowerBitField* field, uint32_t shift)
+{
+    const uint8_t wide = field->is_signed ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64;
+    const uint32_t up = 64 - shift - field->width;
+    if (up != 0)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, up);
+        check_lower_emit(writer, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    if (field->is_signed)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+    }
+    if (field->width != 64)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, wide, 64 - field->width);
+        check_lower_emit(writer, BUSTER_TYPED_SHR, wide, 0);
+    }
+    if (field->class != wide)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, field->class, 0);
+    }
+}
+
+static void check_lower_bit_read(CheckLowerWriter* writer, uint32_t packed)
+{
+    const CheckLowerBitField field = check_lower_bit_unpack(packed);
+    check_lower_bit_unit(writer, (field.shift + field.width + 7) / 8);
+    check_lower_bit_extract(writer, &field, field.shift);
+}
+
+// The value on top of the stack, in the field's class, stored into the bit-field whose first byte's address local
+// `address` holds: its low `width` bits kept in a temporary; the unit read, the field's bits cleared and the value's
+// put in their place; the unit written back by its pieces. The value as the field now reads it stays unless `discard`.
+static void check_lower_bit_store(CheckLowerWriter* writer, uint32_t packed, uint32_t address, bool discard)
+{
+    const CheckLowerBitField field = check_lower_bit_unpack(packed);
+    const uint32_t bytes = (field.shift + field.width + 7) / 8;
+    const bool whole = (bytes & (bytes - 1)) == 0;
+    const uint64_t mask = field.width == 64 ? UINT64_MAX : (UINT64_C(1) << field.width) - 1;
+    const uint32_t value = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    if (field.class != BUSTER_TYPED_CLASS_U64)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    if (field.width != 64)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, mask);
+        check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, value);
+    if (whole)
+    {
+        // The address the piece's SET writes through, under the unit.
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+    check_lower_bit_unit(writer, bytes);
+    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, ~(mask << field.shift));
+    check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, value);
+    if (field.shift != 0)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, field.shift);
+        check_lower_emit(writer, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+    if (whole)
+    {
+        const uint8_t class = check_lower_piece_class(bytes);
+        if (class != BUSTER_TYPED_CLASS_U64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
+    }
+    else
+    {
+        const uint32_t unit = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, unit);
+        uint32_t offset = 0;
+        while (offset < bytes && writer->output->status == CHECK_PROGRAM_OK)
+        {
+            const uint32_t piece = check_lower_piece(bytes - offset);
+            const uint8_t class = check_lower_piece_class(piece);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+            check_lower_offset(writer, offset);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, unit);
+            if (offset != 0)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 8 * offset);
+                check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            if (class != BUSTER_TYPED_CLASS_U64)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+            }
+            check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
+            offset += piece;
+        }
+    }
+    if (!discard)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, value);
+        check_lower_bit_extract(writer, &field, 0);
     }
 }
 
@@ -1191,6 +1435,80 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// `destination = value` on a bit-field: the address of the field's first byte in a temporary, then the value converted
+// to the field's type, stored by check_lower_bit_store, whose value is the field's as it now reads.
+static void check_lower_bit_assign(CheckLowerWriter* writer, uint32_t node, bool discard)
+{
+    const CheckProgram* program = writer->program;
+    const uint32_t destination = check_lower_bit_destination(program, program->input->graph.operand0[node]);
+    CheckLowerBitField field = { 0 };
+    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field))
+    {
+        check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
+    }
+    else
+    {
+        const uint32_t address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_STORE, .type = check_lower_bit_pack(&field), .value = address, .discard = discard });
+        check_lower_operand(writer, node, 1, false, program->stream->values[node].type);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+        check_lower_operand(writer, node, 0, true, 0);
+    }
+}
+
+// ++, -- and op= on a bit-field, as check_lower_update does them on other lvalues: the address of the field's first
+// byte in a temporary, the field read, converted, operated on and converted back, then stored by check_lower_bit_store.
+// A postfix one's value is the field as it was, kept in a temporary.
+static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool discard)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const CheckOp op = graph->ops[node];
+    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId calculated = stream->conversions[node].operands[0].type;
+    const uint8_t calculated_class = check_lower_class(program->types, calculated);
+    const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
+    const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
+    const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT;
+    const uint32_t destination = check_lower_bit_destination(program, graph->operand0[node]);
+    CheckLowerBitField field = { 0 };
+    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field) || calculated_class >= BUSTER_TYPED_CLASSES)
+    {
+        check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
+    }
+    else
+    {
+        const uint32_t address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t old = postfix && !discard ? check_lower_temporary(writer, field.class) : BUSTER_CHECK_NONE;
+        const uint32_t packed = check_lower_bit_pack(&field);
+        if (old != BUSTER_CHECK_NONE)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, field.class, old);
+        }
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_STORE, .type = packed, .value = address, .discard = postfix || discard });
+        check_lower_convert(writer, calculated, stored);
+        check_lower_instruction(writer, increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op), calculated_class, 0);
+        if (increment)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, calculated_class, 1);
+        }
+        else
+        {
+            check_lower_operand(writer, node, 1, false, stream->conversions[node].operands[1].type);
+        }
+        check_lower_convert(writer, stored, calculated);
+        if (old != BUSTER_CHECK_NONE)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, field.class, old);
+        }
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_READ, .type = packed });
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+        check_lower_operand(writer, node, 0, true, 0);
+    }
+}
+
 static void check_lower_initializer(CheckLowerWriter* writer, CheckControl control);
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index);
 
@@ -1645,10 +1963,6 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             check_lower_initializer(writer, (CheckControl){ .token = value.object - 1, .target = selected - 1 });
         }
     }
-    else if ((value.flags & BUSTER_CHECK_BIT_FIELD) != 0)
-    {
-        check_lower_unsupported(writer, "bit-fields");
-    }
     else if (op == CHECK_OP_STATEMENT_VALUE)
     {
         check_lower_region(writer, task);
@@ -1845,20 +2159,34 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         }
         uint64_t offset = 0;
         const uint32_t member = type_find_member(types, record, graph->members[node], &offset);
-        if (member == 0 || offset % 8 != 0)
+        // A bit-field's address, which only its stores ask for, is its first byte's.
+        const bool bit_field = (value.flags & BUSTER_CHECK_BIT_FIELD) != 0;
+        CheckLowerBitField field = { 0 };
+        if (member == 0 || (!bit_field && offset % 8 != 0))
         {
-            check_lower_unsupported(writer, "bit-fields");
+            check_lower_unsupported(writer, "this member access");
         }
-        if (!task.address && !address_value)
+        else if (bit_field && !check_lower_bit_member(program, node, &field))
         {
-            check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+            check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
         }
-        if (offset != 0)
+        else
         {
-            check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
-            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset / 8);
+            if (bit_field && !task.address)
+            {
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_READ, .type = check_lower_bit_pack(&field) });
+            }
+            else if (!task.address && !address_value)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+            }
+            if (offset / 8 != 0)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset / 8);
+            }
+            check_lower_operand(writer, node, 0, op == CHECK_OP_MEMBER, type_a);
         }
-        check_lower_operand(writer, node, 0, op == CHECK_OP_MEMBER, type_a);
     }
     else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
     {
@@ -1949,6 +2277,14 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     else if (op == CHECK_OP_CALL)
     {
         check_lower_call(writer, node);
+    }
+    else if (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
+    {
+        check_lower_bit_assign(writer, node, task.discard);
+    }
+    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
+    {
+        check_lower_bit_update(writer, node, task.discard);
     }
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
@@ -2109,6 +2445,14 @@ static void check_lower_drain(CheckLowerWriter* writer)
             const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = task.type };
             check_lower_fill(writer, &clear, (uint32_t)task.value);
         }
+        else if (task.kind == CHECK_LOWER_BIT_READ)
+        {
+            check_lower_bit_read(writer, task.type);
+        }
+        else if (task.kind == CHECK_LOWER_BIT_STORE)
+        {
+            check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+        }
         else
         {
             check_lower_expand(writer, task);
@@ -2155,14 +2499,48 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
     const CheckInitPart* write = &writer->program->initializers->plans[plan].parts[index];
     const bool aggregate = check_lower_aggregate(types, write->type);
     const uint8_t class = check_lower_class(types, write->type);
-    if (write->kind != CHECK_INIT_VALUE)
+    // A bit-field's value, or zeros over bits that don't start or end a byte (as unsigned bits of no particular type).
+    const bool bits = write->bit_width != 0 && (write->kind == CHECK_INIT_VALUE || write->kind == CHECK_INIT_CLEAR);
+    CheckLowerBitField field = {
+        .first = write->bit_offset / 8,
+        .shift = (uint32_t)(write->bit_offset % 8),
+        .width = write->bit_width,
+        .class = BUSTER_TYPED_CLASS_U64,
+    };
+    const bool placed = write->kind == CHECK_INIT_VALUE ? check_lower_bit_place(types, write->bit_offset, write->bit_width, write->type, &field)
+                                                        : field.shift + field.width <= 64;
+    if (bits && !placed)
+    {
+        check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
+    }
+    else if (bits)
+    {
+        const uint32_t address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_STORE, .type = check_lower_bit_pack(&field), .value = address, .discard = true });
+        if (write->kind == CHECK_INIT_CLEAR)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else
+        {
+            check_lower_part_value(writer, write);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+        if (field.first != 0)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, field.first);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+    }
+    else if (write->kind != CHECK_INIT_VALUE)
     {
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_FILL, .node = plan, .type = index, .value = object });
     }
-    else if (write->bit_width != 0 || write->bit_offset % 8 != 0 || (!aggregate && (class >= BUSTER_TYPED_CLASSES || class == BUSTER_TYPED_CLASS_VOID)))
+    else if (write->bit_offset % 8 != 0 || (!aggregate && (class >= BUSTER_TYPED_CLASSES || class == BUSTER_TYPED_CLASS_VOID)))
     {
-        check_lower_unsupported(writer, write->bit_width != 0 || write->bit_offset % 8 != 0 ? "bit-field initializers in local objects" :
-                                                                                                check_lower_type_feature(types, write->type));
+        check_lower_unsupported(writer, write->bit_offset % 8 != 0 ? "values that don't start a byte in local objects" :
+                                                                     check_lower_type_feature(types, write->type));
     }
     else
     {

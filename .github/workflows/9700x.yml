@@ -180,6 +180,14 @@ jobs:
         # Default C checking and object emission have their own external-oracle tests below.
         run: ./build/compiler parse -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
+      - name: Fetch c-testsuite at its pinned commit
+        # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
+        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them.
+        run: |
+          git init -q --template= build/c-testsuite
+          git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
+          git -C build/c-testsuite checkout -q FETCH_HEAD
+
       - name: Run the tests at once
         # Tests don't need the machine to themselves, unlike the benchmarks after them, which run one at a time and
         # pinned. build/compiler parallel (AGENTS.md, "The parallel runner") runs each test below in a bash of its own,
@@ -434,6 +442,13 @@ jobs:
           ./build/compiler test-builtin-atomic-rmw-helpers
           ./build/compiler test-builtin-rounds-helper
           ./build/compiler test-builtin-math-helpers
+          == Test c-testsuite's programs end to end
+          # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
+          # the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links.
+          # The declared subset must pass. The self-test checks the harness's timeouts, relative paths (as given here)
+          # and cross-check rule with a stand-in compiler.
+          ./build/compiler test-c-testsuite --self-test
+          ./build/compiler test-c-testsuite --cross-check --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           ./build/compiler test-checker-asm

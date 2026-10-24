@@ -3,21 +3,26 @@
 //
 // The c-testsuite harness (#145), for the test-c-testsuite command:
 //
-//   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--cross-check] [--keep] DIR
+//   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--cross-check]
+//                                   [--keep] DIR
+//   build/compiler test-c-testsuite --self-test
 //
 // DIR is a checkout of c-testsuite (https://github.com/c-testsuite/c-testsuite) or its tests/single-exec directory. Each
 // NAME.c there is a program that must exit with status 0 having written NAME.c.expected's bytes to its standard output
-// and errors. The harness compiles and links each with this executable, `compiler --verify NAME.c -o NAME` (the direct
-// path, its vector paths, every function's records checked by x86_validate), and again with --scalar (the scalar
-// twins): the two executables must be the same bytes, or the two failures the same diagnostics. Then it runs the program
-// in a directory of its own (some tests write files), with standard input from /dev/null and a timeout.
+// and errors. The harness compiles and links each with this executable (or --compiler's), `compiler --verify NAME.c -o
+// NAME` (the direct path, its vector paths, every function's records checked by x86_validate), and again with --scalar
+// (the scalar twins): the two executables must be the same bytes, or the two failures the same diagnostics. Then it runs
+// the program in a directory of its own (some tests write files), with standard input from /dev/null and a timeout.
 //
 // A test passes when its status and output are the expected ones. One that the compiler refuses with a diagnostic that
 // names a feature it doesn't support yet ("unsupported: ...") is unsupported, with that feature. Anything else fails:
 // another compile error, a crash or a timeout of the compiler or the program, a wrong status or output, the two paths
 // disagreeing. With --cross-check (which needs readelf and cc), each test is also compiled with -c, its object listed by
 // readelf, linked by cc with -lm and run, and that program must give the expected output too, whatever the direct path
-// did: wrong code in a test the direct path can't link still fails.
+// did: wrong code in a test the direct path can't link still fails. -c may refuse a test as unsupported only where the
+// direct path refused it too.
+//
+// --self-test checks the harness itself, on tests of its own and a stand-in compiler (c_testsuite_self_test).
 //
 // --subset FILE lists the tests that must pass (#145's declared subset, tests/c-testsuite/subset.txt): a NAME a line,
 // with blank lines and comments from `#`. The exit status is 1 if a test fails, if a test of the subset doesn't pass or
@@ -30,9 +35,11 @@
 // main.c includes this file after parallel.c, whose parallel_core_count it takes. Layout: the outcomes (CTestsuite,
 // CTestsuiteResult), the processes (c_testsuite_run, c_testsuite_read, c_testsuite_same), a test (c_testsuite_feature,
 // c_testsuite_compiled, c_testsuite_cross_check, c_testsuite_one), the tests' list (c_testsuite_find, c_testsuite_subset),
-// cleanup (c_testsuite_remove) and the command (run_c_testsuite_tests).
+// cleanup (c_testsuite_remove), the run (c_testsuite_execute, c_testsuite_report), the self-test (c_testsuite_self_test)
+// and the command (run_c_testsuite_tests).
 
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -50,6 +57,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <time.h>
 
 // The most tests a directory may have, and the longest name.
 #define BUSTER_C_TESTSUITE_MAX_TESTS 4096
@@ -93,6 +101,17 @@ struct CTestsuite
 // ---------------------------------------------------------------------------------------------------------------------
 // The processes
 
+// The self-test's switch: wait for every process as the harness does where it has no pidfd.
+static bool c_testsuite_without_pidfd;
+
+// Nanoseconds on the monotonic clock.
+static uint64_t c_testsuite_now(void)
+{
+    struct timespec now = { 0 };
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+}
+
 // Runs `arguments` (arguments[0] a path, or a name PATH has) in `directory`, its standard input from /dev/null and its
 // standard output and errors into the file `output`, in a process group of its own that is killed after `seconds`: its
 // wait status, or -1 if it couldn't start or be waited for, with *timed_out set when it was killed for its time.
@@ -115,8 +134,12 @@ static int c_testsuite_run(char* const* arguments, const char* directory, const 
     }
     else if (child > 0)
     {
-        // A pidfd becomes readable when the child ends, so that poll is the timeout.
-        const int descriptor = (int)syscall(SYS_pidfd_open, child, 0);
+        // A pidfd becomes readable when the child ends, so that poll is the timeout. Without one (a kernel before 5.3, a
+        // seccomp filter, no descriptor to spare) or a poll that fails, waitpid without blocking, every millisecond up to
+        // the deadline.
+        const int descriptor = c_testsuite_without_pidfd ? -1 : (int)syscall(SYS_pidfd_open, child, 0);
+        bool polled = false;
+        pid_t waited = 0;
         if (descriptor >= 0)
         {
             struct pollfd poller = { .fd = descriptor, .events = POLLIN };
@@ -126,20 +149,32 @@ static int c_testsuite_run(char* const* arguments, const char* directory, const 
                 ready = poll(&poller, 1, (int)(seconds > INT32_MAX / 1000 ? INT32_MAX : seconds * 1000));
             }
             while (ready < 0 && errno == EINTR);
-            if (ready == 0)
-            {
-                kill(-child, SIGKILL);
-                kill(child, SIGKILL);
-                *timed_out = true;
-            }
+            polled = ready >= 0;
+            *timed_out = ready == 0;
             close(descriptor);
         }
-        pid_t waited = -1;
-        do
+        const uint64_t deadline = c_testsuite_now() + (uint64_t)seconds * 1000000000;
+        while (!polled && waited == 0 && !*timed_out)
+        {
+            waited = waitpid(child, &status, WNOHANG);
+            waited = waited < 0 && errno == EINTR ? 0 : waited;
+            *timed_out = waited == 0 && c_testsuite_now() >= deadline;
+            if (waited == 0 && !*timed_out)
+            {
+                const struct timespec pause = { .tv_nsec = 1000000 };
+                nanosleep(&pause, 0);
+            }
+        }
+        if (*timed_out)
+        {
+            kill(-child, SIGKILL);
+            kill(child, SIGKILL);
+        }
+        while (waited == 0)
         {
             waited = waitpid(child, &status, 0);
+            waited = waited < 0 && errno == EINTR ? 0 : waited;
         }
-        while (waited < 0 && errno == EINTR);
         // Whatever the child left running in its group goes with it.
         kill(-child, SIGKILL);
         status = waited == child ? status : -1;
@@ -284,8 +319,10 @@ static bool c_testsuite_ran(const CTestsuite* suite, const char* program, const 
 }
 
 // --cross-check's half of a test: its object from -c, listed by readelf, linked by cc and run. Whether it gave the
-// expected output; if not, why, in `detail`.
-static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source, const char* directory, const char* expected, char* detail, uint64_t capacity)
+// expected output; if not, why, in `detail`. -c may refuse a test as unsupported only where the direct path did too:
+// when that compiled it (`required`), -c must compile it as well.
+static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source, const char* directory, const char* expected, bool required,
+                                    char* detail, uint64_t capacity)
 {
     char object[PATH_MAX];
     char program[PATH_MAX];
@@ -307,6 +344,10 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     char feature[sizeof(((CTestsuiteResult*)0)->detail)];
     const bool unsupported = !valid && c_testsuite_feature(text, feature, sizeof(feature));
     free(text);
+    if (unsupported && required)
+    {
+        snprintf(detail, capacity, "cross-check: -c refuses what the direct path compiles: %s", feature);
+    }
     if (valid)
     {
         status = c_testsuite_run(readelf, directory, log, BUSTER_C_TESTSUITE_COMPILE_SECONDS, &timed_out);
@@ -327,7 +368,7 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     {
         valid = c_testsuite_ran(suite, program, directory, output, expected, "cross-check: cc's program", detail, capacity);
     }
-    return valid || unsupported;
+    return valid || (unsupported && !required);
 }
 
 // Test `index`: compiled by both paths, run, and with --cross-check linked by cc too, into its result.
@@ -400,7 +441,8 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
         free(text);
     }
     char cross_detail[sizeof(result->detail)];
-    if (suite->cross_check && result->outcome != C_TESTSUITE_FAILED && !c_testsuite_cross_check(suite, source, directory, expected, cross_detail, sizeof(cross_detail)))
+    if (suite->cross_check && result->outcome != C_TESTSUITE_FAILED &&
+        !c_testsuite_cross_check(suite, source, directory, expected, result->outcome == C_TESTSUITE_PASSED, cross_detail, sizeof(cross_detail)))
     {
         result->outcome = C_TESTSUITE_FAILED;
         snprintf(result->detail, sizeof(result->detail), "%s", cross_detail);
@@ -509,35 +551,284 @@ static bool c_testsuite_subset(CTestsuite* suite, const char* path)
 // ---------------------------------------------------------------------------------------------------------------------
 // Cleanup
 
-// Removes the work directory: each test's directory, and the files in it (the tests' own among them), one level deep.
+// Removes the directory at `path` and the files in it, one level deep: whether it could.
+static bool c_testsuite_remove_directory(const char* path)
+{
+    DIR* directory = opendir(path);
+    struct dirent* entry = directory != 0 ? readdir(directory) : 0;
+    while (entry != 0)
+    {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+        {
+            char file[PATH_MAX];
+            snprintf(file, sizeof(file), "%s/%s", path, entry->d_name);
+            unlink(file);
+        }
+        entry = readdir(directory);
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    return rmdir(path) == 0;
+}
+
+// Removes the work directory: each test's directory and the files in it (the tests' own among them).
 static void c_testsuite_remove(const CTestsuite* suite)
 {
     for (uint32_t i = 0; i < suite->count; i += 1)
     {
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", suite->work, suite->names[i]);
-        DIR* directory = opendir(path);
-        struct dirent* entry = directory != 0 ? readdir(directory) : 0;
-        while (entry != 0)
-        {
-            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
-            {
-                char file[PATH_MAX];
-                snprintf(file, sizeof(file), "%s/%s", path, entry->d_name);
-                unlink(file);
-            }
-            entry = readdir(directory);
-        }
-        if (directory != 0)
-        {
-            closedir(directory);
-        }
-        rmdir(path);
+        c_testsuite_remove_directory(path);
     }
     if (rmdir(suite->work) != 0)
     {
         fprintf(stderr, "test-c-testsuite: couldn't remove %s (a test left a directory in it)\n", suite->work);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The run
+
+// Finds the tests of `root` (the checkout or its tests/single-exec, relative to the current directory or not), marks
+// the subset's (from the file at `subset`, if any) and runs them on `jobs` workers (0: one per core) into
+// suite->results, in a new work directory under $TMPDIR (or /tmp). A test's processes run in a directory of their own,
+// so the paths they get must be absolute: the tests' directory and the work directory are made so here. Whether the
+// tests could run.
+static bool c_testsuite_execute(CTestsuite* suite, const char* root, const char* subset, uint64_t jobs)
+{
+    char nested[PATH_MAX];
+    char work[PATH_MAX];
+    struct stat stats;
+    snprintf(nested, sizeof(nested), "%s/tests/single-exec", root);
+    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    snprintf(work, sizeof(work), "%s/buster-c-testsuite-XXXXXX", temporary);
+    memset(suite->results, 0, BUSTER_C_TESTSUITE_MAX_TESTS * sizeof(CTestsuiteResult));
+    suite->count = 0;
+    bool valid = realpath(stat(nested, &stats) == 0 && S_ISDIR(stats.st_mode) ? nested : root, suite->tests) != 0;
+    if (valid)
+    {
+        suite->count = c_testsuite_find(suite);
+        valid = suite->count != UINT32_MAX && suite->count != 0;
+    }
+    if (!valid)
+    {
+        fprintf(stderr, "test-c-testsuite: no tests in %s\n", root);
+        suite->count = 0;
+    }
+    valid = valid && (subset == 0 || c_testsuite_subset(suite, subset));
+    valid = valid && mkdtemp(work) != 0 && realpath(work, suite->work) != 0;
+    if (valid)
+    {
+        // Workers take the tests in turn: worker w the tests w, w + jobs, ...
+        const uint64_t workers = jobs != 0 ? jobs : parallel_core_count();
+        pid_t* children = malloc((workers != 0 ? workers : 1) * sizeof(pid_t));
+        uint64_t started = 0;
+        for (uint64_t w = 0; children != 0 && w < workers && w < suite->count; w += 1)
+        {
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                for (uint32_t i = (uint32_t)w; i < suite->count; i += (uint32_t)workers)
+                {
+                    c_testsuite_one(suite, i);
+                }
+                _exit(0);
+            }
+            children[started] = child;
+            started += child > 0;
+        }
+        for (uint64_t w = 0; w < started; w += 1)
+        {
+            int status = 0;
+            pid_t waited = -1;
+            do
+            {
+                waited = waitpid(children[w], &status, 0);
+            }
+            while (waited < 0 && errno == EINTR);
+        }
+        free(children);
+    }
+    return valid;
+}
+
+// Prints each test's outcome in name order, then the counts: whether no test failed or wasn't run, and (`subset`) the
+// subset's all passed.
+static bool c_testsuite_report(const CTestsuite* suite, bool subset)
+{
+    uint32_t counts[C_TESTSUITE_FAILED + 1] = { 0 };
+    uint32_t subset_count = 0;
+    uint32_t subset_passed = 0;
+    for (uint32_t i = 0; i < suite->count; i += 1)
+    {
+        const CTestsuiteResult* test = &suite->results[i];
+        const char* outcome = test->outcome == C_TESTSUITE_PASSED ? "passed" : test->outcome == C_TESTSUITE_UNSUPPORTED ? "unsupported" :
+                              test->outcome == C_TESTSUITE_FAILED ? "failed" : "not run";
+        const bool missed = test->subset && test->outcome != C_TESTSUITE_PASSED;
+        printf("%s %s%s%s%s\n", suite->names[i], outcome, test->detail[0] != 0 ? ": " : "", test->detail, missed ? " (in the subset)" : "");
+        counts[test->outcome] += 1;
+        subset_count += test->subset;
+        subset_passed += test->subset && test->outcome == C_TESTSUITE_PASSED;
+    }
+    printf("test-c-testsuite: %u tests: %u passed, %u unsupported, %u failed, %u not run", suite->count, counts[C_TESTSUITE_PASSED],
+           counts[C_TESTSUITE_UNSUPPORTED], counts[C_TESTSUITE_FAILED], counts[C_TESTSUITE_NOT_RUN]);
+    if (subset)
+    {
+        printf("; the subset's %u: %u passed", subset_count, subset_passed);
+    }
+    printf("\n");
+    return counts[C_TESTSUITE_FAILED] == 0 && counts[C_TESTSUITE_NOT_RUN] == 0 && subset_passed == subset_count;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The harness's own test (--self-test)
+
+// The self-test's stand-in for the compiler, a shell script: it "compiles" a test into a script, after checking that the
+// source it was given exists from the test's directory, where it runs. 00001's program prints its expected line, 00002
+// is unsupported, and 00003's program doesn't end; with C_TESTSUITE_REFUSE_OBJECTS set, -c refuses every test as
+// unsupported.
+static const char c_testsuite_stand_in[] =
+    "#!/bin/sh\n"
+    "object=0 source= output=\n"
+    "while [ $# -gt 0 ]; do case \"$1\" in -c) object=1;; -o) output=$2; shift;; -*) ;; *) source=$1;; esac; shift; done\n"
+    "[ -f \"$source\" ] || { echo \"error: no such file: $source\" >&2; exit 1; }\n"
+    "case \"$source\" in *00002.c) echo 'error: unsupported: a stand-in feature' >&2; exit 1;; esac\n"
+    "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_REFUSE_OBJECTS\" ]; then echo 'error: unsupported: a stand-in object' >&2; exit 1; fi\n"
+    "case \"$source\" in *00003.c) body='exec sleep 30';; *) body='echo passed';; esac\n"
+    "printf '#!/bin/sh\\n%s\\n' \"$body\" > \"$output\" && chmod +x \"$output\"\n";
+
+// A self-test's expectation of a test: its outcome and part of its detail.
+typedef struct CTestsuiteExpectation CTestsuiteExpectation;
+struct CTestsuiteExpectation
+{
+    uint8_t outcome;
+    const char* detail;
+};
+
+// Writes `text` to a new file at `path` with `mode`: whether it could.
+static bool c_testsuite_write(const char* path, const char* text, mode_t mode)
+{
+    const int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
+    const uint64_t length = strlen(text);
+    const bool written = descriptor >= 0 && write(descriptor, text, length) == (ssize_t)length;
+    if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    return written;
+}
+
+// Whether the self-test's three tests came out as `expected`, printing each that didn't.
+static bool c_testsuite_expect(const CTestsuite* suite, const char* scenario, const CTestsuiteExpectation* expected)
+{
+    bool same = suite->count == 3;
+    for (uint32_t i = 0; i < suite->count && i < 3; i += 1)
+    {
+        const CTestsuiteResult* result = &suite->results[i];
+        const bool matches = result->outcome == expected[i].outcome && strstr(result->detail, expected[i].detail) != 0;
+        if (!matches)
+        {
+            fprintf(stderr, "test-c-testsuite: self-test, %s: %s came out %u (%s), not %u (%s)\n", scenario, suite->names[i], result->outcome,
+                    result->detail, expected[i].outcome, expected[i].detail);
+        }
+        same &= matches;
+    }
+    return same;
+}
+
+// The harness on three tests of its own, with the stand-in compiler: from a DIR and a $TMPDIR relative to the current
+// directory; waiting without a pidfd, by polling; and with --cross-check where -c refuses what the direct path compiles,
+// which must fail. Each time 00003's program must be killed at its one-second timeout, long before it would end.
+static int c_testsuite_self_test(CTestsuite* suite)
+{
+    static const char* const directories[] = { "checkout", "checkout/tests", "checkout/tests/single-exec", "work" };
+    static const char* const files[][2] = {
+        { "checkout/tests/single-exec/00001.c", "int main(void) { return 0; }\n" },
+        { "checkout/tests/single-exec/00001.c.expected", "passed\n" },
+        { "checkout/tests/single-exec/00002.c", "int main(void) { return 0; }\n" },
+        { "checkout/tests/single-exec/00002.c.expected", "" },
+        { "checkout/tests/single-exec/00003.c", "int main(void) { for (;;) { } }\n" },
+        { "checkout/tests/single-exec/00003.c.expected", "" },
+    };
+    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check" };
+    static const CTestsuiteExpectation direct[] = {
+        { C_TESTSUITE_PASSED, "" },
+        { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
+        { C_TESTSUITE_FAILED, "the program: timed out" },
+    };
+    static const CTestsuiteExpectation crossed[] = {
+        { C_TESTSUITE_FAILED, "cross-check: -c refuses what the direct path compiles: a stand-in object" },
+        { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
+        { C_TESTSUITE_FAILED, "the program: timed out" },
+    };
+    char base[PATH_MAX];
+    char original[PATH_MAX];
+    char path[PATH_MAX];
+    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    snprintf(base, sizeof(base), "%s/buster-c-testsuite-self-XXXXXX", temporary);
+    char* saved = getenv("TMPDIR") != 0 ? strdup(getenv("TMPDIR")) : 0;
+    bool valid = getcwd(original, sizeof(original)) != 0 && mkdtemp(base) != 0 && realpath(base, path) != 0;
+    if (valid)
+    {
+        snprintf(base, sizeof(base), "%s", path);
+    }
+    for (uint32_t i = 0; valid && i < sizeof(directories) / sizeof(directories[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", base, directories[i]);
+        valid = mkdir(path, 0755) == 0;
+    }
+    for (uint32_t i = 0; valid && i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", base, files[i][0]);
+        valid = c_testsuite_write(path, files[i][1], 0644);
+    }
+    snprintf(suite->compiler, sizeof(suite->compiler), "%s/stand-in.sh", base);
+    valid = valid && c_testsuite_write(suite->compiler, c_testsuite_stand_in, 0755);
+    suite->timeout = 1;
+    uint32_t failures = valid ? 0 : 1;
+    for (uint32_t scenario = 0; valid && scenario < 3; scenario += 1)
+    {
+        const bool relative = scenario == 0;
+        c_testsuite_without_pidfd = scenario == 1;
+        suite->cross_check = scenario == 2;
+        snprintf(path, sizeof(path), "%s/checkout", base);
+        valid = !relative || (chdir(base) == 0 && setenv("TMPDIR", "work", 1) == 0);
+        valid = valid && (scenario != 2 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "1", 1) == 0);
+        const uint64_t start = c_testsuite_now();
+        const bool ran = valid && c_testsuite_execute(suite, relative ? "checkout" : path, 0, 3);
+        const uint64_t elapsed = c_testsuite_now() - start;
+        unsetenv("C_TESTSUITE_REFUSE_OBJECTS");
+        valid = (saved != 0 ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0) && chdir(original) == 0;
+        const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], scenario == 2 ? crossed : direct) &&
+                              elapsed < UINT64_C(20) * 1000000000;
+        if (ran)
+        {
+            c_testsuite_remove(suite);
+        }
+        if (!expected)
+        {
+            fprintf(stderr, "test-c-testsuite: self-test, %s: failed (%" PRIu64 " ms)\n", scenarios[scenario], elapsed / 1000000);
+        }
+        failures += !expected;
+    }
+    c_testsuite_without_pidfd = false;
+    for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", base, files[i][0]);
+        unlink(path);
+    }
+    unlink(suite->compiler);
+    for (uint32_t i = sizeof(directories) / sizeof(directories[0]); i-- > 0;)
+    {
+        snprintf(path, sizeof(path), "%s/%s", base, directories[i]);
+        rmdir(path);
+    }
+    rmdir(base);
+    free(saved);
+    printf("test-c-testsuite: self-test: 3 scenarios, %u failed\n", failures + (valid ? 0 : 1));
+    return valid && failures == 0 ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -548,8 +839,10 @@ static int run_c_testsuite_tests(int argc, char** argv)
     static CTestsuite suite;
     const char* subset = 0;
     const char* root = 0;
+    const char* compiler = 0;
     uint64_t jobs = 0;
     bool keep = false;
+    bool self_test = false;
     bool valid = true;
     suite.timeout = 10;
     for (int i = 0; valid && i < argc; i += 1)
@@ -570,6 +863,10 @@ static int run_c_testsuite_tests(int argc, char** argv)
             valid = *end == 0 && seconds != 0 && seconds <= 3600;
             suite.timeout = (uint32_t)seconds;
         }
+        else if (strcmp(argv[i], "--compiler") == 0 && i + 1 < argc)
+        {
+            compiler = argv[++i];
+        }
         else if (strcmp(argv[i], "--cross-check") == 0)
         {
             suite.cross_check = true;
@@ -577,6 +874,10 @@ static int run_c_testsuite_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
+        }
+        else if (strcmp(argv[i], "--self-test") == 0)
+        {
+            self_test = true;
         }
         else if (argv[i][0] != '-' && root == 0)
         {
@@ -588,88 +889,29 @@ static int run_c_testsuite_tests(int argc, char** argv)
         }
     }
     int result = 1;
-    if (!valid || root == 0)
+    if (!valid || (self_test ? root != 0 : root == 0))
     {
-        fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--cross-check] [--keep] DIR\n");
+        fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--cross-check] "
+                        "[--keep] DIR\n       compiler test-c-testsuite --self-test\n");
     }
     else
     {
-        // DIR may be the checkout or its tests/single-exec.
-        char nested[PATH_MAX];
-        struct stat stats;
-        snprintf(nested, sizeof(nested), "%s/tests/single-exec", root);
-        snprintf(suite.tests, sizeof(suite.tests), "%s", stat(nested, &stats) == 0 && S_ISDIR(stats.st_mode) ? nested : root);
-        const ssize_t self = readlink("/proc/self/exe", suite.compiler, sizeof(suite.compiler) - 1);
-        const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
-        snprintf(suite.work, sizeof(suite.work), "%s/buster-c-testsuite-XXXXXX", temporary);
+        // The compiler is this executable, or --compiler's, as an absolute path: each test's processes run elsewhere.
+        const ssize_t self = compiler != 0 ? 0 : readlink("/proc/self/exe", suite.compiler, sizeof(suite.compiler) - 1);
         suite.names = malloc((uint64_t)BUSTER_C_TESTSUITE_MAX_TESTS * BUSTER_C_TESTSUITE_NAME_BYTES);
         suite.results = mmap(0, BUSTER_C_TESTSUITE_MAX_TESTS * sizeof(CTestsuiteResult), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-        valid = self > 0 && suite.names != 0 && suite.results != MAP_FAILED;
-        if (valid)
+        valid = suite.names != 0 && suite.results != MAP_FAILED && (compiler != 0 ? realpath(compiler, suite.compiler) != 0 : self > 0);
+        if (valid && compiler == 0)
         {
             suite.compiler[self] = 0;
-            suite.count = c_testsuite_find(&suite);
-            valid = suite.count != UINT32_MAX && suite.count != 0;
-            if (!valid)
-            {
-                fprintf(stderr, "test-c-testsuite: no tests in %s\n", suite.tests);
-            }
         }
-        valid = valid && (subset == 0 || c_testsuite_subset(&suite, subset));
-        valid = valid && mkdtemp(suite.work) != 0;
-        if (valid)
+        if (valid && self_test)
         {
-            // Workers take the tests in turn: worker w the tests w, w + jobs, ...
-            const uint64_t workers = jobs != 0 ? jobs : parallel_core_count();
-            pid_t* children = malloc((workers != 0 ? workers : 1) * sizeof(pid_t));
-            uint64_t started = 0;
-            for (uint64_t w = 0; children != 0 && w < workers && w < suite.count; w += 1)
-            {
-                const pid_t child = fork();
-                if (child == 0)
-                {
-                    for (uint32_t i = (uint32_t)w; i < suite.count; i += (uint32_t)workers)
-                    {
-                        c_testsuite_one(&suite, i);
-                    }
-                    _exit(0);
-                }
-                children[started] = child;
-                started += child > 0;
-            }
-            for (uint64_t w = 0; w < started; w += 1)
-            {
-                int status = 0;
-                pid_t waited = -1;
-                do
-                {
-                    waited = waitpid(children[w], &status, 0);
-                }
-                while (waited < 0 && errno == EINTR);
-            }
-            free(children);
-            uint32_t counts[C_TESTSUITE_FAILED + 1] = { 0 };
-            uint32_t subset_count = 0;
-            uint32_t subset_passed = 0;
-            for (uint32_t i = 0; i < suite.count; i += 1)
-            {
-                const CTestsuiteResult* test = &suite.results[i];
-                const char* outcome = test->outcome == C_TESTSUITE_PASSED ? "passed" : test->outcome == C_TESTSUITE_UNSUPPORTED ? "unsupported" :
-                                      test->outcome == C_TESTSUITE_FAILED ? "failed" : "not run";
-                const bool missed = test->subset && test->outcome != C_TESTSUITE_PASSED;
-                printf("%s %s%s%s%s\n", suite.names[i], outcome, test->detail[0] != 0 ? ": " : "", test->detail, missed ? " (in the subset)" : "");
-                counts[test->outcome] += 1;
-                subset_count += test->subset;
-                subset_passed += test->subset && test->outcome == C_TESTSUITE_PASSED;
-            }
-            const bool passed = counts[C_TESTSUITE_FAILED] == 0 && counts[C_TESTSUITE_NOT_RUN] == 0 && subset_passed == subset_count;
-            printf("test-c-testsuite: %u tests: %u passed, %u unsupported, %u failed, %u not run", suite.count, counts[C_TESTSUITE_PASSED],
-                   counts[C_TESTSUITE_UNSUPPORTED], counts[C_TESTSUITE_FAILED], counts[C_TESTSUITE_NOT_RUN]);
-            if (subset != 0)
-            {
-                printf("; the subset's %u: %u passed", subset_count, subset_passed);
-            }
-            printf("\n");
+            result = c_testsuite_self_test(&suite);
+        }
+        else if (valid && c_testsuite_execute(&suite, root, subset, jobs))
+        {
+            const bool passed = c_testsuite_report(&suite, subset != 0);
             result = passed ? 0 : 1;
             if (keep || !passed)
             {
