@@ -1122,6 +1122,10 @@ static const PPTestCase pp_test_cases[] = {
     // An empty expansion's or empty argument's leading space goes to the next token, as clang does.
     { "spaces through empty expansions", "#define EMPTY\n#define S(x) #x\n#define EXPAND(x) S(x)\nEXPAND(a EMPTY+b)\n#define F(x) a x+b\nEXPAND(F())\n#define G()\nEXPAND(a G()+b)\n#define H(x) a x\nEXPAND(H()+b)\n#define E2 EMPTY\nEXPAND(a E2+b)\n#define J(x, y) [x y]\nEXPAND(J(, +))\n#define K(x) x\nEXPAND(a K()+b)\n#define V(...) a __VA_OPT__(b)c\nEXPAND(V() V(1))\n",
       0, "c23", "\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"[ +]\"\n\"a +b\"\n\"a c a bc\"\n", false, 0, 0, 0 },
+    // Invocations read from a file's text whose names have no space before them: an empty expansion's trailing space, and
+    // a nonempty one's, go to the next token (pp_invoke_file's, as pp_finish_simple's).
+    { "spaces after invocations in a file's text", "#define E(a, b) a b\n#define F(a, b, c) [a b c]\n#define G(a)\n#define H(a, b) a b\nx=E(,)+1;\ny=E( , )-2;\nz=F(,,)*3;\nw=G(1)+4;\nv=H(,)H(,)5;\nu=H(1,)+6;\n",
+      0, "c17", "x= +1;\ny= -2;\nz=[ ]*3;\nw=+4;\nv= 5;\nu=1 +6;\n", false },
     { "__has_include in a macro's argument in #if", "#define ID(x) x\n#if ID(__has_include(\"other.h\")) && ID(!__has_include(\"missing.h\"))\npresent\n#else\nabsent\n#endif\n",
       "x\n", "c17", "present\n", false, 0, 0, 0 },
     { "header names with line splices", "#include \"oth\\\ner.h\"\n#include <oth\\\ner.h>\n",
