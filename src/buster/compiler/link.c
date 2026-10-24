@@ -121,7 +121,8 @@ typedef uint32_t FixupId;
 
 // Symbol flags, laid out so that an Elf64_Sym's st_info is flags & BUSTER_LINK_SYMBOL_INFO and its st_other is
 // flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT: the type (STT_*) in bits 0 to 3, the binding (STB_*) in bits 4 and 5
-// and the visibility (STV_*) in bits 6 and 7. The object writer makes the section and file symbols itself.
+// and the visibility (STV_*) in bits 6 and 7, but for BUSTER_LINK_SYMBOL_UNIQUE, which an Elf64_Sym writes as
+// STB_GNU_UNIQUE (link_symbol_elf_info). The object writer makes the section and file symbols itself.
 #define BUSTER_LINK_SYMBOL_TYPE 0x0f
 #define BUSTER_LINK_SYMBOL_NOTYPE 0x00
 #define BUSTER_LINK_SYMBOL_OBJECT 0x01
@@ -134,6 +135,9 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_LOCAL 0x00
 #define BUSTER_LINK_SYMBOL_GLOBAL 0x10
 #define BUSTER_LINK_SYMBOL_WEAK 0x20
+// STB_GNU_UNIQUE, which GCC gives C++'s inline variables and the static data of templates and inline functions: a
+// definition that binds as a global one does, kept unique in the process by the loader, and written back as it came.
+#define BUSTER_LINK_SYMBOL_UNIQUE 0x30
 #define BUSTER_LINK_SYMBOL_VISIBILITY 0xc0
 #define BUSTER_LINK_SYMBOL_DEFAULT 0x00
 #define BUSTER_LINK_SYMBOL_INTERNAL 0x40
@@ -873,13 +877,19 @@ static AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, u
     return result;
 }
 
-// Flags whose type is one the representation has and whose binding exists.
+// Flags whose type is one the representation has: each of its bindings exists.
 static bool link_symbol_flags_are_valid(uint8_t flags)
 {
     const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
-    const bool type_valid = type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
-                            type == BUSTER_LINK_SYMBOL_IFUNC;
-    return type_valid && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_BINDING;
+    return type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
+           type == BUSTER_LINK_SYMBOL_IFUNC;
+}
+
+// An Elf64_Sym's st_info for symbol flags: their type and binding, BUSTER_LINK_SYMBOL_UNIQUE's STB_GNU_UNIQUE (10).
+static __attribute__((unused)) uint8_t link_symbol_elf_info(uint8_t flags)
+{
+    const bool unique = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE;
+    return (uint8_t)(unique ? 10u << 4 | (flags & BUSTER_LINK_SYMBOL_TYPE) : flags & BUSTER_LINK_SYMBOL_INFO);
 }
 
 // Whether a symbol with `flags` can be defined in `atom`, which exists, at `value` with `size`: within the atom, and a

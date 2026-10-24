@@ -2852,6 +2852,7 @@ static bool foreign_test_extended(const char* directory, Arena* arena)
 #include "buster/compiler/foreign_driver_test.c"
 #include "buster/compiler/foreign_driver_dedup_test.c"
 #include "buster/compiler/foreign_driver_pipeline_test.c"
+#include "buster/compiler/foreign_corpus_test.c"
 
 static int run_foreign_tests(int argc, char** argv)
 {

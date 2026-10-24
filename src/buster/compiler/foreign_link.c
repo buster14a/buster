@@ -433,10 +433,12 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             object_id = foreign_symbol_object(foreign, winner);
             const ForeignObject* object = &foreign->objects[object_id];
             Elf64_Sym symbol = import_symbol(&object->symbols, foreign_symbol_index(foreign, winner));
-            // The resolver ranks GNU_UNIQUE with weak definitions; the final executable has one canonical definition.
-            if (ELF64_ST_BIND(symbol.st_info) == STB_GNU_UNIQUE)
+            // The resolver ranks GNU_UNIQUE with weak definitions; the executable keeps the winner's binding, as GNU ld,
+            // lld and mold do.
+            const bool unique = ELF64_ST_BIND(symbol.st_info) == STB_GNU_UNIQUE;
+            if (unique)
             {
-                symbol.st_info = ELF64_ST_INFO(STB_WEAK, ELF64_ST_TYPE(symbol.st_info));
+                symbol.st_info = ELF64_ST_INFO(STB_GLOBAL, ELF64_ST_TYPE(symbol.st_info));
             }
             if (ELF64_ST_TYPE(symbol.st_info) == STT_COMMON)
             {
@@ -447,7 +449,9 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             value = symbol.st_value;
             size = symbol.st_size;
             source = BUSTER_LINK_SOURCE_FOREIGN_OBJECT;
-            if (!import_symbol_flags(&symbol, &flags))
+            const bool known = import_symbol_flags(&symbol, &flags);
+            flags = unique ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_UNIQUE) : flags;
+            if (!known)
             {
                 result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
             }
@@ -520,7 +524,10 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         }
         const uint8_t visibility = linker ? foreign_link_linker_visibility(names->bytes[name], names->length[name]) : names->visibility[name];
         flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
-        const bool discarded_only = discarded_shared || (resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0);
+        // Nor does a name nothing defines that only libraries refer to (libstdc++.so.6's weak _ITM_ references).
+        const bool regular = (names->flags[name] & (BUSTER_FOREIGN_NAME_REGULAR_REFERENCED | BUSTER_FOREIGN_NAME_REGULAR_WEAK_REFERENCED)) != 0;
+        const bool unreferenced = !defined && source == BUSTER_LINK_SOURCE_NONE && !regular;
+        const bool discarded_only = discarded_shared || unreferenced || (resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0);
         if (result.error == FOREIGN_LINK_ERROR_NONE && !discarded_only)
         {
             const NameId named = link_add_name_hashed(link, names->bytes[name], names->length[name], names->hash[name]);
@@ -571,6 +578,26 @@ static ImportResult foreign_link_relocations(ForeignLink* output, const Foreign*
 
 // Preserve the resolver's needed-library choices, including an unversioned as-needed DSO. Original ELF version
 // indices are local to each library; the writer needs one global index space and version rows grouped by library.
+// A needed library's DT_NEEDED name: its soname, or its path without one.
+static String8 foreign_link_library_name(const Foreign* foreign, const ForeignLibrary* library)
+{
+    return library->library.soname.length != 0 ? library->library.soname : foreign->inputs[library->input].path;
+}
+
+// The earlier needed library of the same DT_NEEDED name as needed library `l` (given twice, as g++'s driver gives -lgcc_s),
+// plus 1, or 0: GNU ld, lld and mold take a library once, by its soname, and so does the output.
+static uint32_t foreign_link_duplicate(const Foreign* foreign, uint32_t l)
+{
+    const String8 name = foreign_link_library_name(foreign, &foreign->libraries[l]);
+    uint32_t result = 0;
+    for (uint32_t e = 0; result == 0 && e < l; e += 1)
+    {
+        const String8 earlier = foreign->libraries[e].needed ? foreign_link_library_name(foreign, &foreign->libraries[e]) : (String8){ 0 };
+        result = earlier.length == name.length && memcmp(earlier.pointer, name.pointer, name.length) == 0 ? e + 1 : 0;
+    }
+    return result;
+}
+
 static ForeignLinkError foreign_link_libraries(ForeignLink* output, const Foreign* foreign, Arena* arena, String8 interpreter)
 {
     uint64_t version_count = 0;
@@ -578,8 +605,9 @@ static ForeignLinkError foreign_link_libraries(ForeignLink* output, const Foreig
     for (uint32_t l = 0; l < foreign->library_count; l += 1)
     {
         const ForeignLibrary* library = &foreign->libraries[l];
-        library_count += library->needed ? 1 : 0;
-        for (uint32_t v = 0; library->needed && v < library->library.version_count; v += 1)
+        const bool listed = library->needed && foreign_link_duplicate(foreign, l) == 0;
+        library_count += listed ? 1 : 0;
+        for (uint32_t v = 0; listed && v < library->library.version_count; v += 1)
         {
             version_count += !library->library.versions[v].base && library->library.versions[v].index > VER_NDX_GLOBAL ? 1 : 0;
         }
@@ -597,10 +625,12 @@ static ForeignLinkError foreign_link_libraries(ForeignLink* output, const Foreig
     for (uint32_t l = 0; result == FOREIGN_LINK_ERROR_NONE && l < foreign->library_count; l += 1)
     {
         const ForeignLibrary* library = &foreign->libraries[l];
-        output->library_versions[l] = 0;
-        if (library->needed)
+        const uint32_t duplicate = library->needed ? foreign_link_duplicate(foreign, l) : 0;
+        // A library given again binds at the first one's versions.
+        output->library_versions[l] = duplicate != 0 ? output->library_versions[duplicate - 1] : 0;
+        if (library->needed && duplicate == 0)
         {
-            const String8 name = library->library.soname.length != 0 ? library->library.soname : foreign->inputs[library->input].path;
+            const String8 name = foreign_link_library_name(foreign, library);
             libraries[next_library] = (ExecutableLibrary){
                 .name = name,
                 .required = true,

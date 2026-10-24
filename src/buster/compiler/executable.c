@@ -5207,7 +5207,7 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
             dynstr[name_offset + length] = 0;
             dynsym[entry] = (Elf64_Sym){
                 .st_name = (uint32_t)name_offset,
-                .st_info = (uint8_t)(symbols->flags[symbol] & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)),
+                .st_info = link_symbol_elf_info(symbols->flags[symbol]),
                 .st_other = (uint8_t)(symbols->flags[symbol] >> 6),
                 .st_shndx = SHN_UNDEF,
             };
@@ -5619,7 +5619,7 @@ static void executable_write_exports(const Link* link, ExecutableShared* shared,
         const uint64_t address = atom != 0 ? link->atoms.address[atom] + symbols->value[symbol] : (uint64_t)(int64_t)(int32_t)symbols->reference[symbol];
         dynsym[index] = (Elf64_Sym){
             .st_name = (uint32_t)name_offset,
-            .st_info = (uint8_t)(symbols->flags[symbol] & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)),
+            .st_info = link_symbol_elf_info(symbols->flags[symbol]),
             .st_other = (uint8_t)(symbols->flags[symbol] >> 6),
             .st_shndx = (uint16_t)(section != EXECUTABLE_SECTION_COUNT ? layout->section_index[section] : SHN_ABS),
             .st_value = tls ? address - tdata->address : layout->base + address,
@@ -6208,7 +6208,7 @@ static bool executable_debug_valid(const Link* link, const ExecutableDebug* debu
                         link->symbols.value[symbol] < link->atoms.size[atom] && link->symbols.size[symbol] <= link->atoms.size[atom] - link->symbols.value[symbol] &&
                         line.pointer[offset - 3] == 0 && line.pointer[offset - 2] == 9 && line.pointer[offset - 1] == 2;
                 const NameId name = link->symbols.name[symbol];
-                valid = valid && name < link->names.count && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_BINDING;
+                valid = valid && name < link->names.count;
                 if (valid)
                 {
                     const uint32_t length = link->names.length[name];
@@ -6403,7 +6403,7 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
         global += is_local ? 0 : 1;
         symbols[index] = (Elf64_Sym){
             .st_name = name_offset,
-            .st_info = is_local ? flags & BUSTER_LINK_SYMBOL_TYPE : flags & BUSTER_LINK_SYMBOL_INFO,
+            .st_info = is_local ? flags & BUSTER_LINK_SYMBOL_TYPE : link_symbol_elf_info(flags),
             .st_other = link->symbols.flags[symbol] >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
             .st_shndx = section,
             .st_value = address,

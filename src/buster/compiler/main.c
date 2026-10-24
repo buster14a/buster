@@ -778,6 +778,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_foreign_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-foreign-corpus") == 0)
+    {
+        result = run_foreign_corpus_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-output") == 0)
     {
         result = run_foreign_link_benchmark(argc - 2, argv + 2);
