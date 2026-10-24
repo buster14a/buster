@@ -808,6 +808,24 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
         check.instruction = BUSTER_IR_NONE;
         check.detail = BUSTER_IR_NONE;
     }
+    // Aggregates passed and returned by value (#137): an argument's bytes read through its address, a call's result
+    // stored in its object, a result's registers loaded from its address. The adapter would pass, store and return the
+    // addresses themselves. Their columns are read only when the checks before them found nothing.
+    bool aggregates = check.error == IR_OK && input->result_size != 0;
+    for (uint32_t a = 0; check.error == IR_OK && input->argument_sizes != 0 && a < input->argument_count; a += 1)
+    {
+        aggregates |= input->argument_sizes[a] != 0;
+    }
+    for (uint32_t c = 0; check.error == IR_OK && input->call_result_objects != 0 && c < input->call_count; c += 1)
+    {
+        aggregates |= input->call_result_objects[c] != 0;
+    }
+    if (aggregates)
+    {
+        check.error = IR_ERROR_METADATA;
+        check.instruction = BUSTER_IR_NONE;
+        check.detail = BUSTER_IR_NONE;
+    }
     for (uint32_t l = 0; check.error == IR_OK && l < input->local_count; l += 1)
     {
         if ((input->local_flags[l] & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0)

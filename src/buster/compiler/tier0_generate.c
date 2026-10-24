@@ -42,7 +42,7 @@
 #define BUSTER_TIER0_GENERATE_MAX_FUNCTIONS 64
 #define BUSTER_TIER0_GENERATE_MAX_GLOBALS 64
 #define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 12
-#define BUSTER_TIER0_GENERATE_MAX_LOCALS 48
+#define BUSTER_TIER0_GENERATE_MAX_LOCALS 64
 #define BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS 16
 #define BUSTER_TIER0_GENERATE_EXPRESSION_NODES 128
 #define BUSTER_TIER0_GENERATE_NESTING 4
@@ -58,6 +58,113 @@
 #define BUSTER_TIER0_GENERATE_OBJECT_TARGET(o, part) (BUSTER_TIER0_GENERATE_MAX_LOCALS + (o) * 256u + (part))
 // The work a call of a function may cost, at most (statements run, as the generator counts them).
 #define BUSTER_TIER0_GENERATE_WORK 20000
+// A scope's objects, at most: the function's own (BUSTER_TIER0_GENERATE_MAX_OBJECTS), its records' (with
+// Tier0ProgramOptions.records: its parameters that are records, and those it passes and returns), and its
+// variable-length arrays, which a statement declares only while the scope has fewer than
+// BUSTER_TIER0_GENERATE_OBJECT_CAPACITY objects.
+#define BUSTER_TIER0_GENERATE_SCOPE_OBJECTS 16
+_Static_assert(BUSTER_TIER0_GENERATE_SCOPE_OBJECTS >= BUSTER_TIER0_GENERATE_OBJECT_CAPACITY, "a scope holds its variable-length arrays");
+// A function's parameters that are records, and the objects it has of records to pass and return, at most.
+#define BUSTER_TIER0_GENERATE_RECORD_PARAMETERS 4
+#define BUSTER_TIER0_GENERATE_RECORD_OBJECTS 4
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Records
+
+// The structs and unions programs pass and return by value (#137), a catalog that tier0_tables_open builds in the type
+// table and classifies: byte arrays of 1 to 17 bytes, whose parts load in every way (exactly, overlapping, through a
+// temporary) and the largest of which goes on the stack; floats and doubles (in XMM registers), mixed with integers
+// both ways round, unions, a member aligned to 16 (one part of 16 bytes), the empty struct, and records past 16 bytes
+// (MEMORY: on the stack, returned through a hidden pointer). Each is a shape: a member per letter, of a class (b u8,
+// c i8, s i16, S u16, i i32, I u32, l i64, L u64, f f32, d f64), a union after "u:", its first member _Alignas(16)
+// after "a:". A record's C name is "struct rN" or "union rN".
+#define BUSTER_TIER0_GENERATE_RECORDS 64
+#define BUSTER_TIER0_GENERATE_RECORD_MEMBERS 17
+#define BUSTER_TIER0_GENERATE_NO_RECORD 0xff
+static const char* const tier0_record_shapes[] = {
+    "",
+    "b",
+    "bb",
+    "bbb",
+    "bbbb",
+    "bbbbb",
+    "bbbbbb",
+    "bbbbbbb",
+    "bbbbbbbb",
+    "bbbbbbbbb",
+    "bbbbbbbbbb",
+    "bbbbbbbbbbb",
+    "bbbbbbbbbbbb",
+    "bbbbbbbbbbbbb",
+    "bbbbbbbbbbbbbb",
+    "bbbbbbbbbbbbbbb",
+    "bbbbbbbbbbbbbbbb",
+    "bbbbbbbbbbbbbbbbb",
+    "f",
+    "ff",
+    "fff",
+    "ffff",
+    "d",
+    "dd",
+    "ddd",
+    "dddd",
+    "di",
+    "id",
+    "fi",
+    "if",
+    "ifd",
+    "lf",
+    "ffl",
+    "cd",
+    "sss",
+    "Ss",
+    "ic",
+    "fc",
+    "df",
+    "fd",
+    "cdc",
+    "ll",
+    "lll",
+    "lc",
+    "bL",
+    "IcS",
+    "u:if",
+    "u:dl",
+    "u:fdi",
+    "u:dc",
+    "u:ff",
+    "u:dd",
+    "u:bs",
+    "a:d",
+    "a:i",
+    "a:f",
+    "LLLLLLLLLLLLLLLLL",
+    "ddddddddd",
+    "iiiiiiiiiiiiiiiii",
+};
+
+// A record of the catalog: its members' classes and offsets, its size and alignment, and from the calling convention
+// its type and how it is returned.
+typedef struct Tier0Record Tier0Record;
+struct Tier0Record
+{
+    uint8_t classes[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
+    uint32_t offsets[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
+    uint32_t members;
+    uint32_t size;
+    uint32_t alignment;
+    bool is_union;
+    bool aligned;
+    TypeId type;
+    AbiReturn result;
+};
+
+typedef struct Tier0Records Tier0Records;
+struct Tier0Records
+{
+    Tier0Record records[BUSTER_TIER0_GENERATE_RECORDS];
+    uint32_t count;
+};
 
 // What a program may hold, as options: how many functions (the entry among them), statements per function, the
 // largest expression, and whether to use calls, loops, floating values, pointers and objects (local arrays and
@@ -79,6 +186,9 @@ struct Tier0ProgramOptions
     bool objects;
     // Calls through pointers to functions: locals that hold a function's address, and a function's address itself.
     bool indirect;
+    // With `objects`, the catalog's records passed and returned by value (Tier0Tables.records), or 0 for none: a
+    // program without them is the one it was before them, seed for seed.
+    const Tier0Records* records;
     // Symbols reached otherwise than directly (Tier0Function.symbol_access): globals through the GOT and thread-locals
     // of both TLS accesses, and functions' addresses through the GOT.
     bool access;
@@ -99,14 +209,20 @@ struct Tier0GeneratedFunction
     uint32_t first_call;
     uint32_t call_count;
     uint8_t result_class;
+    // A record the function returns (result_class VOID), or BUSTER_TIER0_GENERATE_NO_RECORD; returned through a hidden
+    // pointer (MEMORY), the pointer is its parameter 0 (`hidden`), which C doesn't spell.
+    uint8_t result_record;
+    bool hidden;
     uint64_t work;
 };
 
 // A program: its functions' streams, locals and calls in shared columns (each function's a range of them), its globals
 // (a class, an element count, 1 or BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS, and their initial values) and its C text. An
 // object local has class VOID and its size and alignment's log2 in `local_sizes` and `local_alignments` (0 for a value).
-// A program a test makes by hand may leave out `local_sizes`, `local_alignments` and `call_indirect` (0): no objects
-// and no indirect calls.
+// With records, `local_records` says which locals are records' objects (a parameter's, or one passed and returned),
+// `argument_records` which arguments are (their addresses), and `call_result_objects` which object receives a call's
+// record (1 + the function's local, or 0). A program a test makes by hand may leave out `local_sizes`,
+// `local_alignments`, `call_indirect` and the records' columns (0): no objects, no indirect calls and no records.
 typedef struct Tier0Program Tier0Program;
 struct Tier0Program
 {
@@ -119,6 +235,7 @@ struct Tier0Program
     uint8_t* local_flags;
     uint32_t* local_sizes;
     uint8_t* local_alignments;
+    uint8_t* local_records;
     uint32_t local_count;
     uint32_t local_capacity;
     uint32_t* call_callees;
@@ -126,9 +243,11 @@ struct Tier0Program
     uint32_t* call_argument_counts;
     // Whether each call is indirect: its callee's address pushed before its arguments.
     uint8_t* call_indirect;
+    uint32_t* call_result_objects;
     uint32_t call_count;
     uint32_t call_capacity;
     uint8_t* argument_classes;
+    uint8_t* argument_records;
     uint32_t argument_count;
     uint32_t argument_capacity;
     uint8_t global_classes[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
@@ -149,6 +268,7 @@ struct Tier0Program
     char* text;
     uint64_t text_length;
     uint64_t text_capacity;
+    const Tier0Records* records;
     bool overflow;
     bool defined;
 };
@@ -160,6 +280,19 @@ static const char* tier0_c_type(uint32_t class)
         "void", "signed char", "unsigned char", "short", "unsigned short", "int", "unsigned", "long", "unsigned long", "float", "double",
     };
     return names[class < BUSTER_TYPED_CLASSES ? class : 0];
+}
+
+// A record's C name (a struct or a union of the catalog's), or a class's for NO_RECORD and in a program without the
+// catalog, whose zeroed columns hold no records.
+static const char* tier0_c_record(const Tier0Records* records, uint32_t record, uint32_t class, char* buffer, uint32_t capacity)
+{
+    const char* name = tier0_c_type(class);
+    if (records != 0 && record != BUSTER_TIER0_GENERATE_NO_RECORD)
+    {
+        snprintf(buffer, capacity, "%s r%u", records->records[record].is_union ? "union" : "struct", record);
+        name = buffer;
+    }
+    return name;
 }
 
 static void tier0_text(Tier0Program* program, const char* format, ...) __attribute__((format(printf, 2, 3)));
@@ -358,7 +491,9 @@ struct Tier0Expression
 
 // An object of a function: a local array (`elements` of class classes[0], a power of two) or a struct (`members`, at
 // their offsets), and its alignment in bytes (`aligned` when it is _Alignas(16) in C: an array's declaration's, or a
-// struct's member's). Objects of one `layout` (a twin and the object it copies) can be copied into one another.
+// struct's member's). Objects of one `layout` (a twin and the object it copies) can be copied into one another. A
+// record's object is of the catalog's `record` (BUSTER_TIER0_GENERATE_NO_RECORD for the function's own), whose layout
+// is its record's, and a union's members aren't read apart (only their bits, by the checksum).
 // A variable-length array (`vla`) is an array whose `local` is a U64 that holds its address (ALLOCA's), not a frame
 // object, of `elements` or up to 3 more, which the program computes; `bytes` is the local that holds its size.
 typedef struct Tier0Object Tier0Object;
@@ -367,12 +502,14 @@ struct Tier0Object
     uint32_t local;
     uint32_t elements;
     uint32_t members;
-    uint8_t classes[BUSTER_TIER0_GENERATE_MAX_MEMBERS];
-    bool aligned[BUSTER_TIER0_GENERATE_MAX_MEMBERS];
-    uint32_t offsets[BUSTER_TIER0_GENERATE_MAX_MEMBERS];
+    uint8_t classes[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
+    bool aligned[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
+    uint32_t offsets[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
     uint32_t alignment;
     uint32_t size;
     uint32_t layout;
+    uint8_t record;
+    bool is_union;
     bool vla;
     uint32_t bytes;
 };
@@ -389,7 +526,7 @@ struct Tier0Scope
     uint32_t pointers[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint8_t pointees[BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint32_t pointer_count;
-    Tier0Object objects[BUSTER_TIER0_GENERATE_OBJECT_CAPACITY];
+    Tier0Object objects[BUSTER_TIER0_GENERATE_SCOPE_OBJECTS];
     uint32_t object_count;
     // The function's local indices are relative to its first; first_local makes them the program's.
     uint32_t first_local;
@@ -492,7 +629,7 @@ static void tier0_generate_leaf(const Tier0Program* program, const Tier0Scope* s
         // An object's element or member of the class, or for a U64 an object's address modulo its alignment, or a
         // variable-length array's size: each candidate as the object times 256 plus the member, an element as member
         // 255, the address as 254 and the size as 253.
-        uint32_t candidates[BUSTER_TIER0_GENERATE_OBJECT_CAPACITY * (BUSTER_TIER0_GENERATE_MAX_MEMBERS + 3)];
+        uint32_t candidates[BUSTER_TIER0_GENERATE_SCOPE_OBJECTS * (BUSTER_TIER0_GENERATE_RECORD_MEMBERS + 3)];
         uint32_t candidate_count = 0;
         const bool index_room = grow && tree->count < BUSTER_TIER0_GENERATE_EXPRESSION_NODES;
         for (uint32_t o = 0; o < scope->object_count; o += 1)
@@ -501,7 +638,7 @@ static void tier0_generate_leaf(const Tier0Program* program, const Tier0Scope* s
             for (uint32_t m = 0; m < object->members; m += 1)
             {
                 candidates[candidate_count] = o << 8 | m;
-                candidate_count += object->classes[m] == class ? 1 : 0;
+                candidate_count += object->classes[m] == class && !object->is_union ? 1 : 0;
             }
             candidates[candidate_count] = o << 8 | 255;
             candidate_count += object->elements != 0 && object->classes[0] == class && index_room ? 1 : 0;
@@ -1118,6 +1255,8 @@ struct Tier0FunctionState
     uint32_t function_pointer_targets[BUSTER_TIER0_GENERATE_FUNCTION_POINTERS];
     uint64_t function_pointer_candidates[BUSTER_TIER0_GENERATE_FUNCTION_POINTERS];
     uint32_t function_pointer_count;
+    // The object each record's calls return into (call_result_objects), made at the first such call; UINT32_MAX before.
+    uint32_t record_temporaries[BUSTER_TIER0_GENERATE_RECORDS];
     const char* prefix;
 };
 
@@ -1131,6 +1270,7 @@ static uint32_t tier0_generate_local(Tier0Program* program, Tier0FunctionState* 
         program->local_flags[program->local_count] = flags;
         program->local_sizes[program->local_count] = 0;
         program->local_alignments[program->local_count] = 0;
+        program->local_records[program->local_count] = BUSTER_TIER0_GENERATE_NO_RECORD;
         program->local_count += 1;
         index = state->function->local_count;
         state->function->local_count += 1;
@@ -1159,8 +1299,10 @@ static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* sta
 {
     Tier0Object object;
     memset(&object, 0, sizeof(object));
-    // A twin, now and then, of the object before: its layout, as a second object of one type.
-    const bool twin = state->scope.object_count != 0 && tier0_generate_chance(random, 40);
+    object.record = BUSTER_TIER0_GENERATE_NO_RECORD;
+    // A twin, now and then, of the object before: its layout, as a second object of one type (a record's never: its
+    // twins are the objects of its record, whose layout is the record's).
+    const bool twin = state->scope.object_count != 0 && tier0_generate_chance(random, 40) && state->scope.objects[state->scope.object_count - 1].record == BUSTER_TIER0_GENERATE_NO_RECORD;
     const bool array = !twin && tier0_generate_chance(random, 55);
     if (twin)
     {
@@ -1208,13 +1350,60 @@ static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* sta
     return made;
 }
 
+// An object of record `record` for the current function: a parameter's, or one it passes, returns or receives a call's
+// record into, in its scope with `scoped` (unless the scope is full). Its local is of class VOID, address-taken, with
+// the record's size (at least a byte: an empty record's object still takes one, as a front end gives it) and alignment.
+// Returns its local, or UINT32_MAX when the columns are full.
+static uint32_t tier0_generate_record_object(Tier0Program* program, Tier0FunctionState* state, uint32_t record, bool scoped)
+{
+    const Tier0Record* layout = &program->records->records[record];
+    const uint32_t local = tier0_generate_local(program, state, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN);
+    if (local != UINT32_MAX)
+    {
+        const uint32_t program_local = state->function->first_local + local;
+        program->local_sizes[program_local] = layout->size != 0 ? layout->size : 1;
+        program->local_alignments[program_local] = (uint8_t)__builtin_ctz(layout->alignment);
+        program->local_records[program_local] = (uint8_t)record;
+        if (scoped && state->scope.object_count < BUSTER_TIER0_GENERATE_SCOPE_OBJECTS)
+        {
+            Tier0Object* object = &state->scope.objects[state->scope.object_count];
+            memset(object, 0, sizeof(*object));
+            object->local = local;
+            object->members = layout->members;
+            memcpy(object->classes, layout->classes, sizeof(object->classes));
+            memcpy(object->offsets, layout->offsets, sizeof(object->offsets));
+            object->aligned[0] = layout->aligned;
+            object->alignment = layout->alignment;
+            object->size = layout->size;
+            object->layout = BUSTER_TIER0_GENERATE_SCOPE_OBJECTS + record;
+            object->record = (uint8_t)record;
+            object->is_union = layout->is_union;
+            state->scope.object_count += 1;
+        }
+    }
+    return local;
+}
+
+// A scope's object of record `record`, a random one of them, or UINT32_MAX without one.
+static uint32_t tier0_record_object(const Tier0Scope* scope, uint32_t record, uint64_t* random)
+{
+    uint32_t candidates[BUSTER_TIER0_GENERATE_SCOPE_OBJECTS];
+    uint32_t count = 0;
+    for (uint32_t o = 0; o < scope->object_count; o += 1)
+    {
+        candidates[count] = scope->objects[o].local;
+        count += scope->objects[o].record == record ? 1 : 0;
+    }
+    return count != 0 ? candidates[tier0_generate_below(random, count)] : UINT32_MAX;
+}
+
 // Whether the function has two objects of one layout.
 static bool tier0_has_twins(const Tier0Scope* scope)
 {
     bool twins = false;
     for (uint32_t o = 1; o < scope->object_count; o += 1)
     {
-        twins |= scope->objects[o].layout == scope->objects[o - 1].layout;
+        twins |= scope->objects[o].layout == scope->objects[o - 1].layout && scope->objects[o].size != 0;
     }
     return twins;
 }
@@ -1223,14 +1412,15 @@ static bool tier0_has_twins(const Tier0Scope* scope)
 // into the stream (COPY) and as C (memcpy, as an expression). Returns false without such objects.
 static bool tier0_generate_copy(Tier0Program* program, const Tier0Scope* scope, uint64_t* random)
 {
-    uint32_t pairs[BUSTER_TIER0_GENERATE_OBJECT_CAPACITY * BUSTER_TIER0_GENERATE_OBJECT_CAPACITY];
+    uint32_t pairs[BUSTER_TIER0_GENERATE_SCOPE_OBJECTS * BUSTER_TIER0_GENERATE_SCOPE_OBJECTS];
     uint32_t pair_count = 0;
     for (uint32_t a = 0; a < scope->object_count; a += 1)
     {
         for (uint32_t b = 0; b < scope->object_count; b += 1)
         {
+            // (An empty record has no bytes to copy.)
             pairs[pair_count] = a << 8 | b;
-            pair_count += a != b && scope->objects[a].layout == scope->objects[b].layout ? 1 : 0;
+            pair_count += a != b && scope->objects[a].layout == scope->objects[b].layout && scope->objects[a].size != 0 ? 1 : 0;
         }
     }
     const bool made = pair_count != 0;
@@ -1251,7 +1441,12 @@ static bool tier0_generate_copy(Tier0Program* program, const Tier0Scope* scope, 
 // An object's declaration, as C.
 static void tier0_declare_object(Tier0Program* program, const Tier0Object* object)
 {
-    if (object->elements != 0)
+    if (object->record != BUSTER_TIER0_GENERATE_NO_RECORD)
+    {
+        char name[32];
+        tier0_text(program, "    %s v%u;\n", tier0_c_record(program->records, object->record, 0, name, sizeof(name)), object->local);
+    }
+    else if (object->elements != 0)
     {
         tier0_text(program, "    %s%s v%u[%u];\n", object->aligned[0] ? "_Alignas(16) " : "", tier0_c_type(object->classes[0]), object->local, object->elements);
     }
@@ -1291,8 +1486,11 @@ static void tier0_object_address(Tier0Program* program, const Tier0Object* objec
 // An object's bytes folded into the program's sink, an element or a member at a time as the unsigned integer of its
 // size (its bits, a floating one's too) XORed in: as C, sink ^= *(unsigned T*)&part, which the cross-check compiles
 // with -fno-strict-aliasing, as this repository's build is compiled (a floating part's bits read through an integer
-// lvalue), indented by `indent` spaces. Padding, which C leaves undefined, isn't read, nor a variable-length array's
-// elements past `elements`, which the program never writes.
+// lvalue), indented by `indent` spaces. A floating part's bits are masked by whether it holds a number,
+// & -(unsigned long)(part == part), so that every NaN folds as 0: C leaves a NaN's sign and payload to the
+// implementation (clang folds a + -b into a - b, whose NaN keeps b's sign where Tier 0's flips it), and the
+// cross-check compares floating globals with any two NaNs the same too. Padding, which C leaves undefined, isn't read,
+// nor a variable-length array's elements past `elements`, which the program never writes.
 static void tier0_generate_checksum_object(Tier0Program* program, const Tier0Object* object, const char* prefix, uint32_t indent)
 {
     static const uint8_t raw_classes[9] = {
@@ -1304,16 +1502,31 @@ static void tier0_generate_checksum_object(Tier0Program* program, const Tier0Obj
     const uint32_t parts = object->elements != 0 ? object->elements : object->members;
     for (uint32_t part = 0; part < parts && program->sink != UINT32_MAX; part += 1)
     {
-        const uint32_t raw = raw_classes[tier0_class_bytes(object->classes[object->elements != 0 ? 0 : part])];
+        const uint32_t class = object->classes[object->elements != 0 ? 0 : part];
+        const uint32_t raw = raw_classes[tier0_class_bytes(class)];
         tier0_emit(program, BUSTER_TYPED_GLOBAL, BUSTER_TYPED_CLASS_U64, program->sink + 1);
         tier0_text(program, "%*s%sg%u ^= (unsigned long)*(%s*)&", (int)indent, "", prefix, program->sink, tier0_c_type(raw));
         tier0_object_address(program, object, part);
-        tier0_text(program, ";\n");
         tier0_emit(program, BUSTER_TYPED_LOAD, raw, 0);
         if (raw != BUSTER_TYPED_CLASS_U64)
         {
             tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
         }
+        if (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64)
+        {
+            tier0_text(program, " & -(unsigned long)(");
+            tier0_object_address(program, object, part);
+            tier0_emit(program, BUSTER_TYPED_LOAD, class, 0);
+            tier0_text(program, " == ");
+            tier0_object_address(program, object, part);
+            tier0_emit(program, BUSTER_TYPED_LOAD, class, 0);
+            tier0_text(program, ")");
+            tier0_emit(program, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        tier0_text(program, ";\n");
         tier0_emit(program, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_SET_GLOBAL, BUSTER_TYPED_CLASS_U64, program->sink + 1);
     }
@@ -1519,17 +1732,74 @@ static void tier0_close(Tier0Program* program, Tier0FunctionState* state, uint64
     }
 }
 
-// Whether two of the program's functions have one type: their results' and parameters' classes.
+// Whether two of the program's functions have one type: their results' and parameters' classes and records.
 static bool tier0_same_signature(const Tier0Program* program, uint32_t a, uint32_t b)
 {
     const Tier0GeneratedFunction* x = &program->functions[a];
     const Tier0GeneratedFunction* y = &program->functions[b];
-    bool same = x->result_class == y->result_class && x->parameter_count == y->parameter_count;
+    bool same = x->result_class == y->result_class && x->result_record == y->result_record && x->parameter_count == y->parameter_count;
     for (uint32_t p = 0; p < x->parameter_count && same; p += 1)
     {
-        same = program->local_classes[x->first_local + p] == program->local_classes[y->first_local + p];
+        same = program->local_classes[x->first_local + p] == program->local_classes[y->first_local + p] &&
+               program->local_records[x->first_local + p] == program->local_records[y->first_local + p];
     }
     return same;
+}
+
+// A function's type as C spells a pointer to it: `result (*name)(parameters)`, its hidden pointer left out.
+static void tier0_text_function_pointer(Tier0Program* program, const Tier0GeneratedFunction* target, uint32_t local)
+{
+    char name[32];
+    tier0_text(program, "    %s (*v%u)(", tier0_c_record(program->records, target->result_record, target->result_class, name, sizeof(name)), local);
+    const uint32_t first = target->hidden ? 1 : 0;
+    for (uint32_t p = first; p < target->parameter_count; p += 1)
+    {
+        const uint32_t at = target->first_local + p;
+        tier0_text(program, "%s%s", p == first ? "" : ", ", tier0_c_record(program->records, program->local_records[at], program->local_classes[at], name, sizeof(name)));
+    }
+    tier0_text(program, "%s);\n", target->parameter_count == first ? "void" : "");
+}
+
+// A return of the function's result, as the stream has it and as C (`return` written already): a value's (an
+// expression), or a record's (one of the scope's objects of it): its address in registers (result_size), its bytes
+// copied through the hidden pointer, which it returns (MEMORY), or nothing (an empty record's IGNORE).
+static void tier0_generate_return(Tier0Program* program, Tier0FunctionState* state, uint64_t* random, const Tier0ProgramOptions* options, uint32_t budget)
+{
+    Tier0GeneratedFunction* function = state->function;
+    const uint32_t result = function->result_class;
+    if (function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD)
+    {
+        const Tier0Record* record = &program->records->records[function->result_record];
+        const uint32_t object = tier0_record_object(&state->scope, function->result_record, random);
+        tier0_text(program, " v%u", object);
+        if (record->result.kind == BUSTER_ABI_RESULT_MEMORY)
+        {
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+            tier0_emit(program, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, record->size);
+            tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else if (record->result.kind == BUSTER_ABI_RESULT_REGISTERS)
+        {
+            tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+            tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else
+        {
+            tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        }
+    }
+    else if (result != BUSTER_TYPED_CLASS_VOID)
+    {
+        tier0_text(program, " ");
+        tier0_generate_value_of(program, function, &state->scope, random, result, budget, options->floating, state->prefix, 0);
+        tier0_emit(program, BUSTER_TYPED_RETURN, result, 0);
+    }
+    else
+    {
+        tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+    }
 }
 
 // A call's head as C: the assignment to its destination, if it has one, and its callee, by name or through the local
@@ -1588,19 +1858,46 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
             costliest = cost > costliest ? cost : costliest;
         }
         const uint64_t work = multiplier * (costliest + 1);
-        if (function->work + work <= BUSTER_TIER0_GENERATE_WORK && program->argument_count + target->parameter_count <= program->argument_capacity)
+        // The callee's parameters that are records take objects of theirs from the scope: a call needs one of each. Its
+        // hidden pointer, if it returns through one, isn't an argument: the call's result object is.
+        const uint32_t spelled = target->hidden ? 1 : 0;
+        const uint32_t arguments = target->parameter_count - spelled;
+        uint32_t argument_objects[BUSTER_TIER0_GENERATE_MAX_PARAMETERS + 1];
+        bool passable = true;
+        for (uint32_t p = 0; p < arguments; p += 1)
+        {
+            const uint32_t record = program->local_records[target->first_local + spelled + p];
+            argument_objects[p] = record != BUSTER_TIER0_GENERATE_NO_RECORD ? tier0_record_object(&state->scope, record, random) : UINT32_MAX;
+            passable &= record == BUSTER_TIER0_GENERATE_NO_RECORD || argument_objects[p] != UINT32_MAX;
+        }
+        if (passable && function->work + work <= BUSTER_TIER0_GENERATE_WORK && program->argument_count + arguments <= program->argument_capacity)
         {
             function->work += work;
             const uint32_t call = program->call_count - function->first_call;
             program->call_callees[program->call_count] = callee;
             program->call_first[program->call_count] = program->argument_count;
-            program->call_argument_counts[program->call_count] = target->parameter_count;
+            program->call_argument_counts[program->call_count] = arguments;
             program->call_indirect[program->call_count] = indirect ? 1 : 0;
+            program->call_result_objects[program->call_count] = 0;
+            const uint32_t program_call = program->call_count;
             program->call_count += 1;
             function->call_count += 1;
             const uint32_t result = target->result_class;
             uint32_t destination = UINT32_MAX;
-            if (result != BUSTER_TYPED_CLASS_VOID && state->scope.local_counts[result] != 0 && tier0_generate_chance(random, 80))
+            // A record's result: into the function's object for the record's calls, then copied to an object of the
+            // record in the scope, or left there.
+            const uint32_t result_record = target->result_record;
+            if (result_record != BUSTER_TIER0_GENERATE_NO_RECORD)
+            {
+                if (state->record_temporaries[result_record] == UINT32_MAX)
+                {
+                    state->record_temporaries[result_record] = tier0_generate_record_object(program, state, result_record, false);
+                }
+                const uint32_t temporary = state->record_temporaries[result_record];
+                program->call_result_objects[program_call] = temporary != UINT32_MAX ? temporary + 1 : 0;
+                destination = tier0_generate_chance(random, 80) ? tier0_record_object(&state->scope, result_record, random) : UINT32_MAX;
+            }
+            else if (result != BUSTER_TYPED_CLASS_VOID && state->scope.local_counts[result] != 0 && tier0_generate_chance(random, 80))
             {
                 // A destination among the assignable locals of the class.
                 uint32_t candidates[BUSTER_TIER0_GENERATE_MAX_LOCALS];
@@ -1621,7 +1918,7 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
             // and each copy a statement at its place there, then the call of the temporaries.
             bool copies[BUSTER_TIER0_GENERATE_MAX_PARAMETERS];
             bool sequenced = false;
-            for (uint32_t p = 0; p < target->parameter_count; p += 1)
+            for (uint32_t p = 0; p < arguments; p += 1)
             {
                 copies[p] = state->scope.object_count > 1 && tier0_generate_chance(random, 10) && tier0_has_twins(&state->scope);
                 sequenced |= copies[p];
@@ -1642,10 +1939,14 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
             {
                 tier0_text_call(program, destination, pointer, state->prefix, callee);
             }
-            for (uint32_t p = 0; p < target->parameter_count; p += 1)
+            for (uint32_t p = 0; p < arguments; p += 1)
             {
-                const uint32_t class = program->local_classes[target->first_local + p];
+                // A record's argument is its object's address; C reads its bytes at the call, as Tier 0 does, after the
+                // copies before it.
+                const uint32_t record = program->local_records[target->first_local + spelled + p];
+                const uint32_t class = record != BUSTER_TIER0_GENERATE_NO_RECORD ? BUSTER_TYPED_CLASS_U64 : program->local_classes[target->first_local + spelled + p];
                 program->argument_classes[program->argument_count] = (uint8_t)class;
+                program->argument_records[program->argument_count] = (uint8_t)record;
                 program->argument_count += 1;
                 if (copies[p])
                 {
@@ -1653,25 +1954,37 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
                     tier0_generate_copy(program, &state->scope, random);
                     tier0_text(program, ";\n");
                 }
-                if (sequenced)
+                if (record != BUSTER_TIER0_GENERATE_NO_RECORD)
                 {
-                    tier0_text(program, "    %s t%u = ", tier0_c_type(class), p);
+                    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, argument_objects[p]);
+                    if (!sequenced)
+                    {
+                        tier0_text(program, p == 0 ? "v%u" : ", v%u", argument_objects[p]);
+                    }
                 }
                 else
                 {
-                    tier0_text(program, p == 0 ? "" : ", ");
+                    if (sequenced)
+                    {
+                        tier0_text(program, "    %s t%u = ", tier0_c_type(class), p);
+                    }
+                    else
+                    {
+                        tier0_text(program, p == 0 ? "" : ", ");
+                    }
+                    tier0_generate_value_of(program, function, &state->scope, random, class, 1 + tier0_generate_below(random, options->expression_nodes / 2 + 1),
+                                            options->floating, state->prefix, p + (indirect ? 1 : 0));
+                    tier0_text(program, sequenced ? ";\n" : "");
                 }
-                tier0_generate_value_of(program, function, &state->scope, random, class, 1 + tier0_generate_below(random, options->expression_nodes / 2 + 1),
-                                        options->floating, state->prefix, p + (indirect ? 1 : 0));
-                tier0_text(program, sequenced ? ";\n" : "");
             }
             if (sequenced)
             {
                 tier0_text(program, "    ");
                 tier0_text_call(program, destination, pointer, state->prefix, callee);
-                for (uint32_t p = 0; p < target->parameter_count; p += 1)
+                for (uint32_t p = 0; p < arguments; p += 1)
                 {
-                    tier0_text(program, p == 0 ? "t%u" : ", t%u", p);
+                    const bool record = argument_objects[p] != UINT32_MAX;
+                    tier0_text(program, p == 0 ? "%c%u" : ", %c%u", record ? 'v' : 't', record ? argument_objects[p] : p);
                 }
                 tier0_text(program, ");\n");
                 tier0_indent(program, state);
@@ -1682,7 +1995,17 @@ static bool tier0_generate_call(Tier0Program* program, Tier0FunctionState* state
                 tier0_text(program, ");\n");
             }
             tier0_emit(program, BUSTER_TYPED_CALL, result, call);
-            if (destination != UINT32_MAX)
+            if (result_record != BUSTER_TIER0_GENERATE_NO_RECORD)
+            {
+                const uint32_t size = program->records->records[result_record].size;
+                if (destination != UINT32_MAX && size != 0 && program->call_result_objects[program_call] != 0)
+                {
+                    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, destination);
+                    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->call_result_objects[program_call] - 1);
+                    tier0_emit(program, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
+                }
+            }
+            else if (destination != UINT32_MAX)
             {
                 tier0_emit(program, BUSTER_TYPED_SET_LOCAL, result, destination);
             }
@@ -1710,6 +2033,8 @@ static void tier0_generate_vla(Tier0Program* program, Tier0FunctionState* state,
     Tier0Object object;
     memset(&object, 0, sizeof(object));
     object.vla = true;
+    // Not a record's object (#137), which tier0_record_object would otherwise take it for: record 0's.
+    object.record = BUSTER_TIER0_GENERATE_NO_RECORD;
     object.elements = 2u << tier0_generate_below(random, 3);
     object.classes[0] = (uint8_t)tier0_generate_class(random, options->floating);
     object.alignment = tier0_class_bytes(object.classes[0]);
@@ -1852,19 +2177,13 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
     else if (choice < 27 && state->depth != 0 && state->index + 1 < program->function_count)
     {
         // An early return.
-        const uint32_t result = function->result_class;
         tier0_indent(program, state);
         tier0_text(program, "if (");
         tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
         tier0_text(program, ") return");
         const uint32_t skip = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
-        if (result != BUSTER_TYPED_CLASS_VOID)
-        {
-            tier0_text(program, " ");
-            tier0_generate_value_of(program, function, &state->scope, random, result, budget, options->floating, prefix, 0);
-        }
+        tier0_generate_return(program, state, random, options, budget);
         tier0_text(program, ";\n");
-        tier0_emit(program, BUSTER_TYPED_RETURN, result, 0);
         tier0_patch(program, skip, tier0_here(program, function));
     }
     else if (choice < 30 && state->function_pointer_count != 0)
@@ -1935,15 +2254,31 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
             }
             tier0_emit(program, BUSTER_TYPED_SET, class, 0);
         }
-        else
+        else if (object->members != 0)
         {
             const uint32_t member = tier0_generate_below(random, object->members);
             const uint32_t class = object->classes[member];
+            // A union's floating member takes an integer's value, converted, so that it never holds a NaN: the
+            // checksum masks a NaN's bits in the floating parts alone, and the union's other members would read them.
+            const bool converted = object->is_union && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64);
             tier0_object_address(program, object, member);
-            tier0_text(program, " = ");
-            tier0_generate_value_of(program, function, &state->scope, random, class, budget, options->floating, prefix, 1);
+            if (converted)
+            {
+                tier0_text(program, " = (%s)(", tier0_c_type(class));
+            }
+            else
+            {
+                tier0_text(program, " = ");
+            }
+            tier0_generate_value_of(program, function, &state->scope, random, converted ? BUSTER_TYPED_CLASS_I32 : class, budget, options->floating, prefix, 1);
+            if (converted)
+            {
+                tier0_text(program, ")");
+                tier0_emit(program, BUSTER_TYPED_CONVERT, class, 0);
+            }
             tier0_emit(program, BUSTER_TYPED_SET, class, 0);
         }
+        // (An empty record's object has nothing to write: the statement is empty.)
         tier0_text(program, ";\n");
     }
     else if (choice < 58 && program->global_count != 0)
@@ -2068,11 +2403,20 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     {
         state.counters[d] = UINT32_MAX;
     }
+    for (uint32_t r = 0; r < BUSTER_TIER0_GENERATE_RECORDS; r += 1)
+    {
+        state.record_temporaries[r] = UINT32_MAX;
+    }
     // The signature: up to 6 parameters mostly, and 7 to 12 one time in five, past the argument registers. With the
-    // `indirect` option, now and then an earlier function's, so that a pointer to a function can hold either.
+    // `indirect` option, now and then an earlier function's, so that a pointer to a function can hold either. With
+    // records (but for the entry), now and then a record's result, and parameters that are records, up to
+    // BUSTER_TIER0_GENERATE_RECORD_PARAMETERS: objects in the scope. A record returned through a hidden pointer makes
+    // that pointer parameter 0, a U64 that C doesn't spell.
+    const Tier0Records* records = options->objects && !entry ? options->records : 0;
     const uint32_t copied = options->indirect && !entry && index != 0 && tier0_generate_chance(random, 40) ? tier0_generate_below(random, index) : UINT32_MAX;
     const Tier0GeneratedFunction* model = copied != UINT32_MAX ? &program->functions[copied] : 0;
-    const uint32_t parameters = model != 0 ? model->parameter_count
+    const uint32_t model_first = model != 0 ? model->first_local + (model->hidden ? 1u : 0u) : 0;
+    const uint32_t parameters = model != 0 ? model->parameter_count - (model->hidden ? 1u : 0u)
                                 : entry   ? 3
                                 : tier0_generate_chance(random, 20) ? 7 + tier0_generate_below(random, 6)
                                                                     : tier0_generate_below(random, 7);
@@ -2080,17 +2424,45 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
                                        : entry   ? BUSTER_TYPED_CLASS_U64
                                        : tier0_generate_chance(random, 15) ? BUSTER_TYPED_CLASS_VOID
                                                                            : tier0_generate_class(random, options->floating));
+    function->result_record = BUSTER_TIER0_GENERATE_NO_RECORD;
+    if (model != 0)
+    {
+        function->result_record = model->result_record;
+    }
+    else if (records != 0 && tier0_generate_chance(random, 25))
+    {
+        function->result_record = (uint8_t)tier0_generate_below(random, records->count);
+        function->result_class = BUSTER_TYPED_CLASS_VOID;
+    }
+    function->hidden = function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD && records->records[function->result_record].result.kind == BUSTER_ABI_RESULT_MEMORY;
+    if (function->hidden)
+    {
+        tier0_generate_local(program, &state, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    uint32_t record_parameters = 0;
     for (uint32_t p = 0; p < parameters; p += 1)
     {
-        const uint32_t class = model != 0 ? program->local_classes[model->first_local + p]
-                               : entry   ? BUSTER_TYPED_CLASS_U64
-                                         : tier0_generate_class(random, options->floating);
-        const uint32_t local = tier0_generate_local(program, &state, class, 0);
-        if (local != UINT32_MAX)
+        const uint32_t record = model != 0                                                                               ? program->local_records[model_first + p]
+                                : records != 0 && record_parameters < BUSTER_TIER0_GENERATE_RECORD_PARAMETERS && tier0_generate_chance(random, 25)
+                                    ? tier0_generate_below(random, records->count)
+                                    : BUSTER_TIER0_GENERATE_NO_RECORD;
+        if (record != BUSTER_TIER0_GENERATE_NO_RECORD)
         {
-            tier0_scope_add(&state.scope, local, class);
-            state.assignable[state.assignable_count] = local;
-            state.assignable_count += 1;
+            tier0_generate_record_object(program, &state, record, true);
+            record_parameters += 1;
+        }
+        else
+        {
+            const uint32_t class = model != 0 ? program->local_classes[model_first + p]
+                                   : entry   ? BUSTER_TYPED_CLASS_U64
+                                             : tier0_generate_class(random, options->floating);
+            const uint32_t local = tier0_generate_local(program, &state, class, 0);
+            if (local != UINT32_MAX)
+            {
+                tier0_scope_add(&state.scope, local, class);
+                state.assignable[state.assignable_count] = local;
+                state.assignable_count += 1;
+            }
         }
     }
     function->parameter_count = function->local_count;
@@ -2120,6 +2492,39 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     for (uint32_t o = 0; o < objects; o += 1)
     {
         tier0_generate_object(program, &state, random, options->floating);
+    }
+    // The records' objects, for what the function passes and returns: one of its result's, and of a few of the
+    // records its earlier functions take (or any); the entry's, of each record its callees take, as far as they go.
+    const Tier0Records* catalog = options->objects ? options->records : 0;
+    if (catalog != 0 && function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD)
+    {
+        tier0_generate_record_object(program, &state, function->result_record, true);
+    }
+    for (uint32_t f = 0; catalog != 0 && entry && f < index && state.scope.object_count < BUSTER_TIER0_GENERATE_SCOPE_OBJECTS - 2; f += 1)
+    {
+        const Tier0GeneratedFunction* callee = &program->functions[f];
+        for (uint32_t p = 0; p < callee->parameter_count; p += 1)
+        {
+            const uint32_t record = program->local_records[callee->first_local + p];
+            if (record != BUSTER_TIER0_GENERATE_NO_RECORD && tier0_record_object(&state.scope, record, random) == UINT32_MAX &&
+                state.scope.object_count < BUSTER_TIER0_GENERATE_SCOPE_OBJECTS - 2)
+            {
+                tier0_generate_record_object(program, &state, record, true);
+            }
+        }
+    }
+    const uint32_t record_objects = catalog != 0 && !entry ? tier0_generate_below(random, BUSTER_TIER0_GENERATE_RECORD_OBJECTS) : 0;
+    for (uint32_t k = 0; k < record_objects; k += 1)
+    {
+        uint32_t record = tier0_generate_below(random, catalog->count);
+        if (index != 0 && tier0_generate_chance(random, 70))
+        {
+            const Tier0GeneratedFunction* callee = &program->functions[tier0_generate_below(random, index)];
+            const uint32_t p = callee->parameter_count != 0 ? tier0_generate_below(random, callee->parameter_count) : 0;
+            const uint32_t taken = callee->parameter_count != 0 ? program->local_records[callee->first_local + p] : BUSTER_TIER0_GENERATE_NO_RECORD;
+            record = taken != BUSTER_TIER0_GENERATE_NO_RECORD ? taken : callee->result_record != BUSTER_TIER0_GENERATE_NO_RECORD ? callee->result_record : record;
+        }
+        tier0_generate_record_object(program, &state, record, true);
     }
     // A pointer's target: an address-taken local (its index), a global array's element (UINT32_MAX less the global),
     // or an object's element or member (BUSTER_TIER0_GENERATE_OBJECT_TARGET).
@@ -2155,7 +2560,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     }
     for (uint32_t o = 0; o < state.scope.object_count && options->pointers; o += 1)
     {
-        if (tier0_generate_chance(random, 40))
+        if (tier0_generate_chance(random, 40) && !state.scope.objects[o].is_union && state.scope.objects[o].size != 0)
         {
             const Tier0Object* object = &state.scope.objects[o];
             const uint32_t part = tier0_generate_below(random, object->elements != 0 ? object->elements : object->members);
@@ -2188,20 +2593,25 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
             state.function_pointer_count += 1;
         }
     }
-    // The header and the declarations.
+    // The header (without a hidden pointer, which C doesn't spell) and the declarations.
+    char type_name[32];
+    const char* result_name = tier0_c_record(program->records, function->result_record, function->result_class, type_name, sizeof(type_name));
     if (entry)
     {
-        tier0_text(program, "%s %sentry(", tier0_c_type(function->result_class), prefix);
+        tier0_text(program, "%s %sentry(", result_name, prefix);
     }
     else
     {
-        tier0_text(program, "%s %sf%u(", tier0_c_type(function->result_class), prefix, index);
+        tier0_text(program, "%s %sf%u(", result_name, prefix, index);
     }
-    for (uint32_t p = 0; p < function->parameter_count; p += 1)
+    const uint32_t spelled = function->hidden ? 1 : 0;
+    for (uint32_t p = spelled; p < function->parameter_count; p += 1)
     {
-        tier0_text(program, "%s%s v%u", p == 0 ? "" : ", ", tier0_c_type(program->local_classes[function->first_local + p]), p);
+        const uint32_t at = function->first_local + p;
+        tier0_text(program, "%s%s v%u", p == spelled ? "" : ", ", tier0_c_record(program->records, program->local_records[at], program->local_classes[at], type_name, sizeof(type_name)),
+                   p);
     }
-    tier0_text(program, "%s)\n{\n", function->parameter_count == 0 ? "void" : "");
+    tier0_text(program, "%s)\n{\n", function->parameter_count == spelled ? "void" : "");
     const uint32_t declared = function->local_count;
     // The counters are made as loops need them, so declare room for them: every nesting depth's.
     for (uint32_t d = 1; d <= BUSTER_TIER0_GENERATE_NESTING; d += 1)
@@ -2227,13 +2637,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         else if (pointee != UINT32_MAX)
         {
             // A pointer to the function's type.
-            const Tier0GeneratedFunction* target = &program->functions[pointee];
-            tier0_text(program, "    %s (*v%u)(", tier0_c_type(target->result_class), l);
-            for (uint32_t p = 0; p < target->parameter_count; p += 1)
-            {
-                tier0_text(program, "%s%s", p == 0 ? "" : ", ", tier0_c_type(program->local_classes[target->first_local + p]));
-            }
-            tier0_text(program, "%s);\n", target->parameter_count == 0 ? "void" : "");
+            tier0_text_function_pointer(program, &program->functions[pointee], l);
         }
         else
         {
@@ -2260,8 +2664,9 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     }
     for (uint32_t o = 0; o < state.scope.object_count; o += 1)
     {
+        // (A parameter's bytes are its argument's.)
         const Tier0Object* object = &state.scope.objects[o];
-        const uint32_t parts = object->elements != 0 ? object->elements : object->members;
+        const uint32_t parts = object->local < function->parameter_count ? 0 : object->elements != 0 ? object->elements : object->members;
         for (uint32_t part = 0; part < parts; part += 1)
         {
             const uint32_t class = object->classes[object->elements != 0 ? 0 : part];
@@ -2284,7 +2689,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
             tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, target);
             tier0_text(program, "    v%u = (unsigned long)&v%u;\n", pointer, target);
         }
-        else if (target < BUSTER_TIER0_GENERATE_OBJECT_TARGET(BUSTER_TIER0_GENERATE_MAX_OBJECTS, 0))
+        else if (target < BUSTER_TIER0_GENERATE_OBJECT_TARGET(BUSTER_TIER0_GENERATE_SCOPE_OBJECTS, 0))
         {
             const uint32_t at = target - BUSTER_TIER0_GENERATE_OBJECT_TARGET(0, 0);
             tier0_text(program, "    v%u = (unsigned long)&", pointer);
@@ -2338,20 +2743,58 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         for (uint32_t callee = 0; callee < index && options->calls; callee += 1)
         {
             const Tier0GeneratedFunction* target = &program->functions[callee];
-            if (program->call_count >= program->call_capacity || program->argument_count + target->parameter_count > program->argument_capacity)
+            // A callee that takes a record the entry has no object of isn't called here, and one that returns a record
+            // returns it into the entry's object for its record's calls, then an object of the record, if it has one.
+            const uint32_t spelled = target->hidden ? 1 : 0;
+            const uint32_t arguments = target->parameter_count - spelled;
+            uint32_t argument_objects[BUSTER_TIER0_GENERATE_MAX_PARAMETERS + 1];
+            bool passable = true;
+            for (uint32_t p = 0; p < arguments; p += 1)
+            {
+                const uint32_t record = program->local_records[target->first_local + spelled + p];
+                argument_objects[p] = record != BUSTER_TIER0_GENERATE_NO_RECORD ? tier0_record_object(&state.scope, record, random) : UINT32_MAX;
+                passable &= record == BUSTER_TIER0_GENERATE_NO_RECORD || argument_objects[p] != UINT32_MAX;
+            }
+            if (!passable)
+            {
+                continue;
+            }
+            if (program->call_count >= program->call_capacity || program->argument_count + arguments > program->argument_capacity)
             {
                 program->overflow = true;
                 break;
             }
             const uint32_t call = program->call_count - function->first_call;
+            const uint32_t program_call = program->call_count;
             program->call_callees[program->call_count] = callee;
             program->call_first[program->call_count] = program->argument_count;
-            program->call_argument_counts[program->call_count] = target->parameter_count;
+            program->call_argument_counts[program->call_count] = arguments;
             program->call_indirect[program->call_count] = 0;
+            program->call_result_objects[program->call_count] = 0;
             program->call_count += 1;
             function->call_count += 1;
             const uint32_t result = target->result_class;
-            if (result != BUSTER_TYPED_CLASS_VOID)
+            const uint32_t result_record = target->result_record;
+            uint32_t destination = UINT32_MAX;
+            if (result_record != BUSTER_TIER0_GENERATE_NO_RECORD)
+            {
+                if (state.record_temporaries[result_record] == UINT32_MAX)
+                {
+                    state.record_temporaries[result_record] = tier0_generate_record_object(program, &state, result_record, false);
+                }
+                const uint32_t temporary = state.record_temporaries[result_record];
+                program->call_result_objects[program_call] = temporary != UINT32_MAX ? temporary + 1 : 0;
+                destination = tier0_record_object(&state.scope, result_record, random);
+                if (destination != UINT32_MAX)
+                {
+                    tier0_text(program, "    v%u = ", destination);
+                }
+                else
+                {
+                    tier0_text(program, "    ");
+                }
+            }
+            else if (result != BUSTER_TYPED_CLASS_VOID)
             {
                 tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, sum);
                 tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31);
@@ -2363,17 +2806,38 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
                 tier0_text(program, "    ");
             }
             tier0_text(program, "%sf%u(", prefix, callee);
-            for (uint32_t p = 0; p < target->parameter_count; p += 1)
+            for (uint32_t p = 0; p < arguments; p += 1)
             {
-                const uint32_t class = program->local_classes[target->first_local + p];
+                const uint32_t record = program->local_records[target->first_local + spelled + p];
+                const uint32_t class = record != BUSTER_TIER0_GENERATE_NO_RECORD ? BUSTER_TYPED_CLASS_U64 : program->local_classes[target->first_local + spelled + p];
                 program->argument_classes[program->argument_count] = (uint8_t)class;
+                program->argument_records[program->argument_count] = (uint8_t)record;
                 program->argument_count += 1;
                 tier0_text(program, p == 0 ? "" : ", ");
-                tier0_generate_value_of(program, function, &state.scope, random, class, 1 + tier0_generate_below(random, options->expression_nodes / 2 + 1),
-                                        options->floating, prefix, 1 + p);
+                if (record != BUSTER_TIER0_GENERATE_NO_RECORD)
+                {
+                    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, argument_objects[p]);
+                    tier0_text(program, "v%u", argument_objects[p]);
+                }
+                else
+                {
+                    tier0_generate_value_of(program, function, &state.scope, random, class, 1 + tier0_generate_below(random, options->expression_nodes / 2 + 1),
+                                            options->floating, prefix, 1 + p);
+                }
             }
             tier0_emit(program, BUSTER_TYPED_CALL, result, call);
-            if (result != BUSTER_TYPED_CLASS_VOID)
+            if (result_record != BUSTER_TIER0_GENERATE_NO_RECORD)
+            {
+                const uint32_t size = program->records->records[result_record].size;
+                if (destination != UINT32_MAX && size != 0 && program->call_result_objects[program_call] != 0)
+                {
+                    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, destination);
+                    tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->call_result_objects[program_call] - 1);
+                    tier0_emit(program, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
+                }
+                tier0_text(program, ");\n");
+            }
+            else if (result != BUSTER_TYPED_CLASS_VOID)
             {
                 if (tier0_class_floating(result))
                 {
@@ -2399,6 +2863,12 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         tier0_text(program, ";\n}\n\n");
         tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else if (function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD)
+    {
+        tier0_text(program, "    return");
+        tier0_generate_return(program, &state, random, options, 0);
+        tier0_text(program, ";\n}\n\n");
     }
     else if (function->result_class != BUSTER_TYPED_CLASS_VOID)
     {
@@ -2443,17 +2913,32 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     program->call_first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
     program->call_argument_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
     program->call_indirect = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->call_capacity);
+    program->call_result_objects = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->call_capacity);
     program->argument_classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->argument_capacity);
+    program->argument_records = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->argument_capacity);
+    program->local_records = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->local_capacity);
     program->global_values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS);
     program->text = BUSTER_ARENA_PUSH_ARRAY(arena, char, program->text_capacity);
     bool result = program->kinds != 0 && program->classes != 0 && program->values != 0 && program->local_classes != 0 && program->local_flags != 0 &&
                   program->local_sizes != 0 && program->local_alignments != 0 && program->call_callees != 0 && program->call_first != 0 &&
                   program->call_argument_counts != 0 && program->call_indirect != 0 && program->argument_classes != 0 && program->global_values != 0 &&
-                  program->text != 0;
+                  program->text != 0 && program->call_result_objects != 0 && program->argument_records != 0 && program->local_records != 0;
     if (result)
     {
         program->text[0] = 0;
+        program->records = options.objects ? options.records : 0;
         program->access = options.access;
+        // The records' declarations, every one the catalog has.
+        for (uint32_t r = 0; program->records != 0 && r < program->records->count; r += 1)
+        {
+            const Tier0Record* record = &program->records->records[r];
+            tier0_text(program, "%s r%u {", record->is_union ? "union" : "struct", r);
+            for (uint32_t m = 0; m < record->members; m += 1)
+            {
+                tier0_text(program, " %s%s m%u;", record->aligned && m == 0 ? "_Alignas(16) " : "", tier0_c_type(record->classes[m]), m);
+            }
+            tier0_text(program, " };\n");
+        }
         // Globals: scalars and arrays of every class, and with `access` two in five direct and the rest through the GOT,
         // or thread-locals of the image's or through the GOT.
         program->global_count = 4 + tier0_generate_below(&random, 9);
@@ -2528,7 +3013,8 @@ static TypeId tier0_program_class_type(uint32_t class)
     return types[class < BUSTER_TYPED_CLASSES ? class : 0];
 }
 
-// The type table and the calling convention's, for the programs' signatures (abi_assign gives them the locations).
+// The type table and the calling convention's, for the programs' signatures (abi_assign gives them the locations), and
+// the records' catalog, in both.
 typedef struct Tier0Tables Tier0Tables;
 struct Tier0Tables
 {
@@ -2537,21 +3023,103 @@ struct Tier0Tables
     Arena index_arena;
     AbiTable abi;
     Arena abi_arena;
+    Tier0Records records;
 };
+
+// A record shape's member class (tier0_record_shapes' letters).
+static uint32_t tier0_record_class(char letter)
+{
+    const uint32_t class = letter == 'b' ? BUSTER_TYPED_CLASS_U8
+                           : letter == 'c' ? BUSTER_TYPED_CLASS_I8
+                           : letter == 's' ? BUSTER_TYPED_CLASS_I16
+                           : letter == 'S' ? BUSTER_TYPED_CLASS_U16
+                           : letter == 'i' ? BUSTER_TYPED_CLASS_I32
+                           : letter == 'I' ? BUSTER_TYPED_CLASS_U32
+                           : letter == 'l' ? BUSTER_TYPED_CLASS_I64
+                           : letter == 'L' ? BUSTER_TYPED_CLASS_U64
+                           : letter == 'f' ? BUSTER_TYPED_CLASS_F32
+                                           : BUSTER_TYPED_CLASS_F64;
+    return class;
+}
+
+// The catalog's records: each laid out as C lays it out (the generator's offsets), made in the type table, which must
+// lay it out alike, and classified, for how functions return it.
+static bool tier0_records_build(Tier0Tables* tables)
+{
+    Tier0Records* records = &tables->records;
+    memset(records, 0, sizeof(*records));
+    _Static_assert(BUSTER_ARRAY_LENGTH(tier0_record_shapes) <= BUSTER_TIER0_GENERATE_RECORDS, "the catalog's records fit");
+    bool result = true;
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(tier0_record_shapes) && result; r += 1)
+    {
+        const char* shape = tier0_record_shapes[r];
+        Tier0Record* record = &records->records[r];
+        record->is_union = shape[0] == 'u' && shape[1] == ':';
+        record->aligned = shape[0] == 'a' && shape[1] == ':';
+        const char* letters = record->is_union || record->aligned ? shape + 2 : shape;
+        TypeMember members[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
+        uint32_t offset = 0;
+        uint32_t end = 0;
+        record->alignment = 1;
+        while (letters[record->members] != 0 && record->members < BUSTER_TIER0_GENERATE_RECORD_MEMBERS)
+        {
+            const uint32_t m = record->members;
+            const uint32_t class = tier0_record_class(letters[m]);
+            const uint32_t bytes = tier0_class_bytes(class);
+            const uint32_t alignment = record->aligned && m == 0 ? 16 : bytes;
+            offset = record->is_union ? 0 : (offset + alignment - 1) & ~(alignment - 1);
+            record->classes[m] = (uint8_t)class;
+            record->offsets[m] = offset;
+            offset += bytes;
+            end = offset > end ? offset : end;
+            record->alignment = alignment > record->alignment ? alignment : record->alignment;
+            members[m] = (TypeMember){
+                .name = m + 1,
+                .type = tier0_program_class_type(class),
+                .bit_width = BUSTER_TYPE_NOT_BIT_FIELD,
+                .alignment_log2 = (uint8_t)(record->aligned && m == 0 ? 5 : 0),
+                .packed = false,
+            };
+            record->members += 1;
+        }
+        record->size = (end + record->alignment - 1) & ~(record->alignment - 1);
+        const TypeRecordAttributes attributes = {
+            .packed = false,
+            .pack_log2 = 0,
+            .alignment_log2 = 0,
+        };
+        record->type = type_tag(&tables->types, record->is_union ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT, 1000 + r);
+        result = record->type != 0 && type_complete_record(&tables->types, record->type, members, record->members, attributes) &&
+                 type_size(&tables->types, record->type) == record->size && (1u << type_alignment_log2(&tables->types, record->type)) == record->alignment;
+        records->count += 1;
+    }
+    if (result)
+    {
+        abi_classify_all(&tables->abi, &tables->types);
+        for (uint32_t r = 0; r < records->count; r += 1)
+        {
+            const uint32_t index = type_index(records->records[r].type);
+            records->records[r].result = tables->abi.results[index];
+            result = result && (tables->abi.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (tables->abi.pass[index] & BUSTER_ABI_PASS_UNSUPPORTED) == 0;
+        }
+    }
+    return result;
+}
 
 static bool tier0_tables_open(Tier0Tables* tables)
 {
     const TypeCapacity capacity = {
-        .types = 256,
+        .types = 512,
         .parameters = 1024,
-        .tags = 16,
-        .members = 64,
+        .tags = 128,
+        .members = 512,
     };
     tables->type_arena = arena_reserve(type_capacity_bytes(capacity));
     tables->index_arena = arena_reserve(type_index_capacity_bytes(capacity));
     bool result = type_initialize(&tables->types, &tables->type_arena, &tables->index_arena, capacity);
     tables->abi_arena = arena_reserve(abi_capacity_bytes(tables->types.types.capacity));
     result = result && abi_initialize(&tables->abi, &tables->abi_arena, &tables->types, 16);
+    result = result && tier0_records_build(tables);
     return result;
 }
 
@@ -2579,16 +3147,25 @@ struct Tier0Functions
     AbiCall* entries;
     AbiCall* calls;
     uint8_t* call_variadic;
+    // With records: each argument's bytes (0 for a value's), and each function's parameters' locations when it returns
+    // through a hidden pointer (rdi's first, then its signature's).
+    uint32_t* argument_sizes;
+    AbiLocation* hidden_parameters;
 };
 
 static bool tier0_program_functions(const Tier0Program* program, const Tier0Tables* tables, Arena* arena, Tier0Functions* functions)
 {
     const uint32_t function_count = program->function_count;
     const uint32_t signatures = function_count + program->call_count;
+    // A record's type, or a class's. A program without the catalog (a hand-made one, whose columns are zeroed, so that
+    // a function's result_record reads as record 0) has no records.
+    const Tier0Records* records = program->records;
     uint32_t parameters = 0;
+    uint32_t hidden = 0;
     for (uint32_t f = 0; f < function_count; f += 1)
     {
-        parameters += program->functions[f].parameter_count;
+        parameters += program->functions[f].parameter_count - (program->functions[f].hidden ? 1 : 0);
+        hidden += program->functions[f].hidden ? program->functions[f].parameter_count : 0;
     }
     const uint32_t arguments = parameters + program->argument_count;
     TypeId* results = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, signatures + 1);
@@ -2599,10 +3176,13 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
     AbiCall* calls = BUSTER_ARENA_PUSH_ARRAY(arena, AbiCall, signatures + 1);
     functions->call_targets = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, program->call_count + 1);
     functions->call_variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->call_count + 1);
+    functions->argument_sizes = records != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, program->argument_count + 1) : 0;
+    functions->hidden_parameters = records != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, AbiLocation, hidden + 1) : 0;
     functions->symbol_count = program->access ? program->global_count + function_count + 1 : 0;
     functions->symbol_access = program->access ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, functions->symbol_count) : 0;
     bool result = results != 0 && counts != 0 && variadic != 0 && types != 0 && locations != 0 && calls != 0 && functions->call_targets != 0 &&
-                  functions->call_variadic != 0 && (!program->access || functions->symbol_access != 0);
+                  functions->call_variadic != 0 && (records == 0 || (functions->argument_sizes != 0 && functions->hidden_parameters != 0)) &&
+                  (!program->access || functions->symbol_access != 0);
     if (result && program->access)
     {
         functions->symbol_access[0] = BUSTER_TIER0_ACCESS_DIRECT;
@@ -2615,24 +3195,36 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
         for (uint32_t f = 0; f < function_count; f += 1)
         {
             const Tier0GeneratedFunction* function = &program->functions[f];
-            results[f] = tier0_program_class_type(function->result_class);
-            counts[f] = function->parameter_count;
+            const uint32_t spelled = function->hidden ? 1 : 0;
+            const uint32_t result_record = records != 0 ? function->result_record : BUSTER_TIER0_GENERATE_NO_RECORD;
+            results[f] = result_record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[result_record].type : tier0_program_class_type(function->result_class);
+            counts[f] = function->parameter_count - spelled;
             variadic[f] = 0;
-            for (uint32_t p = 0; p < function->parameter_count; p += 1)
+            for (uint32_t p = spelled; p < function->parameter_count; p += 1)
             {
-                types[argument] = tier0_program_class_type(program->local_classes[function->first_local + p]);
+                const uint32_t at = function->first_local + p;
+                const uint32_t record = records != 0 ? program->local_records[at] : BUSTER_TIER0_GENERATE_NO_RECORD;
+                types[argument] = record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[record].type : tier0_program_class_type(program->local_classes[at]);
                 argument += 1;
             }
         }
         for (uint32_t c = 0; c < program->call_count; c += 1)
         {
             const Tier0GeneratedFunction* callee = &program->functions[program->call_callees[c]];
-            results[function_count + c] = tier0_program_class_type(callee->result_class);
+            const uint32_t result_record = records != 0 ? callee->result_record : BUSTER_TIER0_GENERATE_NO_RECORD;
+            results[function_count + c] = result_record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[result_record].type
+                                                                                           : tier0_program_class_type(callee->result_class);
             counts[function_count + c] = program->call_argument_counts[c];
             variadic[function_count + c] = 0;
             for (uint32_t a = 0; a < program->call_argument_counts[c]; a += 1)
             {
-                types[argument] = tier0_program_class_type(program->argument_classes[program->call_first[c] + a]);
+                const uint32_t at = program->call_first[c] + a;
+                const uint32_t record = records != 0 ? program->argument_records[at] : BUSTER_TIER0_GENERATE_NO_RECORD;
+                types[argument] = record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[record].type : tier0_program_class_type(program->argument_classes[at]);
+                if (records != 0)
+                {
+                    functions->argument_sizes[at] = record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[record].size : 0;
+                }
                 argument += 1;
             }
             const bool indirect = program->call_indirect != 0 && program->call_indirect[c] != 0;
@@ -2653,6 +3245,7 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
         functions->argument_locations = locations + parameters;
         functions->calls = calls + function_count;
         uint32_t parameter = 0;
+        uint32_t hidden_parameter = 0;
         for (uint32_t f = 0; f < function_count; f += 1)
         {
             const Tier0GeneratedFunction* function = &program->functions[f];
@@ -2676,7 +3269,20 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
             t->parameter_count = function->parameter_count;
             t->parameters = locations + parameter;
             t->result = calls[f].result;
-            parameter += function->parameter_count;
+            if (function->hidden)
+            {
+                // The hidden pointer in rdi, which the signature's locations leave free, then the parameters.
+                AbiLocation* list = functions->hidden_parameters + hidden_parameter;
+                list[0] = (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } };
+                memcpy(list + 1, locations + parameter, (function->parameter_count - 1) * sizeof(AbiLocation));
+                t->parameters = list;
+                hidden_parameter += function->parameter_count;
+            }
+            parameter += function->parameter_count - (function->hidden ? 1 : 0);
+            const bool registers = records != 0 && function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD && calls[f].result.kind == BUSTER_ABI_RESULT_REGISTERS;
+            t->result_size = registers ? records->records[function->result_record].size : 0;
+            t->argument_sizes = functions->argument_sizes;
+            t->call_result_objects = records != 0 ? program->call_result_objects + function->first_call : 0;
             t->call_targets = functions->call_targets + function->first_call;
             t->call_first = program->call_first + function->first_call;
             t->call_argument_counts = program->call_argument_counts + function->first_call;
