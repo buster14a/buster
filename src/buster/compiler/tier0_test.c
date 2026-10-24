@@ -3716,16 +3716,16 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a hidden result without an object", 12, false, BUSTER_TIER0_TEST_METADATA },
     { "a result size with a hidden result", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "a result size of 17 bytes", 3, true, BUSTER_TIER0_TEST_METADATA },
-    { "a return of I64 with a result size", 3, true, "a return of an aggregate in registers that isn't its bytes' address" },
-    { "a function with a result size that reaches its end", 3, true, "a function returning an aggregate in registers that reaches its end" },
+    { "a return of I64 with a result size", 3, true, "a return of an aggregate that isn't an address (U64)" },
+    { "a function with a result size that reaches its end", 3, true, "a function returning an aggregate that reaches its end" },
     { "an object parameter aligned to 32", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "an object parameter of 17 bytes in registers", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "an object parameter of class I64", 3, true, "an object that isn't an address-taken local of class VOID" },
     { "a hidden result without its pointer in rdi", 12, true, BUSTER_TIER0_TEST_METADATA },
     { "a hidden result whose pointer is an object", 12, true, BUSTER_TIER0_TEST_METADATA },
     { "a variadic function's SPLIT slot past its incoming area", 2, true, BUSTER_TIER0_TEST_METADATA },
-    { "a function with a result size that jumps to its end", 3, true, "a function returning an aggregate in registers that reaches its end" },
-    { "a function with a result size that branches to its end", 3, true, "a function returning an aggregate in registers that reaches its end" },
+    { "a function with a result size that jumps to its end", 3, true, "a function returning an aggregate that reaches its end" },
+    { "a function with a result size that branches to its end", 3, true, "a function returning an aggregate that reaches its end" },
     { "a jump to the end with a value left", 2, true, "values left at the function's end" },
     { "an object parameter's two parts in one register", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "an object parameter's part in rax", 3, true, BUSTER_TIER0_TEST_METADATA },
@@ -3737,6 +3737,8 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "an aggregate argument's part in xmm8", 2, false, BUSTER_TIER0_TEST_METADATA },
     { "a result in rax twice", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "a call's result in rax and rbx", 3, false, BUSTER_TIER0_TEST_METADATA },
+    { "a return of VOID with a hidden result", 12, true, "a return of an aggregate that isn't an address (U64)" },
+    { "a function with a hidden result that reaches its end", 12, true, "a function returning an aggregate that reaches its end" },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -3946,6 +3948,17 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             break;
         case 54:
             caller->call.result.registers[1] = BUSTER_ABI_RBX;
+            break;
+        case 55:
+            // A RETURN of nothing in place of the pointer and its RETURN.
+            callee->function.count -= 1;
+            callee->kinds[callee->function.count - 1] = BUSTER_TYPED_RETURN;
+            callee->classes[callee->function.count - 1] = BUSTER_TYPED_CLASS_VOID;
+            callee->values[callee->function.count - 1] = 0;
+            break;
+        case 56:
+            // The pointer and its RETURN left out, so that the copy falls off the end.
+            callee->function.count -= 2;
             break;
         default:
             break;

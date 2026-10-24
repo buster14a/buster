@@ -207,7 +207,7 @@ without aggregates:
   returns the address of the bytes (U64), from which the epilogue loads the result registers while the frame they may
   be in is still there, and control reaches the function's end only through a `RETURN`. A result through a hidden
   pointer is the front end's: the pointer is parameter 0 (U64, in rdi), the bytes are copied there, and each `RETURN`
-  returns the pointer, which rax must hold.
+  returns the pointer (U64), which rax must hold; here too, control reaches the end only through a `RETURN`.
 
 **Parts.** The registers come from `abi_assign`'s locations alone: eightbyte k (at 0 and 8, or the high one alone with
 `BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
@@ -247,8 +247,9 @@ whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a regi
 that another part, another argument of the call or another parameter takes, a slot outside its call's stack area or an
 incoming one past int32, a call's stack alignment past 16, a result object that isn't an object with room for the
 registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a function whose hidden
-result pointer isn't parameter 0 in rdi, an aggregate result of more than two registers, and a `RETURN` of another
-class than U64 with `result_size`. `test-tier0`'s aggregate and parameter errors break each rule (below).
+result pointer isn't parameter 0 in rdi, and an aggregate result of more than two registers. A function returning an
+aggregate, in registers or through the hidden pointer, must leave rax an address at every `RETURN`, which must be of
+U64, and mustn't reach its end without one. `test-tier0`'s aggregate and parameter errors break each rule (below).
 
 The producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)) gives every call site with an aggregate
 result an object of its own, a function with a hidden result pointer its parameter 0, and an aggregate parameter's
@@ -557,11 +558,12 @@ Before the programs, checks of their own:
   - **aggregate functions:** Tier 0's function, by both paths, whose parameters a driver passes from the same bytes,
     copies each parameter's bytes out, each aggregate's address after them (a multiple of its alignment), and returns
     the result in its registers or through the hidden pointer, which must come back in rax;
-  - **aggregate errors:** 55 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
+  - **aggregate errors:** 57 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
     malformed metadata by both compile paths too: among them a function with a result size that reaches its end by
-    falling off it, by a jump and by a branch, a jump that takes a value to the end, an aggregate's two parts in one
-    register, a register two parameters take, and a part, a value or a result in a register outside the convention's
-    (rax, xmm8, rbx), as an argument and as a parameter.
+    falling off it, by a jump and by a branch, a jump that takes a value to the end, a function with a hidden result
+    that returns nothing or falls off its end, an aggregate's two parts in one register, a register two parameters
+    take, and a part, a value or a result in a register outside the convention's (rax, xmm8, rbx), as an argument and
+    as a parameter.
 - **parameter errors:** a function of values alone, which no optional part makes the compile paths check: two
   parameters in rdi, one in rbx and one in xmm8, which `tier0_validate` must refuse, and an F64 in rdx, which doesn't
   fit its class.

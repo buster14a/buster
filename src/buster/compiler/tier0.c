@@ -5527,6 +5527,10 @@ static Tier0Check tier0_validate(const Tier0Function* function)
             }
         }
         uint32_t return_class = BUSTER_TIER0_ANY_DEPTH;
+        // A function returning an aggregate leaves rax an address at every RETURN: in registers, its bytes', which the
+        // epilogue loads the result from; through a hidden pointer, the pointer, which the caller may read the result
+        // through. Only a RETURN of U64 leaves it there.
+        const bool aggregate_result = function->result_size != 0 || function->result.kind == BUSTER_ABI_RESULT_MEMORY;
         for (uint32_t i = 0; i < count && validator.check.error == TIER0_OK; i += 1)
         {
             const uint8_t kind = function->kinds[i];
@@ -5734,9 +5738,9 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 {
                     tier0_reject(&validator, i, "a return of another class");
                 }
-                if (function->result_size != 0 && class != BUSTER_TYPED_CLASS_U64)
+                if (aggregate_result && class != BUSTER_TYPED_CLASS_U64)
                 {
-                    tier0_reject(&validator, i, "a return of an aggregate in registers that isn't its bytes' address (U64)");
+                    tier0_reject(&validator, i, "a return of an aggregate that isn't an address (U64): its bytes', or the hidden pointer");
                 }
                 if (validator.depth != 0 || (return_class != BUSTER_TIER0_ANY_DEPTH && return_class != class))
                 {
@@ -5797,11 +5801,10 @@ static Tier0Check tier0_validate(const Tier0Function* function)
         {
             tier0_reject(&validator, count, "values left at the function's end");
         }
-        if (validator.check.error == TIER0_OK && (validator.reachable || seen[count] != 0) && function->result_size != 0)
+        if (validator.check.error == TIER0_OK && (validator.reachable || seen[count] != 0) && aggregate_result)
         {
-            // The epilogue loads the result from rax's address, which only a RETURN leaves there: neither the last
-            // entry's fallthrough nor a jump to the end does.
-            tier0_reject(&validator, count, "a function returning an aggregate in registers that reaches its end");
+            // Neither the last entry's fallthrough nor a jump to the end leaves rax the address a RETURN does.
+            tier0_reject(&validator, count, "a function returning an aggregate that reaches its end");
         }
         if (validator.check.error == TIER0_OK && validator.reachable)
         {
