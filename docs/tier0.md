@@ -689,7 +689,9 @@ path's 11.1.
   - conversions between U64 and floating values;
   - aggregates passed and returned by value (the objects they live in and copies of up to 256 bytes are done);
   - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
-  - bit-fields;
+  - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
+    as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
+    whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
   - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
   - inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table).
