@@ -8,8 +8,9 @@
 // path's executable of the same code (executable_write on 1 and 3 lanes, in lld's order). The test reads each file back:
 // the segments in the data-first order (R, RW, RX, R), the entry at _start's symbol, .eh_frame_hdr's table sorted and
 // as long as the functions, each FDE's range a function's. With --cross-check, which needs readelf, gdb and perf:
-// readelf reads every file without a warning; gdb stops in the program's functions and unwinds through them to _start
-// with its .eh_frame; and perf's samples, with DWARF call graphs, name the program's functions and reach _start.
+// readelf reads every file without a warning; gdb stops in the program's functions, unwinds through them to _start
+// with its .eh_frame and gives each frame its function's line in streamed.c from the DWARF; and perf's samples, with
+// DWARF call graphs, name the program's functions, reach _start and give the functions' lines.
 // main.c includes this file after tier0_test.c (its interpreter), unwind_native_test.c and streaming.c.
 
 typedef struct StreamTestTally StreamTestTally;
@@ -168,9 +169,28 @@ static const char* stream_test_frame_name(const char* line)
     return name;
 }
 
+// Whether a gdb frame line's " at ./streamed.c:LINE" (the unit's directory, then its file), if it has one, is the line
+// of the function it names: function LINE - 1's, in the DWARF's order. `found` says whether it had one.
+static bool stream_test_frame_line(const StreamProgram* program, const char* line, const char* name, bool* found)
+{
+    const char* end = strchr(line, '\n');
+    const char* at = strstr(line, " at ./streamed.c:");
+    *found = at != 0 && (end == 0 || at < end);
+    const uint64_t number = *found ? strtoull(at + 17, 0, 10) : 0;
+    bool same = !*found;
+    if (*found && number >= 1 && number <= program->function_count)
+    {
+        const char* expected = program->strtab + program->name_offsets[number - 1];
+        const uint64_t length = strlen(expected);
+        same = strncmp(name, expected, length) == 0 && name[length] == ' ';
+    }
+    return same;
+}
+
 // The consumers on a streamed file: readelf without warnings, gdb's backtraces through the program's functions to
-// _start, and perf's samples with DWARF call graphs that name its functions and reach _start.
-static void stream_test_consumers(StreamTestTally* tally, const char* directory, const char* path, Arena* arena)
+// _start with their lines, and perf's samples with DWARF call graphs that name its functions, reach _start and give
+// their lines.
+static void stream_test_consumers(StreamTestTally* tally, const StreamProgram* program, const char* directory, const char* path, Arena* arena)
 {
     char output[PATH_MAX];
     char errors[PATH_MAX];
@@ -204,6 +224,8 @@ static void stream_test_consumers(StreamTestTally* tally, const char* directory,
     // unwinder went through a Tier 0 frame by its FDE.
     bool deep = false;
     bool consistent = true;
+    bool lines_right = true;
+    uint32_t lines = 0;
     uint32_t stops = 0;
     const char* cursor = text.pointer;
     while (cursor != 0 && (cursor = strstr(cursor, "STREAM_STOP\n")) != 0)
@@ -221,6 +243,9 @@ static void stream_test_consumers(StreamTestTally* tally, const char* directory,
                 const char* name = stream_test_frame_name(line);
                 ends_at_start = strncmp(name, "_start ", 7) == 0;
                 program_frames = program_frames && (ends_at_start || stream_test_function_name(name));
+                bool found = false;
+                lines_right = lines_right && stream_test_frame_line(program, line, name, &found);
+                lines += found ? 1 : 0;
                 frames += 1;
             }
             line = strchr(line, '\n');
@@ -231,21 +256,28 @@ static void stream_test_consumers(StreamTestTally* tally, const char* directory,
         cursor += 1;
     }
     stream_test_expect(tally, ran && stops >= 2 && consistent && deep, "gdb stops in the program's functions and unwinds through them to _start", path);
-    if (!(ran && stops >= 2 && consistent && deep) && text.pointer != 0)
+    // Every frame's line is its function's, and the frames have lines: gdb read the DWARF at the data-first addresses.
+    stream_test_expect(tally, ran && lines_right && lines >= stops, "gdb gives each frame its function's line in streamed.c", path);
+    if (!(ran && stops >= 2 && consistent && deep && lines_right && lines >= stops) && text.pointer != 0)
     {
         printf("%.*s\n", (int)(text.length < 4000 ? text.length : 4000), text.pointer);
     }
     char* record[] = { "perf", "record", "-q", "-m", "4M", "-e", "cycles:u", "-c", "20000", "--call-graph", "dwarf", "-o", data, "--", (char*)path, 0 };
-    char* report[] = { "perf", "script", "-i", data, "-F", "ip,sym", 0 };
+    char* report[] = { "perf", "script", "-i", data, "-F", "ip,sym,srcline", 0 };
     const bool recorded = object_test_run(record, "/dev/null", errors) == 0;
     const bool scripted = recorded && object_test_run(report, output, errors) == 0;
     const String8 samples = scripted ? object_test_read_file(arena, output) : (String8){ 0 };
-    // perf script's lines are an address and a symbol: some name a program function, and some _start, a caller.
+    // perf script's lines are an address and a symbol, each with its source line on the line after it: some name a
+    // program function, some _start, a caller, and some give a line of streamed.c.
     bool named = false;
     bool reached = false;
+    bool sourced = false;
     const char* sample = samples.pointer;
     while (sample != 0 && *sample != 0)
     {
+        const char* end = strchr(sample, '\n');
+        const char* source = strstr(sample, "streamed.c:");
+        sourced = sourced || (source != 0 && (end == 0 || source < end));
         const char* symbol = sample;
         while (*symbol == ' ' || *symbol == '\t')
         {
@@ -265,6 +297,7 @@ static void stream_test_consumers(StreamTestTally* tally, const char* directory,
         sample = sample != 0 ? sample + 1 : 0;
     }
     stream_test_expect(tally, scripted && named && reached, "perf's samples name the program's functions and reach _start", path);
+    stream_test_expect(tally, scripted && sourced, "perf's samples give the functions' lines in streamed.c", path);
 }
 
 static bool stream_test_same(String8 left, String8 right)
@@ -322,7 +355,7 @@ static void stream_test_program(StreamTestTally* tally, const char* directory, c
                                    "forward fields only in the callers' order", path);
                 if (cross_check && schedule == STREAM_SCHEDULE_STREAM && order == STREAM_ORDER_CALLEES && chunk_bytes == BUSTER_STREAM_CHUNK_BYTES)
                 {
-                    stream_test_consumers(tally, directory, path, arena);
+                    stream_test_consumers(tally, program, directory, path, arena);
                 }
             }
         }

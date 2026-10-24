@@ -521,7 +521,7 @@ designs and the compilers already built this way.
   `test-debug --cross-check` checks original fixtures with readelf, GDB and
   perf; `benchmark-debug` measures validation through address finalization.
   [The debug guide](docs/debug.md) records the contract and the source-row
-  production and streaming integration still pending.
+  production still pending; `streaming.c` attaches a unit to a streamed file.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
@@ -535,7 +535,8 @@ designs and the compilers already built this way.
 - `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
   units of Tier 0's generated programs, compiled function by function into a
   static executable laid out data first (headers, `.data`, `.text`, then the
-  unwind tables in a segment of their own), written while they compile (by the
+  unwind tables in a segment of their own, and `debug.c`'s DWARF with a line
+  per function), written while they compile (by the
   compiling lane, or by a writer lane it hands chunks to) or once they have
   compiled, the same bytes either way; and the same code as a Link through
   `executable_write`, in lld's order. `streaming_test.c` holds `test-streaming`
@@ -4073,9 +4074,10 @@ three schedules (at the end, streamed, streamed by a writer lane):
 `--cross-check`, which needs readelf, gdb and perf, reads a streamed file with
 `readelf -a` (no warnings), stops gdb in every program function and checks
 that each stop's backtrace goes through the program's functions to `_start`,
-two of them above `_start` at least once (the unwinder used an FDE), and that
-perf's samples with DWARF call graphs name the program's functions and reach
-`_start`. The files go in a directory under `$TMPDIR` (or `/tmp`), removed
+two of them above `_start` at least once (the unwinder used an FDE), each frame
+at its function's line of `streamed.c` (the DWARF's: function f is line f + 1),
+and that perf's samples with DWARF call graphs name the program's functions,
+reach `_start` and give lines of `streamed.c`. The files go in a directory under `$TMPDIR` (or `/tmp`), removed
 unless `--keep` or a failure. The 9700X job's test step runs it with
 `--cross-check`.
 
