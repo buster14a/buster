@@ -73,6 +73,8 @@ struct ForeignLink
     ExecutableDynamic dynamic;
     // A static executable's and a static PIE's (foreign_link_static_finish).
     ExecutableRuntime runtime;
+    // The selected objects' debug sections, built whole, and their references to the link's symbols (foreign_debug.c).
+    ExecutableDebugSections debug;
     // Original library version index -> output version index, one table per ForeignLibrary; null for dropped DSOs.
     uint16_t** library_versions;
     ForeignLinkUnwind** unwind;
@@ -1692,6 +1694,7 @@ struct ForeignLinkBuild
     // The calling thread's scratch, from foreign_link_build_begin to foreign_link_build_finish: the input order, the
     // __start_ and __stop_ plan and the names the link requires live there.
     Scratch scratch;
+    uint32_t* order;
     uint8_t* required;
     ForeignLinkBounds bounds;
     ForeignLinkResult result;
@@ -1728,6 +1731,7 @@ static void foreign_link_build_begin(ForeignLinkBuild* build)
     }
     build->scratch = scratch_begin(arena);
     uint32_t* order = result.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_order(foreign, build->scratch.arena) : 0;
+    build->order = order;
     build->bounds = (ForeignLinkBounds){ 0 };
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
@@ -1919,8 +1923,10 @@ static ForeignLinkError foreign_link_shared_finish(ForeignLink* output, const Fo
     return exports != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
 }
 
+#include "buster/compiler/foreign_debug.c"
+
 // The last step, after the check: a dynamic PIE's exports, a shared library's or a static executable's inputs for the
-// writer; and the scratch given back.
+// writer, and the debug sections; and the scratch given back.
 static void foreign_link_build_finish(ForeignLinkBuild* build)
 {
     if (build->result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_DYNAMIC)
@@ -1934,6 +1940,10 @@ static void foreign_link_build_finish(ForeignLinkBuild* build)
     else if (build->result.error == FOREIGN_LINK_ERROR_NONE)
     {
         foreign_link_static_finish(build->output, build->foreign, build->kind);
+    }
+    if (build->result.error == FOREIGN_LINK_ERROR_NONE)
+    {
+        build->result = foreign_debug_build(build->output, build->foreign, build->order, build->arena);
     }
     scratch_end(build->scratch);
 }
