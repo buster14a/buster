@@ -2809,6 +2809,19 @@ static CheckOp check_input_binary(uint8_t kind)
     return result;
 }
 
+// The first token of the expression whose root is `token`. Every subtree is a contiguous run of tokens and a node's
+// children are in token order, so its first token is down the chain of first children that precede their parents.
+// The chains of a call's arguments stop at nested callees, so each token is on at most one argument's chain.
+static uint32_t check_input_first_token(const CheckInputReader* reader, uint32_t token)
+{
+    uint32_t first = token;
+    while (first < reader->parser->tokens.count && reader->first_child[first] < first)
+    {
+        first = reader->first_child[first];
+    }
+    return first;
+}
+
 static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
                                                uint32_t first, uint64_t* ice_arguments)
 {
@@ -2841,6 +2854,7 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
         }
         if (graph->argument_count < graph->argument_capacity)
         {
+            graph->argument_tokens[graph->argument_count] = span.first;
             graph->argument_nodes[graph->argument_count++] = argument;
         }
         else
@@ -3394,6 +3408,7 @@ static void check_input_expressions(CheckInputReader* reader)
                     {
                         if (graph->argument_count < graph->argument_capacity)
                         {
+                            graph->argument_tokens[graph->argument_count] = check_input_first_token(reader, graph->tokens[argument]);
                             graph->argument_nodes[graph->argument_count++] = argument;
                         }
                         else
@@ -3651,6 +3666,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     input->graph.extensions = check_input_expression_extensions(parser);
     input->graph.warning_suppressed = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : 0;
     valid &= input->graph.warning_suppressed != 0;
+    input->graph.argument_tokens = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
+    valid &= input->graph.argument_tokens != 0;
     if (valid && vector_members != 0)
     {
         input->graph.vector_member_capacity = vector_members;

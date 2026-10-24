@@ -515,7 +515,8 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
         const CheckValue address = { .type = destinations[direction ^ 1], .constant_kind = CHECK_CONSTANT_ADDRESS, .object = 37, .flags = BUSTER_CHECK_STATIC_OBJECT };
         CheckAction action = { .op = CHECK_OP_CONVERT, .operands = { address }, .type = destinations[direction] };
         CheckActionResult result = check_test_action(test, table, action);
-        check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPATIBLE, "void/function pointer implicit conversion is not an ISO object-pointer conversion");
+        check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == 0 && result.value.object == 37,
+                          "void/function pointer implicit conversion is clang's pedantic extension in every mode");
         action.extensions = BUSTER_CHECK_EXTENSION_GNU;
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == destinations[direction] && result.value.object == 37, "explicit GNU mode accepts void/function pointer interchange preserving provenance");
@@ -648,8 +649,8 @@ static void check_test_qualifier_warnings(CheckTest* test, TypeTable* table)
     const CheckValue source = { .type = qualified };
     CheckAction action = { .op = CHECK_OP_CONVERT, .operands = { source }, .type = plain };
     CheckActionResult result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.warnings == 0,
-                      "strict qualifier discard remains an assignment constraint error");
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS && result.value.type == plain,
+                      "qualifier discard outside GNU modes warns, as clang does");
     action.extensions = BUSTER_CHECK_EXTENSION_GNU;
     result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS && result.value.type == plain,

@@ -1279,7 +1279,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     }
     for (uint32_t argument = 0; equal && !a->resource && argument < graph->argument_count; argument += 1)
     {
-        equal = graph->argument_nodes[argument] == other->argument_nodes[argument];
+        equal = graph->argument_nodes[argument] == other->argument_nodes[argument] &&
+                (graph->argument_tokens == NULL) == (other->argument_tokens == NULL) &&
+                (graph->argument_tokens == NULL || graph->argument_tokens[argument] == other->argument_tokens[argument]);
     }
     for (uint32_t call = 0; equal && !a->resource && call < graph->varargs_count; call += 1)
     {

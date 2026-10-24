@@ -33,6 +33,210 @@ static const CheckMutationFixture check_mutation_fixtures[] =
         .rejected = false,
         .line = 0,
     },
+    {
+        .name = "musl 1.2.5 src/string/wcpcpy.c, a parameter made const: returning it discards the qualifier, which only warns",
+        .source =
+            "typedef int wchar_t;\n"
+            "wchar_t *wcpcpy(wchar_t *d, const wchar_t *s)\n"
+            "{\n"
+            "    return d == 0 ? 0 : (s);\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "musl 1.2.5 src/mman/shm_open.c, a parameter made const: passing it to a char * parameter only warns",
+        .source =
+            "char *__shm_mapname(char *, char *);\n"
+            "int shm_open(const char *name)\n"
+            "{\n"
+            "    char buf[10];\n"
+            "    return (name = __shm_mapname(buf, name)) != 0;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "musl 1.2.5 src/stdio/__uflow.c, a local made unsigned: unsigned char * for char * differs only in sign, which only warns",
+        .source =
+            "typedef unsigned long size_t;\n"
+            "typedef struct _IO_FILE FILE;\n"
+            "struct _IO_FILE { size_t (*read)(FILE *, char *, size_t); };\n"
+            "int __uflow(FILE *f)\n"
+            "{\n"
+            "    unsigned char c;\n"
+            "    return f->read(f, &c, 1) == 1 ? c : -1;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "musl 1.2.5 src/thread/thrd_sleep.c, two arguments swapped: a const struct pointer for a plain one only warns",
+        .source =
+            "struct timespec;\n"
+            "int __clock_nanosleep(int, int, struct timespec *, struct timespec *);\n"
+            "int thrd_sleep(const struct timespec *req, struct timespec *rem)\n"
+            "{\n"
+            "    return __clock_nanosleep(0, 0, rem, req);\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "Lua 5.4.8 src/lua.c's pmain, a declaration made const: char ** and const char ** convert with a nested-qualifier warning",
+        .source =
+            "int collectargs(char **argv, int *first);\n"
+            "int pmain(void *L)\n"
+            "{\n"
+            "    const char **argv = (char **)L;\n"
+            "    int script;\n"
+            "    return collectargs(argv, &script);\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "glibc's bits/stdio.h under Lua 5.4.8, a call blanked: a conditional of a pointer and an integer has the pointer's type",
+        .source =
+            "typedef struct _IO_FILE FILE;\n"
+            "struct _IO_FILE { char *_IO_write_ptr; char *_IO_write_end; };\n"
+            "extern FILE *stdout;\n"
+            "int putchar_unlocked(int c)\n"
+            "{\n"
+            "    return (stdout->_IO_write_ptr >= stdout->_IO_write_end ? ((char)c, stdout) : (char)(*stdout->_IO_write_ptr++ = c)) != 0;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "glibc's bits/stdio.h under Lua 5.4.8, a call blanked: a conditional of pointers to other types is void *",
+        .source =
+            "typedef struct _IO_FILE FILE;\n"
+            "struct _IO_FILE { char *_IO_write_ptr; };\n"
+            "int putc_unlocked(int c, FILE *stream)\n"
+            "{\n"
+            "    char *p = c ? stream : stream->_IO_write_ptr;\n"
+            "    return p != 0;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "SQLite 3.53.2, a declaration made a pointer: a pointer compared with an integer, ordered and not, only warns",
+        .source =
+            "int f(int *p, int n)\n"
+            "{\n"
+            "    return p <= n || p == n || n > p || p > 0;\n"
+            "}\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "comparisons of pointers to distinct types, and of void * with a function pointer, only warn in ISO modes too",
+        .source =
+            "int h(void);\n"
+            "int f(int *p, char *q, void *v)\n"
+            "{\n"
+            "    return p == q || p < q || v == h || v < (void *)h || h < h;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "pointers to integers of another width, or to pointers to other types, remain incompatible",
+        .source =
+            "void f(long *p, char **q)\n"
+            "{\n"
+            "    long long *r = p;\n"
+            "    unsigned char **s = q;\n"
+            "    (void)r;\n"
+            "    (void)s;\n"
+            "}\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = true,
+        .line = 3,
+    },
+    {
+        .name = "musl 1.2.5 compat/time32/futimens_time32.c, two arguments swapped: the error is at the argument, not the call's )",
+        .source =
+            "struct timespec32 { long tv_sec, tv_nsec; };\n"
+            "struct timespec { long tv_sec, tv_nsec; };\n"
+            "int futimens(int, const struct timespec[2]);\n"
+            "int __futimens_time32(int fd, const struct timespec32 *times32)\n"
+            "{\n"
+            "    return futimens(times32 ? (&(struct timespec){\n"
+            "        .tv_sec = times32[0].tv_sec, .tv_nsec = times32[0].tv_nsec }) : 0,\n"
+            "        fd);\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = true,
+        .line = 6,
+    },
+    {
+        .name = "musl 1.2.5 compat/time32/settimeofday_time32.c, a parameter's type changed: the error is at the argument's first line",
+        .source =
+            "struct timeval { long tv_sec, tv_usec; };\n"
+            "struct timezone;\n"
+            "int settimeofday(const struct timeval *, const struct timezone *);\n"
+            "int __settimeofday_time32(const struct timeval *tv32, void *tz)\n"
+            "{\n"
+            "    return settimeofday(0, tv32 ? (&(struct timeval){\n"
+            "        .tv_sec = tv32->tv_sec,\n"
+            "        .tv_usec = tv32->tv_usec }) : 0) + (tz != 0);\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = true,
+        .line = 6,
+    },
+    {
+        .name = "too many arguments are reported at the first extra argument",
+        .source =
+            "void h(int, int);\n"
+            "void f(void)\n"
+            "{\n"
+            "    h(1, 2,\n"
+            "      3);\n"
+            "}\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = true,
+        .line = 5,
+    },
+    {
+        .name = "too few arguments are reported at the call's )",
+        .source =
+            "void h(int, int);\n"
+            "void f(void)\n"
+            "{\n"
+            "    h(1\n"
+            "     );\n"
+            "}\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = true,
+        .line = 5,
+    },
 };
 
 // The unit the engine's checks mutate, and the sites its parse gives, counted by hand: nine declarations with

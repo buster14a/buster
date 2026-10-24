@@ -358,14 +358,20 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
     };
     CheckActionResult result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.conversions[1].type == const_pointer, "one-level pointer qualification is allowed");
+    // clang takes both of these in every language mode, with -Wincompatible-pointer-types-discards-qualifiers.
     action.operands[0].type = double_const_pointer;
     action.operands[1].type = double_pointer;
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPATIBLE, "pointer qualification does not recurse through a second pointer");
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS && result.conversions[1].type == double_const_pointer,
+                      "pointer qualification through a second pointer warns rather than refuses");
     action.operands[0].type = pointer;
     action.operands[1].type = const_pointer;
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPATIBLE, "pointer assignment cannot discard pointed-to const");
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.warnings == CHECK_WARNING_DISCARDED_QUALIFIERS, "pointer assignment discarding pointed-to const warns");
+    action.operands[0].type = type_pointer(table, type_pointer(table, BUSTER_TYPE_CHAR));
+    action.operands[1].type = double_pointer;
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.warnings == 0, "pointers to pointers to other types remain incompatible");
     action = (CheckAction){
         .op = CHECK_OP_CAST,
         .type = BUSTER_TYPE_ULONG,
@@ -1279,6 +1285,7 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
         equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
+                (a->diagnostic_operands != NULL ? a->diagnostic_operands[i] : 0) == (b->diagnostic_operands != NULL ? b->diagnostic_operands[i] : 0) &&
                 (a->warning_ignored != NULL ? a->warning_ignored[i] : 0) == (b->warning_ignored != NULL ? b->warning_ignored[i] : 0) &&
                 a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t operand = 0; equal && operand < 3; operand += 1)

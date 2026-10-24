@@ -203,6 +203,12 @@ typedef enum CheckDiagnostic
 #define CHECK_WARNING_SHIFT_COUNT_OVERFLOW 0x20u
 #define CHECK_WARNING_SHIFT_NEGATIVE_VALUE 0x40u
 #define CHECK_WARNING_SHIFT_OVERFLOW 0x80u
+// 0x100 to 0x400 are c_check_diagnostic.c's, whose table describes every bit. The driver keeps 16 bits per token.
+#define CHECK_WARNING_POINTER_SIGN 0x800u
+#define CHECK_WARNING_POINTER_INTEGER_COMPARE 0x1000u
+#define CHECK_WARNING_DISTINCT_POINTER_COMPARE 0x2000u
+#define CHECK_WARNING_CONDITIONAL_POINTER_INTEGER 0x4000u
+#define CHECK_WARNING_CONDITIONAL_POINTER_TYPES 0x8000u
 
 typedef struct CheckConversion CheckConversion;
 struct CheckConversion
@@ -706,9 +712,60 @@ static bool check_action_compatible_at(const TypeTable* table, TypeId left, Type
     return answer == TYPE_ANSWER_YES;
 }
 
-// Pointer assignment is directional: only the immediately pointed-to qualifiers may be added. In particular,
-// int ** to const int ** is not accepted by recursively dropping qualifiers.
-static bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result)
+// clang's pointer conversions take pointees that differ only in signedness for one type: each character type as
+// unsigned char, each signed integer type as its unsigned counterpart (a complete enumeration's through its underlying
+// type, but an enumeration of an unsigned type as itself), each _BitInt by its width, and anything else as itself.
+static uint64_t check_action_sign_key(const TypeTable* table, TypeId type)
+{
+    const TypeId base = type_unqualified(type_strip_aligned(table, type));
+    const uint8_t kind = type_kind(table, base);
+    TypeId integer = base;
+    if (kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(table, base))
+    {
+        integer = type_unqualified(table->types.base[type_index(base)]);
+    }
+    const uint8_t integer_kind = type_kind(table, integer);
+    uint64_t rank = 0;
+    uint64_t width = 0;
+    bool is_signed = false;
+    if (integer_kind == BUSTER_TYPE_KIND_INTEGER || integer_kind == BUSTER_TYPE_KIND_BIT_INT)
+    {
+        type_integer_properties(table, integer, &rank, &width, &is_signed);
+    }
+    uint64_t key = base;
+    if (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT || (kind == BUSTER_TYPE_KIND_ENUM && is_signed))
+    {
+        key = integer_kind == BUSTER_TYPE_KIND_BIT_INT ? (UINT64_C(1) << 32) | width : BUSTER_TYPE_BUILTIN(type_integer_info[type_index(integer)].unsigned_code);
+    }
+    return key;
+}
+
+// clang's rule for pointers to pointers: pointees that reach one canonical type through as many pointer levels on
+// both sides differ only in their levels' qualifiers (char ** to const char **), which it warns about.
+static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, TypeId right, CheckActionResult* result)
+{
+    TypeId l = type_strip_aligned(table, left);
+    TypeId r = type_strip_aligned(table, right);
+    const bool nested = type_kind(table, l) == BUSTER_TYPE_KIND_POINTER && type_kind(table, r) == BUSTER_TYPE_KIND_POINTER;
+    while (type_kind(table, l) == BUSTER_TYPE_KIND_POINTER && type_kind(table, r) == BUSTER_TYPE_KIND_POINTER)
+    {
+        l = type_strip_aligned(table, type_element(table, l));
+        r = type_strip_aligned(table, type_element(table, r));
+    }
+    const TypeAnswer answer = nested ? type_same_canonical(table, type_unqualified(l), type_unqualified(r)) : TYPE_ANSWER_NO;
+    if (answer == TYPE_ANSWER_FULL)
+    {
+        check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+    }
+    return answer == TYPE_ANSWER_YES;
+}
+
+// Pointer assignment as clang's checkPointerTypesForAssignment decides it in every language mode: the pointees'
+// qualifiers may only be added, but losing one only warns, and so do pointees that differ only in signedness and
+// pointers to pointers whose levels' qualifiers differ. void * converts to and from any object pointer, and to and
+// from a function pointer as a pedantic extension, without the qualifier warning. strict takes clang's Compatible
+// alone, as transparent-union selection does: no warning, and no function pointer through void *.
+static bool check_action_assignable_mode(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result, bool strict)
 {
     const TypeId target = type_unqualified(type_strip_aligned(table, destination));
     const TypeId input = type_unqualified(type_strip_aligned(table, source->type));
@@ -737,19 +794,42 @@ static bool check_action_assignable(const TypeTable* table, TypeId destination, 
         const TypeId from = type_element(table, input);
         const uint8_t tk = check_action_kind(table, to);
         const uint8_t fk = check_action_kind(table, from);
-        const bool qualifiers = (type_qualifiers(from) & ~type_qualifiers(to)) == 0;
-        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
-        const bool void_object = (tk == BUSTER_TYPE_KIND_VOID && (gnu || fk != BUSTER_TYPE_KIND_FUNCTION)) || (fk == BUSTER_TYPE_KIND_VOID && (gnu || tk != BUSTER_TYPE_KIND_FUNCTION));
-        accepted = (qualifiers || gnu) && (void_object || check_action_compatible_at(table, type_unqualified(to), type_unqualified(from), action, result));
-        if (accepted && !qualifiers)
+        const bool function = tk == BUSTER_TYPE_KIND_FUNCTION || fk == BUSTER_TYPE_KIND_FUNCTION;
+        uint32_t warning = (type_qualifiers(from) & ~type_qualifiers(to)) == 0 ? 0 : CHECK_WARNING_DISCARDED_QUALIFIERS;
+        bool extension = false;
+        if (tk == BUSTER_TYPE_KIND_VOID || fk == BUSTER_TYPE_KIND_VOID)
         {
-            result->warnings |= CHECK_WARNING_DISCARDED_QUALIFIERS;
+            accepted = true;
+            extension = function;
+            warning = function ? 0 : warning;
         }
+        else if (check_action_compatible_at(table, type_unqualified(to), type_unqualified(from), action, result))
+        {
+            accepted = true;
+        }
+        else if (result->diagnostic == CHECK_DIAG_NONE && check_action_sign_key(table, to) == check_action_sign_key(table, from))
+        {
+            accepted = true;
+            warning = warning != 0 ? warning : CHECK_WARNING_POINTER_SIGN;
+        }
+        else if (result->diagnostic == CHECK_DIAG_NONE && check_action_nested_qualifiers(table, to, from, result))
+        {
+            accepted = true;
+            warning = CHECK_WARNING_DISCARDED_QUALIFIERS;
+        }
+        accepted = accepted && !(strict && (warning != 0 || extension));
+        result->warnings |= accepted ? warning : 0;
     }
     else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR) && target_kind == input_kind)
     {
         accepted = check_action_compatible_at(table, target, input, action, result);
     }
+    return accepted;
+}
+
+static bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result)
+{
+    const bool accepted = check_action_assignable_mode(table, destination, source, action, result, false);
     return accepted;
 }
 
@@ -1152,6 +1232,9 @@ static void check_action_logic(TypeTable* table, const CheckAction* action, Chec
     }
 }
 
+// The common type of two pointer operands (C 6.5.15p6): the other operand's for a null pointer constant, void with
+// both pointees' qualifiers for void and an object type, else the composite of compatible pointees with both
+// qualifiers. 0 for other pointees (void and a function among them), which each caller takes as clang does.
 static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* left, const CheckValue* right, const CheckAction* action, CheckActionResult* result)
 {
     TypeId common = 0;
@@ -1173,8 +1256,7 @@ static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* le
         const uint8_t rk = check_action_kind(table, r);
         const uint32_t qualifiers = type_qualifiers(l) | type_qualifiers(r);
         TypeId pointee = 0;
-        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
-        if ((lk == BUSTER_TYPE_KIND_VOID && (gnu || rk != BUSTER_TYPE_KIND_FUNCTION)) || (rk == BUSTER_TYPE_KIND_VOID && (gnu || lk != BUSTER_TYPE_KIND_FUNCTION)))
+        if ((lk == BUSTER_TYPE_KIND_VOID && rk != BUSTER_TYPE_KIND_FUNCTION) || (rk == BUSTER_TYPE_KIND_VOID && lk != BUSTER_TYPE_KIND_FUNCTION))
         {
             pointee = BUSTER_TYPE_VOID;
         }
@@ -1226,7 +1308,27 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
     }
     else
     {
+        // GCC's softening, which clang keeps with a warning each: pointers to incompatible types (void and a
+        // function among them) make void *, unqualified, and a pointer and an integer (not a null pointer constant,
+        // which the common type takes) the pointer's type.
         common = check_action_pointer_common(table, &left, &right, action, result);
+        const bool lp = check_action_kind(table, left.type) == BUSTER_TYPE_KIND_POINTER;
+        const bool rp = check_action_kind(table, right.type) == BUSTER_TYPE_KIND_POINTER;
+        if (common == 0 && result->diagnostic == CHECK_DIAG_NONE && lp && rp)
+        {
+            common = type_pointer(table, BUSTER_TYPE_VOID);
+            if (common == 0)
+            {
+                check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+            }
+            result->warnings |= CHECK_WARNING_CONDITIONAL_POINTER_TYPES;
+        }
+        else if (common == 0 && result->diagnostic == CHECK_DIAG_NONE &&
+                 ((lp && check_action_is_integer(table, right.type)) || (rp && check_action_is_integer(table, left.type))))
+        {
+            common = lp ? left.type : right.type;
+            result->warnings |= CHECK_WARNING_CONDITIONAL_POINTER_INTEGER;
+        }
     }
     if (common == 0)
     {
@@ -1379,29 +1481,47 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
     }
 }
 
+// Comparisons as clang's CheckCompareOperands has them in C, in every language mode: two pointers always compare,
+// with a warning for incompatible pointees (but for void and any pointee under equality), the right converted to the
+// left's type (the left to the right's when only the left is a null pointer constant). A pointer and an integer
+// compare as two pointers, with a warning under equality unless the integer is a null pointer constant; clang's
+// warning for a relational comparison with a nonzero integer is in no group, and so has no record here.
 static void check_action_pointer_compare(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     CheckValue left = check_action_operand(table, action, result, 0);
     CheckValue right = check_action_operand(table, action, result, 1);
     const bool equality = action->op == CHECK_OP_EQUAL || action->op == CHECK_OP_NOT_EQUAL;
+    const uint8_t lk = check_action_kind(table, left.type);
+    const uint8_t rk = check_action_kind(table, right.type);
+    const bool lp = lk == BUSTER_TYPE_KIND_POINTER;
+    const bool rp = rk == BUSTER_TYPE_KIND_POINTER;
+    const bool left_null = check_action_null(table, &left, action->extensions);
+    const bool right_null = check_action_null(table, &right, action->extensions);
     TypeId common = 0;
     if (equality)
     {
         common = check_action_pointer_common(table, &left, &right, action, result);
-        if (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_NULLPTR && check_action_kind(table, right.type) == BUSTER_TYPE_KIND_NULLPTR)
+        if ((lk == BUSTER_TYPE_KIND_NULLPTR && right_null) || (rk == BUSTER_TYPE_KIND_NULLPTR && left_null))
         {
             common = BUSTER_TYPE_NULLPTR;
         }
     }
-    else if (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_POINTER && check_action_kind(table, right.type) == BUSTER_TYPE_KIND_POINTER)
+    if (common == 0 && result->diagnostic == CHECK_DIAG_NONE && lp && rp)
     {
         const TypeId le = type_element(table, left.type);
         const TypeId re = type_element(table, right.type);
-        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0;
-        if ((gnu || (check_action_kind(table, le) != BUSTER_TYPE_KIND_FUNCTION && check_action_kind(table, le) != BUSTER_TYPE_KIND_VOID)) && check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result))
+        const bool void_pointee = check_action_kind(table, le) == BUSTER_TYPE_KIND_VOID || check_action_kind(table, re) == BUSTER_TYPE_KIND_VOID;
+        if (!check_action_compatible_at(table, type_unqualified(le), type_unqualified(re), action, result) && !(equality && void_pointee))
         {
-            common = left.type;
+            result->warnings |= CHECK_WARNING_DISTINCT_POINTER_COMPARE;
         }
+        common = left_null && !right_null ? right.type : left.type;
+    }
+    else if (common == 0 && result->diagnostic == CHECK_DIAG_NONE &&
+             ((lp && check_action_is_integer(table, right.type)) || (rp && check_action_is_integer(table, left.type))))
+    {
+        common = lp ? left.type : right.type;
+        result->warnings |= equality && !(lp ? right_null : left_null) ? CHECK_WARNING_POINTER_INTEGER_COMPARE : 0;
     }
     if (common == 0)
     {
@@ -1409,8 +1529,10 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
     }
     else
     {
-        check_action_conversion(table, &left, common, left.type == common ? 0 : BUSTER_CHECK_CONVERT_NULL, &result->conversions[0], action->node);
-        check_action_conversion(table, &right, common, right.type == common ? 0 : BUSTER_CHECK_CONVERT_NULL, &result->conversions[1], action->node);
+        const uint32_t left_flags = left.type == common ? 0 : check_action_is_integer(table, left.type) && !left_null ? BUSTER_CHECK_CONVERT_CAST : BUSTER_CHECK_CONVERT_NULL;
+        const uint32_t right_flags = right.type == common ? 0 : check_action_is_integer(table, right.type) && !right_null ? BUSTER_CHECK_CONVERT_CAST : BUSTER_CHECK_CONVERT_NULL;
+        check_action_conversion(table, &left, common, left_flags, &result->conversions[0], action->node);
+        check_action_conversion(table, &right, common, right_flags, &result->conversions[1], action->node);
         result->value.type = BUSTER_TYPE_INT;
         check_action_inherit(&result->value, &left);
         check_action_inherit(&result->value, &right);
@@ -1929,15 +2051,13 @@ static TypeId check_action_transparent_parameter(const TypeTable* table, TypeId 
         {
             const uint32_t first = table->tags.member_begin[tag];
             const uint32_t count = table->tags.member_count[tag];
-            CheckAction strict = *action;
-            // Transparent-union selection requires an actual assignment-compatible member. The ordinary GNU
-            // qualifier-discard and object/function-pointer extensions do not create a matching alternative.
-            strict.extensions &= ~BUSTER_CHECK_EXTENSION_GNU;
+            // Transparent-union selection requires an actual assignment-compatible member. The conversions that
+            // only warn, and object/function pointers through void *, do not create a matching alternative.
             for (uint32_t i = 0; selected == 0 && result->diagnostic == CHECK_DIAG_NONE && i < count; i += 1)
             {
                 CheckActionResult candidate = { 0 };
                 const TypeId member = type_conversion_operand(table, table->members.type[first + i]);
-                if (check_action_assignable(table, member, source, &strict, &candidate))
+                if (check_action_assignable_mode(table, member, source, action, &candidate, true))
                 {
                     selected = member;
                 }
@@ -1976,7 +2096,8 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
         const TypeId* parameters = type_parameters(table, function, &count);
         if (prototype && (action->argument_count < count || (!variadic && action->argument_count != count)))
         {
-            check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, 0);
+            // As clang reports them: too few arguments at the call, too many at the first argument past the last parameter.
+            check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, action->argument_count > count ? count + 1 : 0);
         }
         result->value.type = type_return(table, function);
         result->value.flags = BUSTER_CHECK_SIDE_EFFECT;

@@ -144,6 +144,9 @@ struct CheckGraph
     uint32_t* argument_offsets;
     uint32_t* argument_counts;
     uint32_t* argument_nodes;
+    // Optional, parallel to argument_nodes: each argument's first source token, where clang reports a CALL's
+    // argument conversion and the first argument past a prototype's parameters. Null reports them at the call.
+    uint32_t* argument_tokens;
     uint32_t argument_count;
     uint32_t argument_capacity;
     // VARARGS reuses argument_offsets as the index into this compact source-ordered context list and
@@ -422,6 +425,8 @@ struct CheckStream
     CheckNodeConversions* conversions;
     CheckConversion* argument_conversions;
     CheckDiagnostic* diagnostics;
+    // The operand each diagnostic names, as CheckActionResult.diagnostic_operand has it (a CALL's argument i is 1 + i).
+    uint32_t* diagnostic_operands;
     uint32_t* warnings;
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
@@ -926,6 +931,7 @@ static void check_graph_store(CheckStream* stream, uint32_t node, const CheckAct
     memcpy(stream->conversions[node].operands, result->conversions, sizeof(result->conversions));
     stream->conversions[node].store = result->store_conversion;
     stream->diagnostics[node] = result->diagnostic;
+    stream->diagnostic_operands[node] = result->diagnostic_operand;
     stream->warnings[node] = result->warnings;
 }
 
@@ -1604,9 +1610,15 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
 
 static void check_graph_report(const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckMessage message, CheckDiagnostic diagnostic, CheckFault fault)
 {
+    uint32_t token = graph->tokens != 0 ? graph->tokens[node] : node;
+    const uint32_t operand = message == CHECK_MESSAGE_ACTION ? stream->diagnostic_operands[node] : 0;
+    if (graph->ops[node] == CHECK_OP_CALL && graph->argument_tokens != NULL && operand != 0 && operand <= graph->argument_counts[node])
+    {
+        token = graph->argument_tokens[graph->argument_offsets[node] + operand - 1];
+    }
     stream->reports[stream->report_count] = (CheckReport){
         .node = node,
-        .token = graph->tokens != 0 ? graph->tokens[node] : node,
+        .token = token,
         .message = message,
         .diagnostic = diagnostic,
         .fault = fault,
@@ -1832,6 +1844,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->values = BUSTER_ARENA_PUSH_ARRAY(output, CheckValue, count);
         stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
         stream->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, CheckDiagnostic, count);
+        stream->diagnostic_operands = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->warnings = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->warning_ignored = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->reports = BUSTER_ARENA_PUSH_ARRAY(output, CheckReport, count);
@@ -1848,7 +1861,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->overloads = graph->overload_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadEffect, graph->overload_count) : 0;
         const bool overload_capacity = check_graph_overload_capacity(graph, scratch, &stream->overload_address_capacity, &stream->statistics.scratch_bytes);
         stream->overload_addresses = stream->overload_address_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadAddressEffect, stream->overload_address_capacity) : 0;
-        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->warnings != 0 && stream->warning_ignored != 0 && stream->reports != 0 &&
+        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->warnings != 0 &&
+                 stream->warning_ignored != 0 && stream->reports != 0 &&
                  (maximum_arguments == 0 || arguments != 0) && (graph->argument_count == 0 || stream->argument_conversions != 0) &&
                  (maximum_effects == 0 || stream->effects != 0) && (graph->varargs_count == 0 || stream->varargs != 0) &&
                  (maximum_builtins[0] == 0 || stream->misc != 0) && (maximum_builtins[1] == 0 || stream->floating != 0) &&
@@ -1872,6 +1886,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         if (count != 0)
         {
             memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
+            memset(stream->diagnostic_operands, 0, (size_t)count * sizeof(*stream->diagnostic_operands));
         }
         if (stream->argument_conversions != 0)
         {
