@@ -268,6 +268,11 @@ matched the default's retained columns and graph. The same job passed
 239,862 checker checks, the 1,473-check eager and lazy driver suites, and the
 SQLite Clang comparison with no acceptance, diagnostic or path differences.
 
+That run tested PR merge `bc7e78d26487d2897e78daff2a6cbcd243235894`,
+parents `a7741e836353642041aca0e3c653f38226153358` and original PR head
+`5e538cb5fe93b172e0697f0e70e86d586c4a4c65`, tree
+`51734373b0daef3227ae2d4873b3a65ca1b38f24`.
+
 These original numbers time the **reader only**: type initialization and
 arena reset precede the nanosecond interval, and expression checking, initial
 parsing and cleanup are excluded. Its hardware-cycle interval also included
@@ -307,5 +312,61 @@ No SQLite uses walked or fell back; the header batch walked three uses and
 had no fallback. The closed-sibling source fixtures independently require
 the fallback path.
 
-Fresh pipeline acceptance is recorded separately from these reader-only
-measurements; preprocessing remains a separately reported common phase.
+### Completed fresh pipeline qualification
+
+Candidate `fe7c6f6b2fea4f46176d04543ca7b2d323d2625c` passed
+[run 40095665758](https://github.com/buster14a/buster/actions/runs/40095665758/job/120877304412),
+completed October 24, 2026 at 13:03:56 UTC. It tested PR merge
+`ce5ca7fcdcd7c1f8a4f8285721f4a660b78b034b`, parents
+`608ff3d4d179acac6faf5bdbc83e4b1db9d3031f` and the candidate, with tree
+`0ac7a4e6c1c23356c256d4f091a9457f99f956a9` (identical to the candidate tree).
+[Raw logs, source snapshots, source/input/binary hashes and complete tables](https://github.com/buster14a/buster-performance/blob/cc9ebc99ef97f6feb55f0b4196544e1bc7b83f06/docs/measurements/checker-binding-336-2026-10-24/README.md)
+retain the exact evidence.
+
+The job passed 246,298 checker checks, both 1,473-check eager/lazy driver
+suites and the frozen SQLite Clang comparison without differences or resource
+failures. All five handoffs on fresh tables matched the source columns, graph
+and complete checked stream before timing. The prefix tests cover every legal
+source-order prefix of the guarded random event streams, including stable
+earlier diagnostics and a stream with no consumed answer column.
+
+The following ranges are the three separate processes' medians, each from nine
+interleaved passes after warm-up. This is the complete fresh
+parse/reader/check/cleanup scope described above.
+
+| Input | `direct` process medians | Previous `parser-batch` process medians |
+| --- | ---: | ---: |
+| small | 131.125–131.927 µs | 135.114–136.716 µs |
+| headers | 6.732–6.800 ms | 8.480–8.514 ms |
+| large | 34.317–34.990 ms | 40.210–41.323 ms |
+| SQLite 3.53.2 | 114.398–114.856 ms | 134.207–134.722 ms |
+
+SQLite improves about 14.8%; its slowest direct sample, 115.393 ms, still
+beats the fastest old-path sample, 133.531 ms. Headers and large also have
+disjoint individual sample ranges. After 100 ms of the lighter stack reader,
+SQLite's process medians were 114.268–114.426 ms against
+133.827–134.037 ms, about 14.6% less time. Small's process medians improve
+about 3%, with a gap greater than either path's between-process median spread;
+individual samples overlap, so this does not establish improvement for every
+small invocation.
+
+SQLite's fresh pipeline retained 284.920 MB of output, 163.004 MB of parser
+storage and 136.440 MB of type/index storage before cleanup, unchanged between
+handoffs. These arena lengths are not RSS or a complete scratch peak. There
+were 24,038 name slots, 9,948 distinct namespace/names, at most 7,007 events
+per name and 7,817 active declarations. SQLite had no candidate walks or
+fallback; the header batch walked three uses, and source fixtures independently
+force fallback.
+
+Preprocessing and identifier setup/run/cleanup remain a separately quantified
+common phase: SQLite process 1 observed 12.679 ms plus 0.477 ms cleanup. That
+single observation is not repeated whole-driver performance evidence.
+
+**Decision: retain the direct retained-use answers as the default.** Independent
+source/Clang and stack/batch oracles preserve behavior; the complete fresh
+pipeline gains exceed observed spread on the representative larger units and
+survive lighter scalar conditioning. Keep stack replay as the independent
+scalar twin and keep batch/parser replay as selectable oracles and measurements.
+These results complete #336's binding-handoff qualification; deferred-body
+integration, downstream lowering and repeated whole-compiler throughput remain
+outside this claim.
