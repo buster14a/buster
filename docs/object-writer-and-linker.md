@@ -2542,6 +2542,137 @@ different ELF layouts and file sizes.
 | 2,000 / 8 | 0.192 | 0.177 | 9.957 | 7.020 / 5.869 | 6.964 / 3.717 | 2.984 / 2.892 |
 | 102,400 / 64 | 15.115 | 14.852 | 438.187 | 69.563 / 129.929 | 46.835 / 116.810 | 30.672 / 126.615 |
 
+#### Libraries named with `-l`
+
+A program that calls a library besides the C runtime's (libm's `sin`, #145's c-testsuite 00174) names it as it
+names it to GCC's driver: `-lNAME`, with `-LDIR` for directories to search first. `runtime_libraries_import`
+(`runtime.c`) finds each as GNU ld does, `libNAME.so` or else `libNAME.a` in the first directory that has one, the
+`-L` ones, then glibc's library directories, and imports what it finds with the same readers the runtime's
+libraries take: a shared library by `import_library`, its exports indexed, and a linker script (glibc's `libm.so`,
+`GROUP ( libm.so.6 AS_NEEDED ( libmvec.so.1 ) )`) by `import_script`, standing for the libraries it names, each an
+absolute path. Each library's version indices move past the runtime's (libc.so.6's, then the loader's) and the
+libraries' before it, as `runtime_move_loader_versions` moves the loader's, so that an index names one library's
+version in the link's symbols. A library named twice (its soname) is linked once. Each library's `DT_NEEDED`
+entries are read too, for the rule below.
+
+Binding (`bind.c`, `Bind.libraries`, which the caller sets between `bind_begin` and `bind_end`) takes a name that
+nothing in the link defines from the libraries before `libc.so.6`, where GCC's driver puts `-l` libraries on the
+line (`crt… main.o -lm … -lc`): `ldexp`, which both libm and libc export, binds to libm's, as GNU ld and lld bind
+it. A library is needed only for a strong reference that binds to it, as GCC's driver links them on Debian and
+Ubuntu (`--as-needed`): the program's, or a needed library's own that its `DT_NEEDED` doesn't cover, which GNU ld
+counts too (#398's review: `main` calls `a_func` in libA, which calls `b_func` in libB, and without libB in
+`DT_NEEDED` the program can't load `b_func`). `bind_needed_libraries` adds those in rounds, each from the libraries
+the round before added, a reference binding to the first named library that exports its name. On this VM, lld
+23.1.5 leaves libB out of such a link, whose program then fails to load, and GNU ld 2.42 counts a library's
+references only against the libraries after it on the line, refusing `-lB -lA`'s link; binding counts them against
+every named library, so that both orders link and run. A reference that a definition the executable exports satisfies
+(global or weak, default or protected, in an atom or absolute) needs no library, since the loader binds it to the
+executable's, as both linkers link it (#398's review: `main` defining `b_func` needs libA alone). The rounds record
+the references that lead to another named library, and when there are any, one pass over the link's symbols marks
+those the executable's definitions satisfy and the rounds go again without them: 16 symbols at a time against a
+filter of their names on the vector path, as binding matches the runtime's names, and a symbol at a time on the
+exact one. Such references are rare (libm's lead to none), so a link without them pays nothing more. A hidden
+definition satisfies none, since the loader can't see it: GNU ld 2.42 refuses such a link, lld 23.1.5 refuses it
+without the library that exports the name and leaves that library out of it otherwise (a program that fails to load),
+and binding keeps the library, whose definition the loader binds the reference to. A needed library's strong
+reference that nothing defines (no named library, `libc.so.6`, the loader or the executable) is refused, naming the
+library and the name (`BIND_ERROR_LIBRARY_UNDEFINED`), as both linkers refuse it by default
+(`--no-allow-shlib-undefined`), where the program would fail to load (#398's review: libA's `b_func` with `-lA`
+alone). The rounds record those references too, which the same pass checks against the executable's definitions. A
+library whose `DT_NEEDED` names a library the link doesn't have is left unchecked, as lld leaves it; GNU ld searches
+the system's directories for that library and checks the reference against it. A reference that requires a version
+binds as GNU ld and lld bind it: only to an export at that version, its name's default or not (`name@VERSION`), and
+neither to one without a version nor to the executable's definitions, which have none, though glibc's loader takes
+those where the requirement isn't hidden. So libA's `foo@V1` links against a libB whose `foo@V1` isn't its name's
+default, and is refused against one whose `foo` is `foo@@V2` alone, also where `main` defines `foo` (the loader would
+find libB without `V1`: "version `V1' not found"), and against one whose `foo` has no version (#398's reviews). An
+unversioned reference binds only to a default export. `import_library` keeps each reference's `.gnu.version` index and
+the exports at versions other than their names' defaults, which its vector path compresses beside the exports, and the
+import walks `.gnu.version_r`'s few entries, by `vn_next` and `vna_next` as the loader does, into a table by index,
+which gives each reference its version and the file it requires it of in one load (`runtime_libraries_versions`). A
+first version of the reader made a second pass over `.dynsym` for them, which took libm's import from 183,603 to
+443,241 instructions (86.2 to 97.7 µs) on the 9700X; this one takes it to 213,478 (89.1 µs, the 9700X job of
+[run 40116992018](https://github.com/buster14a/buster/actions/runs/40116992018)), the reader's own work being a walk
+of the section headers and the version needs, and the hidden exports' lengths and hashes (libm's 147). An entry's index is `vna_other` without its top bit (`VER_NEED_HIDDEN`), as the loader and
+lld mask it (GNU ld 2.42 refuses the bit); the bit itself changes nothing here, since only the fallbacks to an export
+without a version, which binding doesn't take, depend on it. Version needs that don't read (an entry or a name outside
+its section, a name empty, a last entry's `vn_next` past the section) and a reference whose index names neither an
+entry nor a definition of the library's own are refused (`RUNTIME_ERROR_IMPORT`), as GNU ld refuses them, where the
+loader would read past the section or take the reference as unversioned (lld counts the entries by `sh_info` and
+refuses the others too). A reference's version of `libc.so.6` or the loader doesn't choose its export: the runtime
+keeps their default exports alone, and a library built against an older glibc requires older versions,
+`memcpy@GLIBC_2.2.5` among them, which the loader binds at load; the version itself is one of the library's needs,
+which binding checks against their definitions (below). A weak reference to a library nothing
+needs is left to nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
+a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
+library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
+each required exactly when needed, and their versions in `.gnu.version_r`. A library's `DT_NEEDED` name is its
+soname, or without one, as GNU ld and lld name it, its file's name where the `-l` search found it and its path where a
+script names it (`runtime_libraries_name`): a script's library in a directory of its own loads without a search
+path.
+
+Which export a versioned reference binds to is the first named library's at its version, whatever library its need
+names, as GNU ld and lld bind it and the loader looks it up. The loader also checks each loaded library's version needs
+on their own (`_dl_check_map_versions`, in glibc's `dl-version.c`): each auxiliary entry of `.gnu.version_r` names a
+version of the library its entry's file names (`vn_file`), which must define it, by hash and name (`vna_hash` against
+`vd_hash`, then the strings), unless that library defines no versions at all or the need is weak (`VER_FLG_WEAK`),
+which the loader only warns about. After the closure, `bind_library_versions` checks them so for the needed libraries
+and the named libraries their `DT_NEEDED` entries load, against the named libraries, `libc.so.6` and the loader, and
+refuses the first that fails (`BIND_ERROR_LIBRARY_VERSION`) in the loader's words: `DIR/libB.so: version 'V1' not
+found (required by DIR/libA.so)`. A file the link doesn't have is left unchecked, as its references are. Neither
+linker checks the needs (#398's review: libA, built against a libB of `foo@@V1`, linked `-lA -lC -lB` with a libC of
+`foo@V1` and a libB of `foo@@V2` alone: GNU ld 2.42 and lld 23.1.5 bind libA's `foo@V1` to libC's and link a
+program that the loader refuses at startup, since libB doesn't define `V1`; binding refuses the link). The check is a
+scalar pass over a few needs per loaded library, shared by both paths, as the closure's rounds are: libm.so.6 has six,
+versions of `libc.so.6`'s and the loader's.
+
+What isn't linked yet: an archive with members (`libNAME.a` found first, or one a script names) is refused by name;
+an empty one, as glibc 2.34 and later install `libpthread.a`, `libdl.a` and `librt.a`, adds nothing, as GNU ld
+links it. The libraries aren't in the runtime's snapshot: they differ from link to link, so each link reads and
+imports its own (libm.so.6 is 0.9 MB). On the cloud VM (not a 9700X measurement), compiling and linking a hello
+world took a median 22.9 ms with `-lm` and 22.4 ms without it, over 60 interleaved runs each (p10 to p90 about 21 to
+26 ms both ways). `benchmark-bind` times libm's import (`runtime_libraries_import`) and binds its programs against
+the dynamic PIE's runtime with libm on the line by both paths, which these programs don't need: each of their names
+is looked up in libm's and libmvec's exports too, which is what a library costs a link that doesn't use it. The
+libraries' lookups are scalar in both paths (one per name binding resolves, in `bind_resolve_symbol`, and per export
+candidate in `bind_library_exports`), as the per-name resolution around them is. On the 9700X (the 9700X job of
+[run 40103628153](https://github.com/buster14a/buster/actions/runs/40103628153), pinned to one CPU, 21-run
+medians), libm's import took 87.2 µs (libm.so.6 and libmvec.so.1, 1,412 exports), and `bind_end` with libm on the
+line took 0.04 µs more than without it by the vector path and 0.05 to 0.06 µs by the exact one, for programs of 1, 64
+and 2,000 workers. For 102,400 workers it took 0.11 µs more by the exact path, and 3.1 µs more by the vector one (25.5
+to 28.6 µs) for 1,890 more instructions, its IPC falling from 4.03 to 3.59. The lookups are small beside the import,
+which a snapshot of the named libraries, as the runtime's is kept, would take off the link if it matters.
+
+`test-bind`'s "libraries" check binds links made by hand with this system's libm by both paths into the same link
+(the line order, a weak reference alone, the exports) and the import's refusals on files of its own;
+`test-checker-driver --executable` links a program that calls libm's functions and reads libm's `signgam` (through its
+GOT slot, as the C library's data is reached) by both paths into the same bytes, runs it against this executable's
+libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whose
+`b_func` libB defines, with libA and libB built by clang: `-lA -lB` and `-lB -lA` must need both, in the line's
+order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running, and `-lA -lB` and `-lA`
+for a program that defines `b_func` itself libA alone, `a_func` calling `main`'s; `-lA` alone for one that doesn't
+must be refused, naming libA and `b_func`; and links one against a library without a soname that a script names by its
+path, which must be its `DT_NEEDED` entry; and links a program against libA, built against a libB whose `foo` is
+`foo@@V1`, with four libBs: one whose `foo@V1` isn't its name's default and one with a default `foo@@V2` beside it, by
+both paths into the same bytes, which run, and one of `foo@@V2` alone and one whose `foo` has no version, each
+refused naming `foo@V1`; with `main` defining `foo` too, against the first (linked and run) and against `foo@@V2`
+alone (refused); and copies of libA whose need of `V1` the test changes: hidden (`vna_other`'s top bit), linked and run
+against the first libB and refused against the other two, and four that don't read (`vn_aux`, `vna_name` and the last
+`vn_next` past their sections, and `foo`'s index naming no entry), each refused naming libA. With a libC of `foo@V1`
+(its name's default, or beside `foo@@V3`) between them on the line, which libA's `foo@V1` binds to, the link is
+refused against a libB of `foo@@V2` alone, which lacks the `V1` libA requires of it, and links and runs against a libB
+of `foo@V1`, one without versions and with libA's need weak; a copy of libA whose need of `V1` has another hash, one
+whose need of `libc.so.6`'s `GLIBC_2.2.5` is renamed `GLIBC_9.9.9`, and a copy of libB renamed so, which libA's
+`DT_NEEDED` loads, are each refused naming the library that lacks the version. Every case links by both paths, into
+the same bytes or refused alike. `test-bind`'s libraries
+check binds, by both paths, links against libraries
+made by hand, two that refer to `b_func` and one that exports it: without a definition of `b_func`, or with a hidden
+one or a reference, the link needs all three; with a global, weak, protected or absolute one, the two alone, and
+exports it; the global one after 0 to 15 other definitions, at every lane of the vector path's batches. Without the
+one that exports it, each needed library's reference to `b_func` is refused, naming the library, and with a hidden
+definition too, but not with a global one, nor where neither library is needed; and a library whose `DT_NEEDED` names
+one the link lacks isn't checked.
+
 #### The unwind tables
 
 Step 5 compares the direct path with linkers on outputs of the same features,

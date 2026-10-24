@@ -316,8 +316,9 @@ designs and the compilers already built this way.
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
   Tier 0 ([the checker guide](docs/c-checker.md)); and with neither option it
   links an executable (`-o`, `a.out` by default) by the direct path, bound
-  against the C runtime's snapshot, `--verify` checking every function's
-  records with `x86_validate`. `./build/compiler parse
+  against the C runtime's snapshot and the shared libraries `-lNAME` names
+  (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
+  checking every function's records with `x86_validate`. `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -2022,11 +2023,11 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   an index of several of the vector path's batches with a member's symbols
   across them, and no members), then malformed ones;
 - a shared library made by hand: version definitions, a name at a default
-  version and at a hidden one, IFUNC, `GNU_UNIQUE`, `COMMON`, TLS and
-  absolute symbols, weak and protected ones, hidden and local ones and one at
-  `VER_NDX_LOCAL`, which aren't exported, references, and a name exported
-  twice (the index finds the first); the same without `.gnu.version`; then
-  malformed ones;
+  version and at a hidden one (kept apart, with its version's index), IFUNC,
+  `GNU_UNIQUE`, `COMMON`, TLS and absolute symbols, weak and protected ones,
+  hidden and local ones and one at `VER_NDX_LOCAL`, which aren't exported,
+  references (with their versions' indices), and a name exported twice (the
+  index finds the first); the same without `.gnu.version`; then malformed ones;
 - linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
   and `OUTPUT_FORMAT`, then each error at its offset;
 - page edges: every prefix of each input made by hand (the object also with
@@ -2193,6 +2194,19 @@ exports and members:
   not for a name left to `crtendS.o`), a name left to `crtendS.o` with source
   `RUNTIME_ARCHIVE`, and an import a member came to define dropped from the
   imports;
+- libraries named with `-l`: links made by hand bound with this system's libm
+  (`runtime_libraries_import`): references to libm's names imports of libm's
+  at their versions, `ldexp`'s before libc.so.6's, a weak reference alone
+  needing no library, and a definition of a name libm exports exported; the
+  import's refusals and an empty archive; and libraries made by hand, two that
+  refer to `b_func` and one that exports it: without a definition of
+  `b_func`, or with a hidden one or a reference, the link needs all three, and
+  with a global, weak, protected or absolute one, which the executable
+  exports, the two alone (the global one after 0 to 15 other definitions);
+  without the third, a needed library's reference to `b_func` is
+  `BIND_ERROR_LIBRARY_UNDEFINED` naming the library (but with a global
+  definition, or neither needed), and a library whose `DT_NEEDED` names one
+  the link lacks isn't checked;
 - an atexit program: `main` registers a handler with `atexit` and returns 3,
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`
@@ -2306,14 +2320,18 @@ removed at the end unless `--keep`. The 9700X job's test step runs it with
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
 translation units have, by each path, against the dynamic PIE's runtime, a
-static executable's, a static PIE's and a shared library's, and reports
-21-run medians (time,
-cycles, instructions, IPC) of the match (the program's global symbols looked
+static executable's, a static PIE's and a shared library's, and against the
+dynamic PIE's with libm on the line as `-lm` puts it there, which these
+programs don't need (each name looked up in libm's and libmvec's exports too),
+and reports 21-run medians (time,
+cycles, instructions, IPC) of libm's import (`runtime_libraries_import`), the
+match (the program's global symbols looked
 up in the runtime's names, per global symbol), `bind_begin`, the static
 runtimes' closure (the members the link needs, per member) and `bind_end`,
 each run on the same link put back as it was. The paths must make the same
 links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
-5's phases, data-parallel" and "Static links, as built" have the numbers. The
+5's phases, data-parallel", "Static links, as built" and "Libraries named with
+`-l`" have the numbers. The
 default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 

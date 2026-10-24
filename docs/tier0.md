@@ -29,9 +29,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
-- **c-testsuite (#145):** 217 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+- **c-testsuite (#145):** 218 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
-  ([the c-testsuite guide](c-testsuite.md)). The other three wait on item 2 of #136's plan and on libm.
+  ([the c-testsuite guide](c-testsuite.md)). The other two wait on item 2 of #136's plan.
 
 **Waits for #133, #145 and #146:**
 

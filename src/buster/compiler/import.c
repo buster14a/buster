@@ -45,7 +45,9 @@
 // Shared libraries (import_library): the soname, the version definitions, and from .dynsym the names it defines, each
 // with its default version (name@@VERSION, or unversioned), type and size, indexed by link_hash (ImportNameIndex), and
 // the names it refers to without defining them, which decide what a program exports (docs/object-writer-and-linker.md,
-// "Exports"). An IFUNC is exported as a function, as linkers show it in a program's .dynsym.
+// "Exports"), each with its .gnu.version index; and apart, the names it defines at versions other than their defaults
+// (name@VERSION), which only a reference that requires that version binds to. An IFUNC is exported as a function, as
+// linkers show it in a program's .dynsym.
 //
 // Each of the three has two paths (docs/object-writer-and-linker.md, "Step 5's phases, data-parallel"): a vector path
 // (import_object_vector, import_archive_vector, import_library_vector), which reads eight records at a time in 64-bit
@@ -224,8 +226,10 @@ struct ImportVersion
     bool base;
 };
 
-// The names a shared library refers to without defining them, as columns: each one's name, length and link_hash, and
-// whether the reference is weak.
+// The names a shared library refers to without defining them, as columns: each one's name, length and link_hash,
+// whether the reference is weak, and its index in .gnu.version without the hidden bit (VER_NDX_GLOBAL for a library
+// without .gnu.version), which names the version it requires, if any, in .gnu.version_r. Only import_library fills the
+// indices: a runtime snapshot doesn't keep them (null).
 typedef struct ImportReferences ImportReferences;
 struct ImportReferences
 {
@@ -233,6 +237,19 @@ struct ImportReferences
     uint32_t* length;
     uint64_t* hash;
     uint8_t* weak;
+    uint16_t* version;
+    uint32_t count;
+};
+
+// The names a shared library defines at versions other than their defaults (name@VERSION, a .gnu.version entry with
+// the hidden bit), which its exports leave out, and which the loader binds only a reference that requires that version
+// to: each one's name, a slice of the library's .dynstr, and its version's index, one the library defines (an
+// ImportVersion's), as an export's is. Only import_library fills them: a runtime snapshot doesn't keep them.
+typedef struct ImportHiddenExports ImportHiddenExports;
+struct ImportHiddenExports
+{
+    const uint8_t** name;
+    uint16_t* version;
     uint32_t count;
 };
 
@@ -256,6 +273,7 @@ struct ImportLibrary
     uint32_t version_count;
     ImportExports exports;
     ImportReferences references;
+    ImportHiddenExports hidden;
     // The exports by their names' hashes.
     ImportNameIndex index;
 };
@@ -3064,11 +3082,24 @@ static uint32_t import_library_find(const ImportLibrary* library, const uint8_t*
     return result;
 }
 
-// Pushes the exports' and references' columns, with room for `count` of each.
+// Whether `index` is VER_NDX_GLOBAL or one of the library's version definitions' indices, as an export's must be: GNU ld
+// and lld refuse a library whose export, at its name's default version or not, names another.
+static bool import_library_version_defined(const ImportLibrary* library, uint16_t index)
+{
+    bool defined = index == VER_NDX_GLOBAL;
+    for (uint32_t v = 0; !defined && v < library->version_count; v += 1)
+    {
+        defined = library->versions[v].index == index;
+    }
+    return defined;
+}
+
+// Pushes the exports', references' and hidden exports' columns, with room for `count` of each.
 static bool import_library_columns(ImportLibrary* library, uint64_t count, Arena* arena)
 {
     ImportExports* exports = &library->exports;
     ImportReferences* references = &library->references;
+    ImportHiddenExports* hidden = &library->hidden;
     exports->name = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, count);
     exports->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
     exports->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count);
@@ -3081,8 +3112,12 @@ static bool import_library_columns(ImportLibrary* library, uint64_t count, Arena
     references->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
     references->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count);
     references->weak = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, count);
+    references->version = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, count);
+    hidden->name = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, count);
+    hidden->version = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, count);
     return exports->name != 0 && exports->length != 0 && exports->hash != 0 && exports->size != 0 && exports->flags != 0 && exports->version != 0 && exports->value != 0 &&
-           exports->section != 0 && references->name != 0 && references->length != 0 && references->hash != 0 && references->weak != 0;
+           exports->section != 0 && references->name != 0 && references->length != 0 && references->hash != 0 && references->weak != 0 && references->version != 0 &&
+           hidden->name != 0 && hidden->version != 0;
 }
 
 // The sections a library's reader reads: .dynsym, .gnu.version, .gnu.version_d and .dynamic, each the first of its type
@@ -3174,6 +3209,7 @@ static ImportResult import_library_scalar(ImportLibrary* library, String8 bytes,
     }
     ImportExports* exports = &library->exports;
     ImportReferences* references = &library->references;
+    ImportHiddenExports* hidden = &library->hidden;
     for (uint64_t i = 1; result.error == IMPORT_ERROR_NONE && i < symbols.count; i += 1)
     {
         Elf64_Sym symbol;
@@ -3203,18 +3239,26 @@ static ImportResult import_library_scalar(ImportLibrary* library, String8 bytes,
             references->length[at] = (uint32_t)name.length;
             references->hash[at] = link_hash((const uint8_t*)name.pointer, name.length);
             references->weak[at] = binding == STB_WEAK ? 1 : 0;
+            references->version[at] = version_index;
             references->count += 1;
+        }
+        else if (symbol.st_shndx != SHN_UNDEF && global && (version & 0x8000) != 0 && version_index > VER_NDX_GLOBAL && name.length != 0 &&
+                 (visibility == STV_DEFAULT || visibility == STV_PROTECTED))
+        {
+            if (!import_library_version_defined(library, version_index))
+            {
+                result = import_fail(IMPORT_ERROR_BOUNDS, versions_offset + i * sizeof(version));
+                result.symbol = (uint32_t)i;
+            }
+            hidden->name[hidden->count] = (const uint8_t*)name.pointer;
+            hidden->version[hidden->count] = version_index;
+            hidden->count += 1;
         }
         else if (symbol.st_shndx != SHN_UNDEF && global && default_version && name.length != 0 && (visibility == STV_DEFAULT || visibility == STV_PROTECTED))
         {
             const uint32_t exported_type = type == STT_GNU_IFUNC ? STT_FUNC : type == STT_COMMON ? STT_OBJECT : type;
             const uint32_t exported_binding = binding == STB_WEAK ? STB_WEAK : STB_GLOBAL;
-            bool defined = version_index == VER_NDX_GLOBAL;
-            for (uint32_t v = 0; !defined && v < library->version_count; v += 1)
-            {
-                defined = library->versions[v].index == version_index;
-            }
-            if (!defined)
+            if (!import_library_version_defined(library, version_index))
             {
                 result = import_fail(IMPORT_ERROR_BOUNDS, versions_offset + i * sizeof(version));
                 result.symbol = (uint32_t)i;
@@ -3354,6 +3398,7 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
     const __m512i names_base = _mm512_set1_epi64((long long)(uintptr_t)names.pointer);
     ImportExports* exports = &library->exports;
     ImportReferences* references = &library->references;
+    ImportHiddenExports* hidden = &library->hidden;
     uint32_t failed = 0;
     for (uint64_t first = 0; result && failed == 0 && first < symbols.count; first += BUSTER_IMPORT_BATCH)
     {
@@ -3383,12 +3428,14 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
         // A name of no bytes past st_name 0 is the exact path's: the lengths below send the library there.
         const uint32_t referenced = active & named & undefined & global;
         const uint32_t exported = active & named & ~undefined & global & default_version & visible;
-        // Each export's version in the set of defined ones: a 512-bit set in a register, its word by vpermq and its
-        // bit by a variable shift.
+        const uint32_t hidden_version = _mm512_test_epi64_mask(version, _mm512_set1_epi64(0x8000)) & _mm512_cmpgt_epu64_mask(version_index, _mm512_set1_epi64(VER_NDX_GLOBAL));
+        const uint32_t hidden_export = active & named & ~undefined & global & hidden_version & visible;
+        // Each export's version, at its name's default or not, in the set of defined ones: a 512-bit set in a register,
+        // its word by vpermq and its bit by a variable shift.
         const __m512i set_word = _mm512_permutexvar_epi64(_mm512_srli_epi64(version_index, 6), defined_set);
         const uint32_t in_set = _mm512_test_epi64_mask(_mm512_srlv_epi64(set_word, _mm512_and_si512(version_index, _mm512_set1_epi64(63))), _mm512_set1_epi64(1)) &
                                 _mm512_cmplt_epu64_mask(version_index, _mm512_set1_epi64(64 * BUSTER_IMPORT_BATCH));
-        failed |= exported & ~in_set;
+        failed |= (exported | hidden_export) & ~in_set;
         const __m512i pointers = _mm512_add_epi64(names_base, name);
         const __m512i exported_type = _mm512_mask_mov_epi64(_mm512_mask_mov_epi64(type, (__mmask8)import_lanes_equal(type, STT_GNU_IFUNC), _mm512_set1_epi64(STT_FUNC)),
                                                             (__mmask8)import_lanes_equal(type, STT_COMMON), _mm512_set1_epi64(STT_OBJECT));
@@ -3397,8 +3444,10 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
         const __m512i flags = _mm512_or_si512(exported_type, _mm512_slli_epi64(exported_binding, 4));
         const uint32_t export_count = (uint32_t)__builtin_popcount(exported);
         const uint32_t reference_count = (uint32_t)__builtin_popcount(referenced);
+        const uint32_t hidden_count = (uint32_t)__builtin_popcount(hidden_export);
         const uint32_t e = exports->count;
         const uint32_t r = references->count;
+        const uint32_t h = hidden->count;
         import_store64(exports->name + e, _mm512_maskz_compress_epi64((__mmask8)exported, pointers), export_count);
         import_store64(exports->size + e, _mm512_maskz_compress_epi64((__mmask8)exported, words[2]), export_count);
         import_store8(exports->flags + e, _mm512_maskz_compress_epi64((__mmask8)exported, flags), export_count);
@@ -3407,8 +3456,18 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
         import_store16(exports->section + e, _mm512_maskz_compress_epi64((__mmask8)exported, shndx), export_count);
         import_store64(references->name + r, _mm512_maskz_compress_epi64((__mmask8)referenced, pointers), reference_count);
         import_store8(references->weak + r, _mm512_maskz_compress_epi64((__mmask8)referenced, _mm512_maskz_mov_epi64((__mmask8)weak, _mm512_set1_epi64(1))), reference_count);
+        import_store16(references->version + r, _mm512_maskz_compress_epi64((__mmask8)referenced, version_index), reference_count);
+        import_store64(hidden->name + h, _mm512_maskz_compress_epi64((__mmask8)hidden_export, pointers), hidden_count);
+        import_store16(hidden->version + h, _mm512_maskz_compress_epi64((__mmask8)hidden_export, version_index), hidden_count);
         exports->count += export_count;
         references->count += reference_count;
+        hidden->count += hidden_count;
+    }
+    // A hidden export's name has a byte before its NUL, as the exact path takes them: an empty one sends the library
+    // there. Each offset is in the table, which ends with a NUL.
+    for (uint32_t i = 0; result && failed == 0 && i < hidden->count; i += 1)
+    {
+        failed |= hidden->name[i][0] == 0 ? 1 : 0;
     }
     // The names' lengths, a masked 64-byte load each, then their hashes eight at a time.
     for (uint32_t i = 0; result && failed == 0 && i < exports->count; i += 1)
