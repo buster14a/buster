@@ -1447,8 +1447,8 @@ static LinkError link_check_lanes(Link* link)
     LinkError result = LINK_ERROR_NONE;
     if (lane == 0)
     {
-        // The priorities, few, and the fixups in no atom's range; then, with a problem anywhere, link_check's own
-        // answer, the first problem in its order.
+        // The priorities, few, and the fixups in no atom's range; then, with a problem anywhere, or without the lanes'
+        // marks, link_check's own answer: the first problem in its order, or none.
         uint64_t fixups = 0;
         bool any = shared == 0;
         for (uint32_t other = 0; shared != 0 && other < lanes; other += 1)
@@ -1464,8 +1464,6 @@ static LinkError link_check_lanes(Link* link)
         }
         any = any || fixups + 1 != link->fixups.count;
         result = any ? link_check(link) : LINK_ERROR_NONE;
-        // A problem that link_check doesn't see (no memory for the marks) is still one.
-        result = any && result == LINK_ERROR_NONE && shared == 0 ? LINK_ERROR_FULL : result;
     }
     result = (LinkError)lane_broadcast((uint64_t)result, 0);
     scratch_end(scratch);
