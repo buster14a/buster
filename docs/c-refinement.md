@@ -845,9 +845,13 @@ the 360 files it lists for `main.c` with the compiler's options.
   table, or diagnose them (#116's open question).
 - **The directive tables a window at a time** take 0.016 ms more of
   `sqlite3.c` than whole, though each window's kinds are scanned while they are
-  in the caches: the windowed table (`pp_directive_table_windowed`) is finished
-  from the words the scans left, two per 64 tokens, in scratch memory. Where the
-  difference goes wasn't measured.
+  in the caches. It isn't the pass that takes the directives out of the words
+  the scans left: with the lines' words and the directives' in two halves, so
+  that it reads half as many words and moves none, the tables took the same
+  time (0.306-0.307 ms against 0.306-0.314), and appending each directive's
+  place as the scan finds it took 0.01 ms more (0.316-0.318). Not measured
+  apart: `pp_finish_directives`, which reads each directive's tokens after the
+  last window, when the early windows' columns have left the caches.
 - **A window's end inside a long logical line.** The part of a macro defined
   over many lines that a window holds is lexed again with the next one (110 KB
   of `x86_64_encoder.c`'s 157 KB macro). Cutting at a line splice would need
