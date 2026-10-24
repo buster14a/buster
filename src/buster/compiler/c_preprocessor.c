@@ -48,7 +48,7 @@
 // and buffer runs (pp_copy_file_run_vector, pp_copy_buffer_run_vector), the argument scan (pp_collect_arguments) and
 // the copies of whole token ranges (pp_append_file_tokens, pp_append_stack_tokens: a function-like macro's arguments,
 // a body's runs of tokens, an object-like macro's body), identifier pastes interned without lexing (pp_paste), line
-// counts (pp_count_lines), the keyword pass over the output (pp_resolve_keywords_vector) and -E's printer
+// counts (pp_count_lines), the keyword pass over the output (pp_resolve_keywords_range) and -E's printer
 // (pp_print_vector). docs/c-preprocessor.md ("Data-parallel design, piece by piece") has each one's 9700X comparison.
 //
 // main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c; every function is static. Layout, in
@@ -132,7 +132,7 @@ _Static_assert(BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT <= BUSTER_PP_KIND_P
 // The ids pp_resolve_keywords looks up (the keywords' are below it): two vpermi2b tables, by an id's low byte.
 #define BUSTER_PP_KEYWORD_TABLE 256
 _Static_assert(C_NAME_KEYWORD_COUNT < BUSTER_PP_KEYWORD_TABLE, "the keywords must have ids below the keyword table's size");
-_Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks up an id's low byte in four 64-byte quarters");
+_Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_range looks up an id's low byte in four 64-byte quarters");
 // Limits: tokens in the output and in each stack, contexts, nested inclusions, a directive's line.
 #define BUSTER_PP_MAX_OUTPUT_TOKENS (1u << 28)
 #define BUSTER_PP_MAX_STACK_TOKENS (1u << 26)
@@ -1258,6 +1258,9 @@ struct Preprocessor
     // arc_cf_code_audited, unsafe_buffer_usage) left open at the main file's end, and #elif, #else or #endif without #if.
     // test-preprocessor's fuzz runs read such a case by clang alone, since in a batch it would reach into the next case.
     uint32_t unterminated;
+    // The output's tokens whose keywords have their kinds (pp_resolve_keywords_range): the vectorized kernels resolve a
+    // chunk at a time as the output grows, while its tokens are in the caches, and pp_resolve_keywords the rest.
+    uint32_t keywords_resolved;
     // The output kind of each identifier id below BUSTER_PP_KEYWORD_TABLE: its keyword's in this language mode, or an
     // identifier's.
     uint8_t keyword_kinds[BUSTER_PP_KEYWORD_TABLE] __attribute__((aligned(64)));
@@ -9266,6 +9269,11 @@ static bool pp_expand_file_direct(Preprocessor* pp, PPContext* context, const PP
     return result;
 }
 
+// The output's tokens pp_step_file resolves the keywords of at once, at a directive (pp_resolve_keywords_range).
+#define BUSTER_PP_KEYWORD_CHUNK 16384
+
+static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t end);
+
 static void pp_step_file(Preprocessor* pp, PPContext* context)
 {
     const PPFileData* data = &pp->datas[context->data];
@@ -9313,6 +9321,14 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
     }
     else if (context->next_directive < data->directive_count)
     {
+        // The output's keywords a chunk at a time, while its tokens are in the caches: nothing reads their kinds until the
+        // run ends, and the output only grows at its end. Read back at the end, sqlite3.c's took 0.12 ms on the 9700X;
+        // checked at each step, 0.7 million instructions.
+        if (pp->vectorized && pp->output.count - pp->keywords_resolved >= BUSTER_PP_KEYWORD_CHUNK)
+        {
+            pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
+            pp->keywords_resolved = pp->output.count;
+        }
         pp_directive(pp, context);
     }
     else
@@ -9494,18 +9510,36 @@ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
 // ---------------------------------------------------------------------------------------------------------------------
 // Directives
 
-// Copies a file's tokens [begin, end) to pp->arguments, as buffers hold them, for expanding a directive's line.
+// Copies a file's tokens [begin, end) to pp->arguments, as buffers hold them, for expanding a directive's line: 64 at a
+// time (pp_append_file_tokens), their line starts then cleared, or a token at a time by the scalar kernels and for a line
+// of a few tokens (#if 1: a line of one token cost 60 instructions more the vectorized way).
 static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
 {
     const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
-    bool result = pp_room(pp, &pp->arguments, end - begin);
-    for (uint32_t t = begin; result && t < end; t += 1)
+    PPTokens* arguments = &pp->arguments;
+    bool result;
+    if (pp->vectorized && end - begin > 3)
     {
-        const PPToken token = pp_file_token(data, base, t);
-        pp_tokens_set(&pp->arguments, pp->arguments.count, token.kind, (uint8_t)(token.flags & ~BUSTER_PP_START_OF_LINE), token.value, token.location);
-        pp_history_fill(pp, &pp->arguments, pp->arguments.count, pp->arguments.count + 1, 0);
-        pp->arguments.count += 1;
+        const uint32_t at = arguments->count;
+        result = pp_append_file_tokens(pp, arguments, data, base, begin, end, false);
+        for (uint32_t i = at; result && i < arguments->count; i += 64)
+        {
+            const __mmask64 valid = _bzhi_u64(~0ull, arguments->count - i < 64 ? arguments->count - i : 64);
+            const __m512i flags = _mm512_maskz_loadu_epi8(valid, arguments->flags + i);
+            _mm512_mask_storeu_epi8(arguments->flags + i, valid, _mm512_andnot_si512(_mm512_set1_epi8(BUSTER_PP_START_OF_LINE), flags));
+        }
+    }
+    else
+    {
+        result = pp_room(pp, arguments, end - begin);
+        for (uint32_t t = begin; result && t < end; t += 1)
+        {
+            const PPToken token = pp_file_token(data, base, t);
+            pp_tokens_set(arguments, arguments->count, token.kind, (uint8_t)(token.flags & ~BUSTER_PP_START_OF_LINE), token.value, token.location);
+            pp_history_fill(pp, arguments, arguments->count, arguments->count + 1, 0);
+            arguments->count += 1;
+        }
     }
     return result;
 }
@@ -14890,19 +14924,19 @@ static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* byt
 // ---------------------------------------------------------------------------------------------------------------------
 // The output
 
-// Gives each identifier of the output that is a keyword in the language mode its keyword's kind, 64 tokens at a time: one
-// compare finds the identifiers, and for each 16, one compare their ids below the table's size, and two vpermi2b look
-// their kinds up in pp->keyword_kinds's halves, one picked by bit 7 of the id.
-static void pp_resolve_keywords_vector(Preprocessor* pp)
+// Gives each identifier of output tokens [begin, end) that is a keyword in the language mode its keyword's kind, 64 tokens
+// at a time: one compare finds the identifiers, and for each 16, one compare their ids below the table's size, and two
+// vpermi2b look their kinds up in pp->keyword_kinds's halves, one picked by bit 7 of the id.
+static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t end)
 {
     PPTokens* out = &pp->output;
     const __m512i table0 = _mm512_loadu_si512(pp->keyword_kinds);
     const __m512i table1 = _mm512_loadu_si512(pp->keyword_kinds + 64);
     const __m512i table2 = _mm512_loadu_si512(pp->keyword_kinds + 128);
     const __m512i table3 = _mm512_loadu_si512(pp->keyword_kinds + 192);
-    for (uint32_t i = 0; i < out->count; i += 64)
+    for (uint32_t i = begin; i < end; i += 64)
     {
-        const __mmask64 valid = out->count - i >= 64 ? ~0ull : _bzhi_u64(~0ull, out->count - i);
+        const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, end - i);
         const __m512i kinds = _mm512_maskz_loadu_epi8(valid, out->kinds + i);
         const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
         if (identifiers != 0)
@@ -14942,11 +14976,13 @@ static void pp_resolve_keywords_scalar(Preprocessor* pp)
     }
 }
 
+// The output's keywords their kinds: the tokens the vectorized kernels' chunks left (pp_run_contexts), or all of them.
 static void pp_resolve_keywords(Preprocessor* pp)
 {
     if (pp->vectorized)
     {
-        pp_resolve_keywords_vector(pp);
+        pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
+        pp->keywords_resolved = pp->output.count;
     }
     else
     {
