@@ -741,78 +741,95 @@ static uint32_t tier0_result_extent(AbiReturn result)
     return result.part_bytes == 16 || high || result.registers[1] != BUSTER_ABI_REGISTER_NONE ? 16 : 8;
 }
 
-// The calls' locations and the aggregates' metadata (argument_sizes, call_result_objects and result_size, and the
-// parameters that are objects), checked by both compile paths too, so that no emitter reads or writes out of place: every
-// argument in a register Tier 0 numbers, none twice in a call, or in its call's stack area; every result object an object
-// with room for what the call stores, its hidden pointer's rdi no argument's; and a function whose result goes through a
-// hidden pointer taking it as parameter 0 (U64, in rdi).
-static bool tier0_aggregates_valid(const Tier0Function* function)
+// Call `c`'s locations and its aggregates' metadata (argument_sizes and call_result_objects), so that no emitter reads or
+// writes out of place: every argument in a register Tier 0 numbers, none twice in the call, or in its stack area; a
+// result object an object with room for what the call stores, its hidden pointer's rdi no argument's; and no hidden
+// pointer without an object, which would point nowhere.
+static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
+{
+    const uint32_t first = function->call_first[c];
+    const uint32_t count = function->call_argument_counts[c];
+    const AbiReturn result = function->calls[c].result;
+    const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
+    const uint64_t stack_bytes = function->calls[c].stack_bytes;
+    // The registers the call's arguments take, as a register set (BUSTER_TIER0_XMM's). The outgoing area starts at rsp, a
+    // multiple of 16 at the call, so no slot may need more.
+    uint32_t taken = 0;
+    bool valid = (uint64_t)first + count <= function->argument_count && function->calls[c].stack_alignment_log2 <= BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    for (uint32_t a = 0; valid && a < count; a += 1)
+    {
+        const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
+        const AbiLocation location = function->argument_locations[first + a];
+        uint32_t registers = 0;
+        if (size == 0)
+        {
+            const uint8_t reg = location.registers[0];
+            const bool in_register = location.kind == BUSTER_ABI_LOCATION_REGISTERS;
+            valid = location.kind == BUSTER_ABI_LOCATION_IGNORE || in_register || location.kind == BUSTER_ABI_LOCATION_STACK;
+            valid = valid && (!in_register || tier0_part_register_valid(reg));
+            valid = valid && (location.kind != BUSTER_ABI_LOCATION_STACK ||
+                              (location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && (uint64_t)location.stack_offset + BUSTER_ABI_SLOT_BYTES <= stack_bytes));
+            registers = valid && in_register ? 1u << tier0_abi_register(reg) : 0;
+        }
+        else
+        {
+            Tier0Part parts[2];
+            valid = size <= BUSTER_TIER0_MAX_ARGUMENT_BYTES && tier0_aggregate_location_valid(location, size, stack_bytes);
+            const uint32_t part_count = valid ? tier0_location_parts(location, size, parts) : 0;
+            for (uint32_t k = 0; k < part_count; k += 1)
+            {
+                const uint32_t bit = parts[k].reg != BUSTER_TIER0_PART_STACK ? 1u << parts[k].reg : 0;
+                valid = valid && (registers & bit) == 0;
+                registers |= bit;
+            }
+        }
+        valid = valid && (taken & registers) == 0;
+        taken |= registers;
+    }
+    if (object != 0)
+    {
+        const uint32_t local = object - 1;
+        valid = valid && local < function->local_count && tier0_is_object(function, local);
+        if (valid && result.kind == BUSTER_ABI_RESULT_REGISTERS)
+        {
+            const uint32_t extent = tier0_result_extent(result);
+            valid = tier0_aggregate_result_valid(result, extent) && (((uint64_t)function->local_sizes[local] + 7) & ~UINT64_C(7)) >= extent;
+        }
+        else
+        {
+            valid = valid && (result.kind == BUSTER_ABI_RESULT_MEMORY || result.kind == BUSTER_ABI_RESULT_IGNORE);
+            valid = valid && (result.kind != BUSTER_ABI_RESULT_MEMORY || (taken >> X86_REGISTER_RDI & 1) == 0);
+        }
+    }
+    else
+    {
+        valid = valid && result.kind != BUSTER_ABI_RESULT_MEMORY;
+    }
+    return valid;
+}
+
+// Whether every call is as tier0_call_valid has it: tier0_validate's check of the calls, a function's without aggregates
+// among them, whose calls tier0_aggregates_valid leaves to it.
+static bool tier0_calls_valid(const Tier0Function* function)
 {
     bool valid = true;
     for (uint32_t c = 0; valid && c < function->call_count; c += 1)
     {
-        const uint32_t first = function->call_first[c];
-        const uint32_t count = function->call_argument_counts[c];
-        const AbiReturn result = function->calls[c].result;
-        const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
-        const uint64_t stack_bytes = function->calls[c].stack_bytes;
-        // The registers the call's arguments take, as a register set (BUSTER_TIER0_XMM's). The outgoing area starts at
-        // rsp, a multiple of 16 at the call, so no slot may need more.
-        uint32_t taken = 0;
-        valid = (uint64_t)first + count <= function->argument_count && function->calls[c].stack_alignment_log2 <= BUSTER_ABI_STACK_ALIGNMENT_LOG2;
-        for (uint32_t a = 0; valid && a < count; a += 1)
-        {
-            const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
-            const AbiLocation location = function->argument_locations[first + a];
-            uint32_t registers = 0;
-            if (size == 0)
-            {
-                const uint8_t reg = location.registers[0];
-                const bool in_register = location.kind == BUSTER_ABI_LOCATION_REGISTERS;
-                valid = location.kind == BUSTER_ABI_LOCATION_IGNORE || in_register || location.kind == BUSTER_ABI_LOCATION_STACK;
-                valid = valid && (!in_register || tier0_part_register_valid(reg));
-                valid = valid && (location.kind != BUSTER_ABI_LOCATION_STACK ||
-                                  (location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && (uint64_t)location.stack_offset + BUSTER_ABI_SLOT_BYTES <= stack_bytes));
-                registers = valid && in_register ? 1u << tier0_abi_register(reg) : 0;
-            }
-            else
-            {
-                Tier0Part parts[2];
-                valid = size <= BUSTER_TIER0_MAX_ARGUMENT_BYTES && tier0_aggregate_location_valid(location, size, stack_bytes);
-                const uint32_t part_count = valid ? tier0_location_parts(location, size, parts) : 0;
-                for (uint32_t k = 0; k < part_count; k += 1)
-                {
-                    const uint32_t bit = parts[k].reg != BUSTER_TIER0_PART_STACK ? 1u << parts[k].reg : 0;
-                    valid = valid && (registers & bit) == 0;
-                    registers |= bit;
-                }
-            }
-            valid = valid && (taken & registers) == 0;
-            taken |= registers;
-        }
-        if (object != 0)
-        {
-            const uint32_t local = object - 1;
-            valid = valid && local < function->local_count && tier0_is_object(function, local);
-            if (valid && result.kind == BUSTER_ABI_RESULT_REGISTERS)
-            {
-                const uint32_t extent = tier0_result_extent(result);
-                valid = tier0_aggregate_result_valid(result, extent) && (((uint64_t)function->local_sizes[local] + 7) & ~UINT64_C(7)) >= extent;
-            }
-            else
-            {
-                valid = valid && (result.kind == BUSTER_ABI_RESULT_MEMORY || result.kind == BUSTER_ABI_RESULT_IGNORE);
-                valid = valid && (result.kind != BUSTER_ABI_RESULT_MEMORY || (taken >> X86_REGISTER_RDI & 1) == 0);
-            }
-        }
-        else
-        {
-            // Without an object, a hidden pointer would point nowhere.
-            valid = valid && result.kind != BUSTER_ABI_RESULT_MEMORY;
-        }
+        valid = tier0_call_valid(function, c);
     }
+    return valid;
+}
+
+// The aggregates' metadata (argument_sizes, call_result_objects and result_size, and the parameters that are objects),
+// checked by both compile paths too, so that no emitter reads or writes out of place: each call of a function that passes
+// or receives aggregates (tier0_call_valid; a function without argument_sizes and call_result_objects has its typed
+// stream's calls, which tier0_validate checks as the compile paths' precondition, at no cost to them), each parameter
+// that is an object, and a function whose result goes through a hidden pointer taking it as parameter 0 (U64, in rdi).
+static bool tier0_aggregates_valid(const Tier0Function* function)
+{
+    bool valid = (function->argument_sizes == 0 && function->call_result_objects == 0) || tier0_calls_valid(function);
     const uint64_t incoming = function->incoming_variadic != 0 ? function->incoming_variadic->stack_bytes : INT32_MAX;
-    for (uint32_t p = 0; valid && p < function->parameter_count; p += 1)
+    for (uint32_t p = 0; valid && p < function->parameter_count && function->local_sizes != 0; p += 1)
     {
         if (tier0_is_object(function, p))
         {
@@ -2975,6 +2992,9 @@ struct Tier0Frame
     uint8_t base;
     bool calls;
     bool pointer;
+    // Whether a parameter is an object (an aggregate's, tier0_object_parameters), without which the passes over the
+    // parameters leave out what only objects need.
+    bool object_parameters;
 };
 
 // The registers each depth table's prefix covers, as a register set.
@@ -3149,6 +3169,17 @@ static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tie
     return callee[callee_taken];
 }
 
+// Whether a parameter is an object (tier0_is_object): an aggregate passed by value (Tier0Frame.object_parameters).
+static bool tier0_object_parameters(const Tier0Function* function)
+{
+    bool objects = false;
+    for (uint32_t p = 0; p < function->parameter_count && function->local_sizes != 0; p += 1)
+    {
+        objects |= function->local_sizes[p] != 0;
+    }
+    return objects;
+}
+
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
 // locals, most referenced first (by index among equals), take the free caller-saved registers, then (referenced at
 // least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
@@ -3164,13 +3195,18 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
     {
         const AbiLocation location = function->parameters[p];
-        const bool object = tier0_is_object(function, p);
-        for (uint32_t k = 0; k < (object ? 2u : 1u); k += 1)
+        const uint8_t reg = location.registers[0];
+        arrivals |= location.kind == BUSTER_ABI_LOCATION_REGISTERS && reg != BUSTER_ABI_REGISTER_NONE ? 1u << tier0_abi_register(reg) : 0;
+    }
+    const bool objects = frame->object_parameters;
+    for (uint32_t p = 0; p < function->parameter_count && objects; p += 1)
+    {
+        const AbiLocation location = function->parameters[p];
+        const bool parts = tier0_is_object(function, p) && (location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT);
+        for (uint32_t k = 0; k < 2 && parts; k += 1)
         {
             const uint8_t reg = location.registers[k];
-            const bool arrives = (location.kind == BUSTER_ABI_LOCATION_REGISTERS || (object && location.kind == BUSTER_ABI_LOCATION_SPLIT)) &&
-                                 reg != BUSTER_ABI_REGISTER_NONE;
-            arrivals |= arrives ? 1u << tier0_abi_register(reg) : 0;
+            arrivals |= reg != BUSTER_ABI_REGISTER_NONE ? 1u << tier0_abi_register(reg) : 0;
         }
     }
     // A frame pointer's rbp is no home either.
@@ -3318,16 +3354,17 @@ static uint64_t tier0_frame_slots_vector(const Tier0Function* function, Tier0Hom
 // The objects' places for the vector path, past the slots: the mask of the objects 16 locals at a time, then each set
 // bit's object at its alignment. Returns the offset past them, and in *aligned whether one is aligned to 16; offsets
 // past INT32_MAX narrow to garbage, as the slots' do, which the caller's check of the final offset refuses.
-static uint64_t tier0_frame_objects_vector(const Tier0Function* function, Tier0Home* homes, uint64_t offset, bool* aligned)
+static uint64_t tier0_frame_objects_vector(const Tier0Function* function, const Tier0Frame* frame, Tier0Home* homes, uint64_t offset, bool* aligned)
 {
     const uint32_t locals = function->local_count;
+    const bool object_parameters = frame->object_parameters;
     for (uint32_t first = 0; first < locals && function->local_sizes != 0; first += 16)
     {
         const __mmask16 lanes = (__mmask16)tier0_lanes(first, locals);
         const __m512i sizes = _mm512_maskz_loadu_epi32(lanes, function->local_sizes + first);
         // An aggregate parameter on the stack whole keeps its incoming bytes (tier0_parameter_in_place).
         uint32_t in_place = 0;
-        for (uint32_t p = first; p < function->parameter_count && p < first + 16; p += 1)
+        for (uint32_t p = first; p < function->parameter_count && p < first + 16 && object_parameters; p += 1)
         {
             in_place |= tier0_parameter_in_place(function, p) ? 1u << (p - first) : 0;
         }
@@ -3350,6 +3387,7 @@ static uint64_t tier0_frame_objects_vector(const Tier0Function* function, Tier0H
 
 static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
 {
+    const bool object_parameters = frame->object_parameters;
     uint64_t outgoing = 0;
     for (uint32_t c = 0; c < function->call_count; c += 1)
     {
@@ -3388,7 +3426,7 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     bool aligned = false;
     for (uint32_t l = 0; l < function->local_count && !vector; l += 1)
     {
-        const bool in_place = l < function->parameter_count && tier0_parameter_in_place(function, l);
+        const bool in_place = object_parameters && l < function->parameter_count && tier0_parameter_in_place(function, l);
         if (tier0_is_object(function, l) && !in_place)
         {
             const uint64_t alignment = 1ull << function->local_alignments[l];
@@ -3403,7 +3441,7 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     }
     bool objects = false;
     offset = vector ? tier0_frame_slots_vector(function, homes, references, offset, &objects) : offset;
-    offset = vector && objects ? tier0_frame_objects_vector(function, homes, offset, &aligned) : offset;
+    offset = vector && objects ? tier0_frame_objects_vector(function, frame, homes, offset, &aligned) : offset;
     // With the pushes and the return address, a multiple of 16 at every call, for an object aligned to 16, and with a
     // frame pointer, under which every allocation keeps it so.
     const uint64_t above = 8 * frame->pushes + 8;
@@ -3437,7 +3475,7 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         {
             const uint64_t incoming = offset + above + function->parameters[p].stack_offset;
             valid = valid && incoming <= INT32_MAX;
-            if (!homes[p].is_register && tier0_parameter_in_place(function, p))
+            if (!homes[p].is_register && (object_parameters ? tier0_parameter_in_place(function, p) : kind == BUSTER_ABI_LOCATION_STACK))
             {
                 homes[p].displacement = valid ? (int32_t)incoming : 0;
                 homes[p].reg = X86_REGISTER_RSP;
@@ -3670,8 +3708,10 @@ static void tier0_move(Tier0Writer* writer, uint32_t to, uint32_t from)
 // floating arguments only move down, and xchg has no XMM form), on bitmasks: a move whose destination no
 // other move still reads goes first (the lowest such register); when none is left, the rest are cycles, and an xchg of
 // the lowest destination with its source settles that move, the move that read the destination reading the source
-// instead. A path's move takes a record, and a cycle of n moves n - 1 (its last move becomes a register's own).
-static void tier0_parallel_moves(Tier0Writer* writer, const uint8_t* to, const uint8_t* from, uint32_t count)
+// instead. A path's move takes a record, and a cycle of n moves n - 1 (its last move becomes a register's own). Always
+// inlined, as it was with one caller: every call's moves go through it, and the second caller, an aggregate's XMM moves
+// (tier0_aggregate_moves), would otherwise put a call of it in every call's emission.
+static inline __attribute__((always_inline)) void tier0_parallel_moves(Tier0Writer* writer, const uint8_t* to, const uint8_t* from, uint32_t count)
 {
     uint8_t source_of[32];
     uint8_t reader_of[32];
@@ -3805,27 +3845,50 @@ static void tier0_store_part(Tier0Writer* writer, uint8_t reg, uint32_t bytes, T
     tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), home.reg, home.mode, home.displacement + (int32_t)offset, 0));
 }
 
-// What a call's aggregates need besides its moves (selection's touches): its integer stack's first free register, the
-// general scratch of a copy below 16 bytes (a SPLIT argument's stack part, an aggregate on the stack, a TEMPORARY part's
-// bytes), and its floating stack's, the XMM scratch of a copy from 16 bytes.
-static void tier0_call_scratch(const Tier0Function* function, uint32_t call, bool* general, bool* xmm)
+// The depths each stack reaches, as selection takes them.
+typedef struct Tier0Tops Tier0Tops;
+struct Tier0Tops
 {
-    const uint32_t first = function->call_first[call];
-    *general = false;
-    *xmm = false;
-    for (uint32_t a = 0; a < function->call_argument_counts[call] && function->argument_sizes != 0; a += 1)
+    int32_t integer;
+    int32_t floating;
+};
+
+// What a function's aggregate arguments (argument_sizes) need at their calls besides the moves, both selections' touches,
+// the stacks' tops past `tops`: at a call, its integer stack's first free register, the general scratch of a copy
+// below 16 bytes (a SPLIT argument's stack part, an aggregate on the stack, a TEMPORARY part's bytes), and its floating
+// stack's, the XMM scratch of a copy from 16 bytes. A pass of its own, which the selections make over a function with
+// argument_sizes alone, after their loops over the entries, which then carry nothing for it (every call is deferred, and
+// an unsupported entry fails the compile whatever the depths).
+static Tier0Tops tier0_select_scratch(const Tier0Function* function, const Tier0Entries* entries, Tier0Tops tops)
+{
+    for (uint32_t i = 0; i < function->count; i += 1)
     {
-        const uint32_t size = function->argument_sizes[first + a];
-        const AbiLocation location = function->argument_locations[first + a];
-        Tier0Part parts[2];
-        const uint32_t count = size != 0 ? tier0_location_parts(location, size, parts) : 0;
-        for (uint32_t k = 0; k < count; k += 1)
+        bool general = false;
+        bool xmm = false;
+        if (function->kinds[i] == BUSTER_TYPED_CALL && entries->absorbed[i] == 0)
         {
-            *general |= parts[k].reg == BUSTER_TIER0_PART_STACK || parts[k].load == BUSTER_TIER0_PART_TEMPORARY;
+            const uint32_t call = (uint32_t)function->values[i];
+            const uint32_t first = function->call_first[call];
+            for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+            {
+                const uint32_t size = function->argument_sizes[first + a];
+                const AbiLocation location = function->argument_locations[first + a];
+                Tier0Part parts[2];
+                const uint32_t count = size != 0 ? tier0_location_parts(location, size, parts) : 0;
+                for (uint32_t k = 0; k < count; k += 1)
+                {
+                    general |= parts[k].reg == BUSTER_TIER0_PART_STACK || parts[k].load == BUSTER_TIER0_PART_TEMPORARY;
+                }
+                general |= size != 0 && size < 16 && tier0_aggregate_whole(location);
+                xmm |= size >= 16 && tier0_aggregate_whole(location);
+            }
         }
-        *general |= size != 0 && size < 16 && tier0_aggregate_whole(location);
-        *xmm |= size >= 16 && tier0_aggregate_whole(location);
+        const int32_t depth = entries->depths[i];
+        const int32_t floating = entries->floating_depths[i];
+        tops.integer = general && depth > tops.integer ? depth : tops.integer;
+        tops.floating = xmm && floating > tops.floating ? floating : tops.floating;
     }
+    return tops;
 }
 
 // A call's aggregate argument in registers as tier0_emit_call places it: the register its address is in, its parts and
@@ -3840,125 +3903,128 @@ struct Tier0CallAggregate
     uint8_t holder;
 };
 
-// A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
-// ones moved into place, with an indirect call's callee into r11 (no argument's register, nor al's), al for a variadic
-// call, the call, the result moved to its depth, and the saved depths restored.
-//
-// An aggregate argument (Tier0Function.argument_sizes) is its address: on the stack, its bytes are copied into its slots
-// with the stores; in registers, its parts load from its bytes, after every value they would overwrite has moved:
-//   1. the XMM moves, then the XMM parts from each address where its argument left it (the floating arguments' moves
-//      have no cycles: their sources and destinations both rise with the arguments' order);
-//   2. the general moves at once, with an address that some move or part would overwrite moved first into the register
-//      of its aggregate's last general part, where it waits;
-//   3. each aggregate's general parts, the one in the register that holds its address last.
-// Without XMM parts, the moves of both kinds go at once, as a call without aggregates has them. A TEMPORARY part's bytes
-// go to its red zone temporary with the stores. The copies' scratch registers are each stack's first free one
-// (tier0_call_scratch). A result object (call_result_objects) has its address in rdi for a hidden pointer, or gets the
-// result's registers stored in it after the call.
-static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
-                            Tier0Writer* writer)
+// A call's aggregate arguments (argument_sizes) after its values' stores, before the moves (tier0_emit_call's), each in
+// `aggregates` in the arguments' order: on the stack whole, its bytes copied into its slots; else its parts (none for one
+// ignored), a SPLIT one's stack part copied into its slot and a TEMPORARY one's bytes into its red zone temporary, the
+// copies through each stack's first free register (tier0_select_scratch's). Returns how many there are. Out of line, as
+// tier0_aggregate_moves is: a pass of its own, so that a call's loop over its values carries nothing for them.
+static __attribute__((noinline)) uint32_t tier0_place_aggregates(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, uint32_t arguments_base,
+                                                                 uint32_t floating_below, Tier0CallAggregate* aggregates, Tier0Writer* writer)
 {
     const uint32_t call = (uint32_t)function->values[i];
     const uint32_t first = function->call_first[call];
-    const uint32_t count = function->call_argument_counts[call];
-    const bool indirect = function->call_targets[call] == 0;
-    uint32_t integer_arguments = 0;
-    uint32_t floating_arguments = 0;
-    for (uint32_t a = 0; a < count; a += 1)
-    {
-        const bool floating = tier0_class_floating(function->argument_classes[first + a]);
-        integer_arguments += floating ? 0 : 1;
-        floating_arguments += floating ? 1 : 0;
-    }
-    // An indirect call's callee is at depth `below`, under its arguments, where the result goes.
-    const uint32_t below = entries->depths[i] - integer_arguments - (indirect ? 1 : 0);
-    const uint32_t arguments_base = below + (indirect ? 1 : 0);
-    const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
-    // The depths below the arguments in callee-saved registers survive the call by themselves.
-    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
-    for (uint32_t d = 0; d < saved; d += 1)
-    {
-        tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, false);
-    }
-    for (uint32_t d = 0; d < floating_below; d += 1)
-    {
-        tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), false);
-    }
     const uint8_t general = entries->depths[i] < BUSTER_TIER0_INTEGER_DEPTHS ? tier0_integer_depths[entries->depths[i]] : 0;
     const uint8_t xmm = entries->floating_depths[i];
-    uint8_t to[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
-    uint8_t from[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
-    Tier0CallAggregate aggregates[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
-    uint32_t moves = 0;
-    uint32_t aggregate_count = 0;
+    uint32_t count = 0;
     uint32_t temporaries = 0;
-    // The general registers the moves and the general parts write, and whether a part goes in an XMM register.
-    uint32_t written = indirect ? 1u << X86_REGISTER_R11 : 0;
-    bool xmm_parts = false;
     uint32_t integer = 0;
     uint32_t floating = 0;
-    for (uint32_t a = 0; a < count; a += 1)
+    for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
     {
-        const uint32_t class = function->argument_classes[first + a];
+        const uint32_t size = function->argument_sizes[first + a];
         const AbiLocation location = function->argument_locations[first + a];
-        const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
-        const bool is_floating = tier0_class_floating(class);
-        const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[arguments_base + integer];
+        const bool is_floating = tier0_class_floating(function->argument_classes[first + a]);
+        const uint8_t source = (uint8_t)(is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[arguments_base + integer]);
         integer += is_floating ? 0 : 1;
         floating += is_floating ? 1 : 0;
-        if (size == 0)
+        if (size != 0)
         {
-            tier0_extend(writer, class, source);
-            if (location.kind == BUSTER_ABI_LOCATION_STACK)
+            Tier0CallAggregate* aggregate = &aggregates[count];
+            count += 1;
+            aggregate->source = source;
+            aggregate->holder = source;
+            aggregate->count = tier0_aggregate_whole(location) ? 0 : (uint8_t)tier0_location_parts(location, size, aggregate->parts);
+            if (tier0_aggregate_whole(location))
             {
-                const uint32_t form = is_floating ? (class == BUSTER_TYPED_CLASS_F32 ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X) : X86_FORM_MOV_RM64_R64;
-                tier0_put(writer, tier0_instruction(form, (uint8_t)(source & 15), X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)location.stack_offset, 0));
+                tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, 0, size, general, xmm);
             }
-            else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS)
-            {
-                to[moves] = tier0_abi_register(location.registers[0]);
-                from[moves] = (uint8_t)source;
-                written |= to[moves] < 16 ? 1u << to[moves] : 0;
-                moves += 1;
-            }
-        }
-        else if (tier0_aggregate_whole(location))
-        {
-            tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, (uint8_t)source, 0, size, general, xmm);
-        }
-        else if (location.kind != BUSTER_ABI_LOCATION_IGNORE)
-        {
-            Tier0CallAggregate* aggregate = &aggregates[aggregate_count];
-            aggregate_count += 1;
-            aggregate->source = (uint8_t)source;
-            aggregate->holder = (uint8_t)source;
-            aggregate->count = (uint8_t)tier0_location_parts(location, size, aggregate->parts);
             for (uint32_t k = 0; k < aggregate->count; k += 1)
             {
                 const Tier0Part part = aggregate->parts[k];
                 aggregate->temporaries[k] = (uint8_t)temporaries;
                 if (part.reg == BUSTER_TIER0_PART_STACK)
                 {
-                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, (uint8_t)source, part.offset, part.bytes, general, xmm);
+                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, part.offset, part.bytes, general, xmm);
                 }
-                else
+                else if (part.load == BUSTER_TIER0_PART_TEMPORARY)
                 {
-                    if (part.load == BUSTER_TIER0_PART_TEMPORARY)
-                    {
-                        tier0_copy(writer, X86_REGISTER_RSP, tier0_temporary(temporaries), (uint8_t)source, part.offset, part.bytes, general, xmm);
-                        temporaries += 1;
-                    }
-                    written |= part.reg < 16 ? 1u << part.reg : 0;
-                    xmm_parts |= part.reg >= 16;
+                    tier0_copy(writer, X86_REGISTER_RSP, tier0_temporary(temporaries), source, part.offset, part.bytes, general, xmm);
+                    temporaries += 1;
                 }
             }
         }
     }
-    if (indirect)
+    return count;
+}
+
+// How many records tier0_place_aggregates and the loads after the moves write for an aggregate argument of `size` bytes
+// at `location` (tier0_count_deferred's): a copy on the stack whole, and per part a stack part's copy, a TEMPORARY one's
+// copy and load, or its loads; with the last of its general parts' registers in *own (BUSTER_TIER0_PART_STACK for none)
+// and the set of them in *own_set.
+static uint32_t tier0_aggregate_records(AbiLocation location, uint32_t size, uint8_t* own, uint32_t* own_set)
+{
+    Tier0Part parts[2];
+    const bool whole = tier0_aggregate_whole(location);
+    const uint32_t part_count = whole ? 0 : tier0_location_parts(location, size, parts);
+    uint32_t count = whole ? tier0_copy_records(size) : 0;
+    *own = BUSTER_TIER0_PART_STACK;
+    *own_set = 0;
+    for (uint32_t k = 0; k < part_count; k += 1)
     {
-        to[moves] = X86_REGISTER_R11;
-        from[moves] = tier0_integer_depths[below];
-        moves += 1;
+        const Tier0Part part = parts[k];
+        const bool general = part.reg < 16;
+        count += part.reg == BUSTER_TIER0_PART_STACK ? tier0_copy_records(part.bytes)
+               : part.load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(part.bytes) + 1 : tier0_part_records(part);
+        *own = general ? part.reg : *own;
+        *own_set |= general ? 1u << part.reg : 0;
+    }
+    return count;
+}
+
+// The records a call's result object takes after its moves (tier0_emit_call's): the lea of its address into rdi for a
+// hidden pointer, or a store per register of a result in registers.
+static uint32_t tier0_result_object_records(AbiReturn returned)
+{
+    const uint32_t stores = (returned.registers[0] != BUSTER_ABI_REGISTER_NONE ? 1u : 0u) + (returned.registers[1] != BUSTER_ABI_REGISTER_NONE ? 1u : 0u);
+    return returned.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : returned.kind == BUSTER_ABI_RESULT_REGISTERS ? stores : 0;
+}
+
+// The general registers a call's argument setup writes (tier0_emit_call's): each value's in a register, each aggregate's
+// general parts' and an indirect call's r11. Only an aggregate's address in registers asks, so a call with one alone.
+static uint32_t tier0_call_written(const Tier0Function* function, uint32_t call)
+{
+    const uint32_t first = function->call_first[call];
+    uint32_t written = function->call_targets[call] == 0 ? 1u << X86_REGISTER_R11 : 0;
+    for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+    {
+        const uint32_t size = function->argument_sizes[first + a];
+        const AbiLocation location = function->argument_locations[first + a];
+        const uint8_t destination = tier0_abi_register(location.registers[0]);
+        written |= size == 0 && location.kind == BUSTER_ABI_LOCATION_REGISTERS && destination < 16 ? 1u << destination : 0;
+        Tier0Part parts[2];
+        const uint32_t count = size != 0 ? tier0_location_parts(location, size, parts) : 0;
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            written |= parts[k].reg < 16 ? 1u << parts[k].reg : 0;
+        }
+    }
+    return written;
+}
+
+// A call's moves around its aggregates' parts in registers, tier0_emit_call's steps 1 and 2: with XMM parts, the XMM
+// moves, then the XMM parts, leaving the general moves in `to` and `from`; then each address that a move or a general
+// part would overwrite moved first into the register that holds it while its general parts load (its `holder`), with
+// the general moves. Returns how many moves are left.
+static __attribute__((noinline)) uint32_t tier0_aggregate_moves(const Tier0Function* function, uint32_t call, Tier0CallAggregate* aggregates, uint32_t aggregate_count,
+                                                                uint8_t* to, uint8_t* from, uint32_t moves, Tier0Writer* writer)
+{
+    bool xmm_parts = false;
+    for (uint32_t g = 0; g < aggregate_count; g += 1)
+    {
+        for (uint32_t k = 0; k < aggregates[g].count; k += 1)
+        {
+            xmm_parts |= aggregates[g].parts[k].reg != BUSTER_TIER0_PART_STACK && aggregates[g].parts[k].reg >= 16;
+        }
     }
     if (xmm_parts)
     {
@@ -3989,8 +4055,9 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
             }
         }
     }
-    // An address that a move or a general part would overwrite waits in its aggregate's last general part's register
-    // (its own, unless it is in another of its parts' already), which loads last.
+    // An address waits in its aggregate's last general part's register (its own, unless it is in another of its parts'
+    // already), which loads last.
+    const uint32_t written = tier0_call_written(function, call);
     for (uint32_t g = 0; g < aggregate_count; g += 1)
     {
         Tier0CallAggregate* aggregate = &aggregates[g];
@@ -4010,10 +4077,99 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
             moves += aggregate->holder != aggregate->source ? 1 : 0;
         }
     }
+    return moves;
+}
+
+// A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
+// ones moved into place, with an indirect call's callee into r11 (no argument's register, nor al's), al for a variadic
+// call, the call, the result moved to its depth, and the saved depths restored.
+//
+// An aggregate argument (Tier0Function.argument_sizes) is its address: on the stack, its bytes are copied into its slots
+// after the values' stores; in registers, its parts load from its bytes, after every value they would overwrite has
+// moved:
+//   1. the XMM moves, then the XMM parts from each address where its argument left it (the floating arguments' moves
+//      have no cycles: their sources and destinations both rise with the arguments' order);
+//   2. the general moves at once, with an address that some move or part would overwrite moved first into the register
+//      of its aggregate's last general part, where it waits;
+//   3. each aggregate's general parts, the one in the register that holds its address last.
+// Without XMM parts, the moves of both kinds go at once, as a call without aggregates has them. A TEMPORARY part's bytes
+// go to its red zone temporary with the copies (tier0_place_aggregates). The copies' scratch registers are each stack's
+// first free one (tier0_select_scratch). A result object (call_result_objects) has its address in rdi for a hidden
+// pointer, or gets the result's registers stored in it after the call. `sized` says whether the function has
+// argument_sizes: a constant at each of tier0_emit_deferred's two uses, so that a function without aggregate arguments
+// has its calls' loops over the values without a look at their sizes.
+static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                                  const Tier0Home* homes, uint32_t i, bool sized, Tier0Writer* writer)
+{
+    const uint32_t call = (uint32_t)function->values[i];
+    const uint32_t first = function->call_first[call];
+    const uint32_t count = function->call_argument_counts[call];
+    const bool indirect = function->call_targets[call] == 0;
+    uint32_t integer_arguments = 0;
+    uint32_t floating_arguments = 0;
+    for (uint32_t a = 0; a < count; a += 1)
+    {
+        const bool floating = tier0_class_floating(function->argument_classes[first + a]);
+        integer_arguments += floating ? 0 : 1;
+        floating_arguments += floating ? 1 : 0;
+    }
+    // An indirect call's callee is at depth `below`, under its arguments, where the result goes.
+    const uint32_t below = entries->depths[i] - integer_arguments - (indirect ? 1 : 0);
+    const uint32_t arguments_base = below + (indirect ? 1 : 0);
+    const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
+    // The depths below the arguments in callee-saved registers survive the call by themselves.
+    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+    for (uint32_t d = 0; d < saved; d += 1)
+    {
+        tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, false);
+    }
+    for (uint32_t d = 0; d < floating_below; d += 1)
+    {
+        tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), false);
+    }
+    uint8_t to[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
+    uint8_t from[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
+    uint32_t moves = 0;
+    uint32_t integer = 0;
+    uint32_t floating = 0;
+    for (uint32_t a = 0; a < count; a += 1)
+    {
+        const uint32_t class = function->argument_classes[first + a];
+        const AbiLocation location = function->argument_locations[first + a];
+        const bool value = !sized || function->argument_sizes[first + a] == 0;
+        const bool is_floating = tier0_class_floating(class);
+        const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[arguments_base + integer];
+        integer += is_floating ? 0 : 1;
+        floating += is_floating ? 1 : 0;
+        if (value)
+        {
+            tier0_extend(writer, class, source);
+            if (location.kind == BUSTER_ABI_LOCATION_STACK)
+            {
+                const uint32_t form = is_floating ? (class == BUSTER_TYPED_CLASS_F32 ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X) : X86_FORM_MOV_RM64_R64;
+                tier0_put(writer, tier0_instruction(form, (uint8_t)(source & 15), X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)location.stack_offset, 0));
+            }
+            else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS)
+            {
+                to[moves] = tier0_abi_register(location.registers[0]);
+                from[moves] = (uint8_t)source;
+                moves += 1;
+            }
+        }
+    }
+    if (indirect)
+    {
+        to[moves] = X86_REGISTER_R11;
+        from[moves] = tier0_integer_depths[below];
+        moves += 1;
+    }
+    Tier0CallAggregate placed[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+    const uint32_t aggregate_count = sized ? tier0_place_aggregates(function, entries, i, arguments_base, floating_below, placed, writer) : 0;
+    moves = aggregate_count != 0 ? tier0_aggregate_moves(function, call, placed, aggregate_count, to, from, moves, writer) : moves;
     tier0_parallel_moves(writer, to, from, moves);
     for (uint32_t g = 0; g < aggregate_count; g += 1)
     {
-        const Tier0CallAggregate* aggregate = &aggregates[g];
+        const Tier0CallAggregate* aggregate = &placed[g];
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             for (uint32_t k = 0; k < aggregate->count; k += 1)
@@ -4244,9 +4400,13 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
                                 Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
-    if (kind == BUSTER_TYPED_CALL)
+    if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
     {
-        tier0_emit_call(function, entries, frame, homes, i, writer);
+        tier0_emit_call(function, entries, frame, homes, i, true, writer);
+    }
+    else if (kind == BUSTER_TYPED_CALL)
+    {
+        tier0_emit_call(function, entries, frame, homes, i, false, writer);
     }
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
@@ -4266,6 +4426,117 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
     }
 }
 
+// How many records a call takes, and its reference (tier0_count_deferred's). `sized` says whether the function has
+// argument_sizes, as tier0_emit_call's does: a constant at each of tier0_count_deferred's two uses.
+static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, bool sized,
+                                                                       uint32_t* references)
+{
+    uint32_t count = 0;
+    const uint32_t call = (uint32_t)function->values[i];
+    const uint32_t first = function->call_first[call];
+    const uint32_t arguments = function->call_argument_counts[call];
+    // One pass from the last argument back: an argument's register is its stack's depth less the arguments of its
+    // stack after it, so the counts before it aren't needed first. An indirect call's callee is past the first. An
+    // aggregate's copies and loads are counted by its parts (tier0_aggregate_records); the addresses that wait for
+    // their general parts in a register of their own (tier0_emit_call's) are known once every register the call
+    // writes is (tier0_call_written).
+    const bool indirect = function->call_targets[call] == 0;
+    uint8_t to[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
+    uint8_t from[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
+    uint8_t addresses[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+    uint8_t owns[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+    uint32_t own_sets[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+    uint32_t moves = 0;
+    uint32_t aggregate_count = 0;
+    uint32_t integer_after = 0;
+    uint32_t floating_after = 0;
+    const uint32_t depth = entries->depths[i];
+    const uint32_t floating_depth = entries->floating_depths[i];
+    for (uint32_t a = arguments; a > 0; a -= 1)
+    {
+        const uint32_t class = function->argument_classes[first + a - 1];
+        const AbiLocation location = function->argument_locations[first + a - 1];
+        const uint32_t size = sized ? function->argument_sizes[first + a - 1] : 0;
+        const bool is_floating = tier0_class_floating(class);
+        const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_depth - 1 - floating_after) : tier0_integer_depths[depth - 1 - integer_after];
+        integer_after += is_floating ? 0 : 1;
+        floating_after += is_floating ? 1 : 0;
+        if (size == 0)
+        {
+            count += tier0_class_integer(class) && tier0_class_bytes(class) < 4 ? 1 : 0;
+            const uint8_t destination = tier0_abi_register(location.registers[0]);
+            to[moves] = destination;
+            from[moves] = (uint8_t)source;
+            moves += location.kind == BUSTER_ABI_LOCATION_REGISTERS && destination != source ? 1 : 0;
+            count += location.kind == BUSTER_ABI_LOCATION_STACK ? 1 : 0;
+        }
+        else
+        {
+            count += tier0_aggregate_records(location, size, &owns[aggregate_count], &own_sets[aggregate_count]);
+            addresses[aggregate_count] = (uint8_t)source;
+            aggregate_count += 1;
+        }
+    }
+    const uint32_t written = aggregate_count != 0 ? tier0_call_written(function, call) : 0;
+    for (uint32_t g = 0; g < aggregate_count; g += 1)
+    {
+        const bool waits = owns[g] != BUSTER_TIER0_PART_STACK && (written >> addresses[g] & 1) != 0 && (own_sets[g] >> addresses[g] & 1) == 0;
+        to[moves] = owns[g];
+        from[moves] = addresses[g];
+        moves += waits ? 1 : 0;
+    }
+    const uint32_t below = depth - integer_after - (indirect ? 1 : 0);
+    // (A direct call's `below` may be past the table: no move reads it then.)
+    const uint8_t callee = indirect ? tier0_integer_depths[below] : X86_REGISTER_R11;
+    to[moves] = X86_REGISTER_R11;
+    from[moves] = callee;
+    moves += callee != X86_REGISTER_R11 ? 1 : 0;
+    const uint32_t floating_below = floating_depth - floating_after;
+    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+    count += 2 * (saved + floating_below);
+    // The cycles among the moves, as tier0_parallel_moves finds them: the paths' moves taken away, what is left.
+    uint8_t source_of[32];
+    uint32_t pending = 0;
+    uint32_t sources = 0;
+    for (uint32_t k = 0; k < moves; k += 1)
+    {
+        source_of[to[k]] = from[k];
+        pending |= 1u << to[k];
+        sources |= 1u << from[k];
+    }
+    uint32_t ready = pending & ~sources;
+    while (ready != 0)
+    {
+        const uint32_t destination = (uint32_t)__builtin_ctz(ready);
+        pending &= ~(1u << destination);
+        sources &= ~(1u << source_of[destination]);
+        ready = pending & ~sources;
+    }
+    uint32_t cycles = 0;
+    while (pending != 0)
+    {
+        uint32_t at = (uint32_t)__builtin_ctz(pending);
+        cycles += 1;
+        while ((pending >> at & 1) != 0)
+        {
+            pending &= ~(1u << at);
+            at = source_of[at];
+        }
+    }
+    count += moves - cycles;
+    count += function->call_variadic[call] ? 1 : 0;
+    count += 1;
+    // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
+    // take the result's move's place.
+    const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
+    const bool stored = object != 0 && function->calls[call].result.kind == BUSTER_ABI_RESULT_REGISTERS;
+    count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
+    const uint32_t result = tier0_stack(function->classes[i]);
+    count += !stored && ((result == 1 && below != 0) || (result == 2 && floating_below != 0)) ? 1 : 0;
+    *references += indirect ? 0 : 1;
+    return count;
+}
+
 // How many records a deferred entry takes (and references: a call's one), counted from what its emitter decides rather
 // than by running it: the vector path's measuring. Each term mirrors its emitter's step: a call's saves and restores,
 // argument extensions, stack stores, its register moves (one per move but the last of each cycle, which the xchg
@@ -4276,128 +4547,13 @@ static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0E
 {
     const uint32_t kind = entries->key_kinds[i];
     uint32_t count = 0;
-    if (kind == BUSTER_TYPED_CALL)
+    if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
     {
-        const uint32_t call = (uint32_t)function->values[i];
-        const uint32_t first = function->call_first[call];
-        const uint32_t arguments = function->call_argument_counts[call];
-        // One pass from the last argument back: an argument's register is its stack's depth less the arguments of its
-        // stack after it, so the counts before it aren't needed first. An indirect call's callee is past the first. An
-        // aggregate's copies and loads are counted by its parts; the addresses that wait for their general parts in a
-        // register of their own (tier0_emit_call's) are known once every register the call writes is.
-        const bool indirect = function->call_targets[call] == 0;
-        uint8_t to[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
-        uint8_t from[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
-        uint8_t addresses[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
-        uint8_t owns[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
-        uint32_t own_sets[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
-        uint32_t moves = 0;
-        uint32_t aggregates = 0;
-        uint32_t written = indirect ? 1u << X86_REGISTER_R11 : 0;
-        uint32_t integer_after = 0;
-        uint32_t floating_after = 0;
-        const uint32_t depth = entries->depths[i];
-        const uint32_t floating_depth = entries->floating_depths[i];
-        for (uint32_t a = arguments; a > 0; a -= 1)
-        {
-            const uint32_t class = function->argument_classes[first + a - 1];
-            const AbiLocation location = function->argument_locations[first + a - 1];
-            const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a - 1] : 0;
-            const bool is_floating = tier0_class_floating(class);
-            const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_depth - 1 - floating_after) : tier0_integer_depths[depth - 1 - integer_after];
-            integer_after += is_floating ? 0 : 1;
-            floating_after += is_floating ? 1 : 0;
-            if (size == 0)
-            {
-                count += tier0_class_integer(class) && tier0_class_bytes(class) < 4 ? 1 : 0;
-                const uint8_t destination = tier0_abi_register(location.registers[0]);
-                const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS;
-                to[moves] = destination;
-                from[moves] = (uint8_t)source;
-                moves += registers && destination != source ? 1 : 0;
-                written |= registers && destination < 16 ? 1u << destination : 0;
-                count += location.kind == BUSTER_ABI_LOCATION_STACK ? 1 : 0;
-            }
-            else if (tier0_aggregate_whole(location))
-            {
-                count += tier0_copy_records(size);
-            }
-            else if (location.kind != BUSTER_ABI_LOCATION_IGNORE)
-            {
-                Tier0Part parts[2];
-                const uint32_t part_count = tier0_location_parts(location, size, parts);
-                addresses[aggregates] = (uint8_t)source;
-                owns[aggregates] = BUSTER_TIER0_PART_STACK;
-                own_sets[aggregates] = 0;
-                for (uint32_t k = 0; k < part_count; k += 1)
-                {
-                    const Tier0Part part = parts[k];
-                    const bool general = part.reg < 16;
-                    count += part.reg == BUSTER_TIER0_PART_STACK ? tier0_copy_records(part.bytes)
-                           : part.load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(part.bytes) + 1 : tier0_part_records(part);
-                    written |= general ? 1u << part.reg : 0;
-                    owns[aggregates] = general ? part.reg : owns[aggregates];
-                    own_sets[aggregates] |= general ? 1u << part.reg : 0;
-                }
-                aggregates += 1;
-            }
-        }
-        for (uint32_t g = 0; g < aggregates; g += 1)
-        {
-            const bool waits = owns[g] != BUSTER_TIER0_PART_STACK && (written >> addresses[g] & 1) != 0 && (own_sets[g] >> addresses[g] & 1) == 0;
-            to[moves] = owns[g];
-            from[moves] = addresses[g];
-            moves += waits ? 1 : 0;
-        }
-        const uint32_t below = depth - integer_after - (indirect ? 1 : 0);
-        // (A direct call's `below` may be past the table: no move reads it then.)
-        const uint8_t callee = indirect ? tier0_integer_depths[below] : X86_REGISTER_R11;
-        to[moves] = X86_REGISTER_R11;
-        from[moves] = callee;
-        moves += callee != X86_REGISTER_R11 ? 1 : 0;
-        const uint32_t floating_below = floating_depth - floating_after;
-        const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
-        count += 2 * (saved + floating_below);
-        // The cycles among the moves, as tier0_parallel_moves finds them: the paths' moves taken away, what is left.
-        uint8_t source_of[32];
-        uint32_t pending = 0;
-        uint32_t sources = 0;
-        for (uint32_t k = 0; k < moves; k += 1)
-        {
-            source_of[to[k]] = from[k];
-            pending |= 1u << to[k];
-            sources |= 1u << from[k];
-        }
-        uint32_t ready = pending & ~sources;
-        while (ready != 0)
-        {
-            const uint32_t destination = (uint32_t)__builtin_ctz(ready);
-            pending &= ~(1u << destination);
-            sources &= ~(1u << source_of[destination]);
-            ready = pending & ~sources;
-        }
-        uint32_t cycles = 0;
-        while (pending != 0)
-        {
-            uint32_t at = (uint32_t)__builtin_ctz(pending);
-            cycles += 1;
-            while ((pending >> at & 1) != 0)
-            {
-                pending &= ~(1u << at);
-                at = source_of[at];
-            }
-        }
-        count += moves - cycles;
-        count += function->call_variadic[call] ? 1 : 0;
-        count += 1;
-        // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers.
-        const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
-        const AbiReturn returned = function->calls[call].result;
-        const uint32_t stores = (returned.registers[0] != BUSTER_ABI_REGISTER_NONE ? 1u : 0u) + (returned.registers[1] != BUSTER_ABI_REGISTER_NONE ? 1u : 0u);
-        count += object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : 0;
-        const uint32_t result = tier0_stack(function->classes[i]);
-        count += object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS ? stores : (result == 1 && below != 0) || (result == 2 && floating_below != 0) ? 1 : 0;
-        *references += indirect ? 0 : 1;
+        count = tier0_count_call(function, entries, i, true, references);
+    }
+    else if (kind == BUSTER_TYPED_CALL)
+    {
+        count = tier0_count_call(function, entries, i, false, references);
     }
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
@@ -4472,24 +4628,27 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     // keep as its home (tier0_parameter_in_place) are copied there, through rax and xmm15, which no parameter arrives in
     // and no move to a home has written yet: a part's slot whole, or the slots of one on the stack whole.
     const uint32_t above = 8 * frame->pushes + 8;
-    for (uint32_t p = 0; p < function->parameter_count; p += 1)
+    const bool objects = frame->object_parameters;
+    for (uint32_t p = 0; p < function->parameter_count && objects; p += 1)
     {
-        const AbiLocation location = function->parameters[p];
-        const bool object = tier0_is_object(function, p) && references[p] != 0;
-        const int32_t incoming = (int32_t)(frame->size + above + location.stack_offset);
-        Tier0Part parts[2];
-        const uint32_t count = object ? tier0_location_parts(location, function->local_sizes[p], parts) : 0;
-        for (uint32_t k = 0; k < count; k += 1)
+        if (tier0_is_object(function, p) && references[p] != 0)
         {
-            if (parts[k].reg == BUSTER_TIER0_PART_STACK)
+            const AbiLocation location = function->parameters[p];
+            const int32_t incoming = (int32_t)(frame->size + above + location.stack_offset);
+            Tier0Part parts[2];
+            const uint32_t count = tier0_location_parts(location, function->local_sizes[p], parts);
+            for (uint32_t k = 0; k < count; k += 1)
             {
-                tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, incoming, 0));
-                tier0_store_part(writer, X86_REGISTER_RAX, 8, homes[p], parts[k].offset);
+                if (parts[k].reg == BUSTER_TIER0_PART_STACK)
+                {
+                    tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, incoming, 0));
+                    tier0_store_part(writer, X86_REGISTER_RAX, 8, homes[p], parts[k].offset);
+                }
             }
-        }
-        if (object && tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p))
-        {
-            tier0_copy(writer, homes[p].reg, homes[p].displacement, X86_REGISTER_RSP, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15);
+            if (tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p))
+            {
+                tier0_copy(writer, homes[p].reg, homes[p].displacement, X86_REGISTER_RSP, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15);
+            }
         }
     }
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -4497,7 +4656,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
         const AbiLocation location = function->parameters[p];
         const uint32_t class = function->local_classes[p];
         const bool address_taken = (function->local_flags[p] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
-        if (tier0_is_object(function, p))
+        if (objects && tier0_is_object(function, p))
         {
             Tier0Part parts[2];
             const uint32_t count = references[p] != 0 ? tier0_location_parts(location, function->local_sizes[p], parts) : 0;
@@ -4539,38 +4698,43 @@ static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0F
 {
     uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + (frame->size != 0 ? 1 : 0);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
+    const bool objects = frame->object_parameters;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
     {
         const AbiLocation location = function->parameters[p];
         const bool address_taken = (function->local_flags[p] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
-        const bool object = tier0_is_object(function, p);
-        const bool arrives = !object && location.kind == BUSTER_ABI_LOCATION_REGISTERS && (references[p] != 0 || address_taken);
+        const bool value = !objects || !tier0_is_object(function, p);
+        const bool arrives = value && location.kind == BUSTER_ABI_LOCATION_REGISTERS && (references[p] != 0 || address_taken);
         const bool stays = homes[p].is_register && homes[p].reg == (location.registers[0] & 0x1f);
-        count += !object && location.kind == BUSTER_ABI_LOCATION_STACK && homes[p].is_register ? 1 : 0;
+        count += value && location.kind == BUSTER_ABI_LOCATION_STACK && homes[p].is_register ? 1 : 0;
         count += arrives && !stays ? 1 : 0;
-        // An aggregate's: a store per part in a register, a load and a store for its part in a stack slot, and the copy of
-        // its slots when it doesn't keep them.
-        Tier0Part parts[2];
-        const uint32_t part_count = object && references[p] != 0 ? tier0_location_parts(location, function->local_sizes[p], parts) : 0;
-        for (uint32_t k = 0; k < part_count; k += 1)
+    }
+    // An aggregate's: a store per part in a register, a load and a store for its part in a stack slot, and the copy of its
+    // slots when it doesn't keep them.
+    for (uint32_t p = 0; p < function->parameter_count && objects; p += 1)
+    {
+        if (tier0_is_object(function, p) && references[p] != 0)
         {
-            count += parts[k].reg == BUSTER_TIER0_PART_STACK ? 2 : 1;
+            const AbiLocation location = function->parameters[p];
+            Tier0Part parts[2];
+            const uint32_t part_count = tier0_location_parts(location, function->local_sizes[p], parts);
+            for (uint32_t k = 0; k < part_count; k += 1)
+            {
+                count += parts[k].reg == BUSTER_TIER0_PART_STACK ? 2 : 1;
+            }
+            count += tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p) ? tier0_copy_records(function->local_sizes[p]) : 0;
         }
-        const bool copied = object && references[p] != 0 && tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p);
-        count += copied ? tier0_copy_records(function->local_sizes[p]) : 0;
     }
     return count;
 }
 
-// The epilogue: an aggregate result's registers (result_size) loaded from the address its RETURN leaves in rax, while the
-// frame they may be in (and what the body allocated) is still there: the TEMPORARY parts' bytes copied to their red zone
-// temporaries through rcx (no result register), the parts in other registers than rax, then rax's. Then the frame
-// released (with a frame pointer, rsp back from rbp, past what the body allocated), the saved registers popped (and rbp
-// last), ret.
-static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame* frame, Tier0Writer* writer)
+// An aggregate result's registers (result_size) loaded from the address its RETURN leaves in rax (tier0_emit_epilogue's):
+// the TEMPORARY parts' bytes copied to their red zone temporaries through rcx (no result register), the parts in other
+// registers than rax, then rax's. Out of line: a function returning an aggregate in registers alone has them.
+static __attribute__((noinline)) void tier0_load_result(const Tier0Function* function, Tier0Writer* writer)
 {
     Tier0Part parts[2];
-    const uint32_t count = function->result_size != 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
+    const uint32_t count = tier0_result_parts(function->result, function->result_size, parts);
     for (uint32_t k = 0; k < count; k += 1)
     {
         if (parts[k].load == BUSTER_TIER0_PART_TEMPORARY)
@@ -4587,6 +4751,30 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
                 tier0_load_part(writer, parts[k], X86_REGISTER_RAX, k);
             }
         }
+    }
+}
+
+// How many records tier0_load_result writes: each part's loads, and a TEMPORARY one's copy. Out of line, as it is.
+static __attribute__((noinline)) uint32_t tier0_result_records(const Tier0Function* function)
+{
+    Tier0Part parts[2];
+    const uint32_t count = tier0_result_parts(function->result, function->result_size, parts);
+    uint32_t records = 0;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        records += tier0_part_records(parts[k]) + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(parts[k].bytes) : 0);
+    }
+    return records;
+}
+
+// The epilogue: an aggregate result's registers loaded (tier0_load_result) while the frame they may be in (and what the
+// body allocated) is still there; then the frame released (with a frame pointer, rsp back from rbp, past what the body
+// allocated), the saved registers popped (and rbp last), ret.
+static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame* frame, Tier0Writer* writer)
+{
+    if (function->result_size != 0)
+    {
+        tier0_load_result(function, writer);
     }
     if (frame->pointer)
     {
@@ -4613,18 +4801,12 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     tier0_put(writer, tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0));
 }
 
-// How many records tier0_emit_epilogue writes, without writing them: the result's loads (a TEMPORARY part's copy too),
-// the frame's release (an add, or with a frame pointer the lea or mov), the pops and the ret.
+// How many records tier0_emit_epilogue writes, without writing them: the result's loads (tier0_result_records), the
+// frame's release (an add, or with a frame pointer the lea or mov), the pops and the ret.
 static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0Frame* frame)
 {
-    Tier0Part parts[2];
-    const uint32_t count = function->result_size != 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
-    uint32_t records = (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes + 1;
-    for (uint32_t k = 0; k < count; k += 1)
-    {
-        records += tier0_part_records(parts[k]) + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(parts[k].bytes) : 0);
-    }
-    return records;
+    const uint32_t records = (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes + 1;
+    return records + (function->result_size != 0 ? tier0_result_records(function) : 0);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -4701,12 +4883,6 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
                     const uint32_t result = tier0_stack(function->classes[i]);
                     integer_top = result == 1 && below > integer_top ? below : integer_top;
                     floating_top = result == 2 && floating_below > floating_top ? floating_below : floating_top;
-                    // An aggregate's copies take each stack's first free register.
-                    bool general_scratch = false;
-                    bool xmm_scratch = false;
-                    tier0_call_scratch(function, call, &general_scratch, &xmm_scratch);
-                    integer_top = general_scratch && depth > integer_top ? depth : integer_top;
-                    floating_top = xmm_scratch && floating > floating_top ? floating : floating_top;
                     clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
                     calls = true;
                 }
@@ -4733,6 +4909,13 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
             }
         }
         entries->templates[i] = entry;
+    }
+    // An aggregate's copies take each stack's first free register.
+    if (function->argument_sizes != 0)
+    {
+        const Tier0Tops tops = tier0_select_scratch(function, entries, (Tier0Tops){ integer_top, floating_top });
+        integer_top = tops.integer;
+        floating_top = tops.floating;
     }
     *error = integer_top >= tier0_integer_depth_count(pointer) || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_top;
@@ -5033,6 +5216,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         {
             tier0_count_references(function, references);
         }
+        frame.object_parameters = tier0_object_parameters(function);
         tier0_assign_homes(function, &frame, homes, references, order, vector);
         error = tier0_layout_frame(function, &frame, homes, references, vector) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
     }
@@ -5241,7 +5425,7 @@ static Tier0Check tier0_validate(const Tier0Function* function)
     {
         tier0_reject(&validator, 0, "more entries or locals than Tier 0 takes, or more parameters than locals");
     }
-    else if (!tier0_frame_input_valid(function))
+    else if (!tier0_frame_input_valid(function) || !tier0_calls_valid(function))
     {
         tier0_reject(&validator, 0, "invalid incoming variadic metadata, address-only local role, call location or aggregate metadata");
     }
@@ -6451,11 +6635,6 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
                 const uint32_t result = tier0_stack(function->classes[i]);
                 deferred_integer_top = result == 1 && below > deferred_integer_top ? below : deferred_integer_top;
                 deferred_floating_top = result == 2 && floating_below > deferred_floating_top ? floating_below : deferred_floating_top;
-                bool general_scratch = false;
-                bool xmm_scratch = false;
-                tier0_call_scratch(function, call, &general_scratch, &xmm_scratch);
-                deferred_integer_top = general_scratch && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
-                deferred_floating_top = xmm_scratch && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
                 clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
                 calls = true;
             }
@@ -6482,6 +6661,12 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
     for (uint32_t i = 0; i < count && any_unsupported != 0 && unsupported == count; i += 1)
     {
         unsupported = (words[i] & BUSTER_TIER0_WORD_UNSUPPORTED) != 0 ? i : count;
+    }
+    if (function->argument_sizes != 0)
+    {
+        const Tier0Tops tops = tier0_select_scratch(function, entries, (Tier0Tops){ deferred_integer_top, deferred_floating_top });
+        deferred_integer_top = tops.integer;
+        deferred_floating_top = tops.floating;
     }
     const bool rdx = (_mm512_reduce_or_epi64(kept_words) & BUSTER_TIER0_WORD_CLOBBERS_RDX) != 0;
     const int64_t vector_integer_top = _mm512_reduce_max_epi64(integer_top);
