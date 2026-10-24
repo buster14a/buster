@@ -37,8 +37,8 @@ and `dynamic.c`). An empty archive (glibc's `libpthread.a`, `libdl.a` and
 `librt.a`) adds nothing; one with members is refused by name, since the direct
 path doesn't link archives yet. A call of a function that a system header
 declares and no linked library has gets a named error that points at `-l`
-(`-lm` for libm's). A read or write of the C library's data (which needs the
-GOT) is refused by name; `-c` and a system linker take it.
+(`-lm` for libm's). A library's data, the C library's or a named library's,
+is reached through its GOT slot (the access column, below).
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check

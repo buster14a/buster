@@ -240,14 +240,16 @@ static bool check_test_driver_needed(const char* path, char* names, uint64_t cap
     return valid;
 }
 
-// The direct path's -l libraries, through the production command (#145): a program that calls libm's functions, and
-// takes one's address, linked with -lm by both paths into the same bytes, that runs and prints what this executable's
-// own libm computes, needing libm.so.6 before libc.so.6; one that calls none, with -lm, needing libc.so.6 alone; and the
-// refusals, each named: no -lm, a library no directory has, and an archive with members.
+// The direct path's -l libraries, through the production command (#145): a program that calls libm's functions, takes
+// one's address and reads libm's signgam (data, through its GOT slot), linked with -lm by both paths into the same bytes,
+// that runs and prints what this executable's own libm computes, needing libm.so.6 before libc.so.6; one that calls
+// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm, a library no directory has, and an
+// archive with members.
 static void check_test_driver_libraries(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "#include <math.h>\n#include <stdio.h>\ndouble (*pick)(double) = cos;\n"
-                                  "int main(void) { printf(\"%f %f %f %f\\n\", sin(2), sqrt(2.0), pow(2.0, 10.0), pick(0.5)); return 0; }\n";
+                                  "int main(void) { double logarithm = lgamma(-0.5); printf(\"%f %f %f %f %f %d\\n\", sin(2), sqrt(2.0), pow(2.0, 10.0), "
+                                  "pick(0.5), logarithm, signgam); return 0; }\n";
     static const char plain[] = "int puts(const char*);\nint main(void) { puts(\"plain\"); return 0; }\n";
     static const char archive[] = "!<arch>\n/               0           0     0     644     4         `\n\0\0\0\0";
     char source[256];
@@ -278,7 +280,8 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     check_test_expect(test, written && check_test_driver_needed(outputs[0], needed, sizeof(needed)) && strcmp(needed, "libm.so.6 libc.so.6") == 0,
                       "libm.so.6 needed before libc.so.6");
     char expected[256];
-    snprintf(expected, sizeof(expected), "%f %f %f %f\n", sin(2), sqrt(2.0), pow(2.0, 10.0), cos(0.5));
+    const double logarithm = lgamma(-0.5);
+    snprintf(expected, sizeof(expected), "%f %f %f %f %f %d\n", sin(2), sqrt(2.0), pow(2.0, 10.0), cos(0.5), logarithm, signgam);
     char captured[256] = { 0 };
     FILE* output = written ? popen(outputs[0], "r") : NULL;
     const size_t got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;

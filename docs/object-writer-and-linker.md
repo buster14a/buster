@@ -2602,8 +2602,9 @@ which a snapshot of the named libraries, as the runtime's is kept, would take of
 
 `test-bind`'s "libraries" check binds links made by hand with this system's libm by both paths into the same link
 (the line order, a weak reference alone, the exports) and the import's refusals on files of its own;
-`test-checker-driver --executable` links a program that calls libm's functions by both paths into the same bytes,
-runs it against this executable's libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whose
+`test-checker-driver --executable` links a program that calls libm's functions and reads libm's `signgam` (through its
+GOT slot, as the C library's data is reached) by both paths into the same bytes, runs it against this executable's
+libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whose
 `b_func` libB defines, with libA and libB built by clang: `-lA -lB` and `-lB -lA` must need both, in the line's
 order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running, and `-lA -lB` for a
 program that defines `b_func` itself libA alone, `a_func` calling `main`'s; and links one against a library without a
