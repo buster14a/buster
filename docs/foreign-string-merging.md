@@ -128,7 +128,7 @@ using that control as evidence.
 
 ## Measured consumer cost
 
-The [October 23 controlled campaign](measurements/foreign-strings-2026-10-23/README.md)
+The [October 23 controlled campaign](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/foreign-strings-2026-10-23/README.md)
 compares frozen baseline `e74b6727` with candidate `aa2e3257`. The candidate
 removes redundant entry searches during symbol and named-fixup translation;
 the generated named zero-addend ABS64 cases directly exercise that shortcut.

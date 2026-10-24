@@ -3,6 +3,13 @@
 Read [AGENTS.md](AGENTS.md) for issue ownership, build/test instructions and
 the shared benchmark host, and follow [the C style](docs/coding-style.md).
 
+Store raw performance measurements, logs, captures, receipts and their harnesses
+in [buster14a/buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements),
+under `docs/measurements/`. Keep design documentation and evidence links in this
+repository. The required `Measurement storage policy` check rejects the retired
+`docs/measurements` path here, even on documentation-only pull requests. Move
+evidence from older branches to the performance repository before merging them.
+
 ## Terms
 
 By intentionally submitting original material for inclusion in material

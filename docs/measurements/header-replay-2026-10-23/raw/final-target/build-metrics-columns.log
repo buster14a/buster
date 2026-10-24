@@ -1,4 +1,0 @@
-command clang -I/home/david/buster-fast-bench/codex-header111/soa-probe -O3 -g -march=native -I/home/david/buster-fast-bench/codex-header111/tree/src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror /home/david/buster-fast-bench/codex-header111/soa-probe/metrics.c -o /home/david/buster-fast-bench/codex-header111/metrics-columns 
-exclusive.sh: waiting for the 9700X, held by: 2026-10-23T14:01:47+00:00 codex-linker-scaling87: ./build/compiler benchmark-link --only direct --cpus 2,0,1,3,4,5,6,7 --seed 87 --runs 11 --cache ../snapshot-cache --directory /tmp/linker-scaling87-output
-  title: Linker #87 logical CPU direct 8 lanes repetition 3
-  link: https://github.com/buster14a/buster/issues/87

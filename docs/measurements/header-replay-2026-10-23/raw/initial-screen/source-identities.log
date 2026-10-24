@@ -1,2 +1,0 @@
-command taskset -c 2 /home/david/buster-fast-bench/codex-header111/experiment source /home/david/buster-fast-bench/codex-header111/state-fixtures/virtual.h 
-virtual source identities: ok=1 cases=12 hits=0

@@ -44,7 +44,7 @@ typedef enum X86CostColumn
 
 // Form, operand case, immediate, latency, reciprocal throughput, retired macro-ops. The last three fields come
 // ONLY from this repository's measure-x86-zen5 command. Unknowns are retained until a controlled observation exists.
-// 2026-10-22: docs/measurements/x86-zen5-2026-10-22/ retains all three processes and the rounding/provenance record.
+// 2026-10-22: https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-zen5-2026-10-22/ retains all three processes and the rounding/provenance record.
 #define BUSTER_X86_ZEN5_ROWS(X) \
     X(ADD_RM32_R32, REGISTER, 0, 256, 48, 256) \
     X(ADD_RM64_R64, REGISTER, 0, 256, 48, 256) \

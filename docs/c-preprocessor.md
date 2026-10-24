@@ -8,7 +8,7 @@ item 2, tracked in #117 and its parts #118 to #125. This document records the
 design, how it is checked against clang, the Zen 5 measurements, and what comes
 next.
 
-The [2026-10-23 acceptance refresh](measurements/preprocessor-117-2026-10-23/README.md)
+The [2026-10-23 acceptance refresh](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md)
 records frozen source and corpus identities, the independent scalar reference,
 lookup and final-output accounting, and the evidence for #118 through #124.
 The earlier results below retain their original revisions and input scope.
@@ -2110,7 +2110,7 @@ records. The older run-work counters below include intermediate captures,
 so their sum is not a final-output share. Timing-disabled preprocessing does
 not collect the lookup intervals or final-output copy counters.
 
-The [cloud macro-batching comparison](measurements/preprocessor-cloud-2026-10-23/README.md)
+The [cloud macro-batching comparison](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-cloud-2026-10-23/README.md)
 records the flat-argument shortcut and compiled literal-run metadata, including
 their construction cost, generated assembly, differential tests and complete
 paired samples. The later [9700X/Clang 23 paired measurements](https://github.com/buster14a/buster/pull/304#issuecomment-6361692970)
@@ -2381,7 +2381,7 @@ SQLite totals, after-lighter-work controls and honest remaining budget results.
 
 ## Header inclusion transcript experiment (#111)
 
-The isolated [#111 experiment](measurements/header-replay-2026-10-23/README.md)
+The isolated [#111 experiment](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/header-replay-2026-10-23/README.md)
 compares the existing preprocessor with a macro-read-set validated inclusion
 transcript. Its serial batch consumer shares the file cache and intern table
 across translation units, while charging the construction and destruction of a

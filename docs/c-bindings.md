@@ -176,7 +176,7 @@ all four varying bytes and every subset of constant middle bytes.
 The expanded suite passes 4,255,777 checks, including AddressSanitizer and
 UndefinedBehaviorSanitizer with leak detection disabled because the sandbox
 blocks LeakSanitizer's process inspection. The
-[measurement record](measurements/simd-301-2026-10-23/README.md) preserves
+[measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/README.md) preserves
 raw process output, source and executable identities, commands, and limits.
 9700X qualification remains separate.
 
@@ -343,7 +343,7 @@ The main input has 2,295,937 tokens and 466,590 source identifier tokens.
 SQLite is the workflow's frozen `preprocessor-391e729af658` corpus, verified
 against its pinned manifests and headers; it has 705,670 tokens and 143,019
 source identifier tokens. This differs from the cloud SQLite 3.53.4 input
-above. The [captured commands and output](measurements/parser-bindings-128-2026-10-23/9700x-source-bindings.log)
+above. The [captured commands and output](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/parser-bindings-128-2026-10-23/9700x-source-bindings.log)
 preserve the exact flags and timings.
 
 | Path | main.c cycles/identifier | SQLite cycles/identifier | main.c ms/unit | SQLite ms/unit |

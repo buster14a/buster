@@ -1,4 +1,0 @@
-inputs/parse-oracle-invalid.c:1:15: error: expected expression
-    1 | int invalid = ;
-      |               ^
-1 error generated.
