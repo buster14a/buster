@@ -3165,16 +3165,6 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.result = result;
         writer.token = body.declaration;
         memset(writer.extent_locals, 0xff, ((uint64_t)input->vla_count + 1) * sizeof(uint32_t));
-        for (uint32_t r = 0; r < body.reference_count; r += 1)
-        {
-            const uint32_t object = program->references[body.reference_first + r];
-            const uint32_t declaration = program->object_declarations[object];
-            if (declaration != BUSTER_CHECK_NONE && input->thread_local[declaration])
-            {
-                writer.token = declaration;
-                check_lower_unsupported(&writer, "thread-local variables");
-            }
-        }
         memset(writer.labels, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
         if (writer.track)
         {

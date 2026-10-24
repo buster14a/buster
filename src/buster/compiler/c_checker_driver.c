@@ -633,9 +633,10 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             const LinkError checked = link_check(&code.link);
             valid = checked == LINK_ERROR_NONE && dynamic_inputs(&dynamic, &runtime, &bind, &arena);
-            // An import the code reaches other than through the GOT, by a call or from data: Tier 0 reads and writes
-            // globals RIP-relatively, which reaches a shared library's data only by a copy relocation, and the direct
-            // path makes none (#84).
+            // An import the code reaches other than through the GOT, by a call or from data, which a shared library's
+            // data needs without copy relocations, which the direct path makes none of (#84). Tier 0 reaches every symbol
+            // the unit doesn't define through the GOT (check_program_emit's access column), so this is the compiler's
+            // error.
             SymbolId direct = 0;
             for (FixupId f = 1; checked == LINK_ERROR_BINDING && direct == 0 && f < code.link.fixups.count; f += 1)
             {
@@ -649,8 +650,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             }
             if (direct != 0)
             {
-                fprintf(stderr, "error: unsupported: '%s', the C library's variable, read or written directly: the direct path reaches a shared "
-                                "library's data through the GOT, which Tier 0 doesn't use yet (-c and a system linker take it)\n",
+                fprintf(stderr, "internal compiler error: '%s', a shared library's symbol, reached directly rather than through the GOT\n",
                         check_driver_link_name(&code.link, code.link.symbols.name[direct], name, sizeof(name)));
             }
             else if (!valid)
