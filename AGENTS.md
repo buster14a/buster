@@ -298,13 +298,26 @@ designs and the compilers already built this way.
   syntax, limitations, example and measurement method are in
   [docs/assembler.md](docs/assembler.md). `.S` uses the shared preprocessor's
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
+- `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
+  [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
+  [--cross-check] [--keep] DIR` compiles each of c-testsuite's single-exec
+  programs by the direct path, by both paths into the same bytes, and runs it
+  against its expected output; `--cross-check` also links its `-c` object with
+  `cc`. `--self-test` checks the harness with a stand-in compiler.
+  `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
+  `5c72756` that must pass; the 9700X job fetches that commit and runs both.
+  [The c-testsuite guide](docs/c-testsuite.md) has the details and the
+  programs still refused, each with what it waits on.
 - `src/buster/compiler/main.c` is the executable entry point: its commands, and
   for anything else the semantic driver (`run_check_command`, in
   `c_checker_driver.c`): `./build/compiler [--scalar] -fsyntax-only [-E's
   options] file.c` preprocesses, parses and checks the file and prints the
   diagnostics as clang does, with exit status 0 for a unit without errors and
-  1 otherwise; `-c [-o file.o]` also writes the supported static data as an
-  object ([the checker guide](docs/c-checker.md)). `./build/compiler parse
+  1 otherwise; `-c [-o file.o]` also writes the object, its functions through
+  Tier 0 ([the checker guide](docs/c-checker.md)); and with neither option it
+  links an executable (`-o`, `a.out` by default) by the direct path, bound
+  against the C runtime's snapshot, `--verify` checking every function's
+  records with `x86_validate`. `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -931,6 +944,11 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
 ./build/compiler benchmark-ir-lowering
+./build/compiler test-c-testsuite --self-test
+git init -q --template= build/c-testsuite
+git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
+git -C build/c-testsuite checkout -q FETCH_HEAD
+./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
