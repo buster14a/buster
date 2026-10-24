@@ -352,6 +352,9 @@ struct RuntimeLibraries
     ImportLibrary libraries[BUSTER_RUNTIME_LIBRARIES];
     // By library: the names it refers to, indexed by their hashes (ImportReferences.hash).
     ImportNameIndex references[BUSTER_RUNTIME_LIBRARIES];
+    // By library: the names its DT_NEEDED entries give, dependency_count[l] of them at dependencies[l].
+    String8* dependencies[BUSTER_RUNTIME_LIBRARIES];
+    uint32_t dependency_count[BUSTER_RUNTIME_LIBRARIES];
     String8 paths[BUSTER_RUNTIME_LIBRARIES];
     uint32_t count;
     // The files' bytes, which the libraries' names point into, and their columns and indices.
@@ -378,6 +381,11 @@ static __attribute__((unused)) uint32_t runtime_libraries_export(const RuntimeLi
 // Whether library `l` refers to `name` without defining it.
 static __attribute__((unused)) bool runtime_libraries_refer(const RuntimeLibraries* libraries, uint32_t l, const uint8_t* name, uint32_t length,
                                                            uint64_t hash);
+// The name library `l` takes in a DT_NEEDED entry: its soname, or for a library without one its file's name, as GNU ld
+// names it.
+static __attribute__((unused)) String8 runtime_libraries_name(const RuntimeLibraries* libraries, uint32_t l);
+// Whether library `l`'s own DT_NEEDED entries name library `m`, which the loader then loads for it.
+static __attribute__((unused)) bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m);
 // Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
 // st_size, st_mtim and st_ctim.
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
@@ -1787,8 +1795,49 @@ static uint16_t runtime_libraries_top(const ImportLibrary* library)
     return top;
 }
 
+// Reads the names library `bytes`' DT_NEEDED entries give, before its first DT_NULL, into slot `l`, the array pushed from
+// the libraries' arena: RUNTIME_ERROR_IMPORT if they can't be read (import_library has checked its .dynamic), or
+// RUNTIME_ERROR_MEMORY. A library without .dynamic has none. A pass over a few entries per library, beside its import.
+static RuntimeError runtime_libraries_dependencies(RuntimeLibraries* libraries, uint32_t l, String8 bytes)
+{
+    ImportElf elf;
+    RuntimeError result = import_elf(&elf, bytes, ET_DYN).error == IMPORT_ERROR_NONE ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_IMPORT;
+    uint32_t dynamic = 0;
+    for (uint32_t index = 1; result == RUNTIME_ERROR_NONE && dynamic == 0 && index < elf.section_count; index += 1)
+    {
+        dynamic = import_section_header(&elf, index).sh_type == SHT_DYNAMIC ? index : 0;
+    }
+    const Elf64_Shdr header = dynamic != 0 ? import_section_header(&elf, dynamic) : (Elf64_Shdr){ 0 };
+    uint64_t count = 0;
+    const bool table = dynamic != 0 && import_table(&header, sizeof(Elf64_Dyn), &count);
+    const bool linked = table && header.sh_link != SHN_UNDEF && header.sh_link < elf.section_count &&
+                        import_section_header(&elf, header.sh_link).sh_type == SHT_STRTAB;
+    result = dynamic != 0 && !linked ? RUNTIME_ERROR_IMPORT : result;
+    const Elf64_Shdr strings_header = linked ? import_section_header(&elf, header.sh_link) : header;
+    const String8 strings = linked ? import_section_bytes(&elf, &strings_header) : (String8){ 0 };
+    const String8 entries = linked ? import_section_bytes(&elf, &header) : (String8){ 0 };
+    String8* names = result == RUNTIME_ERROR_NONE && linked ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, count + 1) : 0;
+    result = result == RUNTIME_ERROR_NONE && linked && names == 0 ? RUNTIME_ERROR_MEMORY : result;
+    uint32_t found = 0;
+    bool ended = false;
+    for (uint64_t i = 0; result == RUNTIME_ERROR_NONE && names != 0 && !ended && i < count; i += 1)
+    {
+        Elf64_Dyn entry;
+        memcpy(&entry, entries.pointer + i * sizeof(entry), sizeof(entry));
+        ended = entry.d_tag == DT_NULL;
+        if (entry.d_tag == DT_NEEDED)
+        {
+            result = import_string(strings, entry.d_un.d_val, &names[found]) ? result : RUNTIME_ERROR_IMPORT;
+            found += result == RUNTIME_ERROR_NONE ? 1 : 0;
+        }
+    }
+    libraries->dependencies[l] = names;
+    libraries->dependency_count[l] = found;
+    return result;
+}
+
 // Imports the shared library `bytes` (at `path`) as the next library, its version indices moved past `*base`, which
-// moves past its own; with an index of the names it refers to. A library named twice (by its soname, whatever the
+// moves past its own; with an index of the names it refers to and the names its DT_NEEDED entries give. A library named twice (by its soname, whatever the
 // path) is linked once, at its first place, as GNU ld loads it once.
 static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const char* path, String8 bytes, uint16_t* base)
 {
@@ -1825,6 +1874,7 @@ static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const cha
         *base = (uint16_t)(*base + top);
         const ImportReferences* references = &library->references;
         result = import_index_build(&libraries->references[libraries->count], references->hash, references->count, &libraries->arena) ? result : RUNTIME_ERROR_MEMORY;
+        result = result == RUNTIME_ERROR_NONE ? runtime_libraries_dependencies(libraries, libraries->count, bytes) : result;
     }
     if (result == RUNTIME_ERROR_NONE && !repeated)
     {
@@ -1943,6 +1993,33 @@ static uint32_t runtime_libraries_export(const RuntimeLibraries* libraries, cons
         result = found != 0 ? l + 1 : 0;
     }
     return result;
+}
+
+static String8 runtime_libraries_name(const RuntimeLibraries* libraries, uint32_t l)
+{
+    const String8 path = libraries->paths[l];
+    String8 result = libraries->libraries[l].soname;
+    for (uint64_t i = 0; result.length == 0 && i < path.length; i += 1)
+    {
+        const uint64_t at = path.length - 1 - i;
+        result = path.pointer[at] == '/' || at == 0 ? (String8){
+            .pointer = path.pointer + at + (path.pointer[at] == '/' ? 1 : 0),
+            .length = path.length - at - (path.pointer[at] == '/' ? 1 : 0),
+        } : result;
+    }
+    return result;
+}
+
+static bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m)
+{
+    const String8 name = runtime_libraries_name(libraries, m);
+    bool listed = false;
+    for (uint32_t d = 0; !listed && d < libraries->dependency_count[l]; d += 1)
+    {
+        const String8 dependency = libraries->dependencies[l][d];
+        listed = dependency.length == name.length && memcmp(dependency.pointer, name.pointer, name.length) == 0;
+    }
+    return listed;
 }
 
 static bool runtime_libraries_refer(const RuntimeLibraries* libraries, uint32_t l, const uint8_t* name, uint32_t length, uint64_t hash)

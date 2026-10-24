@@ -313,6 +313,81 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     unlink(plain_output);
 }
 
+// A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
+// b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
+// either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
+// it, and the loader loads libB for it. clang builds the libraries, and each program runs, finding them through
+// LD_LIBRARY_PATH.
+static void check_test_driver_dependencies(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char a_source[] = "int b_func(void);\nint a_func(void) { return b_func() + 1; }\n";
+    static const char b_source[] = "int b_func(void) { return 41; }\n";
+    static const char program[] = "int a_func(void);\nint main(void) { return a_func() == 42 ? 0 : 1; }\n";
+    char a_path[256];
+    char b_path[256];
+    char source[256];
+    char library_a[256];
+    char library_b[256];
+    char library_ab[256];
+    char output[256];
+    char search[300];
+    snprintf(a_path, sizeof(a_path), "%s/a.c", directory);
+    snprintf(b_path, sizeof(b_path), "%s/b.c", directory);
+    snprintf(source, sizeof(source), "%s/uses_a.c", directory);
+    snprintf(library_a, sizeof(library_a), "%s/libA.so", directory);
+    snprintf(library_b, sizeof(library_b), "%s/libB.so", directory);
+    snprintf(library_ab, sizeof(library_ab), "%s/libAB.so", directory);
+    snprintf(output, sizeof(output), "%s/uses_a", directory);
+    snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s", directory);
+    const bool written = parse_test_write(a_path, a_source, sizeof(a_source) - 1) && parse_test_write(b_path, b_source, sizeof(b_source) - 1) &&
+                         parse_test_write(source, program, sizeof(program) - 1);
+    // libB.so, libA.so without a DT_NEEDED for libB, and libAB.so with one (libB.so, which has no soname).
+    char* const build_b[] = { (char*)clang, "-shared", "-fPIC", "-o", library_b, b_path, NULL };
+    char* const build_a[] = { (char*)clang, "-shared", "-fPIC", "-o", library_a, a_path, NULL };
+    char* const build_ab[] = { (char*)clang, "-shared", "-fPIC", "-o", library_ab, a_path, "-L", (char*)directory, "-lB", NULL };
+    char* text = NULL;
+    bool built = written;
+    char* const* const builds[] = { build_b, build_a, build_ab };
+    for (uint32_t b = 0; built && b < BUSTER_ARRAY_LENGTH(builds); b += 1)
+    {
+        built = check_test_driver_spawn(builds[b], &text) == 0;
+        free(text);
+    }
+    check_test_expect(test, built, "libraries a needed library refers to: clang builds them");
+    struct
+    {
+        const char* name;
+        const char* first;
+        const char* second;
+        const char* needed;
+    } const cases[] = {
+        { "-lA -lB: libB for libA's reference", "-lA", "-lB", "libA.so libB.so libc.so.6" },
+        { "-lB -lA: libB for libA's reference", "-lB", "-lA", "libB.so libA.so libc.so.6" },
+        { "-lAB -lB: libB left to libAB's DT_NEEDED", "-lAB", "-lB", "libAB.so libc.so.6" },
+    };
+    for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char* const link[] = { (char*)executable, "-o", output, source, "-L", (char*)directory, (char*)cases[c].first, (char*)cases[c].second, NULL };
+        char* const run[] = { "env", search, output, NULL };
+        const int linked = check_test_driver_spawn(link, &text);
+        free(text);
+        char needed[256] = { 0 };
+        const bool listed = linked == 0 && check_test_driver_needed(output, needed, sizeof(needed)) && strcmp(needed, cases[c].needed) == 0;
+        const int ran = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+        free(text);
+        if (!listed || ran != 0)
+        {
+            printf("  %s: link status %d, DT_NEEDED \"%s\", run status %d\n", cases[c].name, linked, needed, ran);
+        }
+        check_test_expect(test, listed && ran == 0, cases[c].name);
+    }
+    const char* const files[] = { a_path, b_path, source, library_a, library_b, library_ab, output };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+}
+
 static void check_test_driver_diagnostic_capacity(CheckTest* test)
 {
     Arena scratch = arena_reserve(64);
@@ -842,6 +917,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (executable != NULL)
         {
             check_test_driver_libraries(&test, executable, directory);
+            check_test_driver_dependencies(&test, clang, executable, directory);
         }
         rmdir(directory);
     }

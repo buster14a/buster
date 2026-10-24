@@ -39,9 +39,10 @@
 //     (bind_keep_loader);
 //   - before libc.so.6, to an export of a shared library the link names with -l (Bind.libraries, which the caller sets
 //     between bind_begin and bind_end): an import of that library's, as GCC's driver puts -l libraries before libc.so
-//     on the line. A link needs such a library only for a strong reference that binds to it, as GNU ld and lld take
-//     one --as-needed (bind_keep_libraries); and it exports its definitions of names a needed library defines or
-//     refers to (bind_library_exports);
+//     on the line. A link needs such a library only for a strong reference that binds to it, as GNU ld takes one
+//     --as-needed: the program's, or a needed library's that its own DT_NEEDED doesn't cover (bind_needed_libraries,
+//     bind_keep_libraries); and it exports its definitions of names a needed library defines or refers to
+//     (bind_library_exports);
 //   - for a strong reference, to a member of libc_nonshared.a (atexit), which joins the link;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
@@ -200,7 +201,8 @@ struct Bind
     uint32_t export_count;
     uint32_t capacity;
     // The shared libraries the link names with -l (runtime_libraries_import), which the caller sets between bind_begin
-    // and bind_end, or 0; and those that a strong reference binds to, a bit each: the ones the link needs.
+    // and bind_end, or 0; and the ones the link needs, a bit each: those a strong reference binds to, and from
+    // bind_keep_libraries on, those a needed library's strong reference does (bind_needed_libraries).
     const RuntimeLibraries* libraries;
     uint32_t libraries_needed;
     // The first error, and the link's name it is about (0 for none).
@@ -1022,6 +1024,37 @@ static void bind_keep_loader(Bind* bind, Link* link)
     bind->import_count = kept;
 }
 
+// The libraries the link names with -l that it needs, from `needed`, the ones the program's strong references bind to.
+// GNU ld's --as-needed counts a needed library's strong references too: a library is needed for one that it satisfies,
+// the first named library that exports the name, unless the referring library's own DT_NEEDED names it, which the
+// loader then loads for it (#398's review). Each round takes the references of the libraries the round before added,
+// so there are at most as many rounds as libraries. GNU ld counts a library's references only against the libraries
+// after it on the line, and refuses a link that names them the other way round (-lB -lA, libA referring to libB's
+// name); this counts them against every library, so that such a link works. The references of libc.so.6 and the
+// loader, which come after every named library on the line, count against none. A scalar pass over the needed
+// libraries' references, a few hundred for libm, shared by both paths.
+static uint32_t bind_needed_libraries(const RuntimeLibraries* libraries, uint32_t needed)
+{
+    uint32_t added = libraries != 0 ? needed : 0;
+    while (added != 0)
+    {
+        uint32_t next = 0;
+        for (uint32_t l = 0; l < libraries->count; l += 1)
+        {
+            const ImportReferences* references = &libraries->libraries[l].references;
+            for (uint32_t r = 0; (added & (1u << l)) != 0 && r < references->count; r += 1)
+            {
+                uint32_t export = 0;
+                const uint32_t m = references->weak[r] ? 0 : runtime_libraries_export(libraries, references->name[r], references->length[r], references->hash[r], &export);
+                next |= m != 0 && m - 1 != l && !runtime_libraries_lists(libraries, l, m - 1) ? 1u << (m - 1) : 0;
+            }
+        }
+        added = next & ~needed;
+        needed |= added;
+    }
+    return needed;
+}
+
 // The imports from libraries named with -l that the link doesn't need, which only weak references bound to: as GNU ld
 // and lld take a library --as-needed, those are left to nothing, unversioned, keeping their export's type, as
 // bind_keep_loader leaves the loader's. An import is a library's when one exports its name, since binding looks in the
@@ -1029,6 +1062,7 @@ static void bind_keep_loader(Bind* bind, Link* link)
 static void bind_keep_libraries(Bind* bind, Link* link)
 {
     LinkSymbols* symbols = &link->symbols;
+    bind->libraries_needed = bind_needed_libraries(bind->libraries, bind->libraries_needed);
     uint32_t kept = 0;
     for (uint32_t i = 0; i < bind->import_count; i += 1)
     {

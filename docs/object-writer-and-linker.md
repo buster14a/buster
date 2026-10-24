@@ -2552,14 +2552,21 @@ libraries take: a shared library by `import_library`, its exports indexed, and a
 `GROUP ( libm.so.6 AS_NEEDED ( libmvec.so.1 ) )`) by `import_script`, standing for the libraries it names, each an
 absolute path. Each library's version indices move past the runtime's (libc.so.6's, then the loader's) and the
 libraries' before it, as `runtime_move_loader_versions` moves the loader's, so that an index names one library's
-version in the link's symbols. A library named twice (its soname) is linked once.
+version in the link's symbols. A library named twice (its soname) is linked once. Each library's `DT_NEEDED`
+entries are read too, for the rule below.
 
 Binding (`bind.c`, `Bind.libraries`, which the caller sets between `bind_begin` and `bind_end`) takes a name that
 nothing in the link defines from the libraries before `libc.so.6`, where GCC's driver puts `-l` libraries on the
 line (`crt… main.o -lm … -lc`): `ldexp`, which both libm and libc export, binds to libm's, as GNU ld and lld bind
 it. A library is needed only for a strong reference that binds to it, as GCC's driver links them on Debian and
-Ubuntu (`--as-needed`), and lld with it: a weak reference to a library nothing else needs is left to nothing
-(`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
+Ubuntu (`--as-needed`): the program's, or a needed library's own that its `DT_NEEDED` doesn't cover, which GNU ld
+counts too (#398's review: `main` calls `a_func` in libA, which calls `b_func` in libB, and without libB in
+`DT_NEEDED` the program can't load `b_func`). `bind_needed_libraries` adds those in rounds, each from the libraries
+the round before added, a reference binding to the first named library that exports its name. On this VM, lld
+23.1.5 leaves libB out of such a link, whose program then fails to load, and GNU ld 2.42 counts a library's
+references only against the libraries after it on the line, refusing `-lB -lA`'s link; binding counts them against
+every named library, so that both orders link and run. A weak reference to a library nothing needs is left to
+nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
 a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
 library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
 each required exactly when needed, and their versions in `.gnu.version_r`.
@@ -2582,7 +2589,9 @@ if it matters.
 `test-bind`'s "libraries" check binds links made by hand with this system's libm by both paths into the same link
 (the line order, a weak reference alone, the exports) and the import's refusals on files of its own;
 `test-checker-driver --executable` links a program that calls libm's functions by both paths into the same bytes,
-runs it against this executable's libm, and reads `DT_NEEDED` back.
+runs it against this executable's libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whose
+`b_func` libB defines, with libA and libB built by clang: `-lA -lB` and `-lB -lA` must need both, in the line's
+order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running.
 
 #### The unwind tables
 

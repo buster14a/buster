@@ -78,21 +78,6 @@ static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic*
     };
 }
 
-// The name a library takes in DT_NEEDED: its soname, or for a library without one the file's name, as GNU ld takes it.
-static String8 dynamic_library_name(const ImportLibrary* library, String8 path)
-{
-    String8 result = library->soname;
-    for (uint64_t i = 0; result.length == 0 && i < path.length; i += 1)
-    {
-        const uint64_t at = path.length - 1 - i;
-        result = path.pointer[at] == '/' || at == 0 ? (String8){
-            .pointer = path.pointer + at + (path.pointer[at] == '/' ? 1 : 0),
-            .length = path.length - at - (path.pointer[at] == '/' ? 1 : 0),
-        } : result;
-    }
-    return result;
-}
-
 // Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`: the libraries the
 // link names with -l (Bind.libraries), in their order, each needed when a strong reference binds to it; then libc.so.6's,
 // then the loader's, as GCC's driver puts them on the line. False if the arena has no room for them.
@@ -115,7 +100,7 @@ static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, c
         const bool libc = l == named_count;
         const ImportLibrary* library = l < named_count ? &named->libraries[l] : libc ? &runtime->libc : &runtime->loader;
         needed[l] = (ExecutableLibrary){
-            .name = l < named_count ? dynamic_library_name(library, named->paths[l]) : library->soname,
+            .name = l < named_count ? runtime_libraries_name(named, l) : library->soname,
             .required = l < named_count ? (bind->libraries_needed & (1u << l)) != 0 : libc,
         };
         for (uint32_t v = 0; v < library->version_count; v += 1)

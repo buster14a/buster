@@ -26,9 +26,11 @@ GNU ld finds it: `libNAME.so`, or else `libNAME.a`, in the first of the `-LDIR`
 directories, then glibc's library directories, that has one; a linker script
 (glibc's `libm.so`) stands for the libraries it names. Binding takes a name
 from them before `libc.so.6`, where GCC's driver puts them on the line, and the
-executable needs one only for a strong reference that binds to it, as GCC's
-driver links them on Debian and Ubuntu (`--as-needed`); `DT_NEEDED` lists them
-before `libc.so.6` (`runtime_libraries_import`, `bind.c` and `dynamic.c`). An
+executable needs one only for a strong reference that binds to it, the
+program's or a needed library's own that its `DT_NEEDED` doesn't cover, as GNU
+ld links them `--as-needed` (the default of Debian's and Ubuntu's GCC);
+`DT_NEEDED` lists them before `libc.so.6` (`runtime_libraries_import`, `bind.c`
+and `dynamic.c`). An
 empty archive (glibc's `libpthread.a`, `libdl.a` and `librt.a`) adds nothing;
 one with members is refused by name, since the direct path doesn't link
 archives yet. A call of a function that a system header declares and no linked
