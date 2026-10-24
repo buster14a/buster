@@ -1083,28 +1083,31 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
 }
 
 // The shared library of the globals Tier 0's object leaves undefined (tier0_test_defined), those it reaches through the
-// GOT: each its first values' bytes, a thread-local _Thread_local, so that the executable's GOT slots are the loader's to
-// fill (GLOB_DAT, or TPOFF64 for a thread-local's offset), as a shared library's data is.
+// GOT: each its first values' bytes, a thread-local in .tdata, so that the executable's GOT slots are the loader's to fill
+// (GLOB_DAT, or TPOFF64 for a thread-local's offset), as a shared library's data is. It is GNU as source, which as and
+// ld -shared make into the library in a few milliseconds, where clang -shared of the same data as C took tens.
 static bool tier0_test_library(const Tier0Program* program, const char* path)
 {
     FILE* file = fopen(path, "w");
     bool result = file != 0;
     if (result)
     {
-        fprintf(file, "int t0_library;\n");
+        fprintf(file, "\t.section .note.GNU-stack,\"\",@progbits\n");
         for (uint32_t g = 0; g < program->global_count; g += 1)
         {
             const uint32_t class_bytes = tier0_class_bytes(program->global_classes[g]);
             const uint32_t size = class_bytes * program->global_elements[g];
             if (!tier0_test_defined(program, g))
             {
-                fprintf(file, "%sunsigned char t0_g%u[%u] __attribute__((aligned(8))) = {", tier0_test_thread_local(program, g) ? "_Thread_local " : "", g, size);
+                const bool thread_local = tier0_test_thread_local(program, g);
+                fprintf(file, "\t%s\n\t.globl t0_g%u\n\t.type t0_g%u, %s\n\t.size t0_g%u, %u\n\t.balign 8\nt0_g%u:\n\t.byte",
+                        thread_local ? ".section .tdata,\"awT\",@progbits" : ".data", g, g, thread_local ? "@tls_object" : "@object", g, size, g);
                 for (uint32_t b = 0; b < size; b += 1)
                 {
                     const uint64_t value = program->global_values[program->global_first_value[g] + b / class_bytes];
                     fprintf(file, "%s%u", b == 0 ? " " : ", ", (uint32_t)(value >> (8 * (b % class_bytes)) & 0xff));
                 }
-                fprintf(file, " };\n");
+                fprintf(file, "\n");
             }
         }
         result = fclose(file) == 0;
@@ -1176,7 +1179,7 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
             snprintf(source, sizeof(source), "%s/program_%u.c", directory, p);
             snprintf(object, sizeof(object), "%s/tier0_%u.o", directory, p);
             snprintf(harness, sizeof(harness), "%s/harness_%u.c", directory, p);
-            snprintf(library, sizeof(library), "%s/library_%u.c", directory, p);
+            snprintf(library, sizeof(library), "%s/library_%u.s", directory, p);
             snprintf(executable, sizeof(executable), "%s/run_%u", directory, p);
             if (ok)
             {
@@ -1195,11 +1198,11 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 // -fwrapv and -fno-strict-aliasing, this repository's own dialect: signed arithmetic wraps, as Tier 0's
                 // does, and the objects' checksums read floating parts' bits through integer lvalues. The library of the
                 // globals Tier 0 reaches through the GOT is a shared library the executable finds by its run path, data
-                // alone, linked without the C runtime's files.
+                // alone, which GNU as assembles and ld links without the C runtime's files.
                 snprintf(command, sizeof(command),
-                         "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && %s -O0 -w -fPIC -shared -nostdlib -o %s.so %s 2>&1 && "
+                         "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
                          "%s -O0 -w -o %s %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
-                         clang, source, source, clang, library, library, clang, executable, harness, source, object, library, directory);
+                         clang, source, source, library, library, library, library, clang, executable, harness, source, object, library, directory);
                 ok = tier0_test_expect(tally, tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
                                        program_seed, directory);
                 snprintf(command, sizeof(command), "size -A %s.o", source);

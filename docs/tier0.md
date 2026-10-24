@@ -495,7 +495,9 @@ floating global's elements compare as their bytes, but any two NaNs are the same
 the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN. Tier 0's object defines the
 direct globals and the thread-locals of the image's (in `.tdata`), and a shared library generated beside it defines
 the ones Tier 0 reaches through the GOT, so that the executable's slots for them are the loader's to fill: `GLOB_DAT`,
-and `TPOFF64` for a thread-local's offset.
+and `TPOFF64` for a thread-local's offset. The library is GNU as source, which `as` and `ld -shared` link in a few
+milliseconds a program, where `clang -shared` of the same data as C took tens: in the 9700X job's test step, `test-tier0
+--cross-check` took 5.8 s with clang's libraries, against 4.2 s before it had any.
 
 **Robustness:**
 
