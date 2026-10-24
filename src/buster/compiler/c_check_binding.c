@@ -1,16 +1,44 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Parser declaration-column consumption and the retained semantic event oracle. Include after CheckInputReader
-// and its resolver. Declaration/type elaboration still needs immediate visibility in source order and publishes
-// its semantic events to CheckEnvironment. Ordinary expression identities come from ParseBindings, independently
-// resolved by the selected scalar/batch kernel. Its source-less builtin typedefs never index a source column.
-// Raw attributes have no parser binding events; those uses retain the identity and type captured during ordered
-// elaboration. Tags map lexical parser declarations through the checker's canonical tag declaration. A use-specific
-// type already captured before a later completion remains unchanged. The parser, tree and original scratch arena
-// are immutable: a local Parser view borrows checker scratch only while constructing the temporary columns.
-// Failed allocation/resolution publishes no parser results. No column has a padding contract. The original event
-// consumer remains an independent semantic-history oracle for focused synthetic and real-source tests.
+// Binding handoff (#336). Include after CheckInputReader and its resolver. Declaration/type elaboration needs
+// immediate visibility in source order, so the checker's reader is the one producer of binding events: it records
+// every declaration, use and scope restore in reader->bindings, which CheckEnvironment publishes (#113). A use
+// event's `previous` is the head of its name when it was recorded: the activation event + 1 that the use sees,
+// already in the resolvers' result form. The default path reads those retained answers directly, with no replay,
+// sort or name lookup. --scalar resolves the same events with the independent stack replay (c_bindings_scalar),
+// whose results must be the same. The batch sort and the parser's own grammar replay (#128's ParseBindings,
+// mapped onto the reader's use events) remain selectable for measurement and as oracles.
+//
+// Every mode feeds one consumer, check_input_binding_answers, with an answer per event: each use's declaration
+// identity, its type at that point and its reports. Raw attribute uses have reader events but no parser events;
+// a use-specific type captured during ordered elaboration (before a later completion) is kept. Tags take their
+// canonical declaration during elaboration; the parser modes also check them against the parser's tag column.
+// The parser, tree and original scratch arena are immutable: a local Parser view borrows checker scratch only
+// while the parser modes build their temporary columns. A failed resolution or an invalid answer publishes nothing
+// and sets `resource`. No column has a padding contract.
+
+typedef enum CheckInputBindingMode
+{
+    // The direct answers, or the stack replay for --scalar.
+    CHECK_INPUT_BINDINGS_DEFAULT,
+    CHECK_INPUT_BINDINGS_DIRECT,
+    CHECK_INPUT_BINDINGS_STACKS,
+    CHECK_INPUT_BINDINGS_BATCH,
+    CHECK_INPUT_BINDINGS_PARSER_STACKS,
+    CHECK_INPUT_BINDINGS_PARSER_BATCH,
+    CHECK_INPUT_BINDING_MODES,
+} CheckInputBindingMode;
+
+static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODES] =
+{
+    "default",
+    "direct",
+    "stacks",
+    "batch",
+    "parser-stacks",
+    "parser-batch",
+};
 
 static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
 {
@@ -18,55 +46,90 @@ static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uin
            token < reader->output->initializer_ends[declaration] ? reader->incomplete_array_types[declaration] : 0;
 }
 
-static bool check_input_binding_events(CheckInputReader* reader, bool scalar)
+// `resolved` has an answer for each of reader->bindings' events (only its uses' are read). Every answer is
+// checked before any is published: a use names a token, and sees no event at or after itself.
+static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t* resolved)
+{
+    CheckInput* output = reader->output;
+    const Parser* parser = reader->parser;
+    const CBindings* events = &reader->bindings;
+    const uint32_t count = parser->tokens.count;
+    bool valid = !output->resource;
+    uint64_t identifiers = 0;
+    uint64_t declarations = 0;
+    for (uint32_t event = 0; valid && event < events->count; event += 1)
+    {
+        const uint8_t operation = events->operation[event];
+        const uint32_t handle = resolved[event];
+        valid = operation != C_BINDING_USE ||
+                (events->declaration[event] < count && handle <= event &&
+                 (handle == 0 || (events->operation[handle - 1] == C_BINDING_DECLARE && events->declaration[handle - 1] < count)));
+        identifiers += operation != C_BINDING_RESTORE;
+        declarations += operation == C_BINDING_DECLARE;
+    }
+    output->resource |= !valid;
+    if (valid)
+    {
+        output->binding_statistics.identifiers = identifiers;
+        output->binding_statistics.declarations = declarations;
+    }
+    for (uint32_t event = 0; valid && event < events->count; event += 1)
+    {
+        if (events->operation[event] == C_BINDING_USE)
+        {
+            const uint32_t token = events->declaration[event];
+            const uint32_t handle = resolved[event];
+            const uint32_t declaration = handle != 0 ? events->declaration[handle - 1] : BUSTER_CHECK_NONE;
+            const uint32_t old = output->declarations[token];
+            const TypeId captured = reader->declared_types[token];
+            const TypeId incomplete = check_input_binding_incomplete(reader, declaration, token);
+            output->declarations[token] = declaration;
+            if (events->key[event] / events->name_capacity == C_BINDING_ORDINARY)
+            {
+                reader->declared_types[token] = incomplete != 0 ? incomplete : declaration < count ?
+                    (old == declaration && captured != 0 ? captured : reader->declared_types[declaration]) : 0;
+                const bool typedef_use = handle != 0 && events->kind[handle - 1] == C_BINDING_TYPEDEF;
+                if (declaration < count && (reader->declared_types[token] == 0 ||
+                    (captured != 0 && old != declaration) ||
+                    (typedef_use && parser->tree.roles[token] == PARSE_ROLE_OPERAND && !reader->ignored[token])))
+                {
+                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                }
+            }
+            if (declaration == BUSTER_CHECK_NONE)
+            {
+                check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+            }
+        }
+    }
+    return valid && output->report_count == 0;
+}
+
+// Resolve the reader's own events: DIRECT reads each use's retained answer, STACKS replays them independently and
+// BATCH sorts them. The replay's and the sort's scratch is released before returning.
+static bool check_input_binding_events(CheckInputReader* reader, CheckInputBindingMode mode)
 {
     CheckInput* output = reader->output;
     const CBindings* bindings = &reader->bindings;
     const uint64_t mark = reader->scratch->length;
     output->binding_event_count = bindings->count;
     output->binding_statistics = (CBindingStatistics){ 0 };
-    bool valid = bindings->valid && !output->resource;
-    uint32_t* resolved = valid && bindings->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, bindings->count) : 0;
-    valid = valid && (bindings->count == 0 || resolved != 0);
-    if (valid && bindings->count != 0)
+    const bool direct = mode == CHECK_INPUT_BINDINGS_DIRECT;
+    bool valid = bindings->valid && !output->resource && (mode == CHECK_INPUT_BINDINGS_DIRECT || mode == CHECK_INPUT_BINDINGS_STACKS || mode == CHECK_INPUT_BINDINGS_BATCH);
+    valid = valid && (!direct || bindings->count == 0 || bindings->previous != 0);
+    uint32_t* resolved = valid && !direct && bindings->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, bindings->count) : 0;
+    valid = valid && (direct || bindings->count == 0 || resolved != 0);
+    CBindingStatistics statistics = { 0 };
+    if (valid && !direct && bindings->count != 0)
     {
-        valid = scalar ? c_bindings_scalar(bindings, resolved, reader->scratch) :
-                         c_bindings_batch(bindings, resolved, reader->scratch, &output->binding_statistics);
+        valid = mode == CHECK_INPUT_BINDINGS_STACKS ? c_bindings_scalar(bindings, resolved, reader->scratch) :
+                                                      c_bindings_batch(bindings, resolved, reader->scratch, &statistics);
     }
-    if (!valid)
-    {
-        output->resource = true;
-    }
-    for (uint32_t event = 0; valid && event < bindings->count; event += 1)
-    {
-        const uint8_t operation = bindings->operation[event];
-        if (scalar)
-        {
-            output->binding_statistics.identifiers += operation != C_BINDING_RESTORE;
-            output->binding_statistics.declarations += operation == C_BINDING_DECLARE;
-        }
-        if (operation == C_BINDING_USE)
-        {
-            const uint32_t token = bindings->declaration[event];
-            const uint32_t handle = resolved[event];
-            const uint32_t declaration = handle != 0 ? bindings->declaration[handle - 1] : BUSTER_CHECK_NONE;
-            const TypeId incomplete = check_input_binding_incomplete(reader, declaration, token);
-            output->declarations[token] = declaration;
-            if (bindings->key[event] / bindings->name_capacity == C_BINDING_ORDINARY)
-            {
-                reader->declared_types[token] = incomplete != 0 ? incomplete : handle != 0 ? reader->declared_types[declaration] : 0;
-                if (handle != 0 && (reader->declared_types[token] == 0 ||
-                    (bindings->kind[handle - 1] == C_BINDING_TYPEDEF && reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && !reader->ignored[token])))
-                {
-                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
-                }
-            }
-            if (handle == 0)
-            {
-                check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
-            }
-        }
-    }
+    output->resource |= !valid;
+    valid = valid && check_input_binding_answers(reader, direct ? bindings->previous : resolved);
+    output->binding_statistics.walks = statistics.walks;
+    output->binding_statistics.walked_uses = statistics.walked_uses;
+    output->binding_statistics.fallback_uses = statistics.fallback_uses;
     arena_pop_to(reader->scratch, mark);
     return valid && !output->resource && output->report_count == 0;
 }
@@ -144,7 +207,9 @@ static bool check_input_binding_columns(CheckInputReader* reader, const ParseBin
     return valid && !output->resource && output->report_count == 0;
 }
 
-static bool check_input_bindings(CheckInputReader* reader, bool scalar)
+// The parser modes: the parser's own grammar replay (parse_bindings_build) and resolution, mapped onto the
+// reader's use events. Kept for measurement and as an oracle; the reader's events already hold these answers.
+static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
 {
     CheckInput* output = reader->output;
     const uint64_t mark = reader->arena->length;
@@ -184,4 +249,12 @@ static bool check_input_bindings(CheckInputReader* reader, bool scalar)
     }
     arena_pop_to(reader->arena, mark);
     return valid && !output->resource && output->report_count == 0;
+}
+
+static bool check_input_bindings(CheckInputReader* reader, CheckInputBindingMode mode)
+{
+    const CheckInputBindingMode selected = mode != CHECK_INPUT_BINDINGS_DEFAULT ? mode :
+                                           reader->parser->options.scalar ? CHECK_INPUT_BINDINGS_STACKS : CHECK_INPUT_BINDINGS_DIRECT;
+    const bool parser = selected == CHECK_INPUT_BINDINGS_PARSER_STACKS || selected == CHECK_INPUT_BINDINGS_PARSER_BATCH;
+    return parser ? check_input_binding_parser(reader, selected == CHECK_INPUT_BINDINGS_PARSER_STACKS) : check_input_binding_events(reader, selected);
 }

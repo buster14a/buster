@@ -1394,8 +1394,8 @@ static bool check_corpus_file(CheckCorpusTally* tally, const char* file, const c
     tally->nodes += paths[0].stream.count;
     tally->scalar_nodes += paths[1].stream.statistics.scalar_nodes;
     tally->vector_nodes += paths[1].stream.statistics.vector_nodes;
-    tally->binding_uses += paths[1].input.parser_binding_statistics.walked_uses;
-    tally->binding_fallback_uses += paths[1].input.parser_binding_statistics.fallback_uses;
+    tally->binding_uses += paths[1].input.binding_statistics.walked_uses;
+    tally->binding_fallback_uses += paths[1].input.binding_statistics.fallback_uses;
     const bool different = !acceptance || !line || !diagnostic_path || !equal || resource;
     if (report != 0)
     {
