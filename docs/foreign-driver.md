@@ -12,7 +12,7 @@ build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared]
     [--lanes N] [--scalar] [-s|--strip-all] [--time]
     [--gc-sections|--no-gc-sections]
     [--merge-strings|--no-merge-strings]
-    [--dedup-unwind|--no-dedup-unwind]
+    [--dedup-unwind|--no-dedup-unwind] [--startup-applies-irelative]
     INPUT... [-L DIR] [-l LIB] [-u NAME]
 ```
 
@@ -34,7 +34,9 @@ error after the link, each stage's wall time (the arguments, the interpreter's
 discovery, the resolution with each of its phases on the slowest lane, the
 conversion, the optional passes, the write with each of the writer's phases on
 lane 0, and the release), as wild's `--time` and mold's `--perf` report
-theirs. `--help` describes the supported
+theirs. `--startup-applies-irelative` says that a static link's own startup
+applies its `IRELATIVE` relocations (below, "What a static executable and a
+static PIE hold"). `--help` describes the supported
 command forms. The entry is a forced undefined reference during resolution,
 so an archive can supply it; final entry lookup is repeated after symbol
 remapping.
@@ -155,14 +157,23 @@ static PIE also gets `DT_INIT` and `DT_FINI` from `crti.o`'s `_init` and
 `_fini` and its `RELATIVE` relocations in `.rela.dyn` without RELR, as lld
 writes `-static-pie` without `-z pack-relative-relocs`; `rcrt1.o`'s startup
 applies them before anything else runs. A static program without libc takes
-the same handling, which changes nothing for it, but for IFUNCs: the kernel
-applies no relocations, and a static link in which nothing refers to
-`__rela_iplt_start` (in a static PIE, to `_DYNAMIC`) has no startup code that
-applies their `IRELATIVE` relocations. The first IFUNC a fixup reaches there
-is refused, naming it and the startup's missing name, where lld writes a
-program whose call through the slot that nothing filled faults. A `_start` of
-its own that applies the relocations between `__rela_iplt_start` and
-`__rela_iplt_end`, as `libc.a`'s does, makes the link take them.
+the same handling, which changes nothing for it, but for IFUNCs. The kernel
+applies no relocations, so something in the program must apply their
+`IRELATIVE` ones before it calls them, and the conversion takes them only from
+a startup it recognizes (`foreign_link_startup_applies`): glibc's, followed
+from the entry's object. A static executable's entry (`crt1.o`'s `_start`)
+refers to `__libc_start_main`, whose object (`libc.a`'s `libc-start.o`) refers
+to `__rela_iplt_start` and applies the relocations between it and
+`__rela_iplt_end`; a static PIE's (`rcrt1.o`'s) refers to `__libc_start_main`
+too, whose object refers to `_dl_relocate_static_pie`, whose object
+(`dl-reloc-static-pie.o`) refers to `_DYNAMIC` and applies the image's
+relocations through it, `IRELATIVE` ones among them. Another C library's
+startup isn't glibc's (musl's `__libc_start_main` refers to none of these and
+applies no `IRELATIVE` relocation), and a mere mention of those names, a
+pointer to `__rela_iplt_start` that nothing reads, proves nothing. A program
+whose own startup applies them says so with `--startup-applies-irelative`.
+Otherwise the first IFUNC a fixup reaches is refused, naming it and why, where
+lld writes a program whose call through the slot that nothing filled faults.
 
 ## What a shared library holds
 
@@ -275,12 +286,17 @@ must run alike and define the bounds alike. The driver's own tests link a
 shared library with `-soname` and with `-h`, check its `DT_SONAME`, export,
 missing entry point and interpreter, and run a PIE that calls it; check that
 `-pie` with `-static` writes a static PIE; refuse `-shared` with `-static`,
-`--no-dynamic-linker` with `-pie` and `-soname` without a value; and link a
-program without libc whose `_start` calls an IFUNC, refused as a static
-executable and as a static PIE, naming the IFUNC and the startup's missing
-name, and linked and run with its status when its `_start` applies the
-relocations between `__rela_iplt_start` and `__rela_iplt_end` first. Its
-section GC case collects a link after the merge: a
+`--no-dynamic-linker` with `-pie` and `-soname` without a value; and link
+programs without libc whose `_start` calls an IFUNC. They are refused, naming
+the IFUNC and why, as a static executable and as a static PIE, with a pointer
+to `__rela_iplt_start` or to `_DYNAMIC` that nothing reads, and with a `_start`
+that applies the relocations itself but without `--startup-applies-irelative`.
+With it, a static executable whose `_start` applies those between
+`__rela_iplt_start` and `__rela_iplt_end`, and a static PIE whose `_start`
+applies `.rela.dyn`'s `RELATIVE` and `IRELATIVE` relocations through
+`_DYNAMIC` from wherever the loader put it, link and run with their status;
+the corpus links glibc's startup in both. Its section GC case collects a link
+after the merge: a
 retained section whose bounds only dead code refers to must keep its bytes,
 and a hook in a merged code section its FDE, while the dead code goes.
 
@@ -312,7 +328,10 @@ design's generated programs, from one command line, as a process of its own
 with `--lanes=8` and `--lanes=1`. On the 9700X, one lane links the programs of
 1 worker, 2,000 workers and synth's shape in 0.60, 1.12 and 55.2 ms, against
 wild's 1.35, 2.56 and 99.9 ms and mold's 2.44, 3.31 and 99.9 ms on one thread:
-0.89 GB/s of output per lane on the largest, against mold's 0.54. "Foreign
-executables, as built" in the linker design has the tables, the appendix's own
-inputs and where the time goes. GC, string pooling and CIE pooling remain
+0.89 GB/s of output per lane on the largest, against mold's 0.54; as a
+static executable, a static PIE and a shared library, synth's shape takes
+58.3, 59.3 and 65.6 ms on one lane, against mold's 100.1, 106.6 and 116.6 and
+lld's 98.3, 102.5 and 128.2 on one thread. "Foreign executables, as built" in
+the linker design has the tables, the appendix's own inputs and where the time
+goes. GC, string pooling and CIE pooling remain
 disabled by default; their own measurements are in the linker design.

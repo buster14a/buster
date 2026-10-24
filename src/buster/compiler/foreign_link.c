@@ -100,11 +100,22 @@ static bool foreign_link_bounded(const ForeignLinkBounds* plan, uint32_t name);
 
 static __attribute__((unused)) ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena);
 static __attribute__((unused)) ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter);
-// `interpreter` is a dynamic PIE's alone. A shared library's soname is its caller's to set in the result's
-// ExecutableDynamic (empty for none).
+// What a static link takes for the startup that applies its IRELATIVE relocations (foreign_link_startup_applies): the
+// entry's name, from whose object glibc's startup is followed, and the caller's word that the output's own startup
+// applies them (link-foreign's --startup-applies-irelative).
+typedef struct ForeignLinkStartup ForeignLinkStartup;
+struct ForeignLinkStartup
+{
+    String8 entry;
+    bool applies_irelative;
+};
+
+// `interpreter` is a dynamic PIE's alone, and `startup` a static kind's. A shared library's soname is its caller's to
+// set in the result's ExecutableDynamic (empty for none).
 static __attribute__((unused)) ForeignLinkResult foreign_link_build_kind(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind,
-                                                                         String8 interpreter);
-static __attribute__((unused)) ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter);
+                                                                         String8 interpreter, ForeignLinkStartup startup);
+static __attribute__((unused)) ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter,
+                                                                           ForeignLinkStartup startup);
 
 static bool foreign_link_add_capacity(LinkCapacity* total, LinkCapacity added)
 {
@@ -1697,6 +1708,7 @@ struct ForeignLinkBuild
     RuntimeKind kind;
     String8 interpreter;
     bool defer_undefined;
+    ForeignLinkStartup startup;
     // The calling thread's scratch, from foreign_link_build_begin to foreign_link_build_finish: the input order, the
     // __start_ and __stop_ plan and the names the link requires live there.
     Scratch scratch;
@@ -1850,17 +1862,55 @@ static void foreign_link_build_middle(ForeignLinkBuild* build)
     build->result = result;
 }
 
-// Whether an input refers to (or defines) a name.
-static bool foreign_link_referenced(const Foreign* foreign, const char* text)
+// The name id (from 1) of `name` among the inputs' names, or 0.
+static uint32_t foreign_link_name_id(const Foreign* foreign, String8 name)
 {
-    const uint32_t length = (uint32_t)strlen(text);
-    return foreign_find_name(foreign, (const uint8_t*)text, length, link_hash((const uint8_t*)text, length)) != 0;
+    const uint32_t length = (uint32_t)name.length;
+    return name.length != 0 && name.length <= UINT32_MAX ? foreign_find_name(foreign, (const uint8_t*)name.pointer, length, link_hash((const uint8_t*)name.pointer, length)) : 0;
+}
+
+// Whether the object the link takes name `definer`'s definition from (name ids from 1) refers to name `referenced`: an
+// undefined symbol of that name among its global ones.
+static bool foreign_link_refers(const Foreign* foreign, uint32_t definer, uint32_t referenced)
+{
+    const uint8_t resolution = definer != 0 ? foreign->names.resolution[definer - 1] : FOREIGN_RESOLUTION_UNDEFINED;
+    const bool by_object = referenced != 0 && (resolution == FOREIGN_RESOLUTION_STRONG || resolution == FOREIGN_RESOLUTION_WEAK);
+    const ForeignObject* object = by_object ? &foreign->objects[foreign_symbol_object(foreign, foreign->names.symbol[definer - 1])] : 0;
+    bool result = false;
+    for (uint32_t s = 0; object != 0 && !result && s < object->global_count; s += 1)
+    {
+        const uint32_t symbol = object->global_begin + s;
+        const ForeignRound* round = foreign_symbol_round(foreign, symbol);
+        const uint32_t at = symbol - round->first_symbol;
+        result = round->symbols.name_id[at] + 1 == referenced && round->symbols.section[at] == SHN_UNDEF;
+    }
+    return result;
+}
+
+// Whether a static link's startup applies its IRELATIVE relocations, which the kernel doesn't: the caller says the
+// output's own does (link-foreign's --startup-applies-irelative), or glibc's does, followed from the entry's object as
+// glibc's start file and libc.a chain to it. A static executable's entry (crt1.o's _start) refers to __libc_start_main,
+// whose object (libc.a's libc-start.o) refers to __rela_iplt_start, and applies the relocations between it and
+// __rela_iplt_end; a static PIE's (rcrt1.o's) too, whose __libc_start_main refers to _dl_relocate_static_pie, whose
+// object (dl-reloc-static-pie.o) refers to _DYNAMIC, through which it applies the image's relocations, IRELATIVE ones
+// among them. A mention of those names anywhere else proves nothing (#405's review), and neither does another C
+// library's startup: musl's __libc_start_main refers to none of them, and applies no IRELATIVE relocation.
+static bool foreign_link_startup_applies(const Foreign* foreign, RuntimeKind kind, ForeignLinkStartup startup)
+{
+    const uint32_t start = foreign_link_name_id(foreign, startup.entry);
+    const uint32_t main_start = foreign_link_name_id(foreign, foreign_string("__libc_start_main"));
+    const uint32_t relocator = foreign_link_name_id(foreign, foreign_string("_dl_relocate_static_pie"));
+    const bool glibc = foreign_link_refers(foreign, start, main_start) &&
+                       (kind == RUNTIME_KIND_STATIC ? foreign_link_refers(foreign, main_start, foreign_link_name_id(foreign, foreign_string("__rela_iplt_start"))) :
+                                                      foreign_link_refers(foreign, main_start, relocator) &&
+                                                          foreign_link_refers(foreign, relocator, foreign_link_name_id(foreign, foreign_string("_DYNAMIC"))));
+    return startup.applies_irelative || glibc;
 }
 
 // The steps after the relocations but the check: the __start_ and __stop_ sections' relocations, a dynamic PIE's copies,
 // the dynamic images' _DYNAMIC, and the refusal of the IFUNCs a fixup reaches that the output can't take
 // (foreign_link_refuse_ifuncs): a shared library's that the loader can't bind, and every one of a static link whose
-// startup applies no IRELATIVE relocation (nothing refers to __rela_iplt_start, or a static PIE's to _DYNAMIC).
+// startup applies no IRELATIVE relocation (foreign_link_startup_applies).
 static void foreign_link_build_end(ForeignLinkBuild* build)
 {
     ForeignLink* output = build->output;
@@ -1875,10 +1925,8 @@ static void foreign_link_build_end(ForeignLinkBuild* build)
     {
         result = foreign_link_copies(output, foreign, build->arena);
     }
-    // The inputs' names: _DYNAMIC's own symbol, which the conversion adds below, isn't one.
-    const bool applied = build->kind == RUNTIME_KIND_STATIC     ? foreign_link_referenced(foreign, "__rela_iplt_start") :
-                         build->kind == RUNTIME_KIND_STATIC_PIE ? foreign_link_referenced(foreign, "_DYNAMIC") :
-                                                                  true;
+    // From the resolution's names and objects: _DYNAMIC's own symbol, which the conversion adds below, isn't one.
+    const bool applied = !runtime_kind_is_static(build->kind) || foreign_link_startup_applies(foreign, build->kind, build->startup);
     if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind != RUNTIME_KIND_STATIC)
     {
         result.error = foreign_link_dynamic_symbol(output, foreign);
@@ -1969,7 +2017,8 @@ static void foreign_link_build_finish(ForeignLinkBuild* build)
 
 #include "buster/compiler/foreign_link_lanes.c"
 
-static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter, bool defer_undefined)
+static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter, bool defer_undefined,
+                                                 ForeignLinkStartup startup)
 {
     ForeignLinkBuild build = {
         .output = output,
@@ -1979,6 +2028,7 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
         .kind = kind,
         .interpreter = interpreter,
         .defer_undefined = defer_undefined,
+        .startup = startup,
         .start = foreign_now(),
     };
     if (foreign->path == FOREIGN_PATH_VECTOR && foreign->lanes > 1)
@@ -2031,24 +2081,28 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
     return build.result;
 }
 
+// A static executable whose entry is _start.
 static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_STATIC, (String8){ 0 }, false);
+    const ForeignLinkStartup startup = { .entry = foreign_string("_start") };
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_STATIC, (String8){ 0 }, false, startup);
 }
 
 static ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_DYNAMIC, interpreter, false);
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_DYNAMIC, interpreter, false, (ForeignLinkStartup){ 0 });
 }
 
-static ForeignLinkResult foreign_link_build_kind(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter)
+static ForeignLinkResult foreign_link_build_kind(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter,
+                                                 ForeignLinkStartup startup)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, false);
+    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, false, startup);
 }
 
 // Reachability, including FDE/CIE dependencies, decides which unresolved references remain errors. Preserve those
 // names as GLOBAL/NONE until foreign_gc_link diagnoses the surviving closure; ordinary producers remain eager.
-static ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter)
+static ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter,
+                                                   ForeignLinkStartup startup)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, true);
+    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, true, startup);
 }

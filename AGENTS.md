@@ -672,10 +672,11 @@ designs and the compilers already built this way.
   aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for libraries'
   own references, lld's regular symbol table, and a dynamic PIE's own IFUNCs
   through the writer's stubs and `IRELATIVE` relocations; a shared library
-  refuses an IFUNC that isn't preemptible, and a static link whose startup
-  applies no `IRELATIVE` relocation (nothing refers to `__rela_iplt_start`, or
-  in a static PIE to `_DYNAMIC`: a program without libc) refuses every IFUNC
-  a fixup reaches. GC, literal pooling and CIE pooling are off by default.
+  refuses an IFUNC that isn't preemptible, and a static link refuses every
+  IFUNC a fixup reaches unless glibc's startup, followed from the entry's
+  object (`crt1.o` or `rcrt1.o`, then `libc.a`'s members), applies their
+  `IRELATIVE` relocations or `--startup-applies-irelative` says the program's
+  own does. GC, literal pooling and CIE pooling are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,

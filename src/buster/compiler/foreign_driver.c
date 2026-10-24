@@ -7,7 +7,9 @@
 // -pie makes a dynamic PIE, -static with -pie a static PIE (GCC's -static-pie line: -static -pie --no-dynamic-linker
 // -z text) and -shared a shared library, without an entry point unless -e names one, with -soname's DT_SONAME. A
 // static executable and a static PIE get the static runtime's handling (IFUNC stubs and IRELATIVE relocations, TLS
-// relaxation, the names libc.a's startup looks for), which a static program without libc doesn't notice.
+// relaxation, the names libc.a's startup looks for), which a static program without libc doesn't notice but for its
+// IFUNCs: the conversion refuses those unless glibc's startup applies their IRELATIVE relocations, followed from the
+// entry, or --startup-applies-irelative says the program's own startup does (foreign_link_startup_applies).
 //
 // Conversion precedes optional section GC and literal merging, then the existing lane-parallel writer. The original
 // Foreign and all arenas remain live through writing. Entry lookup uses Foreign's canonical names again after GC's
@@ -39,6 +41,9 @@ struct ForeignDriver
     bool help;
     // Whether -e named the entry point: a shared library has none otherwise.
     bool entry_given;
+    // --startup-applies-irelative: the output's own startup applies a static link's IRELATIVE relocations, which
+    // glibc's otherwise must (foreign_link_startup_applies).
+    bool startup_irelative;
 };
 
 typedef struct ForeignDriverWrite ForeignDriverWrite;
@@ -61,12 +66,15 @@ static void foreign_driver_usage(void)
 {
     fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared] [-soname NAME] [--dynamic-linker PATH]\n"
                     "                    [--no-dynamic-linker] [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
-                    "                    [--dedup-unwind|--no-dedup-unwind]\n"
+                    "                    [--dedup-unwind|--no-dedup-unwind] [--startup-applies-irelative]\n"
                     "                    [-s|--strip-all] [-S|--strip-debug] [--scalar] [--lanes N] [--time] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
                     "Defaults: static executable, a.out, entry _start, one lane; GC, string merging and unwind deduplication off.\n"
                     "Supply startup objects and runtime libraries explicitly, in link order, as GCC's driver gives them to GNU ld.\n"
                     "-pie writes a dynamic PIE, -static -pie a static PIE and -shared a shared library (no entry point without -e).\n"
                     "Static output searches archives by default; PIE and shared output prefer shared libraries.\n"
+                    "A static link takes IFUNCs when glibc's startup (crt1.o or rcrt1.o, libc.a) applies their relocations, or when\n"
+                    "--startup-applies-irelative says its own startup does (those between __rela_iplt_start and __rela_iplt_end, or a\n"
+                    "static PIE's through _DYNAMIC).\n"
                     "Named regular symbols and the inputs' DWARF are emitted by default; -s/--strip-all omits both, preserving\n"
                     "dynamic symbols, and -S/--strip-debug the DWARF alone.\n"
                     "Archive groups, --whole-archive, --as-needed, -Bstatic and -Bdynamic retain input order.\n"
@@ -189,6 +197,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         {
             // A static PIE's, which has no interpreter whatever this says.
             no_interpreter = true;
+        }
+        else if (strcmp(argument, "--startup-applies-irelative") == 0)
+        {
+            driver->startup_irelative = true;
         }
         else if (strcmp(argument, "--gc-sections") == 0 || strcmp(argument, "--no-gc-sections") == 0)
         {
@@ -323,9 +335,9 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
             "a compressed debug section whose zlib stream doesn't decompress to its size",
         };
         // An IFUNC's refusal says why for the kind (foreign_link_refuse_ifuncs).
-        const char* ifunc = kind == RUNTIME_KIND_STATIC ? "an IFUNC whose IRELATIVE relocation nothing applies: no startup code refers to __rela_iplt_start" :
-                            kind == RUNTIME_KIND_STATIC_PIE ? "an IFUNC whose IRELATIVE relocation nothing applies: no startup code refers to _DYNAMIC" :
-                                                              messages[FOREIGN_LINK_ERROR_IFUNC];
+        const char* ifunc = runtime_kind_is_static(kind) ? "an IFUNC whose IRELATIVE relocation nothing applies: the entry doesn't lead to glibc's startup "
+                                                           "(crt1.o or rcrt1.o, libc.a), and no --startup-applies-irelative says the output's own applies it" :
+                                                           messages[FOREIGN_LINK_ERROR_IFUNC];
         // A compressed debug section's refusal says which way it doesn't decompress (foreign_debug_build).
         const char* compression = result.import.error == IMPORT_ERROR_UNSUPPORTED ?
                                       "a debug section compressed otherwise than with zlib (-gz=zstd's), which link-foreign doesn't decompress: compile with -gz=zlib or -gz=none" :
@@ -681,8 +693,12 @@ static int run_foreign_link(int argc, char** argv)
     ends[FOREIGN_DRIVER_STAGE_RESOLVE] = foreign_driver_now();
     if (succeeded && !driver.help)
     {
-        ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter) :
-                                               foreign_link_build_kind(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter);
+        const ForeignLinkStartup startup = {
+            .entry = driver.entry,
+            .applies_irelative = driver.startup_irelative,
+        };
+        ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, startup) :
+                                               foreign_link_build_kind(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, startup);
         // The conversion's phases, before section GC replaces the link.
         memcpy(convert, converted.phase_nanoseconds, sizeof(convert));
         if (result.error == FOREIGN_LINK_ERROR_NONE && driver.gc)
