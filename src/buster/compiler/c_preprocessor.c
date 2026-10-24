@@ -628,6 +628,19 @@ struct PPRange
     uint8_t system;
     // The line markers with flag 1 in it that no marker with flag 2 has left yet (pp_apply_line).
     uint32_t marker_entries;
+    // One past the output boundary where argument collection left this inclusion, or zero. Only -E records it.
+    uint32_t collected_exit;
+};
+
+// FileChanged runs before the collected invocation emits anything. Keep these rare exits in execution order;
+// ordinary inclusions still need no event allocation. Locations and expansion history retain their source meaning.
+typedef struct PPIncludeExit PPIncludeExit;
+struct PPIncludeExit
+{
+    PPIncludeExit* next;
+    uint32_t token;
+    uint32_t range;
+    uint32_t location;
 };
 
 // A line note, from a #line or a #pragma GCC system_header: from `location` on in its range, lines are `delta` more
@@ -1127,6 +1140,8 @@ struct Preprocessor
     // #embed's tokens that come before any other output start a line (pp_embed_line).
     uint32_t file_change_token;
     uint32_t file_change_location;
+    PPIncludeExit* include_exits;
+    PPIncludeExit* last_include_exit;
     PPExpansion* history;
     uint32_t history_count;
     uint32_t history_capacity;
@@ -6972,7 +6987,34 @@ static void pp_collect_step(Preprocessor* pp)
         {
             // An included file's end: clang's lexer goes back to the includer and the collection goes on there, whether
             // the invocation started in the file or an #include among its arguments entered it.
+            const uint32_t range = context->range;
             pp_pop_context(pp);
+            if (pp->options.expansion_starts && pp->contexts[pp->context_count - 1].kind == BUSTER_PP_CONTEXT_FILE && pp->contexts[pp->context_count - 1].range != range)
+            {
+                PPIncludeExit* event = arena_push(&pp->arena, sizeof(PPIncludeExit), _Alignof(PPIncludeExit));
+                if (event != 0)
+                {
+                    *event = (PPIncludeExit){
+                        .token = pp->output.count,
+                        .range = range,
+                        .location = pp->file_change_location,
+                    };
+                    if (pp->last_include_exit != 0)
+                    {
+                        pp->last_include_exit->next = event;
+                    }
+                    else
+                    {
+                        pp->include_exits = event;
+                    }
+                    pp->last_include_exit = event;
+                    pp->ranges[range].collected_exit = pp->output.count + 1;
+                }
+                else
+                {
+                    pp_diagnose(pp, PP_SEVERITY_FATAL, pp->file_change_location, "out of memory recording an include exit");
+                }
+            }
         }
         else
         {
@@ -14013,6 +14055,8 @@ struct PPMarkers
     uint32_t root;
     uint32_t* cursors;
     uint32_t expansion;
+    uint32_t token;
+    const PPIncludeExit* include_exit;
     Arena* arena;
     char* text;
     uint64_t length;
@@ -14039,6 +14083,7 @@ static bool pp_markers_initialize(const Preprocessor* pp, PPMarkers* markers, Ar
         .root = BUSTER_PP_NONE,
         .cursors = arena_push_array(arena, (uint64_t)pp->range_count + 1, sizeof(uint32_t), 4),
         .arena = arena,
+        .include_exit = pp->include_exits,
         .capacity = 4096,
         .text = arena_push(arena, 4096, 1),
     };
@@ -14210,6 +14255,7 @@ static __attribute__((noinline)) bool pp_print_keeps_line(const Preprocessor* pp
 // printers then move it to where clang's lexer starts that token, with the line splices right before it.
 static uint32_t pp_print_location(const Preprocessor* pp, PPMarkers* markers, uint32_t token)
 {
+    markers->token = token;
     uint32_t at = markers->expansion;
     while (at < pp->expansion_start_count && pp->expansion_starts[at].token <= token)
     {
@@ -14231,11 +14277,20 @@ static uint32_t pp_print_location(const Preprocessor* pp, PPMarkers* markers, ui
 // go to markers->text (markers->length bytes, ending in a line break); returns the line breaks to put after them, before
 // the token, and false in `*written` if memory ran out. pp_print_place takes the common case inline.
 static __attribute__((noinline)) uint32_t pp_print_place_marking(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical,
-                                                                 bool line_start, bool* written)
+                                                                 bool line_start, bool file_change, bool* written)
 {
     markers->length = 0;
     const uint32_t previous_note = markers->cursors[range];
     PPPresumed here = pp_print_presumed(pp, markers, range, location, physical);
+    if (!file_change && pp->ranges[range].collected_exit != 0 && pp->ranges[range].collected_exit - 1 <= markers->token)
+    {
+        // MoveToLine takes the expansion's presumed line, but FileChanged has already selected the includer.
+        range = markers->range;
+        here.delta = markers->delta;
+        here.name = markers->name;
+        here.name_length = markers->name_length;
+        here.system = markers->system;
+    }
     if (markers->keep_line && range == markers->range && previous_note == markers->cursors[range] && here.name == markers->name &&
         here.delta == markers->delta && here.system == markers->system)
     {
@@ -14333,7 +14388,37 @@ BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint
     }
     else
     {
-        result = pp_print_place_marking(pp, markers, range, location, physical, line_start, written);
+        result = pp_print_place_marking(pp, markers, range, location, physical, line_start, false, written);
+    }
+    return result;
+}
+
+// Replay the include exits that happened before this token was returned. A header with no preceding output still
+// gets its entry marker before its exit. The vector printer flushes its batch buffer before this cold stdio path.
+static __attribute__((noinline)) bool pp_print_include_exits(Preprocessor* pp, PPMarkers* markers, uint32_t token, bool* line_start, FILE* stream)
+{
+    bool result = true;
+    while (result && markers->include_exit != 0 && markers->include_exit->token <= token)
+    {
+        const PPIncludeExit* event = markers->include_exit;
+        markers->length = 0;
+        if (markers->range != event->range)
+        {
+            pp_print_place_marking(pp, markers, event->range, pp->ranges[event->range].base, 1, *line_start, true, &result);
+            *line_start = *line_start || markers->length != 0;
+        }
+        const uint32_t parent = pp_print_parent(pp, markers, event->range);
+        uint32_t column;
+        const PPPresumed back = pp_print_presumed(pp, markers, parent, event->location, pp_line_of(pp, parent, event->location, &column));
+        result = result && pp_print_marker_line(markers, line_start, back.line, back.name, back.name_length, " 2", back.system);
+        markers->range = parent;
+        markers->line = back.line;
+        markers->delta = back.delta;
+        markers->name = back.name;
+        markers->name_length = back.name_length;
+        markers->system = back.system;
+        result = result && fwrite(markers->text, 1, markers->length, stream) == markers->length;
+        markers->include_exit = event->next;
     }
     return result;
 }
@@ -14361,7 +14446,9 @@ static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp,
         const uint32_t place = pp_lexed_start(pp, pp_print_location(pp, markers, token));
         const char* name;
         uint32_t length;
-        const bool moves = pp_find_range(pp, place) != markers->range || pp_presumed(pp, place, &name, &length) != markers->line;
+        const uint32_t range = pp_find_range(pp, place);
+        const bool exited = range != BUSTER_PP_NONE && pp->ranges[range].collected_exit != 0 && pp->ranges[range].collected_exit - 1 <= token;
+        const bool moves = (!exited && range != markers->range) || pp_presumed(pp, place, &name, &length) != markers->line;
         result = moves ? place : BUSTER_PP_NONE;
     }
     while (*silent < pp->silent_pragma_count && pp->silent_pragmas[*silent].token <= token)
@@ -14374,7 +14461,9 @@ static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp,
             const uint32_t place = made ? pp_lexed_start(pp, pp->silent_pragmas[*silent].location) : own;
             const char* name;
             uint32_t length;
-            const bool moves = pp_find_range(pp, place) != markers->range || pp_presumed(pp, place, &name, &length) != markers->line;
+            const uint32_t range = pp_find_range(pp, place);
+            const bool exited = range != BUSTER_PP_NONE && pp->ranges[range].collected_exit != 0 && pp->ranges[range].collected_exit - 1 <= token;
+            const bool moves = (!exited && range != markers->range) || pp_presumed(pp, place, &name, &length) != markers->line;
             result = moves ? place : BUSTER_PP_NONE;
         }
         *silent += 1;
@@ -14532,6 +14621,15 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
     }
     for (uint32_t i = 0; result && i < out->count; i += 1)
     {
+        if (markers && BUSTER_UNLIKELY(marked.include_exit != 0 && marked.include_exit->token <= i))
+        {
+            result = pp_print_include_exits(pp, &marked, i, &line_start, stream);
+            force_line = true;
+            if (!result)
+            {
+                break;
+            }
+        }
         const uint8_t kind = out->kinds[i];
         const uint8_t flags = out->flags[i];
         const bool written = pp_spelled_as_written(pragma, kind);
@@ -14610,6 +14708,10 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             line_start = false;
         }
         arena_pop_to(scratch.arena, mark);
+    }
+    if (result && markers && marked.include_exit != 0)
+    {
+        result = pp_print_include_exits(pp, &marked, out->count, &line_start, stream);
     }
     if (!line_start)
     {
@@ -14891,6 +14993,16 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         {
             const uint32_t i = c + k;
             const uint32_t length = lengths[k];
+            const bool exited = markers && BUSTER_UNLIKELY(marked.include_exit != 0 && marked.include_exit->token <= i);
+            if (exited)
+            {
+                result = result && fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, i, &line_start, stream);
+                used = 0;
+                if (!result)
+                {
+                    break;
+                }
+            }
             if ((pragma_ends >> k) & 1)
             {
                 force_line = true;
@@ -14908,7 +15020,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                                        ? pp_print_moves(pp, &marked, i, &silent)
                                        : BUSTER_PP_NONE;
             const bool moves = moved != BUSTER_PP_NONE;
-            const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves;
+            const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves | (uint32_t)exited;
             // A line start's break after something on the line; with markers, as many as pp_print_place puts.
             uint32_t breaks = starts_line & (uint32_t)!line_start;
             if (markers && starts_line)
@@ -14953,7 +15065,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
             line_start = line_start || starts_line;
             force_line = false;
             buffer[used] = ' ';
-            used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves;
+            used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves & (uint32_t)!exited;
             // The spelling: one masked 64-byte copy, or more for a longer one (written straight out past the buffer's
             // room), or an #embed's text in pieces.
             const uint8_t* spelling = spellings[k];
@@ -14991,6 +15103,11 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
             previous_kind = out_kinds[i];
         }
         arena_pop_to(scratch.arena, spare_mark);
+    }
+    if (result && markers && marked.include_exit != 0)
+    {
+        result = fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, count, &line_start, stream);
+        used = 0;
     }
     if (result && !line_start)
     {
