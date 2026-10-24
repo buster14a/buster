@@ -438,6 +438,28 @@ static const CheckMutationFixture check_mutation_fixtures[] =
         .line = 15,
     },
     {
+        .name = "Zig 0.14.1's lib/libc any-macos-any/simd/base.h, through clang 23's <immintrin.h>: f16 literals and align_value",
+        .source =
+            "typedef _Float16 __m512h __attribute__((__vector_size__(64), __aligned__(64)));\n"
+            "static __inline__ _Float16 __attribute__((__always_inline__, __nodebug__, __target__(\"avx512fp16\"), __min_vector_width__(512)))\n"
+            "_mm512_reduce_add_ph(__m512h __W) {\n"
+            "  return __builtin_ia32_reduce_fadd_ph512(-0.0f16, __W);\n"
+            "}\n"
+            "static __inline__ _Float16 __attribute__((__always_inline__, __nodebug__, __target__(\"avx512fp16\"), __min_vector_width__(512)))\n"
+            "_mm512_reduce_mul_ph(__m512h __W) {\n"
+            "  return __builtin_ia32_reduce_fmul_ph512(1.0F16, __W);\n"
+            "}\n"
+            "static __inline__ void __attribute__((__always_inline__, __nodebug__, __target__(\"movdir64b\")))\n"
+            "_movdir64b (void *__dst __attribute__((align_value(64))), const void *__src)\n"
+            "{\n"
+            "  __builtin_ia32_movdir64b(__dst, __src);\n"
+            "}\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
         .name = "too few arguments are reported at the call's )",
         .source =
             "void h(int, int);\n"

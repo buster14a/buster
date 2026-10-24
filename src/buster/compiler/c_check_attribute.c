@@ -94,6 +94,7 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_REPRODUCIBLE,
     CHECK_ATTRIBUTE_NULLABILITY,
     CHECK_ATTRIBUTE_REGPARM,
+    CHECK_ATTRIBUTE_ALIGN_VALUE,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -249,6 +250,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "alloc_size", CHECK_ATTRIBUTE_ALLOC_SIZE, CHECK_ATTRIBUTE_INTEGER_LIST, 1, 2 },
     { "alloc_align", CHECK_ATTRIBUTE_ALLOC_ALIGN, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "assume_aligned", CHECK_ATTRIBUTE_ASSUME_ALIGNED, CHECK_ATTRIBUTE_INTEGER_LIST, 1, 2 },
+    { "align_value", CHECK_ATTRIBUTE_ALIGN_VALUE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "nonnull", CHECK_ATTRIBUTE_NONNULL, CHECK_ATTRIBUTE_INTEGER_LIST, 0, 255 },
     { "returns_nonnull", CHECK_ATTRIBUTE_RETURNS_NONNULL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "format", CHECK_ATTRIBUTE_FORMAT, CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS, 3, 3 },
@@ -573,6 +575,13 @@ static bool check_input_attribute_value(CheckInputReader* reader, CheckInputAttr
         else if (attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || attribute->kind == CHECK_ATTRIBUTE_FORMAT_ARG)
         {
             valid = value > 0 && value <= UINT32_MAX;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_ALIGN_VALUE)
+        {
+            // A pointer's promised alignment: any power of two, past the alignments an object may have. Clang only
+            // warns where its declaration isn't a pointer variable or typedef, and ignores it there.
+            valid = value != 0 && ((uint64_t)value & ((uint64_t)value - 1)) == 0;
+            error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT;
         }
         else
         {
