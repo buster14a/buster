@@ -536,12 +536,83 @@ static void parse_tokens_from_output_scalar(const PPTokens* output, ParseTokens*
     parse_tokens_pad(tokens);
 }
 
+// Gives the identifiers among output tokens [first, end) their keyword kinds, as pp_resolve_keywords_scalar does: the
+// fused conversion's resolution of what it doesn't store (a pragma's tokens) and its scalar twin's of every token.
+static void parse_resolve_keywords(PPTokens* output, const uint8_t* keyword_kinds, uint32_t first, uint32_t end)
+{
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        if (output->kinds[i] == C_TOKEN_RAW_IDENTIFIER && output->values[i] < BUSTER_PP_KEYWORD_TABLE)
+        {
+            output->kinds[i] = keyword_kinds[output->values[i]];
+        }
+    }
+}
+
+// The fused conversion's twin (#335): pp_resolve_keywords_scalar over a token, or over a whole pragma from its '#', then
+// parse_convert_token of it.
+static void parse_tokens_from_output_fused_scalar(PPTokens* output, const uint8_t* keyword_kinds, ParseTokens* tokens)
+{
+    uint32_t written = 0;
+    tokens->pragma_count = 0;
+    uint32_t i = 0;
+    while (i < output->count)
+    {
+        uint32_t end = i;
+        const bool pragma = output->kinds[i] == C_TOKEN_HASH && (output->flags[i] & BUSTER_PP_START_OF_LINE) != 0 && parse_pragma_at(output, i, &end);
+        parse_resolve_keywords(output, keyword_kinds, i, pragma ? end : i + 1);
+        i = parse_convert_token(output, i, tokens, &written);
+    }
+    tokens->count = written;
+    parse_tokens_pad(tokens);
+}
+
+// The keyword kinds of the identifiers among the `live` tokens from `i`, whose kinds are `kinds`, as
+// pp_resolve_keywords_vector looks them up: stored back into the output, and returned with the block's other kinds.
+static inline __attribute__((always_inline)) __m512i parse_resolve_keywords_block(PPTokens* output, const uint8_t* keyword_kinds, uint32_t i, __mmask64 live, __m512i kinds)
+{
+    __m512i result = kinds;
+    const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+    if (identifiers != 0)
+    {
+        const __m512i table0 = _mm512_loadu_si512(keyword_kinds);
+        const __m512i table1 = _mm512_loadu_si512(keyword_kinds + 64);
+        const __m512i table2 = _mm512_loadu_si512(keyword_kinds + 128);
+        const __m512i table3 = _mm512_loadu_si512(keyword_kinds + 192);
+        __m512i looked = _mm512_setzero_si512();
+        uint64_t small = 0;
+        for (uint32_t group = 0; group < 4; group += 1)
+        {
+            const __mmask16 lanes = (__mmask16)(identifiers >> (group * 16));
+            const __m512i values = _mm512_maskz_loadu_epi32(lanes, output->values + i + group * 16);
+            const __mmask16 keywords = _mm512_mask_cmplt_epu32_mask(lanes, values, _mm512_set1_epi32(BUSTER_PP_KEYWORD_TABLE));
+            const __m128i indices = _mm512_cvtepi32_epi8(values);
+            const __m512i wide = _mm512_zextsi128_si512(indices);
+            const __m128i lower = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table0, wide, table1));
+            const __m128i upper = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table2, wide, table3));
+            const __m128i kinds_here = _mm_mask_blend_epi8(_mm_movepi8_mask(indices), lower, upper);
+            looked = group == 0 ? _mm512_inserti32x4(looked, kinds_here, 0)
+                   : group == 1 ? _mm512_inserti32x4(looked, kinds_here, 1)
+                   : group == 2 ? _mm512_inserti32x4(looked, kinds_here, 2)
+                                : _mm512_inserti32x4(looked, kinds_here, 3);
+            small |= (uint64_t)keywords << (group * 16);
+        }
+        _mm512_mask_storeu_epi8(output->kinds + i, small, looked);
+        result = _mm512_mask_blend_epi8(small, kinds, looked);
+    }
+    return result;
+}
+
 // The output's tokens as the parser's: kinds through parse_kind_table, names for identifiers and each token's index in
 // the output, 64 tokens at a time. A run of tokens without a '#', a PRAGMA_END or a `::` is stored as it is, with one
 // table lookup (two vpermi2b for the table's halves, picked by the kind's bit 7) and masked stores; each of those
 // three goes through parse_convert_token. `tokens` has room for twice the output's tokens (every one a `::`) and its
 // pragmas, with the padding on both sides.
-static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
+//
+// With `keyword_kinds` (fused, #335's experiment: the preprocessor left its keywords to it, PPOptions.parser_keywords),
+// each block's identifiers first get their keyword kinds as pp_resolve_keywords_vector gives them, stored back into the
+// output for its other readers, and a pragma's tokens, which the parser doesn't store, get theirs one by one.
+static inline __attribute__((always_inline)) void parse_tokens_convert(PPTokens* output, const uint8_t* keyword_kinds, ParseTokens* tokens, bool fused)
 {
     const __m512i table0 = _mm512_load_si512(parse_kind_table);
     const __m512i table1 = _mm512_load_si512(parse_kind_table + 64);
@@ -555,7 +626,11 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
     {
         const uint32_t left = output->count - i;
         const __mmask64 live = left >= 64 ? ~(__mmask64)0 : _bzhi_u64(~0ull, left);
-        const __m512i kinds = _mm512_maskz_loadu_epi8(live, output->kinds + i);
+        __m512i kinds = _mm512_maskz_loadu_epi8(live, output->kinds + i);
+        if (fused)
+        {
+            kinds = parse_resolve_keywords_block(output, keyword_kinds, i, live, kinds);
+        }
         const uint64_t special = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_HASH)) |
                                  _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)) |
                                  _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_COLONCOLON));
@@ -582,11 +657,27 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
         i += run;
         if (special != 0)
         {
-            i = parse_convert_token(output, i, tokens, &written);
+            const uint32_t next = parse_convert_token(output, i, tokens, &written);
+            if (fused && next > i + 1)
+            {
+                parse_resolve_keywords(output, keyword_kinds, i + 1, next);
+            }
+            i = next;
         }
     }
     tokens->count = written;
     parse_tokens_pad(tokens);
+}
+
+static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
+{
+    // The plain conversion never stores into the output.
+    parse_tokens_convert((PPTokens*)output, 0, tokens, false);
+}
+
+static void parse_tokens_from_output_fused(PPTokens* output, const uint8_t* keyword_kinds, ParseTokens* tokens)
+{
+    parse_tokens_convert(output, keyword_kinds, tokens, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -11819,7 +11910,11 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
 // of memory (parser->fatal); the diagnostics are in parser->diagnostics (parse_print_diagnostics prints them).
 static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
 {
-    const PPTokens* output = &pp->output;
+    PPTokens* output = &pp->output;
+    // A run with PPOptions.parser_keywords left the keywords to this conversion; whatever happens here, the output has
+    // them when it returns, as its other readers (diagnostics, history, the checker) expect.
+    const bool fused = pp->keywords_pending;
+    pp->keywords_pending = false;
     bool result = output->count <= BUSTER_PARSE_MAX_TOKENS / 2;
     const uint64_t capacity = 2 * (uint64_t)output->count + 64;
     parser->diagnostic_count = 0;
@@ -11844,9 +11939,21 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
         result = tokens->flags != 0;
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
+    if (!result && fused)
+    {
+        pp_resolve_keywords(pp);
+    }
     if (result)
     {
-        if (parser->options.scalar)
+        if (fused && parser->options.scalar)
+        {
+            parse_tokens_from_output_fused_scalar(output, pp->keyword_kinds, &parser->tokens);
+        }
+        else if (fused)
+        {
+            parse_tokens_from_output_fused(output, pp->keyword_kinds, &parser->tokens);
+        }
+        else if (parser->options.scalar)
         {
             parse_tokens_from_output_scalar(output, &parser->tokens);
         }

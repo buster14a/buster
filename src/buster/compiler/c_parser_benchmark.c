@@ -337,6 +337,8 @@ struct ParseBenchmarkFile
     const char* path;
     // The preprocessor's output, which the input's conversion reads, and the parser with the file's tokens.
     PPTokens output;
+    // The output's kinds as pp_run_file leaves them, before the keyword pass: the handoff's rows start from them.
+    uint8_t* raw_kinds;
     Parser parser;
     ParseFallback fallback;
 };
@@ -350,6 +352,10 @@ typedef enum ParseBenchmarkTimed
 {
     PARSE_TIMED_INPUT_TWIN,
     PARSE_TIMED_INPUT,
+    PARSE_TIMED_HANDOFF_TWIN,
+    PARSE_TIMED_HANDOFF,
+    PARSE_TIMED_FUSED_TWIN,
+    PARSE_TIMED_FUSED,
     PARSE_TIMED_SCALAR_PARSER,
     PARSE_TIMED_TWINS,
     PARSE_TIMED_VECTOR,
@@ -383,6 +389,10 @@ static const char* const parse_benchmark_timed_names[PARSE_TIMED_COUNT] =
 {
     "input-twin",
     "input",
+    "handoff-twin",
+    "handoff",
+    "fused-twin",
+    "fused",
     "scalar-parser",
     "twins",
     "vector",
@@ -455,6 +465,8 @@ struct ParseBenchmark
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_capacity;
     ParseTokens converted;
+    // The language mode's keyword kinds (pp->keyword_kinds), for the handoff's rows.
+    uint8_t keyword_kinds[BUSTER_PP_KEYWORD_TABLE] __attribute__((aligned(64)));
     Arena scratch;
     // K5's result for the file the stages are on, which the fallback reads; whether the file is past K4's 16-bit keys.
     bool statements_ok;
@@ -474,6 +486,64 @@ static ParseInput parse_benchmark_input(ParseBenchmark* bench, ParseBenchmarkFil
         .diagnostics = bench->diagnostics,
         .diagnostic_capacity = bench->diagnostic_capacity,
     };
+}
+
+// One file's handoff by `which` (#335), from its output's kinds as pp_run_file leaves them: the keyword pass then the
+// conversion, as the drivers run them (PARSE_TIMED_HANDOFF, and their twins), or the fused conversion
+// (PPOptions.parser_keywords; PARSE_TIMED_FUSED, and its twin). The output's kinds end resolved either way.
+static void parse_benchmark_handoff(ParseBenchmark* bench, ParseBenchmarkFile* file, ParseBenchmarkTimed which)
+{
+    static Preprocessor pp;
+    pp.output = file->output;
+    memcpy(pp.keyword_kinds, bench->keyword_kinds, sizeof(pp.keyword_kinds));
+    switch (which)
+    {
+        case PARSE_TIMED_HANDOFF_TWIN:
+            pp_resolve_keywords_scalar(&pp);
+            parse_tokens_from_output_scalar(&pp.output, &bench->converted);
+            break;
+        case PARSE_TIMED_HANDOFF:
+            pp_resolve_keywords_vector(&pp);
+            parse_tokens_from_output(&pp.output, &bench->converted);
+            break;
+        case PARSE_TIMED_FUSED_TWIN: parse_tokens_from_output_fused_scalar(&pp.output, bench->keyword_kinds, &bench->converted); break;
+        default: parse_tokens_from_output_fused(&pp.output, bench->keyword_kinds, &bench->converted); break;
+    }
+}
+
+// Whether every handoff row gives every file the drivers' tokens (the parser's, from pp_run's resolved output) and
+// leaves the output's kinds resolved as pp_run did.
+static bool parse_benchmark_check_handoff(ParseBenchmark* bench)
+{
+    bool same = true;
+    for (uint32_t f = 0; same && f < bench->file_count; f += 1)
+    {
+        ParseBenchmarkFile* file = &bench->files[f];
+        const ParseTokens* tokens = &file->parser.tokens;
+        uint8_t* resolved = malloc((uint64_t)file->output.count + 1);
+        same = resolved != 0;
+        if (same)
+        {
+            memcpy(resolved, file->output.kinds, file->output.count);
+        }
+        for (uint32_t which = PARSE_TIMED_HANDOFF_TWIN; same && which <= PARSE_TIMED_FUSED; which += 1)
+        {
+            memcpy(file->output.kinds, file->raw_kinds, file->output.count);
+            parse_benchmark_handoff(bench, file, (ParseBenchmarkTimed)which);
+            const ParseTokens* got = &bench->converted;
+            same = memcmp(file->output.kinds, resolved, file->output.count) == 0 && got->count == tokens->count && got->pragma_count == tokens->pragma_count &&
+                   memcmp(got->kinds, tokens->kinds, tokens->count) == 0 && memcmp(got->names, tokens->names, (uint64_t)tokens->count * 4) == 0 &&
+                   memcmp(got->sources, tokens->sources, (uint64_t)tokens->count * 4) == 0 && memcmp(got->flags, tokens->flags, tokens->count) == 0 &&
+                   memcmp(got->pragma_sources, tokens->pragma_sources, (uint64_t)tokens->pragma_count * 4) == 0 &&
+                   memcmp(got->pragma_positions, tokens->pragma_positions, (uint64_t)tokens->pragma_count * 4) == 0;
+            if (!same)
+            {
+                fprintf(stderr, "%s: the handoff's %s row differs from the drivers' tokens\n", file->path, parse_benchmark_timed_names[which]);
+            }
+        }
+        free(resolved);
+    }
+    return same;
 }
 
 // Runs a whole path over every file.
@@ -626,7 +696,22 @@ static void parse_benchmark_time(ParseBenchmark* bench, uint32_t passes, int32_t
     {
         for (uint32_t which = PARSE_TIMED_INPUT_TWIN; which <= PARSE_TIMED_VECTOR; which += 1)
         {
-            if (only < 0 || only == (int32_t)which)
+            const bool handoff = which >= PARSE_TIMED_HANDOFF_TWIN && which <= PARSE_TIMED_FUSED;
+            if (handoff && (only < 0 || only == (int32_t)which))
+            {
+                // Per file, from the kinds pp_run_file leaves, put back outside the time.
+                ParseBenchmarkSample total = { 0 };
+                for (uint32_t f = 0; f < bench->file_count; f += 1)
+                {
+                    ParseBenchmarkFile* file = &bench->files[f];
+                    memcpy(file->output.kinds, file->raw_kinds, file->output.count);
+                    const ParseBenchmarkSample before = parse_benchmark_sample(&counters);
+                    parse_benchmark_handoff(bench, file, (ParseBenchmarkTimed)which);
+                    parse_benchmark_accumulate(&total, before, parse_benchmark_sample(&counters), &overhead);
+                }
+                samples[which][pass == 0 ? 0 : pass - 1] = total;
+            }
+            else if (only < 0 || only == (int32_t)which)
             {
                 ParseBenchmarkSample total = { 0 };
                 const ParseBenchmarkSample before = parse_benchmark_sample(&counters);
@@ -824,6 +909,15 @@ int run_parser_benchmark(int argc, char** argv)
             // make among them: kept for every file, a corpus of hundreds of files would exhaust the address space.
             file->output = pp.output;
             pp.output = (PPTokens){ 0 };
+            // Keyword kinds come only from the keyword pass, so the kinds before it are these.
+            memcpy(bench.keyword_kinds, pp.keyword_kinds, sizeof(bench.keyword_kinds));
+            file->raw_kinds = loaded ? malloc((uint64_t)file->output.count + 1) : 0;
+            loaded = loaded && file->raw_kinds != 0;
+            for (uint32_t t = 0; loaded && t < file->output.count; t += 1)
+            {
+                const uint8_t kind = file->output.kinds[t];
+                file->raw_kinds[t] = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END ? C_TOKEN_RAW_IDENTIFIER : kind;
+            }
             pp_release(&pp);
             intern_release(&table);
             arena_release(&file->parser.scratch);
@@ -873,6 +967,7 @@ int run_parser_benchmark(int argc, char** argv)
             bench.tree.depths = bench.tree.depths != 0 ? bench.tree.depths + BUSTER_PARSE_TOKEN_PADDING : 0;
             bench.tree.parents = bench.tree.parents != 0 ? bench.tree.parents + BUSTER_PARSE_TOKEN_PADDING : 0;
         }
+        loaded = loaded && parse_benchmark_check_handoff(&bench);
         if (loaded)
         {
             parse_benchmark_time(&bench, passes, only, repeat, set);
@@ -882,6 +977,7 @@ int run_parser_benchmark(int argc, char** argv)
         {
             parse_release(&bench.files[f].parser);
             pp_tokens_release(&bench.files[f].output);
+            free(bench.files[f].raw_kinds);
         }
         arena_release(&shared);
         arena_release(&bench.scratch);
