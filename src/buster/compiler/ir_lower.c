@@ -6,7 +6,8 @@
 // into exact-sized columns. Locals and expression values crossing edges use stack slots for #134 to promote. A separate
 // preheader initializes parameters once, even when source entry zero is a loop target. Pointer-valued U64 entries are
 // converted explicitly at pointer operations. ABI locations never enter the IR. An explicit semantic return type is
-// required because Tier0Function.result only describes the ABI. See docs/ir.md for limits and pending source integration.
+// required because Tier0Function.result only describes the ABI. Frame objects become address-taken slots of their own
+// size and alignment, and COPY loads and stores of integer pieces. See docs/ir.md for limits and pending integration.
 // Layout: IrTypedPlan/ir_typed_plan; ir_typed_classify; IrTypedSink/ir_typed_emit_function; ir_lower_typed_path.
 
 typedef struct IrTypedPlan IrTypedPlan;
@@ -64,6 +65,10 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
     }
     return ok;
 }
+
+// The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
+// after COPY must be lowered (or refused) here before tier0_validate accepts it.
+_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_COPY + 1, "ir_lower.c lowers every typed kind");
 
 static bool ir_typed_control(uint8_t kind)
 {
@@ -173,6 +178,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     stack[depth - 1] = class;
                     break;
                 case BUSTER_TYPED_SET:
+                case BUSTER_TYPED_COPY:
                     depth -= 2;
                     break;
                 case BUSTER_TYPED_CALL:
@@ -219,7 +225,8 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 // Emission algorithm:
 //
 // 1. Create one stack slot per source local, plus maximum_spill_depth slots of size 8
-//    and alignment 8. Source slots keep the typed local's actual size/alignment;
+//    and alignment 8. Source slots keep the typed local's actual size/alignment
+//    (an object's from local_sizes and local_alignments, with type VOID);
 //    expression slots are untyped bytes and may hold different classes in
 //    disjoint regions. Mark all address-taken locals so #134 never promotes them.
 // 2. In a preheader, materialize each slot address and each PARAM value, then
@@ -444,6 +451,45 @@ static uint32_t ir_typed_address(IrTypedSink* sink, uint32_t base_bits, uint32_t
     return ir_typed_emit(sink, IR_PTRTOINT, IR_I64, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 }
 
+// A pointer `offset` bytes past `base` (a pointer), with no index.
+static uint32_t ir_typed_offset(IrTypedSink* sink, uint32_t base, uint64_t offset)
+{
+    uint32_t pointer = base;
+    if (offset != 0)
+    {
+        const uint32_t address = (uint32_t)sink->sizes.address_count;
+        sink->sizes.address_count += 1;
+        if (sink->output != 0)
+        {
+            sink->output->addresses[address] = (IrAddress){
+                .offset = (int64_t)offset,
+                .scale = 1,
+            };
+        }
+        pointer = ir_typed_emit(sink, IR_ADDRESS, IR_PTR, base, BUSTER_IR_NONE, address, 0);
+    }
+    return pointer;
+}
+
+// COPY's `bytes` (at most BUSTER_TIER0_MAX_COPY_BYTES) as a load and a store per piece, each the widest integer that
+// fits what remains: 32 pairs of i64 at most. The typed stream's ranges are the same or apart, so each piece's load
+// before its store reads the source's bytes either way. Their alignment is unknown, as LOAD's is.
+static void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
+{
+    const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    uint64_t offset = 0;
+    while (offset < bytes)
+    {
+        const uint64_t remaining = bytes - offset;
+        const uint32_t piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+        const IrType type = piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
+        const uint32_t loaded = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, offset), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, offset), loaded, BUSTER_IR_NONE, 0);
+        offset += piece;
+    }
+}
+
 static uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, const uint32_t* arguments)
 {
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
@@ -498,9 +544,11 @@ static IrSizes ir_typed_emit_function(const Tier0Function* input, IrType result_
         {
             const bool local = s < input->local_count;
             const uint8_t class = local ? input->local_classes[s] : BUSTER_TYPED_CLASS_U64;
+            // tier0_validate established that an object is an address-taken VOID local aligned to at most 16.
+            const bool object = local && tier0_is_object(input, s);
             output->slots[s] = (IrSlot){
-                .size = tier0_class_bytes(class),
-                .alignment = 1u << ir_typed_alignment(class),
+                .size = object ? input->local_sizes[s] : tier0_class_bytes(class),
+                .alignment = 1u << (object ? input->local_alignments[s] : ir_typed_alignment(class)),
                 .type = local ? ir_typed_types[class] : IR_VOID,
                 .flags = local ? ((input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0) : BUSTER_IR_SLOT_TEMPORARY,
             };
@@ -639,6 +687,10 @@ static IrSizes ir_typed_emit_function(const Tier0Function* input, IrType result_
             case BUSTER_TYPED_DISCARD:
                 depth -= 1;
                 break;
+            case BUSTER_TYPED_COPY:
+                ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value);
+                depth -= 2;
+                break;
             case BUSTER_TYPED_BRANCH_FALSE:
             case BUSTER_TYPED_BRANCH_TRUE:
             {
@@ -742,14 +794,13 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     {
         check.error = IR_ERROR_STRUCTURE;
     }
-    // An incoming variadic frame (its pointer compared, never read), a local
-    // flag other than ADDRESS_TAKEN (BUSTER_TYPED_LOCAL_ADDRESS_ONLY's anchors
-    // and va_list objects, or a later role) and an object (a local with a
-    // size in local_sizes: an array, a struct or a union, of class VOID) are
-    // frame state this adapter doesn't model: lowering a role or an object as
-    // an ordinary slot would size and place it wrongly (an object's slot would
-    // take VOID's bytes and overlap its neighbours), so they are refused
-    // before the stream is validated or anything is allocated.
+    // An incoming variadic frame (its pointer compared, never read) and a
+    // local flag other than ADDRESS_TAKEN (BUSTER_TYPED_LOCAL_ADDRESS_ONLY's
+    // anchors and va_list objects, or a later role) are frame state this
+    // adapter doesn't model: lowering a role as an ordinary slot would size
+    // and place it wrongly, so they are refused before the stream is
+    // validated or anything is allocated. Objects (a local with a size in
+    // local_sizes) get slots of their own size and alignment.
     if (check.error == IR_OK && input->incoming_variadic != 0)
     {
         check.error = IR_ERROR_METADATA;
@@ -758,7 +809,7 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     }
     for (uint32_t l = 0; check.error == IR_OK && l < input->local_count; l += 1)
     {
-        if ((input->local_flags[l] & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 || (input->local_sizes != 0 && input->local_sizes[l] != 0))
+        if ((input->local_flags[l] & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0)
         {
             check.error = IR_ERROR_METADATA;
             check.instruction = BUSTER_IR_NONE;
@@ -788,13 +839,6 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
         else if (kind == BUSTER_TYPED_CALL && (input->call_targets[value] == 0 || input->call_targets[value] >= symbol_count))
         {
             check.error = IR_ERROR_OPERAND;
-            check.instruction = i;
-        }
-        else if (kind > BUSTER_TYPED_RETURN)
-        {
-            // A kind this adapter doesn't lower (COPY, and those after it),
-            // which the plan and the emitter would take for a binary operation.
-            check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
     }

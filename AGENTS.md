@@ -691,10 +691,12 @@ designs and the compilers already built this way.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
   (#131). `ir_lower.c` lowers the existing `Tier0Function` stream into the
-  all-in-memory form for SSA promotion. `test-ir` checks independent fixtures,
-  guarded columns, malformed inputs and allocation rollback; `test-ir-lowering`
-  also executes generated IR against the typed-stream interpreter, including
-  calls and global-memory effects. `benchmark-ir` measures verification and
+  all-in-memory form for SSA promotion, frame objects as address-taken slots of
+  their size and alignment and `COPY` as integer load/store pieces. `test-ir`
+  checks independent fixtures, guarded columns, malformed inputs and allocation
+  rollback; `test-ir-lowering` also executes generated IR, with and without
+  objects, against the typed-stream interpreter and Tier 0's native code,
+  including calls and global-memory effects. `benchmark-ir` measures verification and
   derived-array rebuilding on synthetic functions. `benchmark-ir-lowering`
   measures the available typed-stream producer through output verification.
   [The IR guide](docs/ir.md) records the producer/consumer contract and the
@@ -3942,10 +3944,12 @@ handled without relying on twin agreement alone. The default random count is
 `./build/compiler test-ir-lowering [--seed N] [--count N]` lowers generated
 typed programs through both paths, compares every column and verifies each
 function. A test-only executor with explicit call frames compares results and
-global-memory effects with the existing typed-stream interpreter. Targeted
+global-memory effects with the existing typed-stream interpreter and with Tier
+0's native code of the same streams, run in a child process. It runs `--count`
+programs of values and as many with frame objects and copies. Targeted
 fixtures exercise conditional joins, entry-zero backedges, narrow shifts, wide
-pointer scales, guarded source tails and transactional failures. The default
-count is 32 programs. It does not supply the production interpreter of #176.
+pointer scales, objects' slots, `COPY` of every size from 1 to 256, guarded
+source tails and transactional failures. The default count is 32 programs. It does not supply the production interpreter of #176.
 
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
