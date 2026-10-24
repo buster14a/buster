@@ -8,7 +8,7 @@ link order. It does not invoke a system linker to produce its output.
 
 ```text
 build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static|-pie]
-    [--dynamic-linker PATH] [--lanes N] [--scalar] [-s|--strip-all]
+    [--dynamic-linker PATH] [--lanes N] [--scalar] [-s|--strip-all] [--time]
     [--gc-sections|--no-gc-sections]
     [--merge-strings|--no-merge-strings]
     [--dedup-unwind|--no-dedup-unwind]
@@ -19,7 +19,12 @@ Defaults are a static executable named `a.out`, entry `_start`, one lane,
 and all optional transformations disabled. Named regular symbols are emitted
 by default; `-s` and `--strip-all` omit `.symtab` and `.strtab` while preserving
 the dynamic symbol table and runtime dependencies. `--scalar` selects the exact
-resolver, symbol-selection and writer paths. `--help` describes the supported
+resolver, symbol-selection and writer paths. `--time` reports, on standard
+error after the link, each stage's wall time (the arguments, the interpreter's
+discovery, the resolution with each of its phases on the slowest lane, the
+conversion, the optional passes, the write with each of the writer's phases on
+lane 0, and the release), as wild's `--time` and mold's `--perf` report
+theirs. `--help` describes the supported
 command forms. The entry is a forced undefined reference during resolution,
 so an archive can supply it; final entry lookup is repeated after symbol
 remapping.

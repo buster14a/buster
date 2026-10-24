@@ -327,6 +327,10 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+  The executable is linked at a fixed address (`-no-pie`), from the same code:
+  as a PIE, its pointer tables' 366,684 relative relocations made every start
+  take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
+  process.
 - `C_TOKENIZER_NO_DIGIT_SEPARATORS` makes both lexer paths end pp-numbers
   before `'`; the preprocessor sets it in modes before C23, including file
   caches, scratch text and pastes. The standalone lexer's default keeps C23

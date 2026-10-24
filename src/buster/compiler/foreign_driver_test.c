@@ -1148,6 +1148,66 @@ static void foreign_driver_test_interpreter(ForeignTestTally* tally, const char*
     unlink(path);
 }
 
+// --time: a link reports every stage and the phases of the resolution and the writer on standard error, at 1 and 3
+// lanes, and still writes the program; a link that fails reports no stages, only its diagnostic.
+static void foreign_driver_test_time(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
+{
+    static const char* const expected[] = {
+        "link-foreign: ",
+        "  arguments ",
+        "  interpreter ",
+        "  resolve ",
+        " winners ",
+        "  convert ",
+        "  dedup-unwind ",
+        "  merge-strings ",
+        "  write ",
+        " lanes+symbols ",
+        " chunks ",
+        " finish ",
+        "  release ",
+    };
+    for (uint32_t way = 0; way < 3; way += 1)
+    {
+        const bool fails = way == 2;
+        ForeignTestPath executable;
+        ForeignTestPath output;
+        ForeignTestPath errors;
+        snprintf(executable, sizeof(executable), "%s/fdriver_time_%u", directory, way);
+        snprintf(output, sizeof(output), "%s/fdriver_time_%u.out", directory, way);
+        snprintf(errors, sizeof(errors), "%s/fdriver_time_%u.err", directory, way);
+        char* arguments[] = {
+            (char*)"/proc/self/exe",
+            (char*)"link-foreign",
+            (char*)"--time",
+            way == 1 ? (char*)"--lanes=3" : (char*)"--lanes=1",
+            (char*)"-o",
+            executable,
+            fails ? files->objects[FOREIGN_DRIVER_TEST_POISON] : files->objects[FOREIGN_DRIVER_TEST_START],
+            0,
+        };
+        const int status = object_test_run(arguments, output, errors);
+        const String8 report = foreign_test_read(arena, errors);
+        bool complete = report.pointer != 0;
+        bool none = report.pointer != 0;
+        for (uint32_t i = 0; report.pointer != 0 && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
+        {
+            const bool found = memmem(report.pointer, report.length, expected[i], strlen(expected[i])) != 0;
+            complete = complete && found;
+            none = none && (i == 0 || !found);
+        }
+        if (fails)
+        {
+            foreign_test_expect(tally, status > 0 && none, "a failed link with --time reports no stages", errors);
+        }
+        else
+        {
+            foreign_test_expect(tally, status == 0 && complete, "--time reports every stage and phase", errors);
+            foreign_test_expect(tally, status == 0 && foreign_driver_test_run(directory, executable, output, errors, arena) == 42, "a link with --time runs", executable);
+        }
+    }
+}
+
 static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     const uint64_t saved = arena->length;
@@ -1164,6 +1224,7 @@ static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_
         foreign_driver_test_paths(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_symbols_test(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_test_cases(&tally, directory, &files, arena);
+        foreign_driver_test_time(&tally, directory, &files, arena);
         foreign_driver_test_strings(&tally, directory, &files, arena);
         foreign_driver_test_dynamic(&tally, directory, &files, arena, system, runtime.loader_path);
         if (cross_check)

@@ -12,6 +12,8 @@
 // Named semantic symbols are selected from the final Link, after all maps. Each lane counts and then compacts its
 // ID range into one checked arena allocation; the ordered prefixes preserve IDs across lanes. The exact twin runs
 // on lane zero. All name loads are logically bounded, and the descriptor lives through writing. -s skips selection.
+// --time reports each stage's wall time on standard error after the link, as wild's --time and mold's --perf do: the
+// resolution's phases (the slowest lane's), the conversion, the optional passes and the writer's phases (lane 0's).
 
 typedef struct ForeignDriver ForeignDriver;
 struct ForeignDriver
@@ -27,6 +29,7 @@ struct ForeignDriver
     bool merge_strings;
     bool dedup_unwind;
     bool strip_all;
+    bool time;
     bool help;
 };
 
@@ -51,14 +54,15 @@ static void foreign_driver_usage(void)
     fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static|-pie] [--dynamic-linker PATH]\n"
                     "                    [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
                     "                    [--dedup-unwind|--no-dedup-unwind]\n"
-                    "                    [-s|--strip-all] [--scalar] [--lanes N] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
+                    "                    [-s|--strip-all] [--scalar] [--lanes N] [--time] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
                     "Defaults: static executable, a.out, entry _start, one lane; GC, string merging and unwind deduplication off.\n"
                     "Supply startup objects and runtime libraries explicitly, in link order.\n"
                     "Use -pie for C runtime startup; static output currently supports no-libc inputs.\n"
                     "Shared-library and static-PIE outputs are not supported by this command yet.\n"
                     "Static output searches archives by default; PIE output prefers shared libraries.\n"
                     "Named regular symbols are emitted by default; -s/--strip-all omits them, preserving dynamic symbols.\n"
-                    "Archive groups, --whole-archive, --as-needed, -Bstatic and -Bdynamic retain input order.\n");
+                    "Archive groups, --whole-archive, --as-needed, -Bstatic and -Bdynamic retain input order.\n"
+                    "--time reports each stage's time on standard error.\n");
 }
 
 static bool foreign_driver_count(const char* text, uint32_t* count)
@@ -190,6 +194,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         else if (strcmp(argument, "-s") == 0 || strcmp(argument, "--strip-all") == 0)
         {
             driver->strip_all = true;
+        }
+        else if (strcmp(argument, "--time") == 0)
+        {
+            driver->time = true;
         }
         else if (strcmp(argument, "--help") == 0 || strcmp(argument, "-h") == 0)
         {
@@ -416,8 +424,108 @@ static void foreign_driver_write_lane(void* argument)
     }
 }
 
+// The stages --time reports, each the time from the stage before's end to its own.
+typedef enum ForeignDriverStage
+{
+    FOREIGN_DRIVER_STAGE_ARGUMENTS,
+    FOREIGN_DRIVER_STAGE_INTERPRETER,
+    FOREIGN_DRIVER_STAGE_RESOLVE,
+    FOREIGN_DRIVER_STAGE_CONVERT,
+    FOREIGN_DRIVER_STAGE_DEDUP_UNWIND,
+    FOREIGN_DRIVER_STAGE_MERGE_STRINGS,
+    FOREIGN_DRIVER_STAGE_WRITE,
+    FOREIGN_DRIVER_STAGE_RELEASE,
+    FOREIGN_DRIVER_STAGES,
+} ForeignDriverStage;
+
+static uint64_t foreign_driver_now(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+// Each resolution phase's time on the slowest lane, into `slowest`.
+static void foreign_driver_resolve_phases(const Foreign* foreign, uint64_t* slowest)
+{
+    for (uint32_t phase = 0; phase < FOREIGN_PHASES; phase += 1)
+    {
+        slowest[phase] = 0;
+        for (uint32_t lane = 0; foreign->lane_states != 0 && lane < foreign->lanes; lane += 1)
+        {
+            const uint64_t taken = foreign->lane_states[lane].nanoseconds[phase];
+            slowest[phase] = taken > slowest[phase] ? taken : slowest[phase];
+        }
+    }
+}
+
+// The report: the whole, each stage, the resolution's phases (`resolve`, the slowest lane's time in each) and the
+// writer's, from lane 0's timestamps; the writer's first part is the lanes' start and the symbol selection, up to
+// executable_write's own start. `ends` holds each stage's end, `begin` the start; a stage that didn't run ends where the
+// one before did.
+static void foreign_driver_report(const uint64_t* resolve, uint64_t begin, const uint64_t* ends, uint64_t write_begin, const ExecutableResult* written)
+{
+    static const char* const stages[FOREIGN_DRIVER_STAGES] = {
+        "arguments",
+        "interpreter",
+        "resolve",
+        "convert",
+        "dedup-unwind",
+        "merge-strings",
+        "write",
+        "release",
+    };
+    static const char* const resolve_phases[FOREIGN_PHASES] = {
+        "open",
+        "indices",
+        "headers",
+        "symbols",
+        "exchange",
+        "resolve",
+        "load",
+        "groups",
+        "winners",
+    };
+    static const char* const write_phases[EXECUTABLE_PHASES] = {
+        "count",
+        "layout",
+        "symbols",
+        "dynamic",
+        "open",
+        "chunks",
+        "finish",
+    };
+    fprintf(stderr, "link-foreign: %.3f ms\n", (double)(ends[FOREIGN_DRIVER_STAGES - 1] - begin) / 1e6);
+    uint64_t previous = begin;
+    for (uint32_t stage = 0; stage < FOREIGN_DRIVER_STAGES; stage += 1)
+    {
+        fprintf(stderr, "  %-13s %9.3f ms", stages[stage], (double)(ends[stage] - previous) / 1e6);
+        for (uint32_t phase = 0; stage == FOREIGN_DRIVER_STAGE_RESOLVE && phase < FOREIGN_PHASES; phase += 1)
+        {
+            fprintf(stderr, " %s %.3f", resolve_phases[phase], (double)resolve[phase] / 1e6);
+        }
+        if (stage == FOREIGN_DRIVER_STAGE_WRITE && written->start_time >= write_begin)
+        {
+            fprintf(stderr, " lanes+symbols %.3f", (double)(written->start_time - write_begin) / 1e6);
+            uint64_t phase_begin = written->start_time;
+            for (uint32_t phase = 0; phase < EXECUTABLE_PHASES; phase += 1)
+            {
+                const uint64_t end = written->phase_times[phase] >= phase_begin ? written->phase_times[phase] : phase_begin;
+                fprintf(stderr, " %s %.3f", write_phases[phase], (double)(end - phase_begin) / 1e6);
+                phase_begin = end;
+            }
+        }
+        fprintf(stderr, "\n");
+        previous = ends[stage];
+    }
+}
+
 static int run_foreign_link(int argc, char** argv)
 {
+    const uint64_t begin = foreign_driver_now();
+    uint64_t ends[FOREIGN_DRIVER_STAGES] = { 0 };
+    uint64_t write_begin = 0;
+    ExecutableResult written = { 0 };
     Arena arena = arena_reserve(1ull << 36);
     Arena names = arena_reserve(1ull << 34);
     ForeignDriver driver = { 0 };
@@ -430,6 +538,7 @@ static int run_foreign_link(int argc, char** argv)
     {
         foreign_driver_usage();
     }
+    ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = foreign_driver_now();
     if (succeeded && !driver.help && driver.kind == RUNTIME_KIND_DYNAMIC && driver.interpreter.length == 0)
     {
         succeeded = runtime_discover_interpreter(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
@@ -439,6 +548,7 @@ static int run_foreign_link(int argc, char** argv)
             fprintf(stderr, "link-foreign: no system interpreter found; pass --dynamic-linker PATH\n");
         }
     }
+    ends[FOREIGN_DRIVER_STAGE_INTERPRETER] = foreign_driver_now();
     if (succeeded && !driver.help)
     {
         foreign_run(&foreign, &driver.command, driver.path, driver.lanes, 0);
@@ -470,6 +580,7 @@ static int run_foreign_link(int argc, char** argv)
             fprintf(stderr, "\n");
         }
     }
+    ends[FOREIGN_DRIVER_STAGE_RESOLVE] = foreign_driver_now();
     if (succeeded && !driver.help)
     {
         ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter) :
@@ -491,6 +602,7 @@ static int run_foreign_link(int argc, char** argv)
             foreign_driver_conversion_error(&foreign, result, driver.kind);
         }
     }
+    ends[FOREIGN_DRIVER_STAGE_CONVERT] = foreign_driver_now();
     if (succeeded && !driver.help && driver.dedup_unwind)
     {
         const ForeignGcRoots roots = { .entry = foreign_driver_entry(&driver, &foreign, &converted) };
@@ -506,6 +618,7 @@ static int run_foreign_link(int argc, char** argv)
                     (unsigned)result.error, result.object, result.import.section, (unsigned long long)result.import.offset);
         }
     }
+    ends[FOREIGN_DRIVER_STAGE_DEDUP_UNWIND] = foreign_driver_now();
     if (succeeded && !driver.help && driver.merge_strings)
     {
         ForeignStringsMerge merged = { 0 };
@@ -516,6 +629,8 @@ static int run_foreign_link(int argc, char** argv)
             fprintf(stderr, "link-foreign: string merging failed (%u)\n", (unsigned)error);
         }
     }
+    ends[FOREIGN_DRIVER_STAGE_MERGE_STRINGS] = foreign_driver_now();
+    write_begin = ends[FOREIGN_DRIVER_STAGE_MERGE_STRINGS];
     if (succeeded && !driver.help)
     {
         ForeignDriverWrite write = {
@@ -531,6 +646,7 @@ static int run_foreign_link(int argc, char** argv)
             .symbols_ready = true,
         };
         succeeded = lane_run(driver.lanes, foreign_driver_write_lane, &write, 0) && write.succeeded;
+        written = write.result;
         if (!succeeded)
         {
             fprintf(stderr, "link-foreign: executable writing failed (%u, atom %u, symbol %u, fixup %u)",
@@ -542,9 +658,19 @@ static int run_foreign_link(int argc, char** argv)
             fprintf(stderr, "\n");
         }
     }
+    ends[FOREIGN_DRIVER_STAGE_WRITE] = foreign_driver_now();
+    const bool time = driver.time && succeeded;
+    // The resolution's lane states, which foreign_release frees, give their phases' times first.
+    uint64_t resolve[FOREIGN_PHASES];
+    foreign_driver_resolve_phases(&foreign, resolve);
     foreign_release(&foreign);
     runtime_release(&runtime);
     arena_release(&names);
     arena_release(&arena);
+    ends[FOREIGN_DRIVER_STAGE_RELEASE] = foreign_driver_now();
+    if (time)
+    {
+        foreign_driver_report(resolve, begin, ends, write_begin, &written);
+    }
     return succeeded ? 0 : 1;
 }
