@@ -15,10 +15,126 @@
 // counted as declarations); the distinct names those events bind; and the parser replay's events. Memory: the
 // output arena's retained bytes, the highest byte each arena's run writes (a lower bound on its peak, found by
 // poisoning before an untimed run), and each isolated piece's own footprint past its arenas' lengths.
+//
+// Besides a file, it takes built-in inputs (--input NAME; --print writes one out): small and large, the 4 and
+// 4,096 functions of the checker's source-measurement generator (the same bytes, whose SHA-256 are be568cb5...
+// and 0e33678843...), and headers, a header-heavy unit: most of its tokens and binding events come from 24 C
+// library and POSIX headers, as a typical translation unit's do, and four functions use and shadow them.
 #ifndef BUSTER_C_CHECK_BINDING_BENCHMARK_INCLUDED
 #define BUSTER_C_CHECK_BINDING_BENCHMARK_INCLUDED
 
 #define BUSTER_CHECK_BINDING_BENCHMARK_POISON 0x5au
+
+static const char check_binding_benchmark_headers[] =
+    "#define _GNU_SOURCE 1\n"
+    "#include <assert.h>\n"
+    "#include <ctype.h>\n"
+    "#include <errno.h>\n"
+    "#include <fcntl.h>\n"
+    "#include <float.h>\n"
+    "#include <inttypes.h>\n"
+    "#include <limits.h>\n"
+    "#include <locale.h>\n"
+    "#include <math.h>\n"
+    "#include <pthread.h>\n"
+    "#include <signal.h>\n"
+    "#include <stdarg.h>\n"
+    "#include <stdbool.h>\n"
+    "#include <stddef.h>\n"
+    "#include <stdint.h>\n"
+    "#include <stdio.h>\n"
+    "#include <stdlib.h>\n"
+    "#include <string.h>\n"
+    "#include <sys/mman.h>\n"
+    "#include <sys/stat.h>\n"
+    "#include <sys/types.h>\n"
+    "#include <time.h>\n"
+    "#include <unistd.h>\n"
+    "#include <wchar.h>\n"
+    "\n"
+    "typedef struct Buffer Buffer;\n"
+    "struct Buffer\n"
+    "{\n"
+    "    char* bytes;\n"
+    "    size_t length;\n"
+    "    size_t capacity;\n"
+    "};\n"
+    "\n"
+    "static int count_digits(const char* text, size_t length)\n"
+    "{\n"
+    "    int count = 0;\n"
+    "    for (size_t i = 0; i < length; i += 1)\n"
+    "    {\n"
+    "        count += isdigit((unsigned char)text[i]) != 0;\n"
+    "    }\n"
+    "    return count;\n"
+    "}\n"
+    "\n"
+    "static bool buffer_append(Buffer* buffer, const char* text)\n"
+    "{\n"
+    "    const size_t length = strlen(text);\n"
+    "    bool fits = buffer->length + length <= buffer->capacity;\n"
+    "    if (fits)\n"
+    "    {\n"
+    "        memcpy(buffer->bytes + buffer->length, text, length);\n"
+    "        buffer->length += length;\n"
+    "    }\n"
+    "    return fits;\n"
+    "}\n"
+    "\n"
+    "int describe(const char* path, Buffer* buffer)\n"
+    "{\n"
+    "    struct stat status;\n"
+    "    int result = stat(path, &status);\n"
+    "    if (result == 0)\n"
+    "    {\n"
+    "        char line[128];\n"
+    "        int length = snprintf(line, sizeof line, \"%\" PRIu64 \" bytes, mode %o\\n\", (uint64_t)status.st_size, (unsigned)status.st_mode);\n"
+    "        {\n"
+    "            int result = count_digits(line, (size_t)length);\n"
+    "            length = result > 0 ? length : 0;\n"
+    "        }\n"
+    "        result = buffer_append(buffer, line) ? 0 : ENOSPC;\n"
+    "    }\n"
+    "    else\n"
+    "    {\n"
+    "        result = errno;\n"
+    "    }\n"
+    "    return result;\n"
+    "}\n"
+    "\n"
+    "double scaled(double value, int exponent)\n"
+    "{\n"
+    "    double result = ldexp(value, exponent);\n"
+    "    return isfinite(result) ? result : DBL_MAX;\n"
+    "}\n";
+
+// The input named `name`, in `arena`: the generator's functions, or the header-heavy unit. 0 for another name.
+static char* check_binding_benchmark_input(Arena* arena, const char* name, uint32_t* length)
+{
+    const uint32_t functions = strcmp(name, "small") == 0 ? 4 : strcmp(name, "large") == 0 ? 4096 : 0;
+    const bool headers = strcmp(name, "headers") == 0;
+    const uint64_t capacity = headers ? sizeof(check_binding_benchmark_headers) : 64 + (uint64_t)functions * 192;
+    char* text = functions != 0 || headers ? BUSTER_ARENA_PUSH_ARRAY(arena, char, capacity) : 0;
+    uint32_t used = 0;
+    if (text != 0 && headers)
+    {
+        memcpy(text, check_binding_benchmark_headers, sizeof(check_binding_benchmark_headers));
+        used = (uint32_t)sizeof(check_binding_benchmark_headers) - 1;
+    }
+    else if (text != 0)
+    {
+        used = (uint32_t)snprintf(text, capacity, "typedef unsigned long Word;\nstatic Word seed = 7;\n");
+        for (uint32_t i = 0; i < functions; i += 1)
+        {
+            used += (uint32_t)snprintf(text + used, capacity - used,
+                                       "Word f%u(Word a, Word b) { Word x = a + %uu; { Word a = b ^ %uu; x = x + a; } if (x < b) x = x + seed; "
+                                       "return (x * 3u) ^ (b >> 1); }\n", i, i + 1, i + 3);
+        }
+    }
+    *length = used;
+    return text;
+}
 
 typedef struct CheckBindingBenchmark CheckBindingBenchmark;
 struct CheckBindingBenchmark
@@ -138,58 +254,17 @@ static uint64_t check_binding_benchmark_extreme(const uint64_t* values, uint32_t
     return result;
 }
 
-static int run_checker_binding_benchmark(int count, char** arguments)
+// Measures the unit `file` names, or `input_text` under that name: the checks, then the samples and the report.
+static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* file, const char* input_text, uint32_t input_length, uint64_t passes,
+                                            uint64_t after, uint32_t only)
 {
-    uint64_t passes = 21;
-    uint64_t after = 0;
-    uint32_t only = CHECK_INPUT_BINDING_MODES;
-    Arena option_arena = arena_reserve(UINT64_C(1) << 24);
-    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)count + 1);
-    uint32_t used = 0;
-    bool valid = own != 0;
-    for (int i = 0; valid && i < count; i += 1)
-    {
-        const char* option = arguments[i];
-        if (strcmp(option, "--only") == 0 || strcmp(option, "--passes") == 0 || strcmp(option, "--after-scalar") == 0)
-        {
-            valid = i + 1 < count;
-            const char* value = valid ? arguments[++i] : "";
-            if (strcmp(option, "--only") == 0)
-            {
-                only = CHECK_INPUT_BINDING_MODES;
-                for (uint32_t mode = CHECK_INPUT_BINDINGS_DIRECT; mode < CHECK_INPUT_BINDING_MODES; mode += 1)
-                {
-                    only = strcmp(value, check_input_binding_mode_names[mode]) == 0 ? mode : only;
-                }
-                valid = valid && only != CHECK_INPUT_BINDING_MODES;
-            }
-            else
-            {
-                valid = valid && check_corpus_number(value, strcmp(option, "--passes") == 0 ? &passes : &after);
-            }
-        }
-        else if (strcmp(option, "--no-default-config") != 0)
-        {
-            own[used++] = arguments[i];
-        }
-    }
-    PPOptions pp_options;
-    const char* file = 0;
-    const char* output_file = 0;
-    bool markers = false;
-    valid = valid && passes != 0 && passes <= BUSTER_CHECK_SOURCE_MAX_PASSES && after <= 1000 && (after == 0 || only != CHECK_INPUT_BINDING_MODES) &&
-            pp_parse_options((int)used, own, &pp_options, &option_arena, &file, &output_file, &markers) && output_file == 0 && file != 0;
-    if (!valid)
-    {
-        fprintf(stderr, "usage: benchmark-checker-bindings [--passes N] [--only MODE [--after-scalar MS]] [-E's options] file.c\n"
-                        "modes: direct, stacks, batch, parser-stacks, parser-batch\n");
-    }
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
-    pp_options.semantic_pragmas = true;
+    pp_options->semantic_pragmas = true;
     const ParseOptions parse_options = { 0 };
-    valid = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, file) &&
+    bool valid = intern_initialize(&identifiers) && pp_initialize(&pp, pp_options, &identifiers) &&
+            (input_text != 0 ? pp_run_source(&pp, file, (const uint8_t*)input_text, input_length) : pp_run(&pp, file)) &&
             parse_initialize(&parser, &parse_options, pp.options.language) && parse_translation_unit(&parser, &pp) &&
             parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE;
     const uint32_t tokens = parser.tokens.count;
@@ -440,10 +515,84 @@ static int run_checker_binding_benchmark(int count, char** arguments)
     arena_release(&benchmark.output);
     arena_release(&benchmark.index);
     arena_release(&benchmark.types);
-    arena_release(&option_arena);
     parse_release(&parser);
     pp_release(&pp);
     intern_release(&identifiers);
+    return valid;
+}
+
+static int run_checker_binding_benchmark(int count, char** arguments)
+{
+    uint64_t passes = 21;
+    uint64_t after = 0;
+    uint32_t only = CHECK_INPUT_BINDING_MODES;
+    const char* input_name = 0;
+    bool print = false;
+    Arena option_arena = arena_reserve(UINT64_C(1) << 24);
+    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)count + 1);
+    uint32_t used = 0;
+    bool valid = own != 0;
+    for (int i = 0; valid && i < count; i += 1)
+    {
+        const char* option = arguments[i];
+        if (strcmp(option, "--print") == 0)
+        {
+            print = true;
+        }
+        else if (strcmp(option, "--only") == 0 || strcmp(option, "--passes") == 0 || strcmp(option, "--after-scalar") == 0 || strcmp(option, "--input") == 0)
+        {
+            valid = i + 1 < count;
+            const char* value = valid ? arguments[++i] : "";
+            if (strcmp(option, "--input") == 0)
+            {
+                // The preprocessor's options take it as the unit's name, so that a file besides it is refused.
+                input_name = value;
+                own[used++] = arguments[i];
+            }
+            else if (strcmp(option, "--only") == 0)
+            {
+                only = CHECK_INPUT_BINDING_MODES;
+                for (uint32_t mode = CHECK_INPUT_BINDINGS_DIRECT; mode < CHECK_INPUT_BINDING_MODES; mode += 1)
+                {
+                    only = strcmp(value, check_input_binding_mode_names[mode]) == 0 ? mode : only;
+                }
+                valid = valid && only != CHECK_INPUT_BINDING_MODES;
+            }
+            else
+            {
+                valid = valid && check_corpus_number(value, strcmp(option, "--passes") == 0 ? &passes : &after);
+            }
+        }
+        else if (strcmp(option, "--no-default-config") != 0)
+        {
+            own[used++] = arguments[i];
+        }
+    }
+    PPOptions pp_options;
+    const char* file = 0;
+    const char* output_file = 0;
+    bool markers = false;
+    valid = valid && passes != 0 && passes <= BUSTER_CHECK_SOURCE_MAX_PASSES && after <= 1000 && (after == 0 || only != CHECK_INPUT_BINDING_MODES) &&
+            pp_parse_options((int)used, own, &pp_options, &option_arena, &file, &output_file, &markers) && output_file == 0 &&
+            (!print || input_name != 0);
+    uint32_t input_length = 0;
+    const char* input_text = valid && input_name != 0 ? check_binding_benchmark_input(&option_arena, input_name, &input_length) : 0;
+    valid = valid && (input_name == 0 || input_text != 0);
+    if (!valid)
+    {
+        fprintf(stderr, "usage: benchmark-checker-bindings [--passes N] [--only MODE [--after-scalar MS]] [-E's options] {file.c | --input NAME}\n"
+                        "       benchmark-checker-bindings --input NAME --print\n"
+                        "modes: direct, stacks, batch, parser-stacks, parser-batch; inputs: small, large, headers\n");
+    }
+    if (valid && print)
+    {
+        valid = fwrite(input_text, 1, input_length, stdout) == input_length;
+    }
+    else if (valid)
+    {
+        valid = check_binding_benchmark_measure(&pp_options, file, input_text, input_length, passes, after, only);
+    }
+    arena_release(&option_arena);
     return valid ? 0 : 1;
 }
 

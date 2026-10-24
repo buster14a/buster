@@ -899,11 +899,8 @@ jobs:
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
-          clang -O2 docs/measurements/c-checker-2026-10-23/generate_checker_source.c -o build/generate-checker-source
-          build/generate-checker-source 4 > build/source-small.c
-          build/generate-checker-source 4096 > build/source-large.c
-          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" build/source-small.c
-          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" docs/measurements/c-check-bindings-2026-10-24/headers.c
+          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input small
+          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input headers
           taskset -c 2 ./build/compiler benchmark-checker-bindings --passes 5 "${system[@]}" "$corpus/sqlite/sqlite3.c"
 
       - name: Benchmark the checker's binding handoff in repeated processes, in isolation and after scalar work
@@ -916,7 +913,7 @@ jobs:
           system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
           for sample in 1 2 3; do
             echo "Binding handoff process $sample"
-            taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" build/source-large.c
+            taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input large
             taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
             # The new default against the old one, each alone and after 100 ms of the scalar twin's reader.
             for mode in direct parser-batch; do

@@ -139,7 +139,8 @@ Clang's.
 ## Benchmark
 
 ```sh
-./build/compiler benchmark-checker-bindings [--passes N] [--only MODE [--after-scalar MS]] [-E's options] file.c
+./build/compiler benchmark-checker-bindings [--passes N] [--only MODE [--after-scalar MS]] [-E's options] {file.c | --input NAME}
+./build/compiler benchmark-checker-bindings --input NAME --print
 ```
 
 It preprocesses and parses once, outside timing, and requires the checker to
@@ -174,15 +175,19 @@ and `parser-batch` alone and after 100 ms of scalar work.
 
 ### Inputs
 
-| Input | Source | SHA-256 |
+The synthetic inputs are built in (`--input NAME`; `--print` writes one out),
+so that no measurement input lives under `docs/measurements`:
+
+| Input | What it is | SHA-256 of `--print` |
 | --- | --- | --- |
-| small, 4 functions | `docs/measurements/c-checker-2026-10-23/generate_checker_source.c 4` | `be568cb5db8dd471edc19be730653ce43623143c033ccc8cc883b640e263dcee` |
-| large, 4,096 functions | the same generator, `4096` | `0e33678843ad025277ad6bf0c918c556e526d9421ca78c3f42ab3dd5f5dc47a7` |
-| header-heavy | [`headers.c`](measurements/c-check-bindings-2026-10-24/headers.c), 24 C library and POSIX headers and four functions | (the file) |
+| `small` | 4 functions of the checker's source-measurement generator (`generate_checker_source.c 4`, now in buster-performance), byte for byte | `be568cb5db8dd471edc19be730653ce43623143c033ccc8cc883b640e263dcee` |
+| `large` | the same generator's 4,096 functions | `0e33678843ad025277ad6bf0c918c556e526d9421ca78c3f42ab3dd5f5dc47a7` |
+| `headers` | 24 C library and POSIX headers and four functions that use and shadow their names | `b62447a1cbdccfcb310f3c43f644c081e8af7c720c7565d9184c22c5a25518e0` |
 | SQLite | the frozen amalgamation on the 9700X, `$corpus/sqlite/sqlite3.c` | recorded in [the preprocessor oracle guide](preprocessor-oracle.md) |
 
 The checker doesn't accept `main.c` yet (Clang's `_Float16` intrinsic
-headers), so `headers.c` stands in for a header-heavy unit.
+headers), so `headers` stands in for a header-heavy unit. Its headers, and
+therefore its counts, are those the search options find.
 
 ## Measurements
 
@@ -195,11 +200,13 @@ the decision rests on the 9700X's numbers below.
 | Input | Tokens | Reader events (uses) | Distinct names | Parser events | `direct` | `stacks` | `batch` | `parser-stacks` | `parser-batch` (old default) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | small | 243 | 94 (48) | 9 | 118 | 31.5 µs | 31.7 µs | 32.2 µs | 41.3 µs | 42.2 µs |
-| headers.c | 52,160 | 9,263 (81) | 3,363 | 12,185 | 7.32 ms | 7.02 ms | 7.25 ms | 9.29 ms | 9.54 ms |
+| headers | 52,160 | 9,263 (81) | 3,363 | 12,185 | 7.32 ms | 7.02 ms | 7.25 ms | 9.29 ms | 9.54 ms |
 | large | 237,579 | 94,210 (49,152) | 4,101 | 110,602 | 34.3 ms | 34.4 ms | 34.3 ms | 44.0 ms | 45.2 ms |
 | SQLite 3.50.4 | 684,797 | 159,421 (93,280) | 9,453 | 153,880 | 150.5 ms | 162.4 ms | 151.4 ms | 191.8 ms | 182.1 ms |
 
-Medians of whole `check_input` calls, 11 passes (SQLite 5). The three event
+Medians of whole `check_input` calls, 11 passes (SQLite 5); `small` and
+`large` with `-std=gnu17` alone, `headers` and SQLite with `-march=native` and
+the system's search directories as well. The three event
 modes are within each other's spread (SQLite's samples ranged from 143 to
 195 ms); the parser modes cost 21% to 30% more on every input, past the spread
 (on SQLite, `parser-batch`'s fastest sample, 176.9 ms, was slower than every
@@ -210,6 +217,12 @@ large input the parser's replay wrote 30.9 MB of output and 27.3 MB of
 scratch; the reader's stack replay 0.81 MB of scratch and its batch 1.88 MB.
 The sort doesn't earn its cost anywhere: the reader's events are in source
 order already, and the stack replay is 3 to 5 times faster.
+
+A small unit's call is dominated by per-call setup that grows with the interned
+names, not with the unit: `small` took 31.5 µs without target options and
+136 µs with `-march=native`'s predefines, whose macros' names the reader's
+per-name arrays (the binding heads, the parameter marks) clear on every call.
+That cost is the reader's and the same in every mode; it is outside #336.
 
 ### Ryzen 7 9700X
 
