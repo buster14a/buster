@@ -3949,14 +3949,17 @@ global-memory effects with the existing typed-stream interpreter and with Tier
 programs of values and as many with frame objects and copies. Targeted
 fixtures exercise conditional joins, entry-zero backedges, narrow shifts, wide
 pointer scales, objects' slots, `COPY` of every size from 1 to 256, guarded
-source tails and transactional failures. The default count is 32 programs. It does not supply the production interpreter of #176.
+source tails and transactional failures. Every lowered function is also
+promoted by both SSA paths, verified, and must keep its objects' slots. The
+default count is 32 programs. It does not supply the production interpreter of #176.
 
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
 builders on small and large synthetic functions. `benchmark-ir-lowering
 [--seed N] [--passes N] [--only scalar|vector] [--after-scalar MS]` measures
 the complete available typed-stream-to-verified-IR path on generated mixed
-programs. Both require optimized builds, calibrate samples to at least 2 ms,
+programs: small and larger value-only ones, and the larger shape with frame
+objects and copies, reported apart. Both require optimized builds, calibrate samples to at least 2 ms,
 rotate variant order and report 21-pass medians by default. TSC ticks are
 labeled separately from core cycles. The 9700X workflow runs the tests and
 pins each benchmark to one allowed CPU; it adds the runs after 200 ms of scalar

@@ -529,9 +529,59 @@ static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* so
     return ok;
 }
 
+// Whether `promoted` keeps every object slot of `lowered` (a VOID slot that isn't a temporary) as it was, in order:
+// promotion compacts the slots it removes and must never take an object's.
+static bool ir_lower_test_objects_kept(const IrFunction* lowered, const IrFunction* promoted)
+{
+    uint32_t next = 0;
+    bool same = true;
+    for (uint32_t s = 0; same && s < lowered->slot_count; s += 1)
+    {
+        const IrSlot slot = lowered->slots[s];
+        if (slot.type == IR_VOID && (slot.flags & BUSTER_IR_SLOT_TEMPORARY) == 0)
+        {
+            while (next < promoted->slot_count && !(promoted->slots[next].type == IR_VOID && (promoted->slots[next].flags & BUSTER_IR_SLOT_TEMPORARY) == 0))
+            {
+                next += 1;
+            }
+            same = next < promoted->slot_count && promoted->slots[next].size == slot.size && promoted->slots[next].alignment == slot.alignment &&
+                   promoted->slots[next].flags == slot.flags;
+            next += 1;
+        }
+    }
+    return same;
+}
+
+// #134's promotion of a lowered function, by both paths, which may order their output differently (test-ssa-ir checks
+// their semantics): each must accept it with real dominance, pass both verifiers and keep every object's slot.
+static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* lowered, Arena* output, Arena* twin_output, Arena* scratch, uint64_t seed, uint32_t index)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t twin_mark = twin_output->length;
+    IrFunction vector =
+    {
+        0
+    };
+    IrFunction scalar =
+    {
+        0
+    };
+    const IrCheck vector_check = ssa_ir_promote(lowered, output, scratch, &vector);
+    const IrCheck scalar_check = ssa_ir_promote_scalar(lowered, twin_output, scratch, &scalar);
+    bool ok = ir_lower_test_expect(tally, vector_check.error == IR_OK && scalar_check.error == IR_OK && vector_check.dominance_checked && scalar_check.dominance_checked,
+                                   "both SSA promotion paths accept the lowering", seed, index);
+    ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK && ir_verify_scalar(&vector, scratch, 0).error == IR_OK &&
+                                               ir_verify(&scalar, scratch, 0).error == IR_OK && ir_verify_scalar(&scalar, scratch, 0).error == IR_OK,
+                                    "both verifiers accept both promotions", seed, index);
+    ok = ok && ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &vector) && ir_lower_test_objects_kept(lowered, &scalar), "promotion keeps every object's slot", seed, index);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(twin_output, twin_mark);
+}
+
 // Generated programs, lowered by both paths and executed as IR, against the typed-stream interpreter and Tier 0's
 // native code of the same streams (test-tier0's harness, which checks the two of them against each other too): their
-// results and global bytes. `options` choose the shapes; `name` labels the report.
+// results and global bytes; and each lowered function promoted to SSA by both paths. `options` choose the shapes;
+// `name` labels the report.
 static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count, Tier0ProgramOptions options, const char* name)
 {
     Tier0Tables tables =
@@ -543,11 +593,13 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     Arena twin_output = arena_reserve(1ull << 30);
     Arena scratch = arena_reserve(1ull << 30);
     Arena execution = arena_reserve(1ull << 30);
+    Arena promoted = arena_reserve(1ull << 30);
+    Arena twin_promoted = arena_reserve(1ull << 30);
     Arena native = arena_reserve(1ull << 32);
     Tier0TestCode* code = native.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&native, Tier0TestCode, 1) : 0;
     uint8_t* code_bytes = native.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&native, uint8_t, BUSTER_TIER0_TEST_CODE_BYTES) : 0;
-    bool ready = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && code != 0 && code_bytes != 0 &&
-                 tier0_tables_open(&tables);
+    bool ready = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && promoted.base != 0 &&
+                 twin_promoted.base != 0 && code != 0 && code_bytes != 0 && tier0_tables_open(&tables);
     ready = ir_lower_test_expect(tally, ready, "program arenas and ABI tables", seed, 0);
     const uint64_t native_mark = native.length;
     uint64_t entries = 0;
@@ -584,6 +636,7 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
                 {
                     objects += tier0_is_object(source, l);
                 }
+                ir_lower_test_promote(tally, &functions[f], &promoted, &twin_promoted, &scratch, program_seed, f);
             }
             arena_pop_to(&twin_output, 0);
         }
@@ -634,6 +687,8 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
            functions_seen, entries, instructions, objects, copies);
     tier0_tables_close(&tables);
     arena_release(&native);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
     arena_release(&input);
     arena_release(&output);
     arena_release(&twin_output);
