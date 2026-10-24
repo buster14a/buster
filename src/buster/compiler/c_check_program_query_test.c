@@ -57,7 +57,7 @@ static void check_test_program_queries(CheckTest* test, const char* clang)
                               "runtime query truth consumes its own known value without rewriting the source proof");
             CheckProgramCode code = { 0 };
             const bool emitted = check_program_emit(&code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
-                                                    &output, &bytes, &scratch, NULL);
+                                                    &output, &bytes, &scratch, NULL, true);
             check_test_expect(test, emitted && check_test_program_execute(&code.link, "int tested(int n){return n;}", clang, &scratch),
                               "native query consumer uses runtime value even when the source proof has no effect flags");
             *effect = saved;
@@ -92,7 +92,7 @@ static void check_test_program_queries(CheckTest* test, const char* clang)
                 }
                 CheckProgramCode rejected = { 0 };
                 const bool accepted = check_program_emit(&rejected, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
-                                                         &output, &bytes, &scratch, NULL);
+                                                         &output, &bytes, &scratch, NULL, true);
                 const CheckProgramStatus expected = mutation == 4 ? CHECK_PROGRAM_INVALID : CHECK_PROGRAM_UNSUPPORTED;
                 check_test_expect(test, !accepted && rejected.status == expected && rejected.lowered.functions == NULL &&
                                        rejected.link.symbols.count == 0 && output.length == output_mark && bytes.length == bytes_mark &&

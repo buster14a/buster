@@ -44,9 +44,11 @@ struct CheckProgramCode
     uint64_t code_bytes;
 };
 
+// With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
+// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND.
 static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
-                               CheckProgramBinding* binding)
+                               CheckProgramBinding* binding, bool verify)
 {
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -297,6 +299,13 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         const uint64_t before = bytes->length;
         uint8_t* encoded = arena_push(bytes, byte_capacity, 16);
         valid = offsets != 0 && fixup_ends != 0 && encoded != 0;
+        if (valid && verify && x86_validate(code->records, code->count) != code->count)
+        {
+            result->status = CHECK_PROGRAM_BACKEND;
+            result->reason = "internal compiler error: a record of Tier 0's fails x86_validate";
+            result->token = source_body ? program->bodies[b].declaration : BUSTER_CHECK_NONE;
+            valid = false;
+        }
         if (valid)
         {
             const BranchSizingCheck shape = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);

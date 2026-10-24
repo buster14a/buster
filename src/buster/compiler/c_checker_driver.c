@@ -427,7 +427,7 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
 
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, bool dump_static, Arena* scratch)
+                                 bool scalar, bool verify, bool dump_static, Arena* scratch)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
@@ -435,7 +435,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL);
+                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, verify);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
@@ -520,6 +520,23 @@ static void check_driver_bind_failed(BindError error, const char* name)
     }
 }
 
+// Whether the link's name `name` is a symbol of the program's whose declaration a system header wrote: an undefined one
+// is then a library's function that the C library doesn't have (libm's sin, linked by -lm).
+static bool check_driver_system_declared(const CheckProgram* program, const Parser* parser, const Preprocessor* pp, const Link* link, NameId name)
+{
+    bool system = false;
+    for (uint32_t s = 0; name != 0 && s < program->symbol_count && s + 1 < link->symbols.count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+        if (link->symbols.name[s + 1] == name && declaration < parser->tokens.count)
+        {
+            system = check_lazy_system(pp, parser->tokens.sources[declaration]);
+        }
+    }
+    return system;
+}
+
 // A name of the link's, for a diagnostic, as a string in `buffer`.
 static const char* check_driver_link_name(const Link* link, NameId name, char* buffer, uint64_t capacity)
 {
@@ -536,7 +553,7 @@ static const char* check_driver_link_name(const Link* link, NameId name, char* b
 // when it is missing or stale) and which binding joins between the program's symbols and its atoms. A binding that finds
 // a piece of the snapshot damaged (BIND_ERROR_SNAPSHOT) discards the snapshot and emits once more from a fresh import.
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
-                                     Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, Arena* scratch)
+                                     Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, Arena* scratch)
 {
     char cache[PATH_MAX];
     const bool cached = snapshot_directory(cache, sizeof(cache));
@@ -572,7 +589,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
-        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding))
+        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, verify))
         {
             valid = false;
             again = bind.error == BIND_ERROR_SNAPSHOT;
@@ -599,7 +616,16 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             again = !valid && bind.error == BIND_ERROR_SNAPSHOT;
             if (!valid && !again)
             {
-                check_driver_bind_failed(bind.error, check_driver_link_name(&code.link, bind.name, name, sizeof(name)));
+                check_driver_link_name(&code.link, bind.name, name, sizeof(name));
+                if (bind.error == BIND_ERROR_UNDEFINED && check_driver_system_declared(program, parser, pp, &code.link, bind.name))
+                {
+                    fprintf(stderr, "error: unsupported: libraries other than the C library: '%s', which a system header declares, isn't in "
+                                    "libc.so.6, and the direct path links no other library yet (-c and a system linker with its -l take it)\n", name);
+                }
+                else
+                {
+                    check_driver_bind_failed(bind.error, name);
+                }
             }
         }
         ExecutableDynamic dynamic = { 0 };
@@ -701,6 +727,8 @@ static int run_check_command(int count, char** arguments, bool executable)
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
     uint32_t filtered_count = 0;
     bool scalar = false;
+    // --verify checks every function's records with x86_validate (the c-testsuite harness passes it).
+    bool verify = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -711,7 +739,11 @@ static int run_check_command(int count, char** arguments, bool executable)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
         quiet |= strcmp(arguments[i], "-w") == 0;
-        if (strcmp(arguments[i], "-flazy-system-headers") == 0)
+        if (strcmp(arguments[i], "--verify") == 0)
+        {
+            verify = true;
+        }
+        else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
         {
             lazy_system_headers = true;
         }
@@ -990,7 +1022,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             {
                                 const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
                                 result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
-                                                                               object_path, scalar, dump_static, &scratch) ? 0 : 1;
+                                                                               object_path, scalar, verify, dump_static, &scratch) ? 0 : 1;
                             }
                             else
                             {
@@ -1004,7 +1036,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types,
-                                                                 output != 0 ? output : "a.out", scalar, &scratch) ? 0 : 1;
+                                                                 output != 0 ? output : "a.out", scalar, verify, &scratch) ? 0 : 1;
                             }
                             else
                             {
