@@ -58,8 +58,13 @@
 #include <string.h>
 #include <immintrin.h>
 
-// Tokens per block: pass A's dense identifier arrays for a block stay in the L1 cache.
-#define BUSTER_REFINE_BLOCK_TOKENS 1024
+// Tokens per block: pass A's dense identifier arrays for a block (about 20 KB) stay in the L1 cache, and pass B's
+// pipeline, which starts and drains with each block, does so once per 1,600 identifiers or so. On the 9700X, sqlite3.c's
+// windowed refinement took 1.548 ms with blocks of 1,024 tokens, 1.528 with 2,048, 1.514 with 4,096, 1.516 with 8,192
+// and 1.533 with 16,384.
+#define BUSTER_REFINE_BLOCK_TOKENS 4096
+// How far ahead pass A prefetches the columns of a whole file lexed before its refinement: a step 1,024 tokens on.
+#define BUSTER_REFINE_PREFETCH_TOKENS 1024
 // Pass A's step: the kinds of 64 tokens are one vector, their starts and ends four.
 #define BUSTER_REFINE_STEP_TOKENS 64
 #define BUSTER_REFINE_LANES 16
@@ -67,7 +72,7 @@
 #define BUSTER_REFINE_WINDOW_BYTES 128
 // The dense arrays get whole-vector stores past their last entry.
 #define BUSTER_REFINE_DENSE_SLACK BUSTER_REFINE_LANES
-// The source bytes pass A prefetches per step, ahead of the scan: 16 steps' worth, 8 KB, is about a block's.
+// The source bytes pass A prefetches per step, ahead of the scan: a block's 64 steps' worth, 32 KB, is about its source.
 #define BUSTER_REFINE_PREFETCH_SOURCE 512
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -451,10 +456,11 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
     const bool block_backslashes = begin < end && refine_chunks_have_backslash(backslash_chunks, block_gaps_begin, starts[end - 1]);
     for (uint64_t step = begin; step < end; step += BUSTER_REFINE_STEP_TOKENS)
     {
-        // The next block's step in the token columns, and BUSTER_REFINE_PREFETCH_SOURCE bytes of the source past what the
-        // scan has read: fetched from memory while this block's pass B runs, so that the next block finds them in the
-        // caches (the columns were written a whole file before, and the lexer's pass over the source evicted them).
-        const uint64_t ahead = step + BUSTER_REFINE_BLOCK_TOKENS;
+        // The step BUSTER_REFINE_PREFETCH_TOKENS on in the token columns, and BUSTER_REFINE_PREFETCH_SOURCE bytes of the
+        // source past what the scan has read: fetched from memory while this block's pass B runs, so that the steps after
+        // find them in the caches (the columns were written a whole file before, and the lexer's pass over the source
+        // evicted them).
+        const uint64_t ahead = step + BUSTER_REFINE_PREFETCH_TOKENS;
         if (prefetch && ahead < count)
         {
             _mm_prefetch((const char*)(kinds + ahead), _MM_HINT_T0);
