@@ -76,7 +76,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         if (valid && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
         {
             int64_t number = 0;
-            valid = check_action_i64(reader->types, &value, &number) && number >= 0 && (number != 0 || parser->language.gnu);
+            valid = check_action_i64(reader->types, &value, &number) && number >= 0;
             *kind = BUSTER_TYPE_KIND_ARRAY;
             *extent = (uint64_t)number;
             if (valid)

@@ -56,7 +56,8 @@
 //   - API: PPOptions, PPTokens, the flags and internal kinds, PPStatistics, Preprocessor and the entry points.
 //   - Diagnostics, token stacks, location ranges and scratch spellings.
 //   - Files: PPFileData, PPFile, the file cache's records and paths (FileCache), the directive scan
-//     (pp_scan_directives_vector, pp_finish_directives, pp_find_guard), pp_prepare_into, pp_count_lines and pp_line_of,
+//     (pp_scan_directives_vector, pp_finish_directives, pp_find_guard), pp_prepare_into (a file whole, pp_prepare_whole, or
+//     a large one a window at a time, pp_prepare_windows), pp_count_lines and pp_line_of,
 //     the cache's functions (file_cache_lookup_path, file_cache_prepare and the ones they're made of), and a translation
 //     unit's paths (pp_lookup_path) and preparation (pp_prepare_data).
 //   - Include search: pp_include_candidate and pp_find_include (pp_dedupe_directories drops missing and repeated
@@ -310,6 +311,9 @@ struct PPOptions
     bool no_guard_skip;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
     uint32_t location_limit;
+    // The bytes of the windows a large file is lexed and refined in (pp_prepare_windows): 0 for BUSTER_PP_WINDOW_BYTES.
+    // Tests make them small, so that small files take the windows too.
+    uint32_t window_bytes;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
@@ -360,6 +364,9 @@ static __attribute__((unused)) void pp_release(Preprocessor* pp);
 // The state
 
 #define BUSTER_PP_NONE UINT32_MAX
+// The bytes of the windows pp_prepare_windows lexes and refines a file of at least two of them in: a window's source and
+// columns, about 280 KB, fit the 9700X's 1 MB L2 cache beside the intern table's lines that refinement reads.
+#define BUSTER_PP_WINDOW_BYTES (128u << 10)
 // The bytes of scratch spellings per location range, and the most the scratch arena holds.
 #define BUSTER_PP_SCRATCH_CHUNK_BYTES (64u << 10)
 #define BUSTER_PP_SCRATCH_BYTES (1ull << 32)
@@ -572,8 +579,9 @@ struct FileCacheArenas
 };
 
 // How files are prepared: the lexer's and refinement's flags (trigraphs, and raw strings: pp_raw_strings), the literal
-// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and whether
-// by the vectorized kernels or by their scalar twins, which prepare the same records.
+// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), whether by the
+// vectorized kernels or by their scalar twins, which prepare the same records, and the bytes of the windows a large file
+// is lexed and refined in (pp_prepare_windows; 0 for BUSTER_PP_WINDOW_BYTES).
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
@@ -581,6 +589,7 @@ struct PPPrepare
     uint64_t split_kinds;
     bool dollar_punctuation;
     bool vectorized;
+    uint32_t window_bytes;
 };
 
 struct FileCache
@@ -2389,6 +2398,17 @@ BUSTER_INLINE bool pp_is_unterminated_comment(const uint8_t* bytes, uint8_t kind
     return (kind & 0x7F) == C_TOKEN_UNKNOWN && bytes[start] == '/';
 }
 
+// The directive table's arrays for `count` directives, in `arena`. Returns false if memory runs out.
+static bool pp_directive_arrays(Arena* arena, PPFileData* data, uint32_t count)
+{
+    data->directive_count = count;
+    data->directive_hash = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+    data->directive_end = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+    data->directive_kind = arena_push(arena, count + 1, 1);
+    data->directive_next = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+    return data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+}
+
 // A file's directive table (#118) from its refined tokens, in `arena`, by the kernels `vectorized` picks: the
 // directives (pp_scan_directives_*), their kinds, line ends, pairing and notes (pp_finish_directives), and the include
 // guard. Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
@@ -2401,12 +2421,7 @@ static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
     {
         const uint32_t directive_count = vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
                                                     : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
-        data->directive_count = directive_count;
-        data->directive_hash = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-        data->directive_end = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-        data->directive_kind = arena_push(arena, directive_count + 1, 1);
-        data->directive_next = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-        result = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+        result = pp_directive_arrays(arena, data, directive_count);
     }
     if (result)
     {
@@ -2425,6 +2440,50 @@ static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
     return result;
 }
 
+// pp_directive_table's scan for a file prepared a window at a time (pp_prepare_windows), for tokens [begin, end) as each
+// window's blocks are refined, while their kinds are in the caches: per 64 tokens, the word of the tokens that start a
+// line into `lines` (pp_scan_directives_vector's) and the word of the directives' '#' tokens into `directives`.
+// Returns the directives found. Appending each directive's place to an array as the scan finds it, rather than taking
+// them out of the words at the end, made the directive tables of sqlite3.c and its headers take 0.01 ms more on the
+// 9700X (0.316-0.318 ms against 0.306-0.307).
+static uint32_t pp_scan_directives_window(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t* lines, uint64_t* directives)
+{
+    uint32_t result = 0;
+    for (uint32_t i = begin; i < end; i += 64)
+    {
+        const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, end - i);
+        const __m512i block = _mm512_maskz_loadu_epi8(valid, kinds + i);
+        const uint64_t word = _mm512_mask_cmpeq_epi8_mask(valid, block, _mm512_set1_epi8((char)(C_TOKEN_HASH | BUSTER_C_TOKEN_START_OF_LINE)));
+        lines[i / 64] = _mm512_movepi8_mask(block) & valid;
+        directives[i / 64] = word;
+        result += (uint32_t)__builtin_popcountll(word);
+    }
+    return result;
+}
+// The windows' scans start at refinement's block boundaries, a word of 64 tokens apart.
+_Static_assert(BUSTER_REFINE_BLOCK_TOKENS % 64 == 0, "pp_scan_directives_window takes whole words of 64 tokens");
+
+// pp_directive_table for a file prepared a window at a time, whose `count` directives pp_scan_directives_window found
+// in the words of `directives`, and its lines in those of `lines`: the directives' '#' tokens out of their words into
+// the table.
+static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, const uint64_t* lines, const uint64_t* directives, uint32_t count)
+{
+    bool result = pp_directive_arrays(arena, data, count);
+    const uint32_t word_count = (data->token_count + 63) / 64;
+    uint32_t directive = 0;
+    for (uint32_t w = 0; result && w < word_count; w += 1)
+    {
+        for (uint64_t bits = directives[w]; bits != 0; bits &= bits - 1)
+        {
+            data->directive_hash[directive] = 64 * w + (uint32_t)__builtin_ctzll(bits);
+            directive += 1;
+        }
+    }
+    result = result && pp_finish_directives(true, arena, data, lines);
+    data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
+    return result;
+}
+
 // What preparing a file came to (pp_prepare_into).
 typedef enum PPPrepareStatus
 {
@@ -2437,31 +2496,39 @@ typedef enum PPPrepareStatus
     PP_PREPARE_NO_MEMORY,
 } PPPrepareStatus;
 
-// Keep only exceptional raw errors, never a per-token diagnostic column. Ordinary files allocate nothing. Both
-// preparation kernels use the same independent scalar delimiter check on the UNKNOWN candidates they produced.
-static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileData* data)
+// The UNKNOWN tokens among `count` kinds, where a raw string literal's error can be (raw strings on, or C++), by the
+// kernels `prepare` picks: 0 otherwise.
+static uint32_t pp_count_raw_candidates(const PPPrepare* prepare, const uint8_t* kinds, uint64_t count)
 {
     uint32_t unknowns = 0;
-    data->raw_error_count = 0;
-    data->raw_errors = 0;
     const bool raw = (prepare->refine_flags & (C_TOKENIZER_RAW_STRINGS | C_TOKENIZER_CPLUSPLUS)) != 0;
-    for (uint32_t t = 0; raw && t < data->token_count; t += 64)
+    for (uint64_t t = 0; raw && t < count; t += 64)
     {
-        const uint32_t count = data->token_count - t < 64 ? data->token_count - t : 64;
+        const uint32_t chunk = count - t < 64 ? (uint32_t)(count - t) : 64;
         if (prepare->vectorized)
         {
-            const __mmask64 valid = _bzhi_u64(~0ull, count);
-            const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, data->kinds + t), _mm512_set1_epi8(0x7F));
-            unknowns += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)));
+            const __mmask64 valid = _bzhi_u64(~0ull, chunk);
+            const __m512i chunk_kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
+            unknowns += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(valid, chunk_kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)));
         }
         else
         {
-            for (uint32_t i = 0; i < count; i += 1)
+            for (uint32_t i = 0; i < chunk; i += 1)
             {
-                unknowns += (data->kinds[t + i] & 0x7F) == C_TOKEN_UNKNOWN;
+                unknowns += (kinds[t + i] & 0x7F) == C_TOKEN_UNKNOWN;
             }
         }
     }
+    return unknowns;
+}
+
+// Keep only exceptional raw errors, never a per-token diagnostic column. Ordinary files allocate nothing. Both
+// preparation kernels use the same independent scalar delimiter check on the UNKNOWN candidates they produced, of which
+// the file has `unknowns` (pp_count_raw_candidates).
+static bool pp_record_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileData* data, uint32_t unknowns)
+{
+    data->raw_error_count = 0;
+    data->raw_errors = 0;
     const uint64_t mark = arena->length;
     data->raw_errors = unknowns != 0 ? arena_push_array(arena, unknowns, sizeof(PPRawError), _Alignof(PPRawError)) : 0;
     const bool result = unknowns == 0 || data->raw_errors != 0;
@@ -2489,10 +2556,8 @@ static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFile
     return result;
 }
 
-// Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
-// leading-space bits, directive table and guard, in `columns` (kinds, starts and values, an arena each) and `arena` (the
-// directive table). Adds each phase's TSC ticks to `ticks` (by PPPhase) unless it is null.
-static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
+// pp_prepare_into for the whole file at once: lexed, then refined, then indexed.
+static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)data->length);
     data->kinds = arena_push(&columns[0], capacity, 64);
@@ -2541,7 +2606,7 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
         data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
-        bool refined = data->space != 0 && pp_prepare_raw_errors(prepare, arena, data);
+        bool refined = data->space != 0 && pp_record_raw_errors(prepare, arena, data, pp_count_raw_candidates(prepare, data->kinds, data->token_count));
         if (refined && prepare->vectorized)
         {
             refined = refine_tokens(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values, data->space,
@@ -2570,6 +2635,199 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
         }
     }
     return result;
+}
+
+// Whether bytes [at, end) of a file hold a line end that isn't a line splice's: a '\n' or '\r' that doesn't follow a
+// backslash, nor a '\n' a '\r' after one, 64 bytes at a time. A window without one, whose line goes on through splices
+// alone (a macro defined over many lines), keeps no token when lexed (pp_prepare_windows), so it is doubled unlexed:
+// x86_64_encoder.c's BUSTER_X86_VECTOR_FORMS, 157 KB on 1,695 lines, had the lexer go over 241 KB of the file's 582 KB
+// twice. A splice the lexer takes otherwise (with blanks after the backslash, or a trigraph's) counts as a line end here,
+// and its window is lexed; the check only spares work, and the tokens are the same either way.
+static bool pp_window_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t end)
+{
+    bool result = false;
+    // Bit 0 of each: the byte before the chunk is a backslash, or a '\r' after one.
+    uint64_t backslash_before = 0;
+    uint64_t spliced_return_before = 0;
+    for (uint64_t i = at; !result && i < end; i += 64)
+    {
+        const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, (uint32_t)(end - i));
+        const __m512i chunk = _mm512_maskz_loadu_epi8(valid, bytes + i);
+        const uint64_t newlines = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\n'));
+        const uint64_t returns = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\r'));
+        const uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\\'));
+        const uint64_t after_backslash = (backslashes << 1) | backslash_before;
+        const uint64_t spliced_returns = returns & after_backslash;
+        const uint64_t spliced_newlines = newlines & (after_backslash | (spliced_returns << 1) | spliced_return_before);
+        result = ((newlines & ~spliced_newlines) | (returns & ~spliced_returns)) != 0;
+        backslash_before = backslashes >> 63;
+        spliced_return_before = spliced_returns >> 63;
+    }
+    return result;
+}
+
+// pp_prepare_into for a file of at least two windows (`window` bytes) that the vectorized kernels lex: lexed a window at
+// a time (c_tokenize_lines), each window's tokens kept up to the last one that starts a logical line (that line is lexed
+// again with the next window, and a line that takes a whole window doubles it, unlexed when only splices continue it:
+// pp_window_has_line_end), and each completed block of
+// BUSTER_REFINE_BLOCK_TOKENS refined at once (refine_tokens_blocks), while the lexer's columns and the source are still
+// in the caches: a whole file lexed before its refinement had refinement read them from memory again
+// (docs/c-refinement.md). The records are pp_prepare_whole's, byte for byte. The leading-space words, whose place after
+// the kinds waits for the count, are refined into scratch memory and copied there.
+static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t window,
+                                          uint64_t* ticks)
+{
+    const uint64_t length = data->length;
+    const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
+    data->kinds = arena_push(&columns[0], capacity, 64);
+    data->starts = arena_push_array(&columns[1], capacity, sizeof(uint32_t), 64);
+    data->values = arena_push_array(&columns[2], capacity, sizeof(uint32_t), 64);
+    uint64_t tick = ticks != 0 ? __rdtsc() : 0;
+    Scratch scratch = scratch_begin(0);
+    uint64_t* backslash_chunks = arena_push_array(scratch.arena, refine_progress_words(length), sizeof(uint64_t), 64);
+    // A word for every 64 of the most tokens the file can have; refinement writes those of the tokens it has. The
+    // directive table's scan (pp_scan_directives_window) writes two, the lines' and the directives' '#' tokens, into the
+    // two halves of `directive_words`: the directives' places need no room of their own, bounded only by the tokens, so
+    // that for a file of up to about 12 MB the scratch memory touched stays in the huge page that pp_prepare_whole's
+    // touches.
+    const uint64_t word_room = capacity / 64 + 2;
+    uint64_t* space = arena_push_array(scratch.arena, word_room, sizeof(uint64_t), 64);
+    uint64_t* directive_words = arena_push_array(scratch.arena, 2 * word_room, sizeof(uint64_t), 64);
+    RefineProgress progress;
+    refine_progress_begin(&progress, backslash_chunks);
+    const bool pushed = data->kinds != 0 && data->starts != 0 && data->values != 0;
+    PPPrepareStatus result = !pushed                                                           ? PP_PREPARE_NO_COLUMNS
+                             : backslash_chunks == 0 || space == 0 || directive_words == 0 ? PP_PREPARE_NO_MEMORY
+                                                                                               : PP_PREPARE_DONE;
+    // The next window starts at `at`, the start of the file or of a token that starts a logical line, and takes `size`
+    // bytes; the tokens before it are kept (`count`), those before `refined` are refined, and those before `counted`
+    // have had their UNKNOWN tokens counted (`unknowns`).
+    uint64_t at = 0;
+    uint64_t size = window;
+    uint64_t count = 0;
+    uint64_t refined = 0;
+    uint64_t counted = 0;
+    uint32_t unknowns = 0;
+    uint32_t directives = 0;
+    bool last = false;
+    while (result == PP_PREPARE_DONE && !last)
+    {
+        const uint64_t end = length - at <= size ? length : at + size;
+        last = end == length;
+        const int64_t lexed = last || pp_window_has_line_end(data->bytes, at, end)
+                                  ? c_tokenize_lines(data->bytes, end, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags)
+                                  : 0;
+        int64_t kept = last ? lexed : 0;
+        for (int64_t i = lexed - 1; !last && kept == 0 && i > 0; i -= 1)
+        {
+            kept = (data->kinds[count + i] & BUSTER_C_TOKEN_START_OF_LINE) != 0 ? i : 0;
+        }
+        const uint64_t next = kept > 0 && !last ? data->starts[count + kept] : end;
+        if (lexed < 0)
+        {
+            result = PP_PREPARE_TOO_BIG;
+        }
+        else if (kept == 0 && !last)
+        {
+            size *= 2;
+        }
+        else
+        {
+            kept = pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds + count, data->starts + count, data->values + count, (uint32_t)kept, true);
+            result = kept < 0 ? PP_PREPARE_NO_MEMORY : PP_PREPARE_DONE;
+            // An unterminated block comment (pp_is_unterminated_comment), reported when this inclusion reads it.
+            if (last && kept > 0 && pp_is_unterminated_comment(data->bytes, data->kinds[count + kept - 1], data->starts[count + kept - 1]))
+            {
+                data->unterminated_comment = data->starts[count + kept - 1] + 1;
+                data->unterminated_comment_starts_line = (data->kinds[count + kept - 1] & BUSTER_C_TOKEN_START_OF_LINE) != 0;
+                kept -= 1;
+            }
+            count += kept > 0 ? (uint64_t)kept : 0;
+            at = next;
+            size = window;
+        }
+        if (ticks != 0)
+        {
+            const uint64_t now = __rdtsc();
+            ticks[PP_PHASE_LEX] += now - tick;
+            tick = now;
+        }
+        // The raw string errors' candidates (pp_record_raw_errors), counted while the window's kinds are in the caches.
+        unknowns += result == PP_PREPARE_DONE ? pp_count_raw_candidates(prepare, data->kinds + counted, count - counted) : 0;
+        counted = count;
+        const uint64_t complete = last ? count : count - count % BUSTER_REFINE_BLOCK_TOKENS;
+        const uint64_t begin = refined;
+        if (result == PP_PREPARE_DONE && complete > refined)
+        {
+            result = refine_tokens_blocks(table, data->bytes, length, data->kinds, data->starts, data->values, space, prepare->refine_flags, refined, complete, &progress)
+                         ? PP_PREPARE_DONE
+                         : PP_PREPARE_NO_MEMORY;
+            refined = complete;
+        }
+        if (ticks != 0)
+        {
+            const uint64_t now = __rdtsc();
+            ticks[PP_PHASE_REFINE] += now - tick;
+            tick = now;
+        }
+        // The directive table's scan of the blocks just refined, while their kinds are in the caches.
+        directives += result == PP_PREPARE_DONE ? pp_scan_directives_window(data->kinds, (uint32_t)begin, (uint32_t)refined, directive_words, directive_words + word_room) : 0;
+        if (ticks != 0)
+        {
+            const uint64_t now = __rdtsc();
+            ticks[PP_PHASE_DIRECTIVES] += now - tick;
+            tick = now;
+        }
+    }
+    if (result == PP_PREPARE_DONE)
+    {
+        // Each column keeps what the file has, with the lexer's slack, and the leading-space words go after the kinds, as
+        // pp_prepare_whole places them.
+        data->token_count = (uint32_t)count;
+        const uint64_t kept = count + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
+        arena_pop_to(&columns[0], (uint64_t)(data->kinds - columns[0].base) + kept);
+        arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
+        arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
+        data->space = arena_push_array(&columns[0], count / 64 + 2, sizeof(uint64_t), 64);
+        if (data->space != 0)
+        {
+            // The words past the last token's are zero: an earlier window's tokens may have been written there.
+            const uint64_t words = (count + 63) / 64;
+            memcpy(data->space, space, words * sizeof(uint64_t));
+            memset(data->space + words, 0, (count / 64 + 2 - words) * sizeof(uint64_t));
+        }
+        result = data->space != 0 && pp_record_raw_errors(prepare, arena, data, unknowns) ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+    }
+    if (ticks != 0)
+    {
+        const uint64_t now = __rdtsc();
+        ticks[PP_PHASE_REFINE] += now - tick;
+        tick = now;
+    }
+    if (result == PP_PREPARE_DONE)
+    {
+        data->prepared = pp_directive_table_windowed(arena, data, directive_words, directive_words + word_room, directives);
+        result = data->prepared ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+    }
+    scratch_end(scratch);
+    if (ticks != 0)
+    {
+        ticks[PP_PHASE_DIRECTIVES] += __rdtsc() - tick;
+    }
+    return result;
+}
+
+// Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
+// leading-space bits, directive table and guard, in `columns` (kinds, starts and values, an arena each) and `arena` (the
+// directive table). Adds each phase's TSC ticks to `ticks` (by PPPhase) unless it is null. A file of at least two windows
+// (BUSTER_PP_WINDOW_BYTES, or the options' size) that the vectorized kernels lex is lexed and refined a window at a time
+// (pp_prepare_windows), into the same records.
+static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
+{
+    const uint64_t window = prepare->window_bytes != 0 ? prepare->window_bytes : BUSTER_PP_WINDOW_BYTES;
+    const bool windows = prepare->vectorized && !prepare->dollar_punctuation && data->length >= 2 * window &&
+                         data->length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK && !c_tokenize_scalar_only(data->bytes, data->length, prepare->refine_flags);
+    return windows ? pp_prepare_windows(prepare, table, columns, arena, data, window, ticks) : pp_prepare_whole(prepare, table, columns, arena, data, ticks);
 }
 
 // The line ends in bytes [begin, end) of a file: "\n", "\r\n" (at its '\n') and a '\r' that no '\n' follows, 64 bytes at
@@ -3072,6 +3330,7 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
         .vectorized = !options->scalar,
+        .window_bytes = options->window_bytes,
     };
 }
 
@@ -3083,6 +3342,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
         .split_kinds = pp->split_kinds,
         .dollar_punctuation = pp_dollar_punctuation(&pp->options),
         .vectorized = pp->vectorized,
+        .window_bytes = pp->options.window_bytes,
     };
 }
 
@@ -15552,12 +15812,12 @@ static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
 }
 
 // Is `argument` one of our options that clang doesn't have and that take the next argument as their value
-// (--predefines FILE, --location-limit N)? The commands that split -E's options from their files take the value with
-// the option, and those that give the options to clang too (test-preprocessor's files and --compare-clang,
-// benchmark-preprocessor --clang) leave both out of clang's arguments.
+// (--predefines FILE, --location-limit N, --window-bytes N)? The commands that split -E's options from their files take
+// the value with the option, and those that give the options to clang too (test-preprocessor's files and
+// --compare-clang, benchmark-preprocessor --clang) leave both out of clang's arguments.
 static bool pp_own_option_with_value(const char* argument)
 {
-    return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0;
+    return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0 || strcmp(argument, "--window-bytes") == 0;
 }
 
 // The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
@@ -15645,6 +15905,16 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
             const unsigned long long limit = strtoull(next, &rest, 10);
             result = *rest == 0 && limit != 0 && limit <= UINT32_MAX;
             options->location_limit = (uint32_t)limit;
+            i += 1;
+        }
+        else if (strcmp(argument, "--window-bytes") == 0 && next != 0)
+        {
+            // A test option: the windows a large file is lexed and refined in (pp_prepare_windows), this many bytes, so
+            // that small ones send every file of two windows or more through them.
+            char* rest;
+            const unsigned long long bytes = strtoull(next, &rest, 10);
+            result = *rest == 0 && bytes != 0 && bytes <= UINT32_MAX / 2;
+            options->window_bytes = (uint32_t)bytes;
             i += 1;
         }
         else if (strcmp(argument, "-trigraphs") == 0 || strcmp(argument, "-ftrigraphs") == 0 || strcmp(argument, "-fno-trigraphs") == 0)

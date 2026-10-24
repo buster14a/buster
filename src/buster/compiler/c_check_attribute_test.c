@@ -950,6 +950,22 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .values = { 7 },
         },
         {
+            .name = "align_value on a pointer parameter, as clang 23's <movdirintrin.h> has it",
+            .source = "void f(void *p __attribute__((align_value(64))), const void *q);\n"
+                      "typedef double *aligned_double __attribute__((align_value(1ull << 40)));\n",
+            .count = 2,
+            .last_kind = CHECK_ATTRIBUTE_ALIGN_VALUE,
+            .values = { 64, INT64_C(1) << 40 },
+        },
+        {
+            .name = "align_value of a value other than a power of two",
+            .source = "void f(void *p __attribute__((align_value(48))));\n",
+            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
+            .error_word = "48",
+            .rejected = true,
+            .values = { 48 },
+        },
+        {
             .name = "unknown attribute is explicit",
             .source = "int x __attribute__((invented_semantics(3)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_UNKNOWN,

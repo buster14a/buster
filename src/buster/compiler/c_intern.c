@@ -854,6 +854,29 @@ static IdentId intern_find_or_add_vector(InternTable* table, const uint8_t* byte
     return result;
 }
 
+// intern_find_or_add_vector's insertion of a spelling of 1 to BUSTER_INTERN_FAST_LENGTH bytes, `spelling` (zero past its
+// end), that a probe of its hash's bucket in the table as it is, `bucket`, has just shown absent: no slot of the bucket
+// has its prefix and one is empty, the first of which `empties` (intern_bucket_empties') names. A spelling is in its
+// hash's bucket unless that was full when it was added, and slots are never emptied but by growing, so it is absent, and
+// the slot is where intern_place puts it. Its record, id and slot, when the table has room for the id without growing
+// and for the record; returns 0 otherwise, for intern_find_or_add_vector to decide.
+BUSTER_INLINE IdentId intern_add_in_bucket(InternTable* table, __m512i spelling, uint32_t length, uint8_t* bucket, uint32_t empties)
+{
+    IdentId result = 0;
+    uint8_t* record = table->count < table->capacity ? arena_push(&table->record_arena, (uint64_t)length + 1, 1) : 0;
+    if (record != 0)
+    {
+        result = table->count;
+        // The spelling and its NUL: the vector is zero past the spelling.
+        _mm512_mask_storeu_epi8(record, _bzhi_u64(~0ull, length + 1), spelling);
+        table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records), .length = length };
+        table->count += 1;
+        // Bit 4s + 3 is slot s's id.
+        _mm_storeu_si128((__m128i*)(bucket + ((uint32_t)__builtin_ctz(empties) - 3) * 4), intern_slot(_mm512_castsi512_si128(spelling), result));
+    }
+    return result;
+}
+
 // The id of a spelling, or 0 if it was never interned.
 static __attribute__((unused)) IdentId intern_find(const InternTable* table, const uint8_t* bytes, uint32_t length)
 {

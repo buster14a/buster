@@ -339,7 +339,7 @@ static bool check_init_vector_literal(CheckInitWalker* walker, uint32_t node, ui
         {
             const CheckAction action = {
                 .op = CHECK_OP_INITIALIZE, .operands = { value }, .type = element,
-                .node = value_node, .extensions = check_init_extensions(walker),
+                .node = value_node, .extensions = check_init_extensions(walker, first),
             };
             CheckActionResult converted = { 0 };
             check_action_scalar(walker->types, &action, &converted);

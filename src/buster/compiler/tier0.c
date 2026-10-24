@@ -2267,14 +2267,16 @@ static uint32_t tier0_kind_by_access(uint32_t kind, uint32_t access)
 _Static_assert(BUSTER_TYPED_GLOBAL == 4 && BUSTER_TYPED_GLOBAL_ADDRESS == 5 && BUSTER_TYPED_STORE_GLOBAL == 32 && BUSTER_TYPED_SET_GLOBAL == 33,
                "tier0_kind_by_access's order of the global kinds");
 
-// The kind fusion keys entry i by before its fusions: a global kind's for its symbol's access (tier0_kind_by_access),
-// the entry's kind otherwise. A symbol past the column is direct, as tier0_validate requires none to be.
-static uint32_t tier0_access_kind(const Tier0Function* function, uint32_t i)
+// The kind fusion keys an entry of kind `kind` and value `symbol` by before its fusions: a global kind's for its
+// symbol's access (tier0_kind_by_access), the entry's kind otherwise. `access` and `count` are the function's column and
+// its symbols, read once per function (the fusion's byte stores may alias the function's fields under
+// -fno-strict-aliasing, so reads through the function would load them again for every entry), or 0 and 0 in the
+// fusion's copy for functions without a column, where the lookup folds away. A symbol past the column is direct, as
+// tier0_validate requires none to be.
+static uint32_t tier0_access_kind(uint32_t kind, uint64_t symbol, const uint8_t* access, uint32_t count)
 {
-    const uint32_t kind = function->kinds[i];
-    const uint64_t symbol = function->values[i];
-    const bool reached = tier0_global_kind(kind) && function->symbol_access != 0 && symbol < function->symbol_count;
-    return tier0_kind_by_access(kind, reached ? function->symbol_access[symbol] & (BUSTER_TIER0_ACCESSES - 1) : BUSTER_TIER0_ACCESS_DIRECT);
+    const bool reached = count != 0 && tier0_global_kind(kind) && symbol < count;
+    return reached ? tier0_kind_by_access(kind, access[symbol] & (BUSTER_TIER0_ACCESSES - 1)) : kind;
 }
 
 // The per-entry columns both paths fill, which the tests compare: each entry's key (its template's kind, class and
@@ -2441,8 +2443,10 @@ static bool tier0_takes_last(const Tier0Function* function, uint32_t i)
 }
 
 // Phase 1, an entry at a time: each consumer takes the entries its windows allow (they are all behind it, and no two
-// consumers want the same one), and gets its key. The vector path computes the same columns with masks.
-static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries)
+// consumers want the same one), and gets its key. The vector path computes the same columns with masks. `access` and
+// `access_count` are the function's access column and its symbols (tier0_access_kind), or 0 and 0 without one.
+static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries,
+                                                                    const uint8_t* access, uint32_t access_count)
 {
     const uint8_t* kinds = function->kinds;
     const uint8_t* classes = function->classes;
@@ -2452,7 +2456,7 @@ static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* lab
         const uint8_t kind = kinds[i];
         const uint8_t class = classes[i];
         const uint8_t operand = i > 0 ? classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
-        uint32_t key_kind = tier0_access_kind(function, i);
+        uint32_t key_kind = tier0_access_kind(kind, values[i], access, access_count);
         uint32_t key_class = tier0_key_class(kind, class, operand);
         uint32_t variant = tier0_kind_variant(kind, operand, BUSTER_TIER0_VARIANT_PLAIN);
         int32_t integer = 0;
@@ -2593,6 +2597,27 @@ static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* lab
         entries->key_kinds[i] = (uint8_t)key_kind;
         entries->key_classes[i] = (uint8_t)key_class;
         entries->variants[i] = (uint8_t)variant;
+    }
+}
+
+// Phase 1 for a function with an access column: tier0_fuse_entries's copy with the lookups. It is a function of its
+// own because inlined beside the other copy it cost that one two more register moves per entry.
+static __attribute__((noinline)) void tier0_fuse_columned(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries)
+{
+    tier0_fuse_entries(function, labels, entries, function->symbol_access, function->symbol_count);
+}
+
+// Phase 1 by tier0_fuse_entries's copies, as the encoder's loops are made (encode_batches): a function without an access
+// column gets the one whose lookups fold away, inlined into tier0_compile_scalar as the loop was before the column.
+static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries)
+{
+    if (function->symbol_access != 0)
+    {
+        tier0_fuse_columned(function, labels, entries);
+    }
+    else
+    {
+        tier0_fuse_entries(function, labels, entries, 0, 0);
     }
 }
 

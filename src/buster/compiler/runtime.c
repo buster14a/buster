@@ -327,6 +327,7 @@ static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime
 // Finds the default interpreter through libc.so's script without importing CRT objects, archives or library symbols.
 // The path and probe records belong to runtime->files until runtime_release. This is path discovery, not ELF validation.
 static __attribute__((unused)) RuntimeError runtime_discover_interpreter(Runtime* runtime);
+static __attribute__((unused)) bool runtime_library_identity(const char* name, uint64_t* device, uint64_t* inode);
 static __attribute__((unused)) void runtime_release(Runtime* runtime);
 // Whether a runtime of `kind` is libc.a's, with archives and without a shared library: a static executable's or a static
 // PIE's.
@@ -649,6 +650,26 @@ static String8 runtime_find_file(Runtime* runtime, const char* name, bool gcc)
     return result;
 }
 
+// The identity (device and inode) of the first library directory's file named `name`, which runtime_find_file finds
+// for the C library's crt objects, but without a Runtime or a probe recorded: link-foreign compares its inputs with
+// glibc's start files and libc.a by it (foreign_link_startup_applies). False, with both 0, when no directory has one.
+static bool runtime_library_identity(const char* name, uint64_t* device, uint64_t* inode)
+{
+    char path[BUSTER_RUNTIME_PATH_BYTES];
+    bool found = false;
+    *device = 0;
+    *inode = 0;
+    for (uint64_t d = 0; !found && d < BUSTER_ARRAY_LENGTH(runtime_library_directories); d += 1)
+    {
+        struct stat status;
+        snprintf(path, sizeof(path), "%s/%s", runtime_library_directories[d], name);
+        found = stat(path, &status) == 0 && S_ISREG(status.st_mode);
+        *device = found ? (uint64_t)status.st_dev : 0;
+        *inode = found ? (uint64_t)status.st_ino : 0;
+    }
+    return found;
+}
+
 // The first of GCC's installation and the library directories that has `name`, as -L finds a static executable's
 // archive there, probing each in order; an empty path if none has it.
 static String8 runtime_find_archive(Runtime* runtime, const char* name)
@@ -695,38 +716,40 @@ static RuntimeError runtime_search_archives(Runtime* runtime)
     return result;
 }
 
+// Each kind's crt objects, by RuntimeObject, as GCC's driver links them.
+static const char* const runtime_object_names[RUNTIME_KINDS][RUNTIME_OBJECTS] = {
+    [RUNTIME_KIND_DYNAMIC] = {
+        [RUNTIME_OBJECT_START] = "Scrt1.o",
+        [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+        [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+        [RUNTIME_OBJECT_END] = "crtendS.o",
+        [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+    },
+    [RUNTIME_KIND_STATIC] = {
+        [RUNTIME_OBJECT_START] = "crt1.o",
+        [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+        [RUNTIME_OBJECT_BEGIN] = "crtbeginT.o",
+        [RUNTIME_OBJECT_END] = "crtend.o",
+        [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+    },
+    // No start object: its path stays empty.
+    [RUNTIME_KIND_SHARED] = {
+        [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+        [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+        [RUNTIME_OBJECT_END] = "crtendS.o",
+        [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+    },
+    [RUNTIME_KIND_STATIC_PIE] = {
+        [RUNTIME_OBJECT_START] = "rcrt1.o",
+        [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+        [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
+        [RUNTIME_OBJECT_END] = "crtendS.o",
+        [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+    },
+};
+
 static RuntimeError runtime_search(Runtime* runtime)
 {
-    static const char* const objects[RUNTIME_KINDS][RUNTIME_OBJECTS] = {
-        [RUNTIME_KIND_DYNAMIC] = {
-            [RUNTIME_OBJECT_START] = "Scrt1.o",
-            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
-            [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
-            [RUNTIME_OBJECT_END] = "crtendS.o",
-            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
-        },
-        [RUNTIME_KIND_STATIC] = {
-            [RUNTIME_OBJECT_START] = "crt1.o",
-            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
-            [RUNTIME_OBJECT_BEGIN] = "crtbeginT.o",
-            [RUNTIME_OBJECT_END] = "crtend.o",
-            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
-        },
-        // No start object: its path stays empty.
-        [RUNTIME_KIND_SHARED] = {
-            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
-            [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
-            [RUNTIME_OBJECT_END] = "crtendS.o",
-            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
-        },
-        [RUNTIME_KIND_STATIC_PIE] = {
-            [RUNTIME_OBJECT_START] = "rcrt1.o",
-            [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
-            [RUNTIME_OBJECT_BEGIN] = "crtbeginS.o",
-            [RUNTIME_OBJECT_END] = "crtendS.o",
-            [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
-        },
-    };
     RuntimeError result = runtime_find_gcc(runtime, runtime_gcc_bases, BUSTER_ARRAY_LENGTH(runtime_gcc_bases)) ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MISSING;
     if (result != RUNTIME_ERROR_NONE)
     {
@@ -735,7 +758,7 @@ static RuntimeError runtime_search(Runtime* runtime)
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
     {
         const bool gcc = i == RUNTIME_OBJECT_BEGIN || i == RUNTIME_OBJECT_END;
-        const char* name = objects[runtime->kind][i];
+        const char* name = runtime_object_names[runtime->kind][i];
         runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
         result = name == 0 || runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
     }

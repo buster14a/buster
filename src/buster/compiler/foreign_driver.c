@@ -8,8 +8,9 @@
 // -z text) and -shared a shared library, without an entry point unless -e names one, with -soname's DT_SONAME. A
 // static executable and a static PIE get the static runtime's handling (IFUNC stubs and IRELATIVE relocations, TLS
 // relaxation, the names libc.a's startup looks for), which a static program without libc doesn't notice but for its
-// IFUNCs: the conversion refuses those unless glibc's startup applies their IRELATIVE relocations, followed from the
-// entry, or --startup-applies-irelative says the program's own startup does (foreign_link_startup_applies).
+// IFUNCs: the conversion refuses those unless the entry is glibc's startup (the system's start file and libc.a, by
+// file identity), which applies their IRELATIVE relocations, or --startup-applies-irelative says the program's own
+// startup does (foreign_link_startup_applies).
 //
 // Conversion precedes optional section GC and literal merging, then the existing lane-parallel writer. The original
 // Foreign and all arenas remain live through writing. Entry lookup uses Foreign's canonical names again after GC's
@@ -72,8 +73,9 @@ static void foreign_driver_usage(void)
                     "Supply startup objects and runtime libraries explicitly, in link order, as GCC's driver gives them to GNU ld.\n"
                     "-pie writes a dynamic PIE, -static -pie a static PIE and -shared a shared library (no entry point without -e).\n"
                     "Static output searches archives by default; PIE and shared output prefer shared libraries.\n"
-                    "A static link takes IFUNCs when glibc's startup (crt1.o or rcrt1.o, libc.a) applies their relocations, or when\n"
-                    "--startup-applies-irelative says its own startup does (those between __rela_iplt_start and __rela_iplt_end, or a\n"
+                    "A static link takes IFUNCs when its entry is glibc's startup, which applies their relocations: the system's crt1.o\n"
+                    "or rcrt1.o, as GCC's driver finds them, calling libc.a's __libc_start_main. Other startup needs\n"
+                    "--startup-applies-irelative to say it applies them (those between __rela_iplt_start and __rela_iplt_end, or a\n"
                     "static PIE's through _DYNAMIC).\n"
                     "Named regular symbols and the inputs' DWARF are emitted by default; -s/--strip-all omits both, preserving\n"
                     "dynamic symbols, and -S/--strip-debug the DWARF alone.\n"
@@ -335,8 +337,9 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
             "a compressed debug section whose zlib stream doesn't decompress to its size",
         };
         // An IFUNC's refusal says why for the kind (foreign_link_refuse_ifuncs).
-        const char* ifunc = runtime_kind_is_static(kind) ? "an IFUNC whose IRELATIVE relocation nothing applies: the entry doesn't lead to glibc's startup "
-                                                           "(crt1.o or rcrt1.o, libc.a), and no --startup-applies-irelative says the output's own applies it" :
+        const char* ifunc = runtime_kind_is_static(kind) ? "an IFUNC whose IRELATIVE relocation nothing applies: the entry isn't glibc's startup (the system's "
+                                                           "crt1.o or rcrt1.o, calling libc.a's __libc_start_main), and no --startup-applies-irelative says the "
+                                                           "output's own applies it" :
                                                            messages[FOREIGN_LINK_ERROR_IFUNC];
         // A compressed debug section's refusal says which way it doesn't decompress (foreign_debug_build).
         const char* compression = result.import.error == IMPORT_ERROR_UNSUPPORTED ?

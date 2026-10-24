@@ -673,10 +673,11 @@ designs and the compilers already built this way.
   own references, lld's regular symbol table, and a dynamic PIE's own IFUNCs
   through the writer's stubs and `IRELATIVE` relocations; a shared library
   refuses an IFUNC that isn't preemptible, and a static link refuses every
-  IFUNC a fixup reaches unless glibc's startup, followed from the entry's
-  object (`crt1.o` or `rcrt1.o`, then `libc.a`'s members), applies their
-  `IRELATIVE` relocations or `--startup-applies-irelative` says the program's
-  own does. GC, literal pooling and CIE pooling are off by default.
+  IFUNC a fixup reaches unless its entry is glibc's startup, recognized by its
+  files (the system's `crt1.o` or `rcrt1.o`, by identity, then `libc.a`'s
+  `__libc_start_main`), which applies their `IRELATIVE` relocations, or
+  `--startup-applies-irelative` says the program's own does. GC, literal
+  pooling and CIE pooling are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
@@ -754,8 +755,10 @@ designs and the compilers already built this way.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
   check the driver and inline assembly against Clang; `test-checker-corpus`
-  compares a corpus's acceptance and first diagnostics with Clang, and
-  `benchmark-checker-source` measures checking of real source bodies.
+  compares a corpus's acceptance and first diagnostics with Clang, and its
+  semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
+  mutations" below), and `benchmark-checker-source` measures checking of real
+  source bodies.
   `test-checker [--seed N] [--clang PATH]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang. `c_check_data.c`
   and `c_check_data_input.c` turn selected static scalar definitions into real
@@ -828,9 +831,13 @@ designs and the compilers already built this way.
   ids (keywords, directive names, the preprocessor's names), and
   `src/buster/compiler/c_refine.c` is token refinement: per file, after the
   lexer, each identifier's `IdentId` (in place of its end) and each token's
-  exact leading-space bit. `docs/c-refinement.md` explains the design and its
-  9700X measurements. `c_refine_test.c` holds their tests (`main.c` includes
-  it; `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
+  exact leading-space bit. The preprocessor lexes a file of two windows (256 KB)
+  or more a 128 KB window at a time (`c_tokenize_lines`, cut where a logical
+  line starts) and refines each window's completed blocks while they are in the
+  caches (`refine_tokens_blocks`, `pp_prepare_windows`), into the whole file's
+  records. `docs/c-refinement.md` explains the design and its 9700X
+  measurements. `c_refine_test.c` holds their tests (`main.c` includes it;
+  `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens (C23's `#embed` among its
@@ -3421,9 +3428,20 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `benchmark-preprocessor` (with `--clang`, and `--compare-clang`), run as
   children on a small file, must take `--location-limit N` with its value as
   ours, kept from clang, succeeding in a space the file fits in and running
-  out of one of a byte;
+  out of one of a byte. Then the windows (#116, `c_preprocessor_windows_test.c`):
+  240 generated sources of up to 96 KB, of what a window's end can cut (comments
+  and raw string literals over many lines, macros continued over hundreds of
+  lines by splices, line splices, `\r\n`, long lines, a byte order mark,
+  constructs left open at the end), each prepared whole by both kernels and a
+  window at a time (`pp_prepare_windows`) in windows of 1 byte to 8 KB, in five
+  language modes: every record must be the whole file's, byte for byte; and the
+  scan for a line end that isn't a splice's (`pp_window_has_line_end`) against a
+  byte at a time, on random bytes ending at a `PROT_NONE` page;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
+  `--window-bytes N` (ours alone, like `--location-limit`) sends every file of
+  two windows or more through windows of N bytes, so that the vectorized side's
+  windowed preparation of a whole unit is compared too;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
   path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
   the C library corpus).
@@ -3437,7 +3455,7 @@ Every case and file runs with clang's answers to the feature queries
 ways: by default they answer what buster implements.
 
 `--clang` also compares every case and file with `clang -E` and the same
-options (but `--predefines` and `--location-limit`, ours alone), token spelling by token spelling, and then where clang's line markers
+options (but `--predefines`, `--location-limit` and `--window-bytes`, ours alone), token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`, and clang
@@ -3961,6 +3979,42 @@ Run it under the 9700X's lock with `taskset -c 2`. `docs/c-types.md` has the
 numbers and the layout designs the vector one was chosen over. The default
 9700X job runs it after the tests, pinned to one allowed CPU; like the
 others, its measurements are informational.
+
+## Checker corpus and semantic mutations
+
+`./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
+[--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
+[--seed N] [--keep] [preprocessor options] file-or-directory...` checks each
+file as the driver does and compares it with `clang -fsyntax-only` on the same
+options: acceptance, the first error's presumed file and line, and the scalar
+and vector paths, column by column. `--semantic-mutations N` then checks N
+mutants of the units it found no difference in (#133's last "Done when" item,
+`c_check_mutation.c`):
+
+- each unit's base is its `-E` text with line markers, compared as a file
+  first; the scalar parser's tree gives the sites;
+- each mutant is one edit of a base: a declaration's type changed (a pointer
+  added or removed, signedness, width, `const`, a struct for its type), a
+  declaration removed (a local, a parameter, a file-scope one, a member), or a
+  binary operator's operands or a call's two arguments swapped. Three in four
+  edit the unit's own file, the fourth a file it includes, and `--seed N`
+  (133) picks them;
+- each mutant is checked as a file is, against clang on the same text with
+  `-x cpp-output`. The first `--minimize N` (4) differences are minimized and
+  saved as `checker_mutation_N.c` in the current directory, and
+  `--minimize-mutant FILE...` minimizes saved ones again. A fixed difference
+  becomes a fixture in `c_check_mutation_test.c`, which `test-checker` checks
+  against clang and through both paths; a difference the checker means to
+  keep would go in `check_mutation_intended`, with its reason (none so far).
+
+It prints each kind's sites, mutants, clang's rejections and differences, and
+exits with status 1 on any difference. `docs/c-checker.md` ("Corpus comparison
+and semantic mutations") has the four corpora's configurations, the campaigns'
+counts and the three base differences left (Lua's labels as values, and two
+of #148's builtins in the libc corpus). The 9700X job's test step checks 8
+mutants of the frozen SQLite source and 96 of the oracle's four musl sources
+with seed 133; a run that differs fails it, and `--keep` with `--minimize`
+reproduces it locally.
 
 ## Calling convention tests
 

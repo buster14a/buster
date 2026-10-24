@@ -211,6 +211,14 @@ struct ForeignCommand
     uint32_t slow_lane;
 };
 
+// A file by its identity (st_dev and st_ino), or 0 and 0 for none.
+typedef struct ForeignFileIdentity ForeignFileIdentity;
+struct ForeignFileIdentity
+{
+    uint64_t device;
+    uint64_t inode;
+};
+
 // An input in link order, a script's inputs in place of the script: its path (NUL-terminated), its bytes (the file,
 // mapped privately: an executable patches sections where they are), what it is, and its flags. `item` is its
 // archive's, library's or object's index among them; `position` is its place in the order (see "Positions").
@@ -221,6 +229,9 @@ struct ForeignInput
     String8 name;
     String8 path;
     String8 bytes;
+    // The identity of the file mapped (from the open's fstat, so a later rename over the path changes nothing), or 0
+    // and 0 for bytes given in memory.
+    ForeignFileIdentity identity;
     // Whether `bytes` are the caller's, which foreign_release leaves alone.
     bool given;
     ForeignKind kind;
@@ -949,15 +960,16 @@ static bool foreign_find(const Foreign* foreign, const ForeignInput* input, char
     return result;
 }
 
-// Maps a file privately and writably (a later phase patches sections in place): its bytes, or empty with *error set.
-// The open doesn't block: a FIFO without a writer would block it before fstat could tell that it isn't a regular file
-// (a check of the path before the open would leave a race with a rename over it).
-static String8 foreign_map(const char* path, int* error)
+// Maps a file privately and writably (a later phase patches sections in place): its bytes and its identity, or empty
+// with *error set. The open doesn't block: a FIFO without a writer would block it before fstat could tell that it
+// isn't a regular file (a check of the path before the open would leave a race with a rename over it).
+static String8 foreign_map(const char* path, int* error, ForeignFileIdentity* identity)
 {
     String8 result = { 0 };
     const int file = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     struct stat status;
     *error = 0;
+    *identity = (ForeignFileIdentity){ 0 };
     if (file < 0 || fstat(file, &status) != 0)
     {
         *error = errno;
@@ -968,6 +980,7 @@ static String8 foreign_map(const char* path, int* error)
     }
     else if (status.st_size != 0)
     {
+        *identity = (ForeignFileIdentity){ .device = (uint64_t)status.st_dev, .inode = (uint64_t)status.st_ino };
         void* mapping = mmap(0, (uint64_t)status.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, file, 0);
         if (mapping == MAP_FAILED)
         {
@@ -1022,7 +1035,7 @@ static void foreign_open_input(Foreign* foreign, uint32_t index, ForeignLane* la
                 .pointer = copy,
                 .length = length,
             };
-            input->bytes = foreign_map(copy, &error);
+            input->bytes = foreign_map(copy, &error, &input->identity);
             input->kind = error == 0 ? foreign_kind(input->bytes) : FOREIGN_KIND_NONE;
         }
         if (copy != 0 && error != 0)
@@ -1493,7 +1506,8 @@ static String8 foreign_thin_member(const ForeignInput* input, const ImportMember
     *error = ENAMETOOLONG;
     if (foreign_join(path, absolute ? none : foreign_directory(input->path), "", member->name, ""))
     {
-        *mapping = foreign_map(path, error);
+        ForeignFileIdentity identity;
+        *mapping = foreign_map(path, error, &identity);
         *error = *error == 0 && mapping->length == 0 ? EINVAL : *error;
         result = *mapping;
     }

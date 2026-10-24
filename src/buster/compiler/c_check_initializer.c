@@ -240,10 +240,13 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token)
     }
 }
 
-static uint32_t check_init_extensions(const CheckInitWalker* walker)
+// The extensions of an initializer at `token`: the graph's, and a system header's leniency where the token is in one;
+// without a graph, check_input_expression_extensions' (c_check_constant.c, included after this file).
+static uint32_t check_init_extensions(const CheckInitWalker* walker, uint32_t token)
 {
-    return walker->ignore_excess ? (walker->graph != NULL ? walker->graph->extensions :
-           walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU_CONSTANT | BUSTER_CHECK_EXTENSION_GNU : 0) : 0;
+    const uint32_t system = walker->graph != NULL && check_graph_system_token(walker->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0;
+    return walker->ignore_excess ? (walker->graph != NULL ? walker->graph->extensions | system :
+           BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0)) : 0;
 }
 
 static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part)
@@ -753,8 +756,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
             uint64_t last = 0;
             if ((kind != BUSTER_TYPE_KIND_ARRAY && kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) || close == end ||
                 !check_init_index(walker, token, ellipsis != BUSTER_CHECK_NONE ? ellipsis : close, &index) ||
-                (ellipsis != BUSTER_CHECK_NONE && (!parser->language.gnu ||
-                 !check_init_index(walker, ellipsis, close, &last) || last < index)))
+                (ellipsis != BUSTER_CHECK_NONE && (!check_init_index(walker, ellipsis, close, &last) || last < index)))
             {
                 check_init_fail(walker, CHECK_INIT_INVALID, token);
             }
@@ -1185,7 +1187,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
             .operands = { source },
             .type = element,
             .node = source_node,
-            .extensions = check_init_extensions(walker),
+            .extensions = check_init_extensions(walker, token),
         };
         CheckActionResult converted;
         check_action_scalar(walker->types, &action, &converted);
@@ -1371,7 +1373,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 .op = CHECK_OP_INITIALIZE,
                 .type = selected->type,
                 .node = node,
-                .extensions = check_init_extensions(walker),
+                .extensions = check_init_extensions(walker, token),
             };
             action.operands[0] = check_init_constant_value(walker, node);
             CheckActionResult converted = { 0 };
@@ -1414,8 +1416,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
 
 static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin, uint32_t end)
 {
-    walker->flexible_storage = walker->static_storage && walker->parser->language.gnu &&
-                               walker->parser->tree.roles[begin] != PARSE_ROLE_OPEN_COMPOUND_BODY;
+    walker->flexible_storage = walker->static_storage && walker->parser->tree.roles[begin] != PARSE_ROLE_OPEN_COMPOUND_BODY;
     walker->capacity = 16;
     walker->frames = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitFrame, walker->capacity);
     if (walker->frames == 0 || walker->capacity == 0)

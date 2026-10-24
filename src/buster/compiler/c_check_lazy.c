@@ -94,12 +94,11 @@ static bool check_lazy_mask_valid(const Parser* parser, const uint8_t* mask)
 
 // Expansion location, including argument forwarding and generated tokens, determines where a definition was
 // written. A macro defined in a system header but invoked in ordinary source must not make that source lazy.
-static bool check_lazy_system(const Preprocessor* pp, uint32_t token)
+// `origin` is the output token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
+static uint32_t check_lazy_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
 {
-    bool system = false;
     bool valid = token < pp->output.count && pp->output.locations != 0;
     uint32_t location = valid ? pp->output.locations[token] : 0;
-    uint32_t origin = valid ? pp_history_at(pp, token) : 0;
     const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
     for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
     {
@@ -124,7 +123,14 @@ static bool check_lazy_system(const Preprocessor* pp, uint32_t token)
         }
     }
     valid &= origin == 0;
-    const uint32_t range = valid && location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    return valid ? location : 0;
+}
+
+static bool check_lazy_system(const Preprocessor* pp, uint32_t token)
+{
+    bool system = false;
+    const uint32_t location = check_lazy_expansion_location(pp, token, pp_history_at(pp, token));
+    const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     if (range != BUSTER_PP_NONE && range < pp->range_count)
     {
         const PPRange* source = pp->ranges + range;
