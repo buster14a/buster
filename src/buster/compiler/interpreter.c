@@ -623,7 +623,14 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     for (uint32_t a = 0; result && a < function->argument_count; a += 1)
     {
         result = function->argument_classes[a] > BUSTER_TYPED_CLASS_VOID && function->argument_classes[a] < BUSTER_TYPED_CLASSES;
+        // An aggregate's bytes pass by value through its address (#137), which this interpreter doesn't model.
+        result = result && (function->argument_sizes == 0 || function->argument_sizes[a] == 0);
     }
+    for (uint32_t c = 0; result && c < function->call_count; c += 1)
+    {
+        result = function->call_result_objects == 0 || function->call_result_objects[c] == 0;
+    }
+    result = result && function->result_size == 0;
     return result;
 }
 
