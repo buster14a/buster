@@ -1457,6 +1457,101 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
+// #136's variable-length arrays: an allocation, and a position saved and restored, which the adapter doesn't lower
+// yet. Both paths refuse each stream at its first stack entry, after validation and before anything is allocated,
+// leaving the caller's result and both arenas as they were.
+static void ir_lower_test_stack(IrLowerTestTally* tally)
+{
+    static const uint8_t kinds[2][4] =
+    {
+        {
+            BUSTER_TYPED_CONST,
+            BUSTER_TYPED_ALLOCA,
+            BUSTER_TYPED_DISCARD,
+            BUSTER_TYPED_RETURN
+        },
+        {
+            BUSTER_TYPED_STACK_SAVE,
+            BUSTER_TYPED_STACK_RESTORE,
+            BUSTER_TYPED_RETURN,
+            BUSTER_TYPED_NONE
+        },
+    };
+    static const uint8_t classes[2][4] =
+    {
+        {
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_VOID
+        },
+        {
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_VOID,
+            BUSTER_TYPED_CLASS_VOID
+        },
+    };
+    static const uint64_t values[2][4] =
+    {
+        {
+            48,
+            0,
+            0,
+            0
+        },
+        {
+            0,
+            0,
+            0,
+            0
+        },
+    };
+    static const uint32_t counts[2] =
+    {
+        4,
+        3
+    };
+    static const uint32_t refused[2] =
+    {
+        1,
+        0
+    };
+    const IrFunction preserved =
+    {
+        .instruction_count = 123,
+        .block_count = 17,
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    // Nonzero marks, so that a rollback to zero would show.
+    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    ir_lower_test_expect(tally, ready, "stack arenas", 0, 0);
+    for (uint32_t s = 0; ready && s < 2; s += 1)
+    {
+        const Tier0Function source =
+        {
+            .kinds = kinds[s],
+            .classes = classes[s],
+            .values = values[s],
+            .count = counts[s],
+        };
+        for (uint32_t vector = 0; vector < 2; vector += 1)
+        {
+            const uint64_t output_mark = output.length;
+            const uint64_t scratch_mark = scratch.length;
+            IrFunction result = preserved;
+            const IrCheck check = ir_lower_typed_path(&source, IR_VOID, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == refused[s] &&
+                                            output.length == output_mark && scratch.length == scratch_mark &&
+                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                                 "the stack's kinds refused at their entry without allocation", s, vector);
+        }
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static void ir_lower_test_guarded(IrLowerTestTally* tally)
 {
     const uint64_t page = 4096;
@@ -1561,6 +1656,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_local_roles(&tally);
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);
+        ir_lower_test_stack(&tally);
         ir_lower_test_guarded(&tally);
         const Tier0ProgramOptions values =
         {

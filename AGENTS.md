@@ -701,7 +701,9 @@ designs and the compilers already built this way.
   get registers or frame slots, and objects (local arrays, structs and unions,
   from optional size and alignment columns) places of their own in the frame,
   reached through their addresses; calls, and division and shifts at depths where
-  their fixed registers are taken, are emitted entry by entry. The output is
+  their fixed registers are taken, are emitted entry by entry, and so are
+  variable-length arrays' allocations and the stack's saved and restored
+  positions, which give their function a frame pointer. The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
@@ -715,7 +717,9 @@ designs and the compilers already built this way.
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
   (#131). `ir_lower.c` lowers the existing `Tier0Function` stream into the
   all-in-memory form for SSA promotion, frame objects as address-taken slots of
-  their size and alignment and `COPY` as integer load/store pieces. `test-ir`
+  their size and alignment and `COPY` as integer load/store pieces; it refuses
+  variable-length arrays' stack entries (`ALLOCA`, `STACK_SAVE`,
+  `STACK_RESTORE`). `test-ir`
   checks independent fixtures, guarded columns, malformed inputs and allocation
   rollback; `test-ir-lowering` also executes generated IR, with and without
   objects, against the typed-stream interpreter and Tier 0's native code,
@@ -3908,7 +3912,10 @@ element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
 into, copied (twins' bytes, all or a prefix, in statements and before a call's
 arguments, its C sequenced), each address's remainder by its alignment a value,
-and every object's bits folded into a global at its function's end. Before them
+and every object's bits folded into a global at its function's end. In the
+last two shapes they have variable-length arrays too, whose sizes and addresses
+are values, with the stack's position saved and restored around the loops'
+constructs that declare them, as a producer does. Before them
 it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
 cycles of every length) run on a register file, the vector path's application
@@ -3924,7 +3931,10 @@ call's arguments, after moves that are cycles and that run through `r11`, with
 values saved around the call; and the operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
-under a store of their class). Every function must pass `tier0_validate`, both
+under a store of their class); and the stack: `tier0_validate`'s rules for
+`ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
+depths, and a function that allocates 64 KB and up a thousand times, each in a
+scope of its own, around calls with stack arguments, run natively. Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into

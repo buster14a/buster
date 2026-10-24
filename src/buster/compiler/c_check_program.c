@@ -19,6 +19,11 @@ typedef enum CheckProgramStatus
     CHECK_PROGRAM_BACKEND,
 } CheckProgramStatus;
 
+// A variable-length array's object (block scope, automatic, of a runtime size) is ALLOCATEd at its declaration (`token`;
+// `target` is its block's closing token), after its bounds' VLA entries; the first of its block is preceded by the
+// block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (from its
+// first array to its end) by a STACK_RESTORE of the outermost block it leaves (`target`, a closing token). The function's
+// own block's end needs none: its return releases its frame.
 typedef enum CheckControlKind
 {
     CHECK_CONTROL_EVALUATE,
@@ -29,6 +34,9 @@ typedef enum CheckControlKind
     CHECK_CONTROL_SWITCH,
     CHECK_CONTROL_CASE,
     CHECK_CONTROL_END,
+    CHECK_CONTROL_STACK_SAVE,
+    CHECK_CONTROL_ALLOCATE,
+    CHECK_CONTROL_STACK_RESTORE,
     CHECK_CONTROL_BRANCH_FALSE,
     CHECK_CONTROL_BRANCH_TRUE,
     CHECK_CONTROL_JUMP,
@@ -162,6 +170,11 @@ struct CheckControlWriter
     const uint32_t* plan_next;
     const uint32_t* vla_first;
     const uint32_t* vla_next;
+    // The variable-length arrays' objects of each statement (by its terminator), in declaration order, and each block's
+    // first one's declaration token plus one (by the block's closing token; 0 for a block without them).
+    const uint32_t* allocation_first;
+    const uint32_t* allocation_next;
+    const uint32_t* vla_blocks;
     const uint32_t* asm_statements;
     const uint32_t* case_first;
     const uint32_t* case_next;
@@ -554,6 +567,33 @@ static bool check_control_static(const CheckControlWriter* writer, uint32_t node
     return declaration != BUSTER_CHECK_NONE && input->static_objects[declaration];
 }
 
+// The STACK_RESTORE that a jump at `jump` needs before it, when it leaves blocks with variable-length arrays: of the
+// outermost block whose region (from its first array to its end) holds the jump but not where it goes. A break or a
+// continue goes past the blocks inside its loop or switch, the ancestor whose label in `targets` (stops or repeats) is
+// its `target`; a goto (`targets` 0) goes to `label`, a token, inside or outside each region up to the function's
+// block. Jumps into a region are the checker's errors.
+static void check_control_leave(CheckControlWriter* writer, uint32_t jump, uint32_t label, const uint32_t* targets, uint32_t target)
+{
+    const Parser* parser = writer->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t left = BUSTER_CHECK_NONE;
+    uint32_t steps = 0;
+    bool past = false;
+    for (uint32_t ancestor = parser->tree.parents[jump]; ancestor < count && steps < count && !past; ancestor = parser->tree.parents[ancestor])
+    {
+        past = targets != 0 && targets[ancestor] == target;
+        const uint32_t first = writer->vla_blocks[ancestor];
+        const bool held = targets == 0 && label > first - 1 && label < ancestor;
+        left = !past && first != 0 && first - 1 < jump && !held ? ancestor : left;
+        past |= ancestor == writer->closing;
+        steps += 1;
+    }
+    if (left != BUSTER_CHECK_NONE)
+    {
+        check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, jump, BUSTER_CHECK_NONE, left);
+    }
+}
+
 static void check_control_expand(CheckControlWriter* writer, CheckControlTask task)
 {
     const Parser* parser = writer->parser;
@@ -562,6 +602,11 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
     const uint8_t role = parser->tree.roles[token];
     if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
     {
+        // A block's variable-length arrays are released at its end, after its statements.
+        if (role == PARSE_ROLE_CLOSE_BLOCK && writer->vla_blocks[token] != 0)
+        {
+            check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, token, BUSTER_CHECK_NONE, token);
+        }
         for (uint32_t child = writer->last[token]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
         {
             if (parser->tree.roles[child] != PARSE_ROLE_OPEN_BODY && parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK)
@@ -727,7 +772,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             }
             else if ((kind == PARSE_KIND_BREAK && task.stop != BUSTER_CHECK_NONE) || (kind == PARSE_KIND_CONTINUE && task.repeat != BUSTER_CHECK_NONE))
             {
-                check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, kind == PARSE_KIND_BREAK ? task.stop : task.repeat);
+                // The entries come out in the reverse of their pushes: the restore, then the jump.
+                const bool stops = kind == PARSE_KIND_BREAK;
+                check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, stops ? task.stop : task.repeat);
+                check_control_leave(writer, jump, BUSTER_CHECK_NONE, stops ? writer->stops : writer->repeats, stops ? task.stop : task.repeat);
             }
             else if (kind == PARSE_KIND_GOTO)
             {
@@ -735,6 +783,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 if (target > writer->opening && target < writer->closing && writer->source_labels[target] != BUSTER_CHECK_NONE)
                 {
                     check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, writer->source_labels[target]);
+                    check_control_leave(writer, jump, target, 0, BUSTER_CHECK_NONE);
                 }
                 else
                 {
@@ -851,13 +900,36 @@ static void check_control_drain(CheckControlWriter* writer)
             const uint32_t plan = writer->plan_first[task.token];
             uint32_t i = plan;
             uint32_t v = writer->vla_first[task.token];
-            while ((i != BUSTER_CHECK_NONE || v != BUSTER_CHECK_NONE) && writer->program->status == CHECK_PROGRAM_OK)
+            uint32_t a = writer->allocation_first[task.token];
+            while ((i != BUSTER_CHECK_NONE || v != BUSTER_CHECK_NONE || a != BUSTER_CHECK_NONE) && writer->program->status == CHECK_PROGRAM_OK)
             {
                 const CheckInitializers* initializers = writer->program->initializers;
                 const CheckInput* input = writer->program->input;
-                const bool bound = v != BUSTER_CHECK_NONE && (i == BUSTER_CHECK_NONE || input->vlas[v].declaration <= initializers->declaration_tokens[i]);
-                const uint32_t declaration = bound ? input->vlas[v].declaration : initializers->declaration_tokens[i];
-                if (bound || !input->static_objects[declaration])
+                // A declaration's bounds first, then its array's allocation (an allocation's list holds its declaration),
+                // then its initializer.
+                const uint32_t bounded = v != BUSTER_CHECK_NONE ? input->vlas[v].declaration : BUSTER_CHECK_NONE;
+                const uint32_t initialized = i != BUSTER_CHECK_NONE ? initializers->declaration_tokens[i] : BUSTER_CHECK_NONE;
+                const bool bound = v != BUSTER_CHECK_NONE && bounded <= a && bounded <= initialized;
+                const bool allocation = !bound && a != BUSTER_CHECK_NONE && a <= initialized;
+                const uint32_t declaration = bound ? bounded : initialized;
+                if (allocation)
+                {
+                    const uint32_t closing = writer->parser->tree.parents[task.token];
+                    const CheckControl save = { .kind = CHECK_CONTROL_STACK_SAVE, .node = BUSTER_CHECK_NONE, .token = a, .target = closing };
+                    const CheckControl allocate = { .kind = CHECK_CONTROL_ALLOCATE, .node = BUSTER_CHECK_NONE, .token = a, .target = closing };
+                    if (writer->count + 1 < writer->capacity)
+                    {
+                        writer->entries[writer->count] = save;
+                        writer->count += writer->vla_blocks[closing] == a + 1 ? 1 : 0;
+                        writer->entries[writer->count++] = allocate;
+                    }
+                    else
+                    {
+                        check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, a);
+                    }
+                    a = writer->allocation_next[a];
+                }
+                else if (bound || !input->static_objects[declaration])
                 {
                     if (writer->count < writer->capacity)
                     {
@@ -878,7 +950,7 @@ static void check_control_drain(CheckControlWriter* writer)
                 {
                     v = writer->vla_next[v];
                 }
-                else
+                else if (!allocation)
                 {
                     i = writer->plan_next[i];
                 }
@@ -1284,6 +1356,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* plan_next = valid && options.initializers != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)options.initializers->count + 1) : 0;
     uint32_t* vla_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* vla_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->vla_count + 1) : 0;
+    uint32_t* allocation_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* allocation_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* vla_blocks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* asm_statements = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1305,7 +1380,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && entries != 0 && tasks != 0 && plan_first != 0 && (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && reference_items != 0 && reference_sort != 0 &&
-            stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0;
+            stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
+            allocation_first != 0 && allocation_next != 0 && vla_blocks != 0;
     if (!valid && program->status == CHECK_PROGRAM_OK)
     {
         program->status = CHECK_PROGRAM_RESOURCE;
@@ -1322,6 +1398,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(initializers, 0xff, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         memset(plan_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(vla_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(allocation_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(vla_blocks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(asm_statements, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t i = 0; i < input->asm_count; i += 1)
         {
@@ -1427,6 +1505,31 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 }
             }
         }
+        // The variable-length arrays' objects, by their statements, and each block's first: from the last token back,
+        // so that the lists are in declaration order and a block's last write is its first array.
+        for (uint32_t token = count; token-- > 0;)
+        {
+            if (input->declarations[token] == token && input->declaration_bodies[token] < count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                !input->static_objects[token] && check_action_runtime_size(types, input->declared_types[token]))
+            {
+                uint32_t terminator = token;
+                uint32_t steps = 0;
+                while (terminator < count && steps++ < count && parser->tree.roles[terminator] != PARSE_ROLE_TERMINATOR)
+                {
+                    terminator = parser->tree.parents[terminator];
+                }
+                if (terminator < count && steps < count && parser->tree.parents[terminator] < count)
+                {
+                    allocation_next[token] = allocation_first[terminator];
+                    allocation_first[terminator] = token;
+                    vla_blocks[parser->tree.parents[terminator]] = token + 1;
+                }
+                else
+                {
+                    check_program_fail(program, CHECK_PROGRAM_INVALID, token);
+                }
+            }
+        }
     }
     program->bodies = valid && body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramBody, body_count) : 0;
     program->regions = valid && input->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramRegion, input->region_count) : 0;
@@ -1474,6 +1577,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .plan_next = plan_next,
         .vla_first = vla_first,
         .vla_next = vla_next,
+        .allocation_first = allocation_first,
+        .allocation_next = allocation_next,
+        .vla_blocks = vla_blocks,
         .asm_statements = asm_statements,
         .case_first = case_first,
         .case_next = case_next,
