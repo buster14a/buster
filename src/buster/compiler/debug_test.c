@@ -2,9 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-debug: independent line-machine decoding, scalar/vector bytes, guarded tails, input and capacity failures,
-// late-address patching. --cross-check additionally asks readelf, gdb and perf to consume an original fixed-layout
-// three-function ELF with these five debug sections. GNU as supplies that fixture's CFI, not this module: this checks
-// debug consumption and integration with an unwinder, not a native code-generator unwind producer.
+// late-address patching, units written after others. --cross-check additionally asks readelf, gdb and perf to consume
+// an original fixed-layout three-function ELF with these five debug sections. GNU as supplies that fixture's CFI, not
+// this module: this checks debug consumption and integration with an unwinder, not a native code-generator unwind
+// producer.
 // benchmark-debug times validation, sizing and writing together, plus final address patching, into reused buffers.
 
 #define BUSTER_DEBUG_TEST_BYTES (1u << 20)
@@ -328,6 +329,106 @@ static bool debug_test_units(void)
     return valid;
 }
 
+// A unit written after others (DebugOutput.bases) must be the unit written alone but for the four offsets its header
+// and DIE give: its abbreviations', line program's, address table's (past its 8-byte header) and range lists' (past
+// their 12), each its section's base; and a base that would carry the contribution past DWARF32 is refused, changing
+// nothing.
+static bool debug_test_bases(void)
+{
+    bool valid = true;
+    uint8_t* alone_bytes = malloc(BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES);
+    uint8_t* based_bytes = malloc(BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES);
+    uint32_t alone_addresses[2];
+    uint32_t based_addresses[2];
+    const uint32_t offsets[] = { 0, 4, 9, 0, 3 };
+    const uint32_t lines[] = { 7, 8, 9, 20, 21 };
+    String8 files[] = { BUSTER_S8("based.c"), BUSTER_S8("other.c") };
+    const DebugFunction functions[2] = {
+        {
+            .name = BUSTER_S8("first"),
+            .size = 16,
+            .first_row = 0,
+            .row_count = 3,
+            .file = 0,
+            .line = 7,
+        },
+        {
+            .name = BUSTER_S8("second"),
+            .size = 8,
+            .first_row = 3,
+            .row_count = 2,
+            .file = 1,
+            .line = 20,
+        },
+    };
+    const DebugUnit unit = {
+        .directory = BUSTER_S8("/build/directory"),
+        .files = files,
+        .file_count = 2,
+        .functions = functions,
+        .function_count = 2,
+        .offsets = offsets,
+        .lines = lines,
+        .row_count = 5,
+    };
+    valid &= alone_bytes != 0 && based_bytes != 0;
+    DebugOutput alone = debug_test_output(alone_bytes, alone_addresses, 2);
+    DebugOutput based = debug_test_output(based_bytes, based_addresses, 2);
+    const uint64_t bases[BUSTER_DEBUG_SECTIONS] = {
+        [DEBUG_SECTION_INFO] = 0x5000000,
+        [DEBUG_SECTION_ABBREV] = 0x123,
+        [DEBUG_SECTION_LINE] = 0x2000,
+        [DEBUG_SECTION_ADDR] = 0x30008,
+        [DEBUG_SECTION_RNGLISTS] = 0x40000c,
+    };
+    memcpy(based.bases, bases, sizeof(bases));
+    valid &= valid && debug_write(&unit, &alone, false) == DEBUG_OK && debug_write(&unit, &based, false) == DEBUG_OK;
+    for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        valid &= alone.sections[section].size == based.sections[section].size;
+        valid &= section == DEBUG_SECTION_INFO || memcmp(alone.sections[section].bytes, based.sections[section].bytes, alone.sections[section].size) == 0;
+    }
+    // The header's abbreviation offset at 8; after the DIE's code, its three strings and the language, the line
+    // program's, the address table's and the range lists' offsets.
+    const uint64_t stmt_list = 12 + 1 + (files[0].length + 1) + (unit.directory.length + 1) + sizeof("buster") + 2;
+    const uint64_t places[4] = { 8, stmt_list, stmt_list + 4, stmt_list + 8 };
+    const uint32_t values[4] = { 0x123, 0x2000, 0x30008 + 8, 0x40000c + 12 };
+    const uint32_t alone_values[4] = { 0, 0, 8, 12 };
+    for (uint64_t at = 0; valid && at < alone.sections[DEBUG_SECTION_INFO].size; at += 1)
+    {
+        uint32_t field = 4;
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            field = at >= places[i] && at < places[i] + 4 ? i : field;
+        }
+        valid &= field != 4 || alone.sections[DEBUG_SECTION_INFO].bytes[at] == based.sections[DEBUG_SECTION_INFO].bytes[at];
+    }
+    for (uint32_t i = 0; valid && i < 4; i += 1)
+    {
+        uint32_t alone_value = 0;
+        uint32_t based_value = 0;
+        memcpy(&alone_value, alone.sections[DEBUG_SECTION_INFO].bytes + places[i], 4);
+        memcpy(&based_value, based.sections[DEBUG_SECTION_INFO].bytes + places[i], 4);
+        valid &= alone_value == alone_values[i] && based_value == values[i];
+    }
+    // Past DWARF32: each section's base at which its contribution would end at the limit is refused, with nothing
+    // written, and one byte lower is taken.
+    for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        DebugOutput refused = debug_test_output(based_bytes, based_addresses, 2);
+        refused.bases[section] = BUSTER_DEBUG_DWARF32_LIMIT - alone.sections[section].size;
+        memset(based_bytes, 0xa5, BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES);
+        based_addresses[0] = UINT32_MAX;
+        valid &= debug_write(&unit, &refused, false) == DEBUG_ERROR_LIMIT && based_addresses[0] == UINT32_MAX && based_bytes[0] == 0xa5;
+        refused.bases[section] -= 1;
+        valid &= debug_write(&unit, &refused, false) == DEBUG_OK;
+    }
+    free(alone_bytes);
+    free(based_bytes);
+    printf("debug bases: a unit after others differs from it alone only by its four offsets, %s\n", valid ? "pass" : "FAIL");
+    return valid;
+}
+
 static bool debug_test_guards(void)
 {
     const long page = sysconf(_SC_PAGESIZE);
@@ -582,6 +683,7 @@ static int run_debug_tests(int argc, char** argv)
         valid &= debug_test_rows();
         valid &= debug_test_random_rows();
         valid &= debug_test_units();
+        valid &= debug_test_bases();
         valid &= debug_test_guards();
         valid &= debug_test_profile("debug_leaf\nleaf.c:5\ndebug_outer\n_start\n\n");
         valid &= !debug_test_profile("debug_leaf\nleaf.c:5\n\ndebug_outer\n_start\n\n");

@@ -520,8 +520,10 @@ designs and the compilers already built this way.
   with nonallocated debug sections and a regular function symbol table.
   `test-debug --cross-check` checks original fixtures with readelf, GDB and
   perf; `benchmark-debug` measures validation through address finalization.
-  [The debug guide](docs/debug.md) records the contract and the source-row
-  production still pending; `streaming.c` attaches a unit to a streamed file.
+  [The debug guide](docs/debug.md) records the contract, units written after
+  others (`DebugOutput.bases`), whose four offsets point at their own
+  contributions, and the source-row production still pending; `streaming.c`
+  makes a unit per 256 functions as they compile.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
@@ -536,7 +538,8 @@ designs and the compilers already built this way.
   units of Tier 0's generated programs, compiled function by function into a
   static executable laid out data first (headers, `.data`, `.text`, then the
   unwind tables in a segment of their own, and `debug.c`'s DWARF with a line
-  per function), written while they compile (by the
+  per function, in units made as the functions compile), written while they
+  compile (by the
   compiling lane, or by a writer lane it hands chunks to) or once they have
   compiled, the same bytes either way; and the same code as a Link through
   `executable_write`, in lld's order. `streaming_test.c` holds `test-streaming`
@@ -4071,8 +4074,10 @@ three schedules (at the end, streamed, streamed by a writer lane):
 - a streamed write with several chunks must have written some before the last
   function compiled, and forward fields come only in the callers' order.
 
-`--cross-check`, which needs readelf, gdb and perf, reads a streamed file with
-`readelf -a` (no warnings), stops gdb in every program function and checks
+`--cross-check`, which needs readelf, llvm-dwarfdump, gdb and perf, reads a
+streamed file with `readelf -a` (no warnings) and `llvm-dwarfdump --verify`
+(its DWARF, a unit per 256 functions), stops gdb in every program function and
+checks
 that each stop's backtrace goes through the program's functions to `_start`,
 two of them above `_start` at least once (the unwinder used an FDE), each frame
 at its function's line of `streamed.c` (the DWARF's: function f is line f + 1),
@@ -4094,12 +4099,12 @@ end, streamed, streamed by a writer lane (on `--cpus`), and the direct path's
 `executable_write` of the same code on one lane and on `--lanes` (8). It
 reports the medians of the whole, the compiling, the Link's building (the
 direct path) and what follows the last function compiled, which for the
-schedules it splits into `.text`'s last chunks and pairs, the tail built, the
-tail written, the headers, and the close. Run it under the 9700X's lock with
-`taskset -c 2`, or `taskset -c 2,3` with `--cpus 2,3` for the writer lane. The
-outputs are overwritten in place, as `executable_write` overwrites an
-executable: a file truncated on open and written again is flushed when it is
-closed on btrfs and ext4.
+schedules it splits into `.text`'s last chunks, unwind pairs and DWARF units,
+the tail built, the tail written, the headers, and the close. Run it under the
+9700X's lock with `taskset -c 2`, or `taskset -c 2,3` with `--cpus 2,3` for the
+writer lane. The outputs are overwritten in place, as `executable_write`
+overwrites an executable: a file truncated on open and written again is flushed
+when it is closed on btrfs and ext4.
 
 ## IR tests and benchmarks
 

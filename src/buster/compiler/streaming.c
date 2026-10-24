@@ -12,17 +12,20 @@
 // .eh_frame in a read-only segment of their own, then the DWARF (debug.c's five sections), .symtab, .strtab, .shstrtab
 // and the section headers. .data's size is known before the first function compiles, so .text's address is too, and
 // with it every address the code refers to but a function's that isn't compiled yet. Functions start on 16 bytes and
-// are padded with int3. The DWARF is one unit of one file, streamed.c, in which function f of the program's order (the
-// units' functions, then _start) is line f + 1, with a row at its start; like .eh_frame's, its place in the file waits
-// for .text's size, so it is built and written with the tail.
+// are padded with int3. The DWARF is of one file, streamed.c, in which function f of the program's order (the units'
+// functions, then _start) is line f + 1, with a row at its start, in units of BUSTER_STREAM_DEBUG_UNIT functions in
+// the order of compiling, each written after the units before it (debug.c's bases) and finalized as soon as its
+// functions have compiled, their addresses known; like .eh_frame's, its place in the file waits for .text's size, so it
+// is written with the tail.
 //
 // The schedules write the same bytes, and the same build ID:
 //   - at the end (STREAM_SCHEDULE_END): every function compiled (Tier 0, branch sizing, encoding, its unwind
-//     descriptor) into .text in memory, then .data, every field patched, .text chunk by chunk, the tail and the headers
-//     written;
+//     descriptor) into .text in memory, then .data, every field patched, .text chunk by chunk, the DWARF's units, the
+//     tail and the headers written;
 //   - streamed (STREAM_SCHEDULE_STREAM): .data written first; each function's fields patched once compiled, those to a
-//     function not yet compiled (only in the callers' order) when it is, and each chunk of .text hashed and written as
-//     soon as it is whole and none of its fields waits; then the rest of .text, the tail and the headers;
+//     function not yet compiled (only in the callers' order) when it is, each chunk of .text hashed and written as soon
+//     as it is whole and none of its fields waits, and each unit of the DWARF made once its functions have compiled;
+//     then the rest of .text and of the DWARF, the tail and the headers;
 //   - streamed by a writer lane (STREAM_SCHEDULE_WRITER): the same, with lane 1 hashing and writing the chunks that lane
 //     0, which compiles, publishes as ready (lane_publish and lane_wait on a count of chunks), so that writing overlaps
 //     compiling.
@@ -52,6 +55,9 @@
 #define BUSTER_STREAM_START_PER_UNIT 42
 #define BUSTER_STREAM_START_EPILOGUE 40
 #define BUSTER_STREAM_EH_FRAME_HDR_BYTES(fdes) (12ull + 8ull * (fdes))
+// The functions of a unit of the DWARF, in the order of compiling, the last unit the rest.
+#define BUSTER_STREAM_DEBUG_UNIT 256
+#define BUSTER_STREAM_DEBUG_CAPACITY (1ull << 32)
 
 typedef enum StreamOrder
 {
@@ -397,6 +403,10 @@ struct StreamCode
     uint64_t pending;
     uint64_t forward;
     uint64_t records;
+    // The DWARF so far (stream_write's): each section's units, of the first `debugged` functions in the order.
+    uint8_t* debug[BUSTER_DEBUG_SECTIONS];
+    uint64_t debug_sizes[BUSTER_DEBUG_SECTIONS];
+    uint32_t debugged;
 };
 
 // Room for `count` more fields, in the columns' arenas (each column its own, so that it stays one array).
@@ -664,30 +674,32 @@ static StreamLayout stream_layout_begin(const StreamProgram* program, uint64_t c
     return layout;
 }
 
-// The program's DWARF (see the file's comment) in `output`, its bytes in `arena`: with `addresses` (each function's), its
-// address slots finalized; without, zero, as executable_write takes them.
-static StreamError stream_debug(const StreamProgram* program, const uint32_t* sizes, const uint64_t* addresses, Arena* arena, DebugUnit* unit, DebugOutput* output)
+// A unit of the DWARF (see the file's comment): `count` functions of the order from `first` (all of them, in the
+// program's order, for the direct path's), written into `output`'s sections at its bases and, with `addresses`, each
+// function's, finalized. Its rows and functions are in `arena`, which the caller pops.
+static StreamError stream_debug_unit(const StreamCode* code, uint32_t first, uint32_t count, bool ordered, const uint64_t* addresses, Arena* arena,
+                                     DebugOutput* output)
 {
-    const uint32_t count = program->function_count;
+    const StreamProgram* program = code->program;
     DebugFunction* functions = BUSTER_ARENA_PUSH_ARRAY(arena, DebugFunction, count);
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
     uint32_t* lines = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
-    uint32_t* line_addresses = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
-    StreamError error = functions != 0 && offsets != 0 && lines != 0 && line_addresses != 0 ? STREAM_OK : STREAM_ERROR_MEMORY;
-    for (uint32_t f = 0; error == STREAM_OK && f < count; f += 1)
+    StreamError error = functions != 0 && offsets != 0 && lines != 0 ? STREAM_OK : STREAM_ERROR_MEMORY;
+    for (uint32_t i = 0; error == STREAM_OK && i < count; i += 1)
     {
-        char* name = program->strtab + program->name_offsets[f];
-        functions[f] = (DebugFunction){
+        const uint32_t function = ordered ? stream_function_at(program, code->order, first + i) : first + i;
+        char* name = program->strtab + program->name_offsets[function];
+        functions[i] = (DebugFunction){
             .name = { .pointer = name, .length = strlen(name) },
-            .size = sizes[f],
-            .first_row = f,
+            .size = code->sizes[function],
+            .first_row = i,
             .row_count = 1,
-            .line = f + 1,
+            .line = function + 1,
         };
-        offsets[f] = 0;
-        lines[f] = f + 1;
+        offsets[i] = 0;
+        lines[i] = function + 1;
     }
-    *unit = (DebugUnit){
+    const DebugUnit unit = {
         .directory = BUSTER_S8("."),
         .files = &stream_debug_file,
         .file_count = 1,
@@ -697,19 +709,46 @@ static StreamError stream_debug(const StreamProgram* program, const uint32_t* si
         .lines = lines,
         .row_count = count,
     };
-    memset(output, 0, sizeof(*output));
-    output->line_addresses = line_addresses;
-    output->address_capacity = count;
-    // Measured first, which fails for capacity with the sizes set, then written into room of exactly those sizes.
-    DebugError written = error == STREAM_OK ? debug_write(unit, output, false) : DEBUG_ERROR_INPUT;
-    for (uint32_t section = 0; written == DEBUG_ERROR_CAPACITY && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    const DebugError written = error == STREAM_OK ? debug_write(&unit, output, false) : DEBUG_ERROR_INPUT;
+    const DebugError finalized = written == DEBUG_OK && addresses != 0 ? debug_finalize(&unit, output, addresses) : written;
+    return error != STREAM_OK ? error : finalized == DEBUG_OK ? STREAM_OK : STREAM_ERROR_DEBUG;
+}
+
+// The units of the compiled functions from `code->debugged` up to `until` (in the order), BUSTER_STREAM_DEBUG_UNIT at a
+// time, each after the units so far and finalized at its functions' addresses.
+static StreamError stream_debug_units(StreamCode* code, uint32_t until)
+{
+    StreamError error = STREAM_OK;
+    while (error == STREAM_OK && code->debugged < until)
     {
-        output->sections[section].bytes = arena_push(arena, output->sections[section].size, 8);
-        output->sections[section].capacity = output->sections[section].bytes != 0 ? output->sections[section].size : 0;
+        const uint32_t count = until - code->debugged < BUSTER_STREAM_DEBUG_UNIT ? until - code->debugged : BUSTER_STREAM_DEBUG_UNIT;
+        const uint64_t mark = code->scratch->length;
+        uint32_t* line_addresses = BUSTER_ARENA_PUSH_ARRAY(code->scratch, uint32_t, count);
+        uint64_t* addresses = BUSTER_ARENA_PUSH_ARRAY(code->scratch, uint64_t, count);
+        error = line_addresses != 0 && addresses != 0 ? STREAM_OK : STREAM_ERROR_MEMORY;
+        for (uint32_t i = 0; error == STREAM_OK && i < count; i += 1)
+        {
+            addresses[i] = code->text_address + code->offsets[stream_function_at(code->program, code->order, code->debugged + i)];
+        }
+        DebugOutput output;
+        memset(&output, 0, sizeof(output));
+        output.line_addresses = line_addresses;
+        output.address_capacity = count;
+        for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            output.sections[section].bytes = code->debug[section] + code->debug_sizes[section];
+            output.sections[section].capacity = BUSTER_STREAM_DEBUG_CAPACITY - code->debug_sizes[section];
+            output.bases[section] = code->debug_sizes[section];
+        }
+        error = error == STREAM_OK ? stream_debug_unit(code, code->debugged, count, true, addresses, code->scratch, &output) : error;
+        for (uint32_t section = 0; error == STREAM_OK && section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            code->debug_sizes[section] += output.sections[section].size;
+        }
+        code->debugged += error == STREAM_OK ? count : 0;
+        arena_pop_to(code->scratch, mark);
     }
-    written = written == DEBUG_ERROR_CAPACITY ? debug_write(unit, output, false) : written;
-    written = written == DEBUG_OK && addresses != 0 ? debug_finalize(unit, output, addresses) : written;
-    return error != STREAM_OK ? error : written == DEBUG_OK ? STREAM_OK : STREAM_ERROR_DEBUG;
+    return error;
 }
 
 // The tail: .eh_frame_hdr, .eh_frame (each compiled function's CIE and FDE, in .text's order, then a terminator), and
@@ -727,22 +766,13 @@ static StreamError stream_tail(const StreamCode* code, StreamLayout* layout, Are
     layout->eh_size = code->eh_size + 4;
     const uint64_t eh_frame_offset = layout->eh_offset + stream_align(layout->eh_hdr_size, 8);
     const uint32_t symbols = program->function_count + program->data_symbol_count;
-    // The DWARF at the functions' addresses, after .eh_frame.
-    uint64_t* addresses = error == STREAM_OK ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, program->function_count) : 0;
-    error = error == STREAM_OK && addresses == 0 ? STREAM_ERROR_MEMORY : error;
-    for (uint32_t f = 0; error == STREAM_OK && f < program->function_count; f += 1)
-    {
-        addresses[f] = code->text_address + code->offsets[f];
-    }
-    DebugUnit unit;
-    DebugOutput debug;
-    memset(&debug, 0, sizeof(debug));
-    error = error == STREAM_OK ? stream_debug(program, code->sizes, addresses, arena, &unit, &debug) : error;
+    // The DWARF's units, every function's, after .eh_frame.
+    error = error == STREAM_OK && code->debugged != program->function_count ? STREAM_ERROR_DEBUG : error;
     uint64_t debug_end = stream_align(eh_frame_offset + layout->eh_size, 8);
     for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
     {
         layout->debug_offsets[section] = debug_end;
-        debug_end += debug.sections[section].size;
+        debug_end += code->debug_sizes[section];
     }
     layout->symtab_offset = stream_align(debug_end, 8);
     layout->symtab_size = (uint64_t)(symbols + 1) * sizeof(Elf64_Sym);
@@ -787,7 +817,7 @@ static StreamError stream_tail(const StreamCode* code, StreamLayout* layout, Are
         }
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
-            memcpy(tail + (layout->debug_offsets[section] - layout->eh_offset), debug.sections[section].bytes, debug.sections[section].size);
+            memcpy(tail + (layout->debug_offsets[section] - layout->eh_offset), code->debug[section], code->debug_sizes[section]);
         }
         // .symtab and .strtab: the null symbol, then every function, _start, the result slot and the globals, global.
         Elf64_Sym* table = (Elf64_Sym*)(void*)(tail + (layout->symtab_offset - layout->eh_offset));
@@ -832,7 +862,7 @@ static StreamError stream_tail(const StreamCode* code, StreamLayout* layout, Are
                                     .sh_size = layout->eh_size, .sh_addralign = 8 };
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
-            sections[6 + section] = (Elf64_Shdr){ .sh_type = SHT_PROGBITS, .sh_offset = layout->debug_offsets[section], .sh_size = debug.sections[section].size,
+            sections[6 + section] = (Elf64_Shdr){ .sh_type = SHT_PROGBITS, .sh_offset = layout->debug_offsets[section], .sh_size = code->debug_sizes[section],
                                                   .sh_addralign = 1 };
         }
         sections[11] = (Elf64_Shdr){ .sh_type = SHT_SYMTAB, .sh_offset = layout->symtab_offset, .sh_size = layout->symtab_size, .sh_link = 12, .sh_info = 1,
@@ -1055,8 +1085,9 @@ static void stream_compile_lane(StreamWrite* write)
         code->emitted = i + 1 < program->function_count ? i + 1 : i;
         if (error == STREAM_OK && streamed)
         {
-            // The pairs of each eight functions compiled, then the chunks ready.
+            // The pairs of each eight functions compiled and the DWARF's units of each 256, then the chunks ready.
             error = stream_unwind(code, code->emitted / BUSTER_UNWIND_BATCH * BUSTER_UNWIND_BATCH);
+            error = error == STREAM_OK ? stream_debug_units(code, (i + 1) / BUSTER_STREAM_DEBUG_UNIT * BUSTER_STREAM_DEBUG_UNIT) : error;
             stream_flush(write, false);
         }
     }
@@ -1078,9 +1109,10 @@ static void stream_compile_lane(StreamWrite* write)
     }
     if (error == STREAM_OK)
     {
-        // The rest of .text: every chunk not written yet; and the pairs not written yet.
+        // The rest of .text: every chunk not written yet; and the pairs and the DWARF's units not made yet.
         stream_flush(write, true);
         error = stream_unwind(code, code->emitted);
+        error = error == STREAM_OK ? stream_debug_units(code, program->function_count) : error;
     }
     result->flushed = stream_now();
     if (options->schedule == STREAM_SCHEDULE_WRITER && error != STREAM_OK)
@@ -1137,6 +1169,14 @@ static bool stream_write(const StreamProgram* program, const StreamOptions* opti
     result->start = stream_now();
     Arena arena = arena_reserve(1ull << 36);
     Arena text = arena_reserve(1ull << 34);
+    // The DWARF's sections, each its own reservation, so that each stays one array as its units append.
+    Arena debug[BUSTER_DEBUG_SECTIONS];
+    bool debug_reserved = true;
+    for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        debug[section] = arena_reserve(BUSTER_STREAM_DEBUG_CAPACITY);
+        debug_reserved = debug_reserved && debug[section].base != 0;
+    }
     StreamWrite write;
     memset(&write, 0, sizeof(write));
     write.options = options;
@@ -1152,6 +1192,10 @@ static bool stream_write(const StreamProgram* program, const StreamOptions* opti
     code->eh_capacity = (uint64_t)program->function_count * BUSTER_UNWIND_TEMPLATE_BYTES + 64;
     code->eh = arena_push(&arena, code->eh_capacity, 64);
     code->eh_locations = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, program->function_count);
+    for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        code->debug[section] = debug[section].base;
+    }
     write.layout = stream_layout_begin(program, options->chunk_bytes != 0 ? options->chunk_bytes : BUSTER_STREAM_CHUNK_BYTES);
     code->data_address = BUSTER_EXECUTABLE_BASE + write.layout.data_offset;
     code->text_address = BUSTER_EXECUTABLE_BASE + write.layout.text_offset;
@@ -1164,7 +1208,7 @@ static bool stream_write(const StreamProgram* program, const StreamOptions* opti
     code->unwind = BUSTER_ARENA_PUSH_ARRAY(&arena, UnwindFunction, functions);
     code->waiting_heads = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, functions);
     write.hashes = arena_push(&arena, pieces * BUSTER_EXECUTABLE_BUILD_ID_BYTES, 64);
-    bool valid = arena.base != 0 && text.base != 0 && code->offsets != 0 && code->sizes != 0 && code->compiled != 0 && code->unwind != 0 &&
+    bool valid = arena.base != 0 && text.base != 0 && debug_reserved && code->offsets != 0 && code->sizes != 0 && code->compiled != 0 && code->unwind != 0 &&
                  code->waiting_heads != 0 && write.hashes != 0 && code->eh != 0 && code->eh_locations != 0;
     if (valid)
     {
@@ -1217,6 +1261,10 @@ static bool stream_write(const StreamProgram* program, const StreamOptions* opti
         valid = close(write.descriptor) == 0 && valid;
     }
     result->closed = stream_now();
+    for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        arena_release(&debug[section]);
+    }
     arena_release(&text);
     arena_release(&arena);
     return valid;
@@ -1378,11 +1426,24 @@ static bool stream_write_link(const StreamProgram* program, String8 path, Stream
     result->link_error = linked ? link_check(&link) : link.error;
     linked = linked && result->link_error == LINK_ERROR_NONE;
     error = error == STREAM_OK && !linked ? STREAM_ERROR_LINK : error;
-    // The same DWARF, its address slots left to the writer, which finalizes them at the functions' places.
-    DebugUnit unit;
+    // The DWARF as one unit of every function in the program's order (the writer attaches one), its address slots left
+    // to the writer, which finalizes them at the functions' places: measured first, which fails for capacity with the
+    // sizes set, then written into room of exactly those sizes.
     DebugOutput debug;
     memset(&debug, 0, sizeof(debug));
-    error = error == STREAM_OK ? stream_debug(program, code.sizes, 0, &arena, &unit, &debug) : error;
+    debug.line_addresses = error == STREAM_OK ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, functions) : 0;
+    debug.address_capacity = functions;
+    error = error == STREAM_OK && debug.line_addresses == 0 ? STREAM_ERROR_MEMORY : error;
+    if (error == STREAM_OK)
+    {
+        stream_debug_unit(&code, 0, functions, false, 0, &arena, &debug);
+    }
+    for (uint32_t section = 0; error == STREAM_OK && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        debug.sections[section].bytes = arena_push(&arena, debug.sections[section].size, 8);
+        debug.sections[section].capacity = debug.sections[section].bytes != 0 ? debug.sections[section].size : 0;
+    }
+    error = error == STREAM_OK ? stream_debug_unit(&code, 0, functions, false, 0, &arena, &debug) : error;
     result->linked = stream_now();
     bool succeeded = error == STREAM_OK;
     if (succeeded)

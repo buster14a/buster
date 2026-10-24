@@ -7,10 +7,11 @@
 // each must run and print the fold of every unit's entry as tier0_test.c's interpreter computes it; so must the direct
 // path's executable of the same code (executable_write on 1 and 3 lanes, in lld's order). The test reads each file back:
 // the segments in the data-first order (R, RW, RX, R), the entry at _start's symbol, .eh_frame_hdr's table sorted and
-// as long as the functions, each FDE's range a function's. With --cross-check, which needs readelf, gdb and perf:
-// readelf reads every file without a warning; gdb stops in the program's functions, unwinds through them to _start
-// with its .eh_frame and gives each frame its function's line in streamed.c from the DWARF; and perf's samples, with
-// DWARF call graphs, name the program's functions, reach _start and give the functions' lines.
+// as long as the functions, each FDE's range a function's. With --cross-check, which needs readelf, llvm-dwarfdump, gdb
+// and perf: readelf reads every file without a warning; llvm-dwarfdump verifies its DWARF, a unit per 256 functions;
+// gdb stops in the program's functions, unwinds through them to _start with its .eh_frame and gives each frame its
+// function's line in streamed.c from the DWARF; and perf's samples, with DWARF call graphs, name the program's
+// functions, reach _start and give the functions' lines.
 // main.c includes this file after tier0_test.c (its interpreter), unwind_native_test.c and streaming.c.
 
 typedef struct StreamTestTally StreamTestTally;
@@ -204,6 +205,11 @@ static void stream_test_consumers(StreamTestTally* tally, const StreamProgram* p
     const bool read = object_test_run(readelf, output, errors) == 0;
     const String8 warnings = read ? object_test_read_file(arena, errors) : (String8){ 0 };
     stream_test_expect(tally, read && warnings.pointer != 0 && warnings.length == 0, "readelf reads the streamed file without a warning", path);
+    // The DWARF's units, each made as its functions compiled and pointing at its own contributions, are valid together.
+    char* verify[] = { "llvm-dwarfdump", "--verify", (char*)path, 0 };
+    const bool verified = object_test_run(verify, output, errors) == 0;
+    const String8 verdict = verified ? object_test_read_file(arena, output) : (String8){ 0 };
+    stream_test_expect(tally, verified && verdict.pointer != 0 && strstr(verdict.pointer, "No errors.") != 0, "llvm-dwarfdump verifies the streamed file's DWARF", path);
     // gdb: a breakpoint in every unit's functions, and three stops' backtraces.
     FILE* script = fopen(commands, "w");
     bool written = script != 0;

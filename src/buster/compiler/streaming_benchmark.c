@@ -18,8 +18,8 @@
 #define BUSTER_STREAM_BENCHMARK_VARIANTS 5
 
 // A variant's times in ms: the whole, to the last function compiled, then (the direct path) building the Link, then
-// the rest; and the schedules' rest in parts: .text's last chunks and pairs, the tail built, written, the headers and
-// the close (with the lanes' end).
+// the rest; and the schedules' rest in parts: .text's last chunks, pairs and DWARF units, the tail built, written, the
+// headers and the close (with the lanes' end).
 #define BUSTER_STREAM_BENCHMARK_TIMES 9
 
 typedef struct StreamBenchmarkSample StreamBenchmarkSample;
