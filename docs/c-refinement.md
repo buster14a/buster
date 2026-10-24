@@ -437,6 +437,45 @@ Identifier lengths per occurrence, which set the prefix and the loads' widths:
 | ≤ 32 bytes (hashed from two lanes) | 99.9% | 97% |
 | ≤ 63 bytes (vectorized) | 100% | 99.97% |
 
+## A large file a window at a time
+
+The preprocessor used to lex a whole file, then refine it. For `sqlite3.c` the
+lexer's columns (10.5 MB) and the source (9.5 MB) had then left the L2 cache by
+the time refinement read them again, and refinement's passes waited for memory:
+the budget's "cold data". `pp_prepare_into` now prepares a file of at least two
+windows (`BUSTER_PP_WINDOW_BYTES`, 128 KB) that the vectorized kernels lex a
+window at a time (`pp_prepare_windows`), and each window's columns and source
+are refined while they are in the caches:
+
+- `c_tokenize_lines` lexes the window as if the source ended at its end, from
+  the start of a logical line (or of the file). Every token before the last one
+  that starts a line is then the token the whole file's lexing gives: a
+  construct the window's end cuts (a block comment, a raw string literal, a line
+  splice) runs to that end, as at a file's, and belongs to the window's last
+  line. The tokens from that line on are dropped and lexed again from its start
+  with the next window; a line that takes a whole window doubles the window.
+  Mode splitting (`pp_lex_for_mode`) works on the kept tokens, and a file's
+  last window keeps an unterminated comment for its inclusions to report.
+- `refine_tokens_blocks` refines the blocks of 1,024 tokens the window
+  completes, and the last window the rest. What a block gives the next is
+  carried from call to call (`RefineProgress`: the ends of the 16 tokens before
+  the block, which pass C overwrote in place, and the backslash chunks scanned
+  so far), so that the blocks come out as `refine_tokens` makes them. Pass A
+  prefetches nothing there: the lexer has just written the columns and read the
+  source.
+- The leading-space words go after the kinds, as for a whole file, where the
+  lexer's writes have faulted their pages in. Their place waits for the token
+  count, so refinement writes them to scratch memory, and the end copies them
+  (about 150 KB for `sqlite3.c`). The UNKNOWN tokens that may hold a raw string
+  literal's error are counted per window too (`pp_count_raw_candidates`): a
+  count after the last window read the kinds back from memory.
+
+Splitting C's grammar between windows would need the lexer's state at a cut;
+cutting where a logical line starts needs none, since a line starts outside every
+token and comment. The records are the whole file's, byte for byte.
+Files the scalar lexer takes whole (trigraphs, `$` as punctuation, C++ without
+digraphs or `//`), and the scalar twins, stay whole.
+
 ## Where the time went
 
 The starting point (`main` at 0077380, 2026-10-21): `benchmark-preprocessor`'s
@@ -590,7 +629,27 @@ bit. The checks are:
 On the 9700X, with `src` and the C library corpus as paths, every check
 passed. `benchmark-refinement` also checks every file on every path before it
 times anything, and `test-preprocessor` and the preprocessor's oracle runs
-(`docs/c-preprocessor.md`) run on what refinement gives. The C library corpus's
+(`docs/c-preprocessor.md`) run on what refinement gives.
+
+A file prepared a window at a time must give the whole file's records, byte for
+byte. `test-preprocessor`'s windows check (`c_preprocessor_windows_test.c`)
+generates 240 sources of up to 96 KB from the constructs a window's end can cut:
+block comments and raw string literals over up to 120 lines (with directives in
+them), line splices in identifiers and between tokens, `\r\n`, lines of up to
+6 KB, literals left open at a line's end, raw string literals with bad
+delimiters, a byte order mark, and a comment, a raw string literal or a
+backslash at the file's end. Each is prepared in one of five language modes
+(raw strings and digit separators on and off, C89's lexing, prefixes to split)
+whole by the vectorized kernels and by their scalar twins, which must agree, and
+in windows of 1, 7, 64, 100, 333, 1,024, 4,096 and 8,192 bytes: tokens, values,
+leading-space words, raw errors, the unterminated comment and the directive
+tables. Mutants that keep a window's last line, reset the carried ends between
+calls, drop the unterminated comment, or refine past a window's last whole
+block each fail it. `--window-bytes N` sends every file of two windows or more
+through windows of N bytes, so that `test-preprocessor --window-bytes 64` checks
+a whole translation unit's windowed preparation against the scalar twins:
+`sqlite3.c` and `main.c` (4 million output tokens) agree with windows of 64 bytes
+to 64 KB. The C library corpus's
 table grows four times, from 16,384 buckets to 262,144, and each growth in a
 batch's stage 3 makes the batch after it hash again.
 
@@ -621,13 +680,6 @@ the 360 files it lists for `main.c` with the compiler's options.
 
 ## Next steps
 
-- **Refine a file as it is lexed.** The preprocessor lexes a whole file, then
-  refines it, so for `sqlite3.c` the columns and the source come back from
-  memory and the table has gone cold: reading them first (a diagnostic, not a
-  change) saved 0.08 ms and 0.11 ms of the refine phase. A lexer that hands
-  over its tokens a block at a time would let refinement read them, and keep
-  the table, in the caches. That is a change to `c_tokenize`'s interface, and
-  so to `c_lexer.c`.
 - **The table across translation units** (#152): a process that compiles many
   of them keeps the table and its pages, warm, and pays its first inserts once.
 - **Fewer candidates for 2b.** Three slots of 20 bytes (a 16-byte prefix) would

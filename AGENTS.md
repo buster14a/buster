@@ -788,9 +788,13 @@ designs and the compilers already built this way.
   ids (keywords, directive names, the preprocessor's names), and
   `src/buster/compiler/c_refine.c` is token refinement: per file, after the
   lexer, each identifier's `IdentId` (in place of its end) and each token's
-  exact leading-space bit. `docs/c-refinement.md` explains the design and its
-  9700X measurements. `c_refine_test.c` holds their tests (`main.c` includes
-  it; `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
+  exact leading-space bit. The preprocessor lexes a file of two windows (256 KB)
+  or more a 128 KB window at a time (`c_tokenize_lines`, cut where a logical
+  line starts) and refines each window's completed blocks while they are in the
+  caches (`refine_tokens_blocks`, `pp_prepare_windows`), into the whole file's
+  records. `docs/c-refinement.md` explains the design and its 9700X
+  measurements. `c_refine_test.c` holds their tests (`main.c` includes it;
+  `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
   provides `benchmark-refinement`.
 - `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
   unit's token stream from its files' refined tokens (C23's `#embed` among its
@@ -3326,9 +3330,18 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `benchmark-preprocessor` (with `--clang`, and `--compare-clang`), run as
   children on a small file, must take `--location-limit N` with its value as
   ours, kept from clang, succeeding in a space the file fits in and running
-  out of one of a byte;
+  out of one of a byte. Then the windows (#116, `c_preprocessor_windows_test.c`):
+  240 generated sources of up to 96 KB, of what a window's end can cut (comments
+  and raw string literals over many lines, line splices, `\r\n`, long lines,
+  a byte order mark, constructs left open at the end), each prepared whole by
+  both kernels and a window at a time (`pp_prepare_windows`) in windows of 1 byte
+  to 8 KB, in five language modes: every record must be the whole file's, byte
+  for byte;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
+  `--window-bytes N` (ours alone, like `--location-limit`) sends every file of
+  two windows or more through windows of N bytes, so that the vectorized side's
+  windowed preparation of a whole unit is compared too;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
   path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
   the C library corpus).
@@ -3342,7 +3355,7 @@ Every case and file runs with clang's answers to the feature queries
 ways: by default they answer what buster implements.
 
 `--clang` also compares every case and file with `clang -E` and the same
-options (but `--predefines` and `--location-limit`, ours alone), token spelling by token spelling, and then where clang's line markers
+options (but `--predefines`, `--location-limit` and `--window-bytes`, ours alone), token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
 prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`, and clang
