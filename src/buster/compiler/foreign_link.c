@@ -32,6 +32,8 @@ typedef enum ForeignLinkError
     FOREIGN_LINK_ERROR_IMPORT,
     FOREIGN_LINK_ERROR_LINK,
     FOREIGN_LINK_ERROR_IFUNC,
+    // A compressed debug section that doesn't decompress: a compression other than zlib, or a malformed stream.
+    FOREIGN_LINK_ERROR_COMPRESSION,
 } ForeignLinkError;
 
 typedef struct ForeignLinkResult ForeignLinkResult;

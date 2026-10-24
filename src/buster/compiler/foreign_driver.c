@@ -320,12 +320,18 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
             "unsupported or malformed relocation",
             "invalid link representation",
             "an IFUNC that the loader can't bind as a dynamic symbol, which a shared library doesn't take yet",
+            "a compressed debug section whose zlib stream doesn't decompress to its size",
         };
         // An IFUNC's refusal says why for the kind (foreign_link_refuse_ifuncs).
         const char* ifunc = kind == RUNTIME_KIND_STATIC ? "an IFUNC whose IRELATIVE relocation nothing applies: no startup code refers to __rela_iplt_start" :
                             kind == RUNTIME_KIND_STATIC_PIE ? "an IFUNC whose IRELATIVE relocation nothing applies: no startup code refers to _DYNAMIC" :
                                                               messages[FOREIGN_LINK_ERROR_IFUNC];
+        // A compressed debug section's refusal says which way it doesn't decompress (foreign_debug_build).
+        const char* compression = result.import.error == IMPORT_ERROR_UNSUPPORTED ?
+                                      "a debug section compressed otherwise than with zlib (-gz=zstd's), which link-foreign doesn't decompress: compile with -gz=zlib or -gz=none" :
+                                      messages[FOREIGN_LINK_ERROR_COMPRESSION];
         const char* message = result.error == FOREIGN_LINK_ERROR_IFUNC                      ? ifunc :
+                              result.error == FOREIGN_LINK_ERROR_COMPRESSION                ? compression :
                               (uint32_t)result.error < BUSTER_ARRAY_LENGTH(messages) ? messages[result.error] :
                                                                                        "conversion failed";
         fprintf(stderr, "link-foreign: %s", message);
