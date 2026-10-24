@@ -83,8 +83,10 @@ lld make of them, where the corpus test below compares it:
   loader relocates (GCC's `-fPIE` code reads `stdout` and `environ` by
   `PC32`) gets a copy in `.bss`, an `R_X86_64_COPY` relocation and an export,
   so that the library's own references bind to the copy. The library's other
-  names at the same address (`environ`'s `_environ` and `__environ`) are
-  defined at the copy and exported too, as lld's `getSymbolsAt` defines them.
+  names at the same address (`environ`'s `_environ` and `__environ`), all of
+  them, are defined at the copy and exported too, as lld's `getSymbolsAt`
+  defines them; of those the link has no symbol of, a copy takes up to four,
+  and refuses more.
   The copy is aligned by the largest power of two that divides the
   definition's address, at most its section's alignment, as lld aligns it,
   and is as large as the largest of its names. A function reached that way,
@@ -98,7 +100,9 @@ lld make of them, where the corpus test below compares it:
   sections become one atom of their class, in input order, each at its
   alignment, with their symbols and fixups moved into it, and the two names
   are defined at its ends, global and protected, of no size, as GNU ld and
-  lld define them. Only an undefined name with one of the prefixes asks for
+  lld define them. Each section is that atom to the passes after the
+  conversion: GC roots a retained one's atom and keeps the FDEs of the code in
+  it, and literal pooling leaves the atom's bytes as they are. Only an undefined name with one of the prefixes asks for
   this, so a link without one reads no section's name.
 - **`STB_GNU_UNIQUE`** definitions keep their binding in `.symtab` and
   `.dynsym`.
@@ -187,7 +191,9 @@ across both paths and all four lane counts. `foreign_copy_test.c` links
 assembly that reads a library of its own by `PC32`, as GCC's `-fPIE` code
 reads a library's data (data with aliases, a weak alias, a 64-byte
 alignment, read-only data and a version script, which the library reads back
-through its GOT), a C program that reads libc's stdio streams and `environ`,
+through its GOT; and an object of eleven names, ten of them read through the
+program's GOT, each of which the library reads back through its own), a C
+program that reads libc's stdio streams and `environ`,
 a program that needs the loader by a reference of its own, and the refusals
 of a function and of an object of no size reached that way. Each, by both
 paths and 1/2/3/8 lanes, writes a PIE that the loader runs, byte for byte
@@ -200,7 +206,9 @@ and read-only in another, which merges into one writable section, a weak
 reference to the bounds of a name no section has, which stays zero, and an
 IFUNC called (refused, naming it) and one that nothing refers to (linked);
 with `--cross-check`, lld's link of the same inputs must run alike and define
-the bounds alike.
+the bounds alike. Its section GC case collects a link after the merge: a
+retained section whose bounds only dead code refers to must keep its bytes,
+and a hook in a merged code section its FDE, while the dead code goes.
 
 `test-foreign-corpus` is the differential test against lld and mold: AGENTS.md
 ("Foreign corpus test") has its rules. Each program of the corpus, compiled by
