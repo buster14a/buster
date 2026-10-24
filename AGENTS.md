@@ -1198,9 +1198,16 @@ must be exactly the expected one:
   10,000 branches, which grow its table;
 - `ab`: the rotating order, and runs that succeed, fail and can't start, with
   two argument lists, and through a lock (`env`) pinned to an allowed CPU.
+- `time-runs`: shell commands that log their order, which must be the
+  warm-ups' then each run's rotated one, statuses kept as the first warm-up's
+  (0 and 3), one that changes after it (a failure per run), and an executable
+  that can't start.
 
 The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
-ARGUMENT... [-- ARGUMENT...]...`, `hot-loops FUNCTION DISASSEMBLY SAMPLES
+ARGUMENT... [-- ARGUMENT...]...`, `time-runs [--runs N] [--warmups N]
+[--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list
+ARGUMENT...]...` (whole processes of this executable in rotated order, with
+their wall time, rusage, peak resident set and page faults; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
 [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
 FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
 ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the

@@ -615,6 +615,61 @@ static void profile_test_ab(ProfileTest* test)
                          "ab: done, 1 failed runs\n");
 }
 
+// time-runs on shell commands that log their order into a file: the warm-ups in list order, then each run's lists from
+// an order that rotates by run; statuses kept as the first warm-up's (0 and 3) pass, and one that changes after it
+// fails each run, as does a list that can't start.
+static void profile_test_time_runs(ProfileTest* test)
+{
+    test->cases += 1;
+    char directory[] = "/tmp/buster-time-runs-XXXXXX";
+    bool ok = mkdtemp(directory) != 0;
+    char log[64];
+    char flag[64];
+    char first[160];
+    char second[160];
+    char changing[160];
+    snprintf(log, sizeof(log), "%s/log", directory);
+    snprintf(flag, sizeof(flag), "%s/flag", directory);
+    snprintf(first, sizeof(first), "echo a >> %s", log);
+    snprintf(second, sizeof(second), "echo b >> %s; exit 3", log);
+    snprintf(changing, sizeof(changing), "test -e %s && exit 1; touch %s", flag, flag);
+    char* arguments[] = { "-c", first, "-c", second, "-c", changing };
+    const uint64_t starts[] = { 0, 2, 4 };
+    const uint64_t counts[] = { 2, 2, 2 };
+    const int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    ProfileTimeRuns t = {
+        .executable = "/bin/sh",
+        .arguments = arguments,
+        .starts = starts,
+        .counts = counts,
+        .list_count = 2,
+        .runs = 3,
+        .warmups = 1,
+        .after_scalar_ms = 1,
+        .output = null,
+    };
+    ok = ok && null != -1 && profile_time_runs(&test->arena, &t) == 0;
+    String8 text = ok ? profile_read_file(&test->arena, log) : (String8){ 0 };
+    ok = ok && text.length == 16 && memcmp(text.pointer, "a\nb\na\nb\nb\na\na\nb\n", 16) == 0;
+    t.starts = starts + 2;
+    t.list_count = 1;
+    ok = ok && profile_time_runs(&test->arena, &t) == 3;
+    t.executable = "/nonexistent/compiler";
+    ok = ok && profile_time_runs(&test->arena, &t) == 4;
+    if (null != -1)
+    {
+        close(null);
+    }
+    unlink(log);
+    unlink(flag);
+    rmdir(directory);
+    if (!ok)
+    {
+        test->failures += 1;
+        printf("  time-runs: FAILED\n");
+    }
+}
+
 // Runs argv with its output into `output` (a path), and returns whether it exited with status 0.
 static bool profile_test_command(char* const* argv, const char* output)
 {
@@ -798,6 +853,7 @@ static int run_profile_tests(int argc, char** argv)
         profile_test_program(&test);
         profile_test_entry_program(&test);
         profile_test_ab(&test);
+        profile_test_time_runs(&test);
         printf("test-profile: %llu checks, %llu failed\n", (unsigned long long)test.cases, (unsigned long long)test.failures);
         result = test.failures == 0 ? 0 : 1;
         arena_release(&test.report.arena);
