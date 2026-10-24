@@ -5089,6 +5089,92 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
     return p;
 }
 
+// pp_copy_file_run_vector for a file's text read straight into the output (pp_step_file's `text`), which doesn't stop at
+// the name of an object-like macro whose body is one token that names no macro: it writes the expansion in the name's
+// place, as pp_expand_file_direct would after the run stopped there (the expansion's record, its token with the name's
+// flags, the output's history, the statistics), and goes on. Most expansions in a file's text are so (sqlite3.c's
+// 12,431 of 13,197), and each one stopped a run, and started another unless it was the last token before `limit`.
+// Returns where it stopped (at a name it doesn't expand, or at `limit`), in `*directs` the expansions it wrote, and in
+// `*runs` the runs the old path would have started after them.
+static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit, uint32_t* directs,
+                                         uint32_t* runs)
+{
+    PPTokens* out = &pp->output;
+    uint32_t p = position;
+    uint32_t written = 0;
+    bool last_written = false;
+    bool stopped = false;
+    while (!stopped && p < limit && pp_room(pp, out, BUSTER_PP_TOKEN_SLACK))
+    {
+        const uint32_t available = limit - p < 64 ? limit - p : 64;
+        const __mmask64 valid = _bzhi_u64(~0ull, available);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, data->kinds + p);
+        const __m512i plain = _mm512_and_si512(kinds, _mm512_set1_epi8(0x7F));
+        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+        uint32_t take = available;
+        uint64_t replaced = 0;
+        for (uint64_t bits = identifiers; bits != 0; bits &= bits - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+            const IdentId value = data->values[p + lane];
+            if (pp_is_macro_vector(pp, value))
+            {
+                const PPMacro* macro = &pp->macros[pp->macro_of[value]];
+                const PPFileData* body = &pp->datas[macro->data];
+                const uint32_t b = macro->body_begin;
+                const bool direct = (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
+                                    macro->body_end - b == 1 && ((body->kinds[b] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[b]));
+                if (!direct)
+                {
+                    take = lane;
+                    stopped = true;
+                    break;
+                }
+                replaced |= 1ull << lane;
+            }
+        }
+        if (take != 0)
+        {
+            pp_store_file_tokens(out, out->count, data, base, p, available, take, kinds, false);
+        }
+        // Each name replaced, in order, by its body's token, which takes the name's flags as stored (its leading space
+        // and line start) in place of its own space.
+        for (uint64_t bits = replaced; bits != 0; bits &= bits - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+            const uint32_t at = out->count + lane;
+            const PPMacroId id = pp->macro_of[data->values[p + lane]];
+            const PPMacro* macro = &pp->macros[id];
+            const PPFileData* body = &pp->datas[macro->data];
+            const uint32_t b = macro->body_begin;
+            const uint32_t expansion = pp_history_expansion(pp, id, base + data->starts[p + lane], 0);
+            const uint8_t kind = body->kinds[b] & 0x7F;
+            out->kinds[at] = kind;
+            out->flags[at] = (uint8_t)((out->flags[at] & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | BUSTER_PP_FROM_MACRO | BUSTER_PP_NAME_SPACE);
+            out->values[at] = kind == C_TOKEN_RAW_IDENTIFIER ? body->values[b] : macro->base + body->values[b];
+            out->locations[at] = macro->base + body->starts[b];
+            if (!pp->options.no_history && !pp->fatal)
+            {
+                pp_history_change(pp, at, expansion);
+                pp_history_change(pp, at + 1, 0);
+            }
+        }
+        const uint32_t count = (uint32_t)__builtin_popcountll(replaced);
+        if (pp->options.timing)
+        {
+            pp->statistics.direct_expansions += count;
+            pp->statistics.final_direct_object_tokens += count;
+        }
+        written += count;
+        last_written = take != 0 && ((replaced >> (take - 1)) & 1) != 0;
+        out->count += take;
+        p += take;
+    }
+    *directs = written;
+    *runs = written - (last_written && p == limit);
+    return p;
+}
+
 // The same, a token at a time, testing the macro table without the vector path's cached name bits.
 static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit)
 {
@@ -9254,11 +9340,27 @@ static bool pp_expand_file_direct(Preprocessor* pp, PPContext* context, const PP
         const uint32_t saved_history = pp->history_current;
         pp->history_current = pp_history_expansion(pp, id, location, 0);
         const uint32_t begin = target->count;
-        pp_append_file_tokens(pp, target, body, macro->base, macro->body_begin, macro->body_end, true);
         // The name's leading space and line start go to the first token (pp_expand_object).
         const uint8_t name_flags = (uint8_t)((pp_file_space(data, position) ? BUSTER_PP_SPACE : 0) | ((data->kinds[position] & BUSTER_C_TOKEN_START_OF_LINE) ? BUSTER_PP_START_OF_LINE : 0));
-        uint8_t* flags = &target->flags[begin];
-        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+        if (macro->body_end - macro->body_begin == 1)
+        {
+            // Most bodies are one token (sqlite3.c's 12,431 of 13,197): pp_append_file_tokens' token with the name's flags,
+            // in place of its own space, written without its 64 lanes.
+            const uint32_t b = macro->body_begin;
+            const uint8_t kind = body->kinds[b] & 0x7F;
+            target->kinds[begin] = kind;
+            target->flags[begin] = (uint8_t)(BUSTER_PP_FROM_MACRO | name_flags | BUSTER_PP_NAME_SPACE);
+            target->values[begin] = kind == C_TOKEN_RAW_IDENTIFIER ? body->values[b] : macro->base + body->values[b];
+            target->locations[begin] = macro->base + body->starts[b];
+            target->count = begin + 1;
+            pp_history_fill(pp, target, begin, begin + 1, pp->history_current);
+        }
+        else
+        {
+            pp_append_file_tokens(pp, target, body, macro->base, macro->body_begin, macro->body_end, true);
+            uint8_t* flags = &target->flags[begin];
+            *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+        }
         if (pp->options.timing)
         {
             pp->statistics.direct_expansions += 1;
@@ -9286,7 +9388,15 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
         while (more)
         {
             const uint32_t run_end = pp_step_limit(pp, context->position, limit);
-            const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, run_end) : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
+            // A file's text read straight into the output: nothing open that a token read from a file goes to or is counted
+            // by, no poisoned name, no raw string error to report, no -E markers' starts, nothing pending.
+            const bool text = pp->vectorized && (pp->capture_count | pp->stream_count | pp->limit_count | pp->poison_count | context->pending_flags) == 0 &&
+                              !pp->options.expansion_starts && data->raw_error_count == 0;
+            uint32_t directs = 0;
+            uint32_t runs = 0;
+            const uint32_t stop = text            ? pp_copy_file_text_vector(pp, data, base, context->position, run_end, &directs, &runs)
+                                  : pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, run_end)
+                                                   : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
             pp_read_raw_errors(pp, context, context->position, stop);
             if (pp->capture_count != 0)
             {
@@ -9295,9 +9405,10 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             pp_take_pending_flags(pp, context, stop - context->position);
             if (pp->options.timing)
             {
-                pp->statistics.file_runs += 1;
-                pp->statistics.file_run_tokens += stop - context->position;
-                pp->statistics.final_file_run_tokens += pp_target(pp) == &pp->output ? stop - context->position : 0;
+                // A run ended at each expansion pp_copy_file_text_vector wrote, and those names weren't the runs'.
+                pp->statistics.file_runs += 1 + runs;
+                pp->statistics.file_run_tokens += stop - context->position - directs;
+                pp->statistics.final_file_run_tokens += pp_target(pp) == &pp->output ? stop - context->position - directs : 0;
             }
             context->position = stop;
             more = false;
@@ -9305,11 +9416,8 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             {
                 more = pp->vectorized && pp_expand_file_direct(pp, context, data, base);
                 // A simple invocation whose expansion goes straight into the output, after which the main loop's next step
-                // would be this context's next run. It needs nothing open that a token read from a file goes to or is
-                // counted by, no poisoned name, no raw string error to report, no -E markers' starts, nothing pending.
-                const bool invocation_read = !more && pp->vectorized && (pp->macros[pp->macro_of[data->values[stop]]].flags & BUSTER_PP_MACRO_FUNCTION) &&
-                                             (pp->capture_count | pp->stream_count | pp->limit_count | pp->poison_count | context->pending_flags) == 0 &&
-                                             !pp->options.expansion_starts && data->raw_error_count == 0;
+                // would be this context's next run.
+                const bool invocation_read = !more && text && (pp->macros[pp->macro_of[data->values[stop]]].flags & BUSTER_PP_MACRO_FUNCTION);
                 more = more || (invocation_read && pp_invoke_file(pp, context, data, base, limit));
                 if (!more)
                 {
