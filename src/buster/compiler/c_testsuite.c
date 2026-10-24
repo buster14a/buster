@@ -405,8 +405,8 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     snprintf(log, sizeof(log), "%s/compile.txt", directory);
     snprintf(scalar_log, sizeof(scalar_log), "%s/compile-scalar.txt", directory);
     snprintf(output, sizeof(output), "%s/output.txt", directory);
-    char* const vector_arguments[] = { (char*)suite->compiler, "--verify", source, "-o", program, 0 };
-    char* const scalar_arguments[] = { (char*)suite->compiler, "--verify", "--scalar", source, "-o", scalar, 0 };
+    char* const vector_arguments[] = { (char*)suite->compiler, "--verify", source, "-o", program, "-lm", 0 };
+    char* const scalar_arguments[] = { (char*)suite->compiler, "--verify", "--scalar", source, "-o", scalar, "-lm", 0 };
     result->outcome = C_TESTSUITE_FAILED;
     bool valid = mkdir(directory, 0755) == 0;
     if (!valid)

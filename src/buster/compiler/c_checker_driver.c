@@ -548,12 +548,51 @@ static const char* check_driver_link_name(const Link* link, NameId name, char* b
     return buffer;
 }
 
+// The libraries the command line names, -lNAME (or -l NAME), and the directories it adds to their search, -LDIR (or
+// -L DIR), each in its order, for the direct path to link (runtime_libraries_import).
+typedef struct CheckDriverLibraries CheckDriverLibraries;
+struct CheckDriverLibraries
+{
+    String8* names;
+    uint32_t count;
+    String8* directories;
+    uint32_t directory_count;
+};
+
+// Says why the -l libraries didn't import (runtime_libraries_import's error).
+static void check_driver_libraries_failed(const RuntimeLibraries* libraries, RuntimeError error)
+{
+    if (error == RUNTIME_ERROR_MISSING)
+    {
+        fprintf(stderr, "error: cannot find %s\n", libraries->failed);
+    }
+    else if (error == RUNTIME_ERROR_ARCHIVE)
+    {
+        fprintf(stderr, "error: unsupported: static libraries: %s is an archive, which the direct path doesn't link yet (-c and a system linker "
+                        "take it)\n", libraries->failed);
+    }
+    else if (error == RUNTIME_ERROR_FILE)
+    {
+        fprintf(stderr, "error: can't read %s: %s\n", libraries->failed, strerror(libraries->system_error));
+    }
+    else if (error == RUNTIME_ERROR_IMPORT)
+    {
+        fprintf(stderr, "error: %s isn't a shared library or a linker script the direct path reads (import error %u)\n", libraries->failed,
+                (uint32_t)libraries->import.error);
+    }
+    else
+    {
+        fprintf(stderr, "fatal error: can't reserve memory for the libraries\n");
+    }
+}
+
 // Links the checked program straight into an executable at `output_path` (#157's direct path, #145's slice): a dynamic
 // PIE against the system's C runtime, which comes from its snapshot in the cache directory (imported and written there
 // when it is missing or stale) and which binding joins between the program's symbols and its atoms. A binding that finds
 // a piece of the snapshot damaged (BIND_ERROR_SNAPSHOT) discards the snapshot and emits once more from a fresh import.
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
-                                     Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, Arena* scratch)
+                                     Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify,
+                                     const CheckDriverLibraries* libraries, Arena* scratch)
 {
     char cache[PATH_MAX];
     const bool cached = snapshot_directory(cache, sizeof(cache));
@@ -564,6 +603,11 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         again = false;
         Runtime runtime;
         const SnapshotResult opened = runtime_open(&runtime, cached ? cache : NULL);
+        // The libraries -l names, imported for this runtime, whose version indices theirs follow.
+        static RuntimeLibraries named;
+        const bool naming = libraries->count != 0 && opened.error == RUNTIME_ERROR_NONE;
+        const RuntimeError imported = naming ? runtime_libraries_import(&named, &runtime, libraries->names, libraries->count, libraries->directories,
+                                                                        libraries->directory_count) : RUNTIME_ERROR_NONE;
         Arena output = arena_reserve(UINT64_C(1) << 34);
         Arena bytes = arena_reserve(UINT64_C(1) << 34);
         Arena arena = arena_reserve(UINT64_C(1) << 32);
@@ -580,10 +624,14 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
         CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
         char name[256] = { 0 };
-        valid = opened.error == RUNTIME_ERROR_NONE && output.base != 0 && bytes.base != 0 && arena.base != 0;
+        valid = opened.error == RUNTIME_ERROR_NONE && imported == RUNTIME_ERROR_NONE && output.base != 0 && bytes.base != 0 && arena.base != 0;
         if (opened.error != RUNTIME_ERROR_NONE)
         {
             fprintf(stderr, "error: can't import the C runtime%s%s\n", runtime.failed_file[0] != 0 ? ": " : "", runtime.failed_file);
+        }
+        else if (imported != RUNTIME_ERROR_NONE)
+        {
+            check_driver_libraries_failed(&named, imported);
         }
         else if (!valid)
         {
@@ -612,6 +660,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         if (valid)
         {
+            // Binding takes the libraries between bind_begin, which check_program_emit ran, and bind_end.
+            bind.libraries = naming ? &named : 0;
             valid = bind_end(&bind, &code.link);
             again = !valid && bind.error == BIND_ERROR_SNAPSHOT;
             if (!valid && !again)
@@ -619,8 +669,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 check_driver_link_name(&code.link, bind.name, name, sizeof(name));
                 if (bind.error == BIND_ERROR_UNDEFINED && check_driver_system_declared(program, parser, pp, &code.link, bind.name))
                 {
-                    fprintf(stderr, "error: unsupported: libraries other than the C library: '%s', which a system header declares, isn't in "
-                                    "libc.so.6, and the direct path links no other library yet (-c and a system linker with its -l take it)\n", name);
+                    fprintf(stderr, "error: undefined reference to '%s', which a system header declares: its library isn't linked (-lm links "
+                                    "libm's functions)\n", name);
                 }
                 else
                 {
@@ -694,6 +744,10 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         arena_release(&arena);
         arena_release(&bytes);
         arena_release(&output);
+        if (naming)
+        {
+            runtime_libraries_release(&named);
+        }
         runtime_release(&runtime);
     }
     return valid;
@@ -735,11 +789,36 @@ static int run_check_command(int count, char** arguments, bool executable)
     bool syntax_only = false;
     bool quiet = false;
     bool lazy_system_headers = false;
-    for (int i = 0; filtered != 0 && i < count; i += 1)
+    // The direct path's -l libraries and -L directories, which every other mode leaves alone.
+    CheckDriverLibraries libraries = {
+        .names = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
+        .directories = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
+    };
+    bool missing_value = false;
+    for (int i = 0; filtered != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
         quiet |= strcmp(arguments[i], "-w") == 0;
-        if (strcmp(arguments[i], "--verify") == 0)
+        const bool library = arguments[i][0] == '-' && arguments[i][1] == 'l';
+        const bool directory = arguments[i][0] == '-' && arguments[i][1] == 'L';
+        if (library || directory)
+        {
+            const char* value = arguments[i][2] != 0 ? arguments[i] + 2 : i + 1 < count ? arguments[++i] : 0;
+            const String8 text = {
+                .pointer = (char*)value,
+                .length = value != 0 ? strlen(value) : 0,
+            };
+            missing_value |= text.length == 0;
+            if (library)
+            {
+                libraries.names[libraries.count++] = text;
+            }
+            else
+            {
+                libraries.directories[libraries.directory_count++] = text;
+            }
+        }
+        else if (strcmp(arguments[i], "--verify") == 0)
         {
             verify = true;
         }
@@ -778,12 +857,12 @@ static int run_check_command(int count, char** arguments, bool executable)
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool parsed = filtered != 0 && !missing_value && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
     if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--dump-typed] [--dump-static] [-flazy-system-headers] [-fsyntax-only | -c] [-o file] "
-                        "[preprocessor options] file.c\n");
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [-fsyntax-only | -c] "
+                        "[-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -1036,7 +1115,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types,
-                                                                 output != 0 ? output : "a.out", scalar, verify, &scratch) ? 0 : 1;
+                                                                 output != 0 ? output : "a.out", scalar, verify, &libraries, &scratch) ? 0 : 1;
                             }
                             else
                             {

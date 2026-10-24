@@ -37,6 +37,11 @@
 //     lld bind one. The loader is needed only for a strong reference to one of its names, as GNU ld and lld take a
 //     library AS_NEEDED: without one, the weak references to its names are left to nothing, unversioned
 //     (bind_keep_loader);
+//   - before libc.so.6, to an export of a shared library the link names with -l (Bind.libraries, which the caller sets
+//     between bind_begin and bind_end): an import of that library's, as GCC's driver puts -l libraries before libc.so
+//     on the line. A link needs such a library only for a strong reference that binds to it, as GNU ld and lld take
+//     one --as-needed (bind_keep_libraries); and it exports its definitions of names a needed library defines or
+//     refers to (bind_library_exports);
 //   - for a strong reference, to a member of libc_nonshared.a (atexit), which joins the link;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
@@ -187,12 +192,17 @@ struct Bind
     bool resolving;
     bool bound;
     bool tail_joined;
-    // The link's imports from libc.so.6 and the loader, and the definitions it exports, room for `capacity` of each.
+    // The link's imports from libc.so.6, the loader and the libraries it names, and the definitions it exports, room for
+    // `capacity` of each.
     SymbolId* imports;
     uint32_t import_count;
     SymbolId* exports;
     uint32_t export_count;
     uint32_t capacity;
+    // The shared libraries the link names with -l (runtime_libraries_import), which the caller sets between bind_begin
+    // and bind_end, or 0; and those that a strong reference binds to, a bit each: the ones the link needs.
+    const RuntimeLibraries* libraries;
+    uint32_t libraries_needed;
     // The first error, and the link's name it is about (0 for none).
     BindError error;
     NameId name;
@@ -814,6 +824,9 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     // A reference with a visibility other than default needs a definition within the executable: a library's can't be
     // one, as GNU ld and lld resolve it.
     const bool shareable = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
+    // A library the link names with -l comes before libc.so's on the link line, as GCC's driver puts it.
+    uint32_t library_export = 0;
+    const uint32_t library = runtime_libraries_export(bind->libraries, link->names.bytes[name], link->names.length[name], link->names.hash[name], &library_export);
     if (entry != 0 && names->linker[entry - 1])
     {
         symbols->source[symbol] = BUSTER_LINK_SOURCE_LINKER;
@@ -822,6 +835,23 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     {
         // crtendS.o or crtn.o defines it when it joins.
         symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
+    }
+    else if (library != 0 && shareable)
+    {
+        const ImportExports* exports = &bind->libraries->libraries[library - 1].exports;
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+        symbols->version[symbol] = exports->version[library_export];
+        symbols->flags[symbol] = (uint8_t)((symbols->flags[symbol] & ~BUSTER_LINK_SYMBOL_TYPE) | (exports->flags[library_export] & BUSTER_LINK_SYMBOL_TYPE));
+        bind->libraries_needed |= weak ? 0 : 1u << (library - 1);
+        if (bind->import_count < bind->capacity)
+        {
+            bind->imports[bind->import_count] = symbol;
+            bind->import_count += 1;
+        }
+        else
+        {
+            bind_fail(bind, BIND_ERROR_FULL, name);
+        }
     }
     else if (export != 0 && shareable)
     {
@@ -992,6 +1022,29 @@ static void bind_keep_loader(Bind* bind, Link* link)
     bind->import_count = kept;
 }
 
+// The imports from libraries named with -l that the link doesn't need, which only weak references bound to: as GNU ld
+// and lld take a library --as-needed, those are left to nothing, unversioned, keeping their export's type, as
+// bind_keep_loader leaves the loader's. An import is a library's when one exports its name, since binding looks in the
+// libraries first. A pass over the imports, which are tens, shared by both paths.
+static void bind_keep_libraries(Bind* bind, Link* link)
+{
+    LinkSymbols* symbols = &link->symbols;
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < bind->import_count; i += 1)
+    {
+        const SymbolId symbol = bind->imports[i];
+        const NameId name = symbols->name[symbol];
+        uint32_t export = 0;
+        const uint32_t library = runtime_libraries_export(bind->libraries, link->names.bytes[name], link->names.length[name], link->names.hash[name], &export);
+        const bool dropped = library != 0 && (bind->libraries_needed & (1u << (library - 1))) == 0;
+        symbols->source[symbol] = dropped ? BUSTER_LINK_SOURCE_NONE : symbols->source[symbol];
+        symbols->version[symbol] = dropped ? 0 : symbols->version[symbol];
+        bind->imports[kept] = symbol;
+        kept += dropped ? 0 : 1;
+    }
+    bind->import_count = kept;
+}
+
 // The link's definitions of names that libc.so.6 or the loader defines too, or libc.so.6 refers to, with default or
 // protected visibility: among the runtime's names that took a link symbol, in the order they took it.
 static void bind_find_exports(Bind* bind, const Link* link)
@@ -1072,6 +1125,74 @@ static void bind_shared_exports(Bind* bind, const Link* link)
         }
     }
     bind->export_count = export_count;
+}
+
+// The link's definitions of names that a library the link needs (Bind.libraries) defines too or refers to, global or
+// weak with default or protected visibility, which the executable exports, as GNU ld and lld export a definition that a
+// shared library on the line defines or refers to: after binding's other exports, each once, in symbol order. The
+// candidates by the vector path 16 symbols at a time (bind_exported_lanes), by the exact one a symbol at a time; each
+// then looked up in the libraries' exports and references, a scalar pass both share, run only with -l libraries.
+static void bind_library_exports(Bind* bind, const Link* link)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const RuntimeLibraries* libraries = bind->libraries;
+    const uint32_t found = bind->export_count;
+    const __m512i lane_index = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    for (SymbolId batch = 1; libraries != 0 && bind->libraries_needed != 0 && bind->error == BIND_ERROR_NONE && batch < symbols->count; batch += 16)
+    {
+        const uint32_t n = symbols->count - batch < 16 ? symbols->count - batch : 16;
+        SymbolId candidates[16];
+        uint32_t taken = 0;
+        if (bind->path == BIND_PATH_VECTOR)
+        {
+            const __mmask16 loaded = (__mmask16)((1u << n) - 1);
+            const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, symbols->flags + batch));
+            const __m512i atoms = _mm512_maskz_loadu_epi32(loaded, symbols->atom + batch);
+            const __m512i sources = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, symbols->source + batch));
+            const __mmask16 exported = bind_exported_lanes(flags, atoms, sources) & loaded;
+            taken = (uint32_t)__builtin_popcount(exported);
+            _mm512_mask_storeu_epi32(candidates, (__mmask16)((1u << taken) - 1), _mm512_maskz_compress_epi32(exported, _mm512_add_epi32(lane_index, _mm512_set1_epi32((int)batch))));
+        }
+        else
+        {
+            for (SymbolId symbol = batch; symbol < batch + n; symbol += 1)
+            {
+                const uint8_t flags = symbols->flags[symbol];
+                const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+                const bool defined = symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+                candidates[taken] = symbol;
+                taken += global && bind_visibility_rank(flags) <= 1 && defined ? 1 : 0;
+            }
+        }
+        for (uint32_t c = 0; c < taken; c += 1)
+        {
+            const SymbolId symbol = candidates[c];
+            const NameId name = symbols->name[symbol];
+            const uint8_t* bytes = link->names.bytes[name];
+            const uint32_t length = link->names.length[name];
+            const uint64_t hash = link->names.hash[name];
+            bool shared = false;
+            for (uint32_t l = 0; !shared && name != 0 && l < libraries->count; l += 1)
+            {
+                const bool needed = (bind->libraries_needed & (1u << l)) != 0;
+                shared = needed && (import_library_find(&libraries->libraries[l], bytes, length, hash) != 0 || runtime_libraries_refer(libraries, l, bytes, length, hash));
+            }
+            bool listed = false;
+            for (uint32_t e = 0; shared && !listed && e < found; e += 1)
+            {
+                listed = bind->exports[e] == symbol;
+            }
+            if (shared && !listed && bind->export_count < bind->capacity)
+            {
+                bind->exports[bind->export_count] = symbol;
+                bind->export_count += 1;
+            }
+            else if (shared && !listed)
+            {
+                bind_fail(bind, BIND_ERROR_FULL, name);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1393,6 +1514,7 @@ static bool bind_end(Bind* bind, Link* link)
     }
     bind_keep_imports(bind, link);
     bind_keep_loader(bind, link);
+    bind_keep_libraries(bind, link);
     if (bind->error == BIND_ERROR_NONE && bind->runtime->kind == RUNTIME_KIND_SHARED)
     {
         bind_shared_exports(bind, link);
@@ -1400,6 +1522,7 @@ static bool bind_end(Bind* bind, Link* link)
     else
     {
         bind_find_exports(bind, link);
+        bind_library_exports(bind, link);
     }
     return bind->error == BIND_ERROR_NONE;
 }

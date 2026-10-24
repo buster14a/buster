@@ -112,6 +112,207 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     return ready;
 }
 
+// Runs `arguments` (arguments[0] the executable) with standard output to /dev/null and its errors into *text, which
+// the caller frees: its exit status, or -1 if it didn't exit.
+static int check_test_driver_spawn(char* const* arguments, char** text)
+{
+    FILE* errors = tmpfile();
+    int status = 0;
+    pid_t child = -1;
+    size_t length = 0;
+    *text = NULL;
+    if (errors != NULL)
+    {
+        fflush(NULL);
+        child = fork();
+        if (child == 0)
+        {
+            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0)
+            {
+                execvp(arguments[0], arguments);
+            }
+            _exit(127);
+        }
+    }
+    pid_t waited = -1;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    }
+    while (waited < 0 && child > 0 && errno == EINTR);
+    const bool read = errors != NULL && waited == child && pp_test_read_output(errors, text, &length);
+    if (errors != NULL)
+    {
+        fclose(errors);
+    }
+    return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Whether the files at `a` and `b` can be read and have the same bytes.
+static bool check_test_driver_same_files(const char* a, const char* b)
+{
+    FILE* files[2] = { fopen(a, "rb"), fopen(b, "rb") };
+    bool same = files[0] != NULL && files[1] != NULL;
+    bool reading = same;
+    while (reading)
+    {
+        char first[4096];
+        char second[4096];
+        const size_t got = fread(first, 1, sizeof(first), files[0]);
+        same = fread(second, 1, sizeof(second), files[1]) == got && memcmp(first, second, got) == 0;
+        reading = same && got != 0;
+    }
+    for (uint32_t f = 0; f < 2; f += 1)
+    {
+        if (files[f] != NULL)
+        {
+            fclose(files[f]);
+        }
+    }
+    return same;
+}
+
+// The DT_NEEDED names of the executable at `path`, in order, joined by spaces into `names`: whether its dynamic section
+// could be read (a PIE's file offsets are its addresses' in its first PT_LOAD, as the direct path lays one out).
+static bool check_test_driver_needed(const char* path, char* names, uint64_t capacity)
+{
+    uint64_t length = 0;
+    FILE* file = fopen(path, "rb");
+    uint8_t* bytes = NULL;
+    if (file != NULL && fseek(file, 0, SEEK_END) == 0)
+    {
+        const long size = ftell(file);
+        bytes = size > (long)sizeof(Elf64_Ehdr) && fseek(file, 0, SEEK_SET) == 0 ? malloc((uint64_t)size) : NULL;
+        length = bytes != NULL && fread(bytes, 1, (uint64_t)size, file) == (uint64_t)size ? (uint64_t)size : 0;
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    names[0] = 0;
+    Elf64_Ehdr header = { 0 };
+    bool valid = length != 0;
+    if (valid)
+    {
+        memcpy(&header, bytes, sizeof(header));
+        valid = memcmp(header.e_ident, ELFMAG, SELFMAG) == 0 && header.e_phoff + (uint64_t)header.e_phnum * sizeof(Elf64_Phdr) <= length;
+    }
+    uint64_t dynamic_offset = 0;
+    uint64_t dynamic_size = 0;
+    uint64_t load_offset = 0;
+    uint64_t load_address = 0;
+    bool load = false;
+    for (uint32_t p = 0; valid && p < header.e_phnum; p += 1)
+    {
+        Elf64_Phdr segment;
+        memcpy(&segment, bytes + header.e_phoff + p * sizeof(Elf64_Phdr), sizeof(segment));
+        dynamic_offset = segment.p_type == PT_DYNAMIC ? segment.p_offset : dynamic_offset;
+        dynamic_size = segment.p_type == PT_DYNAMIC ? segment.p_filesz : dynamic_size;
+        load_offset = segment.p_type == PT_LOAD && !load ? segment.p_offset : load_offset;
+        load_address = segment.p_type == PT_LOAD && !load ? segment.p_vaddr : load_address;
+        load = load || segment.p_type == PT_LOAD;
+    }
+    valid = valid && dynamic_size != 0 && dynamic_offset + dynamic_size <= length;
+    uint64_t strings = 0;
+    for (uint64_t at = 0; valid && at + sizeof(Elf64_Dyn) <= dynamic_size; at += sizeof(Elf64_Dyn))
+    {
+        Elf64_Dyn entry;
+        memcpy(&entry, bytes + dynamic_offset + at, sizeof(entry));
+        strings = entry.d_tag == DT_STRTAB ? entry.d_un.d_ptr - load_address + load_offset : strings;
+    }
+    valid = valid && strings != 0 && strings < length;
+    uint64_t used = 0;
+    for (uint64_t at = 0; valid && at + sizeof(Elf64_Dyn) <= dynamic_size; at += sizeof(Elf64_Dyn))
+    {
+        Elf64_Dyn entry;
+        memcpy(&entry, bytes + dynamic_offset + at, sizeof(entry));
+        if (entry.d_tag == DT_NEEDED)
+        {
+            const uint64_t name = strings + entry.d_un.d_val;
+            valid = name < length && memchr(bytes + name, 0, length - name) != NULL;
+            const int written = valid ? snprintf(names + used, capacity - used, "%s%s", used != 0 ? " " : "", (const char*)bytes + name) : 0;
+            valid = valid && written > 0 && used + (uint64_t)written < capacity;
+            used += valid ? (uint64_t)written : 0;
+        }
+    }
+    free(bytes);
+    return valid;
+}
+
+// The direct path's -l libraries, through the production command (#145): a program that calls libm's functions, and
+// takes one's address, linked with -lm by both paths into the same bytes, that runs and prints what this executable's
+// own libm computes, needing libm.so.6 before libc.so.6; one that calls none, with -lm, needing libc.so.6 alone; and the
+// refusals, each named: no -lm, a library no directory has, and an archive with members.
+static void check_test_driver_libraries(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <math.h>\n#include <stdio.h>\ndouble (*pick)(double) = cos;\n"
+                                  "int main(void) { printf(\"%f %f %f %f\\n\", sin(2), sqrt(2.0), pow(2.0, 10.0), pick(0.5)); return 0; }\n";
+    static const char plain[] = "int puts(const char*);\nint main(void) { puts(\"plain\"); return 0; }\n";
+    static const char archive[] = "!<arch>\n/               0           0     0     644     4         `\n\0\0\0\0";
+    char source[256];
+    char plain_source[256];
+    char archive_path[256];
+    char outputs[2][256];
+    char plain_output[256];
+    snprintf(source, sizeof(source), "%s/math.c", directory);
+    snprintf(plain_source, sizeof(plain_source), "%s/plain.c", directory);
+    snprintf(archive_path, sizeof(archive_path), "%s/libbuster_members.a", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/math", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/math-scalar", directory);
+    snprintf(plain_output, sizeof(plain_output), "%s/plain", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1) && parse_test_write(plain_source, plain, sizeof(plain) - 1) &&
+                         parse_test_write(archive_path, archive, sizeof(archive) - 1);
+    check_test_expect(test, written, "library programs written");
+    char* text = NULL;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-o", outputs[0], source, "-lm", NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", outputs[1], source, "-lm", NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "-lm links libm's functions" : "-lm links libm's functions, scalar");
+        free(text);
+    }
+    check_test_expect(test, written && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable with -lm");
+    char needed[256] = { 0 };
+    check_test_expect(test, written && check_test_driver_needed(outputs[0], needed, sizeof(needed)) && strcmp(needed, "libm.so.6 libc.so.6") == 0,
+                      "libm.so.6 needed before libc.so.6");
+    char expected[256];
+    snprintf(expected, sizeof(expected), "%f %f %f %f\n", sin(2), sqrt(2.0), pow(2.0, 10.0), cos(0.5));
+    char captured[256] = { 0 };
+    FILE* output = written ? popen(outputs[0], "r") : NULL;
+    const size_t got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
+    const int closed = output != NULL ? pclose(output) : -1;
+    check_test_expect(test, closed == 0 && got == strlen(expected) && memcmp(captured, expected, got) == 0, "the program prints libm's results");
+    char* const plain_arguments[] = { (char*)executable, "-o", plain_output, plain_source, "-lm", NULL };
+    const int plain_status = written ? check_test_driver_spawn(plain_arguments, &text) : -1;
+    free(text);
+    check_test_expect(test, plain_status == 0 && check_test_driver_needed(plain_output, needed, sizeof(needed)) && strcmp(needed, "libc.so.6") == 0,
+                      "-lm unused needs libc.so.6 alone (as needed)");
+    struct
+    {
+        const char* name;
+        const char* message;
+        char* arguments[8];
+    } const refusals[] = {
+        { "no -lm", "undefined reference to 'cos'", { (char*)executable, "-o", outputs[0], source, NULL } },
+        { "a library nowhere", "cannot find -lbuster_nowhere", { (char*)executable, "-o", outputs[0], source, "-lm", "-lbuster_nowhere", NULL } },
+        { "an archive with members", "unsupported: static libraries", { (char*)executable, "-o", outputs[0], source, "-L", (char*)directory, "-lbuster_members", NULL } },
+    };
+    for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
+    {
+        const int status = check_test_driver_spawn(refusals[r].arguments, &text);
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, refusals[r].message) != NULL, refusals[r].name);
+        free(text);
+    }
+    unlink(source);
+    unlink(plain_source);
+    unlink(archive_path);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+    unlink(plain_output);
+}
+
 static void check_test_driver_diagnostic_capacity(CheckTest* test)
 {
     Arena scratch = arena_reserve(64);
@@ -638,6 +839,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary)
     {
         check_test_driver_lazy(&test, clang, executable, directory);
+        if (executable != NULL)
+        {
+            check_test_driver_libraries(&test, executable, directory);
+        }
         rmdir(directory);
     }
     printf("checker-driver: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);

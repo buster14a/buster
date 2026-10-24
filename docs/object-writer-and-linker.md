@@ -2542,6 +2542,40 @@ different ELF layouts and file sizes.
 | 2,000 / 8 | 0.192 | 0.177 | 9.957 | 7.020 / 5.869 | 6.964 / 3.717 | 2.984 / 2.892 |
 | 102,400 / 64 | 15.115 | 14.852 | 438.187 | 69.563 / 129.929 | 46.835 / 116.810 | 30.672 / 126.615 |
 
+#### Libraries named with `-l`
+
+A program that calls a library besides the C runtime's (libm's `sin`, #145's c-testsuite 00174) names it as it
+names it to GCC's driver: `-lNAME`, with `-LDIR` for directories to search first. `runtime_libraries_import`
+(`runtime.c`) finds each as GNU ld does, `libNAME.so` or else `libNAME.a` in the first directory that has one, the
+`-L` ones, then glibc's library directories, and imports what it finds with the same readers the runtime's
+libraries take: a shared library by `import_library`, its exports indexed, and a linker script (glibc's `libm.so`,
+`GROUP ( libm.so.6 AS_NEEDED ( libmvec.so.1 ) )`) by `import_script`, standing for the libraries it names, each an
+absolute path. Each library's version indices move past the runtime's (libc.so.6's, then the loader's) and the
+libraries' before it, as `runtime_move_loader_versions` moves the loader's, so that an index names one library's
+version in the link's symbols. A library named twice (its soname) is linked once.
+
+Binding (`bind.c`, `Bind.libraries`, which the caller sets between `bind_begin` and `bind_end`) takes a name that
+nothing in the link defines from the libraries before `libc.so.6`, where GCC's driver puts `-l` libraries on the
+line (`crt… main.o -lm … -lc`): `ldexp`, which both libm and libc export, binds to libm's, as GNU ld and lld bind
+it. A library is needed only for a strong reference that binds to it, as GCC's driver links them on Debian and
+Ubuntu (`--as-needed`), and lld with it: a weak reference to a library nothing else needs is left to nothing
+(`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
+a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
+library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
+each required exactly when needed, and their versions in `.gnu.version_r`.
+
+What isn't linked yet: an archive with members (`libNAME.a` found first, or one a script names) is refused by name;
+an empty one, as glibc 2.34 and later install `libpthread.a`, `libdl.a` and `librt.a`, adds nothing, as GNU ld
+links it. The libraries aren't in the runtime's snapshot: they differ from link to link, so each link reads and
+imports its own (libm.so.6 is 0.9 MB). On the cloud VM (not a 9700X measurement), compiling and linking a hello
+world took a median 22.9 ms with `-lm` and 22.4 ms without it, over 60 interleaved runs each (p10 to p90 about 21 to
+26 ms both ways); the 9700X's numbers wait for `benchmark-link` to take libraries.
+
+`test-bind`'s "libraries" check binds links made by hand with this system's libm by both paths into the same link
+(the line order, a weak reference alone, the exports) and the import's refusals on files of its own;
+`test-checker-driver --executable` links a program that calls libm's functions by both paths into the same bytes,
+runs it against this executable's libm, and reads `DT_NEEDED` back.
+
 #### The unwind tables
 
 Step 5 compares the direct path with linkers on outputs of the same features,

@@ -84,6 +84,9 @@ typedef enum RuntimeError
     RUNTIME_ERROR_FILE,
     // An arena couldn't hold what the runtime needs.
     RUNTIME_ERROR_MEMORY,
+    // A library a link names with -l (RuntimeLibraries) is an archive, which the direct path doesn't link yet
+    // (RuntimeLibraries.failed says which).
+    RUNTIME_ERROR_ARCHIVE,
 } RuntimeError;
 
 // What the runtime is for: the files GCC's driver links around a program's objects (see the orientation comment).
@@ -331,6 +334,50 @@ static __attribute__((unused)) void runtime_release(Runtime* runtime);
 // Whether a runtime of `kind` is libc.a's, with archives and without a shared library: a static executable's or a static
 // PIE's.
 static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
+
+// The shared libraries a link names with -l, which it binds after the program and before the C runtime's libraries,
+// where GCC's driver puts them on the link line (bind.c). -l NAME is lib<NAME>.so, or else lib<NAME>.a, in the first of
+// the -L directories, then the library directories (runtime_library_directories), that has one, as GNU ld searches; an
+// archive found first is refused, since the direct path doesn't link one yet. A file that is a linker script (glibc's
+// libm.so, in libc.so's subset: import_script) stands for the shared libraries it names, each an absolute path. Each
+// library is imported as libc.so.6 is (import_library), with an index of the names it refers to, and its version
+// indices are moved past the runtime's and the libraries' before it, so that an index names one library's version, as
+// runtime_move_loader_versions moves the loader's. A link needs a library only for a strong reference that binds to it,
+// as GCC's driver links them on Debian and Ubuntu (--as-needed).
+#define BUSTER_RUNTIME_LIBRARIES 32
+
+typedef struct RuntimeLibraries RuntimeLibraries;
+struct RuntimeLibraries
+{
+    ImportLibrary libraries[BUSTER_RUNTIME_LIBRARIES];
+    // By library: the names it refers to, indexed by their hashes (ImportReferences.hash).
+    ImportNameIndex references[BUSTER_RUNTIME_LIBRARIES];
+    String8 paths[BUSTER_RUNTIME_LIBRARIES];
+    uint32_t count;
+    // The files' bytes, which the libraries' names point into, and their columns and indices.
+    Arena arena;
+    // When it failed: the -l name or the file, the importer's result, and errno.
+    char failed[BUSTER_RUNTIME_PATH_BYTES];
+    ImportResult import;
+    int system_error;
+};
+
+// Imports the libraries that `name_count` -l names find, in their order, through `directory_count` -L directories, for
+// a link against `runtime`, into an arena of their own that runtime_libraries_release frees. On failure,
+// RUNTIME_ERROR_MISSING for a name no directory has, RUNTIME_ERROR_ARCHIVE for one found as an archive first,
+// RUNTIME_ERROR_IMPORT for a file that is neither a shared library nor a script the reader takes, or for a script that
+// names another script, an archive or a path that isn't absolute, RUNTIME_ERROR_FILE or RUNTIME_ERROR_MEMORY, with
+// `failed` saying where.
+static __attribute__((unused)) RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names,
+                                                                    uint32_t name_count, const String8* directories, uint32_t directory_count);
+static __attribute__((unused)) void runtime_libraries_release(RuntimeLibraries* libraries);
+// The first library, in link order, that exports `name`: its index plus 1, and the export's index in *export; 0 for none
+// (also with no libraries).
+static __attribute__((unused)) uint32_t runtime_libraries_export(const RuntimeLibraries* libraries, const uint8_t* name, uint32_t length, uint64_t hash,
+                                                                uint32_t* export);
+// Whether library `l` refers to `name` without defining it.
+static __attribute__((unused)) bool runtime_libraries_refer(const RuntimeLibraries* libraries, uint32_t l, const uint8_t* name, uint32_t length,
+                                                           uint64_t hash);
 // Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
 // st_size, st_mtim and st_ctim.
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
@@ -1654,6 +1701,264 @@ static void runtime_release(Runtime* runtime)
         arena_release(&runtime->names);
         arena_release(&runtime->files);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Libraries a link names (-l)
+
+// The address space the libraries' arena reserves: their files' bytes and columns.
+#define BUSTER_RUNTIME_LIBRARIES_BYTES (UINT64_C(1) << 34)
+
+// Reads the file at `path` into the libraries' arena: its bytes, NUL-terminated, or empty with *error set.
+static String8 runtime_libraries_read(RuntimeLibraries* libraries, const char* path, RuntimeError* error)
+{
+    String8 result = { 0 };
+    const int file = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    struct stat status;
+    const bool opened = file >= 0 && fstat(file, &status) == 0 && S_ISREG(status.st_mode);
+    char* bytes = opened ? arena_push(&libraries->arena, (uint64_t)status.st_size + 1, 64) : 0;
+    uint64_t done = 0;
+    int read_error = opened ? 0 : file >= 0 ? EINVAL : errno;
+    while (bytes != 0 && read_error == 0 && done < (uint64_t)status.st_size)
+    {
+        const ssize_t count = read(file, bytes + done, (uint64_t)status.st_size - done);
+        read_error = count > 0 || (count < 0 && errno == EINTR) ? 0 : count == 0 ? EIO : errno;
+        done += count > 0 ? (uint64_t)count : 0;
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    if (opened && bytes == 0)
+    {
+        *error = RUNTIME_ERROR_MEMORY;
+    }
+    else if (!opened || read_error != 0)
+    {
+        *error = RUNTIME_ERROR_FILE;
+        libraries->system_error = read_error;
+    }
+    else
+    {
+        bytes[done] = 0;
+        result.pointer = bytes;
+        result.length = done;
+    }
+    if (*error != RUNTIME_ERROR_NONE)
+    {
+        snprintf(libraries->failed, sizeof(libraries->failed), "%s", path);
+    }
+    return result;
+}
+
+// Finds -l `name` into `path`: lib<name>.so, or else lib<name>.a, in the first directory that has one, the -L ones in
+// order, then the library directories. Whether one was found, and in *archive whether it is the archive.
+static bool runtime_libraries_find(String8 name, const String8* directories, uint32_t directory_count, char* path, bool* archive)
+{
+    const uint32_t total = directory_count + (uint32_t)BUSTER_ARRAY_LENGTH(runtime_library_directories);
+    bool found = false;
+    *archive = false;
+    for (uint32_t d = 0; !found && d < total; d += 1)
+    {
+        const String8 directory = d < directory_count ? directories[d] : (String8){
+            .pointer = (char*)runtime_library_directories[d - directory_count],
+            .length = strlen(runtime_library_directories[d - directory_count]),
+        };
+        for (uint32_t kind = 0; !found && kind < 2; kind += 1)
+        {
+            const int length = snprintf(path, BUSTER_RUNTIME_PATH_BYTES, "%.*s/lib%.*s%s", (int)directory.length, directory.pointer, (int)name.length,
+                                        name.pointer, kind == 0 ? ".so" : ".a");
+            struct stat status;
+            found = length > 0 && length < BUSTER_RUNTIME_PATH_BYTES && stat(path, &status) == 0 && S_ISREG(status.st_mode);
+            *archive = found && kind == 1;
+        }
+    }
+    return found;
+}
+
+// The largest version index of `library`'s definitions (0 for a library without versions).
+static uint16_t runtime_libraries_top(const ImportLibrary* library)
+{
+    uint16_t top = 0;
+    for (uint32_t v = 0; v < library->version_count; v += 1)
+    {
+        top = library->versions[v].index > top ? library->versions[v].index : top;
+    }
+    return top;
+}
+
+// Imports the shared library `bytes` (at `path`) as the next library, its version indices moved past `*base`, which
+// moves past its own; with an index of the names it refers to. A library named twice (by its soname, whatever the
+// path) is linked once, at its first place, as GNU ld loads it once.
+static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const char* path, String8 bytes, uint16_t* base)
+{
+    RuntimeError result = libraries->count < BUSTER_RUNTIME_LIBRARIES ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
+    ImportLibrary* library = &libraries->libraries[libraries->count];
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        libraries->import = import_library(library, bytes, &libraries->arena);
+        result = libraries->import.error == IMPORT_ERROR_NONE ? result : RUNTIME_ERROR_IMPORT;
+    }
+    bool repeated = false;
+    for (uint32_t l = 0; result == RUNTIME_ERROR_NONE && l < libraries->count; l += 1)
+    {
+        const String8 soname = libraries->libraries[l].soname;
+        repeated = repeated || (soname.length != 0 && soname.length == library->soname.length && memcmp(soname.pointer, library->soname.pointer, soname.length) == 0);
+    }
+    const uint16_t top = result == RUNTIME_ERROR_NONE ? runtime_libraries_top(library) : 0;
+    if (result == RUNTIME_ERROR_NONE && (uint32_t)*base + top >= 0x8000)
+    {
+        // Version indices are 15 bits.
+        result = RUNTIME_ERROR_IMPORT;
+    }
+    if (result == RUNTIME_ERROR_NONE && !repeated)
+    {
+        for (uint32_t v = 0; v < library->version_count; v += 1)
+        {
+            library->versions[v].index = (uint16_t)(library->versions[v].index + *base);
+        }
+        for (uint32_t e = 0; e < library->exports.count; e += 1)
+        {
+            const uint16_t version = library->exports.version[e];
+            library->exports.version[e] = version > VER_NDX_GLOBAL ? (uint16_t)(version + *base) : version;
+        }
+        *base = (uint16_t)(*base + top);
+        const ImportReferences* references = &library->references;
+        result = import_index_build(&libraries->references[libraries->count], references->hash, references->count, &libraries->arena) ? result : RUNTIME_ERROR_MEMORY;
+    }
+    if (result == RUNTIME_ERROR_NONE && !repeated)
+    {
+        const uint64_t length = strlen(path);
+        char* copy = arena_push(&libraries->arena, length + 1, 1);
+        result = copy != 0 ? result : RUNTIME_ERROR_MEMORY;
+        if (copy != 0)
+        {
+            memcpy(copy, path, length + 1);
+            libraries->paths[libraries->count] = (String8){
+                .pointer = copy,
+                .length = length,
+            };
+            libraries->count += 1;
+        }
+    }
+    if (result != RUNTIME_ERROR_NONE)
+    {
+        snprintf(libraries->failed, sizeof(libraries->failed), "%s", path);
+    }
+    return result;
+}
+
+// Whether `bytes` are an ELF file: a library to import, where anything else is read as a script.
+static bool runtime_libraries_elf(String8 bytes)
+{
+    return bytes.length >= SELFMAG && memcmp(bytes.pointer, ELFMAG, SELFMAG) == 0;
+}
+
+static RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names, uint32_t name_count,
+                                             const String8* directories, uint32_t directory_count)
+{
+    *libraries = (RuntimeLibraries){ 0 };
+    libraries->arena = arena_reserve(BUSTER_RUNTIME_LIBRARIES_BYTES);
+    RuntimeError result = libraries->arena.base != 0 ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
+    // Past libc.so.6's and the loader's indices, which runtime_move_loader_versions made apart.
+    const uint16_t libc_top = runtime_libraries_top(&runtime->libc);
+    const uint16_t loader_top = runtime_libraries_top(&runtime->loader);
+    uint16_t base = libc_top > loader_top ? libc_top : loader_top;
+    for (uint32_t n = 0; result == RUNTIME_ERROR_NONE && n < name_count; n += 1)
+    {
+        char path[BUSTER_RUNTIME_PATH_BYTES];
+        bool archive = false;
+        if (!runtime_libraries_find(names[n], directories, directory_count, path, &archive))
+        {
+            result = RUNTIME_ERROR_MISSING;
+            snprintf(libraries->failed, sizeof(libraries->failed), "-l%.*s", (int)names[n].length, names[n].pointer);
+        }
+        const String8 bytes = result == RUNTIME_ERROR_NONE ? runtime_libraries_read(libraries, path, &result) : (String8){ 0 };
+        // An archive without members (glibc's libpthread.a, libdl.a and librt.a since 2.34) adds nothing, as GNU ld links
+        // it; one with members is refused.
+        const uint64_t magic = sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1;
+        const bool empty = archive && bytes.length == magic && memcmp(bytes.pointer, BUSTER_IMPORT_ARCHIVE_MAGIC, magic) == 0;
+        if (result == RUNTIME_ERROR_NONE && archive && !empty)
+        {
+            result = RUNTIME_ERROR_ARCHIVE;
+            snprintf(libraries->failed, sizeof(libraries->failed), "%s", path);
+        }
+        if (result == RUNTIME_ERROR_NONE && archive)
+        {
+            // The empty archive.
+        }
+        else if (result == RUNTIME_ERROR_NONE && runtime_libraries_elf(bytes))
+        {
+            result = runtime_libraries_add(libraries, path, bytes, &base);
+        }
+        else if (result == RUNTIME_ERROR_NONE)
+        {
+            // A script's inputs, each an absolute path to a shared library (glibc's name them so).
+            ImportScript script = { 0 };
+            libraries->import = import_script(&script, bytes, &libraries->arena);
+            result = libraries->import.error == IMPORT_ERROR_NONE ? result : RUNTIME_ERROR_IMPORT;
+            if (result != RUNTIME_ERROR_NONE)
+            {
+                snprintf(libraries->failed, sizeof(libraries->failed), "%s", path);
+            }
+            for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < script.input_count; i += 1)
+            {
+                const ImportScriptInput* input = &script.inputs[i];
+                const uint64_t length = input->name.length;
+                char input_path[BUSTER_RUNTIME_PATH_BYTES];
+                snprintf(input_path, sizeof(input_path), "%.*s", (int)length, input->name.pointer);
+                const bool absolute = !input->library && length > 0 && length < sizeof(input_path) && input->name.pointer[0] == '/';
+                const bool input_archive = length > 2 && memcmp(input->name.pointer + length - 2, ".a", 2) == 0;
+                if (!absolute || input_archive)
+                {
+                    result = input_archive ? RUNTIME_ERROR_ARCHIVE : RUNTIME_ERROR_IMPORT;
+                    snprintf(libraries->failed, sizeof(libraries->failed), "%s, which %s names", input_path, path);
+                }
+                const String8 input_bytes = result == RUNTIME_ERROR_NONE ? runtime_libraries_read(libraries, input_path, &result) : (String8){ 0 };
+                if (result == RUNTIME_ERROR_NONE && !runtime_libraries_elf(input_bytes))
+                {
+                    result = RUNTIME_ERROR_IMPORT;
+                    snprintf(libraries->failed, sizeof(libraries->failed), "%s, a script that %s names", input_path, path);
+                }
+                result = result == RUNTIME_ERROR_NONE ? runtime_libraries_add(libraries, input_path, input_bytes, &base) : result;
+            }
+        }
+    }
+    return result;
+}
+
+static void runtime_libraries_release(RuntimeLibraries* libraries)
+{
+    arena_release(&libraries->arena);
+    libraries->count = 0;
+}
+
+static uint32_t runtime_libraries_export(const RuntimeLibraries* libraries, const uint8_t* name, uint32_t length, uint64_t hash, uint32_t* export)
+{
+    uint32_t result = 0;
+    for (uint32_t l = 0; libraries != 0 && result == 0 && l < libraries->count; l += 1)
+    {
+        const uint32_t found = import_library_find(&libraries->libraries[l], name, length, hash);
+        *export = found != 0 ? found - 1 : *export;
+        result = found != 0 ? l + 1 : 0;
+    }
+    return result;
+}
+
+static bool runtime_libraries_refer(const RuntimeLibraries* libraries, uint32_t l, const uint8_t* name, uint32_t length, uint64_t hash)
+{
+    const ImportReferences* references = &libraries->libraries[l].references;
+    const ImportNameIndex* index = &libraries->references[l];
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    import_index_bucket(index, hash, &begin, &end);
+    bool found = false;
+    for (uint32_t place = begin; !found && place < end; place += 1)
+    {
+        const uint32_t reference = index->order[place];
+        found = index->hash[place] == hash && references->length[reference] == length && import_same_bytes(references->name[reference], name, length);
+    }
+    return found;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

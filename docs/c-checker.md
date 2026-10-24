@@ -19,10 +19,22 @@ checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`executable_write`). A binding that finds the snapshot damaged discards it and
 links once more from a fresh import. `--verify` also checks every function's
 records with `x86_validate`, as the c-testsuite harness asks
-([the c-testsuite guide](c-testsuite.md)). The direct path links `libc.so.6`
-and its loader alone: a call of a function that a system header declares and
-the C library lacks (libm's) and a read or write of the C library's data (which
-needs the GOT) are refused by name; `-c` and a system linker take both.
+([the c-testsuite guide](c-testsuite.md)).
+
+`-lNAME` (or `-l NAME`) links a shared library besides the C runtime's, found as
+GNU ld finds it: `libNAME.so`, or else `libNAME.a`, in the first of the `-LDIR`
+directories, then glibc's library directories, that has one; a linker script
+(glibc's `libm.so`) stands for the libraries it names. Binding takes a name
+from them before `libc.so.6`, where GCC's driver puts them on the line, and the
+executable needs one only for a strong reference that binds to it, as GCC's
+driver links them on Debian and Ubuntu (`--as-needed`); `DT_NEEDED` lists them
+before `libc.so.6` (`runtime_libraries_import`, `bind.c` and `dynamic.c`). An
+empty archive (glibc's `libpthread.a`, `libdl.a` and `librt.a`) adds nothing;
+one with members is refused by name, since the direct path doesn't link
+archives yet. A call of a function that a system header declares and no linked
+library has gets a named error that points at `-l` (`-lm` for libm's). A read
+or write of the C library's data (which needs the GOT) is refused by name;
+`-c` and a system linker take it.
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check

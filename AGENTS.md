@@ -316,8 +316,9 @@ designs and the compilers already built this way.
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
   Tier 0 ([the checker guide](docs/c-checker.md)); and with neither option it
   links an executable (`-o`, `a.out` by default) by the direct path, bound
-  against the C runtime's snapshot, `--verify` checking every function's
-  records with `x86_validate`. `./build/compiler parse
+  against the C runtime's snapshot and the shared libraries `-lNAME` names
+  (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
+  checking every function's records with `x86_validate`. `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
