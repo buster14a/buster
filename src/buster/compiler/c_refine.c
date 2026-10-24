@@ -37,11 +37,12 @@
 //         which identifies a spelling of up to 11 bytes outright. The bookkeeping (slow, unmatched, longer) is 16
 //         identifiers at a time from their lengths and ids, as bits of masks.
 //      2b. A longer identifier's match is confirmed with one masked compare of its record's bytes and terminating
-//         zero, its record prefetched from its span before the next batch's stage 1 and compared after it.
+//         zero, after the next batch's stage 1.
 //      3. Nothing above branches on an identifier's outcome: one not found this way (a new spelling, a second
 //         candidate, a probe past its first bucket, or the scalar path) is deferred, and the deferred ones are interned
-//         in token order (intern_find_or_add_vector, from stage 1's bucket), so that new spellings get the same ids
-//         as refine_tokens_scalar gives them.
+//         in token order (refine_intern_deferred: a new spelling that its bucket shows absent is added there, and the
+//         others go to intern_find_or_add_vector, from stage 1's bucket), so that new spellings get the same ids as
+//         refine_tokens_scalar gives them.
 //   C. The block's ids, from the dense array, into its identifiers' values (vpexpandd, a masked store per 16 tokens).
 //
 // main.c includes this file after c_lexer.c (whose scalar lexer it uses for splices and UCNs), lane.c and
@@ -49,9 +50,9 @@
 // refine_identifier_key, refine_identifier_end, refine_gap_is_splices, refine_intern_identifier),
 // refine_tokens_scalar, then the vectorized path (RefineIdentifiers, refine_newlines_before, refine_scan_chunks,
 // refine_chunks_have_backslash, refine_step_splices, refine_pass_a, refine_key, refine_probe, refine_batch_specials,
-// refine_intern_batch_fused (the fused variant's pass B), RefineHashes, refine_hash_batch, refine_pass_b, refine_pass_c,
-// the instantiations, RefineProgress, refine_progress_words, refine_progress_begin, refine_tokens_with,
-// refine_tokens_whole, RefineVariant, refine_tokens_variant, refine_tokens and refine_tokens_blocks).
+// refine_intern_deferred, refine_intern_batch_fused (the fused variant's pass B), RefineHashes, refine_hash_batch,
+// refine_pass_b, refine_pass_c, the instantiations, RefineProgress, refine_progress_words, refine_progress_begin,
+// refine_tokens_with, refine_tokens_whole, RefineVariant, refine_tokens_variant, refine_tokens and refine_tokens_blocks).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -555,6 +556,39 @@ static __attribute__((noinline)) uint64_t refine_batch_specials(const uint8_t* s
     return result;
 }
 
+// Stage 3 of pass B for a deferred identifier of `identifier_length` bytes at `start` (`slow` if it takes the scalar key),
+// whose bucket stage 1 found at byte `offset` of a table of `bucket_mask` and whose key is `key` (refine_key's). Most
+// deferred identifiers are new spellings, which that bucket shows absent (no slot has their prefix, and one is empty):
+// they are added there (intern_add_in_bucket). The rest are interned as refine_tokens_scalar interns them, from that
+// bucket (unless an insert has grown the table since): the slow ones, repeats of a spelling added earlier in the batch,
+// longer ones whose record differs, and those whose bucket is full or whose table has to grow. Returns 0 if the table
+// runs out of room.
+BUSTER_INLINE IdentId refine_intern_deferred(InternTable* table, const uint8_t* source, uint64_t length, uint32_t start, uint32_t identifier_length, bool slow,
+                                             uint64_t bucket_mask, uint64_t offset, __m128i key, uint32_t flags)
+{
+    IdentId result = 0;
+    if (!slow && bucket_mask == table->bucket_mask)
+    {
+        uint8_t* const bucket = table->buckets + offset;
+        const __m512i slots = _mm512_load_si512(bucket);
+        const uint32_t empties = intern_bucket_empties(slots);
+        if (BUSTER_LIKELY(intern_bucket_matches(slots, intern_bucket_key(key)) == 0 && empties != 0))
+        {
+            const __m512i spelling = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, identifier_length), source + start);
+            result = intern_add_in_bucket(table, spelling, identifier_length, bucket, empties);
+        }
+    }
+    if (result == 0 && slow)
+    {
+        result = refine_intern_identifier(table, source, length, start, identifier_length, flags);
+    }
+    else if (result == 0)
+    {
+        result = intern_find_or_add_vector(table, source + start, identifier_length, bucket_mask, offset / BUSTER_INTERN_BUCKET_BYTES);
+    }
+    return result;
+}
+
 // The fused form of pass B, which the benchmark compares the pipelined one with (REFINE_VARIANT_FUSED_64): for
 // identifiers [begin, begin + count) of the dense arrays (count at most 64), each identifier loaded, hashed and probed
 // at once, without a prefetch (stages 1 and 2 fused), then the bookkeeping, 2b and stage 3 as refine_pass_b has them,
@@ -628,20 +662,13 @@ BUSTER_INLINE bool refine_intern_batch_fused(InternTable* table, const uint8_t* 
         deferred |= (uint64_t)(_mm512_mask_cmpneq_epi8_mask(compare_mask, bytes, record) != 0) << j;
     }
 
-    // 3. The deferred ones, in token order, each probing from its bucket (unless an insert has grown the table since).
+    // 3. The deferred ones, in token order (refine_intern_deferred).
     bool result = true;
     for (; result && deferred != 0; deferred &= deferred - 1)
     {
         const uint32_t j = (uint32_t)__builtin_ctzll(deferred);
-        IdentId id;
-        if ((slow >> j) & 1)
-        {
-            id = refine_intern_identifier(table, source, length, starts[j], lengths[j], flags);
-        }
-        else
-        {
-            id = intern_find_or_add_vector(table, source + starts[j], lengths[j], bucket_mask, offsets[j] / BUSTER_INTERN_BUCKET_BYTES);
-        }
+        const __m128i key = refine_key(intern_first_bytes(source + starts[j], lengths[j]));
+        const IdentId id = refine_intern_deferred(table, source, length, starts[j], lengths[j], ((slow >> j) & 1) != 0, bucket_mask, offsets[j], key, flags);
         ids[j] = id;
         result = id != 0;
     }
@@ -781,16 +808,15 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
 
 // Pass B over a block's identifiers (identifiers->count of them), in batches of `batch` (at most 64), with each
 // identifier's id in `identifiers->ids`, pipelined: a batch's stages 2 to 3 run with the next batch's stage 1 in their
-// middle, after 2b has loaded its candidates' spans and prefetched their records (two dependent loads per candidate, from
-// the table's spans and records) and before it compares them, so that the hashing hides those loads; and the buckets a
-// batch probes were prefetched a batch earlier. A batch's stages:
+// middle, before 2b, so that the buckets a batch probes were prefetched a batch earlier. A batch's stages:
 //   2. Each identifier's bucket is probed for its prefix with one compare.
 //   Bookkeeping, 16 identifiers at a time from their lengths and ids, as bits of masks: which are slow (longer than
 //   BUSTER_INTERN_FAST_LENGTH, or with a backslash), unmatched, or candidates (longer than BUSTER_INTERN_SHORT_LENGTH,
 //   with a match).
 //   2b. A candidate is confirmed against its record.
-//   3. The deferred ones (slow, unmatched or not confirmed) in token order, which may grow the table: then the next
-//      batch, hashed for the table as it was, is hashed again.
+//   3. The deferred ones (slow, unmatched or not confirmed) in token order (refine_intern_deferred: most are new
+//      spellings, added in the bucket stage 2 probed), which may grow the table: then the next batch, hashed for the
+//      table as it was, is hashed again.
 // The table's arrays are read once per batch into locals, so that the stores of ids can't make Clang read them again for
 // every identifier. Returns false if the intern table runs out of room.
 BUSTER_INLINE bool refine_pass_b(InternTable* table, const uint8_t* source, uint64_t length, RefineIdentifiers* identifiers, uint32_t flags, const bool trigraphs,
@@ -856,21 +882,16 @@ BUSTER_INLINE bool refine_pass_b(InternTable* table, const uint8_t* source, uint
         uint64_t deferred = slow | unmatched;
         const uint64_t candidates = longer & ~deferred;
 
-        // 2b, first half: each candidate's record prefetched, from its span.
-        for (uint64_t remaining = candidates; remaining != 0; remaining &= remaining - 1)
-        {
-            const uint32_t j = (uint32_t)__builtin_ctzll(remaining);
-            _mm_prefetch((const char*)(records + spans[ids[j]].offset), _MM_HINT_T0);
-        }
-
-        // The next batch's stage 1, while those loads are in flight.
+        // The next batch's stage 1.
         const uint32_t next = first + count;
         if (next < total)
         {
             refine_hash_batch(table, source, length, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1], trigraphs);
         }
 
-        // 2b, second half: one masked compare of each candidate's bytes and terminating zero with its record.
+        // 2b. One masked compare of each candidate's bytes and terminating zero with its record. Its span's and record's
+        // loads are the out-of-order core's to overlap: prefetching them first, in a loop of their own before the next
+        // batch's stage 1, made sqlite3.c's refinement take 0.08 ms more on the 9700X.
         for (uint64_t remaining = candidates; remaining != 0; remaining &= remaining - 1)
         {
             const uint32_t j = (uint32_t)__builtin_ctzll(remaining);
@@ -881,20 +902,13 @@ BUSTER_INLINE bool refine_pass_b(InternTable* table, const uint8_t* source, uint
             deferred |= (uint64_t)(_mm512_mask_cmpneq_epi8_mask(compare_mask, bytes, record) != 0) << j;
         }
 
-        // 3. The deferred ones, in token order: new spellings get the ids the scalar reference gives them. Each starts its
-        // probe at the bucket stage 1 found (unless an insert has grown the table since).
+        // 3. The deferred ones, in token order, so that new spellings get the ids the scalar reference gives them
+        // (refine_intern_deferred).
         for (; result && deferred != 0; deferred &= deferred - 1)
         {
             const uint32_t j = (uint32_t)__builtin_ctzll(deferred);
-            IdentId id;
-            if ((slow >> j) & 1)
-            {
-                id = refine_intern_identifier(table, source, length, starts[j], lengths[j], flags);
-            }
-            else
-            {
-                id = intern_find_or_add_vector(table, source + starts[j], lengths[j], current->bucket_mask, offsets[2 * j] / BUSTER_INTERN_BUCKET_BYTES);
-            }
+            const IdentId id = refine_intern_deferred(table, source, length, starts[j], lengths[j], ((slow >> j) & 1) != 0, current->bucket_mask, offsets[2 * j], keys[j],
+                                                      flags);
             ids[j] = id;
             result = id != 0;
         }
