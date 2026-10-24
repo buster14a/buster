@@ -1,4 +1,0 @@
-2026-10-23T13:57:00+02:00 RUNNING seed=201 first=0 count=200000
-fuzz: c17, seed 201: 200000 cases, 83534 accepted; the kernels differ on 0; 199997 compared with clang (3920 with clang's tokens, 3 unverified), 0 differ (2048 read alone), 0 batches differ from the case alone, 0 batches read case by case; 0 without a result; 9027 whose text can't lex back, as clang's can't
-fuzz: c23, seed 201: 200000 cases, 83652 accepted; the kernels differ on 0; 199997 compared with clang (4258 with clang's tokens, 3 unverified), 0 differ (2048 read alone), 0 batches differ from the case alone, 0 batches read case by case; 0 without a result; 9294 whose text can't lex back, as clang's can't
-2026-10-23T14:02:49+02:00 FAILED seed=201 first=0 exit=1 summaries=0,0 valid=0
