@@ -54,10 +54,13 @@ struct ForeignLinkLanes
     uint32_t* first_typed;
 };
 
-// Whether every lane goes on: lane 0 decides from the conversion's result, every lane gets its answer.
+// Whether every lane goes on: lane 0 decides from the conversion's result and every lane gets its answer. Only lane 0
+// reads the result: it writes it in the steps it takes alone, and another lane's read before the broadcast's barrier
+// would race with those writes, though the broadcast only keeps lane 0's answer.
 static bool foreign_link_lanes_proceed(ForeignLinkLanes* state)
 {
-    return lane_broadcast(state->build->result.error == FOREIGN_LINK_ERROR_NONE, 0) != 0;
+    const bool proceed = lane_index() == 0 && state->build->result.error == FOREIGN_LINK_ERROR_NONE;
+    return lane_broadcast(proceed, 0) != 0;
 }
 
 // The global names' symbols on lanes (see the file's comment). Every lane calls it; lane 0 sets build->result.
