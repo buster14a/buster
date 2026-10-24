@@ -79,3 +79,20 @@ reused. Each is fixed in #369 with permanent fixtures.
   per mode): the comparison dropped a case's last whole token whose spelling
   ends in whitespace. Three end controls; and clang's NUL spelling at a
   file's end, `pp_test_trailing_splices`.
+
+## Confirmation on the merged head
+
+After the freeze, David merged #373 (#370's line markers) into #369's
+branch, and #369 took main's #372 (epoch and calendar validation), both of
+which change `c_preprocessor.c`. The merged head, `8aeeecb` (tree
+`8af57d0d49e363b28299c92c9f2a01fb026ffaf0`), passed the full checks, CI and a
+confirmation campaign of fresh seeds by the same runner and audit
+(`confirmation/`):
+
+| Host | Seed | Slices | Fully verified cases per mode (C17, C23) | Unverified | Differ | Without a result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Local, 16 jobs | 5001 | 5 | 1,000,000, 1,000,000 | 0 | 0 | 0 |
+| 9700X | 5101 | 5 | 1,000,000, 1,000,000 | 0 | 0 | 0 |
+
+The 9700X log names the slice from 400,000 three times: two runners were
+stopped while they waited for the lock, before it ran; the third ran it.
