@@ -577,8 +577,11 @@ static void cbuiltin_va_lower_test_shape_oracle(va_list oracle, uint32_t shape, 
     }
 }
 
-// The shapes' sequences: each argument a shape's index, or a long or a double between them, which leave a kind of
-// register too few for the next shape, or none; then the sequence's end.
+// The shapes' sequences: each argument a shape's index, or a long or a double between them; then the sequence's end.
+// The helpers' named arguments take one general register and one vector register, which leave five and seven to the
+// sequences, so that each shape is read from registers in one sequence and from the overflow area in another: once the
+// registers of its kinds run out, or when one of a kind is left for a shape that needs two, which the next long or
+// double then takes (sequences 1 and 3).
 #define BUSTER_CBUILTIN_VA_TEST_LONG 100u
 #define BUSTER_CBUILTIN_VA_TEST_DOUBLE 101u
 #define BUSTER_CBUILTIN_VA_TEST_STOP 0xffu
@@ -587,29 +590,41 @@ static void cbuiltin_va_lower_test_shape_oracle(va_list oracle, uint32_t shape, 
 static const uint8_t cbuiltin_va_lower_test_sequences[BUSTER_CBUILTIN_VA_TEST_SEQUENCES][24] =
 {
     { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, BUSTER_CBUILTIN_VA_TEST_STOP },
-    { BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, 0,
-      BUSTER_CBUILTIN_VA_TEST_LONG, 4, 1, 9, 10, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_STOP },
-    { BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE,
-      BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, 1, 11, 5, 2, 0, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_STOP },
-    { BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG,
-      BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE,
-      BUSTER_CBUILTIN_VA_TEST_DOUBLE, 2, 3, 8, 7, 6, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_STOP },
+    { BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, 0, BUSTER_CBUILTIN_VA_TEST_LONG, 4, 1, 9, 10, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_STOP },
+    { BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, 1, 11, 5, 2, 0, 6, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_STOP },
+    { BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, 1, 2, 3, 8, 7, 6, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_STOP },
     { 11, 8, 9, 10, 7, 3, 6, 5, 4, BUSTER_CBUILTIN_VA_TEST_STOP },
 };
 
-// Sequence `sequence`'s arguments, read by the helpers from a list Clang started, each against Clang's va_arg of a
-// copy: an aggregate's data bytes copied out exactly, nothing around them written, and both cursors alike after it.
-static __attribute__((noinline)) void cbuiltin_va_lower_test_clang_shapes(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t sequence,
-                                                                         double named, ...)
+// What the sequences' reading needs, the helpers' one named general argument, and how each shape was read: bit 0 from
+// registers (the overflow area untouched), bit 1 from the overflow area.
+#define BUSTER_CBUILTIN_VA_TEST_REGISTERS 1u
+#define BUSTER_CBUILTIN_VA_TEST_OVERFLOW 2u
+typedef struct CBuiltinVaLowerTestRun CBuiltinVaLowerTestRun;
+struct CBuiltinVaLowerTestRun
+{
+    CBuiltinVaLowerTestTally* tally;
+    const CBuiltinVaLowerTestNative* native;
+    uint32_t path;
+    uint32_t sequence;
+    uint8_t read[BUSTER_CBUILTIN_VA_TEST_SHAPES];
+};
+
+// The run's sequence's arguments, read by the helpers from a list Clang started, each against Clang's va_arg of a copy:
+// an aggregate's data bytes copied out exactly, nothing around them written, and both cursors alike after it.
+static __attribute__((noinline)) void cbuiltin_va_lower_test_clang_shapes(CBuiltinVaLowerTestRun* run, double named, ...)
 {
     va_list generated;
     va_list oracle;
     va_start(generated, named);
     va_copy(oracle, generated);
-    const uint8_t* kinds = cbuiltin_va_lower_test_sequences[sequence];
+    CBuiltinVaLowerTestTally* tally = run->tally;
+    const CBuiltinVaLowerTestNative* native = run->native;
+    const uint32_t path = run->path;
+    const uint8_t* kinds = cbuiltin_va_lower_test_sequences[run->sequence];
     for (uint32_t i = 0; kinds[i] != BUSTER_CBUILTIN_VA_TEST_STOP; i += 1)
     {
-        const uint32_t item = 1000 + sequence * 100 + i;
+        const uint32_t item = 1000 + run->sequence * 100 + i;
         if (kinds[i] == BUSTER_CBUILTIN_VA_TEST_LONG || kinds[i] == BUSTER_CBUILTIN_VA_TEST_DOUBLE)
         {
             const uint32_t class = kinds[i] == BUSTER_CBUILTIN_VA_TEST_LONG ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64;
@@ -626,7 +641,12 @@ static __attribute__((noinline)) void cbuiltin_va_lower_test_clang_shapes(CBuilt
             memset(expected, 0xa5, sizeof(expected));
             cbuiltin_va_lower_test_shape_oracle(oracle, kinds[i], expected + 8);
             uint64_t (*entry)(void*, void*) = (uint64_t (*)(void*, void*))(void*)native->programs[path][BUSTER_CBUILTIN_VA_TEST_PROGRAMS + kinds[i]].bytes;
+            AbiVaList before;
+            AbiVaList after;
+            memcpy(&before, generated, sizeof(before));
             const uint64_t result = entry(generated, bytes + 8);
+            memcpy(&after, generated, sizeof(after));
+            run->read[kinds[i]] |= after.overflow_arg_area == before.overflow_arg_area ? BUSTER_CBUILTIN_VA_TEST_REGISTERS : BUSTER_CBUILTIN_VA_TEST_OVERFLOW;
             const bool outside = memcmp(bytes, expected, 8) == 0 && memcmp(bytes + 8 + shape->size, expected + 8 + shape->size, sizeof(bytes) - 8 - shape->size) == 0;
             const bool data = memcmp(bytes + 8 + shape->first, expected + 8 + shape->first, shape->size - shape->first) == 0;
             cbuiltin_va_lower_test_expect(tally, result == 0 && outside && data, "native aggregate bytes", item);
@@ -654,13 +674,23 @@ static void cbuiltin_va_lower_test_real_shapes(CBuiltinVaLowerTestTally* tally, 
     const CBuiltinVaTestChars chars = { { 'x', 'y', 'z' } };
     // Distinct halves, the high one's last byte 0xc0 (-3.5's sign and exponent).
     const CBuiltinVaTestVector vector = { { 1.25, -3.5 } };
-    cbuiltin_va_lower_test_clang_shapes(tally, native, path, 0, 0.5, general_pair, vector_pair, general_vector, vector_general, four, eight, twelve, longs, aligned, high, chars,
-                                        vector);
-    cbuiltin_va_lower_test_clang_shapes(tally, native, path, 1, 0.5, 1L, 2L, 3L, 4L, 5L, general_pair, 6L, four, vector_pair, high, chars, 7.5);
-    cbuiltin_va_lower_test_clang_shapes(tally, native, path, 2, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, vector_pair, vector, eight, general_vector, general_pair, 8L);
-    cbuiltin_va_lower_test_clang_shapes(tally, native, path, 3, 0.5, 1L, 2L, 3L, 4L, 5L, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, general_vector, vector_general, aligned, longs, twelve, 6L,
-                                        7.0);
-    cbuiltin_va_lower_test_clang_shapes(tally, native, path, 4, 0.5, vector, aligned, high, chars, longs, vector_general, twelve, eight, four);
+    CBuiltinVaLowerTestRun run = { tally, native, path, 0, { 0 } };
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, general_pair, vector_pair, general_vector, vector_general, four, eight, twelve, longs, aligned, high, chars, vector);
+    run.sequence = 1;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, 1L, 2L, 3L, 4L, general_pair, 5L, four, vector_pair, high, chars, 7.5);
+    run.sequence = 2;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, vector_pair, vector, eight, general_vector, general_pair, twelve, 8L);
+    run.sequence = 3;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, 1L, 2L, 3L, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, vector_pair, general_vector, vector_general, aligned, longs, twelve, 6L, 7.0);
+    run.sequence = 4;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, vector, aligned, high, chars, longs, vector_general, twelve, eight, four);
+    // Every shape read both ways, but the one always on the stack.
+    for (uint32_t k = 0; k < BUSTER_CBUILTIN_VA_TEST_SHAPES; k += 1)
+    {
+        const bool stack = cbuiltin_va_lower_test_shapes[k].kind == BUSTER_ABI_LOCATION_STACK;
+        const uint8_t expected = stack ? BUSTER_CBUILTIN_VA_TEST_OVERFLOW : BUSTER_CBUILTIN_VA_TEST_REGISTERS | BUSTER_CBUILTIN_VA_TEST_OVERFLOW;
+        cbuiltin_va_lower_test_expect(tally, run.read[k] == expected, "shape read from registers and from the overflow area", k);
+    }
 }
 
 static void cbuiltin_va_lower_test_synthetic(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path)
