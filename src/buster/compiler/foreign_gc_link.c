@@ -681,7 +681,8 @@ static ForeignLinkResult foreign_gc_link_external(ForeignLink* output, const For
     output->objects = BUSTER_ARENA_PUSH_ARRAY(arena, ImportObject, foreign->object_count);
     output->unwind = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignLinkUnwind*, foreign->object_count);
     SymbolId* exports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, input->dynamic.export_count);
-    ForeignLinkResult result = { .error = output->names != 0 && output->objects != 0 && output->unwind != 0 && exports != 0 ?
+    SymbolId* copies = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, input->dynamic.copy_count);
+    ForeignLinkResult result = { .error = output->names != 0 && output->objects != 0 && output->unwind != 0 && exports != 0 && copies != 0 ?
                                         FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY };
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
@@ -695,6 +696,12 @@ static ForeignLinkResult foreign_gc_link_external(ForeignLink* output, const For
         for (uint32_t i = 0; i < input->dynamic.export_count; i += 1)
         {
             exports[i] = state->symbols[input->dynamic.exports[i]];
+        }
+        // The copies are exports, roots that stay; export_versions keeps the exports' order.
+        output->dynamic.copies = copies;
+        for (uint32_t i = 0; i < input->dynamic.copy_count; i += 1)
+        {
+            copies[i] = state->symbols[input->dynamic.copies[i]];
         }
         output->dynamic.init = state->symbols[input->dynamic.init];
         output->dynamic.fini = state->symbols[input->dynamic.fini];

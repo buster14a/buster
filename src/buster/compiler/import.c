@@ -205,6 +205,11 @@ struct ImportExports
     uint64_t* size;
     uint8_t* flags;
     uint16_t* version;
+    // The definition's address in the library and its section's index (st_value and st_shndx), which a copy relocation
+    // needs to find the name's aliases and the copy's alignment, as GNU ld and lld find them. Only import_library fills
+    // them: a runtime snapshot doesn't keep them (null), since the direct path makes no copies.
+    uint64_t* value;
+    uint16_t* section;
     uint32_t count;
 };
 
@@ -3070,12 +3075,14 @@ static bool import_library_columns(ImportLibrary* library, uint64_t count, Arena
     exports->size = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count);
     exports->flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, count);
     exports->version = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, count);
+    exports->value = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count);
+    exports->section = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, count);
     references->name = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, count);
     references->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
     references->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count);
     references->weak = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, count);
-    return exports->name != 0 && exports->length != 0 && exports->hash != 0 && exports->size != 0 && exports->flags != 0 && exports->version != 0 && references->name != 0 &&
-           references->length != 0 && references->hash != 0 && references->weak != 0;
+    return exports->name != 0 && exports->length != 0 && exports->hash != 0 && exports->size != 0 && exports->flags != 0 && exports->version != 0 && exports->value != 0 &&
+           exports->section != 0 && references->name != 0 && references->length != 0 && references->hash != 0 && references->weak != 0;
 }
 
 // The sections a library's reader reads: .dynsym, .gnu.version, .gnu.version_d and .dynamic, each the first of its type
@@ -3219,6 +3226,8 @@ static ImportResult import_library_scalar(ImportLibrary* library, String8 bytes,
             exports->size[at] = symbol.st_size;
             exports->flags[at] = (uint8_t)((exported_type & BUSTER_LINK_SYMBOL_TYPE) | (exported_binding << 4));
             exports->version[at] = version_index;
+            exports->value[at] = symbol.st_value;
+            exports->section[at] = symbol.st_shndx;
             exports->count += 1;
         }
     }
@@ -3394,6 +3403,8 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
         import_store64(exports->size + e, _mm512_maskz_compress_epi64((__mmask8)exported, words[2]), export_count);
         import_store8(exports->flags + e, _mm512_maskz_compress_epi64((__mmask8)exported, flags), export_count);
         import_store16(exports->version + e, _mm512_maskz_compress_epi64((__mmask8)exported, version_index), export_count);
+        import_store64(exports->value + e, _mm512_maskz_compress_epi64((__mmask8)exported, words[1]), export_count);
+        import_store16(exports->section + e, _mm512_maskz_compress_epi64((__mmask8)exported, shndx), export_count);
         import_store64(references->name + r, _mm512_maskz_compress_epi64((__mmask8)referenced, pointers), reference_count);
         import_store8(references->weak + r, _mm512_maskz_compress_epi64((__mmask8)referenced, _mm512_maskz_mov_epi64((__mmask8)weak, _mm512_set1_epi64(1))), reference_count);
         exports->count += export_count;
