@@ -221,12 +221,22 @@ object's frame space, its size rounded up to 8, has room for.
 parts; then the general moves at once, an address that a move or a part would overwrite moved first into the register
 of its aggregate's last general part, where it waits; then each aggregate's general parts, the one in the register that
 holds its address last. Without XMM parts, both kinds of moves go at once, as a call without aggregates has them. An
-aggregate on the stack, and a temporary part's bytes, are copied with the stack arguments' stores, through each stack's
-first free register (the copies' scratch, which selection counts as reached). The vector path's measuring counts the
-records as it counts every call's (`tier0_count_deferred`), from the parts, the copies' sizes and the waits.
+aggregate on the stack, and a temporary part's bytes, are copied after the values' stores, through each stack's first
+free register (the copies' scratch, which selection counts as reached). The vector path's measuring counts the records
+as it counts every call's (`tier0_count_deferred`), from the parts, the copies' sizes and the waits.
+
+**At no cost to the rest.** A function without aggregates compiles as it did before them. Its calls take the emitter's
+and the counter's loops over the values alone: each is specialized on whether the function has `argument_sizes`
+(`tier0_emit_call` and `tier0_count_call`, always inlined, the flag a constant at each use). The aggregates' placement
+and moves (`tier0_place_aggregates`, `tier0_aggregate_moves`) and the result's loads (`tier0_load_result`) are passes
+of their own, out of line. Selection takes the copies' scratch in a pass of its own (`tier0_select_scratch`), and the
+passes over the parameters leave out what only objects need without one among them (`Tier0Frame.object_parameters`).
+[Measurements](#measurements) has what this saves on code without aggregates.
 
 **Validation.** `tier0_validate`, and both compile paths through `tier0_frame_input_valid`, refuse aggregates' metadata
-no emitter could follow: a location whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a slot
+no emitter could follow (the compile paths check a function's calls when it has `argument_sizes` or
+`call_result_objects`; without them its calls are the typed stream's, which `tier0_validate` checks, as the compile
+paths' precondition): a location whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a slot
 outside its call's stack area or an incoming one past int32, a register an earlier argument of the call takes, a
 call's stack alignment past 16, a result object that isn't an object with room for the registers' whole widths, a
 hidden pointer without an object or where an argument takes rdi, a function whose hidden result pointer isn't
@@ -767,6 +777,13 @@ path's 11.1.
   The scalar path, which shares the call emitter, went from 233.2 to 226.2 (589.0 to 559.8 instructions).
 - **The chosen forms applied on the records' halves** (the compiler had split the fields into byte loads and
   stores): 75.6 to 74.8 cycles per entry, 163.5 to 162.0 instructions, in four rounds run in turn, each 1.0 to 1.2%.
+- **Aggregates by value (#137)** at no cost to code without them. On these programs, which have no records, the 9700X
+  job measured the vector path at 182.2 instructions per entry when the aggregates' code was inline in every call's
+  emission and count, in selection's loop and in the passes over the parameters, against main's 166.8 (15.18 against
+  14.19 ns per entry), and the scalar path at 604.6 against 588.6. Intel SDE's counts on a VM, a measure of their own
+  (each path's run of `benchmark-backend` less its sizing run), put the vector path at 144.8 instructions per entry
+  inline, 132.5 specialized and out of line ("At no cost to the rest" above) and 130.8 without aggregates, and the
+  scalar path at 541.5, 528.1 and 527.3; after #407's scalar fusion, at 513.1 against 512.2.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
