@@ -4,7 +4,9 @@
 // Copy relocations and libraries' own references in foreign PIEs (foreign_link_copies, and the resolver's regular
 // references). Include from foreign_test.c after foreign_dynamic_test.c, whose image helpers it takes. The fixtures are
 // original: a library of data with aliases, a 64-byte alignment, read-only data and a version, which assembly reads by
-// PC32 as GCC's -fPIE code reads a library's data, and which the library itself reads back through its GOT; a C program
+// PC32 as GCC's -fPIE code reads a library's data, and which the library itself reads back through its GOT; an object of
+// eleven names, written by PC32 and read through the program's GOT by its ten aliases, each of which the library reads
+// back through its own; a C program
 // that reads libc's stdio streams and environ through the C runtime; a program that needs the loader, which libc.so's
 // script names as needed, by a reference of its own; and refusals of a function and of an object of no size reached
 // that way. Each resolution, on both paths and 1/2/3/8 lanes, writes a PIE that the loader runs, byte for byte alike;
@@ -81,6 +83,55 @@ static const ForeignCopyTestSource foreign_copy_test_sources[] = {
         .text = ".text\n.globl _start\n.type _start,@function\n_start:\nmov fc_empty(%rip),%eax\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
                 ".section .note.GNU-stack,\"\",@progbits\n",
     },
+    {
+        // One object of eleven names, which the library reads back through its GOT, name by name.
+        .file = "fc_many_library.s",
+        .text = ".data\n.globl fc_many\n.type fc_many,@object\n.size fc_many,4\nfc_many:\n.long 1\n"
+                ".globl fc_many_1\n.type fc_many_1,@object\n.size fc_many_1,4\n.set fc_many_1,fc_many\n"
+                ".globl fc_many_2\n.type fc_many_2,@object\n.size fc_many_2,4\n.set fc_many_2,fc_many\n"
+                ".globl fc_many_3\n.type fc_many_3,@object\n.size fc_many_3,4\n.set fc_many_3,fc_many\n"
+                ".globl fc_many_4\n.type fc_many_4,@object\n.size fc_many_4,4\n.set fc_many_4,fc_many\n"
+                ".globl fc_many_5\n.type fc_many_5,@object\n.size fc_many_5,4\n.set fc_many_5,fc_many\n"
+                ".globl fc_many_6\n.type fc_many_6,@object\n.size fc_many_6,4\n.set fc_many_6,fc_many\n"
+                ".globl fc_many_7\n.type fc_many_7,@object\n.size fc_many_7,4\n.set fc_many_7,fc_many\n"
+                ".globl fc_many_8\n.type fc_many_8,@object\n.size fc_many_8,4\n.set fc_many_8,fc_many\n"
+                ".globl fc_many_9\n.type fc_many_9,@object\n.size fc_many_9,4\n.set fc_many_9,fc_many\n"
+                ".globl fc_many_10\n.type fc_many_10,@object\n.size fc_many_10,4\n.set fc_many_10,fc_many\n"
+                ".text\n.globl fc_many_read\n.type fc_many_read,@function\nfc_many_read:\nxor %eax,%eax\n"
+                "mov fc_many_1@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_2@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_3@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_4@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_5@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_6@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_7@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_8@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_9@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "mov fc_many_10@GOTPCREL(%rip),%rcx\nadd (%rcx),%eax\n"
+                "ret\n.size fc_many_read,.-fc_many_read\n.section .note.GNU-stack,\"\",@progbits\n",
+        .pic = true,
+        .library = "libfc-many.so",
+        .version = "FC_MANY_1 { global: fc_many*; local: *; };\n",
+    },
+    {
+        // The object written by PC32, so copied, and each of its ten aliases read through the program's GOT: every name
+        // is the copy's, and the library's reads of them see the write.
+        .file = "fc_many_main.s",
+        .text = ".text\n.globl _start\n.type _start,@function\n_start:\nmovl $5,fc_many(%rip)\n"
+                "mov fc_many_1@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_2@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_3@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_4@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_5@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_6@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_7@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_8@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_9@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "mov fc_many_10@GOTPCREL(%rip),%rcx\ncmpl $5,(%rcx)\njne .Lfail\n"
+                "call fc_many_read\ncmp $50,%eax\njne .Lfail\n"
+                "mov $42,%edi\njmp .Lexit\n.Lfail:\nmov $101,%edi\n.Lexit:\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".section .note.GNU-stack,\"\",@progbits\n",
+    },
 };
 
 // The cases: the fixture objects each links (after the C runtime's for those with main), and what it must do.
@@ -91,6 +142,7 @@ typedef enum ForeignCopyTestCase
     FOREIGN_COPY_TEST_LOADER,
     FOREIGN_COPY_TEST_FUNCTION,
     FOREIGN_COPY_TEST_EMPTY,
+    FOREIGN_COPY_TEST_MANY,
     FOREIGN_COPY_TEST_CASES,
 } ForeignCopyTestCase;
 
@@ -100,6 +152,7 @@ static const char* const foreign_copy_test_objects[FOREIGN_COPY_TEST_CASES] = {
     [FOREIGN_COPY_TEST_LOADER] = "fc_loader.o",
     [FOREIGN_COPY_TEST_FUNCTION] = "fc_function.o",
     [FOREIGN_COPY_TEST_EMPTY] = "fc_empty.o",
+    [FOREIGN_COPY_TEST_MANY] = "fc_many_main.o",
 };
 
 static bool foreign_copy_test_compile(const char* directory, ForeignTestTally* tally)
@@ -293,6 +346,23 @@ static void foreign_copy_test_structure(ForeignTestTally* tally, String8 file, F
         foreign_test_expect(tally, foreign_copy_test_needs(&image, "ld-linux-x86-64.so.2") && foreign_dynamic_test_symbol(&image, "__libc_stack_end", &symbol) != 0,
                             "the program's own reference makes the as-needed loader needed", detail);
     }
+    else if (test == FOREIGN_COPY_TEST_MANY)
+    {
+        // Every one of the eleven names exported at the copy, at the library's version: more than a copy's first
+        // names, and each a record of the copies' exports.
+        Elf64_Sym first = { 0 };
+        bool all = foreign_dynamic_test_symbol(&image, "fc_many", &first) != 0 && first.st_shndx != SHN_UNDEF && strstr(copies, "fc_many@FC_MANY_1:4;") != 0;
+        for (uint32_t i = 1; i <= 10; i += 1)
+        {
+            char name[32];
+            char line[64];
+            snprintf(name, sizeof(name), "fc_many_%u", i);
+            snprintf(line, sizeof(line), "%s@FC_MANY_1:4;", name);
+            all = all && foreign_dynamic_test_symbol(&image, name, &symbol) != 0 && symbol.st_value == first.st_value && strstr(copies, line) != 0;
+        }
+        foreign_test_expect(tally, all, "every name of a copied object is exported at the copy, its aliases past ten among them", detail);
+        foreign_test_expect(tally, copy_count == 1, "one COPY relocation for the object of eleven names", detail);
+    }
 }
 
 static bool foreign_copy_test_run(const char* directory, char* executable, ForeignCopyTestCase test, Arena* arena)
@@ -382,7 +452,7 @@ static void foreign_copy_test_case(ForeignTestTally* tally, const char* director
         foreign_test_add(line, foreign_test_path(directory, foreign_copy_test_objects[test], arena), true, true);
         if (!c_runtime)
         {
-            foreign_test_add(line, foreign_test_path(directory, "libfc-data.so", arena), true, true);
+            foreign_test_add(line, foreign_test_path(directory, test == FOREIGN_COPY_TEST_MANY ? "libfc-many.so" : "libfc-data.so", arena), true, true);
         }
         else
         {

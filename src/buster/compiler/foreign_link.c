@@ -844,7 +844,8 @@ static bool foreign_link_alias(const ImportExports* exports, uint32_t e, uint64_
     return exports->value[e] == value && section != SHN_UNDEF && section != SHN_ABS && (exports->flags[e] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_TLS;
 }
 
-// The exports at `value`, eight addresses at a time: their places into `found` (at most `capacity`); their count.
+// The exports at `value`, eight addresses at a time: the first `capacity` of their places into `found`; how many there
+// are, all of them, so that a caller counts with no room and then gathers into room of the count.
 static uint32_t foreign_link_aliases(const ImportExports* exports, uint64_t value, uint32_t* found, uint32_t capacity)
 {
     uint32_t count = 0;
@@ -855,11 +856,12 @@ static uint32_t foreign_link_aliases(const ImportExports* exports, uint64_t valu
              hits &= hits - 1)
         {
             const uint32_t e = first + (uint32_t)__builtin_ctz(hits);
-            if (foreign_link_alias(exports, e, value) && count < capacity)
+            const bool alias = foreign_link_alias(exports, e, value);
+            if (alias && count < capacity)
             {
                 found[count] = e;
-                count += 1;
             }
+            count += alias ? 1 : 0;
         }
     }
     return count;
@@ -898,9 +900,8 @@ static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign*
         }
     }
     ForeignLinkCopy* copies = marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ForeignLinkCopy, marked) : 0;
-    output->copy_exports = marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, marked * (1 + BUSTER_FOREIGN_LINK_COPY_ALIASES)) : 0;
     output->copies = marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, marked) : 0;
-    result.error = marked != 0 && (copies == 0 || output->copy_exports == 0 || output->copies == 0) ? FOREIGN_LINK_ERROR_MEMORY : result.error;
+    result.error = marked != 0 && (copies == 0 || output->copies == 0) ? FOREIGN_LINK_ERROR_MEMORY : result.error;
     uint32_t copy_count = 0;
     // The copied imports' names, 16 names' symbols at a time against the bitset: each one's copy, by library and address.
     const ForeignNames* names = &foreign->names;
@@ -941,6 +942,24 @@ static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign*
             }
         }
     }
+    // Each copy's names, every export of its library at its address, counted and then gathered into room of their
+    // count: each is defined at the copy, so that the library's own references to any of them bind to it, as lld's
+    // getSymbolsAt defines them. The copies record at most each name and the copied import itself as exports.
+    uint32_t** copy_names = copy_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t*, copy_count) : 0;
+    uint32_t* name_counts = copy_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, copy_count) : 0;
+    result.error = copy_count != 0 && (copy_names == 0 || name_counts == 0) ? FOREIGN_LINK_ERROR_MEMORY : result.error;
+    uint64_t export_capacity = 0;
+    for (uint32_t c = 0; result.error == FOREIGN_LINK_ERROR_NONE && c < copy_count; c += 1)
+    {
+        const ImportExports* exports = &foreign->libraries[copies[c].library].library.exports;
+        const uint32_t count = foreign_link_aliases(exports, copies[c].value, 0, 0);
+        copy_names[c] = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, (uint64_t)count + 1);
+        name_counts[c] = copy_names[c] != 0 ? foreign_link_aliases(exports, copies[c].value, copy_names[c], count) : 0;
+        result.error = copy_names[c] != 0 ? result.error : FOREIGN_LINK_ERROR_MEMORY;
+        export_capacity += (uint64_t)count + 1;
+    }
+    output->copy_exports = result.error == FOREIGN_LINK_ERROR_NONE && export_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, export_capacity) : 0;
+    result.error = result.error == FOREIGN_LINK_ERROR_NONE && export_capacity != 0 && output->copy_exports == 0 ? FOREIGN_LINK_ERROR_MEMORY : result.error;
     // Each copy's atom, as large as its largest name, then its names defined there: the library's exports at its address,
     // the link's imports of them and new symbols for the others.
     for (uint32_t c = 0; result.error == FOREIGN_LINK_ERROR_NONE && c < copy_count; c += 1)
@@ -948,8 +967,8 @@ static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign*
         ForeignLinkCopy* copy = &copies[c];
         const ForeignLibrary* library = &foreign->libraries[copy->library];
         const ImportExports* exports = &library->library.exports;
-        uint32_t aliases[2 * BUSTER_FOREIGN_LINK_COPY_ALIASES + 1];
-        const uint32_t alias_count = foreign_link_aliases(exports, copy->value, aliases, 2 * BUSTER_FOREIGN_LINK_COPY_ALIASES + 1);
+        const uint32_t* aliases = copy_names[c];
+        const uint32_t alias_count = name_counts[c];
         uint64_t size = link->symbols.size[copy->symbol];
         for (uint32_t a = 0; a < alias_count; a += 1)
         {
@@ -985,20 +1004,26 @@ static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign*
             {
                 result.error = FOREIGN_LINK_ERROR_CAPACITY;
             }
-            if (symbol != 0)
+            // Room for every name and the import itself was counted above; one past it would be a bug, refused.
+            const bool room = output->copy_export_count < export_capacity;
+            if (symbol != 0 && room)
             {
                 output->copy_exports[output->copy_export_count] = symbol;
                 output->copy_export_count += 1;
             }
+            result.error = symbol != 0 && !room ? FOREIGN_LINK_ERROR_CAPACITY : result.error;
         }
         // The copied import itself, if its library's export table didn't list it at its address (its default version
         // is another than the one it binds to).
         if (result.error == FOREIGN_LINK_ERROR_NONE && link->symbols.source[copy->symbol] == BUSTER_LINK_SOURCE_FOREIGN_SHARED)
         {
             const bool defined = foreign_link_define_copy(link, copy->symbol, copy->atom, link->symbols.size[copy->symbol], link->symbols.version[copy->symbol]);
-            result.error = defined ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_LINK;
-            output->copy_exports[output->copy_export_count] = copy->symbol;
-            output->copy_export_count += defined ? 1 : 0;
+            result.error = !defined ? FOREIGN_LINK_ERROR_LINK : output->copy_export_count < export_capacity ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_CAPACITY;
+            if (result.error == FOREIGN_LINK_ERROR_NONE)
+            {
+                output->copy_exports[output->copy_export_count] = copy->symbol;
+                output->copy_export_count += 1;
+            }
         }
         output->copies[c] = copy->symbol;
     }
@@ -1275,6 +1300,10 @@ static ForeignLinkResult foreign_link_bounds_merge(ForeignLink* output, const Fo
                 }
                 link->atoms.size[old] = 0;
                 link->atoms.alignment_log2[old] = 0;
+                // From now on the section is the group's atom, at its base (which the relocations take from the plan):
+                // the passes after the conversion find a section's atom through the map (GC's retained roots and its
+                // unwind frames, foreign_gc_link.c), and must find the atom that holds its bytes.
+                output->objects[plan->sections[b].object].section_atoms[plan->sections[b].section] = atom;
             }
         }
     }
