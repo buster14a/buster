@@ -15547,6 +15547,13 @@ static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t
     }
 }
 
+// The whole output's keywords by pp_resolve_keywords_range: the parser's handoff tests and benchmark (#335) time it and the
+// conversion after it against pp_resolve_keywords_scalar.
+static __attribute__((unused)) void pp_resolve_keywords_vector(Preprocessor* pp)
+{
+    pp_resolve_keywords_range(pp, 0, pp->output.count);
+}
+
 static void pp_resolve_keywords_scalar(Preprocessor* pp)
 {
     PPTokens* out = &pp->output;
