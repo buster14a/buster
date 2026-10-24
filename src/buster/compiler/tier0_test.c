@@ -3724,6 +3724,9 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a hidden result without its pointer in rdi", 12, true, BUSTER_TIER0_TEST_METADATA },
     { "a hidden result whose pointer is an object", 12, true, BUSTER_TIER0_TEST_METADATA },
     { "a variadic function's SPLIT slot past its incoming area", 2, true, BUSTER_TIER0_TEST_METADATA },
+    { "a function with a result size that jumps to its end", 3, true, "a function returning an aggregate in registers that reaches its end" },
+    { "a function with a result size that branches to its end", 3, true, "a function returning an aggregate in registers that reaches its end" },
+    { "a jump to the end with a value left", 2, true, "values left at the function's end" },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -3867,6 +3870,42 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
         case 41:
             *incoming = (AbiCall){ .stack_bytes = 32, .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 6, .vector_registers = 3 };
             callee->function.incoming_variadic = incoming;
+            break;
+        case 42:
+            // A jump to the end in place of the RETURN and its address.
+            callee->function.count -= 1;
+            callee->kinds[callee->function.count - 1] = BUSTER_TYPED_JUMP;
+            callee->classes[callee->function.count - 1] = BUSTER_TYPED_CLASS_VOID;
+            callee->values[callee->function.count - 1] = callee->function.count;
+            break;
+        case 43:
+        {
+            // A branch to the end before the RETURN and its address, which only the branch passes by.
+            const uint32_t at = callee->function.count - 2;
+            for (uint32_t i = callee->function.count + 1; i >= at + 2; i -= 1)
+            {
+                callee->kinds[i] = callee->kinds[i - 2];
+                callee->classes[i] = callee->classes[i - 2];
+                callee->values[i] = callee->values[i - 2];
+            }
+            callee->function.count += 2;
+            callee->kinds[at] = BUSTER_TYPED_CONST;
+            callee->classes[at] = BUSTER_TYPED_CLASS_I32;
+            callee->values[at] = 0;
+            callee->kinds[at + 1] = BUSTER_TYPED_BRANCH_FALSE;
+            callee->classes[at + 1] = BUSTER_TYPED_CLASS_I32;
+            callee->values[at + 1] = callee->function.count;
+            break;
+        }
+        case 44:
+            // A value in place of the RETURN, taken to the end by JUMP_VALUE.
+            callee->kinds[callee->function.count - 1] = BUSTER_TYPED_CONST;
+            callee->classes[callee->function.count - 1] = BUSTER_TYPED_CLASS_I64;
+            callee->values[callee->function.count - 1] = 1;
+            callee->kinds[callee->function.count] = BUSTER_TYPED_JUMP_VALUE;
+            callee->classes[callee->function.count] = BUSTER_TYPED_CLASS_I64;
+            callee->function.count += 1;
+            callee->values[callee->function.count - 1] = callee->function.count;
             break;
         default:
             break;

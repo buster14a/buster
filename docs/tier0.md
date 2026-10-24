@@ -540,8 +540,9 @@ Before the programs, checks of their own:
   - **aggregate functions:** Tier 0's function, by both paths, whose parameters a driver passes from the same bytes,
     copies each parameter's bytes out, each aggregate's address after them (a multiple of its alignment), and returns
     the result in its registers or through the hidden pointer, which must come back in rax;
-  - **aggregate errors:** 42 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
-    malformed metadata by both compile paths too.
+  - **aggregate errors:** 45 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
+    malformed metadata by both compile paths too: among them a function with a result size that reaches its end by
+    falling off it, by a jump and by a branch, and a jump that takes a value to the end.
 - **stack:**
   - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
     another class or with a value, and a restore of another class or with a value, and take a save restored.
