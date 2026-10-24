@@ -665,8 +665,10 @@ designs and the compilers already built this way.
   aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for libraries'
   own references, lld's regular symbol table, and a dynamic PIE's own IFUNCs
   through the writer's stubs and `IRELATIVE` relocations; a shared library
-  refuses an IFUNC that isn't preemptible. GC, literal pooling and CIE pooling
-  are off by default.
+  refuses an IFUNC that isn't preemptible, and a static link whose startup
+  applies no `IRELATIVE` relocation (nothing refers to `__rela_iplt_start`, or
+  in a static PIE to `_DYNAMIC`: a program without libc) refuses every IFUNC
+  a fixup reaches. GC, literal pooling and CIE pooling are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
@@ -3040,9 +3042,14 @@ The three outputs must:
   their versions, and on the dynamic relocations by symbol and class (a GOT
   slot, `GLOB_DAT` or `JUMP_SLOT`; `COPY`; `R_X86_64_64`; `TPOFF64`;
   `DTPMOD64`; `DTPOFF64`; `IRELATIVE`, in `.rela.iplt` too, where a static
-  executable of `link-foreign`'s has them as GNU ld does), with as many relative
-  ones as lld's. The comparison reads static executables (`ET_EXEC`) too, and
-  fails an output it can't read.
+  executable of `link-foreign`'s has them as GNU ld does, each by its
+  resolver's name and whether it writes a GOT slot or a pointer in data, and
+  each writing a place of its own), with as many relative ones as lld's. A
+  resolver's name is the first of the names the image's `.symtab` gives its
+  address that the other image gives one of its resolvers too, since lld
+  moves an IFUNC whose address is taken to its stub, and so does mold every
+  IFUNC of a static executable. The comparison reads static executables
+  (`ET_EXEC`) too, and fails an output it can't read.
 
 And `link-foreign`'s program must come out byte for byte the same when it links
 on eight lanes (`--lanes=8`), through the resolution's, the conversion's and
@@ -3056,9 +3063,12 @@ out of `.dynsym`, keeps COMDAT groups' signatures as absolute locals, drops
 aliases weakly, writes internal visibility as hidden and the
 `__start_`/`__stop_` names local (and defines them for every section named as
 a C identifier, though nothing refers to them), and keeps a few GOT slots that
-lld relaxes; in a static executable it writes a hidden symbol made local with
-default visibility and an IFUNC as a function at its resolver, and gives an
-IFUNC that code both calls and loads from the GOT a second `IRELATIVE` slot;
+lld relaxes; in a static executable and a static PIE it writes a hidden
+symbol made local with default visibility, in a static executable an IFUNC
+as a function at its stub, and in the PIEs a pointer to an IFUNC outside the
+GOT with an `IRELATIVE` relocation of its own, where `link-foreign` and lld
+relocate it relative to the IFUNC's stub (each such row of mold's must be one
+of `link-foreign`'s stub pointers, one for one, by the IFUNC's resolver);
 lld leaves an `R_X86_64_64` to a library's data that it scanned before the
 reference that copies it symbolic, gives a function that code both calls and
 loads from the GOT a second slot, and writes an IFUNC whose address is taken
@@ -3069,7 +3079,9 @@ row one side has alone fails the test, and the first 12 are printed.
 The corpus is two original programs, always: C, of three translation units
 and an archive (two members that load, one that doesn't), with threads,
 thread-locals, libc's and libm's data and functions, constructors and
-destructors, a weak reference and a `__start_`/`__stop_` registry; and C++,
+destructors, a weak reference, a `__start_`/`__stop_` registry and two
+IFUNCs (an `ifunc` attribute's and `target_clones`'), called, loaded from the
+GOT and pointed to from data, whose pointers must compare equal; and C++,
 of two translation units, with iostream, exceptions across them, RTTI,
 templates in COMDAT groups, inline variables and a thread. With `--sqlite DIR`
 the SQLite amalgamation's shell (`sqlite3.c` and `shell.c`), with `--lua DIR`

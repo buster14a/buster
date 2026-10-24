@@ -1481,16 +1481,20 @@ static ImportResult foreign_link_bounds_relocations(ForeignLink* output, const F
     return result;
 }
 
-// A shared library doesn't take an IFUNC it defines and refers to that the loader can't bind as a dynamic symbol yet:
-// one that isn't preemptible (local, or of hidden or protected visibility) needs an IRELATIVE relocation, which the
-// writer's shared mode doesn't write. Every other output's writer takes them (a static executable's and a static PIE's
-// stubs in .iplt with IRELATIVE relocations, and a dynamic PIE's beside its imports'), and so does a shared library's for
-// a preemptible one, whose GOT slot's GLOB_DAT the loader binds by calling its resolver, as it binds an IFUNC that
-// another library defines. The first refused IFUNC a fixup reaches is refused, by its name and object, rather than
-// written as a plain function, which calls the resolver; one that nothing reaches is written as it is. The refused
-// IFUNCs are a bitset, 64 symbols' flags at a time, and only a link with one tests the fixups' targets against it, 16
-// at a time.
-static ForeignLinkResult foreign_link_refuse_ifuncs(const ForeignLink* output, const Foreign* foreign, Arena* arena)
+// The IFUNCs an output can't take that it defines and refers to. The writer gives an IFUNC a stub and an IRELATIVE
+// relocation, which something must apply before the IFUNC is called: in a dynamic PIE the loader, which applies them
+// all; in a static executable the startup code that reads them between __rela_iplt_start and __rela_iplt_end (libc.a's
+// __libc_start_main), and in a static PIE the one that relocates the image through _DYNAMIC (libc.a's
+// _dl_relocate_static_pie). A static link in which nothing refers to those names (a program without libc, whose own
+// _start applies nothing) has no such code, and the kernel applies no relocations: every IFUNC is refused there
+// (`every`), as GNU ld and lld would write a program whose first call faults. A shared library can't take one the loader
+// can't bind as a dynamic symbol yet: one that isn't preemptible (local, or of hidden or protected visibility) needs an
+// IRELATIVE relocation, which the writer's shared mode doesn't write, while a preemptible one's GOT slot gets a GLOB_DAT
+// that the loader binds by calling its resolver, as it binds an IFUNC that another library defines. The first refused
+// IFUNC a fixup reaches is refused, by its name and object, rather than written as a plain function, which calls the
+// resolver; one that nothing reaches is written as it is. The refused IFUNCs are a bitset, 64 symbols' flags at a time,
+// and only a link with one tests the fixups' targets against it, 16 at a time.
+static ForeignLinkResult foreign_link_refuse_ifuncs(const ForeignLink* output, const Foreign* foreign, Arena* arena, bool every)
 {
     const Link* link = &output->link;
     const LinkSymbols* symbols = &link->symbols;
@@ -1507,7 +1511,7 @@ static ForeignLinkResult foreign_link_refuse_ifuncs(const ForeignLink* output, c
         const __m512i types = _mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
         const uint64_t local = _mm512_mask_cmpeq_epi8_mask(lanes, _mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_BINDING)), _mm512_setzero_si512());
         const uint64_t visible = _mm512_mask_cmpeq_epi8_mask(lanes, _mm512_and_si512(flags, _mm512_set1_epi8((char)BUSTER_LINK_SYMBOL_VISIBILITY)), _mm512_setzero_si512());
-        uint64_t mask = _mm512_mask_cmpeq_epi8_mask(lanes, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC)) & (local | ~visible);
+        uint64_t mask = _mm512_mask_cmpeq_epi8_mask(lanes, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC)) & (every ? ~0ull : local | ~visible);
         for (uint64_t left = mask; left != 0; left &= left - 1)
         {
             const uint32_t bit = (uint32_t)__builtin_ctzll(left);
@@ -1840,8 +1844,17 @@ static void foreign_link_build_middle(ForeignLinkBuild* build)
     build->result = result;
 }
 
+// Whether an input refers to (or defines) a name.
+static bool foreign_link_referenced(const Foreign* foreign, const char* text)
+{
+    const uint32_t length = (uint32_t)strlen(text);
+    return foreign_find_name(foreign, (const uint8_t*)text, length, link_hash((const uint8_t*)text, length)) != 0;
+}
+
 // The steps after the relocations but the check: the __start_ and __stop_ sections' relocations, a dynamic PIE's copies,
-// the dynamic images' _DYNAMIC and a shared library's refusal of the IFUNCs a fixup reaches that it can't bind.
+// the dynamic images' _DYNAMIC, and the refusal of the IFUNCs a fixup reaches that the output can't take
+// (foreign_link_refuse_ifuncs): a shared library's that the loader can't bind, and every one of a static link whose
+// startup applies no IRELATIVE relocation (nothing refers to __rela_iplt_start, or a static PIE's to _DYNAMIC).
 static void foreign_link_build_end(ForeignLinkBuild* build)
 {
     ForeignLink* output = build->output;
@@ -1856,13 +1869,17 @@ static void foreign_link_build_end(ForeignLinkBuild* build)
     {
         result = foreign_link_copies(output, foreign, build->arena);
     }
+    // The inputs' names: _DYNAMIC's own symbol, which the conversion adds below, isn't one.
+    const bool applied = build->kind == RUNTIME_KIND_STATIC     ? foreign_link_referenced(foreign, "__rela_iplt_start") :
+                         build->kind == RUNTIME_KIND_STATIC_PIE ? foreign_link_referenced(foreign, "_DYNAMIC") :
+                                                                  true;
     if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind != RUNTIME_KIND_STATIC)
     {
         result.error = foreign_link_dynamic_symbol(output, foreign);
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_SHARED)
+    if (result.error == FOREIGN_LINK_ERROR_NONE && (build->kind == RUNTIME_KIND_SHARED || !applied))
     {
-        result = foreign_link_refuse_ifuncs(output, foreign, build->arena);
+        result = foreign_link_refuse_ifuncs(output, foreign, build->arena, !applied);
     }
     build->result = result;
 }

@@ -24,6 +24,8 @@ typedef enum ForeignDriverTestFixture
     FOREIGN_DRIVER_TEST_MAIN,
     FOREIGN_DRIVER_TEST_OPTION_NAMES,
     FOREIGN_DRIVER_TEST_ABSOLUTE,
+    FOREIGN_DRIVER_TEST_IFUNC,
+    FOREIGN_DRIVER_TEST_IFUNC_APPLIED,
     FOREIGN_DRIVER_TEST_FIXTURES,
 } ForeignDriverTestFixture;
 
@@ -123,6 +125,28 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
     [FOREIGN_DRIVER_TEST_ABSOLUTE] = {
         .name = "fdriver_absolute",
         .text = ".globl driver_pick\n.set driver_pick,0x7fff000000000000\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // A program without libc whose _start calls an IFUNC, which returns 42, through its stub: nothing applies the
+    // stub's IRELATIVE relocation, and a static link refuses it.
+    [FOREIGN_DRIVER_TEST_IFUNC] = {
+        .name = "fdriver_ifunc",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // The same, whose _start first applies the IRELATIVE relocations between __rela_iplt_start and __rela_iplt_end
+    // (each slot at its r_offset gets what the resolver at its r_addend returns), as libc.a's startup applies them.
+    [FOREIGN_DRIVER_TEST_IFUNC_APPLIED] = {
+        .name = "fdriver_ifunc_applied",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "lea __rela_iplt_start(%rip),%rbx\nlea __rela_iplt_end(%rip),%r12\n1: cmp %r12,%rbx\njae 2f\n"
+                "mov 16(%rbx),%rax\ncall *%rax\nmov (%rbx),%rcx\nmov %rax,(%rcx)\nadd $24,%rbx\njmp 1b\n"
+                "2: call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
     },
 };
 
@@ -824,6 +848,28 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
             },
         },
         {
+            .name = "static_ifunc_unapplied",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_IFUNC],
+            },
+        },
+        {
+            .name = "static_pie_ifunc_unapplied",
+            .arguments = {
+                (char*)"-static",
+                (char*)"-pie",
+                files->objects[FOREIGN_DRIVER_TEST_IFUNC],
+            },
+        },
+        {
+            .name = "static_ifunc_applied",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_IFUNC_APPLIED],
+            },
+            .success = true,
+            .status = 42,
+        },
+        {
             .name = "shared_with_static",
             .arguments = {
                 (char*)"-shared",
@@ -891,6 +937,20 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
                                       short_name.st_shndx != SHN_UNDEF && long_name.st_shndx != SHN_UNDEF,
                                 "strip-looking undefined values remain named GC roots without stripping", test->name);
         }
+    }
+    // A static link refuses an IFUNC whose IRELATIVE relocation nothing applies, naming the startup code's missing name.
+    static const char* const unapplied[][2] = {
+        { "static_ifunc_unapplied", "__rela_iplt_start" },
+        { "static_pie_ifunc_unapplied", "_DYNAMIC" },
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(unapplied); c += 1)
+    {
+        ForeignTestPath errors;
+        snprintf(errors, sizeof(errors), "%s/fdriver_%s.err", directory, unapplied[c][0]);
+        const String8 diagnostic = foreign_test_read(arena, errors);
+        const bool named = diagnostic.pointer != 0 && memmem(diagnostic.pointer, diagnostic.length, "driver_ifunc", 12) != 0 &&
+                           memmem(diagnostic.pointer, diagnostic.length, unapplied[c][1], strlen(unapplied[c][1])) != 0;
+        foreign_test_expect(tally, named, "a static IFUNC nothing applies is refused, naming it and the startup's missing name", unapplied[c][0]);
     }
     // A refusal's diagnostic is the same from the conversion on lanes as from the calling thread's.
     static const char* const refused[][2] = {
