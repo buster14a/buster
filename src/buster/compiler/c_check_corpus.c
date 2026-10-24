@@ -4,6 +4,7 @@
 // Independent source-corpus qualification. External files stay external: the harness records every input and
 // compares acceptance and the first diagnostic line with Clang, and the complete scalar/vector parser, binding,
 // graph and typed results with each other. Unsupported valid files are failures, never successful skips.
+// --semantic-mutations checks the files' semantic mutants the same way (c_check_mutation.c).
 // Include after c_checker_test.c for the shared source-oracle and exact-value comparison helpers.
 #ifndef BUSTER_C_CHECK_CORPUS_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_INCLUDED
@@ -1362,52 +1363,141 @@ static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* 
     return equal;
 }
 
-static bool check_corpus_file(CheckCorpusTally* tally, const char* file, const char* label, const char* kind, const PPOptions* options,
-                              const CheckCorpusOracle* oracle, FILE* report, uint64_t report_limit)
+// What one unit's check gave, kept after its arenas are released: path 0 is the scalar path, path 1 the vector one, and
+// the first error's place and message are the scalar path's.
+typedef struct CheckCorpusOutcome CheckCorpusOutcome;
+struct CheckCorpusOutcome
+{
+    bool prepared;
+    // The scalar parser found no syntax error.
+    bool parsed;
+    bool accepted[2];
+    bool equal;
+    bool resource;
+    uint32_t lines[2];
+    uint32_t token;
+    uint32_t column;
+    uint32_t tokens;
+    uint64_t nodes;
+    uint64_t scalar_nodes;
+    uint64_t vector_nodes;
+    uint64_t binding_uses;
+    uint64_t binding_fallback_uses;
+    const char* phase;
+    char file[512];
+    char message[256];
+    char spelling[96];
+};
+
+// Preprocesses `file` and checks it on the scalar path and, when `both`, on the vector path too, which must give the
+// same results exactly (`equal`; true when the vector path doesn't run).
+static void check_corpus_measure(const char* file, const PPOptions* options, bool suppress_warnings, bool both, CheckCorpusOutcome* outcome)
 {
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parsers[2];
     CheckCorpusPath paths[2] = { 0 };
-    bool accepted[2] = { 0 };
+    *outcome = (CheckCorpusOutcome){ 0 };
+    const uint32_t count = both ? 2 : 1;
     bool prepared = intern_initialize(&identifiers) && pp_initialize(&pp, options, &identifiers);
     prepared = prepared && pp_run(&pp, file);
-    for (uint32_t path = 0; prepared && path < 2; path += 1)
+    for (uint32_t path = 0; prepared && path < count; path += 1)
     {
-        accepted[path] = check_corpus_check_policy(paths + path, parsers + path, &pp, path == 0, oracle->suppress_warnings);
+        outcome->accepted[path] = check_corpus_check_policy(paths + path, parsers + path, &pp, path == 0, suppress_warnings);
     }
-    const bool equal = prepared && check_corpus_equal(paths, paths + 1, parsers, parsers + 1);
-    const bool acceptance = prepared && accepted[0] != oracle->rejected;
-    const bool line = !oracle->rejected || accepted[0] || paths[0].line == oracle->line;
-    const bool diagnostic_path = !oracle->rejected || accepted[0] || strcmp(paths[0].file, oracle->file) == 0;
-    const bool resource = paths[0].resource || paths[1].resource;
+    outcome->prepared = prepared;
+    outcome->parsed = paths[0].parsed;
+    outcome->equal = prepared && (!both || check_corpus_equal(paths, paths + 1, parsers, parsers + 1));
+    outcome->resource = paths[0].resource || paths[1].resource;
+    outcome->accepted[1] = both ? outcome->accepted[1] : outcome->accepted[0];
+    outcome->lines[0] = paths[0].line;
+    outcome->lines[1] = both ? paths[1].line : paths[0].line;
+    outcome->token = paths[0].token;
+    outcome->column = paths[0].column;
+    outcome->tokens = parsers[0].tokens.count;
+    outcome->nodes = paths[0].stream.count;
+    outcome->scalar_nodes = paths[1].stream.statistics.scalar_nodes;
+    outcome->vector_nodes = paths[1].stream.statistics.vector_nodes;
+    outcome->binding_uses = paths[1].input.parser_binding_statistics.walked_uses;
+    outcome->binding_fallback_uses = paths[1].input.parser_binding_statistics.fallback_uses;
+    outcome->phase = prepared ? paths[0].phase : "preprocess";
+    memcpy(outcome->file, paths[0].file, sizeof(outcome->file));
+    memcpy(outcome->message, paths[0].message, sizeof(outcome->message));
+    memcpy(outcome->spelling, paths[0].spelling, sizeof(outcome->spelling));
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        check_corpus_close(paths + path);
+        parse_release(parsers + path);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
+// The tallies of `from` added to `to`, its differences only when `differences` (an intended semantic mutation's aren't).
+static void check_corpus_tally_add(CheckCorpusTally* to, const CheckCorpusTally* from, bool differences)
+{
+    to->files += from->files;
+    to->excluded += from->excluded;
+    to->preprocessed += from->preprocessed;
+    to->preprocessing_excluded += from->preprocessing_excluded;
+    to->syntax_accepted_excluded += from->syntax_accepted_excluded;
+    to->oracle_accepted += from->oracle_accepted;
+    to->checker_accepted += from->checker_accepted;
+    to->acceptance_differences += differences ? from->acceptance_differences : 0;
+    to->line_differences += differences ? from->line_differences : 0;
+    to->diagnostic_path_differences += differences ? from->diagnostic_path_differences : 0;
+    to->path_differences += from->path_differences;
+    to->resource_failures += from->resource_failures;
+    to->preprocessing_failures += from->preprocessing_failures;
+    to->tokens += from->tokens;
+    to->nodes += from->nodes;
+    to->scalar_nodes += from->scalar_nodes;
+    to->vector_nodes += from->vector_nodes;
+    to->binding_uses += from->binding_uses;
+    to->binding_fallback_uses += from->binding_fallback_uses;
+    to->reports += from->reports;
+}
+
+// Checks `file` against clang's result for it (`oracle`), tallies and reports the comparison, and returns whether it
+// found a difference, with what the check gave in `outcome`.
+static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file, const char* label, const char* kind, const PPOptions* options,
+                                      const CheckCorpusOracle* oracle, FILE* report, uint64_t report_limit, CheckCorpusOutcome* result)
+{
+    CheckCorpusOutcome outcome;
+    check_corpus_measure(file, options, oracle->suppress_warnings, true, &outcome);
+    const bool prepared = outcome.prepared;
+    const bool equal = outcome.equal;
+    const bool acceptance = prepared && outcome.accepted[0] != oracle->rejected;
+    const bool line = !oracle->rejected || outcome.accepted[0] || outcome.lines[0] == oracle->line;
+    const bool diagnostic_path = !oracle->rejected || outcome.accepted[0] || strcmp(outcome.file, oracle->file) == 0;
+    const bool resource = outcome.resource;
     tally->files += 1;
     tally->oracle_accepted += !oracle->rejected;
-    tally->checker_accepted += accepted[0];
+    tally->checker_accepted += outcome.accepted[0];
     tally->acceptance_differences += !acceptance;
     tally->line_differences += !line;
     tally->diagnostic_path_differences += !diagnostic_path;
     tally->path_differences += prepared && !equal;
     tally->resource_failures += resource;
     tally->preprocessing_failures += !prepared;
-    tally->tokens += parsers[0].tokens.count;
-    tally->nodes += paths[0].stream.count;
-    tally->scalar_nodes += paths[1].stream.statistics.scalar_nodes;
-    tally->vector_nodes += paths[1].stream.statistics.vector_nodes;
-    tally->binding_uses += paths[1].input.parser_binding_statistics.walked_uses;
-    tally->binding_fallback_uses += paths[1].input.parser_binding_statistics.fallback_uses;
+    tally->tokens += outcome.tokens;
+    tally->nodes += outcome.nodes;
+    tally->scalar_nodes += outcome.scalar_nodes;
+    tally->vector_nodes += outcome.vector_nodes;
+    tally->binding_uses += outcome.binding_uses;
+    tally->binding_fallback_uses += outcome.binding_fallback_uses;
     const bool different = !acceptance || !line || !diagnostic_path || !equal || resource;
     if (report != 0)
     {
         fprintf(report, "%s\t", kind);
         check_corpus_field(report, label);
-        fprintf(report, "\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t", !oracle->rejected, accepted[0], accepted[1], oracle->line,
-                paths[0].line, paths[1].line, equal, resource, parsers[0].tokens.count, prepared ? paths[0].phase : "preprocess");
-        check_corpus_field(report, paths[0].file);
-        fprintf(report, "\t%u\t%u\t", paths[0].token, paths[0].column);
-        check_corpus_field(report, paths[0].spelling);
+        fprintf(report, "\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t", !oracle->rejected, outcome.accepted[0], outcome.accepted[1], oracle->line,
+                outcome.lines[0], outcome.lines[1], equal, resource, outcome.tokens, outcome.phase);
+        check_corpus_field(report, outcome.file);
+        fprintf(report, "\t%u\t%u\t", outcome.token, outcome.column);
+        check_corpus_field(report, outcome.spelling);
         fputc('\t', report);
-        check_corpus_field(report, paths[0].message);
+        check_corpus_field(report, outcome.message);
         fputc('\t', report);
         check_corpus_field(report, oracle->message);
         fputc('\t', report);
@@ -1418,24 +1508,27 @@ static bool check_corpus_file(CheckCorpusTally* tally, const char* file, const c
     if (different && tally->reports < report_limit)
     {
         fprintf(stderr, "%s: clang=%s:%u checker=%s:%u paths=%s phase=%s token=%u spelling=\"%s\" at %s:%u:%u: %s\n", label,
-                oracle->rejected ? "reject" : "accept", oracle->line, accepted[0] ? "accept" : "reject", paths[0].line,
-                equal ? "equal" : "DIFFERENT", prepared ? paths[0].phase : "preprocess", paths[0].token, paths[0].spelling,
-                paths[0].file, paths[0].line, paths[0].column, paths[0].message);
+                oracle->rejected ? "reject" : "accept", oracle->line, outcome.accepted[0] ? "accept" : "reject", outcome.lines[0],
+                equal ? "equal" : "DIFFERENT", outcome.phase, outcome.token, outcome.spelling,
+                outcome.file, outcome.lines[0], outcome.column, outcome.message);
         tally->reports += 1;
     }
-    for (uint32_t path = 0; path < 2; path += 1)
-    {
-        check_corpus_close(paths + path);
-        parse_release(parsers + path);
-    }
-    pp_release(&pp);
-    intern_release(&identifiers);
+    *result = outcome;
     return different;
 }
 
+static bool check_corpus_file(CheckCorpusTally* tally, const char* file, const char* label, const char* kind, const PPOptions* options,
+                              const CheckCorpusOracle* oracle, FILE* report, uint64_t report_limit)
+{
+    CheckCorpusOutcome outcome;
+    return check_corpus_file_outcome(tally, file, label, kind, options, oracle, report, report_limit, &outcome);
+}
+
+// `bases`, if not null, gets each file's fitness as a semantic mutation's base: compared, accepted by clang, and without
+// a difference.
 static bool check_corpus_files(CheckCorpusTally* tally, char** files, uint32_t count, const PPOptions* options, const char* clang,
                                const char* const* arguments, uint32_t argument_count, FILE* report, FILE* selection,
-                               bool rejections, uint64_t report_limit)
+                               bool rejections, uint64_t report_limit, bool* bases)
 {
     bool valid = true;
     for (uint32_t first = 0; valid && first < count; first += BUSTER_PARSE_TEST_BATCH)
@@ -1481,7 +1574,12 @@ static bool check_corpus_files(CheckCorpusTally* tally, char** files, uint32_t c
                 valid = selection == 0 || fprintf(selection, "%s\n", file) > 0;
                 if (valid)
                 {
-                    check_corpus_file(tally, file, file, rejections ? "semantic-rejection" : "file", options, outcomes + i, report, report_limit);
+                    const bool different = check_corpus_file(tally, file, file, rejections ? "semantic-rejection" : "file", options, outcomes + i,
+                                                             report, report_limit);
+                    if (bases != NULL)
+                    {
+                        bases[first + i] = !different && !outcomes[i].rejected;
+                    }
                 }
             }
         }
@@ -1712,115 +1810,12 @@ static char* check_corpus_mutate(const char* text, size_t length, const uint32_t
     return result;
 }
 
-static bool check_corpus_word(const char* text, uint32_t start, uint32_t end, const char* word)
-{
-    const size_t length = strlen(word);
-    return end - start == length && memcmp(text + start, word, length) == 0;
-}
-
-static bool check_corpus_leaf(const char* text, uint32_t start, uint32_t end, uint8_t kind)
-{
-    const bool number = start < end && text[start] >= '0' && text[start] <= '9';
-    bool result = number || (kind & 0x7f) == C_TOKEN_RAW_IDENTIFIER;
-    for (uint32_t keyword = 1; result && !number && keyword <= C_NAME_KEYWORD_COUNT; keyword += 1)
-    {
-        result = !check_corpus_word(text, start, end, c_name_spellings[keyword]);
-    }
-    return result;
-}
-
-// Each candidate changes a type, removes one whole simple declaration, or exchanges two scalar operands. The
-// surrounding punctuation remains intact; unlike token fuzzing these probe semantic acceptance directly.
-static void check_corpus_semantic_candidates(const char* text, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
-                                             uint32_t tokens, uint32_t** candidates, uint32_t* counts)
-{
-    uint32_t depth = 0;
-    for (uint32_t i = 0; i < tokens; i += 1)
-    {
-        const bool integer = check_corpus_word(text, starts[i], ends[i], "int");
-        if (integer)
-        {
-            candidates[0][counts[0]++] = i;
-        }
-        const bool boundary = i != 0 && (check_corpus_word(text, starts[i - 1], ends[i - 1], ";") ||
-                                        check_corpus_word(text, starts[i - 1], ends[i - 1], "{"));
-        const bool identifier = i + 1 < tokens && (kinds[i + 1] & 0x7f) == C_TOKEN_RAW_IDENTIFIER &&
-                                check_corpus_leaf(text, starts[i + 1], ends[i + 1], kinds[i + 1]);
-        if (integer && depth != 0 && boundary && identifier && i + 2 < tokens && check_corpus_word(text, starts[i + 2], ends[i + 2], ";"))
-        {
-            candidates[1][counts[1]++] = i;
-        }
-        if (i + 2 < tokens && check_corpus_leaf(text, starts[i], ends[i], kinds[i]) &&
-            check_corpus_leaf(text, starts[i + 2], ends[i + 2], kinds[i + 2]))
-        {
-            const uint32_t bytes = ends[i + 1] - starts[i + 1];
-            const bool op = (bytes == 1 && strchr("+-*/%&|^<>", text[starts[i + 1]]) != 0) ||
-                            check_corpus_word(text, starts[i + 1], ends[i + 1], "==") ||
-                            check_corpus_word(text, starts[i + 1], ends[i + 1], "!=");
-            const bool left_number = text[starts[i]] >= '0' && text[starts[i]] <= '9';
-            const bool right_number = text[starts[i + 2]] >= '0' && text[starts[i + 2]] <= '9';
-            const bool member = i != 0 && (check_corpus_word(text, starts[i - 1], ends[i - 1], ".") ||
-                                          check_corpus_word(text, starts[i - 1], ends[i - 1], "->"));
-            const bool suffix = i + 3 < tokens && (check_corpus_word(text, starts[i + 3], ends[i + 3], "(") ||
-                                                   check_corpus_word(text, starts[i + 3], ends[i + 3], "[") ||
-                                                   check_corpus_word(text, starts[i + 3], ends[i + 3], ".") ||
-                                                   check_corpus_word(text, starts[i + 3], ends[i + 3], "->"));
-            if (op && (left_number || right_number) && !member && !suffix)
-            {
-                candidates[2][counts[2]++] = i;
-            }
-        }
-        depth += check_corpus_word(text, starts[i], ends[i], "{");
-        if (depth != 0 && check_corpus_word(text, starts[i], ends[i], "}"))
-        {
-            depth -= 1;
-        }
-    }
-}
-
-static char* check_corpus_semantic_mutate(const char* text, size_t length, const uint32_t* starts, const uint32_t* ends,
-                                         uint32_t token, uint32_t operation, size_t* result_length)
-{
-    char* result = malloc(length + 8);
-    size_t used = length;
-    if (result != 0)
-    {
-        const uint32_t start = starts[token];
-        const uint32_t end = ends[token];
-        memcpy(result, text, length);
-        if (operation == 0)
-        {
-            memcpy(result + start, "double", 6);
-            memcpy(result + start + 6, text + end, length - end);
-            used = start + 6 + length - end;
-        }
-        else if (operation == 1)
-        {
-            for (uint32_t i = start; i < ends[token + 2]; i += 1)
-            {
-                result[i] = text[i] == '\n' ? '\n' : ' ';
-            }
-        }
-        else
-        {
-            const uint32_t right = starts[token + 2];
-            const uint32_t right_end = ends[token + 2];
-            memcpy(result + start, text + right, right_end - right);
-            memcpy(result + start + right_end - right, text + end, right - end);
-            memcpy(result + right_end - end + start, text + start, end - start);
-        }
-    }
-    *result_length = used;
-    return result;
-}
-
 static bool check_corpus_generated(CheckCorpusTally* tally, char** files, uint32_t file_count, uint64_t count, uint64_t seed,
                                    uint32_t mode, const char* directory, bool keep, const PPOptions* options, const char* clang,
                                    const char* const* arguments, uint32_t argument_count, FILE* report, uint64_t report_limit)
 {
     const bool mutations = mode != 0;
-    const bool semantic = mode == 2;
-    const char* kind = semantic ? "semantic" : mutations ? "mutation" : "random";
+    const char* kind = mutations ? "mutation" : "random";
     PPOptions plain = *options;
     plain.no_standard_includes = true;
     plain.include_count = 0;
@@ -1855,19 +1850,8 @@ static bool check_corpus_generated(CheckCorpusTally* tally, char** files, uint32
         valid = !mutations || (original != 0 && kinds != 0 && starts != 0 && ends != 0 && source_length <= UINT32_MAX);
         const int64_t tokens = valid && mutations ? c_tokenize((const uint8_t*)original, source_length, kinds, starts, ends, 0) : 0;
         valid = valid && tokens >= 0;
-        uint32_t* candidates[3] = { 0 };
-        uint32_t candidate_counts[3] = { 0 };
-        for (uint32_t i = 0; valid && semantic && i < 3; i += 1)
-        {
-            candidates[i] = malloc((size_t)tokens * sizeof(uint32_t));
-            valid = candidates[i] != 0;
-        }
-        if (valid && semantic)
-        {
-            check_corpus_semantic_candidates(original, kinds, starts, ends, (uint32_t)tokens, candidates, candidate_counts);
-        }
         uint64_t remaining = mutations ? (count + file_count - 1) / file_count : count;
-        if (mutations && (tokens < 2 || (semantic && (uint64_t)candidate_counts[0] + candidate_counts[1] + candidate_counts[2] == 0)))
+        if (mutations && tokens < 2)
         {
             remaining = 0;
             empty += 1;
@@ -1889,19 +1873,12 @@ static bool check_corpus_generated(CheckCorpusTally* tally, char** files, uint32
                 snprintf(names[b], sizeof(names[b]), "%s/%s_%" PRIu64 ".c", directory, kind, done + b);
                 if (mutations)
                 {
-                    uint32_t operation = semantic ? (uint32_t)((done + b) % 3) : (uint32_t)(parse_test_random(&state) % 3);
-                    while (semantic && candidate_counts[operation] == 0)
-                    {
-                        operation = (operation + 1) % 3;
-                    }
-                    const uint32_t token = semantic ? candidates[operation][parse_test_random(&state) % candidate_counts[operation]] :
-                                                     (uint32_t)(parse_test_random(&state) % (uint64_t)(tokens - 1));
+                    const uint32_t operation = (uint32_t)(parse_test_random(&state) % 3);
+                    const uint32_t token = (uint32_t)(parse_test_random(&state) % (uint64_t)(tokens - 1));
                     size_t length = 0;
-                    char* text = semantic ? check_corpus_semantic_mutate(original, source_length, starts, ends, token, operation, &length) :
-                                           check_corpus_mutate(original, source_length, starts, ends, token, operation, &length);
+                    char* text = check_corpus_mutate(original, source_length, starts, ends, token, operation, &length);
                     valid = text != 0 && check_corpus_write(names[b], text, length);
-                    const char* operation_name = semantic ? (operation == 0 ? "type-change" : operation == 1 ? "declaration-remove" : "operand-swap") :
-                                                           (operation == 0 ? "delete" : operation == 1 ? "duplicate" : "swap");
+                    const char* operation_name = operation == 0 ? "delete" : operation == 1 ? "duplicate" : "swap";
                     snprintf(labels[b], sizeof(labels[b]), "%s (seed=%" PRIu64 " %s=%" PRIu64 " token=%u %s)", file, seed, kind, done + b, token, operation_name);
                     free(text);
                 }
@@ -1934,10 +1911,6 @@ static bool check_corpus_generated(CheckCorpusTally* tally, char** files, uint32
         free(starts);
         free(kinds);
         free(original);
-        for (uint32_t i = 0; i < 3; i += 1)
-        {
-            free(candidates[i]);
-        }
         source += 1;
     }
     free(clang_arguments);
@@ -2001,6 +1974,9 @@ static bool check_corpus_manifest(const char* path, const char* root, char** fil
     return valid;
 }
 
+// The semantic mutation mode (--semantic-mutations) checks its mutants with check_corpus_file_outcome above.
+#include "c_check_mutation.c"
+
 static int run_checker_corpus(int count, char** arguments)
 {
     const char* clang = "clang";
@@ -2013,12 +1989,15 @@ static int run_checker_corpus(int count, char** arguments)
     uint64_t random_count = 0;
     uint64_t mutation_count = 0;
     uint64_t semantic_count = 0;
+    uint64_t minimize = 4;
     uint64_t seed = 133;
     bool keep = false;
     bool rejections = false;
     const uint32_t file_capacity = 1u << 20;
     char** files = calloc(file_capacity, sizeof(char*));
     char** inputs = calloc((size_t)count + 1, sizeof(char*));
+    char** mutants = calloc((size_t)count + 1, sizeof(char*));
+    uint32_t mutant_count = 0;
     const int argument_capacity = count < (INT_MAX - BUSTER_PP_ORACLE_EXTRA_ARGUMENTS) / 2 ? count * 2 + BUSTER_PP_ORACLE_EXTRA_ARGUMENTS : 0;
     char** pp_arguments = calloc((size_t)argument_capacity, sizeof(char*));
     const char** clang_arguments = calloc((size_t)argument_capacity, sizeof(char*));
@@ -2026,7 +2005,7 @@ static int run_checker_corpus(int count, char** arguments)
     uint32_t pp_count = 0;
     uint32_t clang_count = 0;
     uint32_t file_count = 0;
-    bool valid = argument_capacity != 0 && files != 0 && inputs != 0 && pp_arguments != 0 && clang_arguments != 0;
+    bool valid = argument_capacity != 0 && files != 0 && inputs != 0 && mutants != 0 && pp_arguments != 0 && clang_arguments != 0;
     if (valid)
     {
         clang_arguments[clang_count++] = "--no-default-config";
@@ -2042,7 +2021,7 @@ static int run_checker_corpus(int count, char** arguments)
                            strcmp(argument, "--select-accepted") == 0 || strcmp(argument, "--semantic-rejections") == 0 ||
                            strcmp(argument, "--root") == 0 || strcmp(argument, "--reports") == 0 || strcmp(argument, "--limit") == 0 ||
                            strcmp(argument, "--random") == 0 || strcmp(argument, "--mutations") == 0 || strcmp(argument, "--semantic-mutations") == 0 ||
-                           strcmp(argument, "--seed") == 0;
+                           strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0 || strcmp(argument, "--minimize-mutant") == 0;
         if (value)
         {
             valid = i + 1 < count;
@@ -2071,11 +2050,15 @@ static int run_checker_corpus(int count, char** arguments)
                 {
                     root = text;
                 }
+                else if (strcmp(argument, "--minimize-mutant") == 0)
+                {
+                    mutants[mutant_count++] = arguments[i];
+                }
                 else
                 {
                     uint64_t* destination = strcmp(argument, "--limit") == 0 ? &limit : strcmp(argument, "--random") == 0 ? &random_count :
                                             strcmp(argument, "--mutations") == 0 ? &mutation_count : strcmp(argument, "--semantic-mutations") == 0 ? &semantic_count :
-                                            strcmp(argument, "--seed") == 0 ? &seed : &report_limit;
+                                            strcmp(argument, "--seed") == 0 ? &seed : strcmp(argument, "--minimize") == 0 ? &minimize : &report_limit;
                     valid = check_corpus_number(text, destination);
                 }
             }
@@ -2177,9 +2160,9 @@ static int run_checker_corpus(int count, char** arguments)
             valid = file_count > before && file_count < file_capacity;
         }
         valid = valid && (manifest == 0 || check_corpus_manifest(manifest, root, files, &file_count, file_capacity));
-        valid = valid && (file_count != 0 || random_count != 0) && limit != 0 && random_count <= UINT32_MAX && mutation_count <= UINT32_MAX &&
+        valid = valid && (file_count != 0 || random_count != 0 || mutant_count != 0) && (mutant_count == 0 || file_count == 0) && limit != 0 && random_count <= UINT32_MAX && mutation_count <= UINT32_MAX &&
                 semantic_count <= UINT32_MAX && ((mutation_count == 0 && semantic_count == 0) || file_count != 0) &&
-                (selection_path == 0 || (random_count == 0 && mutation_count == 0 && semantic_count == 0));
+                (selection_path == 0 || (random_count == 0 && mutation_count == 0 && (semantic_count == 0 || !rejections)));
     }
     uint32_t selected = 0;
     if (valid)
@@ -2234,23 +2217,31 @@ static int run_checker_corpus(int count, char** arguments)
         fprintf(report, "kind\tinput\tclang_accepted\tscalar_accepted\tvector_accepted\tclang_line\tscalar_line\tvector_line\tpaths_equal\tresource\ttokens\tphase\tfirst_file\tfirst_token\tfirst_column\tspelling\tchecker_message\tclang_message\tclang_file\tdiagnostic_path_equal\n");
     }
     CheckCorpusTally tally = { 0 };
-    if (valid)
+    CheckMutationTally mutations = { 0 };
+    const bool minimized = valid && mutant_count != 0 &&
+                           check_mutation_minimize_files(mutants, mutant_count, &options, clang, clang_arguments, clang_count, directory);
+    bool* bases = valid ? calloc((size_t)selected + 1, sizeof(bool)) : NULL;
+    valid = valid && bases != NULL;
+    if (valid && mutant_count == 0)
     {
         printf("checker-corpus: inventory=%u selected=%u random=%" PRIu64 " mutations=%" PRIu64 " semantic_mutations=%" PRIu64
                " seed=%" PRIu64 " standard=%s oracle=%s selection=%s\n", file_count, selected, random_count, mutation_count, semantic_count, seed, standard + 5, clang,
                rejections ? "preprocessed-semantic-rejections" : selection != NULL ? "syntax-accepted" : "all");
         fflush(stdout);
-        valid = check_corpus_files(&tally, files, selected, &options, clang, clang_arguments, clang_count, report, selection, rejections, report_limit);
+        valid = check_corpus_files(&tally, files, selected, &options, clang, clang_arguments, clang_count, report, selection, rejections, report_limit,
+                                   bases);
         valid = valid && check_corpus_generated(&tally, files, selected, random_count, seed, 0, directory, keep, &options, clang,
                                                clang_arguments, clang_count, report, report_limit);
         valid = valid && check_corpus_generated(&tally, files, selected, mutation_count, seed, 1, directory, keep, &options, clang,
                                                clang_arguments, clang_count, report, report_limit);
-        valid = valid && check_corpus_generated(&tally, files, selected, semantic_count, seed, 2, directory, keep, &options, clang,
-                                               clang_arguments, clang_count, report, report_limit);
+        valid = valid && (semantic_count == 0 || check_mutation_campaign(&tally, &mutations, files, bases, selected, semantic_count, seed, minimize,
+                                                                          directory, keep, &options, clang, clang_arguments, clang_count, report,
+                                                                          report_limit));
     }
-    else
+    else if (!valid)
     {
-        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n");
+        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
+                "       test-checker-corpus [--clang PATH] --minimize-mutant FILE... [preprocessor options]\n");
     }
     if (report != 0)
     {
@@ -2278,9 +2269,21 @@ static int run_checker_corpus(int count, char** arguments)
             }
         }
     }
-    const bool passed = valid && (tally.files != 0 || rejections) && tally.files + tally.excluded == selected + random_count + mutation_count + semantic_count &&
+    const bool passed = mutant_count != 0 ? minimized : valid && (tally.files != 0 || rejections) &&
+                        tally.files + tally.excluded == selected + random_count + mutation_count + semantic_count + mutations.units &&
                         tally.acceptance_differences == 0 && tally.line_differences == 0 && tally.diagnostic_path_differences == 0 &&
                         tally.path_differences == 0 && tally.resource_failures == 0 && tally.preprocessing_failures == 0;
+    if (semantic_count != 0)
+    {
+        for (uint32_t kind = 0; kind < CHECK_MUTATION_KIND_COUNT; kind += 1)
+        {
+            printf("checker-corpus: semantic kind=%s sites=%" PRIu64 " mutants=%" PRIu64 " clang_rejected=%" PRIu64 " differences=%" PRIu64 "\n",
+                   check_mutation_names[kind], mutations.sites[kind], mutations.kinds[kind], mutations.kind_rejected[kind], mutations.kind_differences[kind]);
+        }
+        printf("checker-corpus: semantic units=%" PRIu64 " base_differences=%" PRIu64 " unusable=%" PRIu64 " mutants=%" PRIu64 " differences=%" PRIu64
+               " intended=%" PRIu64 " minimized=%" PRIu64 " saved=%" PRIu64 "\n", mutations.units, mutations.base_differences, mutations.unusable,
+               mutations.mutants, mutations.differences, mutations.intended, mutations.minimized, mutations.saved);
+    }
     printf("checker-corpus: files=%" PRIu64 " excluded_by_clang_selection=%" PRIu64 " clang_accepted=%" PRIu64 " checker_accepted=%" PRIu64 " acceptance_differences=%" PRIu64
            " first_line_differences=%" PRIu64 " diagnostic_path_differences=%" PRIu64 " path_differences=%" PRIu64 " resources=%" PRIu64 " preprocessing_failures=%" PRIu64
            " tokens=%" PRIu64 " nodes=%" PRIu64 " vector_path_scalar_nodes=%" PRIu64 " vector_nodes=%" PRIu64
@@ -2294,6 +2297,8 @@ static int run_checker_corpus(int count, char** arguments)
     {
         free(files[i]);
     }
+    free(bases);
+    free(mutants);
     free(clang_arguments);
     free(pp_arguments);
     free(inputs);
