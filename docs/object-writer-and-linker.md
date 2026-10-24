@@ -2950,6 +2950,76 @@ would make code streamable in any order, but at a permanent cost to the
 generated program. It belongs to an incremental development mode, if
 anywhere.
 
+#### Streaming, as built
+
+`streaming.c` is the experiment (#88): units of Tier 0's generated programs
+(`tier0_generate.c`), compiled function by function into a static executable
+laid out data first (the headers, `.data`, `.text`, then `.eh_frame_hdr` and
+`.eh_frame` in a read-only segment of their own, then the DWARF), written while
+they compile or once they have, and the same code as a Link through
+`executable_write` in lld's order, for the direct path's time.
+
+- **Every schedule writes the same file,** byte for byte with the same build
+  ID: at the end; streamed by the compiling lane, each 256 KB chunk of `.text`
+  hashed and written as soon as it is whole and none of its fields waits for a
+  function not yet compiled; and streamed by a writer lane, to which the
+  compiling lane hands its chunks.
+- **The unwind tables** come from the code generator's prologues
+  (`unwind_tier0.c`) as each function compiles, eight pairs at a time
+  (`unwind.c`), and **the DWARF** (`debug.c`) in units of 256 functions, each
+  made and finalized as soon as its functions have compiled and written after
+  the units before it (`DebugOutput.bases`). In this order every address is
+  known when its function is encoded, so nothing of either waits for layout but
+  its place in the file, after `.text`, whose size the last function decides:
+  both are written with the tail.
+- **gdb, perf and llvm-dwarfdump read the data-first file**
+  (`test-streaming --cross-check`): gdb stops in the program's functions and
+  unwinds through them to `_start` by their FDEs, each frame at its function's
+  line; perf's DWARF call graphs reach `_start` and give the lines;
+  `llvm-dwarfdump --verify` passes the units together, and `readelf` warns about
+  nothing.
+
+**Measured on the 9700X** (`benchmark-streaming --units 3200`, medians of 11
+runs, the output overwritten in place on tmpfs; [the record](https://github.com/buster14a/buster-performance/tree/1cae273d7d9484451744a8abe044ccddc3420d30/docs/measurements/streaming-2026-10-24)): 3,200
+units of 32 functions, 102,400 functions of 13.1 million typed entries,
+compiled by Tier 0 on one lane pinned to CPU 2 into 59.5 MB of code in an 86 MB
+file, 6 MB of it DWARF:
+
+| Variant | Whole | Compiling | After the last function |
+| --- | ---: | ---: | ---: |
+| At the end | 370.0 ms | 351.2 ms | 18.9 ms |
+| Streamed | 370.0 ms | 365.1 ms | **5.0 ms** |
+| Streamed, by a writer lane (CPUs 2 and 3) | 377.0 ms | 371.8 ms | 5.2 ms |
+| Direct path (a Link, then `executable_write`), 1 lane | 390.6 ms | 349.6 ms | 41.2 ms |
+| Direct path, 8 lanes (CPUs 0 to 7) | 382.9 ms | 350.2 ms | 32.8 ms |
+
+- **Streaming takes the code's writing and the DWARF's making out of the end:**
+  5.0 ms follow the last function against 18.9. The whole is the same on one
+  lane, since the 14 ms of `.text`'s chunks and DWARF units move into the
+  compiling, which they lengthen by as much.
+- **What stays at the end is the tail:** 2.7 ms to copy `.eh_frame`'s pairs and
+  the DWARF's units into it and lay out the rest, and 2.2 ms to write it. In
+  this order both are made as the code compiles; only their place in the file
+  waits for `.text`'s size.
+- **A writer lane doesn't pay** on tmpfs: handing it the chunks costs the
+  compiling lane more (371.8 ms) than writing them itself (365.1).
+- **Against the direct path,** streaming saves building the Link (20.8 ms: the
+  atoms, fixups and symbols of the same code) and most of the write (20.4):
+  370.0 ms against 390.6 on one lane. On eight lanes, the direct path's write
+  takes 12.1 ms after its Link's 20.7 on one: 32.8 ms after the last function.
+- **Compiling callers first,** so that nearly every call is forward, the streamed
+  file still leaves 5.1 ms after the last function (`--order callers`): a
+  chunk's fields wait for callees that follow soon, within their unit.
+- **The DWARF:** made at the end as one unit, it left 9.2 ms after the last
+  function, against 3.0 without it; made in units as the functions compile,
+  5.0. A line per function, 6 MB for 102,400 functions, measures the
+  mechanism, not a `-g` build. Synth's `-g` output is 126 MB (mold links it in
+  50.5 ms with its threads, wild in 41.4), most of it DWARF, whose making a
+  compiler would spread over its compiling the same way. Its writing, at the
+  floors' 8 to 14 GB/s on tmpfs ("The floors"), would stay at the end in this
+  order, unless the DWARF went to a file of its own as its units are made (split
+  DWARF).
+
 ### The object writer (`-c`)
 
 The object writer serializes the same state as an ET_REL file that GNU ld,
@@ -4507,6 +4577,24 @@ incremental linking (§10) because the bookkeeping costs every link and changes
 often force a full one. Both arguments are measured here before anything is
 built.
 
+**Not built (#89).** #88's measurements leave it little to save:
+
+- what a rebuild could save by patching pages in place is what a full link
+  costs after the compiling: the direct path writes synth's shape, 44 MB, in
+  7.3 ms on one lane ("Foreign executables, as built"), and streaming leaves
+  5.0 ms after the last of 102,400 functions, the tail of an 86 MB file
+  ("Streaming, as built");
+- every link would pay for the bookkeeping that saving needs: the reverse index
+  of every fixup's target, kept from build to build, and the stable layout's
+  slack, which the canonical layout doesn't have; and a change outside the fast
+  path (a binding, a COMDAT winner, GC's roots, TLS, the dynamic symbols, the
+  options) falls back to the full link anyway.
+
+At a few milliseconds a rebuild, against those costs on every link, the mold
+paper's argument holds here. What would change it is an output whose full write
+takes far longer than an edit's recompile, hundreds of megabytes; until a
+workload like that is measured, the full link stays the only one.
+
 ## Plan
 
 Each step is a pull request with tests and a benchmark in `build/compiler`,
@@ -4629,8 +4717,15 @@ and with this document updated with what was measured:
    choice.
 9. **Unwind tables from the code generator's prologues, and DWARF,** then
    **streaming the output** in the data-first order, measured against writing
-   at the end.
-10. **Incremental output,** if the measurements in 9 leave it worth doing.
+   at the end. Done: the unwind tables from Tier 0's prologues (`unwind_tier0.c`
+   and `unwind.c`, "The unwind tables") and DWARF at final addresses
+   (`debug.c`), which gdb and perf read (`test-unwind`, `test-debug`); and
+   `streaming.c`, which writes a program while Tier 0 compiles it, in the
+   data-first order, with both, the DWARF in units made as the code compiles
+   ("Streaming, as built"): gdb, perf and llvm-dwarfdump read it, and 5.0 ms
+   follow the last of 102,400 functions against 18.9 written at the end.
+10. **Incremental output,** if the measurements in 9 leave it worth doing. Not
+    built: they don't ("Incremental output").
 
 ## Sources
 
