@@ -282,11 +282,12 @@ static const char* tier0_c_type(uint32_t class)
     return names[class < BUSTER_TYPED_CLASSES ? class : 0];
 }
 
-// A record's C name (a struct or a union of the catalog's), or a class's for NO_RECORD.
+// A record's C name (a struct or a union of the catalog's), or a class's for NO_RECORD and in a program without the
+// catalog, whose zeroed columns hold no records.
 static const char* tier0_c_record(const Tier0Records* records, uint32_t record, uint32_t class, char* buffer, uint32_t capacity)
 {
     const char* name = tier0_c_type(class);
-    if (record != BUSTER_TIER0_GENERATE_NO_RECORD)
+    if (records != 0 && record != BUSTER_TIER0_GENERATE_NO_RECORD)
     {
         snprintf(buffer, capacity, "%s r%u", records->records[record].is_union ? "union" : "struct", record);
         name = buffer;
@@ -3156,7 +3157,8 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
 {
     const uint32_t function_count = program->function_count;
     const uint32_t signatures = function_count + program->call_count;
-    // A record's type, or a class's.
+    // A record's type, or a class's. A program without the catalog (a hand-made one, whose columns are zeroed, so that
+    // a function's result_record reads as record 0) has no records.
     const Tier0Records* records = program->records;
     uint32_t parameters = 0;
     uint32_t hidden = 0;
@@ -3194,7 +3196,8 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
         {
             const Tier0GeneratedFunction* function = &program->functions[f];
             const uint32_t spelled = function->hidden ? 1 : 0;
-            results[f] = function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[function->result_record].type : tier0_program_class_type(function->result_class);
+            const uint32_t result_record = records != 0 ? function->result_record : BUSTER_TIER0_GENERATE_NO_RECORD;
+            results[f] = result_record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[result_record].type : tier0_program_class_type(function->result_class);
             counts[f] = function->parameter_count - spelled;
             variadic[f] = 0;
             for (uint32_t p = spelled; p < function->parameter_count; p += 1)
@@ -3208,8 +3211,9 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
         for (uint32_t c = 0; c < program->call_count; c += 1)
         {
             const Tier0GeneratedFunction* callee = &program->functions[program->call_callees[c]];
-            results[function_count + c] = callee->result_record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[callee->result_record].type
-                                                                                                    : tier0_program_class_type(callee->result_class);
+            const uint32_t result_record = records != 0 ? callee->result_record : BUSTER_TIER0_GENERATE_NO_RECORD;
+            results[function_count + c] = result_record != BUSTER_TIER0_GENERATE_NO_RECORD ? records->records[result_record].type
+                                                                                           : tier0_program_class_type(callee->result_class);
             counts[function_count + c] = program->call_argument_counts[c];
             variadic[function_count + c] = 0;
             for (uint32_t a = 0; a < program->call_argument_counts[c]; a += 1)
@@ -3275,7 +3279,7 @@ static bool tier0_program_functions(const Tier0Program* program, const Tier0Tabl
                 hidden_parameter += function->parameter_count;
             }
             parameter += function->parameter_count - (function->hidden ? 1 : 0);
-            const bool registers = function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD && calls[f].result.kind == BUSTER_ABI_RESULT_REGISTERS;
+            const bool registers = records != 0 && function->result_record != BUSTER_TIER0_GENERATE_NO_RECORD && calls[f].result.kind == BUSTER_ABI_RESULT_REGISTERS;
             t->result_size = registers ? records->records[function->result_record].size : 0;
             t->argument_sizes = functions->argument_sizes;
             t->call_result_objects = records != 0 ? program->call_result_objects + function->first_call : 0;
