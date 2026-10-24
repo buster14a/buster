@@ -2589,9 +2589,11 @@ find libB without `V1`: "version `V1' not found"), and against one whose `foo` h
 unversioned reference binds only to a default export. `import_library` keeps each reference's `.gnu.version` index and
 the exports at versions other than their names' defaults, which its vector path compresses beside the exports, and the
 import walks `.gnu.version_r`'s few entries, by `vn_next` and `vna_next` as the loader does, into a table by index,
-which gives each reference its version and the file it requires it of in one load (`runtime_libraries_versions`):
-0365999's second pass over `.dynsym` for them had taken libm's import from 183,603 to 443,241 instructions (86.2 to
-97.7 µs) on the 9700X. An entry's index is `vna_other` without its top bit (`VER_NEED_HIDDEN`), as the loader and
+which gives each reference its version and the file it requires it of in one load (`runtime_libraries_versions`). A
+first version of the reader made a second pass over `.dynsym` for them, which took libm's import from 183,603 to
+443,241 instructions (86.2 to 97.7 µs) on the 9700X; this one takes it to 213,478 (89.1 µs, the 9700X job of
+[run 40116992018](https://github.com/buster14a/buster/actions/runs/40116992018)), the reader's own work being a walk
+of the section headers and the version needs, and the hidden exports' lengths and hashes (libm's 147). An entry's index is `vna_other` without its top bit (`VER_NEED_HIDDEN`), as the loader and
 lld mask it (GNU ld 2.42 refuses the bit); the bit itself changes nothing here, since only the fallbacks to an export
 without a version, which binding doesn't take, depend on it. Version needs that don't read (an entry or a name outside
 its section, a name empty, a last entry's `vn_next` past the section) and a reference whose index names neither an
