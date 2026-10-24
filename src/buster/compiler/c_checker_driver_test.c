@@ -352,6 +352,7 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
     {
         built = check_test_driver_spawn(builds[b], &text) == 0;
         free(text);
+        text = NULL;
     }
     check_test_expect(test, built, "libraries a needed library refers to: clang builds them");
     struct
@@ -371,10 +372,12 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
         char* const run[] = { "env", search, output, NULL };
         const int linked = check_test_driver_spawn(link, &text);
         free(text);
+        text = NULL;
         char needed[256] = { 0 };
         const bool listed = linked == 0 && check_test_driver_needed(output, needed, sizeof(needed)) && strcmp(needed, cases[c].needed) == 0;
         const int ran = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
         free(text);
+        text = NULL;
         if (!listed || ran != 0)
         {
             printf("  %s: link status %d, DT_NEEDED \"%s\", run status %d\n", cases[c].name, linked, needed, ran);
@@ -386,6 +389,105 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
     {
         unlink(files[f]);
     }
+}
+
+// A library that a linker script names by its path, without a soname (#398's review): its DT_NEEDED entry is that
+// path, as GNU ld and lld write it, so that the program loads it with no search path.
+static void check_test_driver_script_path(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char c_source[] = "int c_func(void) { return 7; }\n";
+    static const char program[] = "int c_func(void);\nint main(void) { return c_func() == 7 ? 0 : 1; }\n";
+    char private_directory[256];
+    char scripts[256];
+    char c_path[256];
+    char library_c[256];
+    char script[256];
+    char source[256];
+    char output[256];
+    char script_text[320];
+    char expected[320];
+    snprintf(private_directory, sizeof(private_directory), "%s/private", directory);
+    snprintf(scripts, sizeof(scripts), "%s/scripts", directory);
+    snprintf(c_path, sizeof(c_path), "%s/c.c", directory);
+    snprintf(library_c, sizeof(library_c), "%s/libC.so", private_directory);
+    snprintf(script, sizeof(script), "%s/libwrap.so", scripts);
+    snprintf(source, sizeof(source), "%s/uses_c.c", directory);
+    snprintf(output, sizeof(output), "%s/uses_c", directory);
+    snprintf(script_text, sizeof(script_text), "INPUT(%s)\n", library_c);
+    snprintf(expected, sizeof(expected), "%s libc.so.6", library_c);
+    const bool made = mkdir(private_directory, 0755) == 0 && mkdir(scripts, 0755) == 0 && parse_test_write(c_path, c_source, sizeof(c_source) - 1) &&
+                      parse_test_write(script, script_text, strlen(script_text)) && parse_test_write(source, program, sizeof(program) - 1);
+    char* const build[] = { (char*)clang, "-shared", "-fPIC", "-o", library_c, c_path, NULL };
+    char* const link[] = { (char*)executable, "-o", output, source, "-L", scripts, "-lwrap", NULL };
+    char* const run[] = { output, NULL };
+    char* text = NULL;
+    const int built = made ? check_test_driver_spawn(build, &text) : -1;
+    free(text);
+    text = NULL;
+    const int linked = built == 0 ? check_test_driver_spawn(link, &text) : -1;
+    free(text);
+    text = NULL;
+    char needed[512] = { 0 };
+    const bool listed = linked == 0 && check_test_driver_needed(output, needed, sizeof(needed)) && strcmp(needed, expected) == 0;
+    const int ran = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    if (!listed || ran != 0)
+    {
+        printf("  a script's library by its path: build status %d, link status %d, DT_NEEDED \"%s\", run status %d\n", built, linked, needed, ran);
+    }
+    check_test_expect(test, listed && ran == 0, "a script's library without a soname needed by its path");
+    const char* const files[] = { c_path, library_c, script, source, output };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+    rmdir(private_directory);
+    rmdir(scripts);
+}
+
+// Options that take the next argument as their value keep it, however it is spelled (#398's review): run in the test's
+// directory (env -C), `-o -lresult -include -local.h -I -Lheaders` writes -lresult from a program that needs the forced
+// include's macro and a header that only -Lheaders has, and the program runs.
+static void check_test_driver_option_values(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char header_text[] = "#define VALUE 3\n";
+    static const char forced_text[] = "#define LOCAL 4\n";
+    static const char program[] = "#include \"h.h\"\nint main(void) { return VALUE + LOCAL == 7 ? 0 : 1; }\n";
+    char compiler[PATH_MAX];
+    char headers[256];
+    char header[256];
+    char forced[256];
+    char source[256];
+    char output[256];
+    snprintf(headers, sizeof(headers), "%s/-Lheaders", directory);
+    snprintf(header, sizeof(header), "%s/-Lheaders/h.h", directory);
+    snprintf(forced, sizeof(forced), "%s/-local.h", directory);
+    snprintf(source, sizeof(source), "%s/values.c", directory);
+    snprintf(output, sizeof(output), "%s/-lresult", directory);
+    // The compiler runs in the test's directory, so its path must not be relative to this one.
+    const bool made = realpath(executable, compiler) != NULL && mkdir(headers, 0755) == 0 && parse_test_write(header, header_text, sizeof(header_text) - 1) &&
+                      parse_test_write(forced, forced_text, sizeof(forced_text) - 1) && parse_test_write(source, program, sizeof(program) - 1);
+    char* const link[] = { "env", "-C", (char*)directory, compiler, "values.c", "-o", "-lresult", "-include", "-local.h", "-I", "-Lheaders", NULL };
+    char* const run[] = { output, NULL };
+    char* text = NULL;
+    const int linked = made ? check_test_driver_spawn(link, &text) : -1;
+    if (linked != 0)
+    {
+        printf("  option values: link status %d: %s\n", linked, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    const int ran = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, linked == 0 && ran == 0, "-o -lresult, -include -local.h and -I -Lheaders keep their values");
+    const char* const files[] = { header, forced, source, output };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+    rmdir(headers);
 }
 
 static void check_test_driver_diagnostic_capacity(CheckTest* test)
@@ -918,6 +1020,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);
+            check_test_driver_script_path(&test, clang, executable, directory);
+            check_test_driver_option_values(&test, executable, directory);
         }
         rmdir(directory);
     }

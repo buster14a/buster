@@ -21,7 +21,9 @@ links once more from a fresh import. `--verify` also checks every function's
 records with `x86_validate`, as the c-testsuite harness asks
 ([the c-testsuite guide](c-testsuite.md)).
 
-`-lNAME` (or `-l NAME`) links a shared library besides the C runtime's, found as
+`-lNAME` (or `-l NAME`) links a shared library besides the C runtime's (the
+value of an option that takes the next argument stays that option's, as
+`pp_option_takes_value` lists them: `-o -lresult` writes `-lresult`), found as
 GNU ld finds it: `libNAME.so`, or else `libNAME.a`, in the first of the `-LDIR`
 directories, then glibc's library directories, that has one; a linker script
 (glibc's `libm.so`) stands for the libraries it names. Binding takes a name
@@ -30,13 +32,12 @@ executable needs one only for a strong reference that binds to it, the
 program's or a needed library's own that its `DT_NEEDED` doesn't cover, as GNU
 ld links them `--as-needed` (the default of Debian's and Ubuntu's GCC);
 `DT_NEEDED` lists them before `libc.so.6` (`runtime_libraries_import`, `bind.c`
-and `dynamic.c`). An
-empty archive (glibc's `libpthread.a`, `libdl.a` and `librt.a`) adds nothing;
-one with members is refused by name, since the direct path doesn't link
-archives yet. A call of a function that a system header declares and no linked
-library has gets a named error that points at `-l` (`-lm` for libm's). A read
-or write of the C library's data (which needs the GOT) is refused by name;
-`-c` and a system linker take it.
+and `dynamic.c`). An empty archive (glibc's `libpthread.a`, `libdl.a` and
+`librt.a`) adds nothing; one with members is refused by name, since the direct
+path doesn't link archives yet. A call of a function that a system header
+declares and no linked library has gets a named error that points at `-l`
+(`-lm` for libm's). A read or write of the C library's data (which needs the
+GOT) is refused by name; `-c` and a system linker take it.
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check

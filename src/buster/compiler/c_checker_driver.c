@@ -799,9 +799,19 @@ static int run_check_command(int count, char** arguments, bool executable)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
         quiet |= strcmp(arguments[i], "-w") == 0;
-        const bool library = arguments[i][0] == '-' && arguments[i][1] == 'l';
-        const bool directory = arguments[i][0] == '-' && arguments[i][1] == 'L';
-        if (library || directory)
+        // An option that takes the next argument as its value (pp_option_takes_value: pp_parse_options' and
+        // c_predefines.c's) passes on with it, unread: `-o -lresult` writes -lresult, as clang's driver takes it.
+        const bool valued = i + 1 < count && pp_option_takes_value(arguments[i]);
+        const bool library = !valued && arguments[i][0] == '-' && arguments[i][1] == 'l';
+        const bool directory = !valued && arguments[i][0] == '-' && arguments[i][1] == 'L';
+        if (valued)
+        {
+            // The option and its value, however the value is spelled, for pp_parse_options.
+            filtered[filtered_count++] = arguments[i];
+            filtered[filtered_count++] = arguments[i + 1];
+            i += 1;
+        }
+        else if (library || directory)
         {
             const char* value = arguments[i][2] != 0 ? arguments[i] + 2 : i + 1 < count ? arguments[++i] : 0;
             const String8 text = {

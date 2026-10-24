@@ -2569,7 +2569,10 @@ every named library, so that both orders link and run. A weak reference to a lib
 nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
 a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
 library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
-each required exactly when needed, and their versions in `.gnu.version_r`.
+each required exactly when needed, and their versions in `.gnu.version_r`. A library's `DT_NEEDED` name is its
+soname, or without one, as GNU ld and lld name it, its file's name where the `-l` search found it and its path where a
+script names it (`runtime_libraries_name`): a script's library in a directory of its own loads without a search
+path.
 
 What isn't linked yet: an archive with members (`libNAME.a` found first, or one a script names) is refused by name;
 an empty one, as glibc 2.34 and later install `libpthread.a`, `libdl.a` and `librt.a`, adds nothing, as GNU ld
@@ -2591,7 +2594,8 @@ if it matters.
 `test-checker-driver --executable` links a program that calls libm's functions by both paths into the same bytes,
 runs it against this executable's libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whose
 `b_func` libB defines, with libA and libB built by clang: `-lA -lB` and `-lB -lA` must need both, in the line's
-order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running.
+order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running; and links one against a
+library without a soname that a script names by its path, which must be its `DT_NEEDED` entry.
 
 #### The unwind tables
 
