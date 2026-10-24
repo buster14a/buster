@@ -21,8 +21,8 @@ typedef enum CheckProgramStatus
 
 // A variable-length array's object (block scope, automatic, of a runtime size) is ALLOCATEd at its declaration (`token`;
 // `target` is its block's closing token), after its bounds' VLA entries; the first of its block is preceded by the
-// block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (from its
-// first array to its end) by a STACK_RESTORE of the outermost block it leaves (`target`, a closing token). The function's
+// block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (after the
+// save, to its end) by a STACK_RESTORE of the outermost block it leaves (`target`, a closing token). The function's
 // own block's end needs none: its return releases its frame.
 typedef enum CheckControlKind
 {
@@ -171,10 +171,12 @@ struct CheckControlWriter
     const uint32_t* vla_first;
     const uint32_t* vla_next;
     // The variable-length arrays' objects of each statement (by its terminator), in declaration order, and each block's
-    // first one's declaration token plus one (by the block's closing token; 0 for a block without them).
+    // first one's declaration token plus one (by the block's closing token; 0 for a block without them), and the last
+    // token before the block's STACK_SAVE plus one: the first one's own bounds' last `]`, or its declaration.
     const uint32_t* allocation_first;
     const uint32_t* allocation_next;
     const uint32_t* vla_blocks;
+    const uint32_t* vla_saves;
     const uint32_t* asm_statements;
     const uint32_t* case_first;
     const uint32_t* case_next;
@@ -568,7 +570,8 @@ static bool check_control_static(const CheckControlWriter* writer, uint32_t node
 }
 
 // The STACK_RESTORE that a jump at `jump` needs before it, when it leaves blocks with variable-length arrays: of the
-// outermost block whose region (from its first array to its end) holds the jump but not where it goes. A break or a
+// outermost block whose region (after its STACK_SAVE, to its end) holds the jump but not where it goes. A jump out of
+// the first array's own bounds, from a statement expression, comes before the save and needs none. A break or a
 // continue goes past the blocks inside its loop or switch, the ancestor whose label in `targets` (stops or repeats) is
 // its `target`; a goto (`targets` 0) goes to `label`, a token, inside or outside each region up to the function's
 // block. Jumps into a region are the checker's errors.
@@ -582,9 +585,9 @@ static void check_control_leave(CheckControlWriter* writer, uint32_t jump, uint3
     for (uint32_t ancestor = parser->tree.parents[jump]; ancestor < count && steps < count && !past; ancestor = parser->tree.parents[ancestor])
     {
         past = targets != 0 && targets[ancestor] == target;
-        const uint32_t first = writer->vla_blocks[ancestor];
-        const bool held = targets == 0 && label > first - 1 && label < ancestor;
-        left = !past && first != 0 && first - 1 < jump && !held ? ancestor : left;
+        const uint32_t saved = writer->vla_saves[ancestor];
+        const bool held = targets == 0 && label > saved - 1 && label < ancestor;
+        left = !past && saved != 0 && saved - 1 < jump && !held ? ancestor : left;
         past |= ancestor == writer->closing;
         steps += 1;
     }
@@ -1359,6 +1362,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* allocation_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* allocation_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* vla_blocks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* vla_saves = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* asm_statements = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* case_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1381,7 +1385,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && entries != 0 && tasks != 0 && plan_first != 0 && (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && reference_items != 0 && reference_sort != 0 &&
             stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
-            allocation_first != 0 && allocation_next != 0 && vla_blocks != 0;
+            allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0;
     if (!valid && program->status == CHECK_PROGRAM_OK)
     {
         program->status = CHECK_PROGRAM_RESOURCE;
@@ -1400,6 +1404,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(vla_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(allocation_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(vla_blocks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(vla_saves, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(asm_statements, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t i = 0; i < input->asm_count; i += 1)
         {
@@ -1483,28 +1488,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 check_program_fail(program, CHECK_PROGRAM_INVALID, declaration);
             }
         }
-        for (uint32_t i = input->vla_count; i-- > 0;)
-        {
-            const CheckInputVla* vla = input->vlas + i;
-            if (vla->evaluated && vla->declaration != BUSTER_CHECK_NONE)
-            {
-                uint32_t token = vla->scope_begin == vla->body ? vla->body : vla->declaration;
-                uint32_t steps = 0;
-                while (token < count && token != vla->body && steps++ < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
-                {
-                    token = parser->tree.parents[token];
-                }
-                if (token < count && steps < count && vla->bound_node < node_count && input->graph.ops[vla->bound_node] == CHECK_OP_VLA_BOUND)
-                {
-                    vla_next[i] = vla_first[token];
-                    vla_first[token] = i;
-                }
-                else
-                {
-                    check_program_fail(program, CHECK_PROGRAM_INVALID, vla->bound_begin);
-                }
-            }
-        }
         // The variable-length arrays' objects, by their statements, and each block's first: from the last token back,
         // so that the lists are in declaration order and a block's last write is its first array.
         for (uint32_t token = count; token-- > 0;)
@@ -1523,10 +1506,40 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                     allocation_next[token] = allocation_first[terminator];
                     allocation_first[terminator] = token;
                     vla_blocks[parser->tree.parents[terminator]] = token + 1;
+                    vla_saves[parser->tree.parents[terminator]] = token + 1;
                 }
                 else
                 {
                     check_program_fail(program, CHECK_PROGRAM_INVALID, token);
+                }
+            }
+        }
+        for (uint32_t i = input->vla_count; i-- > 0;)
+        {
+            const CheckInputVla* vla = input->vlas + i;
+            if (vla->evaluated && vla->declaration != BUSTER_CHECK_NONE)
+            {
+                uint32_t token = vla->scope_begin == vla->body ? vla->body : vla->declaration;
+                uint32_t steps = 0;
+                while (token < count && token != vla->body && steps++ < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
+                {
+                    token = parser->tree.parents[token];
+                }
+                if (token < count && steps < count && vla->bound_node < node_count && input->graph.ops[vla->bound_node] == CHECK_OP_VLA_BOUND)
+                {
+                    vla_next[i] = vla_first[token];
+                    vla_first[token] = i;
+                    // The block's stack position is saved after its first array's own bounds, which may jump out of
+                    // it (from a statement expression) before then.
+                    const uint32_t block = parser->tree.parents[token];
+                    if (block < count && vla_blocks[block] == vla->declaration + 1 && vla->bound_end >= vla_saves[block])
+                    {
+                        vla_saves[block] = vla->bound_end + 1;
+                    }
+                }
+                else
+                {
+                    check_program_fail(program, CHECK_PROGRAM_INVALID, vla->bound_begin);
                 }
             }
         }
@@ -1580,6 +1593,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .allocation_first = allocation_first,
         .allocation_next = allocation_next,
         .vla_blocks = vla_blocks,
+        .vla_saves = vla_saves,
         .asm_statements = asm_statements,
         .case_first = case_first,
         .case_next = case_next,

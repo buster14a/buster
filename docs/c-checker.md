@@ -461,7 +461,11 @@ What the lowering covers past scalars (#145's programs):
   pointer arithmetic over a pointer to a variable-length array. An array
   declared in a `for` statement's clause or directly in a statement
   expression's block, one aligned past 16 and one initialized (C23's `= {}`)
-  are refused by name.
+  are refused by name. The source reader doesn't yet take a bound whose
+  statement expression holds more than expression statements (a declaration,
+  an `if` or a jump: `invalid or unsupported declaration`); the control stream
+  already puts such a jump out of a block's first array's bounds before the
+  block's `STACK_SAVE`, where it needs no restore.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
