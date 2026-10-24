@@ -3419,8 +3419,8 @@ reachability model over chains, branches, cycles, duplicate targets,
 guarded tails and failure cases. Foreign adapter fixtures test ordinary
 and unwind closure, COMDAT composition, forced/retained roots, external
 map remapping, rollback, dead versus surviving undefined references, and
-written executable behavior against GNU ld and lld. The callable adapter
-is opt-in; command-driver integration is a separate slice.
+written executable behavior against GNU ld and lld. The adapter is opt-in:
+`link-foreign --gc-sections` runs it ([the command](foreign-driver.md)).
 
 `benchmark-foreign-gc --counts 8,1024 --runs 21` creates original static
 ET_REL leaf objects with one CIE/FDE each, then compares GC on/off with the
@@ -4365,7 +4365,8 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
 - **Foreign links,** against lld and mold on the inputs above and a larger
   corpus: same exit status and output when run, the same set of symbols with
   the same sizes, and `readelf` checks of the dynamic section, versions and
-  relocations.
+  relocations. `test-foreign-corpus` does it, for programs compiled by gcc
+  and clang ("Foreign executables, as built").
 
 Invalid input (an object with an out-of-range offset, an undefined symbol, a
 relocation that doesn't fit) is a diagnostic naming the input, symbol and
