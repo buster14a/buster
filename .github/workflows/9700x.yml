@@ -239,6 +239,11 @@ jobs:
           # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
           # winners, the COMDAT groups and -y's lines with the resolution's.
           ./build/compiler test-foreign --cross-check
+          == Test the foreign linker against lld and mold
+          # Original C and C++ programs, each compiled by gcc and by clang, linked from one command line by
+          # link-foreign, lld and mold: their runs, symbols and sizes, dynamic sections, versions and relocations must
+          # agree but for each reference linker's documented choices.
+          ./build/compiler test-foreign-corpus
           == Test branch sizing
           # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
           # relaxation of them must give the bytes of the sized records.
@@ -757,8 +762,9 @@ jobs:
 
       - name: Benchmark the whole link against GNU ld, lld, mold and wild
         # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
-        # every CPU. Its linkers' side, about 121 s of the step's 122, times GNU ld, lld, mold and wild, which no pull
-        # request changes: it runs where `changes` doesn't rule it out (its baselines).
+        # every CPU. Its linkers' side, most of the step, times GNU ld, lld, mold and wild, which no pull request
+        # changes, and link-foreign on the same command lines: it runs where `changes` doesn't rule it out (its
+        # baselines).
         if: needs.changes.outputs.baselines != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
