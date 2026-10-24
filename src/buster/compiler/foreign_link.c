@@ -413,150 +413,201 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
     return required;
 }
 
+// What foreign_link_names does with a name: whether it gets a symbol (`kept`), and the symbol's atom, value, size,
+// flags, source, version and object; for a common symbol, its new atom's class, alignment and size instead of an atom.
+// Or the error that stops the conversion there.
+typedef struct ForeignLinkName ForeignLinkName;
+struct ForeignLinkName
+{
+    uint64_t value;
+    uint64_t size;
+    AtomId atom;
+    uint32_t object;
+    uint16_t version;
+    uint8_t flags;
+    uint8_t source;
+    uint8_t common_class;
+    uint8_t common_alignment;
+    bool kept;
+    ForeignLinkError error;
+};
+
+// The decision for name `name`, which reads the conversion so far and changes nothing (foreign_link_add_name acts on
+// it): the same on any lane.
+static ForeignLinkName foreign_link_decide_name(const ForeignLink* output, const Foreign* foreign, const uint8_t* required, const ForeignLinkBounds* bounds,
+                                                RuntimeKind kind, bool defer_undefined, uint32_t name)
+{
+    ForeignLinkName result = { 0 };
+    const ForeignNames* names = &foreign->names;
+    const uint8_t resolution = names->resolution[name];
+    const bool defined = resolution == FOREIGN_RESOLUTION_STRONG || resolution == FOREIGN_RESOLUTION_WEAK || resolution == FOREIGN_RESOLUTION_COMMON;
+    uint32_t object_id = 0;
+    uint8_t flags = BUSTER_LINK_SYMBOL_GLOBAL;
+    uint8_t source = BUSTER_LINK_SOURCE_NONE;
+    AtomId atom = 0;
+    uint64_t value = 0;
+    uint64_t size = 0;
+    uint16_t version = 0;
+    bool discarded_shared = false;
+    bool linker = false;
+    bool bounded = false;
+    if (names->definitions[name] > 1)
+    {
+        result.error = FOREIGN_LINK_ERROR_DUPLICATE;
+    }
+    else if (defined)
+    {
+        const uint32_t winner = names->symbol[name];
+        object_id = foreign_symbol_object(foreign, winner);
+        const ForeignObject* object = &foreign->objects[object_id];
+        Elf64_Sym symbol = import_symbol(&object->symbols, object->first_global + (winner - object->global_begin));
+        // The resolver ranks GNU_UNIQUE with weak definitions; the executable keeps the winner's binding, as GNU ld,
+        // lld and mold do.
+        const bool unique = ELF64_ST_BIND(symbol.st_info) == STB_GNU_UNIQUE;
+        if (unique)
+        {
+            symbol.st_info = ELF64_ST_INFO(STB_GLOBAL, ELF64_ST_TYPE(symbol.st_info));
+        }
+        if (ELF64_ST_TYPE(symbol.st_info) == STT_COMMON)
+        {
+            symbol.st_info = ELF64_ST_INFO(ELF64_ST_BIND(symbol.st_info), STT_OBJECT);
+        }
+        const ForeignRound* round = foreign_symbol_round(foreign, winner);
+        const uint32_t section = round->symbols.section[winner - round->first_symbol];
+        value = symbol.st_value;
+        size = symbol.st_size;
+        source = BUSTER_LINK_SOURCE_FOREIGN_OBJECT;
+        const bool known = import_symbol_flags(&symbol, &flags);
+        flags = unique ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_UNIQUE) : flags;
+        if (!known)
+        {
+            result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
+        }
+        else if (resolution == FOREIGN_RESOLUTION_COMMON)
+        {
+            size = names->common_size[name];
+            value = 0;
+            result.common_class = ELF64_ST_TYPE(symbol.st_info) == STT_TLS ? BUSTER_LINK_CLASS_TBSS : BUSTER_LINK_CLASS_BSS;
+            result.common_alignment = names->common_alignment[name];
+        }
+        else if (section == BUSTER_FOREIGN_SECTION_ABS)
+        {
+            source = BUSTER_LINK_SOURCE_ABSOLUTE;
+        }
+        else if (section < output->objects[object_id].section_count)
+        {
+            atom = output->objects[object_id].section_atoms[section];
+        }
+        if (result.error == FOREIGN_LINK_ERROR_NONE && source == BUSTER_LINK_SOURCE_FOREIGN_OBJECT && atom == 0 && result.common_class == 0)
+        {
+            result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
+        }
+    }
+    else if (resolution == FOREIGN_RESOLUTION_SHARED)
+    {
+        const ForeignLibrary* library = &foreign->libraries[names->library[name]];
+        const ImportExports* exports = &library->library.exports;
+        const uint32_t index = names->symbol[name];
+        // Only a regular object's (or the command line's) reference imports the name: one that only libraries
+        // refer to is the loader's to bind among them.
+        const bool regular = (names->flags[name] & (BUSTER_FOREIGN_NAME_REGULAR_REFERENCED | BUSTER_FOREIGN_NAME_REGULAR_WEAK_REFERENCED)) != 0;
+        const bool strong = (names->flags[name] & BUSTER_FOREIGN_NAME_REGULAR_REFERENCED) != 0;
+        discarded_shared = !regular || (strong && !library->needed && required[name] == 0);
+        flags = (uint8_t)((strong ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_WEAK) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
+        size = exports->size[index];
+        if (discarded_shared)
+        {
+            // The resolver saw the reference before COMDAT selection; no retained relocation imports it.
+        }
+        else if (kind == RUNTIME_KIND_STATIC)
+        {
+            result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
+        }
+        else if (library->needed)
+        {
+            source = BUSTER_LINK_SOURCE_FOREIGN_SHARED;
+            const uint16_t original = exports->version[index];
+            version = original > VER_NDX_GLOBAL ? output->library_versions[names->library[name]][original] : 0;
+            result.error = original > VER_NDX_GLOBAL && version == 0 ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_NONE;
+        }
+        else if (strong)
+        {
+            result.error = defer_undefined ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_UNDEFINED;
+        }
+        // A weak reference to an unneeded --as-needed DSO remains unversioned and undefined, retaining its type.
+    }
+    else if (foreign_link_linker_name(kind, names->bytes[name], names->length[name]))
+    {
+        // With lld's visibility (foreign_link_linker_visibility).
+        source = BUSTER_LINK_SOURCE_LINKER;
+        linker = true;
+    }
+    else if (foreign_link_bounded(bounds, name))
+    {
+        // Defined by foreign_link_bounds_merge, global and protected as GNU ld and lld define it.
+        bounded = true;
+    }
+    else if (resolution == FOREIGN_RESOLUTION_UNDEFINED && required[name] != 0 && (names->flags[name] & BUSTER_FOREIGN_NAME_REGULAR_REFERENCED) != 0)
+    {
+        result.error = defer_undefined ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_UNDEFINED;
+    }
+    else
+    {
+        flags = BUSTER_LINK_SYMBOL_WEAK;
+    }
+    const uint8_t visibility = linker                                         ? foreign_link_linker_visibility(names->bytes[name], names->length[name]) :
+                               bounded && names->visibility[name] == STV_DEFAULT ? STV_PROTECTED :
+                                                                                names->visibility[name];
+    flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
+    // Nor does a name nothing defines that only libraries refer to (libstdc++.so.6's weak _ITM_ references).
+    const bool regular = (names->flags[name] & (BUSTER_FOREIGN_NAME_REGULAR_REFERENCED | BUSTER_FOREIGN_NAME_REGULAR_WEAK_REFERENCED)) != 0;
+    const bool unreferenced = !defined && source == BUSTER_LINK_SOURCE_NONE && !regular;
+    const bool discarded_only = !bounded && (discarded_shared || unreferenced ||
+                                             (resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0));
+    result.value = value;
+    result.size = size;
+    result.atom = atom;
+    result.object = object_id;
+    result.version = version;
+    result.flags = flags;
+    result.source = source;
+    result.kept = result.error == FOREIGN_LINK_ERROR_NONE && !discarded_only;
+    return result;
+}
+
+// Name `name`'s symbol, as foreign_link_decide_name decided it: a common symbol's atom first, then its name and its
+// symbol, into output->names. Returns FOREIGN_LINK_ERROR_LINK if the link refuses one.
+static ForeignLinkError foreign_link_add_name(Link* link, ForeignLink* output, const Foreign* foreign, uint32_t name, const ForeignLinkName* decision)
+{
+    const ForeignNames* names = &foreign->names;
+    const AtomId atom = decision->common_class != 0 ? link_add_atom(link, decision->common_class, decision->common_alignment, decision->size, 0, decision->object) :
+                                                     decision->atom;
+    const NameId named = decision->common_class == 0 || atom != 0 ? link_add_name_hashed(link, names->bytes[name], names->length[name], names->hash[name]) : 0;
+    output->names[name] = named != 0 ? link_add_symbol(link, named, atom, decision->value, decision->size, decision->flags, decision->source) : 0;
+    if (output->names[name] != 0)
+    {
+        link->symbols.version[output->names[name]] = decision->version;
+    }
+    return output->names[name] == 0 ? FOREIGN_LINK_ERROR_LINK : FOREIGN_LINK_ERROR_NONE;
+}
+
 static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* foreign, const uint8_t* required, const ForeignLinkBounds* bounds, RuntimeKind kind,
                                             bool defer_undefined)
 {
     ForeignLinkResult result = { 0 };
-    Link* link = &output->link;
     const ForeignNames* names = &foreign->names;
     for (uint32_t name = 0; result.error == FOREIGN_LINK_ERROR_NONE && name < names->count; name += 1)
     {
-        const uint8_t resolution = names->resolution[name];
-        const bool defined = resolution == FOREIGN_RESOLUTION_STRONG || resolution == FOREIGN_RESOLUTION_WEAK || resolution == FOREIGN_RESOLUTION_COMMON;
-        uint32_t object_id = 0;
-        uint8_t flags = BUSTER_LINK_SYMBOL_GLOBAL;
-        uint8_t source = BUSTER_LINK_SOURCE_NONE;
-        AtomId atom = 0;
-        uint64_t value = 0;
-        uint64_t size = 0;
-        uint16_t version = 0;
-        bool discarded_shared = false;
-        bool linker = false;
-        bool bounded = false;
-        if (names->definitions[name] > 1)
+        const ForeignLinkName decision = foreign_link_decide_name(output, foreign, required, bounds, kind, defer_undefined, name);
+        result.error = decision.error;
+        if (result.error == FOREIGN_LINK_ERROR_NONE && decision.kept)
         {
-            result.error = FOREIGN_LINK_ERROR_DUPLICATE;
-        }
-        else if (defined)
-        {
-            const uint32_t winner = names->symbol[name];
-            object_id = foreign_symbol_object(foreign, winner);
-            const ForeignObject* object = &foreign->objects[object_id];
-            Elf64_Sym symbol = import_symbol(&object->symbols, foreign_symbol_index(foreign, winner));
-            // The resolver ranks GNU_UNIQUE with weak definitions; the executable keeps the winner's binding, as GNU ld,
-            // lld and mold do.
-            const bool unique = ELF64_ST_BIND(symbol.st_info) == STB_GNU_UNIQUE;
-            if (unique)
-            {
-                symbol.st_info = ELF64_ST_INFO(STB_GLOBAL, ELF64_ST_TYPE(symbol.st_info));
-            }
-            if (ELF64_ST_TYPE(symbol.st_info) == STT_COMMON)
-            {
-                symbol.st_info = ELF64_ST_INFO(ELF64_ST_BIND(symbol.st_info), STT_OBJECT);
-            }
-            const ForeignRound* round = foreign_symbol_round(foreign, winner);
-            const uint32_t section = round->symbols.section[winner - round->first_symbol];
-            value = symbol.st_value;
-            size = symbol.st_size;
-            source = BUSTER_LINK_SOURCE_FOREIGN_OBJECT;
-            const bool known = import_symbol_flags(&symbol, &flags);
-            flags = unique ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_UNIQUE) : flags;
-            if (!known)
-            {
-                result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
-            }
-            else if (resolution == FOREIGN_RESOLUTION_COMMON)
-            {
-                size = names->common_size[name];
-                value = 0;
-                const uint8_t class = ELF64_ST_TYPE(symbol.st_info) == STT_TLS ? BUSTER_LINK_CLASS_TBSS : BUSTER_LINK_CLASS_BSS;
-                atom = link_add_atom(link, class, names->common_alignment[name], size, 0, object_id);
-            }
-            else if (section == BUSTER_FOREIGN_SECTION_ABS)
-            {
-                source = BUSTER_LINK_SOURCE_ABSOLUTE;
-            }
-            else if (section < output->objects[object_id].section_count)
-            {
-                atom = output->objects[object_id].section_atoms[section];
-            }
-            if (result.error == FOREIGN_LINK_ERROR_NONE && source == BUSTER_LINK_SOURCE_FOREIGN_OBJECT && atom == 0)
-            {
-                result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
-            }
-        }
-        else if (resolution == FOREIGN_RESOLUTION_SHARED)
-        {
-            const ForeignLibrary* library = &foreign->libraries[names->library[name]];
-            const ImportExports* exports = &library->library.exports;
-            const uint32_t index = names->symbol[name];
-            // Only a regular object's (or the command line's) reference imports the name: one that only libraries
-            // refer to is the loader's to bind among them.
-            const bool regular = (names->flags[name] & (BUSTER_FOREIGN_NAME_REGULAR_REFERENCED | BUSTER_FOREIGN_NAME_REGULAR_WEAK_REFERENCED)) != 0;
-            const bool strong = (names->flags[name] & BUSTER_FOREIGN_NAME_REGULAR_REFERENCED) != 0;
-            discarded_shared = !regular || (strong && !library->needed && required[name] == 0);
-            flags = (uint8_t)((strong ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_WEAK) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
-            size = exports->size[index];
-            if (discarded_shared)
-            {
-                // The resolver saw the reference before COMDAT selection; no retained relocation imports it.
-            }
-            else if (kind == RUNTIME_KIND_STATIC)
-            {
-                result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
-            }
-            else if (library->needed)
-            {
-                source = BUSTER_LINK_SOURCE_FOREIGN_SHARED;
-                const uint16_t original = exports->version[index];
-                version = original > VER_NDX_GLOBAL ? output->library_versions[names->library[name]][original] : 0;
-                result.error = original > VER_NDX_GLOBAL && version == 0 ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_NONE;
-            }
-            else if (strong)
-            {
-                result.error = defer_undefined ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_UNDEFINED;
-            }
-            // A weak reference to an unneeded --as-needed DSO remains unversioned and undefined, retaining its type.
-        }
-        else if (foreign_link_linker_name(kind, names->bytes[name], names->length[name]))
-        {
-            // With lld's visibility (foreign_link_linker_visibility).
-            source = BUSTER_LINK_SOURCE_LINKER;
-            linker = true;
-        }
-        else if (foreign_link_bounded(bounds, name))
-        {
-            // Defined by foreign_link_bounds_merge, global and protected as GNU ld and lld define it.
-            bounded = true;
-        }
-        else if (resolution == FOREIGN_RESOLUTION_UNDEFINED && required[name] != 0 && (names->flags[name] & BUSTER_FOREIGN_NAME_REGULAR_REFERENCED) != 0)
-        {
-            result.error = defer_undefined ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_UNDEFINED;
-        }
-        else
-        {
-            flags = BUSTER_LINK_SYMBOL_WEAK;
-        }
-        const uint8_t visibility = linker                                         ? foreign_link_linker_visibility(names->bytes[name], names->length[name]) :
-                                   bounded && names->visibility[name] == STV_DEFAULT ? STV_PROTECTED :
-                                                                                    names->visibility[name];
-        flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
-        // Nor does a name nothing defines that only libraries refer to (libstdc++.so.6's weak _ITM_ references).
-        const bool regular = (names->flags[name] & (BUSTER_FOREIGN_NAME_REGULAR_REFERENCED | BUSTER_FOREIGN_NAME_REGULAR_WEAK_REFERENCED)) != 0;
-        const bool unreferenced = !defined && source == BUSTER_LINK_SOURCE_NONE && !regular;
-        const bool discarded_only = !bounded && (discarded_shared || unreferenced ||
-                                                 (resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0));
-        if (result.error == FOREIGN_LINK_ERROR_NONE && !discarded_only)
-        {
-            const NameId named = link_add_name_hashed(link, names->bytes[name], names->length[name], names->hash[name]);
-            output->names[name] = named != 0 ? link_add_symbol(link, named, atom, value, size, flags, source) : 0;
-            result.error = output->names[name] == 0 ? FOREIGN_LINK_ERROR_LINK : FOREIGN_LINK_ERROR_NONE;
-            link->symbols.version[output->names[name]] = version;
+            result.error = foreign_link_add_name(&output->link, output, foreign, name, &decision);
         }
         if (result.error != FOREIGN_LINK_ERROR_NONE)
         {
             result.name = name + 1;
-            result.object = object_id;
+            result.object = decision.object;
         }
     }
     return result;
@@ -1552,13 +1603,39 @@ static ForeignLinkError foreign_link_dynamic_finish(ForeignLink* output, const F
     return result;
 }
 
-static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter, bool defer_undefined)
+// The conversion's state, through its steps: the exact path takes them on the calling thread, and the lane path
+// (foreign_link_lanes.c) takes them on lane 0 between its passes on lanes.
+typedef struct ForeignLinkBuild ForeignLinkBuild;
+struct ForeignLinkBuild
 {
+    ForeignLink* output;
+    const Foreign* foreign;
+    Arena* arena;
+    Arena* name_arena;
+    RuntimeKind kind;
+    String8 interpreter;
+    bool defer_undefined;
+    // The calling thread's scratch, from foreign_link_build_begin to foreign_link_build_finish: the input order, the
+    // __start_ and __stop_ plan and the names the link requires live there.
+    Scratch scratch;
+    uint8_t* required;
+    ForeignLinkBounds bounds;
+    ForeignLinkResult result;
+};
+
+// The steps up to the global names: the libraries, the order, the __start_ and __stop_ plan, the link, every object's
+// sections and locals, the COMDAT unwind plans and the names the link requires.
+static void foreign_link_build_begin(ForeignLinkBuild* build)
+{
+    ForeignLink* output = build->output;
+    const Foreign* foreign = build->foreign;
+    Arena* arena = build->arena;
+    const RuntimeKind kind = build->kind;
     *output = (ForeignLink){ 0 };
     ForeignLinkResult result = { 0 };
     LinkCapacity capacity = { 0 };
     if (!foreign->started || foreign->failure.error != FOREIGN_ERROR_NONE || (kind != RUNTIME_KIND_STATIC && kind != RUNTIME_KIND_DYNAMIC) ||
-        (kind == RUNTIME_KIND_DYNAMIC && (interpreter.pointer == 0 || interpreter.length == 0)))
+        (kind == RUNTIME_KIND_DYNAMIC && (build->interpreter.pointer == 0 || build->interpreter.length == 0)))
     {
         result.error = FOREIGN_LINK_ERROR_INPUT;
     }
@@ -1568,16 +1645,16 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
     {
-        result.error = foreign_link_libraries(output, foreign, arena, interpreter);
+        result.error = foreign_link_libraries(output, foreign, arena, build->interpreter);
     }
-    Scratch scratch = scratch_begin(arena);
-    uint32_t* order = result.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_order(foreign, scratch.arena) : 0;
-    ForeignLinkBounds bounds = { 0 };
+    build->scratch = scratch_begin(arena);
+    uint32_t* order = result.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_order(foreign, build->scratch.arena) : 0;
+    build->bounds = (ForeignLinkBounds){ 0 };
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
-        result.error = order != 0 ? foreign_link_bounds_plan(foreign, order, &bounds, scratch.arena) : FOREIGN_LINK_ERROR_MEMORY;
+        result.error = order != 0 ? foreign_link_bounds_plan(foreign, order, &build->bounds, build->scratch.arena) : FOREIGN_LINK_ERROR_MEMORY;
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && !foreign_link_capacity(foreign, bounds.group_count, bounds.relocations, &capacity))
+    if (result.error == FOREIGN_LINK_ERROR_NONE && !foreign_link_capacity(foreign, build->bounds.group_count, build->bounds.relocations, &capacity))
     {
         result.error = FOREIGN_LINK_ERROR_CAPACITY;
     }
@@ -1585,7 +1662,7 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
     {
         output->names = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, foreign->names.count);
         output->objects = BUSTER_ARENA_PUSH_ARRAY(arena, ImportObject, foreign->object_count);
-        const bool allocated = order != 0 && output->names != 0 && output->objects != 0 && link_initialize(&output->link, arena, name_arena, capacity);
+        const bool allocated = order != 0 && output->names != 0 && output->objects != 0 && link_initialize(&output->link, arena, build->name_arena, capacity);
         result.error = allocated ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
         if (allocated)
         {
@@ -1625,82 +1702,148 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
-        const uint8_t* required = foreign_link_undefined(output, foreign, kind, scratch.arena);
-        if (required != 0)
-        {
-            result = foreign_link_names(output, foreign, required, &bounds, kind, defer_undefined);
-        }
-        else
-        {
-            result.error = FOREIGN_LINK_ERROR_MEMORY;
-        }
+        build->required = foreign_link_undefined(output, foreign, kind, build->scratch.arena);
+        result.error = build->required != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
     }
-    for (uint32_t id = 1; result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
+    build->result = result;
+}
+
+// Object `id`'s map of its global symbols to the link's. `first_typed`, with a slot per symbol, takes the lanes' ids of
+// the objects whose references give an undefined symbol a type (its least, by an atomic minimum), for the lane path;
+// without it, the first such object gives the symbol its type at once, as the exact path does in id order.
+static void foreign_link_map_object(ForeignLink* output, const Foreign* foreign, uint32_t id, uint32_t* first_typed)
+{
+    const ForeignObject* input = &foreign->objects[id];
+    if (input->library == 0)
     {
-        const ForeignObject* input = &foreign->objects[id];
-        if (input->library == 0)
+        const ForeignRound* round = input->global_count != 0 ? foreign_symbol_round(foreign, input->global_begin) : 0;
+        for (uint32_t i = 0; i < input->global_count; i += 1)
         {
-            const ForeignRound* round = input->global_count != 0 ? foreign_symbol_round(foreign, input->global_begin) : 0;
-            for (uint32_t i = 0; i < input->global_count; i += 1)
+            const uint32_t symbol = input->global_begin + i;
+            const uint32_t at = symbol - round->first_symbol;
+            const uint32_t name = round->symbols.name_id[at];
+            const SymbolId target = output->names[name];
+            output->objects[id].symbols[input->first_global + i] = target;
+            // An undefined weak reference keeps its declared type, notably STT_TLS. The resolver has no winner
+            // for it; unlike a definition, its type must come from a referring object's symbol record.
+            const uint8_t type = ELF64_ST_TYPE(round->symbols.info[at]);
+            if (target != 0 && type != 0 && output->link.symbols.source[target] == BUSTER_LINK_SOURCE_NONE &&
+                (output->link.symbols.flags[target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_NOTYPE)
             {
-                const uint32_t symbol = input->global_begin + i;
-                const uint32_t at = symbol - round->first_symbol;
-                const uint32_t name = round->symbols.name_id[at];
-                const SymbolId target = output->names[name];
-                output->objects[id].symbols[input->first_global + i] = target;
-                // An undefined weak reference keeps its declared type, notably STT_TLS. The resolver has no winner
-                // for it; unlike a definition, its type must come from a referring object's symbol record.
-                if (target != 0 && output->link.symbols.source[target] == BUSTER_LINK_SOURCE_NONE && (output->link.symbols.flags[target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_NOTYPE)
+                if (first_typed != 0)
                 {
-                    output->link.symbols.flags[target] |= ELF64_ST_TYPE(round->symbols.info[at]);
+                    __atomic_fetch_min(&first_typed[target], id, __ATOMIC_RELAXED);
+                }
+                else
+                {
+                    output->link.symbols.flags[target] |= type;
                 }
             }
         }
     }
+}
+
+// The steps between the global names and the relocations: the COMDAT unwind plans' symbols, and the __start_ and
+// __stop_ sections merged. Each object's map of its global symbols comes before (foreign_link_map_object).
+static void foreign_link_build_middle(ForeignLinkBuild* build)
+{
+    ForeignLink* output = build->output;
+    const Foreign* foreign = build->foreign;
+    ForeignLinkResult result = build->result;
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
         result = foreign_link_finish_unwind(output, foreign);
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && bounds.group_count != 0)
+    if (result.error == FOREIGN_LINK_ERROR_NONE && build->bounds.group_count != 0)
     {
-        result = foreign_link_bounds_merge(output, &bounds, arena);
+        result = foreign_link_bounds_merge(output, &build->bounds, build->arena);
     }
-    for (uint32_t id = 1; result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
+    build->result = result;
+}
+
+// The steps after the relocations but the check: the __start_ and __stop_ sections' relocations, the copies, _DYNAMIC
+// and the refusal of the IFUNCs a fixup reaches.
+static void foreign_link_build_end(ForeignLinkBuild* build)
+{
+    ForeignLink* output = build->output;
+    const Foreign* foreign = build->foreign;
+    ForeignLinkResult result = build->result;
+    if (result.error == FOREIGN_LINK_ERROR_NONE && build->bounds.group_count != 0)
     {
-        if (foreign->objects[id].library == 0)
-        {
-            result.import = foreign_link_relocations(output, foreign, &bounds, id, foreign->path, arena);
-            result.error = result.import.error != IMPORT_ERROR_NONE ? FOREIGN_LINK_ERROR_IMPORT : FOREIGN_LINK_ERROR_NONE;
-            result.object = result.error != FOREIGN_LINK_ERROR_NONE ? id : 0;
-        }
-    }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && bounds.group_count != 0)
-    {
-        result.import = foreign_link_bounds_relocations(output, foreign, &bounds, arena);
+        result.import = foreign_link_bounds_relocations(output, foreign, &build->bounds, build->arena);
         result.error = result.import.error != IMPORT_ERROR_NONE ? FOREIGN_LINK_ERROR_IMPORT : FOREIGN_LINK_ERROR_NONE;
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
+    if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_DYNAMIC)
     {
-        result = foreign_link_copies(output, foreign, arena);
+        result = foreign_link_copies(output, foreign, build->arena);
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
+    if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_DYNAMIC)
     {
         result.error = foreign_link_dynamic_symbol(output, foreign);
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
-        result = foreign_link_refuse_ifuncs(output, foreign, arena);
+        result = foreign_link_refuse_ifuncs(output, foreign, build->arena);
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && link_check(&output->link) != LINK_ERROR_NONE)
+    build->result = result;
+}
+
+// The last step, after the check: a PIE's dynamic exports and versions; and the scratch given back.
+static void foreign_link_build_finish(ForeignLinkBuild* build)
+{
+    if (build->result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_DYNAMIC)
     {
-        result.error = FOREIGN_LINK_ERROR_LINK;
+        build->result.error = foreign_link_dynamic_finish(build->output, build->foreign, build->arena);
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
+    scratch_end(build->scratch);
+}
+
+#include "buster/compiler/foreign_link_lanes.c"
+
+static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter, bool defer_undefined)
+{
+    ForeignLinkBuild build = {
+        .output = output,
+        .foreign = foreign,
+        .arena = arena,
+        .name_arena = name_arena,
+        .kind = kind,
+        .interpreter = interpreter,
+        .defer_undefined = defer_undefined,
+    };
+    if (foreign->path == FOREIGN_PATH_VECTOR && foreign->lanes > 1)
     {
-        result.error = foreign_link_dynamic_finish(output, foreign, arena);
+        foreign_link_build_lanes(&build, foreign->lanes);
     }
-    scratch_end(scratch);
-    return result;
+    else
+    {
+        foreign_link_build_begin(&build);
+        if (build.result.error == FOREIGN_LINK_ERROR_NONE)
+        {
+            build.result = foreign_link_names(output, foreign, build.required, &build.bounds, kind, defer_undefined);
+        }
+        for (uint32_t id = 1; build.result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
+        {
+            foreign_link_map_object(output, foreign, id, 0);
+        }
+        foreign_link_build_middle(&build);
+        for (uint32_t id = 1; build.result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
+        {
+            if (foreign->objects[id].library == 0)
+            {
+                build.result.import = foreign_link_relocations(output, foreign, &build.bounds, id, foreign->path, arena);
+                build.result.error = build.result.import.error != IMPORT_ERROR_NONE ? FOREIGN_LINK_ERROR_IMPORT : FOREIGN_LINK_ERROR_NONE;
+                build.result.object = build.result.error != FOREIGN_LINK_ERROR_NONE ? id : 0;
+            }
+        }
+        foreign_link_build_end(&build);
+        if (build.result.error == FOREIGN_LINK_ERROR_NONE && link_check(&output->link) != LINK_ERROR_NONE)
+        {
+            build.result.error = FOREIGN_LINK_ERROR_LINK;
+        }
+        foreign_link_build_finish(&build);
+    }
+    return build.result;
 }
 
 static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena)

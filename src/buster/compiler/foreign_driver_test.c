@@ -652,6 +652,15 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
             },
         },
         {
+            // The conversion on lanes (foreign_link_lanes.c) refuses the same name with the same diagnostic.
+            .name = "eager_undefined_lanes",
+            .arguments = {
+                (char*)"--lanes=8",
+                files->objects[FOREIGN_DRIVER_TEST_START],
+                files->objects[FOREIGN_DRIVER_TEST_DEAD],
+            },
+        },
+        {
             .name = "gc_disabled_last",
             .arguments = {
                 (char*)"--gc-sections",
@@ -703,6 +712,13 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
         {
             .name = "no_implicit_crt",
             .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_MAIN],
+            },
+        },
+        {
+            .name = "no_implicit_crt_lanes",
+            .arguments = {
+                (char*)"--lanes=3",
                 files->objects[FOREIGN_DRIVER_TEST_MAIN],
             },
         },
@@ -846,6 +862,22 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
                                       short_name.st_shndx != SHN_UNDEF && long_name.st_shndx != SHN_UNDEF,
                                 "strip-looking undefined values remain named GC roots without stripping", test->name);
         }
+    }
+    // A refusal's diagnostic is the same from the conversion on lanes as from the calling thread's.
+    static const char* const refused[][2] = {
+        { "eager_undefined", "eager_undefined_lanes" },
+        { "no_implicit_crt", "no_implicit_crt_lanes" },
+    };
+    for (uint32_t pair = 0; pair < BUSTER_ARRAY_LENGTH(refused); pair += 1)
+    {
+        ForeignTestPath one;
+        ForeignTestPath many;
+        snprintf(one, sizeof(one), "%s/fdriver_%s.err", directory, refused[pair][0]);
+        snprintf(many, sizeof(many), "%s/fdriver_%s.err", directory, refused[pair][1]);
+        const String8 first = foreign_test_read(arena, one);
+        const String8 second = foreign_test_read(arena, many);
+        foreign_test_expect(tally, first.pointer != 0 && first.length != 0 && foreign_driver_test_same(first, second), "lanes refuse with the same diagnostic",
+                            refused[pair][1]);
     }
     ForeignTestPath missing;
     snprintf(missing, sizeof(missing), "%s/fdriver_missing.o", directory);
