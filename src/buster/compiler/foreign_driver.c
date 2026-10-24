@@ -438,6 +438,21 @@ typedef enum ForeignDriverStage
     FOREIGN_DRIVER_STAGES,
 } ForeignDriverStage;
 
+// The CPUs this process may run on, at least 1. Lanes past them share CPUs, and each of their syncs waits for a lane the
+// scheduler has set aside: on the 9700X, eight lanes on one CPU took a hello world's link from 0.6 ms to 342 ms, each
+// pass of the conversion about 28 ms of it (#87). The command runs at most a lane per CPU.
+static uint32_t foreign_driver_cpus(void)
+{
+    uint64_t mask[16] = { 0 };
+    const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
+    uint32_t count = 0;
+    for (uint32_t i = 0; known && i < BUSTER_ARRAY_LENGTH(mask); i += 1)
+    {
+        count += (uint32_t)__builtin_popcountll(mask[i]);
+    }
+    return count != 0 ? count : 1;
+}
+
 static uint64_t foreign_driver_now(void)
 {
     struct timespec now;
@@ -459,11 +474,12 @@ static void foreign_driver_resolve_phases(const Foreign* foreign, uint64_t* slow
     }
 }
 
-// The report: the whole, each stage, the resolution's phases (`resolve`, the slowest lane's time in each) and the
-// writer's, from lane 0's timestamps; the writer's first part is the lanes' start and the symbol selection, up to
-// executable_write's own start. `ends` holds each stage's end, `begin` the start; a stage that didn't run ends where the
-// one before did.
-static void foreign_driver_report(const uint64_t* resolve, uint64_t begin, const uint64_t* ends, uint64_t write_begin, const ExecutableResult* written)
+// The report: the whole and its lanes, each stage, the resolution's phases (`resolve`, the slowest lane's time in each),
+// the conversion's (`convert`, foreign_link_build_mode's) and the writer's, from lane 0's timestamps; the writer's first
+// part is the lanes' start and the symbol selection, up to executable_write's own start. `ends` holds each stage's end,
+// `begin` the start; a stage that didn't run ends where the one before did.
+static void foreign_driver_report(uint32_t lanes, const uint64_t* resolve, const uint64_t* convert, uint64_t begin, const uint64_t* ends, uint64_t write_begin,
+                                  const ExecutableResult* written)
 {
     static const char* const stages[FOREIGN_DRIVER_STAGES] = {
         "arguments",
@@ -486,6 +502,16 @@ static void foreign_driver_report(const uint64_t* resolve, uint64_t begin, const
         "groups",
         "winners",
     };
+    static const char* const convert_phases[FOREIGN_LINK_PHASES] = {
+        "sections",
+        "names",
+        "maps",
+        "unwind",
+        "relocations",
+        "copies",
+        "check",
+        "exports",
+    };
     static const char* const write_phases[EXECUTABLE_PHASES] = {
         "count",
         "layout",
@@ -495,7 +521,7 @@ static void foreign_driver_report(const uint64_t* resolve, uint64_t begin, const
         "chunks",
         "finish",
     };
-    fprintf(stderr, "link-foreign: %.3f ms\n", (double)(ends[FOREIGN_DRIVER_STAGES - 1] - begin) / 1e6);
+    fprintf(stderr, "link-foreign: %.3f ms on %u lane%s\n", (double)(ends[FOREIGN_DRIVER_STAGES - 1] - begin) / 1e6, lanes, lanes == 1 ? "" : "s");
     uint64_t previous = begin;
     for (uint32_t stage = 0; stage < FOREIGN_DRIVER_STAGES; stage += 1)
     {
@@ -503,6 +529,10 @@ static void foreign_driver_report(const uint64_t* resolve, uint64_t begin, const
         for (uint32_t phase = 0; stage == FOREIGN_DRIVER_STAGE_RESOLVE && phase < FOREIGN_PHASES; phase += 1)
         {
             fprintf(stderr, " %s %.3f", resolve_phases[phase], (double)resolve[phase] / 1e6);
+        }
+        for (uint32_t phase = 0; stage == FOREIGN_DRIVER_STAGE_CONVERT && phase < FOREIGN_LINK_PHASES; phase += 1)
+        {
+            fprintf(stderr, " %s %.3f", convert_phases[phase], (double)convert[phase] / 1e6);
         }
         if (stage == FOREIGN_DRIVER_STAGE_WRITE && written->start_time >= write_begin)
         {
@@ -534,10 +564,13 @@ static int run_foreign_link(int argc, char** argv)
     Runtime runtime = { 0 };
     ForeignLink converted = { 0 };
     ForeignUnwindDedupLink deduplicated = { 0 };
+    uint64_t convert[FOREIGN_LINK_PHASES] = { 0 };
     if (!succeeded || driver.help)
     {
         foreign_driver_usage();
     }
+    const uint32_t cpus = foreign_driver_cpus();
+    driver.lanes = driver.lanes < cpus ? driver.lanes : cpus;
     ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = foreign_driver_now();
     if (succeeded && !driver.help && driver.kind == RUNTIME_KIND_DYNAMIC && driver.interpreter.length == 0)
     {
@@ -586,6 +619,8 @@ static int run_foreign_link(int argc, char** argv)
         ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter) :
                                    driver.kind == RUNTIME_KIND_DYNAMIC ? foreign_link_build_dynamic(&converted, &foreign, &arena, &names, driver.interpreter) :
                                                                         foreign_link_build(&converted, &foreign, &arena, &names);
+        // The conversion's phases, before section GC replaces the link.
+        memcpy(convert, converted.phase_nanoseconds, sizeof(convert));
         if (result.error == FOREIGN_LINK_ERROR_NONE && driver.gc)
         {
             const ForeignGcRoots roots = { .entry = foreign_driver_entry(&driver, &foreign, &converted) };
@@ -673,7 +708,7 @@ static int run_foreign_link(int argc, char** argv)
     ends[FOREIGN_DRIVER_STAGE_RELEASE] = foreign_driver_now();
     if (time)
     {
-        foreign_driver_report(resolve, begin, ends, write_begin, &written);
+        foreign_driver_report(driver.lanes, resolve, convert, begin, ends, write_begin, &written);
     }
     return succeeded ? 0 : 1;
 }
