@@ -423,6 +423,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "_Thread_local int saved=9;int tested(int n){return n+1;}", "unreferenced-tls-definition", clang);
     check_test_program_source(test,
+        "_Thread_local int counter=9;_Thread_local long wide[4];int tested(int n){counter+=n;wide[n&3]+=counter;int*p=&counter;"
+        "return *p*2+(int)wide[(n+1)&3];}", "thread-local-references", clang);
+    check_test_program_source(test,
         "int missing(void);int tested(int n){return (0&&missing())+(1? n+2:missing())+(int)sizeof(missing());}", "unevaluated-references", clang);
     check_test_program_source(test,
         "int tested(int n){void*p=(void*)100;p++;p+=3;return (char*)p-(char*)100+n;}", "gnu-byte-pointer-stride", clang);
@@ -838,7 +841,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test,
         "extern int missing;int tested(int n,...){__builtin_va_list ap;__builtin_va_start(ap,(missing++,n));"
         "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, false, 0, 1);
-    check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-boundary", true, false, 1, 0);
+    check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, false, 0, 1);
     check_test_program_boundary(test, "int global;struct S{int x;int*p;};int tested(int n){struct S s={n,&global};return s.x;}",
                                 "aggregate-primary-initialization", true, true, 1, 1);

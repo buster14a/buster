@@ -434,7 +434,12 @@ supported operations into `Tier0Function` records with explicit conversions,
 loads/stores, scaled pointer operations, control flow, locals, calls and ABI
 classes. `c_check_program_emit.c` compiles those functions, resolves shared
 symbols and publishes code/data together. Backend machine classes never
-replace the full semantic `TypeId` in the checked stream.
+replace the full semantic `TypeId` in the checked stream. It also gives Tier 0
+the unit's access column (`Tier0Function.symbol_access`, docs/tier0.md): a
+symbol the unit doesn't define is reached through its GOT slot, since it may be
+a shared library's and the direct path makes no copy relocations, and a
+thread-local by local-exec where the unit defines it and by initial-exec where
+it doesn't.
 
 What the lowering covers past scalars (#145's programs):
 
