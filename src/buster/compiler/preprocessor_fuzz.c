@@ -48,7 +48,10 @@ struct PreprocessorFuzzCase
 
 // A token of the stream a text prints that doesn't lex back into itself, which the comparison takes whole
 // (preprocessor_fuzz_lex_printed): its range in the text, its kind (C_TOKEN_UNKNOWN or C_TOKEN_STRING_LITERAL), and
-// whether it is on a pragma's line, whose end it is in both texts.
+// whether it is on a pragma's line, whose end it is in both texts. A case's last token can end in whitespace (an
+// unterminated literal's spaces, or the newline of pp_trailing_splice's spelling), past the case's text, which ends
+// before its trailing whitespace: its range then ends with the text, and `tail` holds the `tail_length` bytes cut from
+// it.
 typedef struct PreprocessorFuzzWhole PreprocessorFuzzWhole;
 struct PreprocessorFuzzWhole
 {
@@ -56,6 +59,8 @@ struct PreprocessorFuzzWhole
     uint32_t end;
     uint8_t kind;
     bool pragma;
+    uint32_t tail_length;
+    const char* tail;
 };
 
 typedef struct PreprocessorFuzzOutput PreprocessorFuzzOutput;

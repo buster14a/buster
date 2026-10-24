@@ -170,6 +170,11 @@ jobs:
           test -x build/compiler
           test "$(find build -type f -executable | wc -l)" -eq 1
 
+      - name: Build the external Clang pragma token oracle
+        run: |
+          bash tools/build-preprocessor-pragma-oracle.sh
+          printf 'BUSTER_PPF_PRAGMA_ORACLE=%s/build/preprocessor-pragma-oracle\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
         # flags such as -funsigned-char.
