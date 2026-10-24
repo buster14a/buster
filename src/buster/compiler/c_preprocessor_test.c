@@ -4232,6 +4232,8 @@ static bool pp_test_option_features(const char* directory)
     return result && failures == 0;
 }
 
+#include "c_preprocessor_time_test.c"
+
 // __TIMESTAMP__ is the modification time of the file it is read in (local time, here UTC), or SOURCE_DATE_EPOCH's time
 // when that is set: a file and the header it includes, written with times of their own, give each theirs (both kernels,
 // and with --clang clang too). The environment is restored after.
@@ -4241,9 +4243,14 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
     {
         const char* epoch;
         const char* expected;
+        const char* date;
+        const char* time;
     } runs[] = {
-        { 0, "\"Sat Jan  1 00:00:00 2000\"\n\"Mon Jan  1 00:00:00 2001\"\n" },
-        { "1234567890", "\"Fri Feb 13 23:31:30 2009\"\n\"Fri Feb 13 23:31:30 2009\"\n" },
+        { 0, "\"Sat Jan  1 00:00:00 2000\"\n\"Mon Jan  1 00:00:00 2001\"\n", 0, 0 },
+        { "1234567890", "\"Fri Feb 13 23:31:30 2009\"\n\"Fri Feb 13 23:31:30 2009\"\n", "Feb 13 2009", "23:31:30" },
+        { "0", "\"Thu Jan  1 00:00:00 1970\"\n\"Thu Jan  1 00:00:00 1970\"\n", "Jan  1 1970", "00:00:00" },
+        { "0000", "\"Thu Jan  1 00:00:00 1970\"\n\"Thu Jan  1 00:00:00 1970\"\n", "Jan  1 1970", "00:00:00" },
+        { "253402300799", "\"Fri Dec 31 23:59:59 9999\"\n\"Fri Dec 31 23:59:59 9999\"\n", "Dec 31 9999", "23:59:59" },
     };
     char path[4096];
     char header[4096];
@@ -4259,6 +4266,7 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
     char* epoch = saved_epoch != 0 ? strdup(saved_epoch) : 0;
     setenv("TZ", "UTC", 1);
     tzset();
+    result = result && pp_test_time_errors(path);
     for (uint32_t r = 0; result && r < BUSTER_ARRAY_LENGTH(runs); r += 1)
     {
         if (runs[r].epoch != 0)
@@ -4286,6 +4294,10 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         {
             options.scalar = k == 1;
             result = result && pp_test_run(&preprocessors[k], &tables[k], &options, path);
+            if (result && runs[r].epoch != 0)
+            {
+                result = preprocessors[k].has_epoch && strcmp(preprocessors[k].date, runs[r].date) == 0 && strcmp(preprocessors[k].time, runs[r].time) == 0;
+            }
         }
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };

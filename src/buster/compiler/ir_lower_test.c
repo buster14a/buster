@@ -529,7 +529,60 @@ static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* so
     return ok;
 }
 
-static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count)
+// Whether `promoted` keeps every object slot of `lowered` (a VOID slot that isn't a temporary) as it was, in order:
+// promotion compacts the slots it removes and must never take an object's.
+static bool ir_lower_test_objects_kept(const IrFunction* lowered, const IrFunction* promoted)
+{
+    uint32_t next = 0;
+    bool same = true;
+    for (uint32_t s = 0; same && s < lowered->slot_count; s += 1)
+    {
+        const IrSlot slot = lowered->slots[s];
+        if (slot.type == IR_VOID && (slot.flags & BUSTER_IR_SLOT_TEMPORARY) == 0)
+        {
+            while (next < promoted->slot_count && !(promoted->slots[next].type == IR_VOID && (promoted->slots[next].flags & BUSTER_IR_SLOT_TEMPORARY) == 0))
+            {
+                next += 1;
+            }
+            same = next < promoted->slot_count && promoted->slots[next].size == slot.size && promoted->slots[next].alignment == slot.alignment &&
+                   promoted->slots[next].flags == slot.flags;
+            next += 1;
+        }
+    }
+    return same;
+}
+
+// #134's promotion of a lowered function, by both paths, which may order their output differently (test-ssa-ir checks
+// their semantics): each must accept it with real dominance, pass both verifiers and keep every object's slot.
+static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* lowered, Arena* output, Arena* twin_output, Arena* scratch, uint64_t seed, uint32_t index)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t twin_mark = twin_output->length;
+    IrFunction vector =
+    {
+        0
+    };
+    IrFunction scalar =
+    {
+        0
+    };
+    const IrCheck vector_check = ssa_ir_promote(lowered, output, scratch, &vector);
+    const IrCheck scalar_check = ssa_ir_promote_scalar(lowered, twin_output, scratch, &scalar);
+    bool ok = ir_lower_test_expect(tally, vector_check.error == IR_OK && scalar_check.error == IR_OK && vector_check.dominance_checked && scalar_check.dominance_checked,
+                                   "both SSA promotion paths accept the lowering", seed, index);
+    ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK && ir_verify_scalar(&vector, scratch, 0).error == IR_OK &&
+                                               ir_verify(&scalar, scratch, 0).error == IR_OK && ir_verify_scalar(&scalar, scratch, 0).error == IR_OK,
+                                    "both verifiers accept both promotions", seed, index);
+    ok = ok && ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &vector) && ir_lower_test_objects_kept(lowered, &scalar), "promotion keeps every object's slot", seed, index);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(twin_output, twin_mark);
+}
+
+// Generated programs, lowered by both paths and executed as IR, against the typed-stream interpreter and Tier 0's
+// native code of the same streams (test-tier0's harness, which checks the two of them against each other too): their
+// results and global bytes; and each lowered function promoted to SSA by both paths. `options` choose the shapes;
+// `name` labels the report.
+static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count, Tier0ProgramOptions options, const char* name)
 {
     Tier0Tables tables =
     {
@@ -540,11 +593,20 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     Arena twin_output = arena_reserve(1ull << 30);
     Arena scratch = arena_reserve(1ull << 30);
     Arena execution = arena_reserve(1ull << 30);
-    bool ready = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && tier0_tables_open(&tables);
+    Arena promoted = arena_reserve(1ull << 30);
+    Arena twin_promoted = arena_reserve(1ull << 30);
+    Arena native = arena_reserve(1ull << 32);
+    Tier0TestCode* code = native.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&native, Tier0TestCode, 1) : 0;
+    uint8_t* code_bytes = native.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&native, uint8_t, BUSTER_TIER0_TEST_CODE_BYTES) : 0;
+    bool ready = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && promoted.base != 0 &&
+                 twin_promoted.base != 0 && code != 0 && code_bytes != 0 && tier0_tables_open(&tables);
     ready = ir_lower_test_expect(tally, ready, "program arenas and ABI tables", seed, 0);
+    const uint64_t native_mark = native.length;
     uint64_t entries = 0;
     uint64_t instructions = 0;
     uint64_t functions_seen = 0;
+    uint64_t copies = 0;
+    uint64_t objects = 0;
     for (uint32_t p = 0; ready && p < count; p += 1)
     {
         const uint64_t program_seed = seed + p;
@@ -553,17 +615,6 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
         IrFunction* functions = BUSTER_ARENA_PUSH_ARRAY(&input, IrFunction, BUSTER_TIER0_GENERATE_MAX_FUNCTIONS);
         uint8_t* globals = BUSTER_ARENA_PUSH_ARRAY(&input, uint8_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS * 8 + 64);
         uint8_t* expected_globals = BUSTER_ARENA_PUSH_ARRAY(&input, uint8_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS * 8 + 64);
-        const Tier0ProgramOptions options =
-        {
-            .functions = 8,
-            .statements = 40,
-            .expression_nodes = 30,
-            .calls = true,
-            .loops = true,
-            .floating = true,
-            .pointers = true,
-            .defined = true,
-        };
         bool ok = program != 0 && sources != 0 && functions != 0 && globals != 0 && expected_globals != 0;
         ok = ok && tier0_generate_program(program, &input, program_seed, options, "ir_c_") && tier0_program_functions(program, &tables, &input, sources);
         ok = ir_lower_test_expect(tally, ok, "generated typed program", program_seed, 0);
@@ -573,40 +624,71 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
             ok = ir_lower_test_lower(tally, &sources->functions[f], result_type, program->global_count + program->function_count + 1, &output, &twin_output, &scratch, &functions[f], program_seed, f);
             if (ok)
             {
-                entries += sources->functions[f].count;
+                const Tier0Function* source = &sources->functions[f];
+                entries += source->count;
                 instructions += functions[f].instruction_count;
                 functions_seen += 1;
+                for (uint32_t i = 0; i < source->count; i += 1)
+                {
+                    copies += source->kinds[i] == BUSTER_TYPED_COPY;
+                }
+                for (uint32_t l = 0; l < source->local_count; l += 1)
+                {
+                    objects += tier0_is_object(source, l);
+                }
+                ir_lower_test_promote(tally, &functions[f], &promoted, &twin_promoted, &scratch, program_seed, f);
             }
             arena_pop_to(&twin_output, 0);
         }
+        const Tier0TestData data = ok ? tier0_test_layout(program) : (Tier0TestData){ 0 };
+        uint64_t arguments[BUSTER_TIER0_TEST_INPUTS][3];
+        tier0_test_inputs(program_seed, arguments);
+        Tier0TestOutcome outcomes[BUSTER_TIER0_TEST_INPUTS];
+        memset(outcomes, 0, sizeof(outcomes));
         if (ok)
         {
-            const Tier0TestData data = tier0_test_layout(program);
-            uint64_t arguments[BUSTER_TIER0_TEST_INPUTS][3];
-            tier0_test_inputs(program_seed, arguments);
-            for (uint32_t r = 0; ok && r < BUSTER_TIER0_TEST_INPUTS; r += 1)
+            Tier0TestTally native_tally =
             {
-                bool source_fault = false;
-                bool ir_fault = false;
-                tier0_test_initial(program, &data, globals);
-                const uint64_t expected = tier0_test_interpret(program, sources, &data, globals, arguments[r], &source_fault);
-                memcpy(expected_globals, globals, data.size);
-                tier0_test_initial(program, &data, globals);
-                const uint64_t actual = ir_lower_test_interpret(functions, sources->count, sources->count - 1, program->global_count, &data, globals, arguments[r], 3, &execution, &ir_fault);
-                ok = ir_lower_test_expect(tally, !source_fault && !ir_fault, "typed and IR execution finish", program_seed, r);
-                ok = ir_lower_test_expect(tally, expected == actual && memcmp(expected_globals, globals, data.size) == 0, "typed and IR results and global bytes agree", program_seed, r) && ok;
-                if (!ok && tally->failures < 20)
-                {
-                    fprintf(stderr, "  expected %016" PRIx64 ", IR %016" PRIx64 ", faults %u/%u\n", expected, actual, source_fault, ir_fault);
-                }
+                0
+            };
+            int status = 0;
+            code->code = code_bytes;
+            code->records = 0;
+            code->entries = 0;
+            code->deferred = 0;
+            ok = tier0_test_build(&native_tally, sources, &native, code, program_seed);
+            tally->checks += native_tally.checks;
+            tally->failures += native_tally.failures;
+            ok = ok && ir_lower_test_expect(tally, tier0_test_run(program, code, &data, arguments, outcomes, &status), "Tier 0's native code exits normally", program_seed, 0);
+            arena_pop_to(&native, native_mark);
+        }
+        for (uint32_t r = 0; ok && r < BUSTER_TIER0_TEST_INPUTS; r += 1)
+        {
+            bool source_fault = false;
+            bool ir_fault = false;
+            tier0_test_initial(program, &data, globals);
+            const uint64_t expected = tier0_test_interpret(program, sources, &data, globals, arguments[r], &source_fault);
+            memcpy(expected_globals, globals, data.size);
+            tier0_test_initial(program, &data, globals);
+            const uint64_t actual = ir_lower_test_interpret(functions, sources->count, sources->count - 1, program->global_count, &data, globals, arguments[r], 3, &execution, &ir_fault);
+            ok = ir_lower_test_expect(tally, !source_fault && !ir_fault, "typed and IR execution finish", program_seed, r);
+            ok = ir_lower_test_expect(tally, expected == actual && memcmp(expected_globals, globals, data.size) == 0, "typed and IR results and global bytes agree", program_seed, r) && ok;
+            ok = ir_lower_test_expect(tally, outcomes[r].result == actual && outcomes[r].globals == tier0_test_hash(globals, data.size), "native and IR results and global bytes agree", program_seed, r) && ok;
+            if (!ok && tally->failures < 20)
+            {
+                fprintf(stderr, "  expected %016" PRIx64 ", native %016" PRIx64 ", IR %016" PRIx64 ", faults %u/%u\n", expected, outcomes[r].result, actual, source_fault, ir_fault);
             }
         }
         arena_pop_to(&input, 0);
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
     }
-    printf("IR lowering generated programs: %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions\n", functions_seen, entries, instructions);
+    printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies\n", name,
+           functions_seen, entries, instructions, objects, copies);
     tier0_tables_close(&tables);
+    arena_release(&native);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
     arena_release(&input);
     arena_release(&output);
     arena_release(&twin_output);
@@ -1092,19 +1174,201 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
     arena_release(&scratch);
 }
 
-// #136's entries this adapter doesn't lower: an object (a local with a size in local_sizes) refused like a frame role,
-// as each local in turn and only where its size isn't 0, and COPY, refused at its entry once the stream validates, all
-// without allocating, by both paths.
-static void ir_lower_test_tier0_entries(IrLowerTestTally* tally)
+// #136's frame objects and COPY. Two objects, of 23 bytes (aligned to 8) and 24 (aligned to 16), the first's bytes
+// stored in pieces of every width and copied into the second, whose last byte the copy mustn't reach, then the second
+// copied over itself (the same range); the result folds the second's three words and its address's remainder by 16.
+// The executor faults on any piece past the first object's 23 bytes. The slots must keep the objects' sizes and
+// alignments, address-taken.
+typedef struct IrLowerTestStream IrLowerTestStream;
+struct IrLowerTestStream
 {
+    uint8_t kinds[64];
+    uint8_t classes[64];
+    uint64_t values[64];
+    uint32_t count;
+};
+
+static void ir_lower_test_entry(IrLowerTestStream* stream, uint8_t kind, uint8_t class, uint64_t value)
+{
+    if (stream->count < 64)
+    {
+        stream->kinds[stream->count] = kind;
+        stream->classes[stream->count] = class;
+        stream->values[stream->count] = value;
+    }
+    stream->count += 1;
+}
+
+static void ir_lower_test_objects(IrLowerTestTally* tally)
+{
+    IrLowerTestStream stream =
+    {
+        0
+    };
+    // The first object's 23 bytes, by pieces of every width.
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0x1122334455667788ull);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 8);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0x99aabbccddeeff00ull);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 16);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0x01020304);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I32, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 20);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I16, 0x0506);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I16, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 22);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I8, 0x07);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I8, 0);
+    // Past the copy's end, the second object's last byte.
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 23);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I8, 0x5a);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I8, 0);
+    // The copy, then the second object over itself.
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 23);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 24);
+    // The second object's three words and its address's remainder by 16.
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 8);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 16);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 15);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_I64, 0);
+    ir_lower_test_entry(&stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I64, 0);
+    const uint8_t local_classes[2] =
+    {
+        BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_VOID
+    };
+    const uint8_t local_flags[2] =
+    {
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN
+    };
+    const uint32_t local_sizes[2] =
+    {
+        23,
+        24
+    };
+    const uint8_t local_alignments[2] =
+    {
+        3,
+        4
+    };
+    const Tier0Function source =
+    {
+        .kinds = stream.kinds,
+        .classes = stream.classes,
+        .values = stream.values,
+        .count = stream.count,
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 2,
+        .local_sizes = local_sizes,
+        .local_alignments = local_alignments,
+    };
+    const uint64_t expected = 0x1122334455667788ull ^ 0x99aabbccddeeff00ull ^ 0x5a07050601020304ull;
+    const bool valid = ir_lower_test_expect(tally, stream.count <= 64 && tier0_validate(&source).error == TIER0_OK, "the object fixture is a valid typed stream", 0, 0);
+    const uint64_t arguments[1] =
+    {
+        0
+    };
+    if (valid)
+    {
+        ir_lower_test_fixture(tally, "objects' bytes copied in pieces, the destination's tail kept", &source, IR_I64, arguments, expected);
+    }
     Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
+    IrFunction function =
+    {
+        0
+    };
+    if (valid && ir_lower_test_lower(tally, &source, IR_I64, 1, &output, &twin_output, &scratch, &function, 0, 0))
+    {
+        bool slots = function.slot_count >= 2;
+        for (uint32_t l = 0; slots && l < 2; l += 1)
+        {
+            const IrSlot slot = function.slots[l];
+            slots = slot.size == local_sizes[l] && slot.alignment == 1u << local_alignments[l] && slot.type == IR_VOID && slot.flags == BUSTER_IR_SLOT_ADDRESS_TAKEN;
+        }
+        ir_lower_test_expect(tally, slots, "objects' slots keep their sizes and alignments, address-taken", 0, 0);
+    }
+    // Objects' metadata tier0_validate refuses, before anything reads it: sizes without alignments, and an object with
+    // a class. Both paths must refuse them as structure errors without allocating or touching the caller's result.
+    const uint8_t classed[2] =
+    {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_VOID
+    };
+    for (uint32_t broken = 0; valid && broken < 2; broken += 1)
+    {
+        Tier0Function malformed = source;
+        if (broken == 0)
+        {
+            malformed.local_alignments = 0;
+        }
+        else
+        {
+            malformed.local_classes = classed;
+        }
+        for (uint32_t vector = 0; vector < 2; vector += 1)
+        {
+            const uint64_t output_mark = output.length;
+            const uint64_t scratch_mark = scratch.length;
+            IrFunction result =
+            {
+                .instruction_count = 123,
+            };
+            const IrCheck check = ir_lower_typed_path(&malformed, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark && result.instruction_count == 123,
+                                 "malformed objects refused without allocation", broken, vector);
+        }
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&scratch);
+}
+
+// COPY of every size from 1 to BUSTER_TIER0_MAX_COPY_BYTES between two globals, and from one global onto itself, by
+// both paths: the destination's first `size` bytes must be the source's, its other bytes and the source unchanged, with
+// one load and one store per piece of the widest integer that fits what remains.
+#define BUSTER_IR_LOWER_TEST_COPY_SPAN (BUSTER_TIER0_MAX_COPY_BYTES + 8)
+
+static void ir_lower_test_copies(IrLowerTestTally* tally)
+{
+    const uint32_t span = BUSTER_IR_LOWER_TEST_COPY_SPAN;
     const uint8_t kinds[] =
     {
-        BUSTER_TYPED_LOCAL_ADDRESS,
-        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
         BUSTER_TYPED_COPY,
-        BUSTER_TYPED_CONST,
         BUSTER_TYPED_RETURN
     };
     const uint8_t classes[] =
@@ -1112,98 +1376,85 @@ static void ir_lower_test_tier0_entries(IrLowerTestTally* tally)
         BUSTER_TYPED_CLASS_U64,
         BUSTER_TYPED_CLASS_U64,
         BUSTER_TYPED_CLASS_VOID,
-        BUSTER_TYPED_CLASS_I64,
-        BUSTER_TYPED_CLASS_I64
+        BUSTER_TYPED_CLASS_VOID
     };
-    const uint64_t values[] =
-    {
-        0,
-        1,
-        8,
-        7,
-        0
-    };
-    uint8_t local_classes[3] =
-    {
-        BUSTER_TYPED_CLASS_U64,
-        BUSTER_TYPED_CLASS_U64,
-        BUSTER_TYPED_CLASS_I64
-    };
-    const uint8_t local_flags[3] =
-    {
-        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
-        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
-        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN
-    };
-    uint32_t local_sizes[3] =
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    Arena execution = arena_reserve(1ull << 20);
+    static uint8_t globals[2 * BUSTER_IR_LOWER_TEST_COPY_SPAN];
+    static uint8_t initial[2 * BUSTER_IR_LOWER_TEST_COPY_SPAN];
+    static uint8_t expected[2 * BUSTER_IR_LOWER_TEST_COPY_SPAN];
+    const uint64_t arguments[1] =
     {
         0
     };
-    uint8_t local_alignments[3] =
+    Tier0TestData data =
     {
         0
     };
-    // Without the copy first: the constant returned.
-    Tier0Function source =
+    data.offsets[0] = 0;
+    data.offsets[1] = span;
+    data.size = 2 * span;
+    uint64_t state = 0x136c09ull;
+    for (uint32_t b = 0; b < 2 * span; b += 1)
     {
-        .kinds = kinds + 3,
-        .classes = classes + 3,
-        .values = values + 3,
-        .count = 2,
-        .local_classes = local_classes,
-        .local_flags = local_flags,
-        .local_count = 3,
-        .local_sizes = local_sizes,
-        .local_alignments = local_alignments,
-    };
-    const IrFunction preserved =
-    {
-        .instruction_count = 123,
-        .block_count = 17,
-    };
-    // Nonzero marks, so that a rollback to zero would show.
-    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
-    ir_lower_test_expect(tally, ready, "Tier 0 entry arenas", 0, 0);
-    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
-    {
-        const uint64_t output_mark = output.length;
-        const uint64_t scratch_mark = scratch.length;
-        IrFunction result = preserved;
-        IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_OK, "objects' columns without objects lower", 0, vector);
-        arena_pop_to(&output, output_mark);
-        for (uint32_t local = 0; local < 3; local += 1)
-        {
-            const uint8_t class = local_classes[local];
-            local_classes[local] = BUSTER_TYPED_CLASS_VOID;
-            local_sizes[local] = 16;
-            local_alignments[local] = 3;
-            result = preserved;
-            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == local && output.length == output_mark && scratch.length == scratch_mark &&
-                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                 "an object refused without allocation", local, vector);
-            local_classes[local] = class;
-            local_sizes[local] = 0;
-            local_alignments[local] = 0;
-        }
-        // The copy between the two address-taken locals, which validates.
-        source.kinds = kinds;
-        source.classes = classes;
-        source.values = values;
-        source.count = 5;
-        result = preserved;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == 2 && output.length == output_mark &&
-                                        scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                             "a copy refused at its entry without allocation", 0, vector);
-        source.kinds = kinds + 3;
-        source.classes = classes + 3;
-        source.values = values + 3;
-        source.count = 2;
+        initial[b] = (uint8_t)tier0_generate_random(&state);
     }
+    uint64_t failed_sizes = 0;
+    for (uint32_t same = 0; same < 2; same += 1)
+    {
+        for (uint32_t size = 1; size <= BUSTER_TIER0_MAX_COPY_BYTES; size += 1)
+        {
+            // Global 1 (the destination) and global 2 (the source), or global 2 onto itself.
+            const uint64_t values[] =
+            {
+                same != 0 ? 2 : 1,
+                2,
+                size,
+                0
+            };
+            const Tier0Function source =
+            {
+                .kinds = kinds,
+                .classes = classes,
+                .values = values,
+                .count = 4,
+            };
+            IrFunction function =
+            {
+                0
+            };
+            bool ok = ir_lower_test_lower(tally, &source, IR_VOID, 3, &output, &twin_output, &scratch, &function, size, same);
+            if (ok)
+            {
+                uint32_t loads = 0;
+                uint32_t stores = 0;
+                for (uint32_t i = 0; i < function.instruction_count; i += 1)
+                {
+                    loads += function.op[i] == IR_LOAD;
+                    stores += function.op[i] == IR_STORE;
+                }
+                const uint32_t pieces = size / 8 + (uint32_t)__builtin_popcount(size % 8);
+                ok = ir_lower_test_expect(tally, loads == pieces && stores == pieces, "a copy is one load and store per widest piece", size, same);
+                // The globals as the copy must leave them.
+                memcpy(expected, initial, sizeof(expected));
+                memmove(expected + (same != 0 ? span : 0), initial + span, size);
+                memcpy(globals, initial, sizeof(globals));
+                bool fault = false;
+                ir_lower_test_interpret(&function, 1, 0, 2, &data, globals, arguments, 0, &execution, &fault);
+                ok = ir_lower_test_expect(tally, !fault && memcmp(globals, expected, sizeof(expected)) == 0, "a copy's bytes, and nothing past them", size, same) && ok;
+            }
+            failed_sizes += !ok;
+            arena_pop_to(&output, 0);
+            arena_pop_to(&twin_output, 0);
+        }
+    }
+    printf("IR lowering copies: %u sizes twice, %" PRIu64 " failed\n", BUSTER_TIER0_MAX_COPY_BYTES, failed_sizes);
     arena_release(&output);
+    arena_release(&twin_output);
     arena_release(&scratch);
+    arena_release(&execution);
 }
 
 static void ir_lower_test_guarded(IrLowerTestTally* tally)
@@ -1294,6 +1545,11 @@ static int run_ir_lower_tests(int argc, char** argv)
     {
         fprintf(stderr, "usage: test-ir-lowering [--seed N] [--count N]\n");
     }
+    else if (!(x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize()))
+    {
+        // Tier 0's tables, for the generated programs' native code.
+        fprintf(stderr, "test-ir-lowering: the tables can't be built\n");
+    }
     else
     {
         IrLowerTestTally tally =
@@ -1303,9 +1559,24 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_fixtures(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);
-        ir_lower_test_tier0_entries(&tally);
+        ir_lower_test_objects(&tally);
+        ir_lower_test_copies(&tally);
         ir_lower_test_guarded(&tally);
-        ir_lower_test_programs(&tally, seed, count);
+        const Tier0ProgramOptions values =
+        {
+            .functions = 8,
+            .statements = 40,
+            .expression_nodes = 30,
+            .calls = true,
+            .loops = true,
+            .floating = true,
+            .pointers = true,
+            .defined = true,
+        };
+        Tier0ProgramOptions objects = values;
+        objects.objects = true;
+        ir_lower_test_programs(&tally, seed, count, values, "values");
+        ir_lower_test_programs(&tally, seed, count, objects, "objects");
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;
     }

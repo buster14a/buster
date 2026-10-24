@@ -9,6 +9,8 @@
 //
 // This measures generated typed entries, not source tokens or a complete C compilation. Memory totals are the sum of
 // per-function core allocations, including alignment gaps; peak output is the largest one, not the process's peak RSS.
+// The small and larger cases are value-only programs, as before #136's frame objects; a third case, reported apart, is
+// the larger shape with the generator's objects (local arrays and structs, and COPY between them).
 // Usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS]
 
 #define BUSTER_IR_LOWER_BENCHMARK_PROGRAMS 8u
@@ -37,6 +39,8 @@ struct IrLowerBenchmarkCorpus
     uint64_t instructions;
     uint64_t core_bytes;
     uint64_t peak_output_bytes;
+    uint64_t objects;
+    uint64_t copies;
 };
 
 static bool ir_lower_benchmark_seed(const char* text, uint64_t* output)
@@ -59,7 +63,7 @@ static bool ir_lower_benchmark_seed(const char* text, uint64_t* output)
     return valid;
 }
 
-static bool ir_lower_benchmark_generate(IrLowerBenchmarkCorpus* corpus, const Tier0Tables* tables, Arena* input, uint64_t seed, bool larger)
+static bool ir_lower_benchmark_generate(IrLowerBenchmarkCorpus* corpus, const Tier0Tables* tables, Arena* input, uint64_t seed, bool larger, bool objects)
 {
     const Tier0ProgramOptions options = {
         .functions = larger ? 8 : 4,
@@ -70,6 +74,7 @@ static bool ir_lower_benchmark_generate(IrLowerBenchmarkCorpus* corpus, const Ti
         .floating = true,
         .pointers = true,
         .defined = true,
+        .objects = objects,
     };
     const uint32_t programs = larger ? BUSTER_IR_LOWER_BENCHMARK_PROGRAMS : 1;
     const uint32_t capacity = programs * options.functions;
@@ -99,6 +104,14 @@ static bool ir_lower_benchmark_generate(IrLowerBenchmarkCorpus* corpus, const Ti
                 corpus->functions[corpus->count] = item;
                 corpus->count += 1;
                 corpus->entries += item.input->count;
+                for (uint32_t i = 0; i < item.input->count; i += 1)
+                {
+                    corpus->copies += item.input->kinds[i] == BUSTER_TYPED_COPY;
+                }
+                for (uint32_t l = 0; l < item.input->local_count; l += 1)
+                {
+                    corpus->objects += tier0_is_object(item.input, l);
+                }
             }
         }
     }
@@ -213,15 +226,16 @@ static IrBenchmarkSample ir_lower_benchmark_sample(const IrLowerBenchmarkCorpus*
     return sample;
 }
 
-static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bool larger, uint32_t passes, uint32_t selected, uint32_t after_scalar_ms)
+static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bool larger, bool objects, uint32_t passes, uint32_t selected, uint32_t after_scalar_ms)
 {
+    const char* name = objects ? "larger object" : larger ? "larger mixed" : "small mixed";
     Arena input = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_INPUT_BYTES);
     Arena output = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES);
     Arena twin_output = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES);
     Arena scratch = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES);
     IrLowerBenchmarkCorpus corpus = { 0 };
     bool valid = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0;
-    valid = valid && ir_lower_benchmark_generate(&corpus, tables, &input, seed, larger);
+    valid = valid && ir_lower_benchmark_generate(&corpus, tables, &input, seed, larger, objects);
     valid = valid && ir_lower_benchmark_validate(&corpus, &output, &twin_output, &scratch);
     uint32_t repetitions[BUSTER_IR_LOWER_BENCHMARK_VARIANTS] = {
         1,
@@ -260,7 +274,8 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
     }
     if (valid)
     {
-        printf("\n%s mixed programs: %u functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions (%.3f/typed entry)\n", larger ? "larger" : "small", corpus.count, corpus.entries, corpus.instructions, (double)corpus.instructions / corpus.entries);
+        printf("\n%s programs: %u functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions (%.3f/typed entry), %" PRIu64 " objects, %" PRIu64 " copies\n", name, corpus.count, corpus.entries, corpus.instructions,
+               (double)corpus.instructions / corpus.entries, corpus.objects, corpus.copies);
         printf("core arena bytes: sum=%" PRIu64 " (%.3f/typed entry), peak/function=%" PRIu64 "\n", corpus.core_bytes, (double)corpus.core_bytes / corpus.entries, corpus.peak_output_bytes);
         printf("%-8s %14s %16s %18s %20s %12s\n", "path", "ns/corpus", "ns/typed entry", "M typed entries/s", "TSC ticks/entry", "repetitions");
         for (uint32_t variant = 0; variant < BUSTER_IR_LOWER_BENCHMARK_VARIANTS; variant += 1)
@@ -275,7 +290,7 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
     }
     else
     {
-        fprintf(stderr, "benchmark-ir-lowering: generation, validation, lowering or calibration failed for the %s case\n", larger ? "larger" : "small");
+        fprintf(stderr, "benchmark-ir-lowering: generation, validation, lowering or calibration failed for the %s case\n", name);
     }
     arena_release(&scratch);
     arena_release(&twin_output);
@@ -346,10 +361,14 @@ static int run_ir_lower_benchmark(int argc, char** argv)
         {
             printf("Each vector sample follows %u ms of untimed scalar lowering.\n", after_scalar_ms);
         }
-        valid = ir_lower_benchmark_case(&tables, seed, false, passes, selected, after_scalar_ms);
+        valid = ir_lower_benchmark_case(&tables, seed, false, false, passes, selected, after_scalar_ms);
         if (valid)
         {
-            valid = ir_lower_benchmark_case(&tables, seed, true, passes, selected, after_scalar_ms);
+            valid = ir_lower_benchmark_case(&tables, seed, true, false, passes, selected, after_scalar_ms);
+        }
+        if (valid)
+        {
+            valid = ir_lower_benchmark_case(&tables, seed, true, true, passes, selected, after_scalar_ms);
         }
     }
     tier0_tables_close(&tables);

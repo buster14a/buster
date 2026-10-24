@@ -207,14 +207,29 @@ variadic frames: a non-null `incoming_variadic` (compared, never read) and a
 local flag other than `ADDRESS_TAKEN` (`BUSTER_TYPED_LOCAL_ADDRESS_ONLY`'s
 anchors and `va_list` objects) are refused with `IR_ERROR_METADATA`, the local
 in `detail` (`BUSTER_IR_NONE` for the frame), after the count and column checks
-and before validation or allocation, rather than lowered as ordinary slots. So
-are #136's frame objects (a local with a size in `local_sizes`: an array, a
-struct or a union, of class VOID), whose ordinary slot would take VOID's bytes
-and overlap its neighbours. A kind past `RETURN` (#136's `COPY`, and those after
-it) is refused with `IR_ERROR_OPCODE` at its entry, after validation and before
-allocation: the plan and the emitter would take it for a binary operation.
-Lowering objects (an `IrSlot` has their size and alignment) and copies remains
-open.
+and before validation or allocation, rather than lowered as ordinary slots.
+
+#136's frame objects (a local with a size in `local_sizes`: an array, a struct
+or a union, of class VOID, address-taken) each get a slot of their own: the
+object's size, `1 << local_alignments[l]` as its alignment, type `void` and
+`BUSTER_IR_SLOT_ADDRESS_TAKEN`, so #134 never promotes it. `LOCAL_ADDRESS`
+reaches it as it reaches any address-taken local, and its bytes go through
+`PTR_ADD`, `LOAD` and `SET` as ordinary memory. A slot's bytes start as the
+frame leaves them: the typed contract leaves an object's first contents to the
+front end.
+
+`COPY` (`value` bytes, 1 to `BUSTER_TIER0_MAX_COPY_BYTES`) needs no IR operation
+of its own. Both addresses cross `inttoptr` once; then, from offset 0, each piece
+is the widest integer that fits what remains (i64 while 8 bytes remain, then at
+most one each of i32, i16 and i8), loaded from the source and stored to the
+destination at the same offset, through an `ADDRESS` with no index (offset 0
+uses the pointer itself). 256 bytes take 32 load/store pairs, 23 take five. The
+typed contract makes the two ranges the same or apart, so loading each piece
+before storing it reads the source's bytes either way; a partial overlap would
+need every load first. The pieces' alignment is unknown (`alignment_log2` 0),
+as a typed `LOAD`'s is. `BUSTER_TYPED_COPY` is the last typed kind; a static
+assertion makes a later kind fail to build until this adapter lowers it, since
+the plan and the emitter would take an unnamed kind for a binary operation.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then
@@ -270,6 +285,32 @@ test-only explicit-frame executor against the existing typed-stream interpreter.
 Calls and global-memory effects are compared, with targeted fixtures for values
 across conditional joins, backedges to entry zero, narrow shifts and wide pointer
 scales. This is adapter testing, not the production interpreter of #176.
+
+It generates two sets of programs from the same seeds: values only, which give
+the same streams as before objects existed, and with the generator's `objects`
+option (local arrays and structs, pointers into them, copies between twins,
+some aligned to 16; no indirect calls, which the adapter refuses). Each program
+is also compiled by Tier 0 and run natively in a child process
+(`test-tier0`'s harness), and its result and global bytes must equal the IR
+executor's, besides the typed interpreter's. The executor bounds every access
+by its slot, so a piece past an object's end faults. Two fixtures target the
+new inputs: two objects, of 23 bytes (aligned to 8) and 24 (aligned to 16),
+the first written in pieces of every width and copied into the second, whose
+24th byte the copy must not reach, then the second copied over itself, the
+slots' sizes, alignments and flags checked; and `COPY` of every size from 1 to
+256 between two globals and from one onto itself, whose bytes must be exactly
+the copy's, with one load and one store per piece. A copy whose pieces were one
+size too wide, and an object's slot rounded down to 8 bytes, each fail the
+command (checked by mutation when this was added).
+
+Every lowered function of both sets is then promoted by both of `ssa_ir.c`'s
+paths, which must accept it with real dominance checking, pass both verifiers,
+and keep each object's slot (a `void` slot that isn't a temporary) with its
+size, alignment and flags, in order: promotion compacts the slots it removes
+and must never take an object's. The two paths may order their output
+differently, so their columns aren't compared here; `test-ssa-ir` checks their
+semantics by execution. A promotion that shrank an object's slot by a byte
+fails this check.
 The current generator can still produce out-of-range floating-to-integer
 conversions with its `defined` option. For those undefined results only, the
 test executor chooses the existing Tier 0 interpreter's CVTT convention; its
@@ -288,7 +329,10 @@ actual core/CFG/use arena charges. TSC ticks are not core cycles.
 `benchmark-ir-lowering` measures the available producer, handoff and consumer
 together: input validation, planning, classification, count/emission and output
 verification. Its units are typed entries, not source tokens, and its inputs
-are generated programs, not SQLite. Target conclusions require the optimized
+are generated programs, not SQLite. Its small and larger cases are value-only
+programs, as before #136's frame objects, so they stay comparable with earlier
+runs; a third case, reported apart, is the larger shape with the generator's
+objects and copies. Target conclusions require the optimized
 repository build on the approved 9700X, pinned to one CPU and under the shared
 lock; cloud correctness runs do not establish Zen 5 throughput.
 

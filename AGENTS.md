@@ -391,7 +391,7 @@ designs and the compilers already built this way.
   CFGs, including analysis and allocation. `docs/ssa.md` records the view's
   contract. `ssa_ir.c` adapts shared IR slots, rebuilds every operand form and
   verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
-  and both promoted forms. Complete source-corpus/Tier 1 acceptance for #134
+  and both promoted forms, with and without frame objects and copies. Complete source-corpus/Tier 1 acceptance for #134
   still needs the checker and downstream pipeline.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
@@ -691,10 +691,12 @@ designs and the compilers already built this way.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
   (#131). `ir_lower.c` lowers the existing `Tier0Function` stream into the
-  all-in-memory form for SSA promotion. `test-ir` checks independent fixtures,
-  guarded columns, malformed inputs and allocation rollback; `test-ir-lowering`
-  also executes generated IR against the typed-stream interpreter, including
-  calls and global-memory effects. `benchmark-ir` measures verification and
+  all-in-memory form for SSA promotion, frame objects as address-taken slots of
+  their size and alignment and `COPY` as integer load/store pieces. `test-ir`
+  checks independent fixtures, guarded columns, malformed inputs and allocation
+  rollback; `test-ir-lowering` also executes generated IR, with and without
+  objects, against the typed-stream interpreter and Tier 0's native code,
+  including calls and global-memory effects. `benchmark-ir` measures verification and
   derived-array rebuilding on synthetic functions. `benchmark-ir-lowering`
   measures the available typed-stream producer through output verification.
   [The IR guide](docs/ir.md) records the producer/consumer contract and the
@@ -3942,17 +3944,22 @@ handled without relying on twin agreement alone. The default random count is
 `./build/compiler test-ir-lowering [--seed N] [--count N]` lowers generated
 typed programs through both paths, compares every column and verifies each
 function. A test-only executor with explicit call frames compares results and
-global-memory effects with the existing typed-stream interpreter. Targeted
+global-memory effects with the existing typed-stream interpreter and with Tier
+0's native code of the same streams, run in a child process. It runs `--count`
+programs of values and as many with frame objects and copies. Targeted
 fixtures exercise conditional joins, entry-zero backedges, narrow shifts, wide
-pointer scales, guarded source tails and transactional failures. The default
-count is 32 programs. It does not supply the production interpreter of #176.
+pointer scales, objects' slots, `COPY` of every size from 1 to 256, guarded
+source tails and transactional failures. Every lowered function is also
+promoted by both SSA paths, verified, and must keep its objects' slots. The
+default count is 32 programs. It does not supply the production interpreter of #176.
 
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
 builders on small and large synthetic functions. `benchmark-ir-lowering
 [--seed N] [--passes N] [--only scalar|vector] [--after-scalar MS]` measures
 the complete available typed-stream-to-verified-IR path on generated mixed
-programs. Both require optimized builds, calibrate samples to at least 2 ms,
+programs: small and larger value-only ones, and the larger shape with frame
+objects and copies, reported apart. Both require optimized builds, calibrate samples to at least 2 ms,
 rotate variant order and report 21-pass medians by default. TSC ticks are
 labeled separately from core cycles. The 9700X workflow runs the tests and
 pins each benchmark to one allowed CPU; it adds the runs after 200 ms of scalar
