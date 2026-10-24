@@ -2633,11 +2633,10 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
             kept = pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds + count, data->starts + count, data->values + count, (uint32_t)kept, true);
             result = kept < 0 ? PP_PREPARE_NO_MEMORY : PP_PREPARE_DONE;
             // An unterminated block comment (pp_is_unterminated_comment), reported when this inclusion reads it.
-            const uint64_t final = count + (uint64_t)kept - 1;
-            if (last && kept > 0 && pp_is_unterminated_comment(data->bytes, data->kinds[final], data->starts[final]))
+            if (last && kept > 0 && pp_is_unterminated_comment(data->bytes, data->kinds[count + kept - 1], data->starts[count + kept - 1]))
             {
-                data->unterminated_comment = data->starts[final] + 1;
-                data->unterminated_comment_starts_line = (data->kinds[final] & BUSTER_C_TOKEN_START_OF_LINE) != 0;
+                data->unterminated_comment = data->starts[count + kept - 1] + 1;
+                data->unterminated_comment_starts_line = (data->kinds[count + kept - 1] & BUSTER_C_TOKEN_START_OF_LINE) != 0;
                 kept -= 1;
             }
             count += kept > 0 ? (uint64_t)kept : 0;
@@ -15694,12 +15693,12 @@ static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
 }
 
 // Is `argument` one of our options that clang doesn't have and that take the next argument as their value
-// (--predefines FILE, --location-limit N)? The commands that split -E's options from their files take the value with
-// the option, and those that give the options to clang too (test-preprocessor's files and --compare-clang,
-// benchmark-preprocessor --clang) leave both out of clang's arguments.
+// (--predefines FILE, --location-limit N, --window-bytes N)? The commands that split -E's options from their files take
+// the value with the option, and those that give the options to clang too (test-preprocessor's files and
+// --compare-clang, benchmark-preprocessor --clang) leave both out of clang's arguments.
 static bool pp_own_option_with_value(const char* argument)
 {
-    return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0;
+    return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0 || strcmp(argument, "--window-bytes") == 0;
 }
 
 // The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
@@ -15787,6 +15786,16 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
             const unsigned long long limit = strtoull(next, &rest, 10);
             result = *rest == 0 && limit != 0 && limit <= UINT32_MAX;
             options->location_limit = (uint32_t)limit;
+            i += 1;
+        }
+        else if (strcmp(argument, "--window-bytes") == 0 && next != 0)
+        {
+            // A test option: the windows a large file is lexed and refined in (pp_prepare_windows), this many bytes, so
+            // that small ones send every file of two windows or more through them.
+            char* rest;
+            const unsigned long long bytes = strtoull(next, &rest, 10);
+            result = *rest == 0 && bytes != 0 && bytes <= UINT32_MAX / 2;
+            options->window_bytes = (uint32_t)bytes;
             i += 1;
         }
         else if (strcmp(argument, "-trigraphs") == 0 || strcmp(argument, "-ftrigraphs") == 0 || strcmp(argument, "-fno-trigraphs") == 0)
