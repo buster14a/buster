@@ -9,7 +9,9 @@
 // merges into one writable section of their bytes; a weak reference to the bounds of a name no section has, which stays
 // zero; then an IFUNC called (refused, naming it) and one that nothing refers to (linked). Each resolution, on both paths
 // and 1/2/3/8 lanes, writes a PIE the loader runs, byte for byte alike, whose symbols the test reads; with --cross-check,
-// lld links the same inputs, which must run alike and define the bounds alike.
+// lld links the same inputs, which must run alike and define the bounds alike. And section GC after the merge
+// (foreign_bounds_test_gc): a retained section whose bounds only dead code refers to, and a hook's FDE in a merged code
+// section, both of which must survive.
 
 static const ForeignCopyTestSource foreign_bounds_test_sources[] = {
     {
@@ -60,6 +62,22 @@ static const ForeignCopyTestSource foreign_bounds_test_sources[] = {
                 "__attribute__((noreturn)) void _start(void) { __asm__ volatile(\"syscall\" : : \"a\"(60), \"D\"(fb_add())); __builtin_unreachable(); }\n",
     },
     {
+        // For section GC after the merge: _start calls fb_gc_run, which calls the hook in fb_gc_code through
+        // __start_fb_gc_code; fb_gc_dead, in a section of its own that nothing reaches, is the only reference to
+        // __start_fb_gc_kept, whose section is retained (SHF_GNU_RETAIN, "R"). Every function has an FDE.
+        .file = "fb_gc.s",
+        .text = ".text\n.globl _start\n.type _start,@function\n_start:\n.cfi_startproc\ncall fb_gc_run\nmov %eax,%edi\nmov $60,%eax\nsyscall\n"
+                ".cfi_endproc\n.size _start,.-_start\n"
+                ".section .text.fb_gc_run,\"ax\",@progbits\n.globl fb_gc_run\n.type fb_gc_run,@function\nfb_gc_run:\n.cfi_startproc\n"
+                "lea __start_fb_gc_code(%rip),%rax\ncall *%rax\nret\n.cfi_endproc\n.size fb_gc_run,.-fb_gc_run\n"
+                ".section fb_gc_code,\"ax\",@progbits\n.globl fb_gc_hook\n.type fb_gc_hook,@function\nfb_gc_hook:\n.cfi_startproc\n"
+                "mov $42,%eax\nret\n.cfi_endproc\n.size fb_gc_hook,.-fb_gc_hook\n"
+                ".section .text.fb_gc_dead,\"ax\",@progbits\n.globl fb_gc_dead\n.type fb_gc_dead,@function\nfb_gc_dead:\n.cfi_startproc\n"
+                "lea __start_fb_gc_kept(%rip),%rax\nret\n.cfi_endproc\n.size fb_gc_dead,.-fb_gc_dead\n"
+                ".section fb_gc_kept,\"aR\",@progbits\n.globl fb_gc_marker\n.type fb_gc_marker,@object\n.size fb_gc_marker,8\nfb_gc_marker:\n"
+                ".quad 0x5a5a5a5a5a5a5a5a\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    {
         .file = "fb_ifunc_unused.c",
         .text = "static int fb_one(void) { return 7; }\n"
                 "static int (*fb_resolve(void))(void) { return fb_one; }\n"
@@ -73,6 +91,7 @@ typedef enum ForeignBoundsTestCase
     FOREIGN_BOUNDS_TEST_TABLE,
     FOREIGN_BOUNDS_TEST_IFUNC,
     FOREIGN_BOUNDS_TEST_IFUNC_UNUSED,
+    FOREIGN_BOUNDS_TEST_GC,
     FOREIGN_BOUNDS_TEST_CASES,
 } ForeignBoundsTestCase;
 
@@ -282,6 +301,89 @@ static void foreign_bounds_test_case(ForeignTestTally* tally, const char* direct
     arena_pop_to(arena, saved);
 }
 
+// Section GC after the merge (foreign_link_build_for_gc, then foreign_gc_link, as link-foreign --gc-sections runs them),
+// on both paths and 1/2/3/8 lanes: a merged section is its group's atom to the passes after the conversion. The
+// retained section's group survives though only dead code refers to its bounds, with its bytes; the hook's FDE survives
+// with its code; the dead function goes; and the static executable runs, byte for byte alike.
+static void foreign_bounds_test_gc(ForeignTestTally* tally, const char* directory, Arena* arena)
+{
+    const uint64_t saved = arena->length;
+    // The resolver's command line: the entry, which link-foreign forces as an undefined reference, and the object.
+    char* arguments[] = {
+        (char*)"-u",
+        (char*)"_start",
+        foreign_test_path(directory, "fb_gc.o", arena),
+    };
+    ForeignCommand command = { 0 };
+    bool ready = arguments[2] != 0 && foreign_test_command(&command, arguments, BUSTER_ARRAY_LENGTH(arguments), arena);
+    foreign_test_expect(tally, ready, "prepare the section GC fixture's command", 0);
+    String8 reference = { 0 };
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(foreign_test_lanes); l += 1)
+        {
+            const uint64_t iteration = arena->length;
+            const ForeignPath mode = path == 0 ? FOREIGN_PATH_EXACT : FOREIGN_PATH_VECTOR;
+            Foreign foreign;
+            foreign_run(&foreign, &command, mode, foreign_test_lanes[l], 0);
+            Arena names = arena_reserve(1ull << 28);
+            ForeignLink input = { 0 };
+            ForeignLink output = { 0 };
+            const ForeignLinkResult built = foreign.failure.error == FOREIGN_ERROR_NONE ? foreign_link_build_for_gc(&input, &foreign, arena, &names, RUNTIME_KIND_STATIC, (String8){ 0 }) :
+                                                                                      (ForeignLinkResult){ .error = FOREIGN_LINK_ERROR_INPUT };
+            const ForeignGcRoots roots = {
+                .entry = built.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_test_symbol(&foreign, &input, "_start") : 0,
+            };
+            const ForeignLinkResult collected = built.error == FOREIGN_LINK_ERROR_NONE ? foreign_gc_link(&output, &foreign, &input, &roots, mode, arena, &names) : built;
+            char detail[192];
+            snprintf(detail, sizeof(detail), "%s %u lanes: resolve %u convert %u collect %u", path == 0 ? "exact" : "vector", foreign_test_lanes[l], (unsigned)foreign.failure.error,
+                     (unsigned)built.error, (unsigned)collected.error);
+            const bool linked = collected.error == FOREIGN_LINK_ERROR_NONE;
+            foreign_test_expect(tally, linked, "convert and collect the section GC fixture", detail);
+            const SymbolId marker = linked ? foreign_link_test_symbol(&foreign, &output, "fb_gc_marker") : 0;
+            const AtomId kept = marker != 0 ? output.link.symbols.atom[marker] : 0;
+            uint64_t value = 0;
+            if (kept != 0 && output.link.atoms.bytes[kept] != 0 && output.link.symbols.value[marker] + 8 <= output.link.atoms.size[kept])
+            {
+                memcpy(&value, output.link.atoms.bytes[kept] + output.link.symbols.value[marker], sizeof(value));
+            }
+            foreign_test_expect(tally, value == 0x5a5a5a5a5a5a5a5aull, "a retained section survives GC in its __start_ group, with its bytes", detail);
+            foreign_test_expect(tally, linked && foreign_link_test_symbol(&foreign, &output, "fb_gc_dead") == 0, "the dead reference to the retained group's bounds goes", detail);
+            uint32_t frames = 0;
+            for (AtomId atom = 1; linked && atom < output.link.atoms.count; atom += 1)
+            {
+                frames += output.link.atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME ? executable_eh_frame_walk(&output.link, atom, 0, 0, 0) : 0;
+            }
+            foreign_test_expect(tally, frames == 3, "the FDE of a function in a merged code section survives GC, as _start's and fb_gc_run's do", detail);
+            ForeignTestPath executable;
+            snprintf(executable, sizeof(executable), "%s/fb_gc_output_%u_%u", directory, path, foreign_test_lanes[l]);
+            const String8 destination = { .pointer = executable, .length = strlen(executable) };
+            const SymbolId entry = linked ? foreign_link_test_symbol(&foreign, &output, "_start") : 0;
+            ExecutableResult written = { 0 };
+            const bool published = entry != 0 && (path == 0 ? executable_test_write_exact(&output.link, entry, destination, foreign_test_lanes[l], &written) :
+                                                             executable_test_write(&output.link, entry, destination, foreign_test_lanes[l], &written, 0, 0));
+            foreign_test_expect(tally, published && foreign_copy_test_run(directory, executable, FOREIGN_COPY_TEST_DATA, arena), "the collected fixture runs its hook", detail);
+            const String8 bytes = published ? foreign_test_read(arena, executable) : (String8){ 0 };
+            if (path == 0 && l == 0)
+            {
+                reference = bytes;
+            }
+            else
+            {
+                const bool same = reference.pointer != 0 && bytes.pointer != 0 && reference.length == bytes.length && memcmp(reference.pointer, bytes.pointer, bytes.length) == 0;
+                foreign_test_expect(tally, same, "the collected fixture's output is identical across paths and lanes", detail);
+            }
+            arena_release(&names);
+            foreign_release(&foreign);
+            if (path != 0 || l != 0)
+            {
+                arena_pop_to(arena, iteration);
+            }
+        }
+    }
+    arena_pop_to(arena, saved);
+}
+
 static bool foreign_bounds_test(const char* directory, Arena* arena, bool cross_check)
 {
     ForeignTestTally tally = {
@@ -294,7 +396,14 @@ static bool foreign_bounds_test(const char* directory, Arena* arena, bool cross_
     {
         for (uint32_t test = 0; test < FOREIGN_BOUNDS_TEST_CASES; test += 1)
         {
-            foreign_bounds_test_case(&tally, directory, arena, cross_check, runtime.loader_path, (ForeignBoundsTestCase)test);
+            if (test == FOREIGN_BOUNDS_TEST_GC)
+            {
+                foreign_bounds_test_gc(&tally, directory, arena);
+            }
+            else
+            {
+                foreign_bounds_test_case(&tally, directory, arena, cross_check, runtime.loader_path, (ForeignBoundsTestCase)test);
+            }
         }
     }
     runtime_release(&runtime);

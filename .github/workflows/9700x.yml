@@ -387,6 +387,8 @@ jobs:
           ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
           == Test native fixed-frame CFI and generated GDB/perf consumers
           ./build/compiler test-unwind --cross-check
+          == Test streaming the output against writing it at the end, with GDB, perf and llvm-dwarfdump on the data-first layout
+          ./build/compiler test-streaming --cross-check
           == Test differential harness accounting, subprocesses and failure preservation
           ./build/compiler test-differential-harness
           == Test Tier 1 allocation, reload splitting and rematerialization
@@ -956,6 +958,7 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
+          taskset -c "$cpu" ./build/compiler benchmark-streaming --units 100 --runs 5
 
       - name: Benchmark the IR verifier and derived arrays
         run: |
