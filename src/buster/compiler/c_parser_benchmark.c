@@ -880,15 +880,17 @@ int run_parser_benchmark(int argc, char** argv)
                 static Parser scalar;
                 const ParseOptions scalar_options = { .scalar = true };
                 const bool vector_ok = parse_translation_unit(&file->parser, &pp);
-                const bool scalar_ok = parse_initialize(&scalar, &scalar_options, options.language) && parse_translation_unit(&scalar, &pp);
-                bool same = vector_ok == scalar_ok && file->parser.tokens.count == scalar.tokens.count;
+                const bool scalar_ready = parse_initialize(&scalar, &scalar_options, options.language);
+                const bool scalar_ok = scalar_ready && parse_translation_unit(&scalar, &pp);
+                bool same = scalar_ready && file->parser.fatal == PARSE_MESSAGE_NONE && scalar.fatal == PARSE_MESSAGE_NONE &&
+                            vector_ok == scalar_ok && file->parser.tokens.count == scalar.tokens.count;
                 for (uint32_t t = 0; same && vector_ok && t < scalar.tokens.count; t += 1)
                 {
                     same = file->parser.tree.parents[t] == scalar.tree.parents[t] && file->parser.tree.depths[t] == scalar.tree.depths[t];
                 }
                 if (!same)
                 {
-                    fprintf(stderr, "%s: the vector path and the scalar parser disagree\n", file->path);
+                    fprintf(stderr, "%s: the parser paths disagree or could not prepare complete benchmark input\n", file->path);
                     loaded = false;
                 }
                 printf("%s: %u tokens%s; the fallback took %llu top-level declarations, %llu tokens (%.3f%%)%s\n", file->path, file->parser.tokens.count,
