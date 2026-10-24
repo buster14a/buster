@@ -4065,7 +4065,7 @@ side: a world of what its C passes (integers to 64 bits, enums, pointers,
 to 16 at most), without what its front end doesn't take yet (C23's enums of a
 fixed underlying type, an attribute after a bit-field's width, which goes
 before its type instead, a struct of a flexible array member alone), and
-signatures within Tier 0's depths (14 integer and 15 floating arguments); our
+signatures within Tier 0's depths (13 integer and 15 floating arguments); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the

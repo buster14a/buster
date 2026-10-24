@@ -1437,9 +1437,11 @@ clang's directed records. They leave out what this compiler's front end
 doesn't take yet: C23's enums of a fixed underlying type, an attribute after a
 bit-field's width (a bit-field's attributes go before its type instead, which
 clang and GCC read alike), and a struct of a flexible array member alone (a
-GNU extension). Tier 0 holds a call's arguments on its stacks at once and
-copies its aggregates through each stack's first free register, so a compiled
-world's signature passes at most 14 integer values (an aggregate is its
+GNU extension). Tier 0 holds a call's arguments on its stacks at once (15
+integer and 16 floating values) and copies its aggregates through each stack's
+first free register, and our caller's `r = c_callee(...)` holds `r`'s address
+under the arguments when the result is a struct or a union, so a compiled
+world's signature passes at most 13 integer values (an aggregate is its
 address) and 15 floating ones, an argument past them becoming one of the
 other stack's. Our side is C (`abi_test_write_ours`): per signature, a callee
 that stores each parameter's bytes, its unnamed ones read with `va_arg`, and
