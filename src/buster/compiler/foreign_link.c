@@ -40,6 +40,24 @@ struct ForeignLinkResult
     ImportResult import;
 };
 
+// The conversion's phases, which link-foreign's --time reports, each from the end of the one before to its own on the
+// thread that takes the steps (lane 0 on lanes, whose syncs end the passes after every lane's part): the libraries, the
+// order and every object's sections and locals; the global names' symbols; the objects' maps of them; the COMDAT unwind
+// plans' symbols and the __start_ and __stop_ sections; the relocations; the bounds' relocations, the copies, _DYNAMIC
+// and the IFUNCs' refusal; link_check; and a PIE's exports.
+typedef enum ForeignLinkPhase
+{
+    FOREIGN_LINK_PHASE_SECTIONS,
+    FOREIGN_LINK_PHASE_NAMES,
+    FOREIGN_LINK_PHASE_MAPS,
+    FOREIGN_LINK_PHASE_UNWIND,
+    FOREIGN_LINK_PHASE_RELOCATIONS,
+    FOREIGN_LINK_PHASE_COPIES,
+    FOREIGN_LINK_PHASE_CHECK,
+    FOREIGN_LINK_PHASE_EXPORTS,
+    FOREIGN_LINK_PHASES,
+} ForeignLinkPhase;
+
 typedef struct ForeignLink ForeignLink;
 typedef struct ForeignLinkUnwind ForeignLinkUnwind;
 struct ForeignLink
@@ -58,6 +76,8 @@ struct ForeignLink
     uint32_t copy_export_count;
     SymbolId* copies;
     uint32_t copy_count;
+    // Each phase's time, in nanoseconds, from foreign_link_build_mode.
+    uint64_t phase_nanoseconds[FOREIGN_LINK_PHASES];
 };
 
 // The most aliases (a library's other names at a copy's address that the link has no symbol of) a copy may add: glibc's
@@ -1621,6 +1641,9 @@ struct ForeignLinkBuild
     uint8_t* required;
     ForeignLinkBounds bounds;
     ForeignLinkResult result;
+    // When the conversion started, and when each phase ended.
+    uint64_t start;
+    uint64_t ends[FOREIGN_LINK_PHASES];
 };
 
 // The steps up to the global names: the libraries, the order, the __start_ and __stop_ plan, the link, every object's
@@ -1810,6 +1833,7 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
         .kind = kind,
         .interpreter = interpreter,
         .defer_undefined = defer_undefined,
+        .start = foreign_now(),
     };
     if (foreign->path == FOREIGN_PATH_VECTOR && foreign->lanes > 1)
     {
@@ -1818,15 +1842,19 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
     else
     {
         foreign_link_build_begin(&build);
+        build.ends[FOREIGN_LINK_PHASE_SECTIONS] = foreign_now();
         if (build.result.error == FOREIGN_LINK_ERROR_NONE)
         {
             build.result = foreign_link_names(output, foreign, build.required, &build.bounds, kind, defer_undefined);
         }
+        build.ends[FOREIGN_LINK_PHASE_NAMES] = foreign_now();
         for (uint32_t id = 1; build.result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
         {
             foreign_link_map_object(output, foreign, id, 0);
         }
+        build.ends[FOREIGN_LINK_PHASE_MAPS] = foreign_now();
         foreign_link_build_middle(&build);
+        build.ends[FOREIGN_LINK_PHASE_UNWIND] = foreign_now();
         for (uint32_t id = 1; build.result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
         {
             if (foreign->objects[id].library == 0)
@@ -1836,12 +1864,23 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
                 build.result.object = build.result.error != FOREIGN_LINK_ERROR_NONE ? id : 0;
             }
         }
+        build.ends[FOREIGN_LINK_PHASE_RELOCATIONS] = foreign_now();
         foreign_link_build_end(&build);
+        build.ends[FOREIGN_LINK_PHASE_COPIES] = foreign_now();
         if (build.result.error == FOREIGN_LINK_ERROR_NONE && link_check(&output->link) != LINK_ERROR_NONE)
         {
             build.result.error = FOREIGN_LINK_ERROR_LINK;
         }
+        build.ends[FOREIGN_LINK_PHASE_CHECK] = foreign_now();
         foreign_link_build_finish(&build);
+        build.ends[FOREIGN_LINK_PHASE_EXPORTS] = foreign_now();
+    }
+    uint64_t previous = build.start;
+    for (uint32_t phase = 0; phase < FOREIGN_LINK_PHASES; phase += 1)
+    {
+        const uint64_t end = build.ends[phase] > previous ? build.ends[phase] : previous;
+        output->phase_nanoseconds[phase] = end - previous;
+        previous = end;
     }
     return build.result;
 }

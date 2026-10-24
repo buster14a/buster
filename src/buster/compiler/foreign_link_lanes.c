@@ -342,10 +342,15 @@ static void foreign_link_lane(void* argument)
         state->first_typed = build->result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(build->scratch.arena, uint32_t, (uint64_t)build->output->link.symbols.capacity + 1) : 0;
         const bool allocated = state->decisions != 0 && state->fixups != 0 && state->entries != 0 && state->first_typed != 0;
         build->result.error = build->result.error == FOREIGN_LINK_ERROR_NONE && !allocated ? FOREIGN_LINK_ERROR_MEMORY : build->result.error;
+        build->ends[FOREIGN_LINK_PHASE_SECTIONS] = foreign_now();
     }
     if (foreign_link_lanes_proceed(state))
     {
         foreign_link_names_lanes(state);
+    }
+    if (lane == 0)
+    {
+        build->ends[FOREIGN_LINK_PHASE_NAMES] = foreign_now();
     }
     if (foreign_link_lanes_proceed(state))
     {
@@ -353,7 +358,9 @@ static void foreign_link_lane(void* argument)
     }
     if (lane == 0)
     {
+        build->ends[FOREIGN_LINK_PHASE_MAPS] = foreign_now();
         foreign_link_build_middle(build);
+        build->ends[FOREIGN_LINK_PHASE_UNWIND] = foreign_now();
     }
     if (foreign_link_lanes_proceed(state))
     {
@@ -361,7 +368,9 @@ static void foreign_link_lane(void* argument)
     }
     if (lane == 0)
     {
+        build->ends[FOREIGN_LINK_PHASE_RELOCATIONS] = foreign_now();
         foreign_link_build_end(build);
+        build->ends[FOREIGN_LINK_PHASE_COPIES] = foreign_now();
     }
     if (foreign_link_lanes_proceed(state))
     {
@@ -373,7 +382,9 @@ static void foreign_link_lane(void* argument)
     }
     if (lane == 0)
     {
+        build->ends[FOREIGN_LINK_PHASE_CHECK] = foreign_now();
         foreign_link_build_finish(build);
+        build->ends[FOREIGN_LINK_PHASE_EXPORTS] = foreign_now();
     }
 }
 

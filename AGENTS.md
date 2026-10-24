@@ -649,6 +649,11 @@ designs and the compilers already built this way.
   libraries' own references and lld's regular symbol table; an IFUNC a fixup
   reaches is refused, and static libc, static PIE and shared output remain
   follow-ups. GC, literal pooling and CIE pooling are off by default.
+  With `--lanes N` past 1 on the vector path, the conversion
+  (`foreign_link.c`) runs its global names, objects' maps, relocations and
+  `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
+  #87), into the exact path's link; `--time` reports the resolution's,
+  the conversion's and the writer's phases.
   [The command contract](docs/foreign-driver.md) has the details. Its tests
   (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
   run through `test-foreign --cross-check`, and `test-foreign-corpus`
@@ -2988,6 +2993,10 @@ must:
   their versions, and on the dynamic relocations by symbol and class (a GOT
   slot, `GLOB_DAT` or `JUMP_SLOT`; `COPY`; `R_X86_64_64`; `TPOFF64`;
   `DTPMOD64`; `DTPOFF64`), with as many relative ones as lld's.
+
+And `link-foreign`'s program must come out byte for byte the same when it links
+on eight lanes (`--lanes=8`), through the resolution's, the conversion's and
+the writer's lane paths, as on one.
 
 What a reference linker writes as its own valid choice is classified, counted
 and printed as documented ("differs, as documented"), never dropped silently

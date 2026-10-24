@@ -1180,8 +1180,8 @@ static void foreign_driver_test_interpreter(ForeignTestTally* tally, const char*
     unlink(path);
 }
 
-// --time: a link reports every stage and the phases of the resolution and the writer on standard error, at 1 and 3
-// lanes, and still writes the program; a link that fails reports no stages, only its diagnostic.
+// --time: a link reports every stage and the phases of the resolution, the conversion and the writer on standard error,
+// at 1 and 3 lanes, and still writes the program; a link that fails reports no stages, only its diagnostic.
 static void foreign_driver_test_time(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
 {
     static const char* const expected[] = {
@@ -1191,6 +1191,9 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
         "  resolve ",
         " winners ",
         "  convert ",
+        " sections ",
+        " relocations ",
+        " exports ",
         "  dedup-unwind ",
         "  merge-strings ",
         "  write ",
