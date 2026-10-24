@@ -135,6 +135,7 @@ static const char* const bind_test_errors[] = {
     [BIND_ERROR_DISCARDED] = "discarded",
     [BIND_ERROR_SNAPSHOT] = "snapshot",
     [BIND_ERROR_LIBRARY_UNDEFINED] = "library undefined",
+    [BIND_ERROR_LIBRARY_VERSION] = "library version",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

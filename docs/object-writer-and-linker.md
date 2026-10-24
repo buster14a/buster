@@ -2599,9 +2599,10 @@ without a version, which binding doesn't take, depend on it. Version needs that 
 its section, a name empty, a last entry's `vn_next` past the section) and a reference whose index names neither an
 entry nor a definition of the library's own are refused (`RUNTIME_ERROR_IMPORT`), as GNU ld refuses them, where the
 loader would read past the section or take the reference as unversioned (lld counts the entries by `sh_info` and
-refuses the others too). A version a library requires of `libc.so.6` or the loader isn't checked: the runtime keeps
-their default exports alone, and a library built against an older glibc requires older versions,
-`memcpy@GLIBC_2.2.5` among them; the loader checks them at load. A weak reference to a library nothing
+refuses the others too). A reference's version of `libc.so.6` or the loader doesn't choose its export: the runtime
+keeps their default exports alone, and a library built against an older glibc requires older versions,
+`memcpy@GLIBC_2.2.5` among them, which the loader binds at load; the version itself is one of the library's needs,
+which binding checks against their definitions (below). A weak reference to a library nothing
 needs is left to nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
 a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
 library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
@@ -2609,6 +2610,21 @@ each required exactly when needed, and their versions in `.gnu.version_r`. A lib
 soname, or without one, as GNU ld and lld name it, its file's name where the `-l` search found it and its path where a
 script names it (`runtime_libraries_name`): a script's library in a directory of its own loads without a search
 path.
+
+Which export a versioned reference binds to is the first named library's at its version, whatever library its need
+names, as GNU ld and lld bind it and the loader looks it up. The loader also checks each loaded library's version needs
+on their own (`_dl_check_map_versions`, in glibc's `dl-version.c`): each auxiliary entry of `.gnu.version_r` names a
+version of the library its entry's file names (`vn_file`), which must define it, by hash and name (`vna_hash` against
+`vd_hash`, then the strings), unless that library defines no versions at all or the need is weak (`VER_FLG_WEAK`),
+which the loader only warns about. After the closure, `bind_library_versions` checks them so for the needed libraries
+and the named libraries their `DT_NEEDED` entries load, against the named libraries, `libc.so.6` and the loader, and
+refuses the first that fails (`BIND_ERROR_LIBRARY_VERSION`) in the loader's words: `DIR/libB.so: version 'V1' not
+found (required by DIR/libA.so)`. A file the link doesn't have is left unchecked, as its references are. Neither
+linker checks the needs (#398's review: libA, built against a libB of `foo@@V1`, linked `-lA -lC -lB` with a libC of
+`foo@V1` and a libB of `foo@@V2` alone: GNU ld 2.42 and lld 23.1.5 bind libA's `foo@V1` to libC's and link a
+program that the loader refuses at startup, since libB doesn't define `V1`; binding refuses the link). The check is a
+scalar pass over a few needs per loaded library, shared by both paths, as the closure's rounds are: libm.so.6 has six,
+versions of `libc.so.6`'s and the loader's.
 
 What isn't linked yet: an archive with members (`libNAME.a` found first, or one a script names) is refused by name;
 an empty one, as glibc 2.34 and later install `libpthread.a`, `libdl.a` and `librt.a`, adds nothing, as GNU ld
@@ -2642,7 +2658,13 @@ both paths into the same bytes, which run, and one of `foo@@V2` alone and one wh
 refused naming `foo@V1`; with `main` defining `foo` too, against the first (linked and run) and against `foo@@V2`
 alone (refused); and copies of libA whose need of `V1` the test changes: hidden (`vna_other`'s top bit), linked and run
 against the first libB and refused against the other two, and four that don't read (`vn_aux`, `vna_name` and the last
-`vn_next` past their sections, and `foo`'s index naming no entry), each refused naming libA. `test-bind`'s libraries
+`vn_next` past their sections, and `foo`'s index naming no entry), each refused naming libA. With a libC of `foo@V1`
+(its name's default, or beside `foo@@V3`) between them on the line, which libA's `foo@V1` binds to, the link is
+refused against a libB of `foo@@V2` alone, which lacks the `V1` libA requires of it, and links and runs against a libB
+of `foo@V1`, one without versions and with libA's need weak; a copy of libA whose need of `V1` has another hash, one
+whose need of `libc.so.6`'s `GLIBC_2.2.5` is renamed `GLIBC_9.9.9`, and a copy of libB renamed so, which libA's
+`DT_NEEDED` loads, are each refused naming the library that lacks the version. Every case links by both paths, into
+the same bytes or refused alike. `test-bind`'s libraries
 check binds, by both paths, links against libraries
 made by hand, two that refer to `b_func` and one that exports it: without a definition of `b_func`, or with a hidden
 one or a reference, the link needs all three; with a global, weak, protected or absolute one, the two alone, and

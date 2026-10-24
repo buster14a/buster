@@ -484,7 +484,28 @@ typedef enum CheckTestNeed
     CHECK_TEST_NEED_INDEX,
     // The entry's vn_next, 0 as the last entry's, to the section's end, where the loader would read one more.
     CHECK_TEST_NEED_NEXT,
+    // VER_FLG_WEAK in the auxiliary entry's vna_flags, a need the loader doesn't refuse a program for.
+    CHECK_TEST_NEED_WEAK,
+    // Another vna_hash, which the loader compares with the version definition's vd_hash before the names.
+    CHECK_TEST_NEED_HASH,
+    // The version renamed in place, each digit a 9 (GLIBC_2.2.5 to GLIBC_9.9.9), with its hash, and not weak: a version
+    // that the entry's file doesn't define.
+    CHECK_TEST_NEED_UNDEFINED,
 } CheckTestNeed;
+
+// The ELF hash of `name`, as vna_hash and vd_hash hold it.
+static uint32_t check_test_driver_elf_hash(const char* name)
+{
+    uint32_t hash = 0;
+    for (const unsigned char* c = (const unsigned char*)name; *c != 0; c += 1)
+    {
+        hash = (hash << 4) + *c;
+        const uint32_t high = hash & 0xf0000000u;
+        hash ^= high >> 24;
+        hash &= ~high;
+    }
+    return hash;
+}
 
 // Copies the library at `from` to `to` with the .gnu.version_r auxiliary entry that requires `version` changed as
 // `change` says: false if the file doesn't read or has no such entry.
@@ -541,7 +562,7 @@ static bool check_test_driver_change_need(const char* from, const char* to, cons
         {
             Elf64_Vernaux auxiliary;
             memcpy(&auxiliary, bytes + needs.sh_offset + at, sizeof(auxiliary));
-            const char* name = (const char*)bytes + strings.sh_offset + auxiliary.vna_name;
+            char* name = (char*)bytes + strings.sh_offset + auxiliary.vna_name;
             const bool named = auxiliary.vna_name < strings.sh_size && memchr(name, 0, strings.sh_size - auxiliary.vna_name) != NULL && strcmp(name, version) == 0;
             if (named)
             {
@@ -551,6 +572,16 @@ static bool check_test_driver_change_need(const char* from, const char* to, cons
                 auxiliary.vna_other = change == CHECK_TEST_NEED_HIDDEN ? (uint16_t)(auxiliary.vna_other | 0x8000)
                                       : change == CHECK_TEST_NEED_INDEX ? 0x7ff0
                                                                         : auxiliary.vna_other;
+                for (char* c = name; change == CHECK_TEST_NEED_UNDEFINED && *c != 0; c += 1)
+                {
+                    *c = *c >= '0' && *c <= '9' ? '9' : *c;
+                }
+                auxiliary.vna_hash = change == CHECK_TEST_NEED_UNDEFINED ? check_test_driver_elf_hash(name)
+                                     : change == CHECK_TEST_NEED_HASH    ? auxiliary.vna_hash ^ 1
+                                                                         : auxiliary.vna_hash;
+                auxiliary.vna_flags = change == CHECK_TEST_NEED_WEAK        ? (uint16_t)(auxiliary.vna_flags | VER_FLG_WEAK)
+                                      : change == CHECK_TEST_NEED_UNDEFINED ? 0
+                                                                            : auxiliary.vna_flags;
                 memcpy(bytes + needs.sh_offset + offset, &need, sizeof(need));
                 memcpy(bytes + needs.sh_offset + at, &auxiliary, sizeof(auxiliary));
                 changed = true;
@@ -582,63 +613,105 @@ static bool check_test_driver_change_need(const char* from, const char* to, cons
 // refused against foo@@V2 alone and against foo without a version, as lld refuses it; and needs that don't read (an
 // entry or a name outside its section) or that foo's index doesn't name, refused as GNU ld and lld refuse them, where
 // the loader would take foo as unversioned, and a last entry's vn_next to the section's end, past which the loader would
-// read another, which GNU ld refuses too (lld counts the entries by sh_info). clang builds the libraries with version
-// scripts.
+// read another, which GNU ld refuses too (lld counts the entries by sh_info). Then each version need checked against the
+// library its file names, as the loader checks it at startup (#398's review): with a libC on the line before libB, of
+// foo@@V1 or of foo@V1 beside foo@@V3, which libA's foo@V1 binds to, it is refused against a libB of foo@@V2 alone,
+// which doesn't define the V1 libA requires of libB.so ("libB.so: version 'V1' not found (required by libA.so)", the
+// loader's words: GNU ld and lld link it and the program fails to load), and links and runs against a libB that defines
+// V1, a libB without versions (the loader only warns), and with the need weak (likewise); a copy of libA whose need of
+// V1 has another hash (vna_hash, which the loader compares with vd_hash) is refused against the libB of foo@V1; a copy
+// of libA whose need of libc.so.6's GLIBC_2.2.5 is renamed GLIBC_9.9.9 is refused naming libc.so.6, and so is a copy
+// of that libB with its own need renamed so, which the loader loads for libA's DT_NEEDED though the link doesn't need
+// it. Each case links by both paths, which must write the same bytes or refuse it alike. clang builds the libraries
+// with version scripts.
 static void check_test_driver_versions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char a_source[] = "int foo(void);\nint a_func(void) { return foo(); }\n";
     static const char program[] = "int a_func(void);\nint main(void) { return a_func() == 11 ? 0 : 1; }\n";
     static const char defines_foo[] = "int a_func(void);\nint foo(void) { return 11; }\nint main(void) { return a_func() == 11 ? 0 : 1; }\n";
-    // The libB the libA is built against, then four to link with: a name, source and version script each.
-    static const char* const variants[][3] = {
-        { "old", "int foo(void) { return 1; }\n", "V1 { global: foo; local: *; };\n" },
-        { "v1only", "int foo_v1(void) { return 11; }\n__asm__(\".symver foo_v1,foo@V1\");\n", "V1 { global: foo; local: *; };\n" },
+    // The libB the libA is built against, four libBs to link with, and two libCs: a name, source, version script and
+    // library each (DIRECTORY/NAME/lib<LIBRARY>.so, whose soname is its file's name).
+    static const char* const variants[][4] = {
+        { "old", "int foo(void) { return 1; }\n", "V1 { global: foo; local: *; };\n", "B" },
+        { "v1only", "int foo_v1(void) { return 11; }\n__asm__(\".symver foo_v1,foo@V1\");\n", "V1 { global: foo; local: *; };\n", "B" },
         { "v1v2", "int foo_v1(void) { return 11; }\nint foo_v2(void) { return 22; }\n__asm__(\".symver foo_v1,foo@V1\");\n__asm__(\".symver foo_v2,foo@@V2\");\n",
-          "V1 { global: foo; local: *; };\nV2 { global: foo; } V1;\n" },
-        { "v2only", "int foo(void) { return 2; }\n", "V2 { global: foo; local: *; };\n" },
-        { "plain", "int foo(void) { return 11; }\n", "" },
+          "V1 { global: foo; local: *; };\nV2 { global: foo; } V1;\n", "B" },
+        { "v2only", "int foo(void) { return 2; }\n", "V2 { global: foo; local: *; };\n", "B" },
+        { "plain", "int foo(void) { return 11; }\n", "", "B" },
+        { "c", "int foo(void) { return 11; }\n", "V1 { global: foo; local: *; };\n", "C" },
+        { "cnd", "int foo_v1(void) { return 11; }\nint foo_v3(void) { return 33; }\n__asm__(\".symver foo_v1,foo@V1\");\n__asm__(\".symver foo_v3,foo@@V3\");\n",
+          "V1 { global: foo; local: *; };\nV3 { global: foo; } V1;\n", "C" },
     };
-    // The copies of libA, each in a directory of its own.
+    // The changed copies, each in a directory of its own: of libA, or of a libB variant's library (`of`), the library's
+    // letter, and the version whose need each changes.
     static const struct
     {
         const char* name;
+        const char* of;
+        const char* library;
         CheckTestNeed change;
+        const char* version;
     } changes[] = {
-        { "hidden", CHECK_TEST_NEED_HIDDEN },
-        { "auxiliary", CHECK_TEST_NEED_AUXILIARY },
-        { "name", CHECK_TEST_NEED_NAME },
-        { "index", CHECK_TEST_NEED_INDEX },
-        { "next", CHECK_TEST_NEED_NEXT },
+        { "hidden", 0, "A", CHECK_TEST_NEED_HIDDEN, "V1" },
+        { "auxiliary", 0, "A", CHECK_TEST_NEED_AUXILIARY, "V1" },
+        { "name", 0, "A", CHECK_TEST_NEED_NAME, "V1" },
+        { "index", 0, "A", CHECK_TEST_NEED_INDEX, "V1" },
+        { "next", 0, "A", CHECK_TEST_NEED_NEXT, "V1" },
+        { "weak", 0, "A", CHECK_TEST_NEED_WEAK, "V1" },
+        { "hash", 0, "A", CHECK_TEST_NEED_HASH, "V1" },
+        { "glibc", 0, "A", CHECK_TEST_NEED_UNDEFINED, "GLIBC_2.2.5" },
+        { "bglibc", "v1only", "B", CHECK_TEST_NEED_UNDEFINED, "GLIBC_2.2.5" },
     };
     enum
     {
         CHECK_TEST_VERSIONS_LINKED,
         CHECK_TEST_VERSIONS_REFUSED,
         CHECK_TEST_VERSIONS_UNREAD,
+        CHECK_TEST_VERSIONS_VERSION,
     };
-    // libA's directory under the test's ("" for libA as built), libB's, whether main defines foo, and what must come of
-    // it.
+    // libA's directory under the test's ("" for libA as built), libC's ("" for none, else on the line between them),
+    // libB's, whether main defines foo, and what must come of it; for a version refused, the library that doesn't define
+    // it (a path under the test's directory, or a soname), the version and the library that requires it (0 for libA).
     static const struct
     {
         const char* name;
         const char* a;
+        const char* c;
         const char* b;
         bool defines;
         int outcome;
+        const char* lacking;
+        const char* missing;
+        const char* by;
     } cases[] = {
-        { "libA's foo@V1 against a libB of foo@V1 alone: linked and run", "", "v1only", false, CHECK_TEST_VERSIONS_LINKED },
-        { "libA's foo@V1 against a libB of foo@V1 and foo@@V2: linked and run", "", "v1v2", false, CHECK_TEST_VERSIONS_LINKED },
-        { "libA's foo@V1 against a libB of foo@@V2 alone: refused", "", "v2only", false, CHECK_TEST_VERSIONS_REFUSED },
-        { "libA's foo@V1 against a libB of foo without a version: refused", "", "plain", false, CHECK_TEST_VERSIONS_REFUSED },
-        { "libA's foo@V1, main defining foo, against a libB of foo@V1: linked and run", "", "v1only", true, CHECK_TEST_VERSIONS_LINKED },
-        { "libA's foo@V1, main defining foo, against a libB of foo@@V2 alone: refused", "", "v2only", true, CHECK_TEST_VERSIONS_REFUSED },
-        { "a hidden foo@V1 against a libB of foo@V1 alone: linked and run", "hidden", "v1only", false, CHECK_TEST_VERSIONS_LINKED },
-        { "a hidden foo@V1 against a libB of foo@@V2 alone: refused", "hidden", "v2only", false, CHECK_TEST_VERSIONS_REFUSED },
-        { "a hidden foo@V1 against a libB of foo without a version: refused", "hidden", "plain", false, CHECK_TEST_VERSIONS_REFUSED },
-        { "libA's need of V1 with vn_aux past its section: refused", "auxiliary", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
-        { "libA's need of V1 with vna_name past the strings: refused", "name", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
-        { "libA's foo at an index that names no need: refused", "index", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
-        { "libA's last need's vn_next to its section's end: refused", "next", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
+        { "libA's foo@V1 against a libB of foo@V1 alone: linked and run", "", "", "v1only", false, CHECK_TEST_VERSIONS_LINKED, 0, 0, 0 },
+        { "libA's foo@V1 against a libB of foo@V1 and foo@@V2: linked and run", "", "", "v1v2", false, CHECK_TEST_VERSIONS_LINKED, 0, 0, 0 },
+        { "libA's foo@V1 against a libB of foo@@V2 alone: refused", "", "", "v2only", false, CHECK_TEST_VERSIONS_REFUSED, 0, 0, 0 },
+        { "libA's foo@V1 against a libB of foo without a version: refused", "", "", "plain", false, CHECK_TEST_VERSIONS_REFUSED, 0, 0, 0 },
+        { "libA's foo@V1, main defining foo, against a libB of foo@V1: linked and run", "", "", "v1only", true, CHECK_TEST_VERSIONS_LINKED, 0, 0, 0 },
+        { "libA's foo@V1, main defining foo, against a libB of foo@@V2 alone: refused", "", "", "v2only", true, CHECK_TEST_VERSIONS_REFUSED, 0, 0, 0 },
+        { "a hidden foo@V1 against a libB of foo@V1 alone: linked and run", "hidden", "", "v1only", false, CHECK_TEST_VERSIONS_LINKED, 0, 0, 0 },
+        { "a hidden foo@V1 against a libB of foo@@V2 alone: refused", "hidden", "", "v2only", false, CHECK_TEST_VERSIONS_REFUSED, 0, 0, 0 },
+        { "a hidden foo@V1 against a libB of foo without a version: refused", "hidden", "", "plain", false, CHECK_TEST_VERSIONS_REFUSED, 0, 0, 0 },
+        { "libA's need of V1 with vn_aux past its section: refused", "auxiliary", "", "v1only", false, CHECK_TEST_VERSIONS_UNREAD, 0, 0, 0 },
+        { "libA's need of V1 with vna_name past the strings: refused", "name", "", "v1only", false, CHECK_TEST_VERSIONS_UNREAD, 0, 0, 0 },
+        { "libA's foo at an index that names no need: refused", "index", "", "v1only", false, CHECK_TEST_VERSIONS_UNREAD, 0, 0, 0 },
+        { "libA's last need's vn_next to its section's end: refused", "next", "", "v1only", false, CHECK_TEST_VERSIONS_UNREAD, 0, 0, 0 },
+        { "libA's foo@V1, libC's foo@@V1, a libB of foo@@V2 alone, which lacks V1: refused", "", "c", "v2only", false, CHECK_TEST_VERSIONS_VERSION,
+          "v2only/libB.so", "V1", 0 },
+        { "libA's foo@V1, libC's foo@V1 beside foo@@V3, a libB of foo@@V2 alone: refused", "", "cnd", "v2only", false, CHECK_TEST_VERSIONS_VERSION,
+          "v2only/libB.so", "V1", 0 },
+        { "libA's foo@V1, libC's foo@@V1, a libB of foo@V1 alone: linked and run", "", "c", "v1only", false, CHECK_TEST_VERSIONS_LINKED, 0, 0, 0 },
+        { "libA's foo@V1, libC's foo@V1 beside foo@@V3, a libB of foo@V1 and foo@@V2: linked and run", "", "cnd", "v1v2", false, CHECK_TEST_VERSIONS_LINKED, 0,
+          0, 0 },
+        { "libA's foo@V1, libC's foo@@V1, a libB without versions: linked and run", "", "c", "plain", false, CHECK_TEST_VERSIONS_LINKED, 0, 0, 0 },
+        { "a weak need of V1, libC's foo@@V1, a libB of foo@@V2 alone: linked and run", "weak", "c", "v2only", false, CHECK_TEST_VERSIONS_LINKED, 0, 0, 0 },
+        { "libA's need of GLIBC_2.2.5 renamed GLIBC_9.9.9: refused naming libc.so.6", "glibc", "", "v1only", false, CHECK_TEST_VERSIONS_VERSION, "libc.so.6",
+          "GLIBC_9.9.9", 0 },
+        { "libA's need of V1 with another hash: refused, as the loader compares it", "hash", "", "v1only", false, CHECK_TEST_VERSIONS_VERSION, "v1only/libB.so", "V1",
+          0 },
+        { "libB's need of GLIBC_9.9.9, libB loaded for libA's DT_NEEDED: refused naming libc.so.6", "", "", "bglibc", false, CHECK_TEST_VERSIONS_VERSION,
+          "libc.so.6", "GLIBC_9.9.9", "bglibc/libB.so" },
     };
     char path[3][320];
     char a_path[256];
@@ -661,13 +734,15 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
         snprintf(path[1], sizeof(path[1]), "%s/%s.c", directory, variants[v][0]);
         snprintf(path[2], sizeof(path[2]), "%s/%s.map", directory, variants[v][0]);
         char library[352];
+        char soname[64];
         char script[352];
-        snprintf(library, sizeof(library), "%s/libB.so", path[0]);
+        snprintf(library, sizeof(library), "%s/lib%s.so", path[0], variants[v][3]);
+        snprintf(soname, sizeof(soname), "-Wl,-soname,lib%s.so", variants[v][3]);
         snprintf(script, sizeof(script), "-Wl,--version-script=%s", path[2]);
         const bool scripted = variants[v][2][0] != 0;
         built = mkdir(path[0], 0755) == 0 && parse_test_write(path[1], variants[v][1], strlen(variants[v][1])) &&
                 (!scripted || parse_test_write(path[2], variants[v][2], strlen(variants[v][2])));
-        char* const build[] = { (char*)clang, "-shared", "-fPIC", "-o", library, path[1], "-Wl,-soname,libB.so", scripted ? script : NULL, NULL };
+        char* const build[] = { (char*)clang, "-shared", "-fPIC", "-o", library, path[1], soname, scripted ? script : NULL, NULL };
         built = built && check_test_driver_spawn(build, &text) == 0;
         free(text);
         text = NULL;
@@ -682,31 +757,60 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(changes); c += 1)
     {
         char copy[352];
+        char original[352];
         snprintf(path[0], sizeof(path[0]), "%s/%s", directory, changes[c].name);
-        snprintf(copy, sizeof(copy), "%s/libA.so", path[0]);
-        built = mkdir(path[0], 0755) == 0 && check_test_driver_change_need(library_a, copy, "V1", changes[c].change);
+        snprintf(copy, sizeof(copy), "%s/lib%s.so", path[0], changes[c].library);
+        snprintf(original, sizeof(original), "%s/%s/lib%s.so", directory, changes[c].of != 0 ? changes[c].of : "", changes[c].library);
+        built = mkdir(path[0], 0755) == 0 && check_test_driver_change_need(changes[c].of != 0 ? original : library_a, copy, changes[c].version, changes[c].change);
     }
     check_test_expect(test, built, "versioned libraries: clang builds them, and the copies of libA");
     for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         char a_directory[320];
         char b_directory[320];
+        char c_directory[320];
         char a_library[352];
-        char search[700];
+        char search[1000];
         snprintf(a_directory, sizeof(a_directory), "%s%s%s", directory, cases[c].a[0] != 0 ? "/" : "", cases[c].a);
         snprintf(b_directory, sizeof(b_directory), "%s/%s", directory, cases[c].b);
+        snprintf(c_directory, sizeof(c_directory), "%s/%s", directory, cases[c].c);
         snprintf(a_library, sizeof(a_library), "%s/libA.so", a_directory);
-        snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s:%s", a_directory, b_directory);
+        const bool third = cases[c].c[0] != 0;
+        snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s:%s%s%s", a_directory, b_directory, third ? ":" : "", third ? c_directory : "");
         const bool linking = cases[c].outcome == CHECK_TEST_VERSIONS_LINKED;
         int linked[2] = { -1, -1 };
-        char message[700] = { 0 };
-        for (uint32_t scalar = 0; scalar < (linking ? 2u : 1u); scalar += 1)
+        char messages[2][700] = { { 0 } };
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
-            char* const source = sources[cases[c].defines ? 1 : 0];
-            char* const link[] = { (char*)executable, "-o", outputs[scalar], source, "-L", a_directory, "-L", b_directory, "-lA", "-lB", NULL };
-            char* const link_scalar[] = { (char*)executable, "--scalar", "-o", outputs[scalar], source, "-L", a_directory, "-L", b_directory, "-lA", "-lB", NULL };
-            linked[scalar] = check_test_driver_spawn(scalar == 0 ? link : link_scalar, &text);
-            snprintf(message, sizeof(message), "%s", text != NULL ? text : "");
+            // [--scalar] -o OUTPUT SOURCE -L A [-L C] -L B -lA [-lC] -lB.
+            char* link[16];
+            uint32_t count = 0;
+            link[count++] = (char*)executable;
+            if (scalar != 0)
+            {
+                link[count++] = "--scalar";
+            }
+            link[count++] = "-o";
+            link[count++] = outputs[scalar];
+            link[count++] = sources[cases[c].defines ? 1 : 0];
+            link[count++] = "-L";
+            link[count++] = a_directory;
+            if (third)
+            {
+                link[count++] = "-L";
+                link[count++] = c_directory;
+            }
+            link[count++] = "-L";
+            link[count++] = b_directory;
+            link[count++] = "-lA";
+            if (third)
+            {
+                link[count++] = "-lC";
+            }
+            link[count++] = "-lB";
+            link[count] = NULL;
+            linked[scalar] = check_test_driver_spawn(link, &text);
+            snprintf(messages[scalar], sizeof(messages[scalar]), "%s", text != NULL ? text : "");
             free(text);
             text = NULL;
         }
@@ -714,20 +818,32 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
         const int ran = linking && linked[0] == 0 ? check_test_driver_spawn(run, &text) : -1;
         free(text);
         text = NULL;
-        char expected[400];
-        snprintf(expected, sizeof(expected), cases[c].outcome == CHECK_TEST_VERSIONS_REFUSED ? "%s: undefined reference to 'foo@V1'" : "%s isn't a shared library", a_library);
+        char expected[1000];
+        if (cases[c].outcome == CHECK_TEST_VERSIONS_VERSION)
+        {
+            const bool under = strchr(cases[c].lacking, '/') != NULL;
+            char requiring[352];
+            snprintf(requiring, sizeof(requiring), "%s%s%s", cases[c].by != 0 ? directory : a_library, cases[c].by != 0 ? "/" : "", cases[c].by != 0 ? cases[c].by : "");
+            snprintf(expected, sizeof(expected), "%s%s%s: version '%s' not found (required by %s)", under ? directory : "", under ? "/" : "", cases[c].lacking,
+                     cases[c].missing, requiring);
+        }
+        else
+        {
+            snprintf(expected, sizeof(expected), cases[c].outcome == CHECK_TEST_VERSIONS_REFUSED ? "%s: undefined reference to 'foo@V1'" : "%s isn't a shared library",
+                     a_library);
+        }
         const bool right = linking ? linked[0] == 0 && linked[1] == 0 && ran == 0 && check_test_driver_same_files(outputs[0], outputs[1])
-                                   : linked[0] == 1 && strstr(message, expected) != NULL;
+                                   : linked[0] == 1 && linked[1] == 1 && strstr(messages[0], expected) != NULL && strstr(messages[1], expected) != NULL;
         if (!right)
         {
-            printf("  %s: link status %d and %d, run status %d: %s\n", cases[c].name, linked[0], linked[1], ran, message);
+            printf("  %s: link status %d and %d, run status %d: %s%s\n", cases[c].name, linked[0], linked[1], ran, messages[0], messages[1]);
         }
         check_test_expect(test, right, cases[c].name);
     }
     for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(variants); v += 1)
     {
         char file[352];
-        snprintf(file, sizeof(file), "%s/%s/libB.so", directory, variants[v][0]);
+        snprintf(file, sizeof(file), "%s/%s/lib%s.so", directory, variants[v][0], variants[v][3]);
         unlink(file);
         snprintf(file, sizeof(file), "%s/%s.c", directory, variants[v][0]);
         unlink(file);
@@ -739,7 +855,7 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(changes); c += 1)
     {
         char file[352];
-        snprintf(file, sizeof(file), "%s/%s/libA.so", directory, changes[c].name);
+        snprintf(file, sizeof(file), "%s/%s/lib%s.so", directory, changes[c].name, changes[c].library);
         unlink(file);
         snprintf(file, sizeof(file), "%s/%s", directory, changes[c].name);
         rmdir(file);

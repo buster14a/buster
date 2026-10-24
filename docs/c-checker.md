@@ -36,7 +36,10 @@ definition the executable exports satisfies, as GNU ld links them
 and `dynamic.c`). A needed library's strong reference that nothing defines is
 refused, naming the library, as GNU ld and lld refuse it; one that requires a
 symbol version binds only to an export at that version, as both linkers bind it,
-and version needs that don't read are refused. An empty archive (glibc's
+and version needs that don't read are refused. Each loaded library's version
+needs must be versions that the library each need names defines (a named
+library, `libc.so.6` or the loader), as glibc's loader checks them at startup;
+neither linker checks them (`bind_library_versions`). An empty archive (glibc's
 `libpthread.a`, `libdl.a` and `librt.a`) adds nothing; one with members is
 refused by name, since the direct path doesn't link archives yet. A call of a
 function that a system header declares and no linked library has gets a named

@@ -105,8 +105,8 @@
 //   - Binding: bind_relaxed_name, bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact, bind_resolve,
 //     bind_members, bind_keep_imports, bind_keep_loader, bind_find_exports, bind_exported_lanes, bind_shared_exports,
 //     BindLibraryEdges, bind_library_edges, bind_library_satisfy, bind_library_satisfied_vector,
-//     bind_library_satisfied_exact, bind_library_satisfied, bind_needed_libraries, bind_keep_libraries and
-//     bind_library_exports.
+//     bind_library_satisfied_exact, bind_library_satisfied, bind_library_versions, bind_needed_libraries,
+//     bind_keep_libraries and bind_library_exports.
 //   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
 //     bind_closure_exact and bind_static_members.
 //   - Entry points: bind_capacity, bind_begin and bind_end.
@@ -142,6 +142,9 @@ typedef enum BindError
     // another named library, libc.so.6 or the loader (Bind.library and Bind.reference), as GNU ld and lld refuse it
     // (--no-allow-shlib-undefined) where the program would fail to load.
     BIND_ERROR_LIBRARY_UNDEFINED,
+    // A version that a library the program loads needs of another (its .gnu.version_r) which that one doesn't define, as
+    // glibc's loader refuses the program at startup (bind_library_versions): Bind.library, Bind.need and Bind.provider.
+    BIND_ERROR_LIBRARY_VERSION,
 } BindError;
 
 typedef enum BindPath
@@ -216,11 +219,14 @@ struct Bind
     const RuntimeLibraries* libraries;
     uint32_t libraries_needed;
     // The first error, and the link's name it is about (0 for none); with BIND_ERROR_LIBRARY_UNDEFINED, the library and
-    // its reference.
+    // its reference; with BIND_ERROR_LIBRARY_VERSION, the library, its version need (RuntimeVersionNeeds) and the named
+    // library that doesn't define the version, or UINT32_MAX for libc.so.6 or the loader.
     BindError error;
     NameId name;
     uint32_t library;
     uint32_t reference;
+    uint32_t need;
+    uint32_t provider;
 };
 
 // How many records the runtime adds to a link at most, and how many bytes of names and of atoms (with their
@@ -1319,6 +1325,55 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
     return fits;
 }
 
+// The version needs of the libraries the program loads, checked as glibc's loader checks them when it loads them
+// (dl-version.c's _dl_check_map_versions), #398's review: the `needed` libraries, and the named libraries their
+// DT_NEEDED entries name, which the loader loads for them. Each auxiliary entry of a library's .gnu.version_r requires
+// its version of the library its entry's file names (vn_file, runtime_libraries_provider): a named library, libc.so.6
+// or the loader, which must define it (runtime_library_defines_version), unless it defines no versions at all, or the
+// need is weak (VER_FLG_WEAK), both of which the loader only warns about. A file the link doesn't have is left
+// unchecked, as the references of a library whose DT_NEEDED names one are (bind_needed_libraries). The first that fails,
+// in the libraries' order and each one's walk, is BIND_ERROR_LIBRARY_VERSION. This is apart from which export a
+// versioned reference binds to (runtime_libraries_export_at): the first named library's at that version, whatever the
+// file, as GNU ld and lld bind it and the loader looks it up. Neither linker checks the needs, so that both link a
+// program the loader refuses ("version `V1' not found"): libA's foo@V1, which libA requires of libB.so, bound to libC's
+// foo@V1 against a libB that defines V2 alone. A scalar pass over the loaded libraries' few needs, shared by both paths,
+// as the closure's rounds are: libm.so.6 has six, each a version of libc.so.6's or the loader's.
+static void bind_library_versions(Bind* bind, uint32_t needed)
+{
+    const RuntimeLibraries* libraries = bind->libraries;
+    uint32_t loaded = needed;
+    uint32_t added = needed;
+    while (added != 0)
+    {
+        uint32_t next = 0;
+        for (uint32_t l = 0; l < libraries->count; l += 1)
+        {
+            for (uint32_t m = 0; (added & (1u << l)) != 0 && m < libraries->count; m += 1)
+            {
+                next |= runtime_libraries_lists(libraries, l, m) ? 1u << m : 0;
+            }
+        }
+        added = next & ~loaded;
+        loaded |= added;
+    }
+    for (uint32_t l = 0; bind->error == BIND_ERROR_NONE && l < libraries->count; l += 1)
+    {
+        const RuntimeVersionNeeds* needs = &libraries->needs[l];
+        for (uint32_t n = 0; (loaded & (1u << l)) != 0 && bind->error == BIND_ERROR_NONE && n < needs->count; n += 1)
+        {
+            uint32_t provider = UINT32_MAX;
+            const ImportLibrary* library = needs->weak[n] ? 0 : runtime_libraries_provider(libraries, bind->runtime, needs->file[n], &provider);
+            if (library != 0 && !runtime_library_defines_version(library, needs->name[n], needs->hash[n]))
+            {
+                bind->library = l;
+                bind->need = n;
+                bind->provider = provider;
+                bind_fail(bind, BIND_ERROR_LIBRARY_VERSION, 0);
+            }
+        }
+    }
+}
+
 // The libraries the link names with -l that it needs, from Bind.libraries_needed, the ones the program's strong
 // references bind to. GNU ld's --as-needed counts a needed library's strong references too: a library is needed for one
 // that it satisfies, the first named library that exports the name, unless the referring library's own DT_NEEDED names
@@ -1328,7 +1383,8 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
 // link works. The references of libc.so.6 and the loader, which come after every named library on the line, count
 // against none. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
 // loader nor the executable, is an error (BIND_ERROR_LIBRARY_UNDEFINED), as GNU ld and lld refuse it
-// (--no-allow-shlib-undefined), where the program would fail to load (#398's review).
+// (--no-allow-shlib-undefined), where the program would fail to load (#398's review). Then the version needs of the
+// libraries the program loads (bind_library_versions).
 //
 // The closure goes in rounds, each over the references of the libraries the round before added, at most as many as
 // libraries, which records the edges it follows (BindLibraryEdges), and the references that lead to no library. Both
@@ -1405,6 +1461,10 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
         scratch_end(scratch);
     }
     bind->libraries_needed = needed;
+    if (libraries != 0 && needed != 0)
+    {
+        bind_library_versions(bind, needed);
+    }
 }
 
 // The imports from libraries named with -l that the link doesn't need, which only weak references bound to: as GNU ld

@@ -681,6 +681,17 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     fprintf(stderr, "error: %.*s: undefined reference to '%.*s%s%.*s'\n", (int)path.length, path.pointer, (int)references->length[bind.reference],
                             (const char*)references->name[bind.reference], version.length != 0 ? "@" : "", (int)version.length, version.pointer);
                 }
+                else if (bind.error == BIND_ERROR_LIBRARY_VERSION)
+                {
+                    // A version a loaded library needs of another that that one doesn't define, as glibc's loader words it: the
+                    // named library's path, or libc.so.6's or the loader's soname.
+                    const RuntimeVersionNeeds* needs = &named.needs[bind.library];
+                    const String8 path = named.paths[bind.library];
+                    const String8 provider = bind.provider != UINT32_MAX ? named.paths[bind.provider] : needs->file[bind.need];
+                    const String8 version = needs->name[bind.need];
+                    fprintf(stderr, "error: %.*s: version '%.*s' not found (required by %.*s)\n", (int)provider.length, provider.pointer, (int)version.length,
+                            version.pointer, (int)path.length, path.pointer);
+                }
                 else
                 {
                     check_driver_bind_failed(bind.error, name);
