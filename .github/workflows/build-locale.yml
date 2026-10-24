@@ -1,0 +1,52 @@
+name: build.sh locale
+
+# build.sh times its compiles from $EPOCHREALTIME, which bash writes with the locale's decimal point: a comma in es_ES,
+# and in ps_AF the first byte of U+066B alone. This runs build.sh's own timed() under both, on GitHub's runner rather
+# than the 9700X, so that no edit brings back a substitution that takes out a period alone (#409).
+on:
+  pull_request:
+    paths: [build.sh, .github/workflows/build-locale.yml]
+  push:
+    branches: [main]
+    paths: [build.sh, .github/workflows/build-locale.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  timed:
+    name: build.sh times under decimal points other than a period
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Run timed() under C, es_ES and ps_AF
+        shell: bash
+        run: |
+          set -euo pipefail
+          locales="$RUNNER_TEMP/locales"
+          mkdir -p "$locales"
+          # localedef exits with 1 for warnings alone; the locale's directory is what counts.
+          for name in es_ES ps_AF; do
+              localedef -i "$name" -f UTF-8 "$locales/$name.UTF-8" || true
+              test -d "$locales/$name.UTF-8"
+          done
+          sed -n '/^timed()$/,/^}$/p' build.sh > "$RUNNER_TEMP/timed.sh"
+          grep -q EPOCHREALTIME "$RUNNER_TEMP/timed.sh"
+          # Each locale's own separator must reach $EPOCHREALTIME, or the check would pass in C. The old
+          # ${EPOCHREALTIME/./} failed about one run in ten under es_ES and every run under ps_AF.
+          for case in C.UTF-8:. es_ES.UTF-8:, ps_AF.UTF-8:$'\xd9'; do
+              LOCPATH="$locales" LC_ALL="${case%%:*}" bash -c '
+                  source "$1"
+                  [[ "$EPOCHREALTIME" == *"$2"* ]] || { echo "::error::$LC_ALL: \$EPOCHREALTIME is $EPOCHREALTIME"; exit 1; }
+                  for i in $(seq 100); do
+                      timed "$3" sleep 0.001
+                      t="$(< "$3")"
+                      [[ "$t" =~ ^[0-9]+$ ]] && (( t >= 1000 && t < 1000000 )) || { echo "::error::$LC_ALL: timed() wrote $t"; exit 1; }
+                  done
+                  echo "$LC_ALL: 100 times, the last $t us"' _ "$RUNNER_TEMP/timed.sh" "${case#*:}" "$RUNNER_TEMP/time"
+          done
