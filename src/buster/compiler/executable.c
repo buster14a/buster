@@ -123,9 +123,11 @@
 // CALL and PC32, executable_patch_mixed another's, each fixup by its kind), hashes it while it is in L2 and writes it
 // from there with pwritev. Every lane writes the chunks it patches: the writes take turns at the file's lock in the
 // kernel, but each lane's overlaps the others' patching (docs/object-writer-and-linker.md, "Patching and writing", has
-// what one lane writing them all costs instead). The build ID is a tree of the chunks' hashes: the hash of the chunks'
-// hashes in chunk order, so that the lanes need nothing from each other to compute it and it doesn't depend on how many
-// there are. Its note is hashed as zeros and written last.
+// what one lane writing them all costs instead). With ExecutableOptions.stage (link-foreign's, whose atoms' bytes are
+// mapped from its input files), a lane copies the chunk into its scratch and patches, hashes and writes the copy, so that
+// no page of an input is copied on a write to it (executable_stage_chunk). The build ID is a tree of the chunks' hashes:
+// the hash of the chunks' hashes in chunk order, so that the lanes need nothing from each other to compute it and it
+// doesn't depend on how many there are. Its note is hashed as zeros and written last.
 //
 // The file: overwritten in place (O_RDWR) when it exists as a regular file with one link that no process is running,
 // then truncated to its size if that changed and given its mode; otherwise created, or written beside it and renamed
@@ -388,6 +390,14 @@ struct ExecutableDynamic
     SymbolId fini;
     const SymbolId* exports;
     uint32_t export_count;
+    // Each export's version by its place in `exports` (an ExecutableVersion's index, or 0 or VER_NDX_GLOBAL for the
+    // executable's own definition), or null for all VER_NDX_GLOBAL; and the copies among the exports (copy relocations,
+    // a foreign producer's): each a definition in a BSS atom of the link, where the loader copies a library's data of the
+    // same name before anything runs (R_X86_64_COPY, last in .rela.dyn), as GNU ld and lld write one. A copy is exported
+    // at the version of the library's definition, and so are its aliases, other exports at the same address.
+    const uint16_t* export_versions;
+    const SymbolId* copies;
+    uint32_t copy_count;
     // The library's index of GLIBC_ABI_DT_RELR, whose definition says that its loader takes DT_RELR, or 0: with it,
     // the executable needs the version.
     uint16_t relr_version;
@@ -432,6 +442,11 @@ struct ExecutableOptions
     const ExecutableSymbols* symbols;
     // For the tests: a dynamic PIE's passes by their exact twins, scalar, which must write the same file.
     bool exact;
+    // For a link whose atoms' bytes are borrowed from files mapped privately (link-foreign's): each chunk is copied into
+    // a lane's buffer, patched there, hashed and written from it, so that the atoms' bytes are only read. Patched in
+    // place, each page of a mapped file would be copied on its first write. An output written in order (a FIFO) is
+    // patched in place still.
+    bool stage;
     // For the tests, or null: room for `boundary_capacity` of the chunks' boundaries, which lane 0 copies there (as many
     // as fit, of ExecutableResult.chunks + 1).
     uint64_t* boundaries;
@@ -2363,6 +2378,49 @@ static FixupId executable_patch_chunk(const Link* link, const ExecutablePatch* p
     return result;
 }
 
+// The bytes of [begin, end) of the file into `staged`, as executable_chunk_runs gives them (the pieces' bytes and the
+// gaps' fill: int3 for a gap that starts in .text, zeros for another), with the fixups whose fields are in it patched
+// there, as executable_patch_chunk patches them in place. Returns the smallest fixup whose value doesn't fit, or 0.
+static FixupId executable_stage_chunk(const Link* link, const ExecutableLayout* layout, const ExecutablePatch* patch, const ExecutablePiece* pieces,
+                                      uint64_t piece_count, uint64_t begin, uint64_t end, uint8_t* staged)
+{
+    const ExecutableSectionLayout* text = &layout->sections[EXECUTABLE_SECTION_TEXT];
+    FixupId result = 0;
+    uint64_t cursor = begin;
+    for (uint64_t i = executable_piece_after(pieces, piece_count, begin); i < piece_count && pieces[i].offset < end; i += 1)
+    {
+        const ExecutablePiece* piece = &pieces[i];
+        const uint64_t from = piece->offset > begin ? piece->offset : begin;
+        const uint64_t to = piece->offset + piece->size < end ? piece->offset + piece->size : end;
+        const bool in_text = cursor >= text->offset && cursor < text->offset + text->size;
+        memset(staged + (cursor - begin), in_text ? BUSTER_EXECUTABLE_INT3 : 0, from - cursor);
+        memcpy(staged + (from - begin), piece->bytes + (from - piece->offset), to - from);
+        cursor = to;
+        const AtomId atom = piece->atom;
+        if (atom != 0 && link->atoms.fixup_count[atom] != 0)
+        {
+            FixupId first = link->atoms.fixup_begin[atom];
+            FixupId last = first + link->atoms.fixup_count[atom];
+            if (piece->offset < begin)
+            {
+                first = executable_fixup_at(link->fixups.offset, first, last, begin - piece->offset);
+            }
+            if (piece->offset + piece->size > end)
+            {
+                last = executable_fixup_at(link->fixups.offset, first, last, end - piece->offset);
+            }
+            // The atom's start in the staged bytes, before them for an atom the chunk cuts: its patched fields are all
+            // in the chunk.
+            uint8_t* bytes = (uint8_t*)(uintptr_t)((uintptr_t)staged + piece->offset - begin);
+            const FixupId failed = executable_patch_range(patch, bytes, (uint32_t)link->atoms.address[atom], first, last);
+            result = failed != 0 && (result == 0 || failed < result) ? failed : result;
+        }
+    }
+    const bool in_text = cursor >= text->offset && cursor < text->offset + text->size;
+    memset(staged + (cursor - begin), in_text ? BUSTER_EXECUTABLE_INT3 : 0, end - cursor);
+    return result;
+}
+
 // Fill for the gaps between pieces: int3 in .text, zeros elsewhere.
 #define BUSTER_EXECUTABLE_FILL_BYTES 4096
 static const uint8_t executable_zeros[BUSTER_EXECUTABLE_FILL_BYTES] = { 0 };
@@ -2816,6 +2874,8 @@ struct ExecutableDynamicTotals
     // With the static runtime, the IRELATIVE relocations: a static executable's, in .rela.iplt, and a static PIE's, in
     // .rela.dyn after the others.
     uint64_t irelatives;
+    // A dynamic PIE's copy relocations (ExecutableDynamic.copies), last in .rela.dyn.
+    uint64_t copies;
     // The needed versions, each library's, and the libraries with one (.gnu.version_r's entries).
     uint64_t versions;
     uint64_t* library_versions;
@@ -4441,7 +4501,7 @@ static uint32_t executable_dynamic_entries(const ExecutableLayout* layout, const
     const ExecutableSectionLayout* sections = layout != 0 ? layout->sections : 0;
     const uint64_t base = layout != 0 ? layout->base : 0;
     const uint64_t relocations = totals->got_relative + totals->got_symbolic + totals->got_tpoff + totals->abs64_relative + totals->abs64_symbolic + totals->irelatives +
-                                 totals->tlsgd_relocations + (totals->tlsld ? 1 : 0);
+                                 totals->tlsgd_relocations + (totals->tlsld ? 1 : 0) + totals->copies;
     const uint64_t relative = totals->got_relative + totals->abs64_relative;
     const uint64_t rela = sections != 0 ? base + sections[EXECUTABLE_SECTION_RELA_DYN].address : 0;
     const uint64_t relr = sections != 0 ? base + sections[EXECUTABLE_SECTION_RELR_DYN].address : 0;
@@ -4537,6 +4597,7 @@ static void executable_hash_exports(const Link* link, ExecutableShared* shared, 
     memset(counts, 0, (uint64_t)buckets * sizeof(uint32_t));
     const Range64 range = lane_range(dynamic->export_count);
     uint64_t bytes = 0;
+    ExecutableDynamicCounts* dynamic_counts = &shared->dynamic_counts[lane];
     for (uint64_t e = range.begin; e < range.end; e += 1)
     {
         const NameId name = link->symbols.name[dynamic->exports[e]];
@@ -4544,6 +4605,16 @@ static void executable_hash_exports(const Link* link, ExecutableShared* shared, 
         shared->export_hashes[e] = hash;
         counts[hash % buckets] += 1;
         bytes += (uint64_t)link->names.length[name] + 1;
+        // A copy's version is needed as an import's is (executable_count_dynamic_symbol).
+        const uint16_t version = dynamic->export_versions != 0 ? dynamic->export_versions[e] : 0;
+        if (version < shared->version_limit)
+        {
+            shared->versions_used[lane * shared->version_words + version / 64] |= 1ull << (version % 64);
+        }
+        if (version > VER_NDX_GLOBAL && (version >= shared->version_limit || shared->version_numbers[version] == 0) && dynamic_counts->unknown_version == 0)
+        {
+            dynamic_counts->unknown_version = dynamic->exports[e];
+        }
     }
     shared->export_name_bytes[lane] = bytes;
 }
@@ -4651,6 +4722,7 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
         export_bytes += shared->export_name_bytes[lane];
     }
     totals->irelatives += shared->runtime ? totals->stubs : 0;
+    totals->copies = dynamic->copy_count;
     totals->has_init = dynamic->init != 0;
     totals->has_fini = dynamic->fini != 0;
     totals->exports = dynamic->export_count;
@@ -4683,7 +4755,7 @@ static void executable_dynamic_totals(const Link* link, const ExecutableShared* 
     bytes[EXECUTABLE_SECTION_DYNSTR] = totals->version_names + version_name_bytes;
     bytes[EXECUTABLE_SECTION_RELA_DYN] =
         (totals->got_relative + totals->got_symbolic + totals->got_tpoff + totals->abs64_relative + totals->abs64_symbolic + totals->irelatives +
-         totals->tlsgd_relocations + (totals->tlsld ? 1 : 0)) * sizeof(Elf64_Rela);
+         totals->tlsgd_relocations + (totals->tlsld ? 1 : 0) + totals->copies) * sizeof(Elf64_Rela);
     bytes[EXECUTABLE_SECTION_RELR_DYN] = totals->relr_words * sizeof(uint64_t);
     bytes[EXECUTABLE_SECTION_PLT_GOT] = totals->stubs * BUSTER_EXECUTABLE_STUB_BYTES;
     totals->dynamic_entries = executable_dynamic_entries(0, totals, 0, 0, 0);
@@ -5185,7 +5257,7 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
             dynstr[name_offset + length] = 0;
             dynsym[entry] = (Elf64_Sym){
                 .st_name = (uint32_t)name_offset,
-                .st_info = (uint8_t)(symbols->flags[symbol] & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)),
+                .st_info = link_symbol_elf_info(symbols->flags[symbol]),
                 .st_other = (uint8_t)(symbols->flags[symbol] >> 6),
                 .st_shndx = SHN_UNDEF,
             };
@@ -5276,8 +5348,8 @@ static void executable_irelative_relocations(const Link* link, ExecutableShared*
 // for a fixup. The slots by class come from the bitsets, and with RELR only the atoms that executable_classify found
 // .rela.dyn relocations in (BUSTER_EXECUTABLE_RELR_RELA) are read again. With `exact`, every written atom's fixups one
 // at a time, their targets' atoms loaded.
-static void executable_dynamic_relocations(const Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutableDynamicTotals* totals,
-                                           const ExecutableFilter* filter, uint32_t lane)
+static void executable_dynamic_relocations(const Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutableDynamic* dynamic,
+                                           const ExecutableDynamicTotals* totals, const ExecutableFilter* filter, uint32_t lane)
 {
     Elf64_Rela* rela = (Elf64_Rela*)shared->section_bytes[EXECUTABLE_SECTION_RELA_DYN];
     const uint64_t relative_total = totals->got_relative + totals->abs64_relative;
@@ -5372,6 +5444,21 @@ static void executable_dynamic_relocations(const Link* link, ExecutableShared* s
             .r_info = ELF64_R_INFO(0, R_X86_64_DTPMOD64),
             .r_addend = 0,
         };
+    }
+    // The copies, last, as lld writes them: each at its definition, against its .dynsym entry, an export's.
+    if (lane == 0)
+    {
+        const uint64_t at = relative_total + totals->got_symbolic + totals->abs64_symbolic + totals->got_tpoff + totals->tlsgd_relocations + (totals->tlsld ? 1 : 0) +
+                            totals->irelatives;
+        for (uint32_t c = 0; c < dynamic->copy_count; c += 1)
+        {
+            const SymbolId copy = dynamic->copies[c];
+            rela[at + c] = (Elf64_Rela){
+                .r_offset = layout->base + link->atoms.address[symbols->atom[copy]],
+                .r_info = ELF64_R_INFO(symbols->dynamic_index[copy], R_X86_64_COPY),
+                .r_addend = 0,
+            };
+        }
     }
     const LinkAtoms* atoms = &link->atoms;
     const LinkFixups* fixups = &link->fixups;
@@ -5582,7 +5669,7 @@ static void executable_write_exports(const Link* link, ExecutableShared* shared,
         const uint64_t address = atom != 0 ? link->atoms.address[atom] + symbols->value[symbol] : (uint64_t)(int64_t)(int32_t)symbols->reference[symbol];
         dynsym[index] = (Elf64_Sym){
             .st_name = (uint32_t)name_offset,
-            .st_info = (uint8_t)(symbols->flags[symbol] & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)),
+            .st_info = link_symbol_elf_info(symbols->flags[symbol]),
             .st_other = (uint8_t)(symbols->flags[symbol] >> 6),
             .st_shndx = (uint16_t)(section != EXECUTABLE_SECTION_COUNT ? layout->section_index[section] : SHN_ABS),
             .st_value = tls ? address - tdata->address : layout->base + address,
@@ -5590,7 +5677,8 @@ static void executable_write_exports(const Link* link, ExecutableShared* shared,
         };
         if (versym != 0)
         {
-            versym[index] = VER_NDX_GLOBAL;
+            const uint16_t version = dynamic->export_versions != 0 ? dynamic->export_versions[e] : 0;
+            versym[index] = version > VER_NDX_GLOBAL ? shared->version_numbers[version] : VER_NDX_GLOBAL;
         }
         const uint64_t bits = 1ull << (hash % 64) | 1ull << ((hash >> 26) % 64);
         uint64_t* word = bloom + (hash / 64) % totals->bloom_words;
@@ -5899,29 +5987,39 @@ static void executable_lane_fail_write(ExecutableLaneError* error, int system_er
     }
 }
 
-// Patches and hashes chunk `chunk`, and writes it while it is in L2, unless `file` is -1.
+// Patches and hashes chunk `chunk`, and writes it while it is in L2, unless `file` is -1: patched in place and written
+// from its pieces, or with `staged`, copied into the lane's scratch, patched, hashed and written from there.
 static void executable_chunk(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, uint64_t chunk, int file,
-                             ExecutableLaneError* error)
+                             bool staged, ExecutableLaneError* error)
 {
     const uint64_t begin = shared->boundaries[chunk];
     const uint64_t end = shared->boundaries[chunk + 1];
-    const FixupId failed = executable_patch_chunk(link, patch, shared->pieces, layout->piece_count, begin, end);
+    Scratch scratch = scratch_begin(0);
+    uint8_t* staged_bytes = staged ? arena_push(scratch.arena, end - begin, 64) : 0;
+    const FixupId failed = staged ? (staged_bytes != 0 ? executable_stage_chunk(link, layout, patch, shared->pieces, layout->piece_count, begin, end, staged_bytes) : 0)
+                                  : executable_patch_chunk(link, patch, shared->pieces, layout->piece_count, begin, end);
     if (failed != 0)
     {
         // The smallest fixup that failed, which doesn't depend on the parts' order.
         error->fixup = error->error == EXECUTABLE_ERROR_FIXUP && error->fixup < failed ? error->fixup : failed;
         error->error = EXECUTABLE_ERROR_FIXUP;
     }
-    Scratch scratch = scratch_begin(0);
-    const uint64_t capacity = executable_run_capacity(shared->pieces, layout->piece_count, begin, end);
+    const uint64_t capacity = staged ? 1 : executable_run_capacity(shared->pieces, layout->piece_count, begin, end);
     struct iovec* runs = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, struct iovec, capacity);
-    if (runs == 0)
+    if (runs == 0 || (staged && staged_bytes == 0))
     {
         executable_lane_fail(error, EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
     else
     {
-        const uint64_t count = executable_chunk_runs(layout, shared->pieces, layout->piece_count, begin, end, runs);
+        if (staged)
+        {
+            runs[0] = (struct iovec){
+                .iov_base = staged_bytes,
+                .iov_len = end - begin,
+            };
+        }
+        const uint64_t count = staged ? (end > begin ? 1 : 0) : executable_chunk_runs(layout, shared->pieces, layout->piece_count, begin, end, runs);
         ExecutableHash hash;
         executable_hash_begin(&hash);
         for (uint64_t run = 0; run < count; run += 1)
@@ -5956,8 +6054,9 @@ static int executable_write_in_order(int file, const ExecutableLayout* layout, c
     return result;
 }
 
-// Patches, hashes and writes the chunks of the parts this lane takes.
-static void executable_chunks(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, int file, uint32_t lane, uint32_t lanes)
+// Patches, hashes and writes the chunks of the parts this lane takes, each staged or not (executable_chunk).
+static void executable_chunks(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, int file, bool staged, uint32_t lane,
+                              uint32_t lanes)
 {
     uint32_t* order = shared->orders + lane * BUSTER_LANE_PARTS_PER_LANE * (uint64_t)lanes;
     const uint64_t parts = lane_parts_by_cost(shared->boundaries + 1, layout->chunk_count, shared->part_boundaries, order);
@@ -5966,7 +6065,7 @@ static void executable_chunks(Link* link, ExecutableShared* shared, const Execut
         const uint32_t part = order[taken];
         for (uint64_t chunk = shared->part_boundaries[part]; chunk < shared->part_boundaries[part + 1]; chunk += 1)
         {
-            executable_chunk(link, shared, layout, patch, chunk, file, executable_error(shared, EXECUTABLE_PHASE_CHUNKS, lane, lanes));
+            executable_chunk(link, shared, layout, patch, chunk, file, staged, executable_error(shared, EXECUTABLE_PHASE_CHUNKS, lane, lanes));
         }
     }
 }
@@ -6084,11 +6183,29 @@ static bool executable_eh_frame_sort(uint8_t* bytes, uint64_t fdes, bool exact, 
 // Validate the producer's counted library/version metadata before any lane indexes it. ELF string offsets are
 // 32-bit and the high version bit is visibility, so malformed or overflowing metadata must fail before output.
 // The small library descriptors stay scalar; the symbol columns are already read by the normal batched passes.
-static bool executable_dynamic_valid(const ExecutableDynamic* dynamic)
+static bool executable_dynamic_valid(const Link* link, const ExecutableDynamic* dynamic)
 {
     bool valid = dynamic == 0 || ((dynamic->library_count == 0 || dynamic->libraries != 0) &&
                                 (dynamic->version_count == 0 || dynamic->versions != 0) &&
-                                dynamic->library_count <= UINT32_MAX - BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES && dynamic->version_count < 0x8000);
+                                dynamic->library_count <= UINT32_MAX - BUSTER_EXECUTABLE_MAX_DYNAMIC_ENTRIES && dynamic->version_count < 0x8000 &&
+                                (dynamic->copy_count == 0 || (dynamic->copies != 0 && dynamic->export_versions != 0 && !dynamic->shared)) &&
+                                dynamic->copy_count <= dynamic->export_count);
+    // A copy is an export defined at the start of a BSS atom of the link, which the loader fills whole: one of the
+    // exports, found 16 at a time.
+    for (uint32_t c = 0; valid && dynamic != 0 && c < dynamic->copy_count; c += 1)
+    {
+        const SymbolId copy = dynamic->copies[c];
+        const AtomId atom = copy != 0 && copy < link->symbols.count ? link->symbols.atom[copy] : 0;
+        valid = atom != 0 && link->atoms.class[atom] == BUSTER_LINK_CLASS_BSS && link->symbols.value[copy] == 0 && link->symbols.size[copy] != 0 &&
+                link->symbols.size[copy] <= link->atoms.size[atom];
+        bool exported = false;
+        for (uint32_t first = 0; valid && !exported && first < dynamic->export_count; first += 16)
+        {
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, dynamic->export_count - first < 16 ? dynamic->export_count - first : 16);
+            exported = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, dynamic->exports + first), _mm512_set1_epi32((int)copy)) != 0;
+        }
+        valid = valid && exported;
+    }
     uint64_t names = 0;
     uint32_t previous_library = 0;
     uint64_t indices[0x8000 / 64] = { 0 };
@@ -6152,7 +6269,7 @@ static bool executable_debug_valid(const Link* link, const ExecutableDebug* debu
                         link->symbols.value[symbol] < link->atoms.size[atom] && link->symbols.size[symbol] <= link->atoms.size[atom] - link->symbols.value[symbol] &&
                         line.pointer[offset - 3] == 0 && line.pointer[offset - 2] == 9 && line.pointer[offset - 1] == 2;
                 const NameId name = link->symbols.name[symbol];
-                valid = valid && name < link->names.count && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_BINDING;
+                valid = valid && name < link->names.count;
                 if (valid)
                 {
                     const uint32_t length = link->names.length[name];
@@ -6202,6 +6319,14 @@ static bool executable_symbol_ids_valid(const ExecutableSymbols* symbols, uint32
     return valid;
 }
 
+// Whether a symbol goes among .symtab's locals: a local one, and as GNU ld and lld write them, a hidden or internal one
+// (lld's computeBinding), which keeps its visibility with a local binding.
+static bool executable_symbol_is_local(uint8_t flags)
+{
+    const uint8_t visibility = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
+    return (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL || visibility == BUSTER_LINK_SYMBOL_HIDDEN || visibility == BUSTER_LINK_SYMBOL_INTERNAL;
+}
+
 // Validate/count disjoint selections once; layout and emission consume each lane's published counts. The exact
 // twin retains the scalar lane-zero baseline, including arbitrary debug-function order when no explicit list exists.
 static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* symbols, bool ordered, ExecutableShared* shared, uint32_t lane)
@@ -6229,7 +6354,7 @@ static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* 
                 valid = length == 0 || (link->names.bytes[name] != 0 && memchr(link->names.bytes[name], 0, length) == 0);
                 names += (uint64_t)length + 1;
                 valid &= names <= UINT32_MAX;
-                locals += (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+                locals += executable_symbol_is_local(link->symbols.flags[symbol]);
                 const AtomId atom = link->symbols.atom[symbol];
                 if (atom != 0 && link_class_is_tls(link->atoms.class[atom]))
                 {
@@ -6332,17 +6457,20 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
             address = layout->base + offset;
             section = executable_boundary_section(layout, offset);
         }
-        const bool is_local = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+        const uint8_t flags = link->symbols.flags[symbol];
+        const bool is_local = executable_symbol_is_local(flags);
         const uint32_t index = is_local ? local : global;
         local += is_local ? 1 : 0;
         global += is_local ? 0 : 1;
         symbols[index] = (Elf64_Sym){
             .st_name = name_offset,
-            .st_info = link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_INFO,
+            .st_info = is_local ? flags & BUSTER_LINK_SYMBOL_TYPE : link_symbol_elf_info(flags),
             .st_other = link->symbols.flags[symbol] >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
             .st_shndx = section,
             .st_value = address,
-            .st_size = link->symbols.size[symbol],
+            // An undefined symbol has no size of its own here, as in GNU ld's and lld's tables: an import's is its
+            // library's definition's.
+            .st_size = section != SHN_UNDEF ? link->symbols.size[symbol] : 0,
         };
         name_offset += length + 1;
     }
@@ -6384,7 +6512,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         *result = (ExecutableResult){ 0 };
         result->start_time = executable_now();
-        const bool valid = executable_dynamic_valid(dynamic_options);
+        const bool valid = executable_dynamic_valid(link, dynamic_options);
         result->error = valid ? EXECUTABLE_ERROR_NONE : EXECUTABLE_ERROR_UNSUPPORTED;
         allocated = valid ? executable_allocate(scratch.arena, link, lanes, options) : 0;
     }
@@ -6634,7 +6762,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     }
     if (ok && dynamic)
     {
-        executable_dynamic_relocations(link, shared, layout, &totals, &filter, lane);
+        executable_dynamic_relocations(link, shared, layout, dynamic_options, &totals, &filter, lane);
         executable_relr_relocations(link, shared, layout, &filter, lane, lanes);
         executable_write_exports(link, shared, layout, dynamic_options, &totals, lane, lanes);
     }
@@ -6736,7 +6864,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     };
     if (ok)
     {
-        executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, lane, lanes);
+        executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, options->stage && !sequential, lane, lanes);
     }
     lane_sync();
     const bool patched = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_CHUNKS, lanes);

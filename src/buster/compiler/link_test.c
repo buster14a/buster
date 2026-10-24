@@ -679,9 +679,10 @@ static bool link_test_rules(void)
     link_test_expect(&tally, link_add_symbol(&link, name, 6, 0, 0, object, program) == 0 && link_test_failed(&link, LINK_ERROR_ID), "an atom that doesn't exist", 0);
     link_test_expect(&tally, link_add_symbol(&link, name, data, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | 3, program) == 0 && link_test_failed(&link, LINK_ERROR_RECORD),
                      "a section symbol", 0);
-    link_test_expect(&tally, link_add_symbol(&link, name, data, 0, 0, BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_OBJECT, program) == 0 &&
-                         link_test_failed(&link, LINK_ERROR_RECORD),
-                     "a binding that doesn't exist", 0);
+    link_test_expect(&tally, link_symbol_flags_are_valid(BUSTER_LINK_SYMBOL_UNIQUE | BUSTER_LINK_SYMBOL_OBJECT) &&
+                         link_symbol_elf_info(BUSTER_LINK_SYMBOL_UNIQUE | BUSTER_LINK_SYMBOL_OBJECT) == ELF64_ST_INFO(STB_GNU_UNIQUE, STT_OBJECT) &&
+                         link_symbol_elf_info(BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION) == ELF64_ST_INFO(STB_WEAK, STT_FUNC),
+                     "every binding exists, the unique one written as STB_GNU_UNIQUE", 0);
     link_test_expect(&tally, link_add_symbol(&link, name, data, 0, 0, object, BUSTER_LINK_SOURCE_COUNT) == 0 && link_test_failed(&link, LINK_ERROR_RECORD),
                      "a source that doesn't exist", 0);
     link_test_expect(&tally, link_add_symbol(&link, name, data, 33, 0, object, program) == 0 && link_test_failed(&link, LINK_ERROR_RECORD), "a value past the atom", 0);
