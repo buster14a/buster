@@ -641,6 +641,9 @@ static int run_foreign_link(int argc, char** argv)
                 .entry = foreign_driver_entry(&driver, &foreign, &converted),
                 .dynamic = driver.kind == RUNTIME_KIND_DYNAMIC ? &converted.dynamic : 0,
                 .exact = driver.path == FOREIGN_PATH_EXACT,
+                // The atoms' bytes are the inputs' private mappings: staged, a chunk is patched in a lane's buffer
+                // rather than in pages that each write would copy.
+                .stage = true,
             },
             .strip_all = driver.strip_all,
             .symbols_ready = true,

@@ -123,9 +123,11 @@
 // CALL and PC32, executable_patch_mixed another's, each fixup by its kind), hashes it while it is in L2 and writes it
 // from there with pwritev. Every lane writes the chunks it patches: the writes take turns at the file's lock in the
 // kernel, but each lane's overlaps the others' patching (docs/object-writer-and-linker.md, "Patching and writing", has
-// what one lane writing them all costs instead). The build ID is a tree of the chunks' hashes: the hash of the chunks'
-// hashes in chunk order, so that the lanes need nothing from each other to compute it and it doesn't depend on how many
-// there are. Its note is hashed as zeros and written last.
+// what one lane writing them all costs instead). With ExecutableOptions.stage (link-foreign's, whose atoms' bytes are
+// mapped from its input files), a lane copies the chunk into its scratch and patches, hashes and writes the copy, so that
+// no page of an input is copied on a write to it (executable_stage_chunk). The build ID is a tree of the chunks' hashes:
+// the hash of the chunks' hashes in chunk order, so that the lanes need nothing from each other to compute it and it
+// doesn't depend on how many there are. Its note is hashed as zeros and written last.
 //
 // The file: overwritten in place (O_RDWR) when it exists as a regular file with one link that no process is running,
 // then truncated to its size if that changed and given its mode; otherwise created, or written beside it and renamed
@@ -440,6 +442,11 @@ struct ExecutableOptions
     const ExecutableSymbols* symbols;
     // For the tests: a dynamic PIE's passes by their exact twins, scalar, which must write the same file.
     bool exact;
+    // For a link whose atoms' bytes are borrowed from files mapped privately (link-foreign's): each chunk is copied into
+    // a lane's buffer, patched there, hashed and written from it, so that the atoms' bytes are only read. Patched in
+    // place, each page of a mapped file would be copied on its first write. An output written in order (a FIFO) is
+    // patched in place still.
+    bool stage;
     // For the tests, or null: room for `boundary_capacity` of the chunks' boundaries, which lane 0 copies there (as many
     // as fit, of ExecutableResult.chunks + 1).
     uint64_t* boundaries;
@@ -2368,6 +2375,49 @@ static FixupId executable_patch_chunk(const Link* link, const ExecutablePatch* p
             result = failed != 0 && (result == 0 || failed < result) ? failed : result;
         }
     }
+    return result;
+}
+
+// The bytes of [begin, end) of the file into `staged`, as executable_chunk_runs gives them (the pieces' bytes and the
+// gaps' fill: int3 for a gap that starts in .text, zeros for another), with the fixups whose fields are in it patched
+// there, as executable_patch_chunk patches them in place. Returns the smallest fixup whose value doesn't fit, or 0.
+static FixupId executable_stage_chunk(const Link* link, const ExecutableLayout* layout, const ExecutablePatch* patch, const ExecutablePiece* pieces,
+                                      uint64_t piece_count, uint64_t begin, uint64_t end, uint8_t* staged)
+{
+    const ExecutableSectionLayout* text = &layout->sections[EXECUTABLE_SECTION_TEXT];
+    FixupId result = 0;
+    uint64_t cursor = begin;
+    for (uint64_t i = executable_piece_after(pieces, piece_count, begin); i < piece_count && pieces[i].offset < end; i += 1)
+    {
+        const ExecutablePiece* piece = &pieces[i];
+        const uint64_t from = piece->offset > begin ? piece->offset : begin;
+        const uint64_t to = piece->offset + piece->size < end ? piece->offset + piece->size : end;
+        const bool in_text = cursor >= text->offset && cursor < text->offset + text->size;
+        memset(staged + (cursor - begin), in_text ? BUSTER_EXECUTABLE_INT3 : 0, from - cursor);
+        memcpy(staged + (from - begin), piece->bytes + (from - piece->offset), to - from);
+        cursor = to;
+        const AtomId atom = piece->atom;
+        if (atom != 0 && link->atoms.fixup_count[atom] != 0)
+        {
+            FixupId first = link->atoms.fixup_begin[atom];
+            FixupId last = first + link->atoms.fixup_count[atom];
+            if (piece->offset < begin)
+            {
+                first = executable_fixup_at(link->fixups.offset, first, last, begin - piece->offset);
+            }
+            if (piece->offset + piece->size > end)
+            {
+                last = executable_fixup_at(link->fixups.offset, first, last, end - piece->offset);
+            }
+            // The atom's start in the staged bytes, before them for an atom the chunk cuts: its patched fields are all
+            // in the chunk.
+            uint8_t* bytes = (uint8_t*)(uintptr_t)((uintptr_t)staged + piece->offset - begin);
+            const FixupId failed = executable_patch_range(patch, bytes, (uint32_t)link->atoms.address[atom], first, last);
+            result = failed != 0 && (result == 0 || failed < result) ? failed : result;
+        }
+    }
+    const bool in_text = cursor >= text->offset && cursor < text->offset + text->size;
+    memset(staged + (cursor - begin), in_text ? BUSTER_EXECUTABLE_INT3 : 0, end - cursor);
     return result;
 }
 
@@ -5937,29 +5987,39 @@ static void executable_lane_fail_write(ExecutableLaneError* error, int system_er
     }
 }
 
-// Patches and hashes chunk `chunk`, and writes it while it is in L2, unless `file` is -1.
+// Patches and hashes chunk `chunk`, and writes it while it is in L2, unless `file` is -1: patched in place and written
+// from its pieces, or with `staged`, copied into the lane's scratch, patched, hashed and written from there.
 static void executable_chunk(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, uint64_t chunk, int file,
-                             ExecutableLaneError* error)
+                             bool staged, ExecutableLaneError* error)
 {
     const uint64_t begin = shared->boundaries[chunk];
     const uint64_t end = shared->boundaries[chunk + 1];
-    const FixupId failed = executable_patch_chunk(link, patch, shared->pieces, layout->piece_count, begin, end);
+    Scratch scratch = scratch_begin(0);
+    uint8_t* staged_bytes = staged ? arena_push(scratch.arena, end - begin, 64) : 0;
+    const FixupId failed = staged ? (staged_bytes != 0 ? executable_stage_chunk(link, layout, patch, shared->pieces, layout->piece_count, begin, end, staged_bytes) : 0)
+                                  : executable_patch_chunk(link, patch, shared->pieces, layout->piece_count, begin, end);
     if (failed != 0)
     {
         // The smallest fixup that failed, which doesn't depend on the parts' order.
         error->fixup = error->error == EXECUTABLE_ERROR_FIXUP && error->fixup < failed ? error->fixup : failed;
         error->error = EXECUTABLE_ERROR_FIXUP;
     }
-    Scratch scratch = scratch_begin(0);
-    const uint64_t capacity = executable_run_capacity(shared->pieces, layout->piece_count, begin, end);
+    const uint64_t capacity = staged ? 1 : executable_run_capacity(shared->pieces, layout->piece_count, begin, end);
     struct iovec* runs = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, struct iovec, capacity);
-    if (runs == 0)
+    if (runs == 0 || (staged && staged_bytes == 0))
     {
         executable_lane_fail(error, EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
     else
     {
-        const uint64_t count = executable_chunk_runs(layout, shared->pieces, layout->piece_count, begin, end, runs);
+        if (staged)
+        {
+            runs[0] = (struct iovec){
+                .iov_base = staged_bytes,
+                .iov_len = end - begin,
+            };
+        }
+        const uint64_t count = staged ? (end > begin ? 1 : 0) : executable_chunk_runs(layout, shared->pieces, layout->piece_count, begin, end, runs);
         ExecutableHash hash;
         executable_hash_begin(&hash);
         for (uint64_t run = 0; run < count; run += 1)
@@ -5994,8 +6054,9 @@ static int executable_write_in_order(int file, const ExecutableLayout* layout, c
     return result;
 }
 
-// Patches, hashes and writes the chunks of the parts this lane takes.
-static void executable_chunks(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, int file, uint32_t lane, uint32_t lanes)
+// Patches, hashes and writes the chunks of the parts this lane takes, each staged or not (executable_chunk).
+static void executable_chunks(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, int file, bool staged, uint32_t lane,
+                              uint32_t lanes)
 {
     uint32_t* order = shared->orders + lane * BUSTER_LANE_PARTS_PER_LANE * (uint64_t)lanes;
     const uint64_t parts = lane_parts_by_cost(shared->boundaries + 1, layout->chunk_count, shared->part_boundaries, order);
@@ -6004,7 +6065,7 @@ static void executable_chunks(Link* link, ExecutableShared* shared, const Execut
         const uint32_t part = order[taken];
         for (uint64_t chunk = shared->part_boundaries[part]; chunk < shared->part_boundaries[part + 1]; chunk += 1)
         {
-            executable_chunk(link, shared, layout, patch, chunk, file, executable_error(shared, EXECUTABLE_PHASE_CHUNKS, lane, lanes));
+            executable_chunk(link, shared, layout, patch, chunk, file, staged, executable_error(shared, EXECUTABLE_PHASE_CHUNKS, lane, lanes));
         }
     }
 }
@@ -6803,7 +6864,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     };
     if (ok)
     {
-        executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, lane, lanes);
+        executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, options->stage && !sequential, lane, lanes);
     }
     lane_sync();
     const bool patched = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_CHUNKS, lanes);
