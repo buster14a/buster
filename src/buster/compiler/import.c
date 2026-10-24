@@ -243,8 +243,8 @@ struct ImportReferences
 
 // The names a shared library defines at versions other than their defaults (name@VERSION, a .gnu.version entry with
 // the hidden bit), which its exports leave out, and which the loader binds only a reference that requires that version
-// to: each one's name, a slice of the library's .dynstr, and its version's index (an ImportVersion's). Only
-// import_library fills them: a runtime snapshot doesn't keep them.
+// to: each one's name, a slice of the library's .dynstr, and its version's index, one the library defines (an
+// ImportVersion's), as an export's is. Only import_library fills them: a runtime snapshot doesn't keep them.
 typedef struct ImportHiddenExports ImportHiddenExports;
 struct ImportHiddenExports
 {
@@ -3082,6 +3082,18 @@ static uint32_t import_library_find(const ImportLibrary* library, const uint8_t*
     return result;
 }
 
+// Whether `index` is VER_NDX_GLOBAL or one of the library's version definitions' indices, as an export's must be: GNU ld
+// and lld refuse a library whose export, at its name's default version or not, names another.
+static bool import_library_version_defined(const ImportLibrary* library, uint16_t index)
+{
+    bool defined = index == VER_NDX_GLOBAL;
+    for (uint32_t v = 0; !defined && v < library->version_count; v += 1)
+    {
+        defined = library->versions[v].index == index;
+    }
+    return defined;
+}
+
 // Pushes the exports', references' and hidden exports' columns, with room for `count` of each.
 static bool import_library_columns(ImportLibrary* library, uint64_t count, Arena* arena)
 {
@@ -3233,6 +3245,11 @@ static ImportResult import_library_scalar(ImportLibrary* library, String8 bytes,
         else if (symbol.st_shndx != SHN_UNDEF && global && (version & 0x8000) != 0 && version_index > VER_NDX_GLOBAL && name.length != 0 &&
                  (visibility == STV_DEFAULT || visibility == STV_PROTECTED))
         {
+            if (!import_library_version_defined(library, version_index))
+            {
+                result = import_fail(IMPORT_ERROR_BOUNDS, versions_offset + i * sizeof(version));
+                result.symbol = (uint32_t)i;
+            }
             hidden->name[hidden->count] = (const uint8_t*)name.pointer;
             hidden->version[hidden->count] = version_index;
             hidden->count += 1;
@@ -3241,12 +3258,7 @@ static ImportResult import_library_scalar(ImportLibrary* library, String8 bytes,
         {
             const uint32_t exported_type = type == STT_GNU_IFUNC ? STT_FUNC : type == STT_COMMON ? STT_OBJECT : type;
             const uint32_t exported_binding = binding == STB_WEAK ? STB_WEAK : STB_GLOBAL;
-            bool defined = version_index == VER_NDX_GLOBAL;
-            for (uint32_t v = 0; !defined && v < library->version_count; v += 1)
-            {
-                defined = library->versions[v].index == version_index;
-            }
-            if (!defined)
+            if (!import_library_version_defined(library, version_index))
             {
                 result = import_fail(IMPORT_ERROR_BOUNDS, versions_offset + i * sizeof(version));
                 result.symbol = (uint32_t)i;
@@ -3418,12 +3430,12 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
         const uint32_t exported = active & named & ~undefined & global & default_version & visible;
         const uint32_t hidden_version = _mm512_test_epi64_mask(version, _mm512_set1_epi64(0x8000)) & _mm512_cmpgt_epu64_mask(version_index, _mm512_set1_epi64(VER_NDX_GLOBAL));
         const uint32_t hidden_export = active & named & ~undefined & global & hidden_version & visible;
-        // Each export's version in the set of defined ones: a 512-bit set in a register, its word by vpermq and its
-        // bit by a variable shift.
+        // Each export's version, at its name's default or not, in the set of defined ones: a 512-bit set in a register,
+        // its word by vpermq and its bit by a variable shift.
         const __m512i set_word = _mm512_permutexvar_epi64(_mm512_srli_epi64(version_index, 6), defined_set);
         const uint32_t in_set = _mm512_test_epi64_mask(_mm512_srlv_epi64(set_word, _mm512_and_si512(version_index, _mm512_set1_epi64(63))), _mm512_set1_epi64(1)) &
                                 _mm512_cmplt_epu64_mask(version_index, _mm512_set1_epi64(64 * BUSTER_IMPORT_BATCH));
-        failed |= exported & ~in_set;
+        failed |= (exported | hidden_export) & ~in_set;
         const __m512i pointers = _mm512_add_epi64(names_base, name);
         const __m512i exported_type = _mm512_mask_mov_epi64(_mm512_mask_mov_epi64(type, (__mmask8)import_lanes_equal(type, STT_GNU_IFUNC), _mm512_set1_epi64(STT_FUNC)),
                                                             (__mmask8)import_lanes_equal(type, STT_COMMON), _mm512_set1_epi64(STT_OBJECT));
