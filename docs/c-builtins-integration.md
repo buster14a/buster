@@ -134,7 +134,8 @@ plans cover ordinary integer/pointer and F32/F64 register or stack slots, and
 structs and unions (#137): with `CBuiltinVaLowerCall.size` and `.object`, a
 register plan checks both cursors against the eightbytes it needs, copies them
 from the save area into the frame object (both general, both vector, one of
-each in either order, or the high eightbyte alone) and advances both cursors;
+each in either order, the high eightbyte alone, or a 16-byte vector's SSE and
+SSEUP halves from one XMM register's slot) and advances both cursors;
 otherwise, and for a stack plan, the value is the aligned overflow area's
 address, which advances past the aggregate's slots. An ignored (empty) one's
 value is its object's address. Wider classes, such as `long double`, are

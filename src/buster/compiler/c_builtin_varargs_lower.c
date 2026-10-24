@@ -209,7 +209,9 @@ static void cbuiltin_varargs_argument(CBuiltinLowerRecipe* recipe, const CBuilti
 // An aggregate's va_arg (cbuiltin_varargs_aggregate_plan): its register path, when every register it needs is left,
 // copies each eightbyte from the save area into the object (the general ones from gp_offset on, the vector ones from
 // fp_offset on, a slot each) and advances both offsets; otherwise its overflow path takes its bytes' place in the
-// overflow area. Its address is left either way, the object's for an ignored one.
+// overflow area. Its address is left either way, the object's for an ignored one. An aggregate of more than 8 bytes in
+// one XMM register (a 16-byte vector's SSE and SSEUP eightbytes, or one whose high eightbyte is padding) takes its high
+// eightbyte from the second half of that register's 16-byte slot.
 static void cbuiltin_varargs_aggregate(CBuiltinLowerRecipe* recipe, const CBuiltinVaLowerCall* call, uint32_t list, uint32_t first)
 {
     const AbiVaArg plan = call->plan;
@@ -241,12 +243,14 @@ static void cbuiltin_varargs_aggregate(CBuiltinLowerRecipe* recipe, const CBuilt
         const uint32_t save = cbuiltin_lower_temporary(recipe);
         cbuiltin_varargs_load(recipe, list, offsetof(AbiVaList, reg_save_area), BUSTER_TYPED_CLASS_U64);
         cbuiltin_lower_set(recipe, save);
+        const bool upper = plan.sources[0] == BUSTER_ABI_VA_VECTOR && plan.sources[1] == BUSTER_ABI_VA_NONE && call->size > BUSTER_ABI_SLOT_BYTES;
         uint32_t taken[2] = { 0, 0 };
         for (uint32_t k = 0; k < 2; k += 1)
         {
-            if (plan.sources[k] != BUSTER_ABI_VA_NONE)
+            if (plan.sources[k] != BUSTER_ABI_VA_NONE || (k != 0 && upper))
             {
                 const uint32_t kind = plan.sources[k] == BUSTER_ABI_VA_GENERAL ? 0 : 1;
+                const uint32_t displacement = plan.sources[k] != BUSTER_ABI_VA_NONE ? taken[kind] * strides[kind] : BUSTER_ABI_SLOT_BYTES;
                 cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, call->object);
                 if (k != 0)
                 {
@@ -256,14 +260,14 @@ static void cbuiltin_varargs_aggregate(CBuiltinLowerRecipe* recipe, const CBuilt
                 cbuiltin_lower_local(recipe, save);
                 cbuiltin_lower_local(recipe, offsets[kind]);
                 cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
-                if (taken[kind] != 0)
+                if (displacement != 0)
                 {
-                    cbuiltin_lower_constant(recipe, taken[kind] * strides[kind]);
+                    cbuiltin_lower_constant(recipe, displacement);
                     cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
                 }
                 cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
-                taken[kind] += 1;
+                taken[kind] += plan.sources[k] != BUSTER_ABI_VA_NONE ? 1 : 0;
             }
         }
         for (uint32_t kind = 0; kind < 2; kind += 1)
