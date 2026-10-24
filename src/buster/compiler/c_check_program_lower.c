@@ -3259,8 +3259,9 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                          input->graph.ops[node] == CHECK_OP_BUILTIN_MISC || input->graph.ops[node] == CHECK_OP_BUILTIN_FLOAT;
     }
     // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
-    // three more (the hidden pointer and the anchors) and an end's frame object.
-    const uint64_t varargs = program->stream->varargs_count;
+    // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
+    // no stream, and is refused below without reading one.
+    const uint64_t varargs = program->status == CHECK_PROGRAM_OK && program->stream != 0 ? program->stream->varargs_count : 0;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + 32;
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 2 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
