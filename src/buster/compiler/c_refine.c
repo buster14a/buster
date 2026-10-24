@@ -753,14 +753,17 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
         __m512i first_lanes;
         const __m512i group_hashes = intern_hash_vectors4_short(ab, cd, group_lengths, zero_lanes, &first_lanes);
         _mm512_store_si512(keys + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
-        const __m512i group_offsets = _mm512_and_si512(_mm512_slli_epi64(group_hashes, 6), _mm512_set1_epi64((long long)offset_mask));
-        _mm512_store_si512(offsets + 2 * j, group_offsets);
-        // The prefetches' offsets come from the vector's lanes: loads of them from the store just made would wait for it
-        // to commit (it doesn't forward to them).
-        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_castsi512_si128(group_offsets))), _MM_HINT_T0);
-        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 1))), _MM_HINT_T0);
-        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 2))), _MM_HINT_T0);
-        _mm_prefetch((const char*)(buckets + _mm_cvtsi128_si64(_mm512_extracti32x4_epi32(group_offsets, 3))), _MM_HINT_T0);
+        _mm512_store_si512(offsets + 2 * j, _mm512_and_si512(_mm512_slli_epi64(group_hashes, 6), _mm512_set1_epi64((long long)offset_mask)));
+    }
+    // Their buckets' prefetches, from the offsets stored. Moving each group's four offsets out of its vector as it was
+    // made (three extracts and four moves), in the loop above, made sqlite3.c's windowed refinement take 0.015 ms more on
+    // the 9700X.
+    for (uint32_t k = 0; k < j; k += 4)
+    {
+        _mm_prefetch((const char*)(buckets + offsets[2 * k]), _MM_HINT_T0);
+        _mm_prefetch((const char*)(buckets + offsets[2 * k + 2]), _MM_HINT_T0);
+        _mm_prefetch((const char*)(buckets + offsets[2 * k + 4]), _MM_HINT_T0);
+        _mm_prefetch((const char*)(buckets + offsets[2 * k + 6]), _MM_HINT_T0);
     }
     // Those of 33 bytes or more among them: their whole loads, hashes and prefetches (a longer one than
     // BUSTER_INTERN_FAST_LENGTH is slow, and its hash unused, but its bytes are checked all the same).
