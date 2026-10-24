@@ -389,6 +389,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
+#include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
@@ -457,6 +458,10 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // order) and its tests, for the parallel and test-parallel commands.
 #include "buster/compiler/parallel.c"
 #include "buster/compiler/parallel_test.c"
+
+// The c-testsuite harness (#145), for the test-c-testsuite command: each program compiled and linked by this
+// executable, run and compared with its expected output.
+#include "buster/compiler/c_testsuite.c"
 
 // The other units' main_command, each in its own unit (at the top).
 int main_unit_x86(int argc, char** argv, bool* found);
@@ -841,7 +846,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
-        result = run_check_command(argc - 2, argv + 2);
+        result = run_check_command(argc - 2, argv + 2, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
@@ -1185,7 +1190,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 &&
              (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
-              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0))
+              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
     {
         result = run_profile_command(argc - 1, argv + 1);
     }
@@ -1200,6 +1205,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
     {
         result = run_parallel_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-c-testsuite") == 0)
+    {
+        result = run_c_testsuite_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
@@ -1302,7 +1311,7 @@ int main_unit_types(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECKER
 int run_source_check_command(int count, char** arguments)
 {
-    return run_check_command(count, arguments);
+    return run_check_command(count, arguments, true);
 }
 
 int main_unit_checker(int argc, char** argv, bool* found)

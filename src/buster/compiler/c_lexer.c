@@ -436,6 +436,16 @@ typedef enum CTokenizerError
 // restrict pointers).
 static __attribute__((unused)) int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
+// c_tokenize of the bytes from `begin` to `length` alone, as if the source ended at `length`: `begin` is 0 or the start
+// of a token that starts a logical line (BUSTER_C_TOKEN_START_OF_LINE). Every token before the last one that starts a
+// line is then the token c_tokenize of the whole source gives (a construct the end cuts, such as a block comment or a
+// raw string literal, runs to the end, as at the source's), so a large source can be lexed a window at a time
+// (pp_prepare_into). Not for a source that takes the scalar lexer whole (c_tokenize_scalar_only of the whole source):
+// those go to c_tokenize. Returns the number of tokens, written from kinds[0], starts[0] and ends[0] on (positions are
+// the source's), or C_TOKENIZER_ERROR_FILE_TOO_BIG; the arrays need BUSTER_C_TOKENIZER_CAPACITY(length - begin) entries.
+static __attribute__((unused)) int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+                                                        uint32_t flags);
+
 // c_tokenize without the scalar lexer: returns C_TOKENIZER_ERROR_NEEDS_SCALAR for the rare inputs that need it for a
 // part (see c_tokenizer.c), with the output arrays clobbered. For testing and benchmarking.
 static __attribute__((unused)) int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
@@ -3576,6 +3586,35 @@ static int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uin
     return result;
 }
 
+// The vectorized path from `begin` (the source's start, past a byte order mark, or the start of a line), until a chunk
+// it can't tokenize. Then the scalar lexer goes back to the start of the line before that chunk and lexes up to the
+// first line that starts after it, and the vectorized path resumes there.
+static int64_t c_tokenize_from(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+{
+    uint64_t count = 0;
+    int64_t result = -1;
+    while (result < 0)
+    {
+        uint64_t written;
+        uint64_t restart;
+        uint64_t scalar_until;
+        const int64_t vectorized = tokenize_with_flags(flags, source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until);
+        if (vectorized >= 0)
+        {
+            result = (int64_t)count + vectorized;
+        }
+        else
+        {
+            count = c_tokenize_scalar_range(source, length, restart, true, scalar_until, kinds, starts, ends, count + written, flags, &begin);
+            if (begin >= length)
+            {
+                result = (int64_t)count;
+            }
+        }
+    }
+    return result;
+}
+
 static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     int64_t result;
@@ -3593,31 +3632,27 @@ static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds
     }
     else
     {
-        // The vectorized path, until a chunk it can't tokenize. Then the scalar lexer goes back to the start of the
-        // line before that chunk and lexes up to the first line that starts after it, and the vectorized path resumes
-        // there.
-        uint64_t begin = length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF ? 3 : 0;
-        uint64_t count = 0;
-        result = -1;
-        while (result < 0)
-        {
-            uint64_t written;
-            uint64_t restart;
-            uint64_t scalar_until;
-            const int64_t vectorized = tokenize_with_flags(flags, source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until);
-            if (vectorized >= 0)
-            {
-                result = (int64_t)count + vectorized;
-            }
-            else
-            {
-                count = c_tokenize_scalar_range(source, length, restart, true, scalar_until, kinds, starts, ends, count + written, flags, &begin);
-                if (begin >= length)
-                {
-                    result = (int64_t)count;
-                }
-            }
-        }
+        const uint64_t begin = length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF ? 3 : 0;
+        result = c_tokenize_from(source, length, begin, kinds, starts, ends, flags);
+    }
+    return result;
+}
+
+static int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+{
+    int64_t result;
+    if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
+    {
+        result = C_TOKENIZER_ERROR_FILE_TOO_BIG;
+    }
+    else if (begin >= length)
+    {
+        result = 0;
+    }
+    else
+    {
+        const bool mark = begin == 0 && length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF;
+        result = c_tokenize_from(source, length, mark ? 3 : begin, kinds, starts, ends, flags);
     }
     return result;
 }

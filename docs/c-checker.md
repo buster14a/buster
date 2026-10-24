@@ -10,7 +10,19 @@ the semantic driver:
 ./build/compiler check [--scalar] [--dump-typed] [--dump-static] [preprocessor options] file.c
 ./build/compiler [--scalar] -fsyntax-only [preprocessor options] file.c
 ./build/compiler [--scalar] -c [-o file.o] [preprocessor options] file.c
+./build/compiler [--scalar] [--verify] [-o a.out] [preprocessor options] file.c
 ```
+
+The last form compiles and links an executable by the direct path (#145): the
+checked program lowered to Tier 0, bound against the C runtime's snapshot
+(`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
+(`executable_write`). A binding that finds the snapshot damaged discards it and
+links once more from a fresh import. `--verify` also checks every function's
+records with `x86_validate`, as the c-testsuite harness asks
+([the c-testsuite guide](c-testsuite.md)). The direct path links `libc.so.6`
+and its loader alone: a call of a function that a system header declares and
+the C library lacks (libm's) and a read or write of the C library's data (which
+needs the GOT) are refused by name; `-c` and a system linker take both.
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check
@@ -101,9 +113,16 @@ acquires a guessed `int` type. Full-corpus and target qualification are tracked
 separately from the existence of these interfaces.
 
 Direct semantic actions keep strict integer folding unless the caller selects
-`BUSTER_CHECK_EXTENSION_GNU_CONSTANT`. GNU source enables that explicit policy:
-wrapped overflow and Clang-compatible shift extensions retain a warning witness
-and clear strict ICE eligibility. Lexical ICE-form provenance remains distinct
+`BUSTER_CHECK_EXTENSION_GNU_CONSTANT`. Source enables that explicit policy in
+every C mode, as clang folds GNU's way in `-std=c99` and `-std=c17` too (only
+`-pedantic` warns): wrapped overflow and Clang-compatible shift extensions
+retain a warning witness and clear strict ICE eligibility. The other GNU
+extensions clang accepts in every C mode (zero-length arrays, `sizeof` and
+`__alignof__` of `void` and of functions, arithmetic on `void *` and function
+pointers, a conditional with one void side, `return` of a void expression from
+a void function, a cast of a record to its own type, `?:` without its middle
+operand, designator ranges, static initialization of flexible array members,
+`__extension__`) are accepted in every mode as well. Lexical ICE-form provenance remains distinct
 from an arbitrary folded value, so `__builtin_choose_expr` does not accidentally
 admit comma expressions or computed floating casts. Declaration-time warnings
 are retained by token and merged with graph warnings before rendering. Warning
@@ -124,9 +143,10 @@ on anonymous members.
 bracketing, body references and shared object/function identities without
 rechecking expressions or rebinding identifiers. The source body-extraction
 benchmark verifies that an extracted body's stream equals its original slice
-before comparing scalar and vector schedules. Acceptance still requires the
-frozen #125 corpora, semantic mutants and 9700X measurements at the qualified
-revision; historical evidence below applies only to its named checkpoints.
+before comparing scalar and vector schedules. The corpora and their semantic
+mutants are compared with clang in "Corpus comparison and semantic mutations"
+below; 9700X measurements at the qualified revision are still required, and
+historical evidence below applies only to its named checkpoints.
 
 ## Entry points and storage ownership
 
@@ -414,7 +434,61 @@ supported operations into `Tier0Function` records with explicit conversions,
 loads/stores, scaled pointer operations, control flow, locals, calls and ABI
 classes. `c_check_program_emit.c` compiles those functions, resolves shared
 symbols and publishes code/data together. Backend machine classes never
-replace the full semantic `TypeId` in the checked stream.
+replace the full semantic `TypeId` in the checked stream. It also gives Tier 0
+the unit's access column (`Tier0Function.symbol_access`, docs/tier0.md): a
+symbol the unit doesn't define is reached through its GOT slot, since it may be
+a shared library's and the direct path makes no copy relocations, and a
+thread-local by local-exec where the unit defines it and by initial-exec where
+it doesn't.
+
+What the lowering covers past scalars (#145's programs):
+
+- **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
+  of their own size and alignment (up to 16 bytes, 1 GB), reached through
+  `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+- **Copies.** Struct and union assignment and initialization are `COPY`s of
+  at most 256 bytes each, the source's address kept in a temporary between
+  them; a statement's assignment leaves no address to discard.
+- **Initializers.** A local object's plan is applied in order: the object is
+  cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
+  128 bytes) unless its first part clears it whole, then each part's zeros,
+  bytes or value is stored, an aggregate's copied.
+- **Calls.** A call through a pointer is indirect (callee 0, the address pushed
+  before the arguments), its callee evaluated first.
+- **Bit-fields.** A bit-field is read and written through the bytes that hold
+  its bits and no other member's (C11 makes those other memory locations), as
+  pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
+  its bits to the top and back, sign- or zero-extending them as its type says;
+  a store clears its bits and puts the value's in, and its value is the field's
+  as it now reads. `++`, `--` and compound assignment read, operate and store
+  the same way, and so do initializer parts with a bit width. A field whose bits
+  are spread over more than 8 bytes (a packed one) is refused.
+- **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The control stream puts a `STACK_SAVE` before each block's first array, an
+  `ALLOCATE` at each array's declaration (after its bounds) and a
+  `STACK_RESTORE` at the block's end and before every `break`, `continue` or
+  `goto` that leaves the arrays' scope, restoring the outermost block it
+  leaves; a `return` needs none. The lowering keeps the saved position and each
+  array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
+  `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
+  set once where they were declared, times its constant dimensions and its
+  element's size, and the same extents give `sizeof` and the strides of
+  pointer arithmetic over a pointer to a variable-length array. An array
+  declared in a `for` statement's clause or directly in a statement
+  expression's block, one aligned past 16 and one initialized (C23's `= {}`)
+  are refused by name. The source reader doesn't yet take a bound whose
+  statement expression holds more than expression statements (a declaration,
+  an `if` or a jump: `invalid or unsupported declaration`); the control stream
+  already puts such a jump out of a block's first array's bounds before the
+  block's `STACK_SAVE`, where it needs no restore.
+- **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
+  no compares of those classes.
+
+Everything else the lowering can't express is refused with
+`error: unsupported: FEATURE`, naming the feature: aggregates passed or
+returned by value, variadic definitions, `long double`,
+`_Complex`, thread-locals, inline assembly and so on. The c-testsuite harness
+counts such a test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
 identities and effect requirements. Native helpers are ordinary calls with real
@@ -477,12 +551,101 @@ The test command fails if the oracle cannot run. It covers:
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
 
-The source comparisons deliberately use inputs whose errors Clang treats as
-errors under the selected flags. They are not a universal equivalence claim
-for extensions or constraint violations that Clang accepts with a warning.
-The direct semantic fixtures cover rules such as rejecting `int **` to
-`const int **` assignment even when an oracle configuration only warns.
+Where clang accepts a constraint violation with a warning, the checker accepts
+it with clang's warning, as the semantic mutants require: an assignment that
+discards qualifiers, nested pointer qualifiers (`int **` to `const int **`),
+pointees that differ only in signedness, `void *` with a function pointer, a
+comparison of distinct pointers or of a pointer with an integer, and a
+conditional of either. The warnings clang makes errors by default
+(`-Wint-conversion`, `-Wincompatible-pointer-types` and its function-pointer
+group, `-Wreturn-mismatch`) are errors, but in a system header, where clang
+suppresses them and converts as it would have.
 Floating results are compared field by field, never by `long double` padding.
+
+## Corpus comparison and semantic mutations
+
+```sh
+./build/compiler test-checker-corpus --clang clang [--report NEW.tsv] [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]] [--seed N] [--keep] [preprocessor options] file-or-directory...
+./build/compiler test-checker-corpus --clang clang --minimize-mutant FILE... [preprocessor options]
+```
+
+`test-checker-corpus` checks each file (or every `.c` file under a
+directory) as the driver does and compares it with `clang -fsyntax-only` on
+the same options, #125's configuration: acceptance, the first error's presumed
+file and line, and the scalar and vector paths, column by column. It exits with
+status 1 on any difference.
+
+`--semantic-mutations N` then checks N semantic mutants, #133's last "Done
+when" item (`c_check_mutation.c`). Each unit that the comparison found no
+difference in and that clang accepts is printed as `-E` text with line markers,
+its base, which is compared as a file first, so that any later difference
+belongs to a mutation. The scalar parser's tree of the base gives the sites,
+and each mutant is one edit of the base text:
+
+| Family | Kinds |
+| --- | --- |
+| A type changed | a pointer added or removed, signedness or width changed, `const` added or removed, a struct for the type (or `int` for a struct) |
+| A declaration removed | a local, a parameter, a file-scope declaration, a struct member |
+| Operands swapped | a binary operator's operands, or two arguments of a call |
+
+The families take turns, three mutants in four edit the unit's own file and
+the fourth a file it includes, and `--seed N` (133) orders the units and picks
+the sites. A mutant is checked as a file is, with clang reading the same text
+as `-x cpp-output`. The first `--minimize N` (4) differences are minimized
+(top-level declarations, statements, then tokens blanked while both results
+hold, then the line markers dropped) and saved as `checker_mutation_N.c` in the
+current directory; `--minimize-mutant FILE...` minimizes saved mutants again.
+Each difference that was fixed is a fixture in `c_check_mutation_test.c`, which
+`test-checker` checks against clang, which must still give the result recorded
+with it, and through both paths. A difference the checker means to keep would
+go in `check_mutation_intended`, with its reason; there are none. The command
+prints, for each kind, the sites, the mutants, clang's rejections and the
+differences.
+
+### The campaigns
+
+On a cloud VM, with clang 23.1.5, its glibc 2.39 headers and
+`--no-default-config --target=x86_64-linux-gnu -march=znver5`, seeds 201 to
+204. Their first runs found the last two of the differences below (main's
+signature and initialized objects of incomplete type); these are their runs
+after the fixes:
+
+| Corpus | Options | Files compared | Mutants (clang rejects) | Differences |
+| --- | --- | --- | --- | --- |
+| SQLite 3.53.2's `sqlite3.c` | `-std=gnu17` | 322 | 320 (174) | none |
+| musl 1.2.5 (Zig 0.14.1's tree): its 1,587 sources under `src` and `compat` | `-std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os` with the oracle's include path | 4,725 | 1,600 (774) | none |
+| Lua 5.4.8's 34 files in `src` | `-std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX` | 867 | 800 (469) | `lvm.c`'s base |
+| The libc corpus (Zig 0.14.1's `lib/libc`): the 3,832 of its 8,983 C and header files that clang accepts here | `-std=gnu17` | 6,552 | 1,600 (302) | `fmaxl.c`'s and `fminl.c`'s bases |
+
+Files compared counts each corpus's files, the mutated units' bases and the
+mutants. The scalar and vector paths gave identical columns on every one. The
+three differences left are in bases, and mutants aren't made of a unit whose
+base differs:
+
+- Lua's `lvm.c`: GNU's labels as values (`&&L_OP_MOVE`, `goto *`), which the
+  checker doesn't take yet;
+- the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
+  `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
+  floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s
+  families don't have yet.
+
+What the mutants and the bases found, each fixed with its fixture:
+
+- pointer conversions as clang's Sema has them in every mode (qualifiers
+  discarded, nested qualifiers, signedness, `void *` and function pointers),
+  comparisons of distinct pointers and of a pointer with an integer,
+  conditionals of either (to `void *`), and a call's argument errors at the
+  argument and too many arguments at the first extra one;
+- GNU's extensions in every C mode (above);
+- clang's default-error warnings suppressed in system headers;
+- `restrict` on a non-pointer at the qualifier, attribute items kept out of a
+  failed declaration's graph, `const void` results, main's signature, and
+  initialized objects of incomplete type;
+- in the libc corpus's bases: `f16` literals and `align_value`, which clang's
+  `<immintrin.h>` uses.
+
+The 9700X job's test step checks 8 mutants of the frozen SQLite source and 96
+of the oracle's four musl sources with seed 133, on the frozen headers.
 
 ## Benchmark and validation limits
 

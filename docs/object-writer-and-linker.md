@@ -3967,10 +3967,12 @@ Every output runs and prints what lld's does.
   profile's largest items are the resolution's lane loop (25% of cycles), the
   conversion's (11%) and its `link_check` (9.6%), the relocations' import
   (8.7%) and the kernel's clearing of new pages (7.8%).
-- **On eight lanes** synth's link takes 40.1 ms (`--time`): the resolution
-  10.1 and the write 6.5, while the conversion stays at 20.4 ms on the calling
-  thread. wild with its threads takes 24.8 ms and mold 37.3. #87 puts the
-  conversion on lanes.
+- **On eight lanes** synth's link took 40.1 ms (`--time`): the resolution
+  10.1 and the write 6.5, while the conversion stayed at 20.4 ms on the calling
+  thread. wild with its threads takes 24.8 ms and mold 37.3. With the
+  conversion on lanes too (#87, `foreign_link_lanes.c`), it takes 8.8 ms on 8
+  lanes and the whole link 27.5 ms on 7, against 54.2 on one; each phase's
+  limit is in [linker scaling](linker-scaling.md) ("Complete foreign links").
 - **Small links are the process around them.** `--time` puts a hello world's
   link at 0.22 ms of the 0.59 ms its process takes; the rest is starting and
   ending the compiler's executable, which was a PIE until #86: its 366,684
@@ -4714,7 +4716,14 @@ and with this document updated with what was measured:
    built"). Static executables with libc, static PIEs, shared libraries and the
    dynamic PIE's own IFUNCs remain.
 8. **More than one lane:** measured scaling, and the per-filesystem write
-   choice.
+   choice. Done ([linker scaling](linker-scaling.md)): the direct path's and
+   the foreign link's phases on 1 to 8 lanes, one per core, and on the SMT
+   siblings to 15, with each phase's limit, those still fastest on 15 bounded
+   by the machine's CPUs, past which lanes only lose; the foreign conversion on
+   lanes (`foreign_link_lanes.c`), and `link-foreign` capped at a lane per CPU;
+   and the write method, `pwrite` on tmpfs and btrfs, since mapping the output
+   lost on btrfs and was mixed on tmpfs. The lane tests' outputs stay byte for
+   byte alike on 1, 2, 3 and 8 lanes.
 9. **Unwind tables from the code generator's prologues, and DWARF,** then
    **streaming the output** in the data-first order, measured against writing
    at the end. Done: the unwind tables from Tier 0's prologues (`unwind_tier0.c`

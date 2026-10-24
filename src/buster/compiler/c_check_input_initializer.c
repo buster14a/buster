@@ -51,7 +51,7 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
                     at = parser->tree.parents[at];
                 }
             }
-            valid = close > token && close < end && (range == close || parser->language.gnu);
+            valid = close > token && close < end;
             if (valid)
             {
                 reader->designator_indices[token] = close;

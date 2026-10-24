@@ -18,6 +18,8 @@
 //     slot: GLOB_DAT, or the JUMP_SLOT that lld and mold give a call's slot, where link-foreign binds every import at
 //     load with GLOB_DAT; a COPY; an R_X86_64_64; a TPOFF64; a DTPMOD64; a DTPOFF64), as a multiset, and the count of
 //     relative relocations (RELATIVE ones and RELR's) against lld's.
+// And link-foreign's program must come out byte for byte the same when it links on eight lanes, through the
+// resolution's, the conversion's and the writer's lane paths, as on one.
 // What a reference linker writes as its own choice, where link-foreign's choice is lld's or GNU ld's and as valid, is
 // counted and printed as documented rather than as a failure (foreign_corpus_documented): mold leaves a weak undefined
 // name that nothing defines and that has no version out of .dynsym, binds the aliases it copies weakly, writes its own
@@ -511,9 +513,10 @@ static void foreign_corpus_dynamic(const DynamicTestImage* image, ForeignCorpusR
     foreign_corpus_row(rows, "fini_array %d %" PRIu64, dynamic_test_tag(image, DT_FINI_ARRAY, &value), dynamic_test_tag(image, DT_FINI_ARRAYSZ, &value) ? value : 0);
 }
 
-// The link of one program by one linker into `output`: the GCC driver's PIE line around the objects and archives.
-static bool foreign_corpus_link(ForeignCorpus* corpus, const ForeignCorpusProgram* program, const char* linker, char* const* inputs, uint32_t input_count,
-                                const char* output, const char* log)
+// The link of one program by one linker into `output`: the GCC driver's PIE line around the objects and archives;
+// `lanes`, link-foreign's lanes option.
+static bool foreign_corpus_link(ForeignCorpus* corpus, const ForeignCorpusProgram* program, const char* linker, const char* lanes, char* const* inputs,
+                                uint32_t input_count, const char* output, const char* log)
 {
     char* arguments[BUSTER_FOREIGN_CORPUS_MAX_ARGUMENTS] = { 0 };
     uint32_t count = 0;
@@ -522,6 +525,7 @@ static bool foreign_corpus_link(ForeignCorpus* corpus, const ForeignCorpusProgra
     if (ours)
     {
         foreign_corpus_append(arguments, &count, "link-foreign");
+        foreign_corpus_append(arguments, &count, lanes);
     }
     foreign_corpus_append(arguments, &count, "-pie");
     foreign_corpus_append(arguments, &count, "-o");
@@ -874,11 +878,25 @@ static void foreign_corpus_program(ForeignCorpus* corpus, const ForeignCorpusPro
         snprintf(place, sizeof(place), "%s/%s", directory, linkers[l]);
         snprintf(output, sizeof(output), "%s/program", place);
         snprintf(log, sizeof(log), "%s/link", place);
-        linked[l] = mkdir(place, 0755) == 0 && foreign_corpus_link(corpus, program, linkers[l], inputs, input_count, output, log);
+        linked[l] = mkdir(place, 0755) == 0 && foreign_corpus_link(corpus, program, linkers[l], "--lanes=1", inputs, input_count, output, log);
         char what[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
         snprintf(what, sizeof(what), "%s, linked by %s", detail, linkers[l]);
         foreign_test_expect(&corpus->tally, linked[l], "link the corpus program", what);
         files[l] = linked[l] ? foreign_test_read(arena, output) : (String8){ 0 };
+    }
+    // link-foreign on eight lanes, the resolution's, the conversion's and the writer's lane paths: the same bytes.
+    if (linked[0])
+    {
+        char place[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
+        char output[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        char log[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        snprintf(place, sizeof(place), "%s/buster-lanes", directory);
+        snprintf(output, sizeof(output), "%s/program", place);
+        snprintf(log, sizeof(log), "%s/link", place);
+        const bool laned = mkdir(place, 0755) == 0 && foreign_corpus_link(corpus, program, "buster", "--lanes=8", inputs, input_count, output, log);
+        const String8 file = laned ? foreign_test_read(arena, output) : (String8){ 0 };
+        const bool same = file.pointer != 0 && file.length == files[0].length && memcmp(file.pointer, files[0].pointer, file.length) == 0;
+        foreign_test_expect(&corpus->tally, same, "link-foreign writes the same bytes on eight lanes as on one", detail);
     }
     // The runs, each by every linker's program.
     for (uint32_t r = 0; linked[0] && r < BUSTER_ARRAY_LENGTH(program->runs) && (r == 0 || program->runs[r].arguments[0] != 0 || program->runs[r].input != 0); r += 1)

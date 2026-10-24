@@ -10,6 +10,62 @@ behind each choice, and what comes next.
 
 ## Results
 
+Measured on 2026-10-24 on the Ryzen 7 9700X (`benchpress`, clang 23.1.1,
+`build.sh`'s `-O3 -march=native`), pinned to CPU 2, each run under the
+`exclusive.sh` lock: `main` at 505985b and this design (e5c620f), each built on
+its own, by turns in five rounds of `benchmark-preprocessor --only vectorized`.
+A range is the rounds' medians, each of 21 runs. The budget's measure is the
+refine phase on `sqlite3.c` and its headers (1,243,784 tokens):
+
+| | Refine phase | Directive tables | Lexing | Whole run |
+| --- | ---: | ---: | ---: | ---: |
+| `main` at 505985b | 1.730-1.741 ms | 0.287-0.293 ms | 2.408-2.433 ms | 11.95-12.02 ms |
+| This design | **1.379-1.393 ms** | 0.304-0.307 ms | 2.396-2.419 ms | 11.56-11.63 ms |
+
+On a frozen copy of this compiler's `main.c` and the files it includes
+(3,431,361 tokens), the refine phase went from 5.489-5.512 to 5.017-5.028 ms
+and the whole run from 48.14-48.57 to 47.70-47.92 ms; its lexing took
+5.481-5.522 ms against 5.412-5.430, and its directive tables 0.351-0.357
+against 0.348-0.350 ("A large file a window at a time" has why).
+
+`benchmark-refinement --only refine_tokens_64`, the kernel with its columns,
+table and source in the caches from pass to pass, in two or three rounds, back to
+back and after 100 ms of the scalar path before each pass (Zen 5's power cap,
+#199):
+
+| Corpus | `main` at 505985b, cycles/token | This design, cycles/token | Instructions/token |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 6.37-6.42 (1.344-1.353 ms) | **5.50-5.52** (1.159-1.163 ms) | 22.45 → 20.72 |
+| `sqlite3.c`, after the scalar path | 6.50-6.60 | 5.67-5.71 | |
+| C library (Zig 0.14.1 `lib/libc`) | 11.75-11.82 (27.9-28.0 ms) | **10.95-10.97** (26.0 ms) | 30.40 → 27.60 |
+| C library, after the scalar path | 11.69-11.70 | 10.88-10.91 | |
+
+### Budget
+
+#115 budgets 1.5 ms for refining and interning `sqlite3.c` and its headers on
+the 9700X. The refine phase takes 1.38-1.39 ms. Two costs moved to the
+directive tables count against it: they take 0.016 ms more a window at a time
+(0.304-0.307 against 0.287-0.293 ms), and #241 moved a page fault of 0.03 ms
+there ("Where the time went"). Counted with them, it is 1.43 ms, under the
+budget. What closed the gap from 1.73-1.74 ms on `main` at 505985b
+(#241 measured 1.67 ms):
+
+- **A large file a window at a time** (below): the lexer's columns and the
+  source are still in the caches when refinement reads them, where they came
+  back from memory after the whole file's lexing. 0.11 to 0.13 ms.
+- **Pass B, the same work in fewer instructions**: the probe's id out of the
+  bucket's vector by mask arithmetic and a compress, plain loads of each
+  identifier's 32 bytes and their masks by `bzhi`, and the buckets' prefetches
+  from the offsets stored after the batch's hashing. 0.10 ms.
+- **Blocks of 4,096 tokens**, which start and drain pass B's pipeline a fourth
+  as often. 0.03 ms.
+- **2b without its loop of record prefetches**, and **stage 3 adding new
+  spellings in their bucket** without a probe of its own. 0.10 ms.
+
+"Where the time went" has each step's measurements.
+
+### The first measurements (2026-10-21 and 22)
+
 Measured on 2026-10-21 and 22 on the Ryzen 7 9700X (`benchpress`, clang 23.1.1,
 `build.sh`'s `-O3 -march=native`), pinned to CPU 2, each run under the
 `exclusive.sh` lock. "Before" is `main` at 0077380, with this design's two
@@ -91,12 +147,9 @@ The variants, after: batches of 16, 32 and 64 take 8.05-8.11, 7.08-7.13 and
 identifier right after hashing it, without a prefetch, takes 7.62-7.69
 (14.71-14.72).
 
-### Budget
-
-#115 budgets 1.5 ms for refining and interning `sqlite3.c` and its headers on
-the 9700X. Measured, it takes 1.67 ms. Counting the arena page fault that the
-directive tables now take, it is about 1.70 ms. That is 2.1 times as fast as
-before, and 11 to 13% over the budget. The rest is here:
+Against #115's 1.5 ms, this design then took 1.67 ms, about 1.70 ms counting
+the arena page fault that the directive tables took from it: 2.1 times as fast
+as before, and 11 to 13% over the budget. What was left then:
 
 - **Cold data.** The preprocessor lexes a whole file before it refines it,
   and the table is new in each run. So for `sqlite3.c` the columns, the
@@ -115,8 +168,8 @@ before, and 11 to 13% over the budget. The rest is here:
   identifiers and the bookkeeping. The scan and the passes over tokens take
   the rest, 5.3 per token. Even warm, it is 3% over the budget.
 
-"Next steps" has what would close it: refinement fed a block at a time by the
-lexer (a change to `c_tokenize`'s interface), and a table kept across
+What would close it, then: refinement fed a block at a time by the lexer
+(which "A large file a window at a time" now does), and a table kept across
 translation units (#152).
 
 ## What it produces
@@ -199,11 +252,16 @@ Differences from #116's sketch, each deliberate:
 
 ## The vectorized path
 
-`refine_tokens` works on blocks of `BUSTER_REFINE_BLOCK_TOKENS` (1,024) tokens.
+`refine_tokens` works on blocks of `BUSTER_REFINE_BLOCK_TOKENS` (4,096) tokens.
 Before a block, `refine_scan_chunks` marks its source bytes' 64-byte chunks that
 hold a backslash. Then come three passes: A over the block's tokens, B over its
 identifiers, and C over its tokens again. Each block's dense identifier arrays
-stay in the L1 cache.
+(about 20 KB for `sqlite3.c`'s 1,600 identifiers per block) stay in the L1
+cache. Pass B's pipeline starts and drains with each block: on the 9700X, a
+window at a time (below), `sqlite3.c`'s refine phase took 1.546-1.555 ms with
+blocks of 1,024 tokens, 1.526-1.530 with 2,048, 1.513-1.522 with 4,096,
+1.515-1.517 with 8,192 and 1.532-1.535 with 16,384 (two screening runs of three
+rounds, before the last three changes to pass B).
 
 ### The backslash chunks
 
@@ -236,10 +294,12 @@ ends.
   `refine_gap_is_splices` decide their bit.
 - Pass A writes `values` only when they aren't the ends (in place, as the
   preprocessor refines, a non-identifier's value is its end already).
-- Each step prefetches the next block's step of the three columns, and 512
-  bytes of the source past what the scan has read. The preprocessor lexes a
-  whole file before refining it, so for `sqlite3.c` the columns (10.5 MB) and
-  the source (9.5 MB) come back from memory; pass B's work hides their fetch.
+- For a file lexed whole before its refinement, each step prefetches the step
+  1,024 tokens on in the three columns, and 512 bytes of the source past what
+  the scan has read: the columns (10.5 MB for `sqlite3.c`) and the source
+  (9.5 MB) come back from memory, and pass B's work hides their fetch. A file
+  refined a window at a time prefetches nothing ("A large file a window at a
+  time").
 
 ### Pass B: interning in batches
 
@@ -248,11 +308,18 @@ stages, pipelined: a batch's stage 1 runs in the middle of the batch before's
 stages 2 to 3.
 
 1. **Load and hash** (`refine_hash_batch`). Each identifier's first 32 bytes
-   are read with one masked load, bounded by its length (`bzhi`), so the load
-   never reads outside the token. Four identifiers are hashed at a time
-   (`intern_hash_vectors4_short`, below), and their buckets prefetched, with
-   the offsets taken from the vector's lanes. The rare identifiers of 33 to 63
-   bytes (0.1% of `sqlite3.c`'s) are hashed again from all their bytes. The
+   are read with a plain load, and the bytes past its length cleared by a
+   masked move per two identifiers, whose mask `bzhi` makes from their lengths,
+   when the batch's last identifier's 32 bytes lie in the source (the starts
+   ascend, so all but a source's last few batches); else with one masked load,
+   bounded by its length, so the load never reads outside the token. Masks made
+   in vectors (a byte permute and a compare per two identifiers) took 0.01 ms
+   more. Four identifiers are hashed at a time
+   (`intern_hash_vectors4_short`, below). After the batch's hashing, its
+   buckets are prefetched from the offsets it stored: moving each group's four
+   offsets out of its vector as it was made (three extracts and four moves)
+   took 0.015 ms more of `sqlite3.c`'s refine phase. The rare identifiers of 33
+   to 63 bytes (0.1% of `sqlite3.c`'s) are hashed again from all their bytes. The
    batch's loads are checked for a backslash (or with trigraphs a `?`) with a
    vector minimum of the bytes XORed with `'\\'`, on the two vectors that hold
    four identifiers' bytes. A
@@ -265,29 +332,44 @@ stages 2 to 3.
    because its zero padding includes the zero at its length, and identifiers
    have no NUL bytes. This covers 86% of identifier occurrences in `sqlite3.c`
    and 73% in the C library. The key's last dword is all ones, which no id is
-   (ids are below 2^28), so the compare of all 16 dwords needs no mask. The id
-   is selected with a `cmov` after its load: Clang turns a plain `?:` there into
-   a branch around the load, which mispredicts for every new spelling. Four
-   identifiers are probed per iteration. The bookkeeping (which identifiers are
-   slow, unmatched or longer than 11 bytes) is done 16 identifiers at a time
-   from their lengths and ids, as bits of masks.
+   (ids are below 2^28), so the compare of all 16 dwords needs no mask. The
+   matching slot's id comes out of the bucket's vector without a branch or a
+   load that depends on the match: the compare's mask plus `0x1111`, ANDed with
+   `0x8888` in mask registers, has bit 4s + 3 set for each matching slot s, the
+   dword of its id, and `vpcompressd` moves the first one to lane 0, which is 0
+   without a match. Four identifiers are probed per iteration. The bookkeeping
+   (which identifiers are slow, unmatched or longer than 11 bytes) is done 16
+   identifiers at a time from their lengths and ids, as bits of masks.
 3. **2b, confirm.** A longer spelling whose prefix matched is confirmed with one
-   masked compare of its bytes and terminating zero against its record. Its two
-   loads depend on each other (the id's span, then the record), so 2b
-   prefetches every candidate's record from its span, then runs the next
-   batch's stage 1, then compares. Skipping 2b altogether (a wrong answer for
-   31 of 57,354 candidates) measured 0.18 ms of the refine phase before this
-   split.
+   masked compare of its bytes and terminating zero against its record, after
+   the next batch's stage 1. Its two loads depend on each other (the id's span,
+   then the record), and the out-of-order core overlaps them from candidate to
+   candidate: a loop that prefetched every candidate's record from its span
+   before the next batch's stage 1 took 0.08 ms more ("What didn't pay").
+   Skipping 2b altogether (a wrong answer for 31 of 57,354 candidates) measured
+   0.18 ms of the refine phase when 2b was first split.
 4. **Deferred.** Nothing above branches on an identifier's outcome. An
    identifier that isn't found this way (a new spelling, a repeat of one in the
    same batch, a second candidate, a probe past the first bucket, or the scalar
    path) is deferred, and the deferred ones are interned in token order, so new
-   spellings get exactly the ids `refine_tokens_scalar` gives them.
-   `intern_find_or_add_vector` interns one from one masked load: its key, the
-   record's compare and its write all come from that vector, and its probe
-   starts at stage 1's bucket (hashing again only if an insert has grown the
-   table since). A stage 3 that grows the table makes the next batch, hashed
-   for the table as it was, hash again.
+   spellings get exactly the ids `refine_tokens_scalar` gives them
+   (`refine_intern_deferred`). Most deferred identifiers are new spellings,
+   which their bucket shows absent when it has no slot with their prefix and an
+   empty one: a spelling is in its hash's bucket unless that bucket was full
+   when it was added, and slots are only ever filled. Those are added there at
+   once (`intern_add_in_bucket`: the record, the id and the slot), after one
+   compare of the bucket stage 2 loaded. The rest (a repeat of a spelling added
+   earlier in the batch, a longer one whose record differs, a full bucket, a
+   table that has to grow, and the scalar path) go to
+   `intern_find_or_add_vector`, which interns one from one masked load: its
+   key, the record's compare and its write all come from that vector, and its
+   probe starts at stage 1's bucket (hashing again only if an insert has grown
+   the table since). Adding new spellings in place took 0.01 to 0.02 ms off
+   `sqlite3.c`'s refine phase; the general path branches on the spelling's
+   length and on its probe's outcome, which the 9700X's branch records showed
+   mispredicting (the length's branch on a quarter of the times it was taken).
+   A stage 3 that grows the table makes the next batch, hashed for the table as
+   it was, hash again.
 
 Separating the stages lets a batch's 64 cache misses overlap. The variants
 `benchmark-refinement` compares measure this directly: batches of 16, 32 and
@@ -420,12 +502,17 @@ against the measurements above and below:
 - Stage 1's software prefetches mostly find their line in L1 already: of 10.8
   million in a run of `benchmark-refinement` on `sqlite3.c`, 8.9 million were
   `ls_inef_sw_pref`, and 1.9 million fetched from L2 or L3. Without them the
-  preprocessor's refine phase is still 4% slower, because its table is cold.
+  preprocessor's refine phase is still 4% slower, because its table is cold,
+  and a window at a time 6% (1.593-1.630 ms against 1.520-1.522).
 - A 64-byte vector store reloaded as four 8-byte loads didn't measurably stall
   (the prefetch offsets' two ways measured 6.63 and 6.60 cycles per token).
-- Clang turns `matches != 0 ? id : 0` into a branch around the id's load, and
-  keeps it with `__builtin_unpredictable`. An empty `asm` on the loaded id and
-  a mask instead of the `?:` give a `cmov`.
+  Stage 1's prefetches now load their offsets from the batch's stores, after
+  its hashing.
+- The probe's id read from the bucket at the match's index (`tzcnt`, a load and
+  a select) made the refine phase 0.17 ms slower than compressing it out of the
+  bucket's vector. Clang turns `matches != 0 ? id : 0` there into a branch
+  around the id's load, and keeps it with `__builtin_unpredictable`; an empty
+  `asm` on the loaded id and a mask instead of the `?:` give a `cmov`.
 
 Identifier lengths per occurrence, which set the prefix and the loads' widths:
 
@@ -436,6 +523,65 @@ Identifier lengths per occurrence, which set the prefix and the loads' widths:
 | ≤ 27 bytes | 99.6% | 95.4% |
 | ≤ 32 bytes (hashed from two lanes) | 99.9% | 97% |
 | ≤ 63 bytes (vectorized) | 100% | 99.97% |
+
+## A large file a window at a time
+
+The preprocessor used to lex a whole file, then refine it. For `sqlite3.c` the
+lexer's columns (10.5 MB) and the source (9.5 MB) had then left the L2 cache by
+the time refinement read them again, and refinement's passes waited for memory:
+the budget's "cold data". `pp_prepare_into` now prepares a file of at least two
+windows (`BUSTER_PP_WINDOW_BYTES`, 128 KB) that the vectorized kernels lex a
+window at a time (`pp_prepare_windows`), and each window's columns and source
+are refined while they are in the caches:
+
+- `c_tokenize_lines` lexes the window as if the source ended at its end, from
+  the start of a logical line (or of the file). Every token before the last one
+  that starts a line is then the token the whole file's lexing gives: a
+  construct the window's end cuts (a block comment, a raw string literal, a line
+  splice) runs to that end, as at a file's, and belongs to the window's last
+  line. The tokens from that line on are dropped and lexed again from its start
+  with the next window; a line that takes a whole window doubles the window.
+  Mode splitting (`pp_lex_for_mode`) works on the kept tokens, and a file's
+  last window keeps an unterminated comment for its inclusions to report.
+- `refine_tokens_blocks` refines the blocks of 4,096 tokens the window
+  completes, and the last window the rest. What a block gives the next is
+  carried from call to call (`RefineProgress`: the ends of the 16 tokens before
+  the block, which pass C overwrote in place, and the backslash chunks scanned
+  so far), so that the blocks come out as `refine_tokens` makes them. Pass A
+  prefetches nothing there: the lexer has just written the columns and read the
+  source.
+- The leading-space words go after the kinds, as for a whole file, where the
+  lexer's writes have faulted their pages in. Their place waits for the token
+  count, so refinement writes them to scratch memory, and the end copies them
+  (about 150 KB for `sqlite3.c`). The UNKNOWN tokens that may hold a raw string
+  literal's error are counted per window too (`pp_count_raw_candidates`): a
+  count after the last window read the kinds back from memory.
+
+Splitting C's grammar between windows would need the lexer's state at a cut;
+cutting where a logical line starts needs none, since a line starts outside every
+token and comment. The records are the whole file's, byte for byte.
+Files the scalar lexer takes whole (trigraphs, `$` as punctuation, C++ without
+digraphs or `//`), and the scalar twins, stay whole.
+
+The windows are 128 KB: in a screening build, `sqlite3.c`'s refine phase took
+1.535-1.539 ms with them, 1.540-1.544 with 64 KB and 1.554-1.556 with 256 KB.
+A window costs its last line, lexed twice; a line longer than a window costs
+more. The lexer then gives no token that starts a line after the window's
+first, and the window doubles. A window whose line goes on through line splices
+alone, as a macro defined over many lines does, is doubled before it is lexed
+(`pp_window_has_line_end`, which looks for a line end that isn't a splice's,
+64 bytes at a time), but the part of such a line that the window before held is
+lexed twice. In this compiler's sources, `x86_64_encoder.c`'s
+`BUSTER_X86_VECTOR_FORMS` is 157 KB on 1,695 lines: its file is lexed over
+692,720 bytes for its 582,021 (823,792 before the check), and the other files
+of 256 KB or more that `main.c` includes, over 0.4% more bytes at most. In one
+build, with `--window-bytes 2000000000` for whole files, a frozen copy of
+`main.c`'s sources took 0.06-0.08 ms more lexing a window at a time than whole
+before the check, and 0.045-0.062 ms more after it, against 0.02-0.04 ms less
+refining: for its twelve files of 256 to 850 KB, whose columns and source the L3
+cache holds whole, windows about break even. On `sqlite3.c` the same build took
+0.14 ms less refining (1.388-1.389 ms against 1.529-1.533), 0.018 ms more for
+the directive tables, and no more lexing.
 
 ## Where the time went
 
@@ -492,6 +638,33 @@ and the whole run stayed the same (10.06-10.07 against 10.08-10.12 ms). It is
 kept because the words now take no page of their own, but counted the old way
 the refine phase is about 1.70 ms.
 
+### A window at a time, and pass B again
+
+From `main` at dc8fe2e (2026-10-24), each step was measured against the one
+before it on the 9700X: `benchmark-preprocessor --only vectorized sqlite3.c`,
+each run under the lock on CPU 2, in three or four rounds by turns. The first
+two steps compared separate builds; the others compared variants of pass B in
+one screening build, chosen by an environment variable, since separate builds
+of the same source differ by up to 1.3% in where their code lands. Each row's
+ranges are its rounds' medians of the refine phase, in ms:
+
+| Step | Before | After |
+| --- | ---: | ---: |
+| A large file a window at a time (separate builds) | 1.730-1.743 | 1.610-1.624 |
+| The probe's id by mask arithmetic and a compress; plain identifier loads (separate builds) | 1.610-1.624 | 1.536-1.548 |
+| Blocks of 4,096 tokens, not 1,024 | 1.546-1.555 | 1.513-1.522 |
+| Stage 3's new spellings added in their bucket | 1.531-1.537 | 1.523-1.530 |
+| 2b without its loop of record prefetches | 1.531-1.537 | 1.453-1.455 |
+| The two together | 1.531-1.537 | 1.427-1.430 |
+| Stage 1's prefetches after its hashing, from the stored offsets | 1.433-1.441 | 1.417-1.425 |
+| Stage 1's masks by `bzhi` | 1.400-1.404 | 1.385-1.392 |
+| This design against `main` at 505985b (separate builds, five rounds) | 1.730-1.741 | 1.379-1.393 |
+
+Pass A also asks once per block, not per step, whether the block's gaps hold a
+backslash, and joins its gap bits in mask registers; that change wasn't measured
+apart. The directive tables took 0.304-0.308 ms a window at a time throughout,
+against 0.286-0.295 ms whole.
+
 ## What didn't pay
 
 - **A probe cache.** 1,024 direct-mapped entries of a 16-byte key and an id,
@@ -512,8 +685,21 @@ the refine phase is about 1.70 ms.
   the preprocessor (1.93-1.95 to 2.02-2.05 ms), where the table is cold.
 - **The prefetches' offsets from the vector's lanes** instead of loads from the
   64-byte store just made: 6.63 to 6.60 cycles per token, the refine phase the
-  same. The loads didn't wait for the store as feared; the extraction is kept
-  for its fewer loads.
+  same. The loads didn't wait for the store as feared; the extraction was kept
+  for its fewer loads, until, a window at a time, loads after the batch's
+  hashing took 0.015 ms less (stage 1 above). Issuing each group's prefetches a
+  group later, from its stored offsets, took 0.009 ms less.
+- **Each candidate's record prefetched** from its span, in a loop of its own
+  before the next batch's stage 1, so that the hashing would hide 2b's two
+  dependent loads: a window at a time, 0.08 ms of `sqlite3.c`'s refine phase
+  (1.531-1.537 ms with it, 1.453-1.455 without).
+- **No prefetch in stage 1**, a window at a time: 0.09 ms slower (1.593-1.630
+  against 1.520-1.522 ms).
+- **The probe's id read from the bucket at the match's index** (`tzcnt`, a
+  dependent load and a select) instead of compressed out of the bucket's
+  vector: 0.17 ms slower (1.698-1.716 against 1.531-1.537 ms).
+- **The next batch's stage 1 after 2b**, so that 2b's loads would start
+  earlier: 0.02 ms slower (1.456-1.464 against 1.433-1.441 ms).
 - **Only the columns prefetched**, not the source: the refine phase 4% slower
   in the one round that ran (1.72 against 1.66 ms).
 
@@ -590,7 +776,32 @@ bit. The checks are:
 On the 9700X, with `src` and the C library corpus as paths, every check
 passed. `benchmark-refinement` also checks every file on every path before it
 times anything, and `test-preprocessor` and the preprocessor's oracle runs
-(`docs/c-preprocessor.md`) run on what refinement gives. The C library corpus's
+(`docs/c-preprocessor.md`) run on what refinement gives.
+
+A file prepared a window at a time must give the whole file's records, byte for
+byte. `test-preprocessor`'s windows check (`c_preprocessor_windows_test.c`)
+generates 240 sources of up to 96 KB from the constructs a window's end can cut:
+block comments and raw string literals over up to 120 lines (with directives in
+them), macros defined over up to 400 lines continued by splices of every form
+(a backslash before `\n`, `\r\n` or a lone `\r`, blanks after it, a comment
+before it, and `??/`), line splices in identifiers and between tokens, `\r\n`,
+lines of up to 6 KB, literals left open at a line's end, raw string literals
+with bad delimiters, a byte order mark, and a comment, a raw string literal or a
+backslash at the file's end. The line ends' scan (`pp_window_has_line_end`) is
+compared with a byte-at-a-time one on random strings of backslashes, line ends
+and other bytes, of up to 300 bytes, ending at a `PROT_NONE` page: 28,752
+checks. Each is prepared in one of five language modes
+(raw strings and digit separators on and off, C89's lexing, prefixes to split)
+whole by the vectorized kernels and by their scalar twins, which must agree, and
+in windows of 1, 7, 64, 100, 333, 1,024, 4,096 and 8,192 bytes: tokens, values,
+leading-space words, raw errors, the unterminated comment and the directive
+tables. Mutants that keep a window's last line, reset the carried ends between
+calls, drop the unterminated comment, or refine past a window's last whole
+block each fail it. `--window-bytes N` sends every file of two windows or more
+through windows of N bytes, so that `test-preprocessor --window-bytes 64` checks
+a whole translation unit's windowed preparation against the scalar twins:
+`sqlite3.c` and `main.c` (4 million output tokens) agree with windows of 64 bytes
+to 64 KB. The C library corpus's
 table grows four times, from 16,384 buckets to 262,144, and each growth in a
 batch's stage 3 makes the batch after it hash again.
 
@@ -621,13 +832,6 @@ the 360 files it lists for `main.c` with the compiler's options.
 
 ## Next steps
 
-- **Refine a file as it is lexed.** The preprocessor lexes a whole file, then
-  refines it, so for `sqlite3.c` the columns and the source come back from
-  memory and the table has gone cold: reading them first (a diagnostic, not a
-  change) saved 0.08 ms and 0.11 ms of the refine phase. A lexer that hands
-  over its tokens a block at a time would let refinement read them, and keep
-  the table, in the caches. That is a change to `c_tokenize`'s interface, and
-  so to `c_lexer.c`.
 - **The table across translation units** (#152): a process that compiles many
   of them keeps the table and its pages, warm, and pays its first inserts once.
 - **Fewer candidates for 2b.** Three slots of 20 bytes (a 16-byte prefix) would
@@ -639,6 +843,19 @@ the 360 files it lists for `main.c` with the compiler's options.
   the order of first occurrences, so that they don't depend on the lanes.
 - **Named UCNs:** intern them by their code point, which needs Unicode's name
   table, or diagnose them (#116's open question).
+- **The directive tables a window at a time** take 0.016 ms more of
+  `sqlite3.c` than whole, though each window's kinds are scanned while they are
+  in the caches. It isn't the pass that takes the directives out of the words
+  the scans left: with the lines' words and the directives' in two halves, so
+  that it reads half as many words and moves none, the tables took the same
+  time (0.306-0.307 ms against 0.306-0.314), and appending each directive's
+  place as the scan finds it took 0.01 ms more (0.316-0.318). Not measured
+  apart: `pp_finish_directives`, which reads each directive's tokens after the
+  last window, when the early windows' columns have left the caches.
+- **A window's end inside a long logical line.** The part of a macro defined
+  over many lines that a window holds is lexed again with the next one (110 KB
+  of `x86_64_encoder.c`'s 157 KB macro). Cutting at a line splice would need
+  the lexer to take a window's first token as one that continues a line.
 
 ## Boundary audit #298
 

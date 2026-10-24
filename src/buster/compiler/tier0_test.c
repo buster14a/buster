@@ -23,7 +23,9 @@
 #include <inttypes.h>
 
 #include <unistd.h>
+#include <asm/prctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -68,25 +70,40 @@ static void tier0_test_report(const char* check, Tier0TestTally tally)
 // The interpreter
 
 // The globals' memory: each global at an offset (8-aligned), as the loader lays them out, so that the interpreter and
-// the native run hash the same bytes.
+// the native run hash the same bytes. The thread-locals (the `access` option's) have a place in the TLS block too, where
+// the native run reaches them: each at tls_offsets[g] (8-aligned) in a block of tls_size bytes, a multiple of 64, which
+// the thread pointer ends.
 typedef struct Tier0TestData Tier0TestData;
 struct Tier0TestData
 {
     uint32_t offsets[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
     uint32_t size;
+    uint32_t tls_offsets[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
+    uint32_t tls_size;
 };
+
+// Whether global g is a thread-local: reached by one of the TLS accesses.
+static bool tier0_test_thread_local(const Tier0Program* program, uint32_t g)
+{
+    return program->global_access[g] == BUSTER_TIER0_ACCESS_LOCAL_EXEC || program->global_access[g] == BUSTER_TIER0_ACCESS_INITIAL_EXEC;
+}
 
 static Tier0TestData tier0_test_layout(const Tier0Program* program)
 {
     Tier0TestData data;
     memset(&data, 0, sizeof(data));
     uint32_t offset = 0;
+    uint32_t tls_offset = 0;
     for (uint32_t g = 0; g < program->global_count; g += 1)
     {
+        const uint32_t bytes = (tier0_class_bytes(program->global_classes[g]) * program->global_elements[g] + 7) & ~7u;
         data.offsets[g] = offset;
-        offset += (tier0_class_bytes(program->global_classes[g]) * program->global_elements[g] + 7) & ~7u;
+        offset += bytes;
+        data.tls_offsets[g] = tls_offset;
+        tls_offset += tier0_test_thread_local(program, g) ? bytes : 0;
     }
     data.size = offset;
+    data.tls_size = (tls_offset + 63) & ~63u;
     return data;
 }
 
@@ -324,7 +341,8 @@ static uint64_t tier0_test_compare(uint32_t kind, uint32_t class, uint64_t a, ui
     return holds ? 1 : 0;
 }
 
-// A frame of the interpreter: the function, where it is, its locals' slots, its objects' memory and its stack's base.
+// A frame of the interpreter: the function, where it is, its locals' slots, its objects' memory, its stack's base, and
+// how much of the allocations' area was taken when it began, which its return gives back.
 typedef struct Tier0TestFrame Tier0TestFrame;
 struct Tier0TestFrame
 {
@@ -333,6 +351,7 @@ struct Tier0TestFrame
     uint64_t* locals;
     uint8_t* objects;
     uint32_t stack_base;
+    uint32_t allocated;
 };
 
 #define BUSTER_TIER0_TEST_FRAMES 256
@@ -343,10 +362,13 @@ struct Tier0TestFrame
 // A function's address in the interpreter: its index under this tag.
 #define BUSTER_TIER0_TEST_FUNCTION_TAG 0xf0f0000000000000ull
 #define BUSTER_TIER0_TEST_STEPS 200000000ull
+// The area ALLOCA takes from, every allocation a multiple of 16 at a multiple of 16, as the native stack has them.
+#define BUSTER_TIER0_TEST_ALLOCATION_BYTES (1u << 20)
 
 // Runs the program's entry (its last function) on three arguments over the globals at `globals` (the data layout's),
-// and returns its result; `fault` is set on a division the generator should have made safe, past the step budget, or
-// on an indirect call that reaches a function of another type.
+// and returns its result; `fault` is set on a division the generator should have made safe, past the step budget, on
+// an indirect call that reaches a function of another type, on allocations past their area, or on a restore to a
+// position the frame's allocations never had.
 static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Functions* functions, const Tier0TestData* data, uint8_t* globals,
                                      const uint64_t* inputs, bool* fault)
 {
@@ -354,6 +376,8 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
     static uint64_t stack[BUSTER_TIER0_TEST_STACK];
     static uint64_t slots[BUSTER_TIER0_TEST_SLOTS];
     static uint8_t objects[BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_TEST_OBJECT_BYTES] __attribute__((aligned(64)));
+    static uint8_t allocations[BUSTER_TIER0_TEST_ALLOCATION_BYTES] __attribute__((aligned(64)));
+    uint32_t allocated = 0;
     // Each object's offset in its frame's memory, by the program's local index.
     static uint32_t object_offsets[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS * BUSTER_TIER0_GENERATE_MAX_LOCALS];
     uint32_t depth = 1;
@@ -374,7 +398,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
         }
         *fault |= offset > BUSTER_TIER0_TEST_OBJECT_BYTES;
     }
-    frames[0] = (Tier0TestFrame){ entry, 0, slots, objects, 0 };
+    frames[0] = (Tier0TestFrame){ entry, 0, slots, objects, 0, 0 };
     memset(slots, 0, sizeof(uint64_t) * BUSTER_TIER0_GENERATE_MAX_LOCALS);
     memset(objects, 0, BUSTER_TIER0_TEST_OBJECT_BYTES);
     for (uint32_t p = 0; p < 3 && p < functions->functions[entry].parameter_count; p += 1)
@@ -391,6 +415,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             // Off the end of a void function.
             depth -= 1;
             top = frame->stack_base;
+            allocated = frame->allocated;
             continue;
         }
         const uint32_t i = frame->entry;
@@ -505,7 +530,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
                 *fault |= !typed;
                 callee = function_held ? held : callee;
             }
-            frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top };
+            frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top, allocated };
             depth += 1;
             break;
         }
@@ -528,11 +553,30 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
         case BUSTER_TYPED_JUMP_VALUE:
             frame->entry = (uint32_t)value;
             break;
+        case BUSTER_TYPED_ALLOCA:
+        {
+            // The bytes rounded up to 16, past what is taken; a count past the area is a fault.
+            const uint64_t bytes = stack[top - 1] <= BUSTER_TIER0_TEST_ALLOCATION_BYTES ? (stack[top - 1] + 15) & ~15ull : UINT64_MAX;
+            *fault |= bytes > BUSTER_TIER0_TEST_ALLOCATION_BYTES - allocated;
+            stack[top - 1] = (uint64_t)(uintptr_t)(allocations + (*fault ? 0 : allocated));
+            allocated += *fault ? 0 : (uint32_t)bytes;
+            break;
+        }
+        case BUSTER_TYPED_STACK_SAVE:
+            stack[top++] = allocated;
+            break;
+        case BUSTER_TYPED_STACK_RESTORE:
+            // A position this frame's allocations passed, and no further than they are.
+            top -= 1;
+            *fault |= stack[top] < frame->allocated || stack[top] > allocated;
+            allocated = *fault ? allocated : (uint32_t)stack[top];
+            break;
         case BUSTER_TYPED_RETURN:
         {
             const uint64_t returned = class != BUSTER_TYPED_CLASS_VOID ? stack[top - 1] : 0;
             depth -= 1;
             top = frame->stack_base;
+            allocated = frame->allocated;
             if (depth != 0 && class != BUSTER_TYPED_CLASS_VOID)
             {
                 stack[top++] = returned;
@@ -567,7 +611,7 @@ static uint64_t tier0_test_hash(const uint8_t* bytes, uint64_t length)
 #define BUSTER_TIER0_TEST_FIXUPS (1u << 16)
 
 // A program's machine code (each function at its offset, 16-aligned) and its fixups: each field's offset in the code,
-// its instruction's end and its target symbol.
+// its instruction's end, its target symbol and its kind (BUSTER_LINK_FIXUP_*).
 typedef struct Tier0TestCode Tier0TestCode;
 struct Tier0TestCode
 {
@@ -578,6 +622,7 @@ struct Tier0TestCode
     uint32_t fields[BUSTER_TIER0_TEST_FIXUPS];
     uint32_t ends[BUSTER_TIER0_TEST_FIXUPS];
     SymbolId targets[BUSTER_TIER0_TEST_FIXUPS];
+    uint8_t kinds[BUSTER_TIER0_TEST_FIXUPS];
     uint32_t fixup_count;
     uint64_t records;
     uint64_t entries;
@@ -658,6 +703,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
                     code->fields[code->fixup_count] = start + field;
                     code->ends[code->fixup_count] = start + end;
                     code->targets[code->fixup_count] = reference->target;
+                    code->kinds[code->fixup_count] = reference->kind;
                     code->fixup_count += 1;
                 }
                 code->offsets[f] = start;
@@ -705,11 +751,22 @@ static void tier0_test_inputs(uint64_t seed, uint64_t inputs[BUSTER_TIER0_TEST_I
 // Loads the code and the globals into fresh pages, patches the fixups, and runs the entry on every input in a child
 // process, whose outcomes come back through shared memory. Returns false, with `status` the child's, if it didn't
 // exit normally.
+//
+// The data pages hold the globals, then a GOT slot per SymbolId (a global's or a function's address, or a thread-local's
+// offset from the thread pointer), then the thread-locals' block and the thread pointer at its end, whose first 8 bytes
+// hold its own address, as the C library's thread control block does (what fs:[0] reads). Each run copies the
+// thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone (nothing but
+// the program's code runs while it is the block's), and copies them back beside the other globals, whose bytes it
+// hashes as the interpreter's.
 static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* code, const Tier0TestData* data, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3],
                            Tier0TestOutcome* outcomes, int* status)
 {
     const uint64_t code_pages = ((uint64_t)code->size + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
-    const uint64_t data_pages = ((uint64_t)data->size + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
+    const uint32_t symbols = program->global_count + program->function_count + 1;
+    const uint64_t got_offset = ((uint64_t)data->size + 63) & ~63ull;
+    const uint64_t tls_offset = (got_offset + 8ull * symbols + 63) & ~63ull;
+    const uint64_t data_bytes = tls_offset + data->tls_size + 64;
+    const uint64_t data_pages = (data_bytes + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
     Tier0TestOutcome* shared = mmap(0, sizeof(Tier0TestOutcome) * BUSTER_TIER0_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     bool result = shared != MAP_FAILED;
     const pid_t child = result ? fork() : -1;
@@ -724,17 +781,45 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
             _exit(3);
         }
         uint8_t* data_base = region + code_pages;
+        uint8_t* got = data_base + got_offset;
+        uint8_t* tls = data_base + tls_offset;
+        uint8_t* thread_pointer = tls + data->tls_size;
+        const uint64_t self = (uint64_t)(uintptr_t)thread_pointer;
+        memcpy(thread_pointer, &self, sizeof(self));
+        // Each symbol's address, a thread-local's in the block, and its slot's value.
+        for (SymbolId s = 1; s < symbols; s += 1)
+        {
+            const bool global = s <= program->global_count;
+            const bool thread_local = global && tier0_test_thread_local(program, s - 1);
+            const uint8_t* address = !global ? region + code->offsets[s - 1 - program->global_count] : thread_local ? tls + data->tls_offsets[s - 1] : data_base + data->offsets[s - 1];
+            const uint64_t slot = thread_local ? (uint64_t)(address - thread_pointer) : (uint64_t)(uintptr_t)address;
+            memcpy(got + 8ull * s, &slot, sizeof(slot));
+        }
         memcpy(region, code->code, code->size);
         for (uint32_t x = 0; x < code->fixup_count; x += 1)
         {
             const SymbolId target = code->targets[x];
-            const uint8_t* address = target <= program->global_count ? data_base + data->offsets[target - 1] : region + code->offsets[target - program->global_count - 1];
-            const int32_t displacement = (int32_t)(address - (region + code->ends[x]));
-            memcpy(region + code->fields[x], &displacement, sizeof(displacement));
+            const uint8_t kind = code->kinds[x];
+            uint64_t slot = 0;
+            memcpy(&slot, got + 8ull * target, sizeof(slot));
+            const bool through_slot = kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
+            const bool thread_local = target <= program->global_count && tier0_test_thread_local(program, target - 1);
+            const uint8_t* address = through_slot ? got + 8ull * target
+                                     : target <= program->global_count ? (thread_local ? tls + data->tls_offsets[target - 1] : data_base + data->offsets[target - 1])
+                                                                       : region + code->offsets[target - program->global_count - 1];
+            // A TPOFF32 is the thread-local's offset from the thread pointer (its slot's value); the others are
+            // measured from the instruction's end.
+            const int32_t value = kind == BUSTER_LINK_FIXUP_TPOFF32 ? (int32_t)slot : (int32_t)(address - (region + code->ends[x]));
+            memcpy(region + code->fields[x], &value, sizeof(value));
         }
         if (mprotect(region, code_pages, PROT_READ | PROT_EXEC) != 0)
         {
             _exit(4);
+        }
+        unsigned long saved_fs = 0;
+        if (data->tls_size != 0 && syscall(SYS_arch_prctl, ARCH_GET_FS, &saved_fs) != 0)
+        {
+            _exit(5);
         }
         typedef uint64_t (*Tier0TestEntry)(uint64_t, uint64_t, uint64_t);
         Tier0TestEntry entry = 0;
@@ -743,7 +828,26 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_INPUTS; r += 1)
         {
             tier0_test_initial(program, data, data_base);
-            shared[r].result = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
+            for (uint32_t g = 0; g < program->global_count; g += 1)
+            {
+                const uint32_t bytes = tier0_class_bytes(program->global_classes[g]) * program->global_elements[g];
+                memcpy(tls + data->tls_offsets[g], data_base + data->offsets[g], tier0_test_thread_local(program, g) ? bytes : 0);
+            }
+            if (data->tls_size != 0)
+            {
+                syscall(SYS_arch_prctl, ARCH_SET_FS, self);
+            }
+            const uint64_t value = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
+            if (data->tls_size != 0)
+            {
+                syscall(SYS_arch_prctl, ARCH_SET_FS, saved_fs);
+            }
+            for (uint32_t g = 0; g < program->global_count; g += 1)
+            {
+                const uint32_t bytes = tier0_class_bytes(program->global_classes[g]) * program->global_elements[g];
+                memcpy(data_base + data->offsets[g], tls + data->tls_offsets[g], tier0_test_thread_local(program, g) ? bytes : 0);
+            }
+            shared[r].result = value;
             shared[r].globals = tier0_test_hash(data_base, data->size);
         }
         _exit(0);
@@ -829,10 +933,19 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
 // ---------------------------------------------------------------------------------------------------------------------
 // The cross-check
 
-// Tier 0's code of a program as an ELF object: a TEXT atom per function and a DATA atom per global (its first values),
-// named t0_f<k>, t0_entry and t0_g<k> (symbols in the streams' order: the globals, then the functions), with a fixup
-// per symbolic field: CALL for a call, PC32 for a global's address or value, each addend the field's distance from its
-// instruction's end taken off, as link_add_code_fixups makes them.
+// Whether global g is defined in Tier 0's object of the cross-check: a direct one or a thread-local of the image's. The
+// others, reached through the GOT, are the shared library's (tier0_test_library).
+static bool tier0_test_defined(const Tier0Program* program, uint32_t g)
+{
+    return program->global_access[g] == BUSTER_TIER0_ACCESS_DIRECT || program->global_access[g] == BUSTER_TIER0_ACCESS_LOCAL_EXEC;
+}
+
+// Tier 0's code of a program as an ELF object: a TEXT atom per function and a DATA atom per global (its first values;
+// TDATA for a thread-local) that the object defines (tier0_test_defined; the others are undefined symbols), named t0_f<k>,
+// t0_entry and t0_g<k> (symbols in the streams' order: the globals, then the functions), with a fixup per symbolic field
+// of the code's kind (CALL for a call, PC32 for a global's address or value, and the GOT's and TLS's kinds), each addend
+// the field's distance from its instruction's end taken off for a kind measured from the field, as link_add_code_fixups
+// makes them.
 static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* code, const char* path)
 {
     const uint32_t globals = program->global_count;
@@ -855,8 +968,9 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
     {
         char name[32];
         const int length = snprintf(name, sizeof(name), "t0_g%u", g);
-        result = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
-                                 BUSTER_LINK_SOURCE_PROGRAM) == g + 1;
+        const uint8_t type = tier0_test_thread_local(program, g) ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+        result = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, type | BUSTER_LINK_SYMBOL_GLOBAL,
+                                 tier0_test_defined(program, g) ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == g + 1;
     }
     for (uint32_t f = 0; result && f < functions; f += 1)
     {
@@ -881,8 +995,8 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
             while (result && fixup < code->fixup_count && code->fields[fixup] < start + length)
             {
                 const SymbolId target = code->targets[fixup];
-                const uint8_t kind = target > globals ? BUSTER_LINK_FIXUP_CALL : BUSTER_LINK_FIXUP_PC32;
-                const int64_t addend = -(int64_t)(code->ends[fixup] - code->fields[fixup]);
+                const uint8_t kind = code->kinds[fixup];
+                const int64_t addend = link_fixup_kinds[kind].pc_relative ? -(int64_t)(code->ends[fixup] - code->fields[fixup]) : 0;
                 // The field's bytes are the fixup's, zero as GNU as writes them.
                 memset(atom_bytes + (code->fields[fixup] - start), 0, 4);
                 result = link_add_fixup(&link, atom, code->fields[fixup] - start, kind, target, addend) != 0;
@@ -894,15 +1008,16 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
     {
         const uint32_t class_bytes = tier0_class_bytes(program->global_classes[g]);
         const uint32_t size = class_bytes * program->global_elements[g];
-        uint8_t* atom_bytes = arena_push(&bytes, size, 8);
-        result = atom_bytes != 0;
-        if (result)
+        uint8_t* atom_bytes = tier0_test_defined(program, g) ? arena_push(&bytes, size, 8) : 0;
+        result = atom_bytes != 0 || !tier0_test_defined(program, g);
+        if (atom_bytes != 0)
         {
             for (uint32_t e = 0; e < program->global_elements[g]; e += 1)
             {
                 memcpy(atom_bytes + e * class_bytes, &program->global_values[program->global_first_value[g] + e], class_bytes);
             }
-            const AtomId atom = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, size, atom_bytes, 0);
+            const uint8_t class = tier0_test_thread_local(program, g) ? BUSTER_LINK_CLASS_TDATA : BUSTER_LINK_CLASS_DATA;
+            const AtomId atom = link_add_atom(&link, class, 3, size, atom_bytes, 0);
             result = atom != 0 && link_define_symbol(&link, g + 1, atom, 0, size);
         }
     }
@@ -938,8 +1053,9 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
         {
             const char* type = tier0_c_type(program->global_classes[g]);
             const char* array = program->global_elements[g] != 1 ? "[16]" : "";
-            fprintf(file, "extern %s c_g%u%s;\nextern %s t0_g%u%s;\nstatic unsigned char c_s%u[sizeof c_g%u], t0_s%u[sizeof t0_g%u];\n", type, g, array, type, g, array,
-                    g, g, g, g);
+            const char* thread_local = tier0_test_thread_local(program, g) ? "_Thread_local " : "";
+            fprintf(file, "extern %s%s c_g%u%s;\nextern %s%s t0_g%u%s;\nstatic unsigned char c_s%u[sizeof c_g%u], t0_s%u[sizeof t0_g%u];\n", thread_local, type, g,
+                    array, thread_local, type, g, array, g, g, g, g);
         }
         fprintf(file, "static void reset(void)\n{\n");
         for (uint32_t g = 0; g < program->global_count; g += 1)
@@ -988,6 +1104,39 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
         fprintf(file, "                (void)(side == 0 ? c_entry : t0_entry)(inputs[r][0], inputs[r][1], inputs[r][2]);\n            }\n        }\n");
         fprintf(file, "        times[side] = now() - start;\n    }\n    printf(\"time %%lld %%lld\\n\", times[0], times[1]);\n    printf(failures == 0 ? \"OK\\n\" : \"FAILED\\n\");\n");
         fprintf(file, "    return failures == 0 ? 0 : 1;\n}\n");
+        result = fclose(file) == 0;
+    }
+    return result;
+}
+
+// The shared library of the globals Tier 0's object leaves undefined (tier0_test_defined), those it reaches through the
+// GOT: each its first values' bytes, a thread-local in .tdata, so that the executable's GOT slots are the loader's to fill
+// (GLOB_DAT, or TPOFF64 for a thread-local's offset), as a shared library's data is. It is GNU as source, which as and
+// ld -shared make into the library in a few milliseconds, where clang -shared of the same data as C took tens.
+static bool tier0_test_library(const Tier0Program* program, const char* path)
+{
+    FILE* file = fopen(path, "w");
+    bool result = file != 0;
+    if (result)
+    {
+        fprintf(file, "\t.section .note.GNU-stack,\"\",@progbits\n");
+        for (uint32_t g = 0; g < program->global_count; g += 1)
+        {
+            const uint32_t class_bytes = tier0_class_bytes(program->global_classes[g]);
+            const uint32_t size = class_bytes * program->global_elements[g];
+            if (!tier0_test_defined(program, g))
+            {
+                const bool thread_local = tier0_test_thread_local(program, g);
+                fprintf(file, "\t%s\n\t.globl t0_g%u\n\t.type t0_g%u, %s\n\t.size t0_g%u, %u\n\t.balign 8\nt0_g%u:\n\t.byte",
+                        thread_local ? ".section .tdata,\"awT\",@progbits" : ".data", g, g, thread_local ? "@tls_object" : "@object", g, size, g);
+                for (uint32_t b = 0; b < size; b += 1)
+                {
+                    const uint64_t value = program->global_values[program->global_first_value[g] + b / class_bytes];
+                    fprintf(file, "%s%u", b == 0 ? " " : ", ", (uint32_t)(value >> (8 * (b % class_bytes)) & 0xff));
+                }
+                fprintf(file, "\n");
+            }
+        }
         result = fclose(file) == 0;
     }
     return result;
@@ -1052,10 +1201,12 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
             char source[600];
             char object[600];
             char harness[600];
+            char library[600];
             char executable[600];
             snprintf(source, sizeof(source), "%s/program_%u.c", directory, p);
             snprintf(object, sizeof(object), "%s/tier0_%u.o", directory, p);
             snprintf(harness, sizeof(harness), "%s/harness_%u.c", directory, p);
+            snprintf(library, sizeof(library), "%s/library_%u.s", directory, p);
             snprintf(executable, sizeof(executable), "%s/run_%u", directory, p);
             if (ok)
             {
@@ -1064,7 +1215,7 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 ok = file != 0 && fclose(file) == 0 && ok;
                 uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3];
                 tier0_test_inputs(program_seed, inputs);
-                ok = ok && tier0_test_object(program, code, object) && tier0_test_harness(program, inputs, harness);
+                ok = ok && tier0_test_object(program, code, object) && tier0_test_harness(program, inputs, harness) && tier0_test_library(program, library);
                 ok = tier0_test_expect(tally, ok, "cross-check", "seed %" PRIu64 ": the files can't be written", program_seed);
             }
             if (ok)
@@ -1072,9 +1223,13 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 char command[4096];
                 char line[512];
                 // -fwrapv and -fno-strict-aliasing, this repository's own dialect: signed arithmetic wraps, as Tier 0's
-                // does, and the objects' checksums read floating parts' bits through integer lvalues.
-                snprintf(command, sizeof(command), "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && %s -O0 -w -o %s %s %s.o %s 2>&1", clang, source,
-                         source, clang, executable, harness, source, object);
+                // does, and the objects' checksums read floating parts' bits through integer lvalues. The library of the
+                // globals Tier 0 reaches through the GOT is a shared library the executable finds by its run path, data
+                // alone, which GNU as assembles and ld links without the C runtime's files.
+                snprintf(command, sizeof(command),
+                         "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
+                         "%s -O0 -w -o %s %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
+                         clang, source, source, library, library, library, library, clang, executable, harness, source, object, library, directory);
                 ok = tier0_test_expect(tally, tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
                                        program_seed, directory);
                 snprintf(command, sizeof(command), "size -A %s.o", source);
@@ -2353,6 +2508,421 @@ static void tier0_test_operands(Tier0TestTally* tally)
     }
 }
 
+// The access column (Tier0Function.symbol_access). tier0_validate must refuse a global entry whose symbol is past the
+// column or whose access doesn't exist, and take the column otherwise. Then each global kind of every class, by each
+// access: GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant, and GLOBAL_ADDRESS, whose
+// symbol is 1 of 2. Both paths must compile it alike to valid records with one reference to symbol 1, of the access's
+// kind (PC32, LOAD_GOT, TPOFF32 or GOTTPOFF), in the displacement but for a thread-local's address of the image's (the
+// TPOFF32 immediate an add takes), with an FS override exactly for a thread-local, and for a direct symbol the code
+// without the column. A constant stored into a symbol is an immediate (its CONST absorbed) only for a direct symbol,
+// which a store of an integer's constant's record count shows.
+static void tier0_test_access(Tier0TestTally* tally)
+{
+    static const uint8_t reference_kinds[BUSTER_TIER0_ACCESSES] = {
+        BUSTER_LINK_FIXUP_PC32,
+        BUSTER_LINK_FIXUP_LOAD_GOT,
+        BUSTER_LINK_FIXUP_TPOFF32,
+        BUSTER_LINK_FIXUP_GOTTPOFF,
+    };
+    // A store of an integer's constant, in records: the store and ret, with the constant's mov but directly, and the
+    // slot's load through the GOT.
+    static const uint32_t constant_records[BUSTER_TIER0_ACCESSES] = { 2, 4, 3, 4 };
+    Arena arena = arena_reserve(1ull << 28);
+    uint8_t column[2] = { BUSTER_TIER0_ACCESS_DIRECT, BUSTER_TIER0_ACCESS_DIRECT };
+    uint8_t local_classes[1] = { 0 };
+    static const uint8_t local_flags[1] = { 0 };
+    // Validation: a GLOBAL of symbol 1 with a column of 1 symbol, and with an access past the last.
+    {
+        static const uint8_t kinds[2] = { BUSTER_TYPED_GLOBAL, BUSTER_TYPED_RETURN };
+        static const uint8_t classes[2] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32 };
+        static const uint64_t values[2] = { 1, 0 };
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 2;
+        function.symbol_access = column;
+        function.symbol_count = 1;
+        const Tier0Check short_column = tier0_validate(&function);
+        function.symbol_count = 2;
+        column[1] = BUSTER_TIER0_ACCESSES;
+        const Tier0Check past = tier0_validate(&function);
+        column[1] = BUSTER_TIER0_ACCESS_INITIAL_EXEC;
+        const Tier0Check last = tier0_validate(&function);
+        tier0_test_expect(tally, short_column.error == TIER0_ERROR_INVALID && short_column.node == 0 && past.error == TIER0_ERROR_INVALID && past.node == 0 &&
+                                     last.error == TIER0_OK,
+                          "access", "tier0_validate: a symbol past the column %d at %u, an access past the last %d at %u, the last %d", short_column.error,
+                          short_column.node, past.error, past.node, last.error);
+    }
+    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class < BUSTER_TYPED_CLASSES; class += 1)
+    {
+        for (uint32_t shape = 0; shape < 5; shape += 1)
+        {
+            // 0: GLOBAL; 1: STORE_GLOBAL of a local; 2: SET_GLOBAL of a local; 3: SET_GLOBAL of a constant; 4: GLOBAL_ADDRESS
+            // (of a U64 alone).
+            if (shape == 4 && class != BUSTER_TYPED_CLASS_U64)
+            {
+                continue;
+            }
+            uint8_t kinds[4];
+            uint8_t classes[4];
+            uint64_t values[4] = { 0, 1, 0, 0 };
+            uint32_t count = 0;
+            local_classes[0] = (uint8_t)class;
+            if (shape == 0 || shape == 4)
+            {
+                kinds[0] = shape == 0 ? BUSTER_TYPED_GLOBAL : BUSTER_TYPED_GLOBAL_ADDRESS;
+                values[0] = 1;
+                kinds[1] = BUSTER_TYPED_RETURN;
+                classes[0] = (uint8_t)class;
+                classes[1] = (uint8_t)class;
+                count = 2;
+            }
+            else
+            {
+                kinds[0] = shape == 3 ? BUSTER_TYPED_CONST : BUSTER_TYPED_LOCAL;
+                values[0] = shape == 3 ? (class == BUSTER_TYPED_CLASS_F64 ? 0x4000000000000000ull : class == BUSTER_TYPED_CLASS_F32 ? 0x40000000ull : 5) : 0;
+                kinds[1] = shape == 1 ? BUSTER_TYPED_STORE_GLOBAL : BUSTER_TYPED_SET_GLOBAL;
+                kinds[2] = shape == 1 ? BUSTER_TYPED_DISCARD : BUSTER_TYPED_RETURN;
+                kinds[3] = BUSTER_TYPED_RETURN;
+                classes[0] = (uint8_t)class;
+                classes[1] = (uint8_t)class;
+                classes[2] = shape == 1 ? (uint8_t)class : BUSTER_TYPED_CLASS_VOID;
+                classes[3] = BUSTER_TYPED_CLASS_VOID;
+                count = shape == 1 ? 4 : 3;
+            }
+            Tier0Function function;
+            memset(&function, 0, sizeof(function));
+            function.kinds = kinds;
+            function.classes = classes;
+            function.values = values;
+            function.count = count;
+            function.local_classes = local_classes;
+            function.local_flags = local_flags;
+            function.local_count = 1;
+            const uint64_t mark = arena.length;
+            const Tier0Code plain = tier0_compile_scalar(&function, &arena);
+            function.symbol_access = column;
+            function.symbol_count = 2;
+            for (uint32_t access = 0; access < BUSTER_TIER0_ACCESSES; access += 1)
+            {
+                column[1] = (uint8_t)access;
+                const Tier0Check check = tier0_validate(&function);
+                const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+                const Tier0Code vector = tier0_compile(&function, &arena);
+                const bool compiled = check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector) &&
+                                      x86_validate(scalar.records, scalar.count) == scalar.count;
+                bool segment = false;
+                for (uint32_t r = 0; compiled && r < scalar.count; r += 1)
+                {
+                    segment |= (scalar.records[r].form & BUSTER_X86_FORM_NUMBER) >= BUSTER_X86_FORM_FS;
+                }
+                const bool immediate = shape == 4 && access == BUSTER_TIER0_ACCESS_LOCAL_EXEC;
+                const bool referenced = compiled && scalar.reference_count == 1 && scalar.references[0].kind == reference_kinds[access] &&
+                                        scalar.references[0].target == 1 && scalar.references[0].field == (immediate ? X86_FIXUP_IMMEDIATE : X86_FIXUP_DISPLACEMENT);
+                const bool thread_local = access == BUSTER_TIER0_ACCESS_LOCAL_EXEC || access == BUSTER_TIER0_ACCESS_INITIAL_EXEC;
+                const bool direct = access != BUSTER_TIER0_ACCESS_DIRECT || tier0_test_same_code(&plain, &scalar);
+                const bool constant = shape != 3 || tier0_class_floating(class) || scalar.count == constant_records[access];
+                tier0_test_expect(tally, compiled && referenced && segment == thread_local && direct && constant, "access",
+                                  "class %u, shape %u, access %u: validated %d, compiled %d, the paths alike %d, %u records, %u references (kind %u, field %u), "
+                                  "FS %d, the direct code the code without the column %d",
+                                  class, shape, access, check.error, scalar.error, tier0_test_same_code(&scalar, &vector), scalar.count, scalar.reference_count,
+                                  scalar.reference_count != 0 ? scalar.references[0].kind : 0, scalar.reference_count != 0 ? scalar.references[0].field : 0, segment,
+                                  direct);
+            }
+            arena_pop_to(&arena, mark);
+        }
+    }
+    arena_release(&arena);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The stack's allocations
+
+// The stack check's program: f0(a0 ... a7) = ((a0 * 31 + a1) * 31 + ...) * 31 + a7, which takes two arguments on the
+// stack, and entry(n, m, x), which n times saves the stack's position, allocates m * 8 + 65536 bytes (8 MB of stack
+// would last 128 times without the restores), sets their first and last words, calls f0 with them among its arguments
+// (stored below the allocation, in the outgoing area), with sum * 31 live across the call (in the save area, from rbp),
+// adds the address modulo 16 (0) and both words, which the call's arguments mustn't have overwritten, then restores the
+// position.
+#define BUSTER_TIER0_TEST_STACK_ITERATIONS 1000
+#define BUSTER_TIER0_TEST_STACK_BYTES 65536
+static const Tier0TestEntry tier0_test_stack_callee[] = {
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 4 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 5 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 6 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 7 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 },
+};
+// The entry's locals: n, m and x, then sum, i, the saved position, the bytes, the allocation and its last word.
+enum
+{
+    TIER0_TEST_STACK_N,
+    TIER0_TEST_STACK_M,
+    TIER0_TEST_STACK_X,
+    TIER0_TEST_STACK_SUM,
+    TIER0_TEST_STACK_I,
+    TIER0_TEST_STACK_SAVED,
+    TIER0_TEST_STACK_SIZE,
+    TIER0_TEST_STACK_P,
+    TIER0_TEST_STACK_Q,
+    TIER0_TEST_STACK_LOCALS,
+};
+#define BUSTER_TIER0_TEST_STACK_TOP 4
+#define BUSTER_TIER0_TEST_STACK_END 71
+static const Tier0TestEntry tier0_test_stack_entry[] = {
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_I },
+    // 4: while (i < n)
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_I }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_N },
+    { BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0 }, { BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, BUSTER_TIER0_TEST_STACK_END },
+    // 8: saved = position; size = m * 8 + 65536; p = alloca(size); q = p + size / 8 - 1 words.
+    { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SAVED },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_M }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 8 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_TEST_STACK_BYTES }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SIZE }, { BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_P },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_P }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SIZE },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 8 }, { BUSTER_TYPED_DIV, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1 },
+    { BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 8 }, { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_Q },
+    // 26: *p = i; *q = i * 7.
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_P }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_I }, { BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_Q }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_I },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 7 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0 },
+    // 34: sum += p & 15.
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_P },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 15 }, { BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM },
+    // 40: sum = sum * 31 + f0(*p, 1, 2, 3, 4, 5, 6, *q).
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 31 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_P }, { BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1 }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 2 }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 3 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4 }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 5 }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 6 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_Q }, { BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM },
+    // 56: sum += *p ^ *q; the position restored; i += 1.
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_P },
+    { BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_Q }, { BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SAVED }, { BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_I }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_I }, { BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_TEST_STACK_TOP },
+    // 71: return sum.
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_STACK_SUM }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 },
+};
+
+// What entry(n, m, x) returns, computed here.
+static uint64_t tier0_test_stack_expected(uint64_t n)
+{
+    uint64_t sum = 0;
+    for (uint64_t i = 0; i < n; i += 1)
+    {
+        const uint64_t arguments[8] = { i, 1, 2, 3, 4, 5, 6, i * 7 };
+        uint64_t result = arguments[0];
+        for (uint32_t a = 1; a < 8; a += 1)
+        {
+            result = result * 31 + arguments[a];
+        }
+        sum = sum * 31 + result;
+        sum += i ^ (i * 7);
+    }
+    return sum;
+}
+
+// A function of `count` hand-written entries over U64 locals (`locals`, the first `parameters` its parameters).
+static Tier0Function tier0_test_stack_function(const Tier0TestEntry* entries, uint32_t count, uint8_t* kinds, uint8_t* classes, uint64_t* values,
+                                               const uint8_t* local_classes, const uint8_t* local_flags, uint32_t locals)
+{
+    for (uint32_t e = 0; e < count; e += 1)
+    {
+        kinds[e] = entries[e].kind;
+        classes[e] = entries[e].class;
+        values[e] = entries[e].value;
+    }
+    Tier0Function function;
+    memset(&function, 0, sizeof(function));
+    function.kinds = kinds;
+    function.classes = classes;
+    function.values = values;
+    function.count = count;
+    function.local_classes = local_classes;
+    function.local_flags = local_flags;
+    function.local_count = locals;
+    return function;
+}
+
+// The stack's allocations: the validator's rules for ALLOCA, STACK_SAVE and STACK_RESTORE; a frame pointer's depths
+// (rbp's taken from the table); then the program above, compiled by both paths, its frame pointer in its prologue, run
+// natively on 8 inputs, and against the interpreter and this file's own count.
+static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
+{
+    static const uint8_t local_classes[TIER0_TEST_STACK_LOCALS] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint8_t local_flags[TIER0_TEST_STACK_LOCALS];
+    uint8_t kinds[128];
+    uint8_t classes[128];
+    uint64_t values[128];
+    // The rules: each break refused at its entry, then the valid stream.
+    static const Tier0TestEntry breaks[][3] = {
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 16 }, { BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_I64, 0 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 } },
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 16 }, { BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 16 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0 } },
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 16 }, { BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0 } },
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_I64, 0 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 } },
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 1 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0 } },
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0 }, { BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_I64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } },
+        { { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 8 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } },
+        { { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } },
+    };
+    for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(breaks); b += 1)
+    {
+        const Tier0Function function = tier0_test_stack_function(breaks[b], 3, kinds, classes, values, local_classes, local_flags, 0);
+        const Tier0Check check = tier0_validate(&function);
+        const bool valid = b + 1 == BUSTER_ARRAY_LENGTH(breaks);
+        tier0_test_expect(tally, valid ? check.error == TIER0_OK : check.error == TIER0_ERROR_INVALID && check.node == 1, "stack",
+                          "stream %u: tier0_validate says %s at %u (%s)", b, check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
+    }
+    // The depths: 14 integer values at once stop short of rbp's depth, and 15 reach it, which a frame pointer refuses (the
+    // stack's position saved first) where a function without one takes it. The last value is a DUP, which no add takes as
+    // its operand's home, so that every value takes its depth.
+    Arena arena = arena_reserve(1ull << 28);
+    for (uint32_t values_at_once = 14; values_at_once <= 15; values_at_once += 1)
+    {
+        for (uint32_t pointer = 0; pointer < 2; pointer += 1)
+        {
+            Tier0TestEntry entries[40];
+            uint32_t count = 0;
+            if (pointer != 0)
+            {
+                entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0 };
+                entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0 };
+            }
+            for (uint32_t k = 0; k + 1 < values_at_once; k += 1)
+            {
+                entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k % 3 };
+            }
+            entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0 };
+            for (uint32_t k = 1; k < values_at_once; k += 1)
+            {
+                entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 };
+            }
+            entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 };
+            const Tier0Function function = tier0_test_stack_function(entries, count, kinds, classes, values, local_classes, local_flags, 3);
+            const uint64_t mark = arena.length;
+            const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+            const Tier0Code vector = tier0_compile(&function, &arena);
+            const Tier0Error expected = pointer != 0 && values_at_once == 15 ? TIER0_ERROR_DEPTH : TIER0_OK;
+            tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == expected && vector.error == expected &&
+                                         (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)),
+                              "stack", "%u values at once %s a frame pointer: errors %d and %d, %d expected", values_at_once, pointer != 0 ? "with" : "without",
+                              scalar.error, vector.error, expected);
+            arena_pop_to(&arena, mark);
+        }
+    }
+    arena_release(&arena);
+    // The program, as a program of two functions without globals.
+    enum
+    {
+        callee_count = BUSTER_ARRAY_LENGTH(tier0_test_stack_callee),
+        entry_count = BUSTER_ARRAY_LENGTH(tier0_test_stack_entry),
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(tier0_test_stack_entry) == BUSTER_TIER0_TEST_STACK_END + 2, "the entry's end is its last two entries");
+    uint8_t program_kinds[callee_count + entry_count];
+    uint8_t program_classes[callee_count + entry_count];
+    uint64_t program_values[callee_count + entry_count];
+    uint8_t program_local_classes[8 + TIER0_TEST_STACK_LOCALS];
+    uint8_t program_local_flags[8 + TIER0_TEST_STACK_LOCALS] = { 0 };
+    uint32_t call_callees[1] = { 0 };
+    uint32_t call_first[1] = { 0 };
+    uint32_t call_argument_counts[1] = { 8 };
+    uint8_t call_indirect[1] = { 0 };
+    uint8_t argument_classes[8];
+    for (uint32_t e = 0; e < callee_count + entry_count; e += 1)
+    {
+        const Tier0TestEntry* entry = e < callee_count ? &tier0_test_stack_callee[e] : &tier0_test_stack_entry[e - callee_count];
+        program_kinds[e] = entry->kind;
+        program_classes[e] = entry->class;
+        program_values[e] = entry->value;
+    }
+    memset(program_local_classes, BUSTER_TYPED_CLASS_U64, sizeof(program_local_classes));
+    memset(argument_classes, BUSTER_TYPED_CLASS_U64, sizeof(argument_classes));
+    Tier0Program* program = calloc(1, sizeof(Tier0Program));
+    Tier0Functions* functions = calloc(1, sizeof(Tier0Functions));
+    Arena program_arena = arena_reserve(1ull << 30);
+    Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&program_arena, Tier0TestCode, 1);
+    uint8_t* code_bytes = BUSTER_ARENA_PUSH_ARRAY(&program_arena, uint8_t, BUSTER_TIER0_TEST_CODE_BYTES);
+    bool ok = tier0_test_expect(tally, program != 0 && functions != 0 && code != 0 && code_bytes != 0, "stack", "no memory");
+    if (ok)
+    {
+        program->kinds = program_kinds;
+        program->classes = program_classes;
+        program->values = program_values;
+        program->entry_count = callee_count + entry_count;
+        program->local_classes = program_local_classes;
+        program->local_flags = program_local_flags;
+        program->local_count = 8 + TIER0_TEST_STACK_LOCALS;
+        program->call_callees = call_callees;
+        program->call_first = call_first;
+        program->call_argument_counts = call_argument_counts;
+        program->call_indirect = call_indirect;
+        program->call_count = 1;
+        program->argument_classes = argument_classes;
+        program->argument_count = 8;
+        program->sink = UINT32_MAX;
+        program->function_count = 2;
+        program->functions[0] = (Tier0GeneratedFunction){ .first_entry = 0, .entry_count = callee_count, .first_local = 0, .local_count = 8, .parameter_count = 8,
+                                                          .result_class = BUSTER_TYPED_CLASS_U64 };
+        program->functions[1] = (Tier0GeneratedFunction){ .first_entry = callee_count, .entry_count = entry_count, .first_local = 8, .local_count = TIER0_TEST_STACK_LOCALS,
+                                                          .parameter_count = 3, .first_call = 0, .call_count = 1, .result_class = BUSTER_TYPED_CLASS_U64 };
+        code->code = code_bytes;
+        ok = tier0_test_expect(tally, tier0_program_functions(program, tables, &program_arena, functions), "stack", "no room for the signatures");
+        ok = ok && tier0_test_build(tally, functions, &program_arena, code, 0);
+    }
+    if (ok)
+    {
+        // The callee has no frame pointer, and the entry's prologue starts with push rbp; mov rbp, rsp.
+        const Tier0Code callee = tier0_compile(&functions->functions[0], &program_arena);
+        const Tier0Code entry = tier0_compile(&functions->functions[1], &program_arena);
+        const bool callee_plain = callee.error == TIER0_OK && !(callee.records[0].form == X86_FORM_PUSH_R64 && callee.records[0].rm == X86_REGISTER_RBP);
+        const bool entry_pointer = entry.error == TIER0_OK && entry.count >= 2 && entry.records[0].form == X86_FORM_PUSH_R64 &&
+                                   entry.records[0].rm == X86_REGISTER_RBP && entry.records[1].form == X86_FORM_MOV_RM64_R64 &&
+                                   entry.records[1].rm == X86_REGISTER_RBP && entry.records[1].reg == X86_REGISTER_RSP;
+        tier0_test_expect(tally, callee_plain && entry_pointer, "stack", "the frame pointer: the callee's %s, the entry's %s", callee_plain ? "none" : "there",
+                          entry_pointer ? "there" : "missing");
+        uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3];
+        for (uint32_t r = 0; r < BUSTER_TIER0_TEST_INPUTS; r += 1)
+        {
+            inputs[r][0] = BUSTER_TIER0_TEST_STACK_ITERATIONS + r;
+            inputs[r][1] = r;
+            inputs[r][2] = 0;
+        }
+        const Tier0TestData data = tier0_test_layout(program);
+        Tier0TestOutcome native[BUSTER_TIER0_TEST_INPUTS];
+        int status = 0;
+        const bool ran = tier0_test_run(program, code, &data, inputs, native, &status);
+        tier0_test_expect(tally, ran, "stack", "the program didn't exit normally (status %d, signal %d)", status, WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+        for (uint32_t r = 0; ran && r < BUSTER_TIER0_TEST_INPUTS; r += 1)
+        {
+            bool fault = false;
+            uint8_t globals[8];
+            const uint64_t interpreted = tier0_test_interpret(program, functions, &data, globals, inputs[r], &fault);
+            const uint64_t expected = tier0_test_stack_expected(inputs[r][0]);
+            tier0_test_expect(tally, !fault && interpreted == expected && native[r].result == expected, "stack",
+                              "input %u: %016" PRIx64 " natively, %016" PRIx64 " interpreted (%s), %016" PRIx64 " expected", r, native[r].result, interpreted,
+                              fault ? "a fault" : "no fault", expected);
+        }
+    }
+    arena_release(&program_arena);
+    free(functions);
+    free(program);
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -2414,9 +2984,12 @@ static int run_tier0_tests(int argc, char** argv)
         {
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
-                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true },
-                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
-                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
+                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
+                  .access = true },
+                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
+                  .access = true, .vlas = true },
+                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
+                  .access = true, .vlas = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             {
@@ -2449,6 +3022,13 @@ static int run_tier0_tests(int argc, char** argv)
             }
             {
                 Tier0TestTally tally = { 0, 0 };
+                tier0_test_stack(&tally, &tables);
+                tier0_test_report("stack", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
                 tier0_test_objects(&tally, seed);
                 tier0_test_report("objects", tally);
                 total.checks += tally.checks;
@@ -2465,6 +3045,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_variadic_calls(&tally, &tables);
                 tier0_test_report("variadic calls", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_access(&tally);
+                tier0_test_report("access", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

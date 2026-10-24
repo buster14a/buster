@@ -9,15 +9,18 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 
 **Done:**
 
-- **The lowered typed stream:** the backend contract defined here. #133's
-  [semantic expression stream](c-checker.md) now exists, but the producer of
-  these machine-class and executable control-flow entries remains to be built.
+- **The lowered typed stream:** the backend contract defined here, which #133's
+  producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)'s "Backend handoff") writes from checked C.
 - **Both paths:**
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
 - **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
 - **Indirect calls,** through `r11`.
 - **Block copies** (`COPY`) of up to 256 bytes, a struct's assignment.
+- **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
+  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer.
+- **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
+  function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -26,14 +29,17 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
+- **c-testsuite (#145):** 217 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+  and run right, with both paths' executables the same bytes and every record passing `x86_validate`
+  ([the c-testsuite guide](c-testsuite.md)). The other three wait on item 2 of #136's plan and on libm.
+
 **Waits for #133, #145 and #146:**
 
-- the c-testsuite programs;
 - the corpora and `sqlite3.c`;
 - `speedtest1`;
 - the whole compile's time against tcc's.
 
-Until then, generated programs (below) stand in for #133's streams and for #142's random programs.
+Until then, generated programs (below) stand in for #142's random programs.
 
 ## The typed stream (#133 → #136)
 
@@ -62,6 +68,8 @@ Beside them are three tables:
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
   `AbiCall`. A callee of 0 makes the call indirect: the stream pushes the address it calls (U64) before its
   arguments, and the `CALL` pops it after them.
+- **The symbols' access** (optional, see "Symbols outside the image" below): `symbol_access[s]`, how the code reaches
+  `SymbolId` s, for each of `symbol_count` symbols. Without it every symbol is direct.
 
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
 vectorized across the unit that way, and Tier 0 needs no type table.
@@ -80,6 +88,14 @@ table. The kinds are:
 - `CALL` and `DISCARD`;
 - `COPY`: `value` bytes, 1 to 256, from the address on top to the one under it, the ranges the same or apart (a
   struct's assignment). A front end copies more through `memcpy`, as clang -O0 does past 16 stores of 16 bytes.
+- the stack, for variable-length arrays, each U64 with no value:
+  - `ALLOCA` pops a byte count, rounds it up to 16, takes it from the stack and pushes the allocation's address, a
+    multiple of 16;
+  - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it.
+
+  A producer saves the position into a local before a block's first array, and restores it from there at the block's
+  end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
+  none: the epilogue releases the frame. That a restored position is an earlier save's is the producer's to keep.
 
 **The checker makes explicit** what C leaves implicit:
 
@@ -158,6 +174,41 @@ save area and below the overflow area. Run builds and tests only on
 the approved 9700X, each through its own shared lock. This description records
 the test contract; qualification results are reported with the exact revision.
 
+## Symbols outside the image
+
+`GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
+code reaches it (`BUSTER_TIER0_ACCESS_*`):
+
+| Access | For | Code |
+| --- | --- | --- |
+| `DIRECT` | a symbol in the image | `[rip + symbol]`, a `PC32` |
+| `GOT` | one that may be a shared library's | `mov r, [rip + slot]` (`LOAD_GOT`), then `[r]` |
+| `LOCAL_EXEC` | a thread-local of the image's | `fs:[offset]` (`TPOFF32`); its address `mov r, fs:[0]; add r, offset` |
+| `INITIAL_EXEC` | a thread-local that may be another's | `mov r, [rip + slot]` (`GOTTPOFF`), then `fs:[r]`; its address `add r, fs:[0]` |
+
+- **Why the GOT:** the direct path makes no copy relocations (#84), so a shared library's data, `stdout` among it, is
+  reached only through a GOT slot the loader fills: `GLOB_DAT`, or `TPOFF64` for a thread-local's offset. So is a
+  function's address that may be a shared library's, since a `PC32` to one is refused, as lld refuses it in a PIE. Calls
+  are unaffected: a call of a function outside the image goes through the linker's stub.
+- **Relaxation:** the slot's load is the `mov r64` that linkers rewrite. `executable.c`, GNU ld and lld turn a `LOAD_GOT`
+  into a `lea` where the symbol turns out to be in the image, and the system linkers turn a `GOTTPOFF` into local-exec in
+  an executable.
+- **The column is per unit:** one array serves every function. The producer (`check_program_emit`) fills it from what
+  the unit defines, as clang's `-fPIE` does: a symbol the unit doesn't define through the GOT, and a thread-local by
+  local-exec where the unit defines it and by initial-exec where it doesn't.
+- **How:** fusion keys an entry of a symbol that isn't direct by one of Tier 0's own kinds, past the stream's
+  (`BUSTER_TIER0_KIND_GOT`, `_LOCAL_EXEC` and `_INITIAL_EXEC`, four each, in the global kinds' order:
+  `tier0_access_kind`). Their templates load the slot into R0, the register free above the operand (beside a floating
+  one too), then make the access through it. The vector path finds a block's global entries by compares, reads their
+  symbols' accesses from the column (they are few, as the calls are), and keys each access's lanes by a `vpermb` of its
+  table; without the column it does nothing. A template's reference kind and field are in its summary (`fixup_kind`,
+  `fixup_field`), so a thread-local's address takes its `TPOFF32` in an immediate.
+- **No fusions:** these kinds take no fused local or constant, whose value would need a second free register. A constant
+  stored through the GOT could be an immediate, but its properties would be a row past the vector fusion's sixteen,
+  which every function's lookups would pay for.
+- **Validation:** `tier0_validate` refuses a global entry whose symbol is past the column, or whose access is past the
+  last.
+
 ## The output (contract 1 of #135)
 
 **Records:**
@@ -172,7 +223,8 @@ record index (ascending) and its target's; the function's end is the epilogue's 
 `branch_sizing_validate` accepts.
 
 **Symbolic fields** (`[rip + global]`, `call f`) are records with `BUSTER_X86_FORM_FIXUP` and a `LinkReference`:
-`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order. An indirect call is `call r11`, with none.
+`PC32` or `CALL`, or for a symbol outside the image `LOAD_GOT`, `TPOFF32` or `GOTTPOFF`, the target `SymbolId` and
+addend 0, in record order. An indirect call is `call r11`, with none.
 
 ## The design
 
@@ -217,8 +269,8 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
    reached, nor a template's fixed registers, nor anything if the function calls.
 3. Then they take the callee-saved registers, for a local referenced at least twice (a push and a pop).
 4. Floating locals take free XMM registers.
-5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (no frame
-   pointer), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
+5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (rbp-relative with
+   a frame pointer, below), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
    register, which the prologue loads from that slot. No home is a register a parameter arrives in, so the prologue's
    moves and loads never overwrite one another's sources.
 6. Objects come after the slots, in the locals' order:
@@ -233,6 +285,21 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
 
+**The frame pointer.** A function with any of the stack's kinds has one, which both paths derive from its entries in
+selection:
+
+- the prologue pushes rbp first and sets it to rsp, and rbp leaves the depth table (14 integer depths) and the homes;
+- an allocation moves rsp, so every slot, object and call's save is addressed from rbp (`Tier0Frame.base` and `bias`):
+  the homes' displacements less the frame's size and the pushes after rbp's;
+- a call's stack arguments still go at rsp: the outgoing area is rounded up to 16 and stays below the allocations, so
+  `ALLOCA` is `add r, 15; and r, -16; sub rsp, r; lea r, [rsp + outgoing]` (`mov` without an outgoing area). rsp
+  stays a multiple of 16, at every call too;
+- `STACK_SAVE` and `STACK_RESTORE` are a `mov` from rsp and to it;
+- the epilogue sets rsp back from rbp (`lea rsp, [rbp - 8 * pushes]`, or `mov rsp, rbp`), past whatever the body
+  allocated, before its pops and `pop rbp`.
+
+A function without them keeps the rsp-relative frame, record for record.
+
 **Templates.** A template is up to four records, one per (kind, class, variant). The variant says what the entry
 absorbed (`BUSTER_TIER0_VARIANT_*`); a home-dependent slot holds four templates, one per home case. A pointer
 addition's element size picks its own: `lea` for 1, 2, 4 and 8, `imul r, r, imm32` up to 2^31 − 1, and past that
@@ -244,7 +311,7 @@ the entry's 32-byte hole block:
 - B, the entry's own local's home, or a compare's first local's;
 - the registers at depth −2 to 0 of each stack.
 
-`tier0_initialize` builds 1,569 templates from the encoder's forms and compiles each into one cache line. A byte the
+`tier0_initialize` builds 1,951 templates from the encoder's forms and compiles each into one cache line. A byte the
 template fixes is that byte; a hole's is its index in the hole block. Expansion is copy and patch:
 
 1. one load of the line;
@@ -393,6 +460,23 @@ Before the programs, checks of their own:
     values below make of the result, which must come back right.
 
   Both paths must compile each alike, and each encoder's bytes run in a child.
+- **stack:**
+  - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
+    another class or with a value, and a restore of another class or with a value, and take a save restored.
+  - 14 integer values at once must compile with a frame pointer and without, and 15 only without (rbp, their last
+    depth, is the frame's), by both paths alike.
+  - a function of the test's own (`tier0_test_stack_entry`) allocates 64 KB and up 1,000 times in a loop, each in a
+    scope of its own: the position saved, the allocation's first and last words written, its address modulo 16 added
+    in, a call with stack arguments made (whose outgoing area mustn't overlap the allocation), the words read back and
+    the position restored. Without its restores it would take 64 MB of stack. Both paths must compile it alike, with
+    `push rbp` in its prologue, and it must run in a child on eight inputs with the interpreter's result and the
+    expected one.
+- **access:** `tier0_validate` must refuse a global entry whose symbol is past the access column, and an access past
+  the last, and take the last. Then GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant,
+  and GLOBAL_ADDRESS, of every class, by each access. Both paths must compile each alike to valid records with one
+  reference to the symbol, of the access's kind, in the displacement but for a thread-local's address of the image's
+  (an immediate), with an FS override exactly for a thread-local. A direct symbol's code must be the code without the
+  column, and only a direct symbol takes a stored constant as an immediate.
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
@@ -416,6 +500,17 @@ Before the programs, checks of their own:
     byte any store or copy puts wrong shows in the globals.
 
   A program without objects is the one the same seed gave before they existed;
+- with the `vlas` option (the shapes everything and larger), now and then a variable-length array of 2, 4 or 8
+  elements of a class, plus a generated value's low two bits: `T v[(e & 3) + n]`, its size kept in a local as
+  `sizeof v` and its address in another:
+  - its first n elements written, read, pointed into and folded into the globals at its scope's end;
+  - in a loop's construct, the stack's position saved before the construct's first array and restored at its end and
+    before every `break` and `continue` out of it, as a producer does; at the function's top, nothing, the return
+    releasing them;
+  - its size (`sizeof v`) and its address modulo 16 as values.
+
+  The interpreter allocates them from an area of its own, 16 bytes at a time, and checks that every restored position
+  is one saved since the frame began. A program without the option is the one the same seed gave before it;
 - with the `indirect` option (the shapes with calls), a third of the calls indirect: through locals that hold an
   earlier function's address (C calls through them), or through the function's address itself:
   - four functions in ten take an earlier function's type, so that a type has several functions;
@@ -424,6 +519,15 @@ Before the programs, checks of their own:
   - the interpreter calls the function an address names, once its tag and its type are checked against the call's (its
     result's class and each parameter's, apart from the generator's choice of candidates), and a call's work budget is
     its costliest candidate's.
+
+- with the `access` option (every shape but one function's), the symbols' access column: two globals in five direct,
+  one through the GOT, one a thread-local of the image's and one a thread-local through the GOT (`_Thread_local` in
+  C), and half the functions' addresses through the GOT. The interpreter is unchanged, since the access changes how a
+  symbol is reached and nothing it means. The native run gives every symbol a GOT slot (an address, or a thread-local's
+  offset from the thread pointer) in its data pages, then the thread-locals' block and the thread pointer at its end,
+  whose first 8 bytes hold its own address as the C library's thread control block does. Each run copies the
+  thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone, and copies
+  them back beside the other globals, whose bytes it compares with the interpreter's.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -435,7 +539,12 @@ dialect, `-fwrapv` (signed arithmetic wraps, as Tier 0's does) and `-fno-strict-
 floating parts' bits through integer pointers). These programs keep to what that defines: clang folds an out-of-range
 floating conversion of a constant its own way, so a floating value converts to an integer only from a short's value. A
 floating global's elements compare as their bytes, but any two NaNs are the same: C leaves a NaN's sign and payload to
-the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN.
+the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN. Tier 0's object defines the
+direct globals and the thread-locals of the image's (in `.tdata`), and a shared library generated beside it defines
+the ones Tier 0 reaches through the GOT, so that the executable's slots for them are the loader's to fill: `GLOB_DAT`,
+and `TPOFF64` for a thread-local's offset. The library is GNU as source, which `as` and `ld -shared` link in a few
+milliseconds a program, where `clang -shared` of the same data as C took tens: in the 9700X job's test step, `test-tier0
+--cross-check` took 5.8 s with clang's libraries and 4.6 s with these, against 4.2 s before it had any.
 
 **Robustness:**
 
@@ -491,6 +600,16 @@ the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` m
     - the rule left out: the operands check's nine refused streams taken;
     - the class compared with the entry's own, not the entry before's: 120 failed checks, the generated programs'
       streams refused among them.
+  - and on variable-length arrays, 300 programs per shape (on the cloud VM):
+    - `STACK_RESTORE` emitted as a move that leaves rsp: 1, the stack check's run, which overflows the stack;
+    - allocations rounded to 8, not 16: 7 (addresses modulo 16 that are 8);
+    - an allocation's address at rsp, over the outgoing area: 67 (calls' stack arguments written over it);
+    - the homes left rsp-relative with a frame pointer: 549;
+    - the epilogue releasing the frame by its size, not from rbp: 551.
+
+    And on the producer's control stream (`c_check_program.c`), checked by `test-checker`'s programs: no restore at
+    a block's end, none before a jump out of a block, or none before a `goto` back above an array's declaration. In
+    each case the programs whose arrays would then take 80 MB of stack fail, on both paths.
 - **Every stream source against the operands' rule:** a scratch build validated every function each compile path
   took, besides the validations the sources make, and printed every refusal. The sources were:
   - the generator's programs, with and without the cross-check;
@@ -569,12 +688,15 @@ path's 11.1.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - conversions between U64 and floating values;
   - aggregates passed and returned by value (the objects they live in and copies of up to 256 bytes are done);
-  - objects aligned past 16, which need a frame pointer;
-  - bit-fields;
+  - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
+  - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
+    as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
+    whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
   - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
-  - variable-length arrays, inline assembly, `setjmp` and atomics;
-  - `switch` (no kind yet: a compare sequence or a jump table);
-  - globals of shared libraries through the GOT (a front end's visibility decision).
+  - inline assembly, `setjmp` and atomics;
+  - `switch` (no kind yet: a compare sequence or a jump table).
+- **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
+  padded for it would take a block's at once, if real code shows them to cost.
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
   per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.
 - **The immediates' choice** costs about 7 cycles per entry: the application about 5 (its loads of the records more
@@ -587,10 +709,11 @@ path's 11.1.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
 - **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on
-  them; c-testsuite (#145); `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole
-  compile against tcc.
+  them; `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole compile against
+  tcc. c-testsuite (#145) runs.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
-  records, the fixed prologue and epilogue (`docs/unwind.md`).
+  records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
+  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp.
 
 ## Boundary audit #298
 

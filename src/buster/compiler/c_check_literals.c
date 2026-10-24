@@ -7,6 +7,8 @@
 // Character decoding receives the C23 mode because earlier standards forbid UCNs for most basic characters.
 
 #include <errno.h>
+#include <fenv.h>
+#include <math.h>
 #include <stdlib.h>
 
 typedef struct CheckLiteral CheckLiteral;
@@ -163,6 +165,38 @@ static CheckLiteral check_literal_integer(const uint8_t* bytes, uint32_t length)
     return result;
 }
 
+// A _Float16 constant's value (the f16 suffix), rounded to nearest with ties to even as clang rounds the spelling.
+// strtod's correctly rounded double decides, but where it lands on a midpoint between two _Float16 values it may have
+// rounded the spelling onto it: strtod rounded downward and upward then say on which side the spelling lies. Every
+// floating operation here is exact, so the rounding mode changes only strtod's results.
+static long double check_literal_half(const char* spelling, char** end)
+{
+    const double nearest = strtod(spelling, end);
+    double result = nearest;
+    if (isfinite(nearest) && nearest != 0)
+    {
+        // Steps of _Float16's precision at this magnitude: 2^-10 of its binade, and 2^-24 below the normals.
+        const int binade = ilogb(nearest) > -14 ? ilogb(nearest) : -14;
+        const double scaled = ldexp(nearest, 10 - binade);
+        const uint64_t steps = (uint64_t)scaled;
+        const double fraction = scaled - (double)steps;
+        bool up = fraction > 0.5 || (fraction == 0.5 && (steps & 1) != 0);
+        if (fraction == 0.5)
+        {
+            const int mode = fegetround();
+            fesetround(FE_DOWNWARD);
+            const double below = strtod(spelling, 0);
+            fesetround(FE_UPWARD);
+            const double above = strtod(spelling, 0);
+            fesetround(mode);
+            up = below != nearest ? false : above != nearest ? true : up;
+        }
+        result = ldexp((double)(steps + up), binade - 10);
+        result = result > 65504.0 ? INFINITY : result;
+    }
+    return result;
+}
+
 static CheckLiteral check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch)
 {
     const bool hex = length > 2 && bytes[0] == '0' && (bytes[1] | 32u) == 'x';
@@ -200,7 +234,13 @@ static CheckLiteral check_literal_number_plain(const uint8_t* bytes, uint32_t le
                 }
             }
             TypeId type = BUSTER_TYPE_DOUBLE;
-            if (written != 0 && (spelling[written - 1] == 'f' || spelling[written - 1] == 'F'))
+            if (written >= 3 && (spelling[written - 3] == 'f' || spelling[written - 3] == 'F') && spelling[written - 2] == '1' && spelling[written - 1] == '6')
+            {
+                // f16, _Float16's suffix in every C mode, as clang has it on x86-64.
+                type = BUSTER_TYPE_FLOAT16;
+                written -= 3;
+            }
+            else if (written != 0 && (spelling[written - 1] == 'f' || spelling[written - 1] == 'F'))
             {
                 type = BUSTER_TYPE_FLOAT;
                 written -= 1;
@@ -214,7 +254,11 @@ static CheckLiteral check_literal_number_plain(const uint8_t* bytes, uint32_t le
             char* end = spelling;
             errno = 0;
             long double value;
-            if (type == BUSTER_TYPE_FLOAT)
+            if (type == BUSTER_TYPE_FLOAT16)
+            {
+                value = check_literal_half(spelling, &end);
+            }
+            else if (type == BUSTER_TYPE_FLOAT)
             {
                 value = strtof(spelling, &end);
             }
@@ -251,6 +295,12 @@ static CheckLiteral check_literal_number(const uint8_t* bytes, uint32_t length, 
     while (suffix != 0)
     {
         const uint8_t c = bytes[suffix - 1] | 32u;
+        if (suffix >= 3 && (bytes[suffix - 3] | 32u) == 'f' && bytes[suffix - 2] == '1' && bytes[suffix - 1] == '6')
+        {
+            // f16 after the imaginary suffix (1.5if16), which clang takes as it takes 1.5f16i.
+            suffix -= 3;
+            continue;
+        }
         if (c == 'i' || c == 'j')
         {
             imaginary = suffix - 1;
