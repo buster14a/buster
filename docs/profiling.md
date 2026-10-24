@@ -68,7 +68,7 @@ The noise sets which comparison to use.
 
   ```sh
   ./build/compiler ab --rounds 5 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh ../mine \
-      -- time-runs --runs 21 --list parse -fsyntax-only file.c --list parse -fsyntax-only --parser-keywords file.c
+      -- time-runs --runs 21 --list parse -fsyntax-only file.c --list parse -fsyntax-only --scalar file.c
   ./build/compiler ab --rounds 5 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh ../main ../mine \
       -- time-runs --runs 21 --after-scalar 200 --list -fsyntax-only file.c
   ```

@@ -310,10 +310,6 @@ struct PPOptions
     bool no_guard_skip;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
     uint32_t location_limit;
-    // --parser-keywords: a successful run leaves the output's identifiers to the parser, whose input conversion gives
-    // the keywords their kinds in pp->output in the same pass as its columns (parse_translation_unit; #335's
-    // experiment). Only the drivers that parse the output set it; -E and assembly ignore it.
-    bool parser_keywords;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
@@ -1073,9 +1069,6 @@ struct Preprocessor
     PPOptions options;
     InternTable* table;
     bool vectorized;
-    // The output's identifiers wait for the parser's conversion to resolve its keywords (PPOptions.parser_keywords):
-    // until parse_translation_unit takes them, pp->output's keywords are still C_TOKEN_RAW_IDENTIFIER.
-    bool keywords_pending;
     uint32_t refine_flags;
     // The prefixed literals the language mode doesn't have, by kind (pp_split_kinds).
     uint64_t split_kinds;
@@ -13984,20 +13977,14 @@ static bool pp_run_prelude(Preprocessor* pp)
     return result;
 }
 
-// Runs the main file, then gives the output's keywords their kinds, or on success with PPOptions.parser_keywords leaves
-// them to the parser's conversion (keywords_pending). Returns false if there were errors.
+// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
 static bool pp_run_main(Preprocessor* pp, uint32_t file)
 {
     pp->main_file = file;
     pp->include_depth = 0;
     pp_run_file(pp, file);
-    const bool result = pp->errors == 0 && !pp->fatal;
-    pp->keywords_pending = result && pp->options.parser_keywords && !pp->options.assembly;
-    if (!pp->keywords_pending)
-    {
-        pp_resolve_keywords(pp);
-    }
-    return result;
+    pp_resolve_keywords(pp);
+    return pp->errors == 0 && !pp->fatal;
 }
 
 // Preprocesses the main file: the prelude (pp_run_prelude), then the file. The output is pp->output, with keywords'
@@ -15623,10 +15610,6 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->clang_features = true;
         }
-        else if (strcmp(argument, "--parser-keywords") == 0)
-        {
-            options->parser_keywords = true;
-        }
         else if (strcmp(argument, "-ffreestanding") == 0)
         {
             options->freestanding = true;
@@ -15798,8 +15781,6 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     bool markers = true;
     const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
-    // -E prints the output itself: its keywords are resolved by the run, never left to a parser.
-    options.parser_keywords = false;
     if (arena.base == 0)
     {
         fprintf(stderr, "fatal error: can't reserve memory\n");
@@ -15963,7 +15944,7 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
         const bool directory = search && (strncmp(argument, "-I", 2) == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 ||
                                           strcmp(argument, "-idirafter") == 0);
         if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0 && strcmp(argument, "--scalar") != 0 &&
-            strcmp(argument, "--clang-features") != 0 && strcmp(argument, "--parser-keywords") != 0)
+            strcmp(argument, "--clang-features") != 0)
         {
             result[n] = arguments[i];
             n += 1;

@@ -817,6 +817,8 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          ./build/compiler test-parser --clang tests/parser-handoff/pragma-heavy.c
+          taskset -c "$cpu" ./build/compiler benchmark-parser --passes 1 --only vector tests/parser-handoff/pragma-heavy.c
 
       - name: Benchmark selective lowering on synthetic graphs
         # Includes independent result checks. These unconditioned single-operation samples are informational;
@@ -997,63 +999,3 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
-
-  # Temporary #335 qualification, isolated from the ordinary required test job's ten-minute budget.
-  # Remove this job with the experimental handoff after recording the measured retain/reject decision.
-  handoff_335:
-    name: Qualify the PP/parser handoff on Ryzen 7 9700X
-    if: ${{ github.repository_id == '1421805693' && github.event_name == 'pull_request' && github.event.pull_request.number == 375 && github.event.pull_request.head.repo.id == 1421805693 }}
-    runs-on:
-      group: buster-9700x-service-dispatch
-      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Verify the approved host and CPU 2
-        run: |
-          test "$(uname -s)" = Linux
-          test "$(uname -m)" = x86_64
-          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          taskset -c 2 true
-          clang --version
-
-      - name: Check out the exact triggering candidate
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Build the uninstrumented compiler
-        run: ./build.sh
-
-      - name: Check out the reviewed handoff campaign
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: buster14a/buster-performance
-          ref: 09ca55a91db3cdb4842dfe286fb179a2a6ad1db2
-          path: build/handoff-335-evidence
-          sparse-checkout: docs/measurements/handoff-335-2026-10-24/ci
-          persist-credentials: false
-
-      - name: Qualify whole drivers, source oracles and allocation traffic
-        env:
-          EXPECTED_PERFORMANCE_COMMIT: 09ca55a91db3cdb4842dfe286fb179a2a6ad1db2
-        run: |
-          set -euo pipefail
-          test "$(git -C build/handoff-335-evidence rev-parse HEAD)" = "$EXPECTED_PERFORMANCE_COMMIT"
-          # The approved runner hook already holds the shared host lock for this one bounded job.
-          # The pinned recipe must not nest exclusive.sh or modify compiler source.
-          bash build/handoff-335-evidence/docs/measurements/handoff-335-2026-10-24/ci/run.sh "$RUNNER_TEMP/handoff-335-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-      - name: Preserve exact-head handoff campaign evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: handoff-335-${{ github.sha }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/handoff-335-${{ github.run_id }}-${{ github.run_attempt }}
-            !${{ runner.temp }}/handoff-335-${{ github.run_id }}-${{ github.run_attempt }}/qualify
-          if-no-files-found: warn
-          retention-days: 30

@@ -1668,10 +1668,6 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
     return same ? 0 : 1;
 }
 
-// One file through both paths: preprocessed once, then parsed by the vector path and by the scalar parser alone, which
-// must read the same tokens and give the same outcome, and on a valid unit the same tree, with the tree's invariants
-// and postorders; then each kernel against its twin. *outcome gets the vector path's outcome. Returns the number of
-// failures.
 // ---------------------------------------------------------------------------------------------------------------------
 // The handoff (#335)
 
@@ -1683,9 +1679,16 @@ static uint8_t* parse_test_handoff_column(uint64_t bytes)
     const uint64_t room = (bytes + page - 1) & ~(page - 1);
     uint8_t* mapping = mmap(0, room + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     uint8_t* result = 0;
-    if (mapping != MAP_FAILED && (room == 0 || mprotect(mapping, room, PROT_READ | PROT_WRITE) == 0))
+    if (mapping != MAP_FAILED)
     {
-        result = mapping + room - bytes;
+        if (room == 0 || mprotect(mapping, room, PROT_READ | PROT_WRITE) == 0)
+        {
+            result = mapping + room - bytes;
+        }
+        else
+        {
+            munmap(mapping, room + page);
+        }
     }
     return result;
 }
@@ -1848,10 +1851,9 @@ static bool parse_test_handoff_same(const ParseTokens* got, const ParseTokens* e
 
 // The handoff on generated output streams: every count from 0 to 200 and some to 5,000, with a special token ('#'
 // inside a line, a pragma's '#', a '#' with no PRAGMA_END, or `::`) forced at each of the blocks' edges (0, 62 to 66,
-// 126 to 130, 190 to 194), each stream's columns ending at a PROT_NONE page. Four paths, each from the stream as the
-// preprocessor left it: the keyword pass's vector path and the conversion's, their twins, the fused conversion
-// (PPOptions.parser_keywords) and its twin. Each must give the oracle's resolved kinds and parser tokens, with the
-// padding; a read or a write past a column faults.
+// 126 to 130, 190 to 194), each stream's columns ending at a PROT_NONE page. Both paths start from the stream as the
+// preprocessor left it: the keyword pass's vector path and the conversion's, and their scalar twins. Each must give
+// the oracle's resolved kinds and parser tokens, with the padding; a read or a write past an input column faults.
 static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
 {
     uint32_t failures = 0;
@@ -1868,6 +1870,7 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
     const uint32_t edges[] = { 0, 62, 63, 64, 65, 66, 126, 127, 128, 129, 130, 190, 191, 192, 193, 194, BUSTER_PARSE_NONE };
     uint64_t state = seed ^ 0x335335335ull;
     const bool ready = parse_initialize(&parser, &options, language);
+    failures += !ready;
     for (uint32_t count = 0; ready && count <= 5000 && failures < 8; count += count < 200 ? 1 : 397)
     {
         const uint64_t capacity = 2 * (uint64_t)count + 64;
@@ -1905,10 +1908,16 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
                 parse_test_handoff_stream(&pp.output, count, &state, edges[e], special);
                 memcpy(original, kinds, count);
                 parse_test_handoff_oracle(&pp.output, language, resolved, &expected);
-                for (uint32_t path = 0; path < 4; path += 1)
+                for (uint32_t path = 0; path < 2; path += 1)
                 {
                     memcpy(kinds, original, count);
-                    memset(got.kinds - BUSTER_PARSE_TOKEN_PADDING, 0x5a, capacity + 2 * BUSTER_PARSE_TOKEN_PADDING);
+                    const uint64_t padded = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
+                    memset(got.kinds - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded);
+                    memset(got.names - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded * sizeof(*got.names));
+                    memset(got.sources - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded * sizeof(*got.sources));
+                    memset(got.flags - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded);
+                    memset(got.pragma_sources, 0x5a, ((uint64_t)count + 1) * sizeof(*got.pragma_sources));
+                    memset(got.pragma_positions, 0x5a, ((uint64_t)count + 1) * sizeof(*got.pragma_positions));
                     switch (path)
                     {
                         case 0:
@@ -1919,13 +1928,11 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
                             pp_resolve_keywords_scalar(&pp);
                             parse_tokens_from_output_scalar(&pp.output, &got);
                             break;
-                        case 2: parse_tokens_from_output_fused(&pp.output, pp.keyword_kinds, &got); break;
-                        default: parse_tokens_from_output_fused_scalar(&pp.output, pp.keyword_kinds, &got); break;
                     }
                     const uint32_t kind = parse_test_first_byte(kinds, resolved, count);
                     if (kind != BUSTER_PARSE_NONE || !parse_test_handoff_same(&got, &expected))
                     {
-                        static const char* const names[] = { "keyword pass and conversion", "their twins", "fused conversion", "fused twin" };
+                        static const char* const names[] = { "keyword pass and conversion", "their twins" };
                         parse_test_report("handoff: %s differs from the oracle on %u tokens (special %u at %u), first resolved kind at %u\n", names[path], count, special,
                                           edges[e], kind);
                         failures += 1;
@@ -1948,83 +1955,14 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
     }
     parse_release(&parser);
     memset(&pp, 0, sizeof(pp));
-    printf("handoff: %llu streams by 4 paths against the oracle, %u failures\n", (unsigned long long)cases / 4, failures);
+    printf("handoff: %llu streams by 2 paths against the oracle, %u failures\n", (unsigned long long)cases / 2, failures);
     return failures;
 }
 
-// Whether two parsers of one unit agree on everything the drivers read: errors, tokens, diagnostics and, for a unit
-// without errors, the tree. Returns the number of differences, reported under `label`.
-static uint32_t parse_test_same_parse(const Parser* a, const Parser* b, const char* path, const char* label)
-{
-    uint32_t result = 0;
-    const uint32_t token = parse_test_compare_tokens(&a->tokens, &b->tokens);
-    bool same = a->errors == b->errors && a->fatal == b->fatal && a->diagnostic_count == b->diagnostic_count && token == BUSTER_PARSE_NONE;
-    for (uint32_t d = 0; same && d < a->diagnostic_count; d += 1)
-    {
-        const ParseDiagnostic* x = &a->diagnostics[d];
-        const ParseDiagnostic* y = &b->diagnostics[d];
-        same = x->token == y->token && x->argument == y->argument && x->message == y->message && x->place == y->place && x->error == y->error;
-    }
-    if (same && a->errors == 0)
-    {
-        const uint64_t count = a->tokens.count;
-        same = memcmp(a->tree.roles, b->tree.roles, count) == 0 && memcmp(a->tree.parents, b->tree.parents, count * sizeof(uint32_t)) == 0 &&
-               memcmp(a->tree.depths, b->tree.depths, count * sizeof(uint32_t)) == 0;
-    }
-    if (!same)
-    {
-        parse_test_report("%s: %s differs from the plain handoff (first token %u)\n", path, label, token);
-        result += 1;
-    }
-    return result;
-}
-
-// #335's fused handoff on one unit: the file preprocessed again with PPOptions.parser_keywords, which must leave its
-// keywords pending, then parsed by the vector path and, from another run, by the scalar parser through the fused
-// conversion and its twin. Each must parse as `vector` and `scalar` (the plain handoff of `plain`'s output) did, and
-// leave the output's kinds as `plain`'s keyword pass left them.
-static uint32_t parse_test_fused(const char* path, const PPOptions* options, const Parser* vector, const Parser* scalar, const Preprocessor* plain)
-{
-    uint32_t failures = 0;
-    static InternTable table;
-    static Preprocessor pp;
-    static Parser fused;
-    PPOptions requested = *options;
-    requested.parser_keywords = true;
-    for (uint32_t path_kind = 0; path_kind < 2; path_kind += 1)
-    {
-        const ParseOptions parse_options = { .scalar = path_kind == 1 };
-        if (intern_initialize(&table) && pp_initialize(&pp, &requested, &table) && parse_initialize(&fused, &parse_options, options->language))
-        {
-            const bool ran = pp_run(&pp, path);
-            if (!ran || !pp.keywords_pending || pp.output.count != plain->output.count)
-            {
-                parse_test_report("%s: the fused run didn't leave the output's keywords to the parser (%u tokens, plain %u)\n", path, pp.output.count, plain->output.count);
-                failures += 1;
-            }
-            else
-            {
-                parse_translation_unit(&fused, &pp);
-                const uint32_t kinds = parse_test_first_byte(pp.output.kinds, plain->output.kinds, pp.output.count);
-                if (pp.keywords_pending || kinds != BUSTER_PARSE_NONE)
-                {
-                    parse_test_report("%s: the fused conversion left the output's kinds otherwise than the keyword pass, first at output token %u\n", path, kinds);
-                    failures += 1;
-                }
-                failures += parse_test_same_parse(&fused, path_kind == 1 ? scalar : vector, path, path_kind == 1 ? "the fused scalar twin" : "the fused vector path");
-            }
-        }
-        else
-        {
-            failures += 1;
-        }
-        parse_release(&fused);
-        pp_release(&pp);
-        intern_release(&table);
-    }
-    return failures;
-}
-
+// One file through both paths: preprocessed once, then parsed by the vector path and by the scalar parser alone, which
+// must read the same tokens and give the same outcome, and on a valid unit the same tree, with the tree's invariants
+// and postorders; then each kernel against its twin. *outcome gets the vector path's outcome. Returns the number of
+// failures.
 static uint32_t parse_test_check_file(const char* path, const PPOptions* options, ParseTestOutcome* outcome, ParseTestKernelTally* tally)
 {
     uint32_t failures = 0;
@@ -2066,7 +2004,6 @@ static uint32_t parse_test_check_file(const char* path, const PPOptions* options
                 }
                 failures += parse_test_check_kernels(&vector, &scalar, &pp, path, tally);
             }
-            failures += parse_test_fused(path, options, &vector, &scalar, &pp);
         }
         parse_release(&scalar);
         parse_release(&vector);
@@ -2943,10 +2880,6 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--bogus", 1, "unknown argument: --bogus\nusage: compiler [-fsyntax-only] ", true },
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-gnu-keywords", 0, "", false },
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
-    // #335's fused handoff: the parser's conversion resolves the keywords, and the preprocessor's failures still do.
-    { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--parser-keywords", 0, "", false },
-    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--parser-keywords", 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#error stop\nint x\n", "--parser-keywords", 1, "%s:1:2: error: stop\n", false },
 };
 
 // Whether a run of case `c` did what it must.
@@ -3133,10 +3066,6 @@ static uint32_t parse_test_driver(const char* directory)
         char* invalid[] = { paths[2] };
         failures += parse_test_driver_limits(valid, 1, capture, shared, "a valid file");
         failures += parse_test_driver_limits(invalid, 1, capture, shared, "an invalid file");
-        char* fused_valid[] = { "--parser-keywords", paths[0] };
-        char* fused_invalid[] = { "--parser-keywords", paths[2] };
-        failures += parse_test_driver_limits(fused_valid, 2, capture, shared, "a valid file with --parser-keywords");
-        failures += parse_test_driver_limits(fused_invalid, 2, capture, shared, "an invalid file with --parser-keywords");
     }
     if (shared != MAP_FAILED)
     {
