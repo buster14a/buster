@@ -711,8 +711,11 @@ designs and the compilers already built this way.
   explicit postorder operand graph either in source order or in stable
   dependency levels, with scalar barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
-  `c_check_binding.c` resolves its source events through the batch or independent
-  scalar kernel. `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
+  `c_check_binding.c` publishes each use's retained answer from those events
+  directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
+  [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
+  including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
+  with each handoff ([the binding handoff](docs/c-check-bindings.md), #336). `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
