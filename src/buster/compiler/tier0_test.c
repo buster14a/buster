@@ -23,7 +23,9 @@
 #include <inttypes.h>
 
 #include <unistd.h>
+#include <asm/prctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -68,25 +70,40 @@ static void tier0_test_report(const char* check, Tier0TestTally tally)
 // The interpreter
 
 // The globals' memory: each global at an offset (8-aligned), as the loader lays them out, so that the interpreter and
-// the native run hash the same bytes.
+// the native run hash the same bytes. The thread-locals (the `access` option's) have a place in the TLS block too, where
+// the native run reaches them: each at tls_offsets[g] (8-aligned) in a block of tls_size bytes, a multiple of 64, which
+// the thread pointer ends.
 typedef struct Tier0TestData Tier0TestData;
 struct Tier0TestData
 {
     uint32_t offsets[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
     uint32_t size;
+    uint32_t tls_offsets[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
+    uint32_t tls_size;
 };
+
+// Whether global g is a thread-local: reached by one of the TLS accesses.
+static bool tier0_test_thread_local(const Tier0Program* program, uint32_t g)
+{
+    return program->global_access[g] == BUSTER_TIER0_ACCESS_LOCAL_EXEC || program->global_access[g] == BUSTER_TIER0_ACCESS_INITIAL_EXEC;
+}
 
 static Tier0TestData tier0_test_layout(const Tier0Program* program)
 {
     Tier0TestData data;
     memset(&data, 0, sizeof(data));
     uint32_t offset = 0;
+    uint32_t tls_offset = 0;
     for (uint32_t g = 0; g < program->global_count; g += 1)
     {
+        const uint32_t bytes = (tier0_class_bytes(program->global_classes[g]) * program->global_elements[g] + 7) & ~7u;
         data.offsets[g] = offset;
-        offset += (tier0_class_bytes(program->global_classes[g]) * program->global_elements[g] + 7) & ~7u;
+        offset += bytes;
+        data.tls_offsets[g] = tls_offset;
+        tls_offset += tier0_test_thread_local(program, g) ? bytes : 0;
     }
     data.size = offset;
+    data.tls_size = (tls_offset + 63) & ~63u;
     return data;
 }
 
@@ -567,7 +584,7 @@ static uint64_t tier0_test_hash(const uint8_t* bytes, uint64_t length)
 #define BUSTER_TIER0_TEST_FIXUPS (1u << 16)
 
 // A program's machine code (each function at its offset, 16-aligned) and its fixups: each field's offset in the code,
-// its instruction's end and its target symbol.
+// its instruction's end, its target symbol and its kind (BUSTER_LINK_FIXUP_*).
 typedef struct Tier0TestCode Tier0TestCode;
 struct Tier0TestCode
 {
@@ -578,6 +595,7 @@ struct Tier0TestCode
     uint32_t fields[BUSTER_TIER0_TEST_FIXUPS];
     uint32_t ends[BUSTER_TIER0_TEST_FIXUPS];
     SymbolId targets[BUSTER_TIER0_TEST_FIXUPS];
+    uint8_t kinds[BUSTER_TIER0_TEST_FIXUPS];
     uint32_t fixup_count;
     uint64_t records;
     uint64_t entries;
@@ -658,6 +676,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
                     code->fields[code->fixup_count] = start + field;
                     code->ends[code->fixup_count] = start + end;
                     code->targets[code->fixup_count] = reference->target;
+                    code->kinds[code->fixup_count] = reference->kind;
                     code->fixup_count += 1;
                 }
                 code->offsets[f] = start;
@@ -705,11 +724,22 @@ static void tier0_test_inputs(uint64_t seed, uint64_t inputs[BUSTER_TIER0_TEST_I
 // Loads the code and the globals into fresh pages, patches the fixups, and runs the entry on every input in a child
 // process, whose outcomes come back through shared memory. Returns false, with `status` the child's, if it didn't
 // exit normally.
+//
+// The data pages hold the globals, then a GOT slot per SymbolId (a global's or a function's address, or a thread-local's
+// offset from the thread pointer), then the thread-locals' block and the thread pointer at its end, whose first 8 bytes
+// hold its own address, as the C library's thread control block does (what fs:[0] reads). Each run copies the
+// thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone (nothing but
+// the program's code runs while it is the block's), and copies them back beside the other globals, whose bytes it
+// hashes as the interpreter's.
 static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* code, const Tier0TestData* data, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3],
                            Tier0TestOutcome* outcomes, int* status)
 {
     const uint64_t code_pages = ((uint64_t)code->size + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
-    const uint64_t data_pages = ((uint64_t)data->size + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
+    const uint32_t symbols = program->global_count + program->function_count + 1;
+    const uint64_t got_offset = ((uint64_t)data->size + 63) & ~63ull;
+    const uint64_t tls_offset = (got_offset + 8ull * symbols + 63) & ~63ull;
+    const uint64_t data_bytes = tls_offset + data->tls_size + 64;
+    const uint64_t data_pages = (data_bytes + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
     Tier0TestOutcome* shared = mmap(0, sizeof(Tier0TestOutcome) * BUSTER_TIER0_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     bool result = shared != MAP_FAILED;
     const pid_t child = result ? fork() : -1;
@@ -724,17 +754,45 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
             _exit(3);
         }
         uint8_t* data_base = region + code_pages;
+        uint8_t* got = data_base + got_offset;
+        uint8_t* tls = data_base + tls_offset;
+        uint8_t* thread_pointer = tls + data->tls_size;
+        const uint64_t self = (uint64_t)(uintptr_t)thread_pointer;
+        memcpy(thread_pointer, &self, sizeof(self));
+        // Each symbol's address, a thread-local's in the block, and its slot's value.
+        for (SymbolId s = 1; s < symbols; s += 1)
+        {
+            const bool global = s <= program->global_count;
+            const bool thread_local = global && tier0_test_thread_local(program, s - 1);
+            const uint8_t* address = !global ? region + code->offsets[s - 1 - program->global_count] : thread_local ? tls + data->tls_offsets[s - 1] : data_base + data->offsets[s - 1];
+            const uint64_t slot = thread_local ? (uint64_t)(address - thread_pointer) : (uint64_t)(uintptr_t)address;
+            memcpy(got + 8ull * s, &slot, sizeof(slot));
+        }
         memcpy(region, code->code, code->size);
         for (uint32_t x = 0; x < code->fixup_count; x += 1)
         {
             const SymbolId target = code->targets[x];
-            const uint8_t* address = target <= program->global_count ? data_base + data->offsets[target - 1] : region + code->offsets[target - program->global_count - 1];
-            const int32_t displacement = (int32_t)(address - (region + code->ends[x]));
-            memcpy(region + code->fields[x], &displacement, sizeof(displacement));
+            const uint8_t kind = code->kinds[x];
+            uint64_t slot = 0;
+            memcpy(&slot, got + 8ull * target, sizeof(slot));
+            const bool through_slot = kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
+            const bool thread_local = target <= program->global_count && tier0_test_thread_local(program, target - 1);
+            const uint8_t* address = through_slot ? got + 8ull * target
+                                     : target <= program->global_count ? (thread_local ? tls + data->tls_offsets[target - 1] : data_base + data->offsets[target - 1])
+                                                                       : region + code->offsets[target - program->global_count - 1];
+            // A TPOFF32 is the thread-local's offset from the thread pointer (its slot's value); the others are
+            // measured from the instruction's end.
+            const int32_t value = kind == BUSTER_LINK_FIXUP_TPOFF32 ? (int32_t)slot : (int32_t)(address - (region + code->ends[x]));
+            memcpy(region + code->fields[x], &value, sizeof(value));
         }
         if (mprotect(region, code_pages, PROT_READ | PROT_EXEC) != 0)
         {
             _exit(4);
+        }
+        unsigned long saved_fs = 0;
+        if (data->tls_size != 0 && syscall(SYS_arch_prctl, ARCH_GET_FS, &saved_fs) != 0)
+        {
+            _exit(5);
         }
         typedef uint64_t (*Tier0TestEntry)(uint64_t, uint64_t, uint64_t);
         Tier0TestEntry entry = 0;
@@ -743,7 +801,26 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_INPUTS; r += 1)
         {
             tier0_test_initial(program, data, data_base);
-            shared[r].result = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
+            for (uint32_t g = 0; g < program->global_count; g += 1)
+            {
+                const uint32_t bytes = tier0_class_bytes(program->global_classes[g]) * program->global_elements[g];
+                memcpy(tls + data->tls_offsets[g], data_base + data->offsets[g], tier0_test_thread_local(program, g) ? bytes : 0);
+            }
+            if (data->tls_size != 0)
+            {
+                syscall(SYS_arch_prctl, ARCH_SET_FS, self);
+            }
+            const uint64_t value = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
+            if (data->tls_size != 0)
+            {
+                syscall(SYS_arch_prctl, ARCH_SET_FS, saved_fs);
+            }
+            for (uint32_t g = 0; g < program->global_count; g += 1)
+            {
+                const uint32_t bytes = tier0_class_bytes(program->global_classes[g]) * program->global_elements[g];
+                memcpy(data_base + data->offsets[g], tls + data->tls_offsets[g], tier0_test_thread_local(program, g) ? bytes : 0);
+            }
+            shared[r].result = value;
             shared[r].globals = tier0_test_hash(data_base, data->size);
         }
         _exit(0);
@@ -829,10 +906,19 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
 // ---------------------------------------------------------------------------------------------------------------------
 // The cross-check
 
-// Tier 0's code of a program as an ELF object: a TEXT atom per function and a DATA atom per global (its first values),
-// named t0_f<k>, t0_entry and t0_g<k> (symbols in the streams' order: the globals, then the functions), with a fixup
-// per symbolic field: CALL for a call, PC32 for a global's address or value, each addend the field's distance from its
-// instruction's end taken off, as link_add_code_fixups makes them.
+// Whether global g is defined in Tier 0's object of the cross-check: a direct one or a thread-local of the image's. The
+// others, reached through the GOT, are the shared library's (tier0_test_library).
+static bool tier0_test_defined(const Tier0Program* program, uint32_t g)
+{
+    return program->global_access[g] == BUSTER_TIER0_ACCESS_DIRECT || program->global_access[g] == BUSTER_TIER0_ACCESS_LOCAL_EXEC;
+}
+
+// Tier 0's code of a program as an ELF object: a TEXT atom per function and a DATA atom per global (its first values;
+// TDATA for a thread-local) that the object defines (tier0_test_defined; the others are undefined symbols), named t0_f<k>,
+// t0_entry and t0_g<k> (symbols in the streams' order: the globals, then the functions), with a fixup per symbolic field
+// of the code's kind (CALL for a call, PC32 for a global's address or value, and the GOT's and TLS's kinds), each addend
+// the field's distance from its instruction's end taken off for a kind measured from the field, as link_add_code_fixups
+// makes them.
 static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* code, const char* path)
 {
     const uint32_t globals = program->global_count;
@@ -855,8 +941,9 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
     {
         char name[32];
         const int length = snprintf(name, sizeof(name), "t0_g%u", g);
-        result = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
-                                 BUSTER_LINK_SOURCE_PROGRAM) == g + 1;
+        const uint8_t type = tier0_test_thread_local(program, g) ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+        result = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, type | BUSTER_LINK_SYMBOL_GLOBAL,
+                                 tier0_test_defined(program, g) ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == g + 1;
     }
     for (uint32_t f = 0; result && f < functions; f += 1)
     {
@@ -881,8 +968,8 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
             while (result && fixup < code->fixup_count && code->fields[fixup] < start + length)
             {
                 const SymbolId target = code->targets[fixup];
-                const uint8_t kind = target > globals ? BUSTER_LINK_FIXUP_CALL : BUSTER_LINK_FIXUP_PC32;
-                const int64_t addend = -(int64_t)(code->ends[fixup] - code->fields[fixup]);
+                const uint8_t kind = code->kinds[fixup];
+                const int64_t addend = link_fixup_kinds[kind].pc_relative ? -(int64_t)(code->ends[fixup] - code->fields[fixup]) : 0;
                 // The field's bytes are the fixup's, zero as GNU as writes them.
                 memset(atom_bytes + (code->fields[fixup] - start), 0, 4);
                 result = link_add_fixup(&link, atom, code->fields[fixup] - start, kind, target, addend) != 0;
@@ -894,15 +981,16 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
     {
         const uint32_t class_bytes = tier0_class_bytes(program->global_classes[g]);
         const uint32_t size = class_bytes * program->global_elements[g];
-        uint8_t* atom_bytes = arena_push(&bytes, size, 8);
-        result = atom_bytes != 0;
-        if (result)
+        uint8_t* atom_bytes = tier0_test_defined(program, g) ? arena_push(&bytes, size, 8) : 0;
+        result = atom_bytes != 0 || !tier0_test_defined(program, g);
+        if (atom_bytes != 0)
         {
             for (uint32_t e = 0; e < program->global_elements[g]; e += 1)
             {
                 memcpy(atom_bytes + e * class_bytes, &program->global_values[program->global_first_value[g] + e], class_bytes);
             }
-            const AtomId atom = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, size, atom_bytes, 0);
+            const uint8_t class = tier0_test_thread_local(program, g) ? BUSTER_LINK_CLASS_TDATA : BUSTER_LINK_CLASS_DATA;
+            const AtomId atom = link_add_atom(&link, class, 3, size, atom_bytes, 0);
             result = atom != 0 && link_define_symbol(&link, g + 1, atom, 0, size);
         }
     }
@@ -938,8 +1026,9 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
         {
             const char* type = tier0_c_type(program->global_classes[g]);
             const char* array = program->global_elements[g] != 1 ? "[16]" : "";
-            fprintf(file, "extern %s c_g%u%s;\nextern %s t0_g%u%s;\nstatic unsigned char c_s%u[sizeof c_g%u], t0_s%u[sizeof t0_g%u];\n", type, g, array, type, g, array,
-                    g, g, g, g);
+            const char* thread_local = tier0_test_thread_local(program, g) ? "_Thread_local " : "";
+            fprintf(file, "extern %s%s c_g%u%s;\nextern %s%s t0_g%u%s;\nstatic unsigned char c_s%u[sizeof c_g%u], t0_s%u[sizeof t0_g%u];\n", thread_local, type, g,
+                    array, thread_local, type, g, array, g, g, g, g);
         }
         fprintf(file, "static void reset(void)\n{\n");
         for (uint32_t g = 0; g < program->global_count; g += 1)
@@ -988,6 +1077,36 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
         fprintf(file, "                (void)(side == 0 ? c_entry : t0_entry)(inputs[r][0], inputs[r][1], inputs[r][2]);\n            }\n        }\n");
         fprintf(file, "        times[side] = now() - start;\n    }\n    printf(\"time %%lld %%lld\\n\", times[0], times[1]);\n    printf(failures == 0 ? \"OK\\n\" : \"FAILED\\n\");\n");
         fprintf(file, "    return failures == 0 ? 0 : 1;\n}\n");
+        result = fclose(file) == 0;
+    }
+    return result;
+}
+
+// The shared library of the globals Tier 0's object leaves undefined (tier0_test_defined), those it reaches through the
+// GOT: each its first values' bytes, a thread-local _Thread_local, so that the executable's GOT slots are the loader's to
+// fill (GLOB_DAT, or TPOFF64 for a thread-local's offset), as a shared library's data is.
+static bool tier0_test_library(const Tier0Program* program, const char* path)
+{
+    FILE* file = fopen(path, "w");
+    bool result = file != 0;
+    if (result)
+    {
+        fprintf(file, "int t0_library;\n");
+        for (uint32_t g = 0; g < program->global_count; g += 1)
+        {
+            const uint32_t class_bytes = tier0_class_bytes(program->global_classes[g]);
+            const uint32_t size = class_bytes * program->global_elements[g];
+            if (!tier0_test_defined(program, g))
+            {
+                fprintf(file, "%sunsigned char t0_g%u[%u] __attribute__((aligned(8))) = {", tier0_test_thread_local(program, g) ? "_Thread_local " : "", g, size);
+                for (uint32_t b = 0; b < size; b += 1)
+                {
+                    const uint64_t value = program->global_values[program->global_first_value[g] + b / class_bytes];
+                    fprintf(file, "%s%u", b == 0 ? " " : ", ", (uint32_t)(value >> (8 * (b % class_bytes)) & 0xff));
+                }
+                fprintf(file, " };\n");
+            }
+        }
         result = fclose(file) == 0;
     }
     return result;
@@ -1052,10 +1171,12 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
             char source[600];
             char object[600];
             char harness[600];
+            char library[600];
             char executable[600];
             snprintf(source, sizeof(source), "%s/program_%u.c", directory, p);
             snprintf(object, sizeof(object), "%s/tier0_%u.o", directory, p);
             snprintf(harness, sizeof(harness), "%s/harness_%u.c", directory, p);
+            snprintf(library, sizeof(library), "%s/library_%u.c", directory, p);
             snprintf(executable, sizeof(executable), "%s/run_%u", directory, p);
             if (ok)
             {
@@ -1064,7 +1185,7 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 ok = file != 0 && fclose(file) == 0 && ok;
                 uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3];
                 tier0_test_inputs(program_seed, inputs);
-                ok = ok && tier0_test_object(program, code, object) && tier0_test_harness(program, inputs, harness);
+                ok = ok && tier0_test_object(program, code, object) && tier0_test_harness(program, inputs, harness) && tier0_test_library(program, library);
                 ok = tier0_test_expect(tally, ok, "cross-check", "seed %" PRIu64 ": the files can't be written", program_seed);
             }
             if (ok)
@@ -1072,9 +1193,13 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 char command[4096];
                 char line[512];
                 // -fwrapv and -fno-strict-aliasing, this repository's own dialect: signed arithmetic wraps, as Tier 0's
-                // does, and the objects' checksums read floating parts' bits through integer lvalues.
-                snprintf(command, sizeof(command), "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && %s -O0 -w -o %s %s %s.o %s 2>&1", clang, source,
-                         source, clang, executable, harness, source, object);
+                // does, and the objects' checksums read floating parts' bits through integer lvalues. The library of the
+                // globals Tier 0 reaches through the GOT is a shared library the executable finds by its run path, data
+                // alone, linked without the C runtime's files.
+                snprintf(command, sizeof(command),
+                         "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && %s -O0 -w -fPIC -shared -nostdlib -o %s.so %s 2>&1 && "
+                         "%s -O0 -w -o %s %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
+                         clang, source, source, clang, library, library, clang, executable, harness, source, object, library, directory);
                 ok = tier0_test_expect(tally, tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
                                        program_seed, directory);
                 snprintf(command, sizeof(command), "size -A %s.o", source);
@@ -2353,6 +2478,135 @@ static void tier0_test_operands(Tier0TestTally* tally)
     }
 }
 
+// The access column (Tier0Function.symbol_access). tier0_validate must refuse a global entry whose symbol is past the
+// column or whose access doesn't exist, and take the column otherwise. Then each global kind of every class, by each
+// access: GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant, and GLOBAL_ADDRESS, whose
+// symbol is 1 of 2. Both paths must compile it alike to valid records with one reference to symbol 1, of the access's
+// kind (PC32, LOAD_GOT, TPOFF32 or GOTTPOFF), in the displacement but for a thread-local's address of the image's (the
+// TPOFF32 immediate an add takes), with an FS override exactly for a thread-local, and for a direct symbol the code
+// without the column. A constant stored into a symbol is an immediate (its CONST absorbed) only for a direct symbol,
+// which a store of an integer's constant's record count shows.
+static void tier0_test_access(Tier0TestTally* tally)
+{
+    static const uint8_t reference_kinds[BUSTER_TIER0_ACCESSES] = {
+        BUSTER_LINK_FIXUP_PC32,
+        BUSTER_LINK_FIXUP_LOAD_GOT,
+        BUSTER_LINK_FIXUP_TPOFF32,
+        BUSTER_LINK_FIXUP_GOTTPOFF,
+    };
+    // A store of an integer's constant, in records: the store and ret, with the constant's mov but directly, and the
+    // slot's load through the GOT.
+    static const uint32_t constant_records[BUSTER_TIER0_ACCESSES] = { 2, 4, 3, 4 };
+    Arena arena = arena_reserve(1ull << 28);
+    uint8_t column[2] = { BUSTER_TIER0_ACCESS_DIRECT, BUSTER_TIER0_ACCESS_DIRECT };
+    uint8_t local_classes[1] = { 0 };
+    static const uint8_t local_flags[1] = { 0 };
+    // Validation: a GLOBAL of symbol 1 with a column of 1 symbol, and with an access past the last.
+    {
+        static const uint8_t kinds[2] = { BUSTER_TYPED_GLOBAL, BUSTER_TYPED_RETURN };
+        static const uint8_t classes[2] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32 };
+        static const uint64_t values[2] = { 1, 0 };
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 2;
+        function.symbol_access = column;
+        function.symbol_count = 1;
+        const Tier0Check short_column = tier0_validate(&function);
+        function.symbol_count = 2;
+        column[1] = BUSTER_TIER0_ACCESSES;
+        const Tier0Check past = tier0_validate(&function);
+        column[1] = BUSTER_TIER0_ACCESS_INITIAL_EXEC;
+        const Tier0Check last = tier0_validate(&function);
+        tier0_test_expect(tally, short_column.error == TIER0_ERROR_INVALID && short_column.node == 0 && past.error == TIER0_ERROR_INVALID && past.node == 0 &&
+                                     last.error == TIER0_OK,
+                          "access", "tier0_validate: a symbol past the column %d at %u, an access past the last %d at %u, the last %d", short_column.error,
+                          short_column.node, past.error, past.node, last.error);
+    }
+    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class < BUSTER_TYPED_CLASSES; class += 1)
+    {
+        for (uint32_t shape = 0; shape < 5; shape += 1)
+        {
+            // 0: GLOBAL; 1: STORE_GLOBAL of a local; 2: SET_GLOBAL of a local; 3: SET_GLOBAL of a constant; 4: GLOBAL_ADDRESS
+            // (of a U64 alone).
+            if (shape == 4 && class != BUSTER_TYPED_CLASS_U64)
+            {
+                continue;
+            }
+            uint8_t kinds[4];
+            uint8_t classes[4];
+            uint64_t values[4] = { 0, 1, 0, 0 };
+            uint32_t count = 0;
+            local_classes[0] = (uint8_t)class;
+            if (shape == 0 || shape == 4)
+            {
+                kinds[0] = shape == 0 ? BUSTER_TYPED_GLOBAL : BUSTER_TYPED_GLOBAL_ADDRESS;
+                values[0] = 1;
+                kinds[1] = BUSTER_TYPED_RETURN;
+                classes[0] = (uint8_t)class;
+                classes[1] = (uint8_t)class;
+                count = 2;
+            }
+            else
+            {
+                kinds[0] = shape == 3 ? BUSTER_TYPED_CONST : BUSTER_TYPED_LOCAL;
+                values[0] = shape == 3 ? (class == BUSTER_TYPED_CLASS_F64 ? 0x4000000000000000ull : class == BUSTER_TYPED_CLASS_F32 ? 0x40000000ull : 5) : 0;
+                kinds[1] = shape == 1 ? BUSTER_TYPED_STORE_GLOBAL : BUSTER_TYPED_SET_GLOBAL;
+                kinds[2] = shape == 1 ? BUSTER_TYPED_DISCARD : BUSTER_TYPED_RETURN;
+                kinds[3] = BUSTER_TYPED_RETURN;
+                classes[0] = (uint8_t)class;
+                classes[1] = (uint8_t)class;
+                classes[2] = shape == 1 ? (uint8_t)class : BUSTER_TYPED_CLASS_VOID;
+                classes[3] = BUSTER_TYPED_CLASS_VOID;
+                count = shape == 1 ? 4 : 3;
+            }
+            Tier0Function function;
+            memset(&function, 0, sizeof(function));
+            function.kinds = kinds;
+            function.classes = classes;
+            function.values = values;
+            function.count = count;
+            function.local_classes = local_classes;
+            function.local_flags = local_flags;
+            function.local_count = 1;
+            const uint64_t mark = arena.length;
+            const Tier0Code plain = tier0_compile_scalar(&function, &arena);
+            function.symbol_access = column;
+            function.symbol_count = 2;
+            for (uint32_t access = 0; access < BUSTER_TIER0_ACCESSES; access += 1)
+            {
+                column[1] = (uint8_t)access;
+                const Tier0Check check = tier0_validate(&function);
+                const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+                const Tier0Code vector = tier0_compile(&function, &arena);
+                const bool compiled = check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector) &&
+                                      x86_validate(scalar.records, scalar.count) == scalar.count;
+                bool segment = false;
+                for (uint32_t r = 0; compiled && r < scalar.count; r += 1)
+                {
+                    segment |= (scalar.records[r].form & BUSTER_X86_FORM_NUMBER) >= BUSTER_X86_FORM_FS;
+                }
+                const bool immediate = shape == 4 && access == BUSTER_TIER0_ACCESS_LOCAL_EXEC;
+                const bool referenced = compiled && scalar.reference_count == 1 && scalar.references[0].kind == reference_kinds[access] &&
+                                        scalar.references[0].target == 1 && scalar.references[0].field == (immediate ? X86_FIXUP_IMMEDIATE : X86_FIXUP_DISPLACEMENT);
+                const bool thread_local = access == BUSTER_TIER0_ACCESS_LOCAL_EXEC || access == BUSTER_TIER0_ACCESS_INITIAL_EXEC;
+                const bool direct = access != BUSTER_TIER0_ACCESS_DIRECT || tier0_test_same_code(&plain, &scalar);
+                const bool constant = shape != 3 || tier0_class_floating(class) || scalar.count == constant_records[access];
+                tier0_test_expect(tally, compiled && referenced && segment == thread_local && direct && constant, "access",
+                                  "class %u, shape %u, access %u: validated %d, compiled %d, the paths alike %d, %u records, %u references (kind %u, field %u), "
+                                  "FS %d, the direct code the code without the column %d",
+                                  class, shape, access, check.error, scalar.error, tier0_test_same_code(&scalar, &vector), scalar.count, scalar.reference_count,
+                                  scalar.reference_count != 0 ? scalar.references[0].kind : 0, scalar.reference_count != 0 ? scalar.references[0].field : 0, segment,
+                                  direct);
+            }
+            arena_pop_to(&arena, mark);
+        }
+    }
+    arena_release(&arena);
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -2414,9 +2668,12 @@ static int run_tier0_tests(int argc, char** argv)
         {
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
-                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true },
-                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
-                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true },
+                { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
+                  .access = true },
+                { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
+                  .access = true },
+                { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
+                  .access = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             {
@@ -2465,6 +2722,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_variadic_calls(&tally, &tables);
                 tier0_test_report("variadic calls", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_access(&tally);
+                tier0_test_report("access", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

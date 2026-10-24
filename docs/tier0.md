@@ -17,6 +17,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
 - **Indirect calls,** through `r11`.
 - **Block copies** (`COPY`) of up to 256 bytes, a struct's assignment.
+- **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
+  function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -64,6 +66,8 @@ Beside them are three tables:
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
   `AbiCall`. A callee of 0 makes the call indirect: the stream pushes the address it calls (U64) before its
   arguments, and the `CALL` pops it after them.
+- **The symbols' access** (optional, see "Symbols outside the image" below): `symbol_access[s]`, how the code reaches
+  `SymbolId` s, for each of `symbol_count` symbols. Without it every symbol is direct.
 
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
 vectorized across the unit that way, and Tier 0 needs no type table.
@@ -160,6 +164,41 @@ save area and below the overflow area. Run builds and tests only on
 the approved 9700X, each through its own shared lock. This description records
 the test contract; qualification results are reported with the exact revision.
 
+## Symbols outside the image
+
+`GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
+code reaches it (`BUSTER_TIER0_ACCESS_*`):
+
+| Access | For | Code |
+| --- | --- | --- |
+| `DIRECT` | a symbol in the image | `[rip + symbol]`, a `PC32` |
+| `GOT` | one that may be a shared library's | `mov r, [rip + slot]` (`LOAD_GOT`), then `[r]` |
+| `LOCAL_EXEC` | a thread-local of the image's | `fs:[offset]` (`TPOFF32`); its address `mov r, fs:[0]; add r, offset` |
+| `INITIAL_EXEC` | a thread-local that may be another's | `mov r, [rip + slot]` (`GOTTPOFF`), then `fs:[r]`; its address `add r, fs:[0]` |
+
+- **Why the GOT:** the direct path makes no copy relocations (#84), so a shared library's data, `stdout` among it, is
+  reached only through a GOT slot the loader fills: `GLOB_DAT`, or `TPOFF64` for a thread-local's offset. So is a
+  function's address that may be a shared library's, since a `PC32` to one is refused, as lld refuses it in a PIE. Calls
+  are unaffected: a call of a function outside the image goes through the linker's stub.
+- **Relaxation:** the slot's load is the `mov r64` that linkers rewrite. `executable.c`, GNU ld and lld turn a `LOAD_GOT`
+  into a `lea` where the symbol turns out to be in the image, and the system linkers turn a `GOTTPOFF` into local-exec in
+  an executable.
+- **The column is per unit:** one array serves every function. The producer (`check_program_emit`) fills it from what
+  the unit defines, as clang's `-fPIE` does: a symbol the unit doesn't define through the GOT, and a thread-local by
+  local-exec where the unit defines it and by initial-exec where it doesn't.
+- **How:** fusion keys an entry of a symbol that isn't direct by one of Tier 0's own kinds, past the stream's
+  (`BUSTER_TIER0_KIND_GOT`, `_LOCAL_EXEC` and `_INITIAL_EXEC`, four each, in the global kinds' order:
+  `tier0_access_kind`). Their templates load the slot into R0, the register free above the operand (beside a floating
+  one too), then make the access through it. The vector path finds a block's global entries by compares, reads their
+  symbols' accesses from the column (they are few, as the calls are), and keys each access's lanes by a `vpermb` of its
+  table; without the column it does nothing. A template's reference kind and field are in its summary (`fixup_kind`,
+  `fixup_field`), so a thread-local's address takes its `TPOFF32` in an immediate.
+- **No fusions:** these kinds take no fused local or constant, whose value would need a second free register. A constant
+  stored through the GOT could be an immediate, but its properties would be a row past the vector fusion's sixteen,
+  which every function's lookups would pay for.
+- **Validation:** `tier0_validate` refuses a global entry whose symbol is past the column, or whose access is past the
+  last.
+
 ## The output (contract 1 of #135)
 
 **Records:**
@@ -174,7 +213,8 @@ record index (ascending) and its target's; the function's end is the epilogue's 
 `branch_sizing_validate` accepts.
 
 **Symbolic fields** (`[rip + global]`, `call f`) are records with `BUSTER_X86_FORM_FIXUP` and a `LinkReference`:
-`PC32` or `CALL`, the target `SymbolId` and addend 0, in record order. An indirect call is `call r11`, with none.
+`PC32` or `CALL`, or for a symbol outside the image `LOAD_GOT`, `TPOFF32` or `GOTTPOFF`, the target `SymbolId` and
+addend 0, in record order. An indirect call is `call r11`, with none.
 
 ## The design
 
@@ -246,7 +286,7 @@ the entry's 32-byte hole block:
 - B, the entry's own local's home, or a compare's first local's;
 - the registers at depth −2 to 0 of each stack.
 
-`tier0_initialize` builds 1,569 templates from the encoder's forms and compiles each into one cache line. A byte the
+`tier0_initialize` builds 1,951 templates from the encoder's forms and compiles each into one cache line. A byte the
 template fixes is that byte; a hole's is its index in the hole block. Expansion is copy and patch:
 
 1. one load of the line;
@@ -395,6 +435,12 @@ Before the programs, checks of their own:
     values below make of the result, which must come back right.
 
   Both paths must compile each alike, and each encoder's bytes run in a child.
+- **access:** `tier0_validate` must refuse a global entry whose symbol is past the access column, and an access past
+  the last, and take the last. Then GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant,
+  and GLOBAL_ADDRESS, of every class, by each access. Both paths must compile each alike to valid records with one
+  reference to the symbol, of the access's kind, in the displacement but for a thread-local's address of the image's
+  (an immediate), with an FS override exactly for a thread-local. A direct symbol's code must be the code without the
+  column, and only a direct symbol takes a stored constant as an immediate.
 
 **The generator** (`tier0_generate.c`) writes each program both as typed streams and as C. Its programs have:
 
@@ -427,6 +473,15 @@ Before the programs, checks of their own:
     result's class and each parameter's, apart from the generator's choice of candidates), and a call's work budget is
     its costliest candidate's.
 
+- with the `access` option (every shape but one function's), the symbols' access column: two globals in five direct,
+  one through the GOT, one a thread-local of the image's and one a thread-local through the GOT (`_Thread_local` in
+  C), and half the functions' addresses through the GOT. The interpreter is unchanged, since the access changes how a
+  symbol is reached and nothing it means. The native run gives every symbol a GOT slot (an address, or a thread-local's
+  offset from the thread pointer) in its data pages, then the thread-locals' block and the thread pointer at its end,
+  whose first 8 bytes hold its own address as the C library's thread control block does. Each run copies the
+  thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone, and copies
+  them back beside the other globals, whose bytes it compares with the interpreter's.
+
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
 
@@ -437,7 +492,10 @@ dialect, `-fwrapv` (signed arithmetic wraps, as Tier 0's does) and `-fno-strict-
 floating parts' bits through integer pointers). These programs keep to what that defines: clang folds an out-of-range
 floating conversion of a constant its own way, so a floating value converts to an integer only from a short's value. A
 floating global's elements compare as their bytes, but any two NaNs are the same: C leaves a NaN's sign and payload to
-the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN.
+the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN. Tier 0's object defines the
+direct globals and the thread-locals of the image's (in `.tdata`), and a shared library generated beside it defines
+the ones Tier 0 reaches through the GOT, so that the executable's slots for them are the loader's to fill: `GLOB_DAT`,
+and `TPOFF64` for a thread-local's offset.
 
 **Robustness:**
 
@@ -575,8 +633,9 @@ path's 11.1.
   - bit-fields;
   - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
   - variable-length arrays, inline assembly, `setjmp` and atomics;
-  - `switch` (no kind yet: a compare sequence or a jump table);
-  - globals of shared libraries through the GOT (a front end's visibility decision).
+  - `switch` (no kind yet: a compare sequence or a jump table).
+- **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
+  padded for it would take a block's at once, if real code shows them to cost.
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
   per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.
 - **The immediates' choice** costs about 7 cycles per entry: the application about 5 (its loads of the records more
