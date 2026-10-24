@@ -985,10 +985,13 @@ there at a time, so everything takes one lock:
   runs on every pull request; its isolated and after-scalar samples
   (`--only`, `--after-scalar`, repeated processes), which cost about 200 ms
   before each of 21 samples per case, go in a step of their own that runs where
-  the `changes` job's output for the module isn't `false`: on pushes to main,
-  dispatched runs and pull requests that change the module's sources (its
-  pattern in `changes`). The same holds for the linkers' baselines and floors
-  and mold's and wild's foreign phases.
+  the `changes` job's output for the module isn't `false`: on the daily
+  scheduled run, dispatched runs and pull requests that change the module's
+  sources (its pattern in `changes`). The same holds for the linkers'
+  baselines and floors and mold's and wild's foreign phases. A push to main
+  runs what a pull request that changes none of them runs: its pull request's
+  run measured what it changes, and the full set took the job past its 10
+  minutes. The daily and dispatched runs have 25 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 
@@ -1243,12 +1246,13 @@ stops the run, and its commands are killed.
 
 The 9700X job's test step ("Run the tests at once") runs every test through it,
 with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
-A test goes in its list as a heading and the step's commands, the longest
-first, so that they start first; one that needs the machine to itself doesn't
-belong there. On the 9700X its tests took 52.1 s one after another, as the
-job's steps ran them, and take 21.8 s through the runner, the time of the
-longest, `test-calling-convention --cross-check` (18.1 s alone), whose six
-configurations run in turn. To run the list as the job does (on the 9700X,
+A test goes in its list as a heading and the step's commands, in the order of
+the tests' times in the job, the longest first, so that they start first: put a
+new one where its time puts it. One that needs the machine to itself doesn't
+belong there. On the 9700X its tests' times in the job come to 302 s, and the
+step's bound through the runner is about 38 s, the longest's (the checker's
+group, 33 to 37 s) and the sum's over 8 jobs; with the longest started among
+the last, the step took 64 s. To run the list as the job does (on the 9700X,
 under its lock, as one run):
 
 ```sh
@@ -2821,8 +2825,8 @@ linkers' runs on one thread itself, and the linkers' other runs need every CPU.
 default 9700X job runs it after benchmark-snapshot, with its lane on the job's
 first allowed CPU; like the others, its measurements are informational. The
 linkers' side, about 121 s of its 122, times other programs on the machine,
-the same for every pull request: the job runs it on pushes to main, dispatched
-runs and pull requests that change `link_benchmark.c` or `floors_benchmark.c`,
+the same for every pull request: the job runs it on the daily and dispatched
+runs and on pull requests that change `link_benchmark.c` or `floors_benchmark.c`,
 and only the direct path (`--only direct`, about 1 s) on other pull requests.
 
 ## Floors benchmark
@@ -2986,7 +2990,7 @@ loading, resolving and section resolution. Run it under the 9700X's lock with
 `taskset -c 2` for one lane, or with `--cpus` for several.
 `docs/object-writer-and-linker.md` ("Steps 1 to 5, as built") has the numbers.
 The default 9700X job runs it after benchmark-snapshot, pinned to one allowed
-CPU: with `--linkers` on pushes to main, dispatched runs and pull requests
+CPU: with `--linkers` on the daily and dispatched runs and on pull requests
 that change `foreign_benchmark.c`, since mold's and wild's times don't depend
 on a pull request, and without it on other pull requests. Like the others,
 its measurements are informational.

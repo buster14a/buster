@@ -8,6 +8,9 @@ on:
       - 'docs/**'
       - '**.md'
   workflow_dispatch:
+  # Once a day, the measurements a push to main leaves out (`changes`).
+  schedule:
+    - cron: '23 7 * * *'
   # Every pull request runs the workflow, since its job is a required check: a pull request that changes only
   # documentation gets the job skipped by `changes`, which counts as passed, rather than no check at all, which blocks
   # the merge.
@@ -20,26 +23,30 @@ permissions:
 # cancel another PR's qualification. Each group keeps one pending run, GitHub's default: a newer push replaces its
 # pending run, which would only qualify a commit already superseded. A newer push to a PR also cancels the PR's run in
 # progress, which is mostly a job waiting for the 9700X (the slot is held from then on, so a run waiting hours would
-# otherwise still run for its stale commit); a push to main lets main's run finish. The runner's job hooks serialize all
-# jobs with the shared host lock (AGENTS.md).
+# otherwise still run for its stale commit); a push to main lets main's run finish. The daily run has a group of its
+# own, so that a push to main doesn't replace it while it waits. The runner's job hooks serialize all jobs with the
+# shared host lock (AGENTS.md).
 concurrency:
-  group: buster-fast-9700x-${{ github.event.pull_request.number || github.ref }}
+  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
   # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs. And whether it changes
   # the harnesses of the baselines, the linkers' times and the floors (link_benchmark.c and floors_benchmark.c): they
-  # measure other programs and the machine, the same for every pull request, so `test` measures them on pushes to main,
-  # dispatched runs and pull requests that change these harnesses, as when this job is skipped or fails. The same for
+  # measure other programs and the machine, the same for every pull request, so `test` measures them on the daily and
+  # dispatched runs and on pull requests that change these harnesses, as when this job is skipped or fails. The same for
   # benchmark-foreign's mold and wild (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the
   # foreign path's phases. And, per module, whether it changes the sources of a benchmark whose isolated and
   # after-scalar samples (`--only`, `--after-scalar 200`, repeated in separate processes) cost far more than its plain
   # run: about 200 ms before each of 21 samples per case, 150 s of a pull request's job in all. Every run has the plain
-  # benchmark, with its checks against the scalar twins; those samples run on pushes to main, dispatched runs and pull
+  # benchmark, with its checks against the scalar twins; those samples run on the daily and dispatched runs and on pull
   # requests that change what they measure.
+  # On a push to main, whose pull request's run measured what it changes, every output but `code` is `false`: the full
+  # set took the job past its 10 minutes on every push, which then failed, having kept the 9700X from every pull
+  # request's job meanwhile. The daily and dispatched runs, which skip this job, have the full set.
   changes:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -80,8 +87,17 @@ jobs:
               [checker]='c_check[a-z_]*'
           )
           declare -A measure
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+              # push's paths-ignore leaves out documentation alone.
+              code=true
+              baselines=false
+              foreign=false
+              branch_sizing=false
+              for module in "${modules[@]}"; do
+                  measure[$module]=false
+              done
           # The API lists at most 3,000 files of a pull request: past that, take it as changing code and the harnesses.
-          if [ "$COUNT" -ge 3000 ]; then
+          elif [ "$COUNT" -ge 3000 ]; then
               code=true
               baselines=true
               foreign=true
@@ -139,13 +155,14 @@ jobs:
   test:
     name: Build and execute on Ryzen 7 9700X
     needs: changes
-    # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (not a pull request)
-    # or failed.
+    # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (the daily and
+    # dispatched runs) or failed.
     if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: 10
+    # The full set of measurements takes about 13 minutes; every other run, about 4 to 7.
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 10 }}
     defaults:
       run:
         shell: bash
@@ -198,27 +215,20 @@ jobs:
         # pinned. build/compiler parallel (AGENTS.md, "The parallel runner") runs each test below in a bash of its own,
         # as a step's `run` runs, one per core of the CPUs the job may use and unpinned (test-lanes and test-files run
         # lanes of their own), and prints each test's output in a group of its own in this order, then names the tests
-        # that failed. A test still running after 180 s is killed and fails. The longest come first, so that they
-        # start first.
+        # that failed. A test still running after 180 s is killed and fails. They come in the order of their times
+        # in the job, the longest first, so that they start first: in the order before, the longest started among
+        # the last and the step took 64 s, where its bound is about 38 s (the longest test, and the tests' 302 s on
+        # 8 jobs). A new test goes where its time puts it.
         run: |
           ./build/compiler parallel --github --timeout 180 <<'TESTS'
-          == Test the calling convention
-          # --cross-check also links random signatures between our side, encoded and written as objects, and C that
-          # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both
-          # ways.
-          ./build/compiler test-calling-convention --cross-check
-          == Test the object writer
-          # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
-          # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
-          # and runs them.
-          ./build/compiler test-object-writer --cross-check
-          == Test DWARF source lines and late address finalization
-          # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
-          ./build/compiler test-debug --cross-check
-          == Test the preprocessor on the repository's translation units against clang
-          # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
-          # tokens. -target and its triple (clang's default) go to both.
-          ./build/compiler test-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Test typed postorder checking and source fixtures
+          ./build/compiler test-checker --seed 133
+          ./build/compiler test-checker-asm
+          ./build/compiler test-checker-driver --executable ./build/compiler
+          ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
+          == Test the preprocessor's cases against clang
+          # --clang also preprocesses each case with clang -E and compares the tokens.
+          ./build/compiler test-preprocessor --clang
           == Test the parser on the repository's translation units against clang
           # Both paths, which must agree kernel by kernel, and accept each unit build.sh compiles as clang -fsyntax-only
           # does, but main_unit_*.c, which are main.c again with another BUSTER_UNIT.
@@ -226,21 +236,10 @@ jobs:
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang
-          == Test GNU syntax metadata against clang
-          ./build/compiler test-gnu --clang
-          == Test scoped name-resolution kernels
-          ./build/compiler test-bindings
-          == Test selective lowering against its independent oracle and Clang symbols
-          ./build/compiler test-lowering --clang
-          == Test deferred-body source-position environments
-          ./build/compiler test-environments
-          == Test C-source binding identities and scope semantics
-          ./build/compiler test-parser-bindings --clang
-          == Compare source binding columns on main.c
-          ./build/compiler test-parser-bindings --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
-          == Compare source binding columns on the frozen SQLite input
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          ./build/compiler test-parser-bindings --clang -march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+          == Test the preprocessor on the repository's translation units against clang
+          # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
+          # tokens. -target and its triple (clang's default) go to both.
+          ./build/compiler test-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
           == Test the static executables with libc
           # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
           # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
@@ -252,19 +251,34 @@ jobs:
           # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
           # winners, the COMDAT groups and -y's lines with the resolution's.
           ./build/compiler test-foreign --cross-check
-          == Test the foreign linker against lld and mold
-          # Original C and C++ programs, each compiled by gcc and by clang, linked from one command line by
-          # link-foreign, lld and mold: their runs, symbols and sizes, dynamic sections, versions and relocations must
-          # agree but for each reference linker's documented choices.
-          ./build/compiler test-foreign-corpus
-          == Test branch sizing
-          # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
-          # relaxation of them must give the bytes of the sized records.
-          ./build/compiler test-branch-sizing --cross-check
+          == Test the per-file jobs on the repository's translation units
+          # The predefines follow the options as clang's do (c_predefines.c).
+          ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Test the C lexer as C++
+          ./build/compiler test-lexer --cplusplus
+          ./build/compiler test-lexer --raw-strings
+          ./build/compiler test-lexer --raw-strings-c99
+          == Test the calling convention
+          # --cross-check also links random signatures between our side, encoded and written as objects, and C that
+          # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both
+          # ways.
+          ./build/compiler test-calling-convention --cross-check
           == Check the no-recursion rule on the call graph
           # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
           ./build/compiler test-call-graph
           ./build.sh check-call-graph
+          == Test c-testsuite's programs end to end
+          # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
+          # the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links.
+          # The declared subset must pass. The self-test checks the harness's timeouts, relative paths (as given here)
+          # and cross-check rule with a stand-in compiler.
+          ./build/compiler test-c-testsuite --self-test
+          ./build/compiler test-c-testsuite --cross-check --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
+          == Test the object writer
+          # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
+          # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
+          # and runs them.
+          ./build/compiler test-object-writer --cross-check
           == Test the runner
           ./build/compiler test-parallel
           == Test the IR and typed-stream lowering
@@ -275,48 +289,104 @@ jobs:
           ./build/compiler test-interpreter-native
           ./build/compiler test-interpreter-link
           ./build/compiler test-ir-interpreter
-          == Test the preprocessor's cases against clang
-          # --clang also preprocesses each case with clang -E and compares the tokens.
-          ./build/compiler test-preprocessor --clang
-          == Test the preprocessor directive tables
-          ./build/compiler test-preprocessor --tables src
-          == Test the C lexer as C++
-          ./build/compiler test-lexer --cplusplus
-          ./build/compiler test-lexer --raw-strings
-          ./build/compiler test-lexer --raw-strings-c99
-          == Test the C lexer
-          ./build/compiler test-lexer
+          == Test integer builtin actions against Clang
+          ./build/compiler test-builtins
+          ./build/compiler test-builtin-intrinsic-types
+          ./build/compiler test-builtin-intrinsic-features
+          ./build/compiler test-check-builtins-x86
+          ./build/compiler test-check-builtins-vector
+          ./build/compiler test-builtin-intrinsic-catalog
+          ./build/compiler test-builtin-intrinsic-inventory
+          ./build/compiler test-check-builtins
+          ./build/compiler test-check-varargs
+          ./build/compiler test-tier0-variadic-frame
+          ./build/compiler test-check-builtins-misc
+          ./build/compiler test-check-builtins-query
+          ./build/compiler test-check-builtins-bit-cast
+          ./build/compiler test-check-builtins-float
+          ./build/compiler test-check-builtins-math
+          ./build/compiler test-check-builtins-atomic
+          ./build/compiler test-check-builtins-atomic-rmw
+          ./build/compiler test-check-builtins-typed-overflow
+          ./build/compiler test-check-builtins-rounds
+          ./build/compiler test-builtin-lower
+          ./build/compiler test-builtin-varargs-lower
+          ./build/compiler test-builtin-misc-lower
+          ./build/compiler test-builtin-float-lower
+          ./build/compiler test-builtin-terminal-helpers
+          ./build/compiler test-builtin-atomic-helpers
+          ./build/compiler test-builtin-atomic-rmw-helpers
+          ./build/compiler test-builtin-rounds-helper
+          ./build/compiler test-builtin-math-helpers
+          == Test branch sizing
+          # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
+          # relaxation of them must give the bytes of the sized records.
+          ./build/compiler test-branch-sizing --cross-check
+          == Test Tier 0
+          # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
+          # --cross-check also runs them beside clang -O0's builds of the same programs as C.
+          ./build/compiler test-tier0 --cross-check
+          == Test the dynamic PIEs
+          # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
+          # dynamic symbols and relocations.
+          ./build/compiler test-dynamic --cross-check
           == Test the C lexer without digraphs and // comments, as c89
           ./build/compiler test-lexer --no-digraphs --no-line-comments
           == Test the C lexer without // comments, as C94
           ./build/compiler test-lexer --no-line-comments
+          == Compare source binding columns on main.c
+          ./build/compiler test-parser-bindings --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          == Test the C lexer
+          ./build/compiler test-lexer
           == Test the C lexer without digraphs, as -fno-digraphs
           ./build/compiler test-lexer --no-digraphs
+          == Test the independent preprocessor fuzz harness in C23
+          ./build/compiler test-preprocessor-fuzz --std c23
           == Test the x86-64 encoder
           ./build/compiler test-x86-encoder
-          == Test the per-file jobs on the repository's translation units
-          # The predefines follow the options as clang's do (c_predefines.c).
-          ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Test token refinement
+          ./build/compiler test-refinement src
           == Test the x86-64 disassembler against GNU tools
           corpus="$(mktemp -d)"
           trap 'rm -rf "$corpus"' EXIT
           clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o "$corpus/corpus.o"
           objcopy -O binary -j .text "$corpus/corpus.o" "$corpus/corpus.text"
           ./build/compiler test-x86-disassembler --objdump --file "$corpus/corpus.text"
+          == Test the per-file jobs
+          # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
+          # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
+          # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
+          # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
+          ./build/compiler test-files
           == Test binding
           # --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
           # found with lld's link of the programs' own objects.
           ./build/compiler test-bind --cross-check
           == Test the independent preprocessor fuzz harness in C17
           ./build/compiler test-preprocessor-fuzz --std c17
-          == Test the independent preprocessor fuzz harness in C23
-          ./build/compiler test-preprocessor-fuzz --std c23
-          == Test the dynamic PIEs
-          # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
-          # dynamic symbols and relocations.
-          ./build/compiler test-dynamic --cross-check
-          == Test token refinement
-          ./build/compiler test-refinement src
+          == Test the foreign linker against lld and mold
+          # Original C and C++ programs, each compiled by gcc and by clang, linked from one command line by
+          # link-foreign, lld and mold: their runs, symbols and sizes, dynamic sections, versions and relocations must
+          # agree but for each reference linker's documented choices.
+          ./build/compiler test-foreign-corpus
+          == Test differential harness accounting, subprocesses and failure preservation
+          ./build/compiler test-differential-harness
+          == Test DWARF source lines and late address finalization
+          # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
+          ./build/compiler test-debug --cross-check
+          == Test Tier 1 selection, liveness and native fragments
+          ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
+          ./build/compiler test-tier1-liveness
+          ./build/compiler test-tier1-emit
+          ./build/compiler test-tier1-pipeline --cross-check
+          ./build/compiler test-tier1-model
+          ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
+          == Test the experimental scalar fragment sink
+          ./build/compiler test-fragments
+          == Test shared IR local promotion and typed-stream semantics
+          ./build/compiler test-ssa-ir
+          == Test selective lowering against its independent oracle and Clang symbols
+          ./build/compiler test-lowering --clang
           == Compare a frozen preprocessor corpus subset with Clang
           # The runner hooks hold the shared host lock for this whole job. This copy is readable by the runner, unlike
           # the original bundle under /home/david. Verify the manifests and every input/header byte first.
@@ -351,67 +421,68 @@ jobs:
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl" --report build/oracle-musl.tsv
           awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
-          == Test the import path
-          # --cross-check also compares libc.so.6's exports and references, and the relocations of the crt objects and
-          # libc_nonshared.a's members, with readelf's.
-          ./build/compiler test-import --cross-check
           == Test the runtime snapshot
           ./build/compiler test-snapshot
-          == Test the scalar and AVX-512 assembly frontends
-          ./build/compiler test-assembler --cross-check
           == Test generated-code ISA policy
           ./build/compiler test-x86-target
+          == Check the frozen SQLite source against Clang
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
           == Test the C type table
           # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
           # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and
           # run, and clang's AST dump.
           ./build/compiler test-types
-          == Test the per-file jobs
-          # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
-          # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
-          # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
-          # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
-          ./build/compiler test-files
-          == Test the x86 semantics
-          # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
-          # with GNU as and compares the bytes.
-          ./build/compiler test-x86-semantics --cross-check
-          == Test Tier 0
-          # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
-          # --cross-check also runs them beside clang -O0's builds of the same programs as C.
-          ./build/compiler test-tier0 --cross-check
-          == Test verified Tier 1 optimization passes
-          ./build/compiler test-ir-optimize
-          ./build/compiler test-ir-gvn
-          ./build/compiler test-ir-licm
-          ./build/compiler test-ir-sroa
-          ./build/compiler test-ir-inline
-          == Test Tier 1 selection, liveness and native fragments
-          ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
-          ./build/compiler test-tier1-liveness
-          ./build/compiler test-tier1-emit
-          ./build/compiler test-tier1-pipeline --cross-check
-          ./build/compiler test-tier1-model
-          ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
+          == Test C-source binding identities and scope semantics
+          ./build/compiler test-parser-bindings --clang
+          == Compare source binding columns on the frozen SQLite input
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          ./build/compiler test-parser-bindings --clang -march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+          == Test the import path
+          # --cross-check also compares libc.so.6's exports and references, and the relocations of the crt objects and
+          # libc_nonshared.a's members, with readelf's.
+          ./build/compiler test-import --cross-check
+          == Test the scalar and AVX-512 assembly frontends
+          ./build/compiler test-assembler --cross-check
           == Test native fixed-frame CFI and generated GDB/perf consumers
           ./build/compiler test-unwind --cross-check
-          == Test streaming the output against writing it at the end, with GDB, perf and llvm-dwarfdump on the data-first layout
-          ./build/compiler test-streaming --cross-check
-          == Test differential harness accounting, subprocesses and failure preservation
-          ./build/compiler test-differential-harness
-          == Test Tier 1 allocation, reload splitting and rematerialization
-          ./build/compiler test-tier1-allocation
-          == Test Tier 1 frame planning and slot coloring
-          ./build/compiler test-tier1-frame
-          ./build/compiler test-tier1-frame-execution
+          == Test the direct path's executables
+          ./build/compiler test-executable
+          == Test local SSA construction and its memory interpreter
+          ./build/compiler test-ssa
+          == Test GNU syntax metadata against clang
+          ./build/compiler test-gnu --clang
           == Test experimental Tier 1 scheduling and model coverage
           ./build/compiler test-tier1-schedule
           # This bounded smoke also executes original and reordered machine code against its independent reference.
           ./build/compiler benchmark-tier1-schedule --blocks 4 --records 64
           == Test the lanes
           ./build/compiler test-lanes
-          == Test the direct path's executables
-          ./build/compiler test-executable
+          == Test the x86 semantics
+          # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
+          # with GNU as and compares the bytes.
+          ./build/compiler test-x86-semantics --cross-check
+          == Test Tier 1 frame planning and slot coloring
+          ./build/compiler test-tier1-frame
+          ./build/compiler test-tier1-frame-execution
+          == Test the per-file jobs on the repository's sources, flat
+          ./build/compiler test-files --flat src
+          == Test scoped name-resolution kernels
+          ./build/compiler test-bindings
+          == Test deferred-body source-position environments
+          ./build/compiler test-environments
+          == Test the preprocessor directive tables
+          ./build/compiler test-preprocessor --tables src
+          == Test verified Tier 1 optimization passes
+          ./build/compiler test-ir-optimize
+          ./build/compiler test-ir-gvn
+          ./build/compiler test-ir-licm
+          ./build/compiler test-ir-sroa
+          ./build/compiler test-ir-inline
+          == Test Tier 1 allocation, reload splitting and rematerialization
+          ./build/compiler test-tier1-allocation
           == Test the profiling tools
           ./build/compiler test-profile
           == Test deterministic diagnostic ordering
@@ -425,70 +496,18 @@ jobs:
           if ./build/compiler test-preprocessor --compare-clang --clang /usr/bin/false tests/preprocessor-oracle/accepted.input; then exit 1; fi
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/rejected.input; then exit 1; fi
           if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/no-such-input.c; then exit 1; fi
-          == Test integer builtin actions against Clang
-          ./build/compiler test-builtins
-          ./build/compiler test-builtin-intrinsic-types
-          ./build/compiler test-builtin-intrinsic-features
-          ./build/compiler test-check-builtins-x86
-          ./build/compiler test-check-builtins-vector
-          ./build/compiler test-builtin-intrinsic-catalog
-          ./build/compiler test-builtin-intrinsic-inventory
-          ./build/compiler test-check-builtins
-          ./build/compiler test-check-varargs
-          ./build/compiler test-tier0-variadic-frame
-          ./build/compiler test-check-builtins-misc
-          ./build/compiler test-check-builtins-query
-          ./build/compiler test-check-builtins-bit-cast
-          ./build/compiler test-check-builtins-float
-          ./build/compiler test-check-builtins-math
-          ./build/compiler test-check-builtins-atomic
-          ./build/compiler test-check-builtins-atomic-rmw
-          ./build/compiler test-check-builtins-typed-overflow
-          ./build/compiler test-check-builtins-rounds
-          ./build/compiler test-builtin-lower
-          ./build/compiler test-builtin-varargs-lower
-          ./build/compiler test-builtin-misc-lower
-          ./build/compiler test-builtin-float-lower
-          ./build/compiler test-builtin-terminal-helpers
-          ./build/compiler test-builtin-atomic-helpers
-          ./build/compiler test-builtin-atomic-rmw-helpers
-          ./build/compiler test-builtin-rounds-helper
-          ./build/compiler test-builtin-math-helpers
-          == Test c-testsuite's programs end to end
-          # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
-          # the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links.
-          # The declared subset must pass. The self-test checks the harness's timeouts, relative paths (as given here)
-          # and cross-check rule with a stand-in compiler.
-          ./build/compiler test-c-testsuite --self-test
-          ./build/compiler test-c-testsuite --cross-check --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
-          == Test typed postorder checking and source fixtures
-          ./build/compiler test-checker --seed 133
-          ./build/compiler test-checker-asm
-          ./build/compiler test-checker-driver --executable ./build/compiler
-          ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
-          == Check the frozen SQLite source against Clang
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
-          == Test the per-file jobs on the repository's sources, flat
-          ./build/compiler test-files --flat src
-          == Test the link representation
-          ./build/compiler test-link
           == Test dataflow bitsets
           ./build/compiler test-dataflow
           == Test dominators, frontiers and natural loops
           ./build/compiler test-dominators
-          == Test local SSA construction and its memory interpreter
-          ./build/compiler test-ssa
-          == Test shared IR local promotion and typed-stream semantics
-          ./build/compiler test-ssa-ir
-          == Test the partial Zen 5 model and instruction harness
-          ./build/compiler test-x86-zen5
           == Test fragment byte interleave and protected-page tails
           ./build/compiler test-fragment-interleave
-          == Test the experimental scalar fragment sink
-          ./build/compiler test-fragments
+          == Test streaming the output against writing it at the end, with GDB, perf and llvm-dwarfdump on the data-first layout
+          ./build/compiler test-streaming --cross-check
+          == Test the link representation
+          ./build/compiler test-link
+          == Test the partial Zen 5 model and instruction harness
+          ./build/compiler test-x86-zen5
           TESTS
 
       - name: Benchmark the C lexer on the repository sources
