@@ -2401,6 +2401,17 @@ BUSTER_INLINE bool pp_is_unterminated_comment(const uint8_t* bytes, uint8_t kind
 // A file's directive table (#118) from its refined tokens, in `arena`, by the kernels `vectorized` picks: the
 // directives (pp_scan_directives_*), their kinds, line ends, pairing and notes (pp_finish_directives), and the include
 // guard. Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
+// The directive table's arrays for `count` directives, in `arena`. Returns false if memory runs out.
+static bool pp_directive_arrays(Arena* arena, PPFileData* data, uint32_t count)
+{
+    data->directive_count = count;
+    data->directive_hash = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+    data->directive_end = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+    data->directive_kind = arena_push(arena, count + 1, 1);
+    data->directive_next = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+    return data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+}
+
 static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
 {
     Scratch scratch = scratch_begin(0);
@@ -2410,12 +2421,7 @@ static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
     {
         const uint32_t directive_count = vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
                                                     : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
-        data->directive_count = directive_count;
-        data->directive_hash = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-        data->directive_end = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-        data->directive_kind = arena_push(arena, directive_count + 1, 1);
-        data->directive_next = arena_push_array(arena, directive_count + 1, sizeof(uint32_t), 4);
-        result = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+        result = pp_directive_arrays(arena, data, directive_count);
     }
     if (result)
     {
@@ -2430,6 +2436,47 @@ static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
         result = pp_finish_directives(vectorized, arena, data, lines);
     }
     scratch_end(scratch);
+    data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
+    return result;
+}
+
+// pp_directive_table's scan for a file prepared a window at a time (pp_prepare_windows), for tokens [begin, end) as each
+// window's blocks are refined, while their kinds are in the caches (`begin` a multiple of 64): per 64 tokens, a word of
+// the tokens that start a line (pp_scan_directives_vector's `lines`) and a word of the directives' '#' tokens, in that
+// order in `words`. Returns the directives found.
+static uint32_t pp_scan_directives_window(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t* words)
+{
+    uint32_t result = 0;
+    for (uint32_t i = begin; i < end; i += 64)
+    {
+        const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, end - i);
+        const __m512i block = _mm512_maskz_loadu_epi8(valid, kinds + i);
+        const uint64_t directives = _mm512_mask_cmpeq_epi8_mask(valid, block, _mm512_set1_epi8((char)(C_TOKEN_HASH | BUSTER_C_TOKEN_START_OF_LINE)));
+        words[2 * (i / 64)] = _mm512_movepi8_mask(block) & valid;
+        words[2 * (i / 64) + 1] = directives;
+        result += (uint32_t)__builtin_popcountll(directives);
+    }
+    return result;
+}
+
+// pp_directive_table for a file prepared a window at a time, whose `count` directives and lines
+// pp_scan_directives_window found in `words`: the directives' '#' tokens out of their words into the table, and the
+// lines' words moved down in place to be pp_finish_directives' `lines` (a word never moves past one still to be read).
+static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, uint64_t* words, uint32_t count)
+{
+    bool result = pp_directive_arrays(arena, data, count);
+    const uint32_t word_count = (data->token_count + 63) / 64;
+    uint32_t directive = 0;
+    for (uint32_t w = 0; result && w < word_count; w += 1)
+    {
+        for (uint64_t bits = words[2 * w + 1]; bits != 0; bits &= bits - 1)
+        {
+            data->directive_hash[directive] = 64 * w + (uint32_t)__builtin_ctzll(bits);
+            directive += 1;
+        }
+        words[w] = words[2 * w];
+    }
+    result = result && pp_finish_directives(true, arena, data, words);
     data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
     return result;
 }
@@ -2605,12 +2652,18 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     uint64_t tick = ticks != 0 ? __rdtsc() : 0;
     Scratch scratch = scratch_begin(0);
     uint64_t* backslash_chunks = arena_push_array(scratch.arena, refine_progress_words(length), sizeof(uint64_t), 64);
-    // A word for every 64 of the most tokens the file can have; refinement writes those of the tokens it has.
+    // A word for every 64 of the most tokens the file can have; refinement writes those of the tokens it has. The
+    // directive table's scan (pp_scan_directives_window) writes two, the lines' and the directives' '#' tokens, in pairs:
+    // the directives' places need no room of their own, bounded only by the tokens, so that for a file of up to about
+    // 12 MB the scratch memory touched stays in the huge page that pp_prepare_whole's touches.
     uint64_t* space = arena_push_array(scratch.arena, capacity / 64 + 2, sizeof(uint64_t), 64);
+    uint64_t* directive_words = arena_push_array(scratch.arena, 2 * (capacity / 64 + 2), sizeof(uint64_t), 64);
     RefineProgress progress;
     refine_progress_begin(&progress, backslash_chunks);
     const bool pushed = data->kinds != 0 && data->starts != 0 && data->values != 0;
-    PPPrepareStatus result = !pushed ? PP_PREPARE_NO_COLUMNS : backslash_chunks == 0 || space == 0 ? PP_PREPARE_NO_MEMORY : PP_PREPARE_DONE;
+    PPPrepareStatus result = !pushed                                                           ? PP_PREPARE_NO_COLUMNS
+                             : backslash_chunks == 0 || space == 0 || directive_words == 0 ? PP_PREPARE_NO_MEMORY
+                                                                                               : PP_PREPARE_DONE;
     // The next window starts at `at`, the start of the file or of a token that starts a logical line, and takes `size`
     // bytes; the tokens before it are kept (`count`), those before `refined` are refined, and those before `counted`
     // have had their UNKNOWN tokens counted (`unknowns`).
@@ -2620,6 +2673,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     uint64_t refined = 0;
     uint64_t counted = 0;
     uint32_t unknowns = 0;
+    uint32_t directives = 0;
     bool last = false;
     while (result == PP_PREPARE_DONE && !last)
     {
@@ -2665,6 +2719,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         unknowns += result == PP_PREPARE_DONE ? pp_count_raw_candidates(prepare, data->kinds + counted, count - counted) : 0;
         counted = count;
         const uint64_t complete = last ? count : count - count % BUSTER_REFINE_BLOCK_TOKENS;
+        const uint64_t begin = refined;
         if (result == PP_PREPARE_DONE && complete > refined)
         {
             result = refine_tokens_blocks(table, data->bytes, length, data->kinds, data->starts, data->values, space, prepare->refine_flags, refined, complete, &progress)
@@ -2676,6 +2731,14 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         {
             const uint64_t now = __rdtsc();
             ticks[PP_PHASE_REFINE] += now - tick;
+            tick = now;
+        }
+        // The directive table's scan of the blocks just refined, while their kinds are in the caches.
+        directives += result == PP_PREPARE_DONE ? pp_scan_directives_window(data->kinds, (uint32_t)begin, (uint32_t)refined, directive_words) : 0;
+        if (ticks != 0)
+        {
+            const uint64_t now = __rdtsc();
+            ticks[PP_PHASE_DIRECTIVES] += now - tick;
             tick = now;
         }
     }
@@ -2698,7 +2761,6 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         }
         result = data->space != 0 && pp_record_raw_errors(prepare, arena, data, unknowns) ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
     }
-    scratch_end(scratch);
     if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
@@ -2707,9 +2769,10 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     }
     if (result == PP_PREPARE_DONE)
     {
-        data->prepared = pp_directive_table(prepare->vectorized, arena, data);
+        data->prepared = pp_directive_table_windowed(arena, data, directive_words, directives);
         result = data->prepared ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
     }
+    scratch_end(scratch);
     if (ticks != 0)
     {
         ticks[PP_PHASE_DIRECTIVES] += __rdtsc() - tick;
