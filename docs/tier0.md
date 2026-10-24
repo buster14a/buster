@@ -9,9 +9,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 
 **Done:**
 
-- **The lowered typed stream:** the backend contract defined here. #133's
-  [semantic expression stream](c-checker.md) now exists, but the producer of
-  these machine-class and executable control-flow entries remains to be built.
+- **The lowered typed stream:** the backend contract defined here, which #133's
+  producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)'s "Backend handoff") writes from checked C.
 - **Both paths:**
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
@@ -26,14 +25,17 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
+- **c-testsuite (#145):** 215 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+  and run right, with both paths' executables the same bytes and every record passing `x86_validate`
+  ([the c-testsuite guide](c-testsuite.md)). The other five wait on items 2, 4 and 8 of #136's plan and on libm.
+
 **Waits for #133, #145 and #146:**
 
-- the c-testsuite programs;
 - the corpora and `sqlite3.c`;
 - `speedtest1`;
 - the whole compile's time against tcc's.
 
-Until then, generated programs (below) stand in for #133's streams and for #142's random programs.
+Until then, generated programs (below) stand in for #142's random programs.
 
 ## The typed stream (#133 → #136)
 
@@ -587,8 +589,8 @@ path's 11.1.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
 - **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on
-  them; c-testsuite (#145); `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole
-  compile against tcc.
+  them; `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole compile against
+  tcc. c-testsuite (#145) runs.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`).
 

@@ -19,7 +19,10 @@ Defaults are a static executable named `a.out`, entry `_start`, one lane,
 and all optional transformations disabled. Named regular symbols are emitted
 by default; `-s` and `--strip-all` omit `.symtab` and `.strtab` while preserving
 the dynamic symbol table and runtime dependencies. `--scalar` selects the exact
-resolver, symbol-selection and writer paths. `--time` reports, on standard
+resolver, symbol-selection and writer paths. `--lanes N` runs the resolution,
+the conversion and the writer on up to N lanes, at most one per CPU the process
+may run on: lanes past those share CPUs, and each of their syncs waits for a
+lane the scheduler has set aside. `--time` reports, on standard
 error after the link, each stage's wall time (the arguments, the interpreter's
 discovery, the resolution with each of its phases on the slowest lane, the
 conversion, the optional passes, the write with each of the writer's phases on

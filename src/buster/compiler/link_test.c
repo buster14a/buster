@@ -635,11 +635,57 @@ static bool link_test_capacity(void)
     return link_test_report(&tally);
 }
 
+// link_check_lanes against link_check (#87): from the same state, each of 1, 2, 3 and 8 lanes must answer as link_check
+// does and record the same error. Returns link_check's answer, counting each lane count that differs in `mismatches`.
+typedef struct LinkTestCheck LinkTestCheck;
+struct LinkTestCheck
+{
+    Link* link;
+    LinkError result;
+};
+
+static void link_test_check_lane(void* argument)
+{
+    LinkTestCheck* check = argument;
+    const LinkError result = link_check_lanes(check->link);
+    if (lane_index() == 0)
+    {
+        check->result = result;
+    }
+}
+
+static LinkError link_test_check(Link* link, uint64_t* mismatches)
+{
+    static const uint32_t counts[4] = { 1, 2, 3, 8 };
+    const LinkError before = link->error;
+    LinkError results[4];
+    LinkError errors[4];
+    bool ran[4];
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        link->error = before;
+        LinkTestCheck check = {
+            .link = link,
+        };
+        ran[i] = lane_run(counts[i], link_test_check_lane, &check, 0);
+        results[i] = check.result;
+        errors[i] = link->error;
+    }
+    link->error = before;
+    const LinkError result = link_check(link);
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        *mismatches += !ran[i] || results[i] != result || errors[i] != link->error ? 1 : 0;
+    }
+    return result;
+}
+
 static bool link_test_rules(void)
 {
     LinkTestTally tally = {
         .check = "rules",
     };
+    uint64_t mismatches = 0;
     LinkTestArenas arenas = link_test_reserve();
     static uint8_t bytes[64];
     const LinkCapacity capacity = {
@@ -712,9 +758,9 @@ static bool link_test_rules(void)
     link_test_expect(&tally, link.symbols.atom[defined] == data && link.symbols.value[defined] == 24, "a refused definition changes nothing", 0);
 
     // A local without its atom is what link_check refuses; defined, it isn't.
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING), "link_check: a program symbol without an atom", 0);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING), "link_check: a program symbol without an atom", 0);
     link_test_expect(&tally, link_define_symbol(&link, later, other_unit, 8, 8), "defining later", 0);
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check of what is valid", link.error);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_NONE, "link_check of what is valid", link.error);
 
     // Fixups.
     link_test_expect(&tally, link_add_fixup(&link, 0, 0, BUSTER_LINK_FIXUP_ABS64, defined, 0) == 0 && link_test_failed(&link, LINK_ERROR_ID), "a fixup of atom 0", 0);
@@ -744,7 +790,7 @@ static bool link_test_rules(void)
                      "a fixup of an atom whose range another follows", 0);
     link_test_expect(&tally, link.fixups.count == 6 && link.atoms.fixup_begin[data] == 1 && link.atoms.fixup_count[data] == 2, "the refused fixups change nothing",
                      link.fixups.count);
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check of valid fixups, a local absolute symbol's from another unit among them", link.error);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_NONE, "link_check of valid fixups, a local absolute symbol's from another unit among them", link.error);
 
     // What link_check refuses: TLS kinds and the others on the wrong symbols, and a local from another unit.
     static const struct
@@ -788,16 +834,16 @@ static bool link_test_rules(void)
     {
         const AtomId atom = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, 8, bytes, 0);
         const bool added = atom != 0 && link_add_fixup(&link, atom, 0, wrong[i].kind, wrong[i].target, 0) != 0;
-        link_test_expect(&tally, added && link_check(&link) == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING), wrong[i].what, i);
+        link_test_expect(&tally, added && link_test_check(&link, &mismatches) == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING), wrong[i].what, i);
         // Retargeted to a symbol it can refer to, it passes again.
         const uint8_t kind = wrong[i].kind;
         const bool tls_kind = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32;
         link.fixups.target[link.fixups.count - 1] = tls_kind ? variable : defined;
-        link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after retargeting", i);
+        link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_NONE, "link_check after retargeting", i);
     }
     // The size of a TLS symbol is fine.
     const AtomId sized = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, 8, bytes, 0);
-    link_test_expect(&tally, sized != 0 && link_add_fixup(&link, sized, 0, BUSTER_LINK_FIXUP_SIZE64, variable, 0) != 0 && link_check(&link) == LINK_ERROR_NONE,
+    link_test_expect(&tally, sized != 0 && link_add_fixup(&link, sized, 0, BUSTER_LINK_FIXUP_SIZE64, variable, 0) != 0 && link_test_check(&link, &mismatches) == LINK_ERROR_NONE,
                      "a TLS symbol's size", 0);
     // A shared library's symbols: a function, the object `foreign`, and a TLS variable. The GOT kinds reach each, ABS64
     // the function and the object, and CALL the function; no other kind reaches one.
@@ -888,12 +934,12 @@ static bool link_test_rules(void)
     {
         const AtomId atom = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, 8, bytes, 0);
         const bool added = atom != 0 && link_add_fixup(&link, atom, 0, shared[i].kind, shared[i].target, 0) != 0;
-        const LinkError checked = link_check(&link);
+        const LinkError checked = link_test_check(&link, &mismatches);
         link_test_expect(&tally, added && (shared[i].reaches ? checked == LINK_ERROR_NONE : checked == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING)),
                          shared[i].what, i);
         // Retargeted to a symbol of the program's that it can refer to, it passes again.
         link.fixups.target[link.fixups.count - 1] = shared[i].kind == BUSTER_LINK_FIXUP_TPOFF32 || shared[i].kind == BUSTER_LINK_FIXUP_GOTTPOFF ? variable : defined;
-        link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after retargeting", i);
+        link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_NONE, "link_check after retargeting", i);
     }
     // Priorities: an init or fini array atom's each, after the atoms that have one, up to 65535.
     const AtomId init_array = link_add_atom(&link, BUSTER_LINK_CLASS_INIT_ARRAY, 3, 8, bytes, 0);
@@ -912,20 +958,21 @@ static bool link_test_rules(void)
     link_test_expect(&tally, priorities->count == 3 && priorities->atom[1] == init_array && priorities->priority[1] == UINT16_MAX && priorities->atom[2] == fini_array &&
                          priorities->priority[2] == 0,
                      "the refused priorities change nothing", priorities->count);
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check of valid priorities", link.error);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_NONE, "link_check of valid priorities", link.error);
     link.priorities.atom[2] = init_array;
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "link_check: priorities out of order", 0);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "link_check: priorities out of order", 0);
     link.priorities.atom[2] = data;
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "link_check: a priority of an atom that isn't an array's", 0);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "link_check: a priority of an atom that isn't an array's", 0);
     link.priorities.atom[2] = fini_array;
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after putting the priorities back", 0);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_NONE, "link_check after putting the priorities back", 0);
     // A fixup outside every atom's range, and an atom whose range overlaps another's, which only lanes filling the
     // columns themselves could make.
     link.atoms.fixup_count[data] -= 1;
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "a fixup in no atom's range", 0);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "a fixup in no atom's range", 0);
     link.atoms.fixup_count[data] += 1;
     link.atoms.fixup_begin[other_unit] = link.atoms.fixup_begin[data];
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "overlapping ranges", 0);
+    link_test_expect(&tally, link_test_check(&link, &mismatches) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "overlapping ranges", 0);
+    link_test_expect(&tally, mismatches == 0, "link_check_lanes answers and records as link_check does on 1, 2, 3 and 8 lanes", mismatches);
     link_test_release(&arenas);
     return link_test_report(&tally);
 }
@@ -2479,6 +2526,7 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
     LinkTestTally tally = {
         .check = "programs",
     };
+    uint64_t mismatches = 0;
     LinkProgramOptions options[BUSTER_LINK_TEST_ALL_PROGRAMS];
     const char* names[BUSTER_LINK_TEST_ALL_PROGRAMS];
     const char* directories[BUSTER_LINK_TEST_ALL_PROGRAMS];
@@ -2496,7 +2544,7 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
             printf("  programs: %s: %s, error %d\n", names[i], program.problem, program.link.error);
         }
         link_test_expect(&tally, generated, names[i], i);
-        link_test_expect(&tally, generated && link_check(&program.link) == LINK_ERROR_NONE, "link_check of a generated program", i);
+        link_test_expect(&tally, generated && link_test_check(&program.link, &mismatches) == LINK_ERROR_NONE, "link_check of a generated program", i);
         const bool repeated = link_program_generate(&again, options[i]);
         link_test_expect(&tally, generated && repeated && link_test_same(&program.link, &again.link) &&
                                      memcmp(program.output, again.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES) == 0,
@@ -2564,6 +2612,7 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
         link_program_release(&again);
         link_program_release(&other);
     }
+    link_test_expect(&tally, mismatches == 0, "link_check_lanes answers and records as link_check does on 1, 2, 3 and 8 lanes", mismatches);
     return link_test_report(&tally);
 }
 
