@@ -60,6 +60,24 @@ The noise sets which comparison to use.
   itself under the lock. The output is each run's, after a heading (`== round 3 tree ../mine config [...]`); it exits
   with status 1 if a run fails. For a small difference, time one loop (`--only`, about 0.1 s a run) over 15 rounds,
   and look at an outlier with `perf stat` before believing it.
+- **Whole drivers: `time-runs` under `ab`.** A change to a phase that a few percent of a compile takes has to show in
+  the whole driver, a fresh process each time, startup, page faults and teardown included (#335). `time-runs` runs
+  this executable once per argument list in each run, the lists in an order that rotates by run, after one warm-up
+  each, and reports every process's wall time (fork to `wait4`), user and system time, peak resident set and page
+  faults, then each list's medians:
+
+  ```sh
+  ./build/compiler ab --rounds 5 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh ../mine \
+      -- time-runs --runs 21 --list parse -fsyntax-only file.c --list parse -fsyntax-only --parser-keywords file.c
+  ./build/compiler ab --rounds 5 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh ../main ../mine \
+      -- time-runs --runs 21 --after-scalar 200 --list -fsyntax-only file.c
+  ```
+
+  Its lists start at `--list`, since `ab` takes `--` for its own. Two lists in one binary compare an option; two
+  trees under `ab` compare builds. `--after-scalar MS` runs an untimed scalar loop for MS ms before each timed process,
+  on the same CPU, the state a compiler starts in after lighter work; `--executable PATH` times another program. A
+  process whose exit status isn't its list's first warm-up's fails the command. Compare the five rounds' medians:
+  their spread is the noise.
 
 ## Counting in the process
 
