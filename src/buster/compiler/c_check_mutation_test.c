@@ -2,10 +2,11 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-checker's semantic mutation checks (c_check_mutation.c). check_test_mutation_engine checks the sites a unit
-// of its own gives, counted by hand from its parse, the edits some of them make, and the minimizer's helpers. The
-// fixtures are differences test-checker-corpus --semantic-mutations found, minimized (checker_mutation_N.c) and
-// then fixed in the checker: each is checked as the corpus check checks a file, against clang (which must still give
-// the result recorded with it) and with the scalar and vector paths alike. Include after c_check_corpus.c.
+// of its own gives, counted by hand from its parse, the edits some of them make, and the minimizer's helpers, and
+// check_test_mutation_command runs --minimize-mutant as a command of this executable. The fixtures are differences
+// test-checker-corpus --semantic-mutations found, minimized (checker_mutation_N.c) and then fixed in the checker: each
+// is checked as the corpus check checks a file, against clang (which must still give the result recorded with it) and
+// with the scalar and vector paths alike. Include after c_check_corpus.c.
 #ifndef BUSTER_C_CHECK_MUTATION_TEST_INCLUDED
 #define BUSTER_C_CHECK_MUTATION_TEST_INCLUDED
 
@@ -780,6 +781,44 @@ static void check_test_mutation_fixture(CheckTest* test, CheckCorpusTally* tally
     check_test_expect(test, ready, "the fixture's file is removed");
 }
 
+// --minimize-mutant FILE... as a command (#406's review): every file of the command line is a mutant, here two
+// without a difference, and a command that names none, or mixes it with a campaign, is refused.
+static void check_test_mutation_command(CheckTest* test, const char* directory, const char* clang)
+{
+    static const char source[] = "int f(int x) { return x + 1; }\n";
+    char first[4200];
+    char second[4200];
+    char output[4200];
+    char errors[4200];
+    snprintf(first, sizeof(first), "%s/command_first.c", directory);
+    snprintf(second, sizeof(second), "%s/command_second.c", directory);
+    snprintf(output, sizeof(output), "%s/command.out", directory);
+    snprintf(errors, sizeof(errors), "%s/command.err", directory);
+    const bool ready = check_corpus_write(first, source, sizeof(source) - 1) && check_corpus_write(second, source, sizeof(source) - 1);
+    char* both[] = { "/proc/self/exe", "test-checker-corpus", "--clang", (char*)clang, "--minimize-mutant", first, second, "-std=gnu17", 0 };
+    const int status = ready ? object_test_run(both, output, errors) : -1;
+    char text[8192] = { 0 };
+    FILE* stream = fopen(output, "rb");
+    if (stream != NULL)
+    {
+        const size_t length = fread(text, 1, sizeof(text) - 1, stream);
+        text[length] = 0;
+        fclose(stream);
+    }
+    char first_line[4300];
+    char second_line[4300];
+    snprintf(first_line, sizeof(first_line), "checker-corpus: %s: no difference\n", first);
+    snprintf(second_line, sizeof(second_line), "checker-corpus: %s: no difference\n", second);
+    check_test_expect(test, status == 0 && strstr(text, first_line) != NULL && strstr(text, second_line) != NULL,
+                      "--minimize-mutant FILE... minimizes every file of the command line");
+    char* none[] = { "/proc/self/exe", "test-checker-corpus", "--clang", (char*)clang, "--minimize-mutant", "-std=gnu17", 0 };
+    check_test_expect(test, ready && object_test_run(none, output, errors) == 1, "--minimize-mutant without a file is refused");
+    char* mixed[] = { "/proc/self/exe", "test-checker-corpus", "--clang", (char*)clang, "--minimize-mutant", first, "--semantic-mutations", "1", 0 };
+    check_test_expect(test, ready && object_test_run(mixed, output, errors) == 1, "--minimize-mutant beside a campaign is refused");
+    const bool removed = unlink(first) == 0 && unlink(second) == 0 && unlink(output) == 0 && unlink(errors) == 0;
+    check_test_expect(test, removed, "the command checks' files are removed");
+}
+
 static void check_test_mutations(CheckTest* test, const char* clang)
 {
     char directory[4096];
@@ -790,6 +829,7 @@ static void check_test_mutations(CheckTest* test, const char* clang)
     if (made)
     {
         check_test_mutation_engine(test, directory);
+        check_test_mutation_command(test, directory, clang);
         CheckCorpusTally tally = { 0 };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_mutation_fixtures); i += 1)
         {

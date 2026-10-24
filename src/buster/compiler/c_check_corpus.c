@@ -1996,6 +1996,7 @@ static int run_checker_corpus(int count, char** arguments)
     uint64_t minimize = 4;
     uint64_t seed = 133;
     bool keep = false;
+    bool minimize_mutants = false;
     bool rejections = false;
     const uint32_t file_capacity = 1u << 20;
     char** files = calloc(file_capacity, sizeof(char*));
@@ -2025,7 +2026,7 @@ static int run_checker_corpus(int count, char** arguments)
                            strcmp(argument, "--select-accepted") == 0 || strcmp(argument, "--semantic-rejections") == 0 ||
                            strcmp(argument, "--root") == 0 || strcmp(argument, "--reports") == 0 || strcmp(argument, "--limit") == 0 ||
                            strcmp(argument, "--random") == 0 || strcmp(argument, "--mutations") == 0 || strcmp(argument, "--semantic-mutations") == 0 ||
-                           strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0 || strcmp(argument, "--minimize-mutant") == 0;
+                           strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0;
         if (value)
         {
             valid = i + 1 < count;
@@ -2054,10 +2055,6 @@ static int run_checker_corpus(int count, char** arguments)
                 {
                     root = text;
                 }
-                else if (strcmp(argument, "--minimize-mutant") == 0)
-                {
-                    mutants[mutant_count++] = arguments[i];
-                }
                 else
                 {
                     uint64_t* destination = strcmp(argument, "--limit") == 0 ? &limit : strcmp(argument, "--random") == 0 ? &random_count :
@@ -2070,6 +2067,11 @@ static int run_checker_corpus(int count, char** arguments)
         else if (strcmp(argument, "--keep") == 0)
         {
             keep = true;
+        }
+        else if (strcmp(argument, "--minimize-mutant") == 0)
+        {
+            // Every file of the command line is then a mutant to minimize, as `--minimize-mutant FILE...` says.
+            minimize_mutants = true;
         }
         else if (argument[0] != '-')
         {
@@ -2148,7 +2150,11 @@ static int run_checker_corpus(int count, char** arguments)
         options.quiet = true;
         options.clang_features = true;
         options.semantic_pragmas = true;
-        for (uint32_t i = 0; valid && i < input_count; i += 1)
+        for (uint32_t i = 0; minimize_mutants && i < input_count; i += 1)
+        {
+            mutants[mutant_count++] = inputs[i];
+        }
+        for (uint32_t i = 0; valid && !minimize_mutants && i < input_count; i += 1)
         {
             const uint32_t before = file_count;
             struct stat information;
@@ -2164,7 +2170,8 @@ static int run_checker_corpus(int count, char** arguments)
             valid = file_count > before && file_count < file_capacity;
         }
         valid = valid && (manifest == 0 || check_corpus_manifest(manifest, root, files, &file_count, file_capacity));
-        valid = valid && (file_count != 0 || random_count != 0 || mutant_count != 0) && (mutant_count == 0 || file_count == 0) && limit != 0 && random_count <= UINT32_MAX && mutation_count <= UINT32_MAX &&
+        valid = valid && (file_count != 0 || random_count != 0 || mutant_count != 0) && (!minimize_mutants || (mutant_count != 0 && file_count == 0 && random_count == 0)) &&
+                limit != 0 && random_count <= UINT32_MAX && mutation_count <= UINT32_MAX &&
                 semantic_count <= UINT32_MAX && ((mutation_count == 0 && semantic_count == 0) || file_count != 0) &&
                 (selection_path == 0 || (random_count == 0 && mutation_count == 0 && (semantic_count == 0 || !rejections)));
     }
@@ -2273,7 +2280,7 @@ static int run_checker_corpus(int count, char** arguments)
             }
         }
     }
-    const bool passed = mutant_count != 0 ? minimized : valid && (tally.files != 0 || rejections) &&
+    const bool passed = mutant_count != 0 ? valid && minimized : valid && (tally.files != 0 || rejections) &&
                         tally.files + tally.excluded == selected + random_count + mutation_count + semantic_count + mutations.units &&
                         tally.acceptance_differences == 0 && tally.line_differences == 0 && tally.diagnostic_path_differences == 0 &&
                         tally.path_differences == 0 && tally.resource_failures == 0 && tally.preprocessing_failures == 0;
