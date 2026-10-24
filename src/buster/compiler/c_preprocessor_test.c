@@ -1122,6 +1122,11 @@ static const PPTestCase pp_test_cases[] = {
     // An empty expansion's or empty argument's leading space goes to the next token, as clang does.
     { "spaces through empty expansions", "#define EMPTY\n#define S(x) #x\n#define EXPAND(x) S(x)\nEXPAND(a EMPTY+b)\n#define F(x) a x+b\nEXPAND(F())\n#define G()\nEXPAND(a G()+b)\n#define H(x) a x\nEXPAND(H()+b)\n#define E2 EMPTY\nEXPAND(a E2+b)\n#define J(x, y) [x y]\nEXPAND(J(, +))\n#define K(x) x\nEXPAND(a K()+b)\n#define V(...) a __VA_OPT__(b)c\nEXPAND(V() V(1))\n",
       0, "c23", "\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"[ +]\"\n\"a +b\"\n\"a c a bc\"\n", false, 0, 0, 0 },
+    // #if and #elif lines that pp_condition_direct evaluates without a capture: names through chains of object-like
+    // macros to numbers and to names of no macro, defined X and defined(X), C23's true through a macro, and a
+    // self-referential name, which it leaves to the capture.
+    { "#if lines without a capture", "#define ONE 1\n#define TWO 2\n#define CHAIN ONE\n#define CHAIN2 CHAIN\n#define NAME undefined_name\n#define TRUE_NAME true\n#define SELF SELF\n#if CHAIN2 + TWO == 3 && defined(ONE) && defined TWO && !defined(THREE)\na\n#elif CHAIN\nb\n#endif\n#if NAME || SELF\nc\n#elif defined CHAIN2 && CHAIN2 > 0\nd\n#endif\n#if TRUE_NAME\ne\n#endif\n#if 0\n#elif TWO*TWO == 4\nf\n#endif\n#ifdef ONE\n#if ONE ? CHAIN : TWO\ng\n#endif\n#endif\n",
+      0, "c23", "a\nd\ne\nf\ng\n", false },
     // Invocations read from a file's text whose names have no space before them: an empty expansion's trailing space, and
     // a nonempty one's, go to the next token (pp_invoke_file's, as pp_finish_simple's).
     { "spaces after invocations in a file's text", "#define E(a, b) a b\n#define F(a, b, c) [a b c]\n#define G(a)\n#define H(a, b) a b\nx=E(,)+1;\ny=E( , )-2;\nz=F(,,)*3;\nw=G(1)+4;\nv=H(,)H(,)5;\nu=H(1,)+6;\n",

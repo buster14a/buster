@@ -10058,35 +10058,246 @@ static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     }
 }
 
+// The most macros a name in a #if line expands through for pp_condition_direct (X to Y to 1), and the longest line it
+// takes.
+#define BUSTER_PP_CONDITION_CHAIN 8
+#define BUSTER_PP_CONDITION_TOKENS 64
+
+// pp_start_condition, the main loop's steps over the line's capture and pp_finish_condition for a #if or #elif line whose
+// expansion only ever writes into the capture: its tokens but names, `defined` with its operand (a name, or one in
+// parentheses), names of no macro, and names of object-like macros that expand, through bodies of one token each, to a
+// number or a name of no macro (sqlite3.c's 1,409 lines of 1,737). Its expanded tokens go straight into pp->captures as
+// the capture would hold them (kinds, values, locations and origins: the evaluation reads nothing else), with the
+// expansions' records, the statistics and the temporary origins' peaks the copy of the line and those steps would leave,
+// and are evaluated and decide the group as pp_finish_condition does. The line is checked whole before anything changes:
+// returns false, having changed nothing, when it isn't so, or something is open that the capture's steps would read.
+static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind, uint32_t begin, uint32_t end, uint32_t location)
+{
+    const PPFileData* data = &pp->datas[context->data];
+    const uint32_t base = pp->ranges[context->range].base;
+    PPTokens* captures = &pp->captures;
+    bool result = pp->vectorized && begin < end && end - begin <= BUSTER_PP_CONDITION_TOKENS &&
+                  (pp->capture_count | pp->stream_count | pp->limit_count | pp->poison_count) == 0 && !pp->options.expansion_starts && !pp->fatal &&
+                  data->raw_error_count == 0 && !pp_collecting(pp) && pp->arguments.count + (end - begin) <= pp->arguments.capacity &&
+                  (uint64_t)captures->count + (end - begin) <= captures->capacity &&
+                  pp->expansions.count + BUSTER_PP_CONDITION_CHAIN <= pp->expansions.capacity &&
+                  (pp->options.no_history || pp_history_origin_room(pp, captures, captures->count + (end - begin)));
+    for (uint32_t t = begin; result && t < end; t += 1)
+    {
+        const PPMacroId id = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[data->values[t]] : 0;
+        const PPMacro* macro = &pp->macros[id];
+        if (id != 0 && (macro->flags & BUSTER_PP_MACRO_BUILTIN) && macro->builtin == PP_BUILTIN_DEFINED)
+        {
+            // `defined X` or `defined ( X )`.
+            const bool named = t + 1 < end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+            const bool parenthesized = t + 3 < end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_L_PAREN && (data->kinds[t + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER &&
+                                       (data->kinds[t + 3] & 0x7F) == C_TOKEN_R_PAREN;
+            result = named || parenthesized;
+            t += named ? 1 : 3;
+        }
+        else if (id != 0)
+        {
+            // Object-like macros, each of a body of one token that names the next, to a number or a name of no macro; none
+            // twice, which would be painted.
+            PPMacroId chain[BUSTER_PP_CONDITION_CHAIN];
+            uint32_t depth = 0;
+            bool ended = false;
+            PPMacroId next = id;
+            while (result && !ended)
+            {
+                const PPMacro* link = &pp->macros[next];
+                const PPFileData* body = &pp->datas[link->data];
+                const uint8_t body_kind = body->kinds[link->body_begin] & 0x7F;
+                bool repeated = false;
+                for (uint32_t k = 0; k < depth; k += 1)
+                {
+                    repeated |= chain[k] == next;
+                }
+                result = depth < BUSTER_PP_CONDITION_CHAIN && !repeated && (link->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 &&
+                         link->disabled == 0 && link->body_end - link->body_begin == 1 && (body_kind == C_TOKEN_NUMERIC_CONSTANT || body_kind == C_TOKEN_RAW_IDENTIFIER);
+                chain[depth < BUSTER_PP_CONDITION_CHAIN ? depth : 0] = next;
+                depth += 1;
+                next = result && body_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[body->values[link->body_begin]] : 0;
+                ended = next == 0;
+            }
+        }
+    }
+    if (result)
+    {
+        const bool history = !pp->options.no_history;
+        const uint32_t capture_begin = captures->count;
+        // pp_copy_line's copy into pp->arguments would have given its origins.
+        if (history)
+        {
+            const uint32_t copied = pp->arguments.count + (end - begin);
+            pp->origin_peak[0] = pp->origin_peak[0] < copied ? copied : pp->origin_peak[0];
+        }
+        // The capture's steps: a run of the line's tokens from the start and after each expansion with tokens after it,
+        // and a run of none in the buffer of each expansion whose body names a macro.
+        uint32_t runs = 1;
+        uint32_t run_tokens = 0;
+        uint32_t direct = 0;
+        uint32_t buffered = 0;
+        uint32_t builtins = 0;
+        uint32_t expansions_peak = 0;
+        uint32_t anchor = BUSTER_PP_NONE;
+        uint32_t count = capture_begin;
+        for (uint32_t t = begin; t < end; t += 1)
+        {
+            const uint8_t token_kind = data->kinds[t] & 0x7F;
+            const PPMacroId id = token_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[data->values[t]] : 0;
+            const PPMacro* macro = &pp->macros[id];
+            const uint32_t name_location = base + data->starts[t];
+            // The name's flags in the line's buffer (pp_copy_line's), which the answer or the body's token takes.
+            const uint8_t name_flags = pp_file_space(data, t) ? BUSTER_PP_SPACE : 0;
+            if (id == 0)
+            {
+                captures->kinds[count] = token_kind;
+                captures->flags[count] = name_flags;
+                captures->values[count] = token_kind == C_TOKEN_RAW_IDENTIFIER ? data->values[t] : base + data->values[t];
+                captures->locations[count] = name_location;
+                if (history)
+                {
+                    captures->origins[count] = 0;
+                }
+                count += 1;
+                run_tokens += 1;
+            }
+            else if (macro->flags & BUSTER_PP_MACRO_BUILTIN)
+            {
+                // pp_expand_builtin's `defined`: its record, and its answer with its record as origin.
+                const uint32_t record = pp_history_expansion(pp, id, name_location, 0);
+                const bool parenthesized = (data->kinds[t + 1] & 0x7F) == C_TOKEN_L_PAREN;
+                const IdentId operand = data->values[t + (parenthesized ? 2 : 1)];
+                const uint32_t saved_history = pp->history_current;
+                pp->history_current = record;
+                const PPToken answer = pp_number_token(pp, pp_is_defined(pp, operand), name_flags);
+                pp->history_current = saved_history;
+                captures->kinds[count] = answer.kind;
+                captures->flags[count] = answer.flags;
+                captures->values[count] = answer.value;
+                captures->locations[count] = answer.location;
+                if (history)
+                {
+                    captures->origins[count] = answer.origin;
+                }
+                count += 1;
+                builtins += 1;
+                anchor = name_location;
+                t += parenthesized ? 3 : 1;
+                runs += t + 1 < end;
+            }
+            else
+            {
+                // pp_expand_object's records along the chain: each body that names a macro is buffered, its name read
+                // from that buffer with the expansion as origin, and the last body goes straight into the capture.
+                uint32_t parent = 0;
+                uint32_t place = name_location;
+                PPMacroId next = id;
+                uint32_t depth = 0;
+                while (next != 0)
+                {
+                    const PPMacro* link = &pp->macros[next];
+                    const PPFileData* body = &pp->datas[link->data];
+                    const uint32_t b = link->body_begin;
+                    const uint8_t body_kind = body->kinds[b] & 0x7F;
+                    const uint32_t record = pp_history_expansion(pp, next, place, parent);
+                    const PPMacroId after = body_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[body->values[b]] : 0;
+                    if (after != 0)
+                    {
+                        buffered += 1;
+                        runs += 1;
+                        depth += 1;
+                        expansions_peak = expansions_peak < depth ? depth : expansions_peak;
+                    }
+                    else
+                    {
+                        captures->kinds[count] = body_kind;
+                        captures->flags[count] = (uint8_t)(name_flags | BUSTER_PP_FROM_MACRO | BUSTER_PP_NAME_SPACE);
+                        captures->values[count] = body_kind == C_TOKEN_RAW_IDENTIFIER ? body->values[b] : link->base + body->values[b];
+                        captures->locations[count] = link->base + body->starts[b];
+                        if (history)
+                        {
+                            captures->origins[count] = record;
+                        }
+                        count += 1;
+                        direct += 1;
+                    }
+                    parent = record;
+                    place = link->base + body->starts[b];
+                    next = after;
+                }
+                runs += t + 1 < end;
+            }
+        }
+        captures->count = count;
+        if (history)
+        {
+            pp->origin_peak[1] = pp->origin_peak[1] < count ? count : pp->origin_peak[1];
+            const uint32_t buffers = pp->expansions.count + expansions_peak;
+            pp->origin_peak[2] = expansions_peak != 0 && pp->origin_peak[2] < buffers ? buffers : pp->origin_peak[2];
+        }
+        if (anchor != BUSTER_PP_NONE)
+        {
+            pp->history_anchor = anchor;
+        }
+        if (pp->options.timing)
+        {
+            pp->statistics.buffer_runs += runs;
+            pp->statistics.buffer_run_tokens += run_tokens;
+            pp->statistics.builtins += builtins;
+            pp->statistics.direct_expansions += direct;
+            pp->statistics.buffered_expansions += buffered;
+        }
+        // pp_finish_condition's.
+        pp_read_directive_comment(pp, context, d);
+        const bool taken = pp_evaluate(pp, captures, capture_begin, captures->count, location);
+        if (pp->options.timing)
+        {
+            const uint64_t tokens = captures->count - capture_begin;
+            pp->statistics.conditions += 1;
+            pp->statistics.condition_tokens += tokens;
+            pp->statistics.long_conditions += tokens > 32;
+            pp->statistics.longest_condition = tokens > pp->statistics.longest_condition ? tokens : pp->statistics.longest_condition;
+        }
+        captures->count = capture_begin;
+        pp_apply_condition(pp, context, d, kind, taken);
+    }
+    return result;
+}
+
 // A #if or #elif line (tokens [begin, end) of the context's file) is copied to pp->arguments and expanded through a
 // capture (pp_start_capture); pp_finish_condition evaluates it and decides the group. An empty line is an error, and
-// false at once.
+// false at once. A line pp_condition_direct takes doesn't need the capture.
 static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind, uint32_t begin, uint32_t end, uint32_t location)
 {
-    const uint32_t line = pp->arguments.count;
-    bool started = false;
-    if (begin == end)
+    if (!pp_condition_direct(pp, context, d, kind, begin, end, location))
     {
-        pp_read_directive_comment(pp, context, d);
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#if with no expression");
-    }
-    else if (pp_copy_line(pp, context, begin, end))
-    {
-        const PPCapture capture = {
-            .kind = BUSTER_PP_CAPTURE_CONDITION,
-            .arguments_begin = line,
-            .directive = d,
-            .context = (uint32_t)(context - pp->contexts),
-            .directive_kind = kind,
-            .location = location,
-        };
-        started = pp_start_capture(pp, capture, line, pp->arguments.count, location);
-    }
-    if (!started)
-    {
-        pp_read_directive_comment(pp, context, d);
-        pp->arguments.count = line;
-        pp_apply_condition(pp, context, d, kind, false);
+        const uint32_t line = pp->arguments.count;
+        bool started = false;
+        if (begin == end)
+        {
+            pp_read_directive_comment(pp, context, d);
+            pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#if with no expression");
+        }
+        else if (pp_copy_line(pp, context, begin, end))
+        {
+            const PPCapture capture = {
+                .kind = BUSTER_PP_CAPTURE_CONDITION,
+                .arguments_begin = line,
+                .directive = d,
+                .context = (uint32_t)(context - pp->contexts),
+                .directive_kind = kind,
+                .location = location,
+            };
+            started = pp_start_capture(pp, capture, line, pp->arguments.count, location);
+        }
+        if (!started)
+        {
+            pp_read_directive_comment(pp, context, d);
+            pp->arguments.count = line;
+            pp_apply_condition(pp, context, d, kind, false);
+        }
     }
 }
 
