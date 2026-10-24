@@ -3,7 +3,11 @@
 //
 // Raw built-in linker command. Driver options are removed without reordering foreign_arguments' inputs, archive
 // controls or library-search controls. The caller supplies startup objects and libraries in their desired order;
-// runtime discovery supplies only the default interpreter for a PIE. The default is a static executable at _start.
+// runtime discovery supplies only the default interpreter for a PIE. The default is a static executable at _start;
+// -pie makes a dynamic PIE, -static with -pie a static PIE (GCC's -static-pie line: -static -pie --no-dynamic-linker
+// -z text) and -shared a shared library, without an entry point unless -e names one, with -soname's DT_SONAME. A
+// static executable and a static PIE get the static runtime's handling (IFUNC stubs and IRELATIVE relocations, TLS
+// relaxation, the names libc.a's startup looks for), which a static program without libc doesn't notice.
 //
 // Conversion precedes optional section GC and literal merging, then the existing lane-parallel writer. The original
 // Foreign and all arenas remain live through writing. Entry lookup uses Foreign's canonical names again after GC's
@@ -22,6 +26,7 @@ struct ForeignDriver
     String8 output;
     String8 entry;
     String8 interpreter;
+    String8 soname;
     RuntimeKind kind;
     ForeignPath path;
     uint32_t lanes;
@@ -31,6 +36,8 @@ struct ForeignDriver
     bool strip_all;
     bool time;
     bool help;
+    // Whether -e named the entry point: a shared library has none otherwise.
+    bool entry_given;
 };
 
 typedef struct ForeignDriverWrite ForeignDriverWrite;
@@ -51,15 +58,14 @@ struct ForeignDriverWrite
 
 static void foreign_driver_usage(void)
 {
-    fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static|-pie] [--dynamic-linker PATH]\n"
-                    "                    [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
+    fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared] [-soname NAME] [--dynamic-linker PATH]\n"
+                    "                    [--no-dynamic-linker] [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
                     "                    [--dedup-unwind|--no-dedup-unwind]\n"
                     "                    [-s|--strip-all] [--scalar] [--lanes N] [--time] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
                     "Defaults: static executable, a.out, entry _start, one lane; GC, string merging and unwind deduplication off.\n"
-                    "Supply startup objects and runtime libraries explicitly, in link order.\n"
-                    "Use -pie for C runtime startup; static output currently supports no-libc inputs.\n"
-                    "Shared-library and static-PIE outputs are not supported by this command yet.\n"
-                    "Static output searches archives by default; PIE output prefers shared libraries.\n"
+                    "Supply startup objects and runtime libraries explicitly, in link order, as GCC's driver gives them to GNU ld.\n"
+                    "-pie writes a dynamic PIE, -static -pie a static PIE and -shared a shared library (no entry point without -e).\n"
+                    "Static output searches archives by default; PIE and shared output prefer shared libraries.\n"
                     "Named regular symbols are emitted by default; -s/--strip-all omits them, preserving dynamic symbols.\n"
                     "Archive groups, --whole-archive, --as-needed, -Bstatic and -Bdynamic retain input order.\n"
                     "--time reports each stage's time on standard error.\n");
@@ -95,6 +101,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
     char** inputs = argc >= 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)argc + 2) : 0;
     bool valid = inputs != 0;
     uint32_t count = 1;
+    bool pie = false;
+    bool static_link = false;
+    bool shared = false;
+    bool no_interpreter = false;
     for (int i = 0; valid && i < argc; i += 1)
     {
         const char* argument = argv[i];
@@ -132,6 +142,7 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
             else if (valid && entry)
             {
                 driver->entry = foreign_string(value);
+                driver->entry_given = true;
             }
             else if (valid && interpreter)
             {
@@ -146,15 +157,36 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
                 fprintf(stderr, "link-foreign: invalid or missing value for %s\n", argument);
             }
         }
-        else if (strcmp(argument, "-pie") == 0)
+        else if (strcmp(argument, "-pie") == 0 || strcmp(argument, "--pie") == 0 || strcmp(argument, "-pic-executable") == 0)
         {
-            driver->kind = RUNTIME_KIND_DYNAMIC;
+            pie = true;
         }
         else if (strcmp(argument, "-static") == 0)
         {
-            driver->kind = RUNTIME_KIND_STATIC;
+            static_link = true;
             inputs[count] = argv[i];
             count += 1;
+        }
+        else if (strcmp(argument, "-shared") == 0 || strcmp(argument, "-Bshareable") == 0)
+        {
+            shared = true;
+        }
+        else if (strcmp(argument, "-soname") == 0 || strcmp(argument, "-h") == 0 || foreign_starts_with(argument, "-soname=") ||
+                 foreign_starts_with(argument, "--soname="))
+        {
+            const char* equals = strchr(argument, '=');
+            const char* value = equals != 0 ? equals + 1 : i + 1 < argc ? argv[++i] : 0;
+            valid = value != 0 && value[0] != 0;
+            driver->soname = valid ? foreign_string(value) : driver->soname;
+            if (!valid)
+            {
+                fprintf(stderr, "link-foreign: invalid or missing value for %s\n", argument);
+            }
+        }
+        else if (strcmp(argument, "--no-dynamic-linker") == 0)
+        {
+            // A static PIE's, which has no interpreter whatever this says.
+            no_interpreter = true;
         }
         else if (strcmp(argument, "--gc-sections") == 0 || strcmp(argument, "--no-gc-sections") == 0)
         {
@@ -184,8 +216,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
             // imports bound at load (now), RELRO over the GOT (relro) and a stack that doesn't execute (noexecstack).
             i += 1;
             const char* keyword = argv[i];
+            // And text, which every output keeps: the writer refuses a relocation in read-only memory.
             valid = strcmp(argument, "-m") == 0 ? strcmp(keyword, "elf_x86_64") == 0 :
-                                                  strcmp(keyword, "now") == 0 || strcmp(keyword, "relro") == 0 || strcmp(keyword, "noexecstack") == 0;
+                                                  strcmp(keyword, "now") == 0 || strcmp(keyword, "relro") == 0 || strcmp(keyword, "noexecstack") == 0 ||
+                                                      strcmp(keyword, "text") == 0;
             if (!valid)
             {
                 fprintf(stderr, "link-foreign: unsupported option: %s %s\n", argument, keyword);
@@ -199,7 +233,7 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         {
             driver->time = true;
         }
-        else if (strcmp(argument, "--help") == 0 || strcmp(argument, "-h") == 0)
+        else if (strcmp(argument, "--help") == 0)
         {
             driver->help = true;
         }
@@ -209,16 +243,29 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
             count += 1;
         }
     }
+    driver->kind = shared ? RUNTIME_KIND_SHARED : pie && static_link ? RUNTIME_KIND_STATIC_PIE : pie ? RUNTIME_KIND_DYNAMIC : RUNTIME_KIND_STATIC;
+    // GNU ld takes -shared with -static as a library that links no shared library; lld and this command refuse it, and
+    // --no-dynamic-linker without -static, a dynamic PIE without an interpreter.
+    if (valid && ((shared && (static_link || pie)) || (no_interpreter && driver->kind != RUNTIME_KIND_STATIC_PIE)))
+    {
+        fprintf(stderr, "link-foreign: unsupported combination of -shared, -static, -pie and --no-dynamic-linker\n");
+        valid = false;
+    }
     if (valid && !driver->help)
     {
-        inputs[0] = driver->kind == RUNTIME_KIND_STATIC ? (char*)"-Bstatic" : (char*)"-Bdynamic";
+        inputs[0] = runtime_kind_is_static(driver->kind) ? (char*)"-Bstatic" : (char*)"-Bdynamic";
         const ForeignFailure failure = foreign_arguments(&driver->command, (int)count, inputs, arena);
         valid = failure.error == FOREIGN_ERROR_NONE && driver->command.argument_count != 0 && driver->entry.length <= UINT32_MAX;
         if (failure.error == FOREIGN_ERROR_ARGUMENTS)
         {
             fprintf(stderr, "link-foreign: invalid input option: %s\n", inputs[failure.argument]);
         }
-        if (valid)
+        // A shared library has no entry point unless -e names one.
+        if (valid && driver->kind == RUNTIME_KIND_SHARED && !driver->entry_given)
+        {
+            driver->entry = (String8){ 0 };
+        }
+        if (valid && driver->entry.length != 0)
         {
             // foreign_arguments reserves count + 1 entries, leaving room for the entry's forced reference.
             driver->command.undefined[driver->command.undefined_count] = driver->entry;
@@ -231,14 +278,14 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
 static SymbolId foreign_driver_entry(const ForeignDriver* driver, const Foreign* foreign, const ForeignLink* converted)
 {
     const uint64_t hash = link_hash((const uint8_t*)driver->entry.pointer, driver->entry.length);
-    const uint32_t name = foreign_find_name(foreign, (const uint8_t*)driver->entry.pointer, (uint32_t)driver->entry.length, hash);
+    const uint32_t name = driver->entry.length != 0 ? foreign_find_name(foreign, (const uint8_t*)driver->entry.pointer, (uint32_t)driver->entry.length, hash) : 0;
     return name != 0 ? converted->names[name - 1] : 0;
 }
 
 static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkResult result, RuntimeKind kind)
 {
     String8 shared_library = { 0 };
-    if (kind == RUNTIME_KIND_STATIC && result.error == FOREIGN_LINK_ERROR_UNSUPPORTED)
+    if (runtime_kind_is_static(kind) && result.error == FOREIGN_LINK_ERROR_UNSUPPORTED)
     {
         for (uint32_t library = 0; library < foreign->library_count && shared_library.pointer == 0; library += 1)
         {
@@ -266,7 +313,7 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
             "unsupported input",
             "unsupported or malformed relocation",
             "invalid link representation",
-            "an IFUNC definition, which a foreign executable doesn't take yet",
+            "an IFUNC that the loader can't bind as a dynamic symbol, which a shared library doesn't take yet",
         };
         const char* message = (uint32_t)result.error < BUSTER_ARRAY_LENGTH(messages) ? messages[result.error] : "conversion failed";
         fprintf(stderr, "link-foreign: %s", message);
@@ -617,8 +664,7 @@ static int run_foreign_link(int argc, char** argv)
     if (succeeded && !driver.help)
     {
         ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter) :
-                                   driver.kind == RUNTIME_KIND_DYNAMIC ? foreign_link_build_dynamic(&converted, &foreign, &arena, &names, driver.interpreter) :
-                                                                        foreign_link_build(&converted, &foreign, &arena, &names);
+                                               foreign_link_build_kind(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter);
         // The conversion's phases, before section GC replaces the link.
         memcpy(convert, converted.phase_nanoseconds, sizeof(convert));
         if (result.error == FOREIGN_LINK_ERROR_NONE && driver.gc)
@@ -668,13 +714,15 @@ static int run_foreign_link(int argc, char** argv)
     write_begin = ends[FOREIGN_DRIVER_STAGE_MERGE_STRINGS];
     if (succeeded && !driver.help)
     {
+        converted.dynamic.soname = driver.kind == RUNTIME_KIND_SHARED ? driver.soname : (String8){ 0 };
         ForeignDriverWrite write = {
             .link = &converted.link,
             .arena = &arena,
             .options = {
                 .path = driver.output,
                 .entry = foreign_driver_entry(&driver, &foreign, &converted),
-                .dynamic = driver.kind == RUNTIME_KIND_DYNAMIC ? &converted.dynamic : 0,
+                .dynamic = driver.kind != RUNTIME_KIND_STATIC ? &converted.dynamic : 0,
+                .runtime = runtime_kind_is_static(driver.kind) ? &converted.runtime : 0,
                 .exact = driver.path == FOREIGN_PATH_EXACT,
                 // The atoms' bytes are the inputs' private mappings: staged, a chunk is patched in a lane's buffer
                 // rather than in pages that each write would copy.

@@ -556,7 +556,9 @@ static ForeignLinkResult foreign_gc_link_maps(ForeignGcLinkState* state, const F
         {
             const uint8_t binding = link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING;
             const bool shared_undefined = input->dynamic.shared && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
-            if (link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE && binding != BUSTER_LINK_SYMBOL_WEAK && !shared_undefined)
+            // A static link's __tls_get_addr stays undefined for the writer's TLS relaxation (ExecutableRuntime.tls_get_addr).
+            const bool relaxed = symbol == input->runtime.tls_get_addr;
+            if (link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE && binding != BUSTER_LINK_SYMBOL_WEAK && !shared_undefined && !relaxed)
             {
                 result.error = FOREIGN_LINK_ERROR_UNDEFINED;
                 for (uint32_t name = 0; name < foreign->names.count; name += 1)
@@ -705,6 +707,8 @@ static ForeignLinkResult foreign_gc_link_external(ForeignLink* output, const For
         }
         output->dynamic.init = state->symbols[input->dynamic.init];
         output->dynamic.fini = state->symbols[input->dynamic.fini];
+        output->runtime = input->runtime;
+        output->runtime.tls_get_addr = state->symbols[input->runtime.tls_get_addr];
         output->library_versions = input->library_versions;
     }
     for (uint32_t id = 0; result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)

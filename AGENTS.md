@@ -496,7 +496,9 @@ designs and the compilers already built this way.
   their IRELATIVE relocations last in `.rela.dyn`. Every kind's loads and
   calls through the GOT of the image's symbols are relaxed, as GNU ld and lld
   relax them, and an IFUNC whose stub only calls reach reads the stub's slot
-  through the GOT, as lld's does; all from vector passes with exact twins.
+  through the GOT, as lld's does; a dynamic PIE takes its own IFUNCs too, their
+  stubs before its imports' and their `IRELATIVE` relocations last in
+  `.rela.dyn`; all from vector passes with exact twins.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
@@ -656,12 +658,15 @@ designs and the compilers already built this way.
   command using the built-in resolver/converter/writer. The caller supplies
   startup objects and libraries in order, as GCC's driver hands them to GNU ld,
   whose `--build-id`, `--eh-frame-hdr`, `--hash-style=gnu`, `-m elf_x86_64`
-  and `-z now`/`relro`/`noexecstack` it takes as what its output is already.
-  Static no-libc and dynamic PIE outputs are supported, with copy relocations
-  and their aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for
-  libraries' own references and lld's regular symbol table; an IFUNC a fixup
-  reaches is refused, and static libc, static PIE and shared output remain
-  follow-ups. GC, literal pooling and CIE pooling are off by default.
+  and `-z now`/`relro`/`noexecstack`/`text` it takes as what its output is
+  already. It writes every kind (#394): static executables (with `libc.a` or
+  without libc, `-static`), static PIEs (`-static -pie`), dynamic PIEs (`-pie`)
+  and shared libraries (`-shared`, `-soname`), with copy relocations and their
+  aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for libraries'
+  own references, lld's regular symbol table, and a dynamic PIE's own IFUNCs
+  through the writer's stubs and `IRELATIVE` relocations; a shared library
+  refuses an IFUNC that isn't preemptible. GC, literal pooling and CIE pooling
+  are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
@@ -2818,10 +2823,9 @@ by the direct path and by each linker, and reports medians:
   benchmark would have the benchmark's peak resident set as its own when that
   was higher, which Linux carries over at `exec`. The helper's own floor, a
   program that does nothing, is printed first;
-- `link-foreign` (#86), this executable's linker of other compilers' objects,
-  given the same command line as a process of its own, with `--lanes=8` for its
-  threads and `--lanes=1` for one: the dynamic PIEs alone, since its static
-  executables of libc aren't there yet.
+- `link-foreign` (#86, #394), this executable's linker of other compilers'
+  objects, given the same command line as a process of its own, with
+  `--lanes=8` for its threads and `--lanes=1` for one, for every kind.
 
 Every program written must run and print what its model predicts, but wild's
 static executables and static PIEs of a program whose `.tbss` is more aligned
@@ -3010,12 +3014,18 @@ its measurements are informational.
 
 `./build/compiler test-foreign-corpus [--sqlite DIR] [--lua DIR] [--self DIR]
 [--compilers LIST] [--linkers LIST] [--directory PATH] [--keep]` is #86's
-differential test of `link-foreign`. Each program of its corpus is compiled by
-each compiler of `--compilers` (gcc and clang) at -O2, their default PIEs, then
-linked from one command line by `link-foreign` (this executable, as a process
-of its own), by lld and by mold (`--linkers`), with GCC's crt objects and
-libraries around the program's objects and archives. The three executables
-must:
+differential test of `link-foreign`, and #394's. Each program of its corpus is
+compiled by each compiler of `--compilers` (gcc and clang) at -O2, their
+default PIEs, then linked from one command line by `link-foreign` (this
+executable, as a process of its own), by lld and by mold (`--linkers`), with
+GCC's crt objects and libraries around the program's objects and archives, as
+each kind of output GCC's driver links: a dynamic PIE, a static executable
+(`crt1.o`, `crtbeginT.o` and `--start-group -lgcc -lgcc_eh -lc --end-group`),
+a static PIE (`-static -pie --no-dynamic-linker -z text`, `rcrt1.o`) and a
+shared library (`-shared -soname libcorpus.so`) of the program's library part,
+compiled again with `-fPIC`, which a PIE of the rest that lld links against
+lld's library loads, from each linker's directory with that linker's library.
+The three outputs must:
 
 - run alike: each run's exit status, output and errors, from directories of
   the same name, with the same arguments, input and environment;
@@ -3029,7 +3039,10 @@ must:
   flag, `DT_INIT`, `DT_FINI` and the arrays' sizes), on `.dynsym`'s names at
   their versions, and on the dynamic relocations by symbol and class (a GOT
   slot, `GLOB_DAT` or `JUMP_SLOT`; `COPY`; `R_X86_64_64`; `TPOFF64`;
-  `DTPMOD64`; `DTPOFF64`), with as many relative ones as lld's.
+  `DTPMOD64`; `DTPOFF64`; `IRELATIVE`, in `.rela.iplt` too, where a static
+  executable of `link-foreign`'s has them as GNU ld does), with as many relative
+  ones as lld's. The comparison reads static executables (`ET_EXEC`) too, and
+  fails an output it can't read.
 
 And `link-foreign`'s program must come out byte for byte the same when it links
 on eight lanes (`--lanes=8`), through the resolution's, the conversion's and
@@ -3039,12 +3052,19 @@ What a reference linker writes as its own valid choice is classified, counted
 and printed as documented ("differs, as documented"), never dropped silently
 (`foreign_corpus_reason`): mold leaves weak undefined names without a version
 out of `.dynsym`, keeps COMDAT groups' signatures as absolute locals, drops
-`__FRAME_END__`, binds a copy's aliases weakly, writes internal visibility as
-hidden and the `__start_`/`__stop_` names local, and keeps a few GOT slots
-that lld relaxes; lld leaves an `R_X86_64_64` to a library's data that it
-scanned before the reference that copies it symbolic, and gives a function
-that code both calls and loads from the GOT a second slot. Any other row one
-side has alone fails the test, and the first 12 are printed.
+`__FRAME_END__` (and `crtbeginT.o`'s `__EH_FRAME_BEGIN__`), binds a copy's
+aliases weakly, writes internal visibility as hidden and the
+`__start_`/`__stop_` names local (and defines them for every section named as
+a C identifier, though nothing refers to them), and keeps a few GOT slots that
+lld relaxes; in a static executable it writes a hidden symbol made local with
+default visibility and an IFUNC as a function at its resolver, and gives an
+IFUNC that code both calls and loads from the GOT a second `IRELATIVE` slot;
+lld leaves an `R_X86_64_64` to a library's data that it scanned before the
+reference that copies it symbolic, gives a function that code both calls and
+loads from the GOT a second slot, and writes an IFUNC whose address is taken
+as a function of no size at its stub; both keep the symbols of `libc.a`'s
+`.gnu.warning` sections, which `link-foreign` leaves out with them. Any other
+row one side has alone fails the test, and the first 12 are printed.
 
 The corpus is two original programs, always: C, of three translation units
 and an archive (two members that load, one that doesn't), with threads,
@@ -3055,9 +3075,11 @@ templates in COMDAT groups, inline variables and a thread. With `--sqlite DIR`
 the SQLite amalgamation's shell (`sqlite3.c` and `shell.c`), with `--lua DIR`
 Lua's interpreter (its library as an archive) and with `--self DIR` this
 repository's compiler, built by clang alone, join it, each with runs of its
-own. The files go in a directory under `--directory` (`TMPDIR` or `/tmp`),
-kept with `--keep` or on a failure. The 9700X job's test step runs the
-original programs.
+own; the library parts are the C program's three archived units and its
+counter, the C++ program's thrower, SQLite's `sqlite3.c` and Lua's library
+(this compiler has none, and isn't linked as a library). The files go in a
+directory under `--directory` (`TMPDIR` or `/tmp`), kept with `--keep` or on
+a failure. The 9700X job's test step runs the original programs.
 
 ## Dataflow tests
 

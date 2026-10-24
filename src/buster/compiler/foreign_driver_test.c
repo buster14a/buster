@@ -615,7 +615,8 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
             .status = 19,
         },
         {
-            .name = "explicit_static_after_pie",
+            // -pie with -static is a static PIE, as GNU ld and lld read them; this one needs no relocation.
+            .name = "static_pie_from_pie_and_static",
             .arguments = {
                 (char*)"-pie",
                 files->objects[FOREIGN_DRIVER_TEST_CALL],
@@ -822,6 +823,30 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
                 (char*)"--entry=",
             },
         },
+        {
+            .name = "shared_with_static",
+            .arguments = {
+                (char*)"-shared",
+                (char*)"-static",
+                files->objects[FOREIGN_DRIVER_TEST_FIRST],
+            },
+        },
+        {
+            .name = "no_dynamic_linker_with_pie",
+            .arguments = {
+                (char*)"-pie",
+                (char*)"--no-dynamic-linker",
+                files->objects[FOREIGN_DRIVER_TEST_START],
+            },
+        },
+        {
+            .name = "missing_soname_value",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_FIRST],
+                (char*)"-shared",
+                (char*)"-soname",
+            },
+        },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -835,6 +860,10 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
         if (c == 0)
         {
             foreign_driver_test_structure(tally, bytes, ET_EXEC, (String8){ 0 }, test->name);
+        }
+        else if (strcmp(test->name, "static_pie_from_pie_and_static") == 0)
+        {
+            foreign_driver_test_structure(tally, bytes, ET_DYN, (String8){ 0 }, test->name);
         }
         else if (strcmp(test->name, "option_named_symbols") == 0)
         {
@@ -1262,6 +1291,75 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
     }
 }
 
+// -shared, with its soname by -soname and by GNU ld's -h: a library without an entry point or an interpreter, with
+// DT_SONAME and its definition exported, which a PIE that calls it through its PLT links and the loader runs.
+static void foreign_driver_test_shared(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, String8 interpreter)
+{
+    static const char* const forms[] = { "-soname", "-h" };
+    for (uint32_t form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        ForeignTestPath library_directory;
+        ForeignTestPath library;
+        ForeignTestPath output;
+        ForeignTestPath errors;
+        char soname[64];
+        snprintf(library_directory, sizeof(library_directory), "%s/fdriver_shared_%u", directory, form);
+        snprintf(soname, sizeof(soname), "libfdriver_ours%u.so", form);
+        snprintf(library, sizeof(library), "%s/%s", library_directory, soname);
+        snprintf(output, sizeof(output), "%s/link.out", library_directory);
+        snprintf(errors, sizeof(errors), "%s/link.err", library_directory);
+        char* arguments[] = {
+            (char*)"/proc/self/exe",
+            (char*)"link-foreign",
+            (char*)"-shared",
+            (char*)forms[form],
+            soname,
+            (char*)"-o",
+            library,
+            files->objects[FOREIGN_DRIVER_TEST_FIRST],
+            0,
+        };
+        const bool linked = mkdir(library_directory, 0755) == 0 && object_test_run(arguments, output, errors) == 0;
+        foreign_test_expect(tally, linked, "driver links a shared library", forms[form]);
+        const String8 bytes = linked ? foreign_test_read(arena, library) : (String8){ 0 };
+        const DynamicTestImage image = dynamic_test_image(bytes);
+        uint64_t value = 0;
+        bool named = false;
+        const Elf64_Shdr* strings = dynamic_test_section(&image, ".dynstr");
+        if (image.valid && strings != 0 && dynamic_test_tag(&image, DT_SONAME, &value) && value < strings->sh_size)
+        {
+            named = strcmp((const char*)dynamic_test_bytes(&image, strings) + value, soname) == 0;
+        }
+        bool interpreted = false;
+        for (uint32_t p = 0; image.valid && p < image.header->e_phnum; p += 1)
+        {
+            interpreted = interpreted || image.program_headers[p].p_type == PT_INTERP;
+        }
+        Elf64_Sym pick = { 0 };
+        const bool exported = image.valid && foreign_dynamic_test_symbol(&image, "driver_pick", &pick) != 0 && pick.st_shndx != SHN_UNDEF;
+        foreign_test_expect(tally, image.valid && image.header->e_entry == 0 && !interpreted && named && exported,
+                            "a shared library has no entry point or interpreter, its soname and its export", forms[form]);
+        // A PIE that calls driver_pick, which returns 42, from the library.
+        ForeignTestPath executable;
+        snprintf(executable, sizeof(executable), "%s/fdriver_shared_program_%u", directory, form);
+        char* program[] = {
+            (char*)"/proc/self/exe",
+            (char*)"link-foreign",
+            (char*)"-pie",
+            (char*)"--dynamic-linker",
+            interpreter.pointer,
+            (char*)"-o",
+            executable,
+            files->objects[FOREIGN_DRIVER_TEST_CALL],
+            library,
+            0,
+        };
+        const bool built = linked && object_test_run(program, output, errors) == 0;
+        foreign_test_expect(tally, built && foreign_driver_test_run(library_directory, executable, output, errors, arena) == 42, "a PIE runs the shared library's function",
+                            forms[form]);
+    }
+}
+
 static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     const uint64_t saved = arena->length;
@@ -1278,6 +1376,7 @@ static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_
         foreign_driver_test_paths(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_symbols_test(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_test_cases(&tally, directory, &files, arena);
+        foreign_driver_test_shared(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_test_time(&tally, directory, &files, arena);
         foreign_driver_test_strings(&tally, directory, &files, arena);
         foreign_driver_test_dynamic(&tally, directory, &files, arena, system, runtime.loader_path);

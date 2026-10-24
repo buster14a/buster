@@ -3879,8 +3879,9 @@ step 8's question, with the exchange's and the winners' first touches.
 `foreign_link.c` turns `foreign_run`'s result into the representation, and
 `executable.c` writes it; `link-foreign` ([the command](foreign-driver.md))
 puts the two behind a GNU ld command line, as GCC's and clang's drivers give
-it. It writes static executables without libc and dynamic PIEs; shared
-libraries, static executables with libc and static PIEs are refused for now.
+it. It writes every kind the direct path writes: static executables (with
+`libc.a`, or without libc), static PIEs, dynamic PIEs and shared libraries
+(#394, after the dynamic PIEs of #86).
 
 - **The conversion.** The selected objects' sections become atoms in input
   order (a COMDAT group's loser's dropped first), each object's locals its
@@ -3897,8 +3898,21 @@ libraries, static executables with libc and static PIEs are refused for now.
   `-fPIE` code reads by `PC32`, with the library's other names at its address
   and lld's alignment; `__start_` and `__stop_` over the sections of a
   C-identifier name; `STB_GNU_UNIQUE` kept; the linker's names with lld's
-  visibilities; and lld's regular symbol table. An IFUNC that a fixup reaches is
-  refused: the dynamic PIE has no stubs for its own IFUNCs yet.
+  visibilities; and lld's regular symbol table. A dynamic PIE's own IFUNCs get
+  stubs beside its imports' and `IRELATIVE` relocations, last in `.rela.dyn`,
+  as lld's `.iplt` entries have them.
+- **The static kinds and shared libraries (#394).** A static executable and a
+  static PIE get what `dynamic.c` gives the direct path's: the start file's
+  ABI note and the link's `__tls_get_addr`, which `libc.a` doesn't define and
+  whose general- and local-dynamic accesses the writer relaxes, with a static
+  PIE's `DT_INIT` and `DT_FINI` and no RELR (lld's `-static-pie` without
+  `-z pack-relative-relocs`); the writer's static runtime handling does the
+  rest (`.iplt` and `IRELATIVE`, prioritized arrays, `libc.a`'s names). A
+  shared library exports every global, weak and unique definition of default
+  or protected visibility, leaves a default-visibility reference to nothing to
+  the loader (lld's `-z undefs`), and refuses an IFUNC that isn't preemptible
+  (one the loader can't bind as a dynamic symbol), which would need an
+  `IRELATIVE` relocation that the writer's shared mode doesn't write.
 - **Staged chunks.** The atoms' bytes are the inputs' private mappings, so the
   writer copies each chunk into a lane's buffer and patches, hashes and writes
   the copy (`ExecutableOptions.stage`). Patched in place, each page of an input
