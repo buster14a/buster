@@ -460,6 +460,67 @@ static const CheckMutationFixture check_mutation_fixtures[] =
         .line = 0,
     },
     {
+        .name = "Lua 5.4.8 src/luac.c, a pointer removed from main's argv: main's parameters are checked as clang checks them",
+        .source =
+            "static int doargs(int argc, char **argv) { return argc + (argv != 0); }\n"
+            "int main(int argc,\n"
+            "         char argv[])\n"
+            "{\n"
+            " int i=doargs(argc,argv);\n"
+            " return i;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = true,
+        .line = 2,
+    },
+    {
+        .name = "accepted control: main's parameters with clang's const extensions, and a block's declaration of main",
+        .source =
+            "int main(const int argc, char *const *argv, const char **envp) { return argc + (argv != 0) + (envp != 0); }\n"
+            "void f(void) { extern int main(int, char *const *, const char **); }\n"
+            "typedef int I; typedef char *const *V; int g(void) { int main(I, V, const char **); return 0; }\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "main's result other than int, an error outside GNU's modes at its first type specifier",
+        .source =
+            "static const\n"
+            "long main(void) { return 0; }\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = true,
+        .line = 2,
+    },
+    {
+        .name = "Zig 0.14.1's lib/libc mingw/math/fp_constsf.c, __INFF's union made a struct no one defines: an initialized object needs a complete type",
+        .source =
+            "union _ieee_rep { unsigned short rep[2]; float float_val; };\n"
+            "const union _ieee_rep __QNANF = { { 0, 0x7fc0 } };\n"
+            "struct buster_mutation __INFF  = { 0, 0x7f80 };\n"
+            "float nanf(const char *tagp) { (void)tagp; return __QNANF.float_val; }\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = true,
+        .line = 3,
+    },
+    {
+        .name = "accepted control: tentative definitions whose types are completed later, at file scope and extern",
+        .source =
+            "struct later x;\n"
+            "extern struct later y;\n"
+            "int a[];\n"
+            "struct later { int a, b; };\n"
+            "struct later *p = &x;\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
         .name = "too few arguments are reported at the call's )",
         .source =
             "void h(int, int);\n"

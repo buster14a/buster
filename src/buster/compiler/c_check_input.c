@@ -1988,6 +1988,53 @@ static void check_input_schedule(CheckInputReader* reader, uint32_t token, uint3
 
 // Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
 // over each initializer. Identifier uses within them are resolved later at their own source positions.
+// Whether a parameter of main other than the first has clang's type for it: char ** with any qualifiers on the
+// parameter itself, or const (and only const) on the pointer it points to or on the char, as clang extends it.
+static bool check_input_main_arguments(const TypeTable* types, TypeId type)
+{
+    const TypeId outer = type_strip_aligned(types, type_unqualified(type));
+    bool valid = type_kind(types, outer) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId middle = valid ? type_strip_aligned(types, types->types.base[type_index(outer)]) : 0;
+    valid = valid && (type_qualifiers(middle) & ~BUSTER_TYPE_CONST) == 0 && type_kind(types, middle) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId inner = valid ? type_strip_aligned(types, types->types.base[type_index(middle)]) : 0;
+    return valid && (type_qualifiers(inner) & ~BUSTER_TYPE_CONST) == 0 && type_unqualified(inner) == BUSTER_TYPE_CHAR;
+}
+
+// The token clang reports a declaration of a hosted program's main at, as Sema::CheckMain checks it, or
+// BUSTER_CHECK_NONE: a result other than int outside GNU's modes, at the first type specifier (clang only warns in
+// GNU's), and with a prototype more than three parameters, or a first one other than int and others other than char **,
+// at the name. Its warnings (static, inline, _Noreturn, variadic, one parameter) don't change the verdict.
+static uint32_t check_input_main(CheckInputReader* reader, TypeId type, uint32_t first, uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const TypeId function = type_strip_aligned(types, type);
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (!parser->language.gnu && type_strip_aligned(types, type_return(types, function)) != BUSTER_TYPE_INT)
+    {
+        uint32_t token = first;
+        uint32_t qualifiers = 0;
+        while (token < name && (check_input_attribute_starts(parser, token, name) || parser->tokens.kinds[token] == PARSE_KIND_STORAGE ||
+               parser->tokens.kinds[token] == PARSE_KIND_EXTENSION || check_input_qualifier(parser->tokens.names[token], &qualifiers)))
+        {
+            token = check_input_attribute_starts(parser, token, name) ? check_input_skip_attributes(parser, token, name) : token + 1;
+        }
+        result = token < name ? token : first;
+    }
+    if (result == BUSTER_CHECK_NONE && (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0)
+    {
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, function, &count);
+        bool valid = count <= 3;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            valid = i == 0 ? type_strip_aligned(types, type_unqualified(parameters[i])) == BUSTER_TYPE_INT : check_input_main_arguments(types, parameters[i]);
+        }
+        result = valid ? result : name;
+    }
+    return result;
+}
+
 static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -2099,7 +2146,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= !thread_local || (!function && (file || is_static || storage == C_NAME_EXTERN));
             valid &= !file || (storage != C_NAME_REGISTER && storage != C_NAME_AUTO);
             valid &= !function || (storage != C_NAME_REGISTER && storage != C_NAME_AUTO && (file || !is_static));
-            const bool complete_object = is_typedef || function || file || storage == C_NAME_EXTERN || type_is_complete(reader->types, type) ||
+            // A file scope's or an extern's declaration may leave its type to be completed later, but not a definition
+            // with an initializer: clang reports that one's incomplete type at its name, wherever it is.
+            const bool complete_object = is_typedef || function || ((file || storage == C_NAME_EXTERN) && kind != PARSE_KIND_EQUAL) ||
+                                         type_is_complete(reader->types, type) ||
                                          (kind == PARSE_KIND_EQUAL && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY);
             if (valid && !complete_object)
             {
@@ -2110,6 +2160,17 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
+                memcmp(intern_bytes(reader->pp->table, parser->tokens.names[name]), "main", 4) == 0)
+            {
+                // A hosted program's main, at file scope or in a block, as clang checks it there too.
+                const uint32_t failed = check_input_main(reader, type, first, name);
+                if (failed != BUSTER_CHECK_NONE)
+                {
+                    check_input_report(reader, failed, CHECK_INPUT_DECLARATION);
+                    valid = false;
+                }
+            }
             if (valid)
             {
                 check_input_schedule(reader, name, i, type, is_typedef ? C_BINDING_TYPEDEF : function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
