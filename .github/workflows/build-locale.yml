@@ -2,7 +2,8 @@ name: build.sh locale
 
 # build.sh times its compiles from $EPOCHREALTIME, which bash writes with the locale's decimal point: a comma in es_ES,
 # and in ps_AF the first byte of U+066B alone. This runs build.sh's own timed() under both, on GitHub's runner rather
-# than the 9700X, so that no edit brings back a substitution that takes out a period alone (#409).
+# than the 9700X, so that no edit brings back a substitution that takes out a period alone (#409). Its now() is the
+# only reader of $EPOCHREALTIME, which build_compiler() uses too.
 on:
   pull_request:
     paths: [build.sh, .github/workflows/build-locale.yml]
@@ -35,8 +36,11 @@ jobs:
               localedef -i "$name" -f UTF-8 "$locales/$name.UTF-8" || true
               test -d "$locales/$name.UTF-8"
           done
-          sed -n '/^timed()$/,/^}$/p' build.sh > "$RUNNER_TEMP/timed.sh"
+          readers="$(grep -n EPOCHREALTIME build.sh | grep -v '^[0-9]*: *#' || true)"
+          [ "$(printf '%s\n' "$readers" | grep -c .)" = 1 ] && grep -q 'printf -v' <<< "$readers" || { echo "::error::build.sh must read \$EPOCHREALTIME in now() alone:"; echo "$readers"; exit 1; }
+          sed -n '/^now()$/,/^}$/p; /^timed()$/,/^}$/p' build.sh > "$RUNNER_TEMP/timed.sh"
           grep -q EPOCHREALTIME "$RUNNER_TEMP/timed.sh"
+          grep -q '^timed()$' "$RUNNER_TEMP/timed.sh"
           # Each locale's own separator must reach $EPOCHREALTIME, or the check would pass in C. The old
           # ${EPOCHREALTIME/./} failed about one run in ten under es_ES and every run under ps_AF.
           for case in C.UTF-8:. es_ES.UTF-8:, ps_AF.UTF-8:$'\xd9'; do
