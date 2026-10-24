@@ -218,7 +218,8 @@ independently confirms all three in C17 and C23. Minimized executable
 regressions cover these forms, both unknown namespaces, and their shortened
 spellings. The original inputs and failed qualification receipts remain in
 [the handoff](measurements/preprocessor-fuzz-109-handoff-2026-10-23/README.md).
-The final ten-million-per-mode qualification on either host remains pending.
+Freeze `35638fe` then qualified: ten million fully verified cases per mode on each of the 7940HS and the 9700X
+([the receipts](measurements/preprocessor-fuzz-109-qualification-2026-10-24/README.md)).
 
 #### Clang's `-P` printer, emulated
 

@@ -1,0 +1,2 @@
+audit: 50 verified slices, 10000000 fully verified cases per mode in each of C17 and C23, seeds 4001-4010
+audit: PASS
