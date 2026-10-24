@@ -40,6 +40,11 @@ The [x86-64 disassembler](docs/x86-64-disassembler.md) decodes its documented
 catalogue subset from raw bytes with AVX-512 and scalar paths. Run
 `./build/compiler disassemble input.text` for an Intel-syntax listing.
 
+The proposed [performance website design](docs/performance.md) reuses Perfetto
+and Arrow/JSONL with a thin benchmark manifest. [Roadmap #384](https://github.com/buster14a/buster/issues/384)
+and the [implementation plan](docs/performance/implementation-plan.md) track the
+work required before it is deployed.
+
 ## License and contributions
 
 Except where component-specific terms apply, original material is licensed
