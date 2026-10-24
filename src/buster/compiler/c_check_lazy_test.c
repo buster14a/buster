@@ -269,7 +269,7 @@ static __attribute__((noinline)) void check_test_lazy(CheckTest* test)
         { "uninvolved ordinary static body stays checked", "# 1 \"header.h\" 1 3\nstatic int dead(void){return 0;}\n# 1 \"user.c\" 2\nstatic int local(void){return missing;}\n", 1, 2, false, false },
         { "inactive duplicate switch does not reach program", "# 1 \"header.h\" 1 3\nstatic int dead(int n){switch(n){case 1:return 1;case 1:return 2;}return 0;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
         { "inactive statement expression region", "# 1 \"header.h\" 1 3\nstatic int dead(int n){return ({int x=n; x+1;});}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, true, true },
-        { "inactive invalid initializer", "# 1 \"header.h\" 1 3\nstatic int dead(void){static int*p=3;return 0;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
+        { "inactive invalid initializer", "# 1 \"header.h\" 1 3\nstatic int dead(void){static int*p=3.0;return 0;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
         { "inactive invalid FENV placement", "# 1 \"header.h\" 1 3\nstatic int dead(void){int x=1;\n#pragma STDC FENV_ACCESS ON\nreturn x;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
     };
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)

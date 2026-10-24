@@ -129,6 +129,10 @@ struct CheckGraph
     // Runtime arithmetic warning suppression for semantically checked source branches disconnected by SELECT.
     // Only integer overflow, shift counts and negative shifted values may be suppressed; constraints survive.
     uint8_t* warning_suppressed;
+    // Optional, system_token_count entries: nonzero for a source token written in a system header. A node at such a
+    // token takes BUSTER_CHECK_EXTENSION_SYSTEM_HEADER (clang's suppressed default-error warnings). Null means none.
+    const uint8_t* system_tokens;
+    uint32_t system_token_count;
     // Optional source-time tag history. Each node's cutoff is the exclusive end of its operand/type-name,
     // not the prefix operator token. A missing history preserves the direct action API's current-type view.
     const uint32_t* tag_completions;
@@ -860,6 +864,12 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
     return result;
 }
 
+static bool check_graph_system_token(const CheckGraph* graph, uint32_t token)
+{
+    const bool system = graph->system_tokens != NULL && token < graph->system_token_count && graph->system_tokens[token] != 0;
+    return system;
+}
+
 static void check_graph_action(const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckValue* arguments, CheckAction* action)
 {
     *action = (CheckAction){
@@ -871,7 +881,7 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
         .transparent_unions = graph->transparent_unions,
         .tag_completion_count = graph->tag_completion_count,
         .source_position = graph->source_positions != 0 ? graph->source_positions[node] : BUSTER_CHECK_NONE,
-        .extensions = graph->extensions,
+        .extensions = graph->extensions | (check_graph_system_token(graph, graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
         .fp_environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0,
     };
     if (action->op == CHECK_OP_MEMBER && graph->vector_member_count != 0)

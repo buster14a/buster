@@ -62,6 +62,11 @@ typedef enum CheckFault
 // language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
 #define BUSTER_CHECK_EXTENSION_GNU 0x01u
 #define BUSTER_CHECK_EXTENSION_GNU_CONSTANT 0x02u
+// The action is written in a system header, where clang suppresses its warnings that default to errors and converts as
+// they would have: an integer and a pointer either way (-Wint-conversion), pointers to incompatible types
+// (-Wincompatible-pointer-types and its function pointers' group) and a value returned from a void function
+// (-Wreturn-mismatch). Its other errors stay errors there. Per node (CheckGraph.system_headers), never a graph's.
+#define BUSTER_CHECK_EXTENSION_SYSTEM_HEADER 0x04u
 #define BUSTER_CHECK_FP_ENV_ACCESS 0x01u
 
 typedef struct CheckValue CheckValue;
@@ -826,6 +831,12 @@ static bool check_action_assignable_mode(const TypeTable* table, TypeId destinat
     else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR) && target_kind == input_kind)
     {
         accepted = check_action_compatible_at(table, target, input, action, result);
+    }
+    if (!accepted && !strict && (action->extensions & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0 && result->diagnostic == CHECK_DIAG_NONE &&
+        !check_vector_type(table, target) && !check_vector_type(table, input))
+    {
+        accepted = (target_kind == BUSTER_TYPE_KIND_POINTER && (input_kind == BUSTER_TYPE_KIND_POINTER || check_action_is_integer(table, input))) ||
+                   (input_kind == BUSTER_TYPE_KIND_POINTER && check_action_is_integer(table, target));
     }
     return accepted;
 }
@@ -1814,8 +1825,8 @@ static void check_action_assignment(TypeTable* table, const CheckAction* action,
     if (type_is_valid(table, target))
     {
         target = type_conversion_operand(table, target);
-        const bool void_return = action->op == CHECK_OP_CONVERT &&
-                                 check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID && check_action_kind(table, source.type) == BUSTER_TYPE_KIND_VOID;
+        const bool void_return = action->op == CHECK_OP_CONVERT && check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID &&
+                                 (check_action_kind(table, source.type) == BUSTER_TYPE_KIND_VOID || (action->extensions & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0);
         if (!void_return && !check_action_assignable(table, target, &source, action, result))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, slot);

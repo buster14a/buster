@@ -1277,6 +1277,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             equal = check_test_value_equal(graph->leaves + node, other->leaves + node);
         }
     }
+    equal = equal && graph->system_token_count == other->system_token_count && (graph->system_tokens == NULL) == (other->system_tokens == NULL) &&
+            (graph->system_tokens == NULL || memcmp(graph->system_tokens, other->system_tokens, graph->system_token_count) == 0);
     for (uint32_t argument = 0; equal && !a->resource && argument < graph->argument_count; argument += 1)
     {
         equal = graph->argument_nodes[argument] == other->argument_nodes[argument] &&

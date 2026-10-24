@@ -280,6 +280,95 @@ static const CheckMutationFixture check_mutation_fixtures[] =
         .line = 0,
     },
     {
+        .name = "glibc's bits/stdio.h under Lua 5.4.8 src/lobject.c, two arguments swapped: a system header's -Wint-conversion is suppressed",
+        .source =
+            "# 1 \"lobject.c\"\n"
+            "# 1 \"/usr/include/x86_64-linux-gnu/bits/stdio.h\" 1 3\n"
+            "typedef struct _IO_FILE FILE;\n"
+            "extern FILE *stdout;\n"
+            "extern int __overflow(FILE *, int);\n"
+            "static __inline int putchar_unlocked(int __c)\n"
+            "{\n"
+            "    return __overflow(__c, stdout);\n"
+            "}\n"
+            "# 2 \"lobject.c\" 2\n"
+            "int main(void) { return putchar_unlocked('a'); }\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "glibc's bits/stdio.h under Lua 5.4.8 src/ltablib.c, two arguments swapped: a system header's incompatible pointers convert",
+        .source =
+            "# 1 \"ltablib.c\"\n"
+            "# 1 \"/usr/include/x86_64-linux-gnu/bits/stdio.h\" 1 3\n"
+            "typedef __builtin_va_list __gnuc_va_list;\n"
+            "typedef struct _IO_FILE FILE;\n"
+            "extern FILE *stdout;\n"
+            "extern int vfprintf(FILE *__restrict __s, const char *__restrict __format, __gnuc_va_list __arg);\n"
+            "static __inline int vprintf(const char *__restrict __fmt, __gnuc_va_list __arg)\n"
+            "{\n"
+            "    return vfprintf(stdout, __arg, __fmt);\n"
+            "}\n"
+            "static __inline void none(int __c) { return __c; }\n"
+            "# 2 \"ltablib.c\" 2\n"
+            "int main(void) { return 0; }\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "the same conversions outside a system header remain errors",
+        .source =
+            "# 1 \"lobject.c\"\n"
+            "# 1 \"/usr/include/x86_64-linux-gnu/bits/stdio.h\" 1\n"
+            "typedef struct _IO_FILE FILE;\n"
+            "extern FILE *stdout;\n"
+            "extern int __overflow(FILE *, int);\n"
+            "static __inline int putchar_unlocked(int __c)\n"
+            "{\n"
+            "    return __overflow(__c, stdout);\n"
+            "}\n"
+            "# 2 \"lobject.c\" 2\n"
+            "int main(void) { return putchar_unlocked('a'); }\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = true,
+        .line = 6,
+    },
+    {
+        .name = "glibc's stdlib.h under Lua 5.4.8 src/lua.c, arguments swapped: a struct for a pointer stays an error in a system header",
+        .source =
+            "# 1 \"lua.c\"\n"
+            "# 1 \"/usr/include/stdlib.h\" 1 3\n"
+            "typedef struct { int quot; int rem; } div_t;\n"
+            "extern long strtol(const char *__restrict __nptr, char **__restrict __endptr, int __base);\n"
+            "static __inline int atoi_div(const char *__nptr, div_t __d)\n"
+            "{\n"
+            "    return (int) strtol(10, (char **) ((void*)0), __nptr) + (int) strtol(__d, 0, 10);\n"
+            "}\n"
+            "# 2 \"lua.c\" 2\n"
+            "int main(void) { return 0; }\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = true,
+        .line = 5,
+    },
+    {
+        .name = "musl 1.2.5 src/math/log_data.h, a subtraction's operands swapped: the negative bound is the first error, not the attribute's items",
+        .source =
+            "__attribute__((__visibility__(\"hidden\"))) extern const struct log_data {\n"
+            "    double ln2hi;\n"
+            "    double poly1[1 - 12];\n"
+            "} __log_data;\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = true,
+        .line = 3,
+    },
+    {
         .name = "too few arguments are reported at the call's )",
         .source =
             "void h(int, int);\n"

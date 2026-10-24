@@ -240,10 +240,12 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token)
     }
 }
 
-static uint32_t check_init_extensions(const CheckInitWalker* walker)
+// The extensions of an initializer at `token`: the graph's, and a system header's leniency where the token is in one;
+// without a graph, check_input_expression_extensions' (c_check_constant.c, included after this file).
+static uint32_t check_init_extensions(const CheckInitWalker* walker, uint32_t token)
 {
-    // check_input_expression_extensions' (c_check_constant.c, included after this file): GNU's folding in every mode.
-    return walker->ignore_excess ? (walker->graph != NULL ? walker->graph->extensions :
+    const uint32_t system = walker->graph != NULL && check_graph_system_token(walker->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0;
+    return walker->ignore_excess ? (walker->graph != NULL ? walker->graph->extensions | system :
            BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0)) : 0;
 }
 
@@ -1185,7 +1187,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
             .operands = { source },
             .type = element,
             .node = source_node,
-            .extensions = check_init_extensions(walker),
+            .extensions = check_init_extensions(walker, token),
         };
         CheckActionResult converted;
         check_action_scalar(walker->types, &action, &converted);
@@ -1371,7 +1373,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 .op = CHECK_OP_INITIALIZE,
                 .type = selected->type,
                 .node = node,
-                .extensions = check_init_extensions(walker),
+                .extensions = check_init_extensions(walker, token),
             };
             action.operands[0] = check_init_constant_value(walker, node);
             CheckActionResult converted = { 0 };
