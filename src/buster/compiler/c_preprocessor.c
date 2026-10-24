@@ -477,10 +477,6 @@ struct PPFileData
     // as it goes (__LINE__, diagnostics), so each file's lines are counted about once.
     uint32_t line_cursor;
     uint32_t line_cursor_line;
-    // A large file's line ends before each block of BUSTER_PP_LINE_BLOCK_BYTES (pp_count_line_blocks), counted while it is
-    // prepared and its bytes are in the caches: pp_line_of counts on from the block's start in place of the cursor. 0
-    // for a smaller file, or if there was no room for it.
-    uint32_t* line_blocks;
     // Built on the first diagnostic in this file, then shared by all of its inclusions.
     uint32_t* diagnostic_lines;
     uint32_t diagnostic_line_count;
@@ -2507,71 +2503,6 @@ static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFile
     return result;
 }
 
-// The bytes of a block of a file's line table (PPFileData.line_blocks), and the smallest file that gets one: two of
-// #116's preparation windows. Below it a file's bytes are still in the caches when pp_line_of counts them; past it,
-// sqlite3.c's __LINE__s counted 7 MB of bytes long evicted (0.3 ms on the 9700X).
-#define BUSTER_PP_LINE_BLOCK_BYTES 4096u
-#define BUSTER_PP_LINE_TABLE_BYTES (256u << 10)
-
-// The block a line table counts `offset`'s lines from: the one that holds the byte before it (0 at the file's start).
-// pp_count_lines counts a '\r' just before the end of its range, so that one is in the range even when a '\n' starts
-// the next block, which the table counts that "\r\n" at.
-BUSTER_INLINE uint32_t pp_line_block(uint32_t offset)
-{
-    return offset == 0 ? 0 : (offset - 1) / BUSTER_PP_LINE_BLOCK_BYTES;
-}
-
-// The line ends of `bytes` before each block of BUSTER_PP_LINE_BLOCK_BYTES, into `blocks` (length / block + 1 words):
-// blocks[b] counts those in bytes [0, b * block), a "\r\n" at its '\n' even where a block ends between the two, so that
-// pp_count_lines(0, offset) is blocks[b] + pp_count_lines(b * block, offset) for the block b of pp_line_block(offset).
-// 64 bytes at a time with popcounts.
-static void pp_count_line_blocks(const uint8_t* bytes, uint32_t length, uint32_t* blocks)
-{
-    uint32_t lines = 0;
-    for (uint32_t i = 0; i < length; i += 64)
-    {
-        if (i % BUSTER_PP_LINE_BLOCK_BYTES == 0)
-        {
-            blocks[i / BUSTER_PP_LINE_BLOCK_BYTES] = lines;
-        }
-        const uint32_t remaining = length - i;
-        const __mmask64 valid = remaining >= 64 ? ~0ull : _bzhi_u64(~0ull, remaining);
-        const __m512i chunk = _mm512_maskz_loadu_epi8(valid, bytes + i);
-        const uint64_t newlines = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\n'));
-        const uint64_t returns = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\r'));
-        if (BUSTER_UNLIKELY(returns != 0))
-        {
-            // A '\r' before a '\n' ends its line at the '\n', the next block's byte too.
-            const uint64_t next_newline = remaining > 64 && bytes[i + 64] == '\n';
-            const uint64_t followed = (newlines >> 1) | (next_newline << 63);
-            lines += (uint32_t)__builtin_popcountll(returns & ~followed);
-        }
-        // The masked load zeroed the bytes past the end.
-        lines += (uint32_t)__builtin_popcountll(newlines);
-    }
-    if (length % BUSTER_PP_LINE_BLOCK_BYTES == 0)
-    {
-        blocks[length / BUSTER_PP_LINE_BLOCK_BYTES] = lines;
-    }
-}
-
-// The same, a byte at a time.
-static void pp_count_line_blocks_scalar(const uint8_t* bytes, uint32_t length, uint32_t* blocks)
-{
-    uint32_t lines = 0;
-    for (uint32_t i = 0; i <= length; i += 1)
-    {
-        if (i % BUSTER_PP_LINE_BLOCK_BYTES == 0)
-        {
-            blocks[i / BUSTER_PP_LINE_BLOCK_BYTES] = lines;
-        }
-        if (i < length)
-        {
-            lines += bytes[i] == '\n' || (bytes[i] == '\r' && (i + 1 == length || bytes[i + 1] != '\n'));
-        }
-    }
-}
-
 // Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
 // leading-space bits, directive table and guard, in `columns` (kinds, starts and values, an arena each) and `arena` (the
 // directive table). Adds each phase's TSC ticks to `ticks` (by PPPhase) unless it is null.
@@ -2598,27 +2529,6 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
         const uint64_t now = __rdtsc();
         ticks[PP_PHASE_LEX] += now - tick;
         tick = now;
-    }
-    // A large file's line table, while the lexer has left its bytes in the caches, charged to the directive tables
-    // (agreed with #116, whose phases are the lexer's and refinement's). Without room for it, pp_line_of counts from
-    // its cursor.
-    if (count >= 0 && data->length >= BUSTER_PP_LINE_TABLE_BYTES)
-    {
-        data->line_blocks = arena_push_array(arena, (uint64_t)data->length / BUSTER_PP_LINE_BLOCK_BYTES + 1, sizeof(uint32_t), 64);
-        if (data->line_blocks != 0 && prepare->vectorized)
-        {
-            pp_count_line_blocks(data->bytes, data->length, data->line_blocks);
-        }
-        else if (data->line_blocks != 0)
-        {
-            pp_count_line_blocks_scalar(data->bytes, data->length, data->line_blocks);
-        }
-        if (ticks != 0)
-        {
-            const uint64_t now = __rdtsc();
-            ticks[PP_PHASE_DIRECTIVES] += now - tick;
-            tick = now;
-        }
     }
     if (count < 0)
     {
@@ -2772,23 +2682,14 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
         }
         else
         {
-            if (data->line_blocks != 0)
+            if (data->line_cursor_line == 0 || offset < data->line_cursor)
             {
-                // The lines before the block that holds the byte before the place, then those in the block up to it.
-                const uint32_t block = pp_line_block(offset);
-                result = 1 + data->line_blocks[block] + pp_count_lines(data, block * BUSTER_PP_LINE_BLOCK_BYTES, offset);
+                data->line_cursor = 0;
+                data->line_cursor_line = 1;
             }
-            else
-            {
-                if (data->line_cursor_line == 0 || offset < data->line_cursor)
-                {
-                    data->line_cursor = 0;
-                    data->line_cursor_line = 1;
-                }
-                result = data->line_cursor_line + pp_count_lines(data, data->line_cursor, offset);
-                data->line_cursor = offset;
-                data->line_cursor_line = result;
-            }
+            result = data->line_cursor_line + pp_count_lines(data, data->line_cursor, offset);
+            data->line_cursor = offset;
+            data->line_cursor_line = result;
             uint32_t line_start = offset;
             while (column != 0 && line_start > 0 && data->bytes[line_start - 1] != '\n' && data->bytes[line_start - 1] != '\r')
             {

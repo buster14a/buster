@@ -4608,103 +4608,6 @@ static bool pp_test_embed_text(uint64_t seed)
     return result && failures == 0;
 }
 
-// Large files' line tables (pp_count_line_blocks and its scalar twin), on bytes of lengths around one, two and three
-// blocks and others, ending at a readable page before a PROT_NONE one: random line ends ('\n', '\r' and "\r\n"), "\r\n"
-// across every block's end and every 64 bytes' end, '\r' alone, and "\r\n" alone. The two tables must be the same, and
-// for every offset the line pp_line_of takes from them (the block's count and pp_count_lines from its start) must be
-// pp_count_lines(0, offset), which a byte at a time gives here too.
-static bool pp_test_line_blocks(uint64_t seed)
-{
-    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
-    const uint32_t most = 3 * BUSTER_PP_LINE_BLOCK_BYTES + 70;
-    const uint64_t readable = ((uint64_t)most + page_bytes - 1) / page_bytes * page_bytes;
-    uint8_t* mapping = mmap(0, readable + page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    bool result = mapping != MAP_FAILED && mprotect(mapping + readable, page_bytes, PROT_NONE) == 0;
-    static uint32_t vector[3 * BUSTER_PP_LINE_BLOCK_BYTES / BUSTER_PP_LINE_BLOCK_BYTES + 2];
-    static uint32_t scalar[3 * BUSTER_PP_LINE_BLOCK_BYTES / BUSTER_PP_LINE_BLOCK_BYTES + 2];
-    uint32_t lengths[71 + 3 * 141 + 40];
-    uint32_t length_count = 0;
-    uint64_t state = seed;
-    for (uint32_t length = 0; length <= 70; length += 1)
-    {
-        lengths[length_count++] = length;
-    }
-    for (uint32_t blocks = 1; blocks <= 3; blocks += 1)
-    {
-        for (int32_t delta = -70; delta <= 70; delta += 1)
-        {
-            lengths[length_count++] = (uint32_t)((int32_t)(blocks * BUSTER_PP_LINE_BLOCK_BYTES) + delta);
-        }
-    }
-    while (length_count < sizeof(lengths) / sizeof(lengths[0]))
-    {
-        state = state * 6364136223846793005ull + 1442695040888963407ull;
-        lengths[length_count++] = (uint32_t)((state >> 33) % (most + 1));
-    }
-    uint32_t checks = 0;
-    uint32_t failures = 0;
-    for (uint32_t l = 0; result && l < length_count; l += 1)
-    {
-        const uint32_t length = lengths[l];
-        uint8_t* bytes = mapping + readable - length;
-        for (uint32_t pattern = 0; pattern < 4; pattern += 1)
-        {
-            for (uint32_t i = 0; i < length; i += 1)
-            {
-                state = state * 6364136223846793005ull + 1442695040888963407ull;
-                const uint32_t draw = (uint32_t)(state >> 59);
-                uint8_t byte = draw < 10 ? '\n' : draw < 20 ? '\r' : 'a';
-                // A "\r\n" across the end of each block and of each 64 bytes.
-                byte = pattern == 1 && ((i + 1) % 64 == 0) ? '\r' : pattern == 1 && i % 64 == 0 && i != 0 ? '\n' : byte;
-                byte = pattern == 2 ? '\r' : pattern == 3 ? (i % 2 == 0 ? '\r' : '\n') : byte;
-                bytes[i] = byte;
-            }
-            pp_count_line_blocks(bytes, length, vector);
-            pp_count_line_blocks_scalar(bytes, length, scalar);
-            const uint32_t block_count = length / BUSTER_PP_LINE_BLOCK_BYTES + 1;
-            bool same = memcmp(vector, scalar, block_count * sizeof(uint32_t)) == 0;
-            if (!same && failures < 5)
-            {
-                printf("line blocks: %u bytes, pattern %u: the vector and scalar tables differ\n", length, pattern);
-            }
-            failures += !same;
-            checks += 1;
-            const PPFileData data = { .bytes = bytes, .length = length };
-            // The line ends before `offset` a byte at a time: a '\r' counts unless a '\n' follows it before `offset`.
-            uint32_t newlines = 0;
-            uint32_t returns = 0;
-            for (uint32_t offset = 0; offset <= length; offset += 1)
-            {
-                const uint32_t block = pp_line_block(offset);
-                const uint32_t lines = vector[block] + pp_count_lines(&data, block * BUSTER_PP_LINE_BLOCK_BYTES, offset);
-                const uint32_t wanted = newlines + returns;
-                // pp_count_lines from the file's start itself, at the blocks' ends and some places besides.
-                const bool direct = offset % BUSTER_PP_LINE_BLOCK_BYTES < 2 || offset % BUSTER_PP_LINE_BLOCK_BYTES > BUSTER_PP_LINE_BLOCK_BYTES - 2 || offset % 997 == 0;
-                const bool right = lines == wanted && (!direct || pp_count_lines(&data, 0, offset) == wanted);
-                if (!right && failures < 5)
-                {
-                    printf("line blocks: %u bytes, pattern %u, offset %u: %u lines, wanted %u\n", length, pattern, offset, lines, wanted);
-                }
-                failures += !right;
-                checks += 1;
-                if (offset < length)
-                {
-                    newlines += bytes[offset] == '\n';
-                    // The '\r' before a '\n' at `offset` stops counting; one at `offset` counts until a '\n' follows.
-                    returns -= bytes[offset] == '\n' && offset != 0 && bytes[offset - 1] == '\r';
-                    returns += bytes[offset] == '\r';
-                }
-            }
-        }
-    }
-    if (mapping != MAP_FAILED)
-    {
-        munmap(mapping, readable + page_bytes);
-    }
-    printf("line blocks: %u checks, %u failures\n", checks, failures);
-    return result && failures == 0;
-}
-
 // The names reserved to the implementation that other headers and programs test, which buster's headers must define
 // where clang's do: the rest (the guards and helpers clang names __CLANG_..., and buster __BUSTER_...) can differ.
 static const char* const pp_test_header_protocols[] = {
@@ -6316,7 +6219,6 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
-        passed_all &= pp_test_line_blocks(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);
         passed_all &= pp_test_lookup_accounting(directory);
         passed_all &= pp_test_final_copy_accounting();
