@@ -438,14 +438,17 @@ static __attribute__((noinline)) uint64_t refine_step_splices(const uint8_t* sou
 // identifiers'), the dense identifier arrays and the steps' identifier masks. `previous_ends` carries the ends of the 16
 // tokens before `begin` (lane 15 is the last one's), read before pass C could overwrite them in place. A step of 64
 // tokens whose gaps hold no backslash (most: `backslash_chunks`, from refine_scan_chunks) is done with its gap bits; the
-// others go to refine_step_splices. With `prefetch`, each step fetches the next block's columns and source, which a
-// whole file lexed before its refinement has evicted; tokens refined a window at a time (refine_tokens_blocks) are in
-// the caches already.
+// others go to refine_step_splices; a block whose gaps hold none (most) asks once, not per step. With `prefetch`, each
+// step fetches the next block's columns and source, which a whole file lexed before its refinement has evicted; tokens
+// refined a window at a time (refine_tokens_blocks) are in the caches already.
 BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint64_t begin,
                                     uint64_t end, uint32_t* values, uint64_t* space, uint32_t flags, const uint64_t* backslash_chunks, __m512i previous_ends,
                                     RefineIdentifiers* identifiers, uint64_t count, uint64_t scanned_bytes, const bool separate, const bool prefetch)
 {
     uint32_t identifier_count = 0;
+    // The block's gaps lie between the end of the token before it and the start of its last token.
+    const uint32_t block_gaps_begin = (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(previous_ends, 3), 3);
+    const bool block_backslashes = begin < end && refine_chunks_have_backslash(backslash_chunks, block_gaps_begin, starts[end - 1]);
     for (uint64_t step = begin; step < end; step += BUSTER_REFINE_STEP_TOKENS)
     {
         // The next block's step in the token columns, and BUSTER_REFINE_PREFETCH_SOURCE bytes of the source past what the
@@ -474,7 +477,9 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
         identifiers->masks[(step - begin) / BUSTER_REFINE_STEP_TOKENS] = identifier;
         // The step's gaps lie between the end of the token before it and the start of its last token.
         const uint32_t gaps_begin = (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(previous_ends, 3), 3);
-        uint64_t gaps = 0;
+        // Each group's gap bits, joined in mask registers (shifted and ORed in general registers, Clang packed them through a
+        // vector register).
+        __mmask16 group_gaps[4];
         // Groups past the source's last token load nothing and add nothing (their lanes are 0).
         for (uint32_t group = 0; group < 4; group += 1)
         {
@@ -483,7 +488,7 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
             const __m512i start_vector = _mm512_maskz_loadu_epi32(lanes, starts + first);
             const __m512i end_vector = _mm512_maskz_loadu_epi32(lanes, ends + first);
             const __m512i before_ends = _mm512_alignr_epi32(end_vector, previous_ends, 15);
-            gaps |= (uint64_t)_mm512_mask_cmpneq_epi32_mask(lanes, start_vector, before_ends) << (group * BUSTER_REFINE_LANES);
+            group_gaps[group] = _mm512_mask_cmpneq_epi32_mask(lanes, start_vector, before_ends);
             if (separate)
             {
                 _mm512_mask_storeu_epi32(values + first, lanes, end_vector);
@@ -495,7 +500,8 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
             identifier_count += (uint32_t)__builtin_popcount(identifiers_here);
             previous_ends = end_vector;
         }
-        if (BUSTER_UNLIKELY(refine_chunks_have_backslash(backslash_chunks, gaps_begin, starts[step + step_count - 1])))
+        uint64_t gaps = _cvtmask64_u64(_mm512_kunpackd(_mm512_kunpackw(group_gaps[3], group_gaps[2]), _mm512_kunpackw(group_gaps[1], group_gaps[0])));
+        if (BUSTER_UNLIKELY(block_backslashes && refine_chunks_have_backslash(backslash_chunks, gaps_begin, starts[step + step_count - 1])))
         {
             gaps = refine_step_splices(source, length, starts, ends, step, step_count, gaps_begin, _mm512_movepi8_mask(kind_vector), gaps, flags);
         }
