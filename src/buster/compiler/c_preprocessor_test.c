@@ -3863,6 +3863,143 @@ static bool pp_test_raw_recovery_failures(void)
     return result;
 }
 
+// #361: a part of the prelude that can't be made (its arena push or virtual file, out of memory or past the files table)
+// is fatal, and the run fails without running the parts after it. Each fault is injected after pp_initialize: the arena's
+// capacity cut below a part's push (a -D or -include of a megabyte makes the part's push the one that fails), or the
+// data table filled to leave the parts before it room. The controls: the same options with nothing taken away, and no
+// -include with room for every other part but none for an include file, which must then not be made.
+static bool pp_test_prelude_failures(void)
+{
+    enum
+    {
+        PP_TEST_PRELUDE_LONG = 1u << 20,
+    };
+    typedef struct
+    {
+        const char* name;
+        // Which long option the run takes: 0 none, 1 a -D, 2 an -include.
+        uint32_t long_option;
+        // Whether the arena's capacity is cut to the reference prelude's bytes and a page, so that the command line's push
+        // fails, or with `past_command_line` the long option's room besides, so that the push of the long part's file fails.
+        bool cut_arena;
+        bool past_command_line;
+        // Data records left free before the run (0 leaves the table).
+        uint32_t free_data;
+        // The fatal error's text, or null for a run that must succeed; strerror(ENOMEM)'s follows it when `out_of_memory`,
+        // as pp_virtual_file_error gives it.
+        const char* message;
+        bool out_of_memory;
+        // Whether -D X=1 must have taken effect.
+        bool defined;
+    } PPTestPreludeFault;
+    static const PPTestPreludeFault faults[] = {
+        { "command line's arena", 1, true, false, 0, "out of memory for the command line's -D, -U and -include options", false, false },
+        { "-D and -U file's arena", 1, true, true, 0, "can't make the file of the command line's -D and -U options: ", true, false },
+        { "-include file's arena", 2, true, true, 0, "can't make the file of the command line's -include options: ", true, true },
+        { "-D and -U file's record", 0, false, false, 1, "can't make the file of the command line's -D and -U options: too many files", false, false },
+        { "-include file's record", 2, false, false, 2, "can't make the file of the command line's -include options: too many files", false, true },
+        { "no -include, no room for its file", 0, false, false, 3, 0, false, true },
+        { "a megabyte's -D, nothing taken away", 1, false, false, 0, 0, false, true },
+    };
+    static const uint8_t source[] = "X Y\n";
+    char* long_text = malloc(PP_TEST_PRELUDE_LONG + 8);
+    bool result = long_text != 0;
+    // The reference: the prelude's bytes with -D X=1 -U Y alone.
+    uint64_t reference = 0;
+    if (result)
+    {
+        static InternTable table;
+        static Preprocessor pp;
+        static const char* const macros[] = { "DX=1", "UY" };
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true, .macros = macros, .macro_count = 2 };
+        result = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        const uint64_t initial = pp.arena.length;
+        result = result && pp_run_prelude(&pp);
+        reference = pp.arena.length - initial;
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    for (uint32_t f = 0; result && f < BUSTER_ARRAY_LENGTH(faults); f += 1)
+    {
+        const PPTestPreludeFault* fault = &faults[f];
+        static InternTable table;
+        static Preprocessor pp;
+        // The long -D's value, or the long -include's name, of PP_TEST_PRELUDE_LONG bytes.
+        memset(long_text, 'v', PP_TEST_PRELUDE_LONG + 7);
+        long_text[PP_TEST_PRELUDE_LONG + 7] = 0;
+        memcpy(long_text, "DLONG=", 6);
+        const char* macros[3] = { "DX=1", "UY", long_text };
+        const char* includes[1] = { long_text + 7 };
+        char* diagnostics = 0;
+        size_t diagnostics_length = 0;
+        FILE* stream = open_memstream(&diagnostics, &diagnostics_length);
+        const PPOptions options = {
+            .language = { .standard = 2017, .gnu = true },
+            .macros = macros,
+            .macro_count = fault->long_option == 1 ? 3 : 2,
+            .includes = includes,
+            .include_count = fault->long_option == 2 ? 1 : 0,
+            .diagnostics = stream,
+        };
+        bool ran = false;
+        bool checked = stream != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        const uint64_t capacity = pp.arena.capacity;
+        const uint32_t data_count = pp.data_count;
+        if (checked)
+        {
+            const uint64_t long_room = PP_TEST_PRELUDE_LONG + 7 + 16;
+            if (fault->cut_arena)
+            {
+                pp.arena.capacity = pp.arena.length + reference + (fault->past_command_line ? long_room + 32 + 32 : 0) + 4096;
+            }
+            if (fault->free_data != 0)
+            {
+                pp.data_count = BUSTER_PP_MAX_FILES - fault->free_data;
+            }
+            ran = pp_run_source(&pp, "prelude.c", source, sizeof(source) - 1);
+            fflush(stream);
+            const IdentId x = intern_find_or_add(&table, (const uint8_t*)"X", 1);
+            const IdentId y = intern_find_or_add(&table, (const uint8_t*)"Y", 1);
+            const IdentId long_name = intern_find_or_add(&table, (const uint8_t*)"LONG", 4);
+            const bool x_defined = x != 0 && pp.macro_of[x] != 0;
+            const bool long_defined = long_name != 0 && pp.macro_of[long_name] != 0;
+            const char* first = diagnostics != 0 ? strstr(diagnostics, "fatal error: ") : 0;
+            if (fault->message == 0)
+            {
+                checked = ran && !pp.fatal && pp.errors == 0 && pp.output.count == 2 && first == 0 && y != 0 && pp.macro_of[y] == 0 &&
+                          long_defined == (fault->long_option == 1);
+            }
+            else
+            {
+                // One fatal error, the part's, and nothing after it: no main file's tokens, no -D after a failed -D file.
+                char message[256];
+                snprintf(message, sizeof(message), "%s%s", fault->message, fault->out_of_memory ? strerror(ENOMEM) : "");
+                checked = !ran && pp.fatal && pp.output.count == 0 && first != 0 && strstr(first, message) != 0 &&
+                          strstr(first + 1, "fatal error: ") == 0 && !long_defined;
+            }
+            checked = checked && x_defined == fault->defined;
+            if (!checked)
+            {
+                printf("prelude failure '%s': ran %u, fatal %u, errors %u, output %u, X %u, LONG %u, diagnostics: %s\n", fault->name, ran, pp.fatal, pp.errors,
+                       pp.output.count, x_defined, long_defined, diagnostics != 0 ? diagnostics : "(none)");
+            }
+        }
+        if (stream != 0)
+        {
+            fclose(stream);
+        }
+        free(diagnostics);
+        pp.arena.capacity = capacity;
+        pp.data_count = data_count;
+        pp_release(&pp);
+        intern_release(&table);
+        result = checked;
+    }
+    free(long_text);
+    printf("prelude failures: %s (%lu faults and controls)\n", result ? "pass" : "FAIL", (unsigned long)BUSTER_ARRAY_LENGTH(faults));
+    return result;
+}
+
 // An option set of #281's families, or one beside them (%d stands for the test's directory): `refused` is in the message
 // of the option pp_parse_options must refuse, or null for a set it must take without a message.
 typedef struct PPTestOptionSet PPTestOptionSet;
@@ -6043,6 +6180,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_raw_query_views(directory);
         passed_all &= pp_test_raw_query_capacity(directory, with_clang);
         passed_all &= pp_test_raw_recovery_failures();
+        passed_all &= pp_test_prelude_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {
