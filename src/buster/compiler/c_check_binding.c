@@ -60,7 +60,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     for (uint32_t event = 0; valid && event < events->count; event += 1)
     {
         const uint8_t operation = events->operation[event];
-        const uint32_t handle = resolved[event];
+        const uint32_t handle = operation == C_BINDING_USE ? resolved[event] : 0;
         valid = operation != C_BINDING_USE ||
                 (events->declaration[event] < count && handle <= event &&
                  (handle == 0 || (events->operation[handle - 1] == C_BINDING_DECLARE && events->declaration[handle - 1] < count)));

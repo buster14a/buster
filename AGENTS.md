@@ -652,7 +652,8 @@ designs and the compilers already built this way.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
   `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
-  [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
+  [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
+  including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
   with each handoff ([the binding handoff](docs/c-check-bindings.md), #336). `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.

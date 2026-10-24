@@ -29,6 +29,14 @@ Labels have no events: the control readers resolve them per function
 elaboration, from a lookup at that point. Raw attribute arguments and asm
 operands keep the identity captured during elaboration.
 
+This is the bounded resolution of #336's duplicated-producer problem. The
+parser's syntax-only path does not request `ParseBindings`; making it publish
+another complete history would recreate the duplication. The semantic reader
+already retains the same source-token declaration identities while doing the
+type-dependent work it must own. Consuming those answers removes the second
+grammar extraction and resolution. The parser adapter remains the independent
+source oracle and the pre-reader lazy-header consumer's optional input.
+
 Points are token positions and never decrease, so the events are in source
 order. Capacity is `4 * tokens + 1` events and three head arrays of the
 interned names' count, in the reader's scratch. Exhaustion is sticky: the
@@ -124,12 +132,14 @@ because it decides which bodies to check before the reader runs.
 - the published history replayed by both resolvers into the same declarations;
 - random event streams of 0 to 64 events with every column the handoff reads
   or writes ending at a `PROT_NONE` page, through the three event modes, which
-  must agree;
+  must agree; every source-order prefix is also resolved from fresh columns,
+  with exactly the full stream's earlier answers and diagnostics;
 - each event mode's failures: an undeclared use, a stale capture, scratch
   exhaustion (which `direct` doesn't need), invalid events and an empty stream;
   invalid answers (a use seeing itself or a later event, a handle naming a use or
   a restore, a declaration outside the tokens), each refused before anything is
-  published; and the parser mode's allocation failures, which leave the parser
+  published; a declaration/restore-only stream consumes no answer column; and
+  the parser mode's allocation failures, which leave the parser
   and both arenas as they were.
 
 `test-checker-corpus` compares the two default paths, now `stacks` and
@@ -139,31 +149,51 @@ Clang's.
 ## Benchmark
 
 ```sh
-./build/compiler benchmark-checker-bindings [--passes N] [--only MODE [--after-scalar MS]] [-E's options] {file.c | --input NAME}
+./build/compiler benchmark-checker-bindings [--pipeline] [--passes N] [--only MODE [--after-scalar MS]] [-E's options] {file.c | --input NAME}
 ./build/compiler benchmark-checker-bindings --input NAME --print
 ```
 
-It preprocesses and parses once, outside timing, and requires the checker to
-accept the unit. Every mode's run on a fresh type table must publish the
+It preprocesses once and requires the checker to accept the unit. Every
+mode's run on a fresh type table must publish the
 default run's acceptance, reports, declaration, type, kind, object, linkage,
 definition and node columns and graph. Then it times whole `check_input` calls,
 21 interleaved passes after a warm-up by default, the order rotating by pass.
-A sample includes reading, elaboration, the handoff, expression graph
-construction, initializer validation and history publication; the type table's
-initialization and the arenas' reset (their pages stay committed) are outside
-it. The modes differ only in the handoff, so their differences are its cost.
+The default `reader-initialize` scope parses once outside timing and includes
+the type table's initialization, the reusable arenas' reset (their pages stay
+committed), reading, elaboration, the handoff, expression graph construction,
+initializer validation and history publication.
+
+`--pipeline` measures `parse-reader-check-cleanup`: fresh parser initialization,
+token extraction and parsing, reservation and initialization of the type,
+index, output and scratch arenas, the complete reader, expression checking,
+and release of every per-invocation parser and checker arena. An untimed run
+also compares each complete checked stream against the reference before
+releasing its storage; timed runs return only scalar metadata. The independent
+oracle and its arenas are outside both timing scopes. Nanoseconds and hardware
+cycles cover the same invocation scope. Preprocessing and identifier-table
+initialization and cleanup are common to every mode and reported separately
+as one untimed-process observation, with no repeated-performance claim.
+
+The modes differ only in the handoff, so their differences are its cost.
 `--only MODE` times one mode back to back, and `--after-scalar MS` runs the
-scalar twin's whole reader (`stacks`) for MS ms before each sample.
+scalar twin's reader (`stacks`, without parsing or expression checking) for
+MS ms before each sample, in either scope.
 
 It reports:
 
 - denominators: tokens, the reader's events (declarations, uses, restores),
-  the distinct names they bind, and the parser replay's events;
+  the distinct names they bind, the parser replay's events, name capacity,
+  maximum event occupancy per namespace/name, and peak active declarations;
 - per mode: median, minimum and maximum nanoseconds, cycles where the counter
   is available, per token, event, use and distinct name, the difference from
   `direct`, walks and fallbacks, the output arena's retained bytes, and the
+  parser and type/index retained bytes, and, in the reusable reader scope, the
   highest byte each arena's run writes (a lower bound on its peak: a transient
-  push that a later retained one writes over doesn't show);
+  push that a later retained one writes over doesn't show). Fresh pipeline
+  arenas are released inside timing; their output retained bytes are captured
+  before release, while poisoned written-byte probes are unavailable
+  (`written_bytes_available=0`, rather than interpreting their zeros as no
+  memory written);
 - isolated pieces on the run's retained events: the reader's stack replay and
   batch sort, the parser's grammar replay, and its two resolutions, each with
   its own footprint past its arenas' lengths (exact for what it writes).
@@ -171,7 +201,9 @@ It reports:
 The 9700X job runs it on every pull request on the small and header-heavy
 inputs and with 5 passes on frozen SQLite; where the checker's sources change,
 it adds three processes of the large input and SQLite, and SQLite's `direct`
-and `parser-batch` alone and after 100 ms of scalar work.
+and `parser-batch` alone and after 100 ms of scalar work. A separate conditional
+step adds three nine-pass pipeline processes on all four inputs and pipeline
+SQLite's `direct` and `parser-batch` after the same scalar conditioning.
 
 ### Inputs
 
@@ -226,4 +258,54 @@ That cost is the reader's and the same in every mode; it is outside #336.
 
 ### Ryzen 7 9700X
 
-Pending: the 9700X job's run on this change records them.
+The original implementation head
+`5e538cb5fe93b172e0697f0e70e86d586c4a4c65` passed
+[run 40089203533](https://github.com/buster14a/buster/actions/runs/40089203533/job/120858240606)
+on October 24, 2026. The runner's shared job lock serialized the work and the
+benchmarks used CPU 2, Clang 23 and the pinned
+`preprocessor-391e729af658` corpus, headers and predefines. Every handoff mode
+matched the default's retained columns and graph. The same job passed
+239,862 checker checks, the 1,473-check eager and lazy driver suites, and the
+SQLite Clang comparison with no acceptance, diagnostic or path differences.
+
+These original numbers time the **reader only**: type initialization and
+arena reset precede the nanosecond interval, and expression checking, initial
+parsing and cleanup are excluded. Its hardware-cycle interval also included
+initialization, so those cycle counts are not used for the comparison below.
+The follow-up measurement scopes above correct that mismatch and add the
+complete fresh parse/reader/check/cleanup comparison.
+
+| Input | Tokens | Reader events (uses) | Distinct names | Parser events | `direct` | `stacks` | `batch` | `parser-stacks` | `parser-batch` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| small | 243 | 94 (48) | 9 | 118 | 13.726 µs | 13.846 µs | 14.066 µs | 17.904 µs | 18.214 µs |
+| headers | 58,346 | 10,668 (80) | 3,725 | 14,285 | 3.301 ms | 3.312 ms | 3.346 ms | 4.295 ms | 4.348 ms |
+| large, process 1 | 237,579 | 94,210 (49,152) | 4,101 | 110,602 | 16.714 ms | 16.415 ms | 16.616 ms | 20.418 ms | 20.922 ms |
+| SQLite, process 1 | 706,237 | 164,321 (95,360) | 9,948 | 159,280 | 71.102 ms | 71.124 ms | 72.157 ms | 87.902 ms | 89.291 ms |
+
+Each row uses 21 interleaved passes. Across three separate processes, `large`
+direct medians were 16.714/16.711/16.814 ms against
+20.922/20.911/21.041 ms for the previous default. SQLite direct medians were
+71.102/70.768/70.826 ms against 89.291/89.005/88.938 ms. Even the slowest
+SQLite direct sample across the processes, 72.354 ms, beat the fastest
+previous-default sample, 88.171 ms. These reader savings are about 20% for
+large and SQLite and 24% for small and headers, beyond the observed spread.
+
+SQLite's isolated direct medians were 70.273/70.492/70.363 ms against
+89.265/89.477/89.008 ms for the previous default. After 100 ms of the stack
+reader before each sample they were 70.671/70.579/70.500 ms against
+88.816/88.992/88.751 ms. The retained-answer improvement therefore survives
+both sustained and lighter-phase-conditioned reader work.
+
+On the five-pass SQLite baseline, the isolated parser grammar replay took
+13.257 ms and wrote 92.100 MB of output and 81.242 MB of scratch. Its stack
+and batch resolutions took 1.282 and 2.484 ms. The reader's stack replay took
+0.433 ms and its batch 1.371 ms; the sort is over three times slower than
+the stacks here. Reader output retained bytes were 230.805 MB in every
+mode. Written-byte lower bounds were 230.805 MB output and 245.375 MB scratch
+for direct, against 261.730 MB and 266.038 MB for the old parser mode.
+No SQLite uses walked or fell back; the header batch walked three uses and
+had no fallback. The closed-sibling source fixtures independently require
+the fallback path.
+
+Fresh pipeline acceptance is recorded separately from these reader-only
+measurements; preprocessing remains a separately reported common phase.

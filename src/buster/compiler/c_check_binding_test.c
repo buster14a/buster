@@ -471,6 +471,25 @@ static void check_test_binding_failures(CheckTest* test)
                                input.binding_statistics.identifiers == 0,
                           "an invalid binding answer published results");
     }
+    // DECLARE and RESTORE events have no consumed answer. In particular, the producer never initializes a
+    // RESTORE's previous slot. A stream without uses must not read the answer column at all.
+    uint8_t operations[] = {
+        C_BINDING_DECLARE,
+        C_BINDING_RESTORE,
+    };
+    CheckInput no_uses = { 0 };
+    CheckInputReader declaration_only = {
+        .output = &no_uses,
+        .parser = &parser,
+        .bindings = {
+            .operation = operations,
+            .count = BUSTER_ARRAY_LENGTH(operations),
+        },
+    };
+    const bool no_answers = check_input_binding_answers(&declaration_only, 0);
+    check_test_expect(test, no_answers && !no_uses.resource && no_uses.report_count == 0 &&
+                           no_uses.binding_statistics.identifiers == 1 && no_uses.binding_statistics.declarations == 1,
+                      "a binding stream without uses read absent answers");
     arena_release(&scratch);
     arena_release(&storage);
 }
@@ -600,6 +619,40 @@ static void check_test_binding_guards(CheckTest* test)
             for (uint32_t report = 0; report < input.report_count && report < 64; report += 1)
             {
                 reports[mode][report] = stored[report].token << 8 | stored[report].message;
+            }
+            // Every source-order prefix is a legal partial batch: later declarations and restores cannot
+            // change an earlier use's answer. Reuse the frozen stream, including visibility ends beyond the
+            // prefix, while starting every publication from fresh columns.
+            for (uint32_t prefix = 0; prefix <= count; prefix += 1)
+            {
+                for (uint32_t token = 0; token < count; token += 1)
+                {
+                    declarations[token] = BUSTER_CHECK_NONE;
+                    declared[token] = source.operation[token] == C_BINDING_DECLARE ? BUSTER_TYPE_INT : 0;
+                }
+                reader.bindings.count = prefix;
+                input.report_count = 0;
+                input.resource = false;
+                check_input_binding_events(&reader, (CheckInputBindingMode)(CHECK_INPUT_BINDINGS_DIRECT + mode));
+                bool equal = !input.resource && scratch.length == 0;
+                for (uint32_t token = 0; equal && token < count; token += 1)
+                {
+                    const bool consumed = token < prefix && source.operation[token] == C_BINDING_USE;
+                    const uint32_t expected_declaration = consumed ? results[mode][token] : BUSTER_CHECK_NONE;
+                    const TypeId expected_type = consumed ? types[mode][token] : source.operation[token] == C_BINDING_DECLARE ? BUSTER_TYPE_INT : 0;
+                    equal = declarations[token] == expected_declaration && declared[token] == expected_type;
+                }
+                uint32_t expected_reports = 0;
+                for (uint32_t report = 0; equal && report < report_counts[mode]; report += 1)
+                {
+                    if ((reports[mode][report] >> 8) < prefix)
+                    {
+                        equal = expected_reports < input.report_count &&
+                                (stored[expected_reports].token << 8 | stored[expected_reports].message) == reports[mode][report];
+                        expected_reports += 1;
+                    }
+                }
+                check_test_expect(test, equal && input.report_count == expected_reports, "a partial binding batch changed earlier answers or reports");
             }
         }
         for (uint32_t mode = 1; ready && mode < 3; mode += 1)
