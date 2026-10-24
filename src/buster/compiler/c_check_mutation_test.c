@@ -369,6 +369,75 @@ static const CheckMutationFixture check_mutation_fixtures[] =
         .line = 3,
     },
     {
+        .name = "Lua 5.4.8 src/liolib.c, const added to opencheck's void result: a qualified void is void, for its body and returns",
+        .source =
+            "typedef struct lua_State lua_State;\n"
+            "static const void opencheck(lua_State *L, const char *fname, const char *mode)\n"
+            "{\n"
+            "    if (L == 0)\n"
+            "        return;\n"
+            "    (void)fname;\n"
+            "    (void)mode;\n"
+            "}\n"
+            "int io_open(lua_State *L) { opencheck(L, \"f\", \"r\"); return 0; }\n",
+        .standard = 1999,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "a return without a value in a system header's int function: -Wreturn-mismatch, which clang suppresses there",
+        .source =
+            "# 1 \"user.c\"\n"
+            "# 1 \"/usr/include/header.h\" 1 3\n"
+            "static int f(int x) { if (x) return; return 1; }\n"
+            "# 2 \"user.c\" 2\n"
+            "int main(void) { return f(0); }\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "SQLite 3.53.2's <string.h>, a pointer removed from strlcpy's source: restrict on a non-pointer is reported at the qualifier",
+        .source =
+            "# 1 \"user.c\"\n"
+            "# 1 \"/usr/include/string.h\" 1 3\n"
+            "extern unsigned long strlcpy(char *__restrict __dest,\n"
+            "    const char __restrict __src, unsigned long __n);\n"
+            "# 2 \"user.c\" 2\n"
+            "int main(void) { return 0; }\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = true,
+        .line = 2,
+    },
+    {
+        .name = "the same rule for a restrict pointer to a function, which clang reports at the pointer's *",
+        .source =
+            "void g(int a, void (*\n"
+            "    restrict f)(void));\n",
+        .standard = 2017,
+        .gnu = true,
+        .rejected = true,
+        .line = 1,
+    },
+    {
+        .name = "musl 1.2.5 src/math/log2_data.h, 11 - 1 swapped in poly1's bound: a visibility attribute before a struct definition that fails is no call",
+        .source =
+            "# 1 \"src/math/log2_data.c\"\n"
+            "# 13 \"src/math/log2_data.h\" 1\n"
+            "extern __attribute__((__visibility__(\"hidden\"))) const struct log2_data {\n"
+            "double invln2hi;\n"
+            "double poly1[ 1 - 11 ];\n"
+            "} __log2_data;\n"
+            "# 12 \"src/math/log2_data.c\" 2\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = true,
+        .line = 15,
+    },
+    {
         .name = "too few arguments are reported at the call's )",
         .source =
             "void h(int, int);\n"
