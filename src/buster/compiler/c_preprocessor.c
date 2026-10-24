@@ -2634,9 +2634,39 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
     return result;
 }
 
+// Whether bytes [at, end) of a file hold a line end that isn't a line splice's: a '\n' or '\r' that doesn't follow a
+// backslash, nor a '\n' a '\r' after one, 64 bytes at a time. A window without one, whose line goes on through splices
+// alone (a macro defined over many lines), keeps no token when lexed (pp_prepare_windows), so it is doubled unlexed:
+// x86_64_encoder.c's BUSTER_X86_VECTOR_FORMS, 157 KB on 1,695 lines, had the lexer go over 241 KB of the file's 582 KB
+// twice. A splice the lexer takes otherwise (with blanks after the backslash, or a trigraph's) counts as a line end here,
+// and its window is lexed; the check only spares work, and the tokens are the same either way.
+static bool pp_window_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t end)
+{
+    bool result = false;
+    // Bit 0 of each: the byte before the chunk is a backslash, or a '\r' after one.
+    uint64_t backslash_before = 0;
+    uint64_t spliced_return_before = 0;
+    for (uint64_t i = at; !result && i < end; i += 64)
+    {
+        const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, (uint32_t)(end - i));
+        const __m512i chunk = _mm512_maskz_loadu_epi8(valid, bytes + i);
+        const uint64_t newlines = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\n'));
+        const uint64_t returns = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\r'));
+        const uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\\'));
+        const uint64_t after_backslash = (backslashes << 1) | backslash_before;
+        const uint64_t spliced_returns = returns & after_backslash;
+        const uint64_t spliced_newlines = newlines & (after_backslash | (spliced_returns << 1) | spliced_return_before);
+        result = ((newlines & ~spliced_newlines) | (returns & ~spliced_returns)) != 0;
+        backslash_before = backslashes >> 63;
+        spliced_return_before = spliced_returns >> 63;
+    }
+    return result;
+}
+
 // pp_prepare_into for a file of at least two windows (`window` bytes) that the vectorized kernels lex: lexed a window at
 // a time (c_tokenize_lines), each window's tokens kept up to the last one that starts a logical line (that line is lexed
-// again with the next window, and a line that takes a whole window doubles it), and each completed block of
+// again with the next window, and a line that takes a whole window doubles it, unlexed when only splices continue it:
+// pp_window_has_line_end), and each completed block of
 // BUSTER_REFINE_BLOCK_TOKENS refined at once (refine_tokens_blocks), while the lexer's columns and the source are still
 // in the caches: a whole file lexed before its refinement had refinement read them from memory again
 // (docs/c-refinement.md). The records are pp_prepare_whole's, byte for byte. The leading-space words, whose place after
@@ -2679,7 +2709,9 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     {
         const uint64_t end = length - at <= size ? length : at + size;
         last = end == length;
-        const int64_t lexed = c_tokenize_lines(data->bytes, end, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags);
+        const int64_t lexed = last || pp_window_has_line_end(data->bytes, at, end)
+                                  ? c_tokenize_lines(data->bytes, end, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags)
+                                  : 0;
         int64_t kept = last ? lexed : 0;
         for (int64_t i = lexed - 1; !last && kept == 0 && i > 0; i -= 1)
         {

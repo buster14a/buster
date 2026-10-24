@@ -12,7 +12,8 @@
 // 8 KB, in five language modes; sources of up to 96 KB give refinement many blocks of BUSTER_REFINE_BLOCK_TOKENS, which
 // the windows complete at every place.
 //
-// Layout: the random sources, the preparations and their comparison, and pp_test_windows.
+// Layout: the random sources, the preparations and their comparison, the line ends' scan (pp_window_has_line_end) against
+// a byte-at-a-time one, and pp_test_windows.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -211,6 +212,22 @@ static void pp_window_test_source(PPWindowTestText* text, uint64_t* random, uint
             }
             pp_window_test_append(text, comment ? "*/" : ")d\"");
         }
+        else if (kind < 996)
+        {
+            // A macro defined over many lines continued by line splices: one logical line, which may outgrow a window,
+            // with splices of every form, a comment and a literal among them.
+            static const char* const continuations[] = { " \\\n", " \\\n", " \\\r\n", " \\\r", " \\  \n", " /* c */ \\\n", " ?\?/\n" };
+            pp_window_test_append(text, "\n#define TABLE(X)");
+            const uint32_t lines = 1 + (uint32_t)(pick % 400);
+            for (uint32_t line = 0; line < lines; line += 1)
+            {
+                pp_window_test_append(text, continuations[pp_window_test_random(random) % BUSTER_ARRAY_LENGTH(continuations)]);
+                pp_window_test_append(text, "    X(");
+                pp_window_test_identifier(text, random);
+                pp_window_test_append(text, (line & 7) == 0 ? ", \"s\")" : ", 1)");
+            }
+            pp_window_test_append(text, "\n");
+        }
         else
         {
             static const uint8_t strays[] = { '@', '`', '\\', 0x80, 0xff, 0x7f, '\f', '\v' };
@@ -334,6 +351,69 @@ static bool pp_window_test_same(PPPrepareStatus a_status, const PPFileData* a, P
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The line ends' scan
+
+// pp_window_has_line_end a byte at a time.
+static bool pp_window_test_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t end)
+{
+    bool result = false;
+    for (uint64_t p = at; p < end; p += 1)
+    {
+        const bool after_backslash = p > at && bytes[p - 1] == '\\';
+        const bool after_spliced_return = p > at + 1 && bytes[p - 1] == '\r' && bytes[p - 2] == '\\';
+        result |= (bytes[p] == '\r' && !after_backslash) || (bytes[p] == '\n' && !after_backslash && !after_spliced_return);
+    }
+    return result;
+}
+
+// pp_window_has_line_end against the byte-at-a-time scan: random bytes of backslashes, line ends, blanks and letters, of
+// 0 to 300 bytes, each scanned from four starts to its end at a PROT_NONE page (a read past the end faults). Returns the
+// differences and adds the checks to `checks`.
+static uint64_t pp_window_test_line_ends(uint64_t* random, uint64_t* checks)
+{
+    static const uint8_t alphabet[] = { '\\', '\\', '\r', '\n', '\n', ' ', 'a', '\t' };
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t failures = mapping == MAP_FAILED || mprotect(mapping + page_bytes, page_bytes, PROT_NONE) != 0;
+    for (uint32_t length = 0; failures == 0 && length <= 300; length += 1)
+    {
+        for (uint32_t trial = 0; trial < 24; trial += 1)
+        {
+            uint8_t* bytes = mapping + page_bytes - length;
+            // Mostly bytes that aren't line ends, so that a scan goes through several chunks before it finds one.
+            const uint64_t density = 1 + pp_window_test_random(random) % 64;
+            for (uint32_t i = 0; i < length; i += 1)
+            {
+                const uint64_t r = pp_window_test_random(random);
+                bytes[i] = r % density == 0 ? alphabet[(r >> 8) % sizeof(alphabet)] : (r >> 16) % 3 == 0 ? (uint8_t)'\\' : (uint8_t)'x';
+                // A splice's newline after most backslashes.
+                if (bytes[i] == '\\' && i + 1 < length && (r >> 24) % 2 == 0)
+                {
+                    i += 1;
+                    bytes[i] = (r >> 25) % 4 == 0 ? (uint8_t)'\r' : (uint8_t)'\n';
+                }
+            }
+            for (uint32_t at = 0; at < 4 && at <= length; at += 1)
+            {
+                const bool vector = pp_window_has_line_end(mapping, page_bytes - length + at, page_bytes);
+                const bool scalar = pp_window_test_has_line_end(mapping, page_bytes - length + at, page_bytes);
+                *checks += 1;
+                if (vector != scalar && failures < 4 && !pp_test_quiet)
+                {
+                    printf("windows: the line ends' scan of %u bytes from %u gives %d, a byte at a time %d\n", length, at, vector, scalar);
+                }
+                failures += vector != scalar;
+            }
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page_bytes);
+    }
+    return failures;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // pp_test_windows
 
 // BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
@@ -357,6 +437,8 @@ static bool pp_test_windows(uint64_t seed)
         initialized &= pp_window_test_initialize(&runs[k]);
     }
     uint64_t random = seed ^ 0x116116116ull;
+    uint64_t line_end_checks = 0;
+    const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks);
     uint64_t failures = 0;
     uint64_t windowed = 0;
     uint64_t tokens = 0;
@@ -394,7 +476,7 @@ static bool pp_test_windows(uint64_t seed)
         pp_window_test_release(&runs[k]);
     }
     free(text.bytes);
-    printf("windows: %lu of %u sources differ (%lu windowed preparations, %lu tokens)\n", (unsigned long)failures, BUSTER_PP_WINDOW_TEST_SOURCES,
-           (unsigned long)windowed, (unsigned long)tokens);
-    return initialized && failures == 0;
+    printf("windows: %lu of %u sources differ (%lu windowed preparations, %lu tokens); the line ends' scan: %lu of %lu checks fail\n", (unsigned long)failures,
+           BUSTER_PP_WINDOW_TEST_SOURCES, (unsigned long)windowed, (unsigned long)tokens, (unsigned long)line_end_failures, (unsigned long)line_end_checks);
+    return initialized && failures == 0 && line_end_failures == 0;
 }
