@@ -565,7 +565,14 @@ macro's expansion, an argument being expanded, or a directive's line):
   (`pp_collect_step`), from the contexts below (popping the ones they exhaust,
   which enables their macros again), and runs any directive on the way. A
   directive among a macro's arguments is undefined behavior that clang accepts
-  (and warns about only with `-pedantic`), so we accept it too.
+  (and warns about only with `-pedantic`), so we accept it too. Clang refuses
+  `#include`, `#pragma` and the like there while one flag says arguments are
+  being collected (`InMacroArgs`, `Preprocessor.in_macro_arguments`); any
+  macro's collection clears it when it ends, so after an invocation with
+  arguments in a `#if` line among them, clang takes those directives, and the
+  collection goes on past an included file's end into the includer (#109's
+  seed 2106). Where -E's line markers place an expansion that started in an
+  included file and ended in its includer is still ours, not clang's (#370).
 - **Nothing nests through calls.** An argument that names an enabled macro is
   expanded before substitution by pushing it as a barrier context with a
   capture. The main loop fills the capture until the barrier ends, and then
@@ -1831,7 +1838,8 @@ full-corpus reproduction and frozen CI subset.
     before C23 and both in C23, a paste that would form `u8'a'` before C23, and
     trigraphs in the ISO modes and in the GNU ones;
   - `#pragma` and `#include` among a macro's arguments, which fail as clang's
-    do and must then give clang's output;
+    do and must then give clang's output, and are taken after an invocation in
+    a `#if` line among them, as clang takes them;
   - the cases from #202's review: a line splice before the quote of a split
     literal (with `u`, `U` and `u8`, and a trigraph splice), and a trigraph a
     stringized argument spells, which stays, beside one a paste forms, which is

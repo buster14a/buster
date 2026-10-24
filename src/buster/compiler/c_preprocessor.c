@@ -1183,6 +1183,11 @@ struct Preprocessor
     uint32_t conditional_count;
     PPInvocation* invocations;
     uint32_t invocation_count;
+    // Clang's InMacroArgs: set when a macro's arguments start to be collected a token at a time, and cleared when any
+    // macro's collection ends, a nested one's in a directive among the arguments too, so that the directives clang
+    // rejects among a macro's arguments (pp_embedded_directive_name) are taken after such a nested invocation, as clang
+    // takes them (Preprocessor::HandleMacroExpandedIdentifier sets and clears one flag, not a depth).
+    bool in_macro_arguments;
     PPArgument* argument_records;
     uint32_t argument_record_count;
     PPCapture* capture_frames;
@@ -6477,6 +6482,7 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
     }
     else
     {
+        pp->in_macro_arguments = false;
         const PPMacro* macro = &pp->macros[invocation->macro];
         const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
         const uint32_t parameter_count = macro->parameter_count;
@@ -6912,8 +6918,9 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
 // One step of the main loop while it collects the top invocation's arguments (or a builtin's operand) a token at a time:
 // the top context's tokens up to its end or its next directive. An exhausted buffer is popped (which enables its macro
 // again); a directive runs, as clang runs one among a macro's arguments (its line may start a capture, during which the
-// collection waits), but for those clang rejects there (pp_embedded_directive_name), which are an error and skipped;
-// the end of a file or of a barrier leaves the invocation unterminated. A builtin's header name a #if line writes is
+// collection waits), but for those clang rejects there (pp_embedded_directive_name) while its flag says the arguments are
+// being collected (Preprocessor.in_macro_arguments), which are an error and skipped; an included file's end goes back to
+// the includer, and the end of the run's file or of a barrier leaves the invocation unterminated. A builtin's header name a #if line writes is
 // read as the line writes it (pp_collect_written_header).
 static void pp_collect_step(Preprocessor* pp)
 {
@@ -6943,7 +6950,7 @@ static void pp_collect_step(Preprocessor* pp)
         else if (context->next_directive < data->directive_count)
         {
             const uint32_t d = context->next_directive;
-            const char* rejected = invocation->builtin ? 0 : pp_embedded_directive_name(data->directive_kind[d]);
+            const char* rejected = invocation->builtin || !pp->in_macro_arguments ? 0 : pp_embedded_directive_name(data->directive_kind[d]);
             if (rejected != 0)
             {
                 // At the directive's name, as clang reports it.
@@ -6957,6 +6964,12 @@ static void pp_collect_step(Preprocessor* pp)
                 // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
                 pp_directive(pp, context);
             }
+        }
+        else if (pp->context_count > 1)
+        {
+            // An included file's end: clang's lexer goes back to the includer and the collection goes on there, whether
+            // the invocation started in the file or an #include among its arguments entered it.
+            pp_pop_context(pp);
         }
         else
         {
@@ -7043,6 +7056,7 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
     {
         pp->invocations[pp->invocation_count] = invocation;
         pp->invocation_count += 1;
+        pp->in_macro_arguments = !collected;
     }
     if (collected)
     {

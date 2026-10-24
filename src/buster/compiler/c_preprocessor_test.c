@@ -1269,6 +1269,19 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
     { "#include among a macro's arguments", "#define F(x) [x]\nF(a\n#include \"other.h\"\nb)\nafter\n",
       "inside\n", "c17", "[a b]\nafter\n", true, 0, 0, 0 },
+    // Clang's flag for a macro's arguments is one flag, not a depth: an invocation with arguments in a directive among
+    // them clears it, and #pragma and #include are taken after it, the arguments going on past the included file's end
+    // (#109's seed 2106).
+    { "an invocation in a #if among a macro's arguments clears clang's flag", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#pragma omp parallel\n#include \"other.h\"\nb)\nafter\n",
+      "inside\n", "c17", "#pragma omp parallel\n[a inside b]\nafter\n", false, 0, 0, 0 },
+    { "an object-like macro in a #if among a macro's arguments keeps clang's flag", "#define F(x) [x]\n#define G 1\nF(a\n#if G\n#endif\n#pragma omp parallel\nb)\nafter\n",
+      0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
+    { "#pragma lines among a macro's arguments after an invocation in a #if", "#define f(x) x\n#define g() 1\n#define h(y) y\nf(a\n#if g()\n#endif\nh(\n#pragma foo\n)\n#pragma bar\nb)\n",
+      0, "c17", "#pragma foo\n#pragma bar\na b\n", false, 0, 0, 0 },
+    { "a file twice by #include among a macro's arguments", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#include \"other.h\"\n#include \"other.h\"\nb)\nafter\n",
+      "inside\n", "c17", "[a inside inside b]\nafter\n", false, 0, 0, 0 },
+    { "fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif", "#\tdefine ppf_190642_b(\\\n ) \n#define ppf_190642_h( )   \n ppf_190642_h       \f (   \\\n     \n#if   \\\n   ( ppf_190642_f ) \\\n!=  \\\nppf_g1\n#endif\n/**/#ifdef\\\n     \t    \t  /**/  /* c */   ppf_190642_bppf_190642_h\n#elif   \\\n  _Pragma(\"ppf_if\") ppf_190642_e\\\n\?       \f /* c */ppf_190642_b(/*\n*/ ) \\\n ppf_190642_d: ( /**/  (ppf_190642_h ) )>/* c */__has_c_attribute(gnu::unused)\\\n \?/**/ppf_190642_a/* c */:__STDC__\n#pragma          \n#if (\f 1u/**/)\n#endif\n#endif /* c */  \n     ) /**/ \n",
+      0, "c23", "#pragma ppf_if\n#pragma\n", false, 0, 0, 0 },
     { "trigraphs in the ISO modes before C23", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
       0, "c17", "1 [ ]\n\"#\" \"[\"\n", false, 0, 0, 0 },
     { "trigraphs ignored in the GNU modes", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
