@@ -3392,11 +3392,13 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   ours, kept from clang, succeeding in a space the file fits in and running
   out of one of a byte. Then the windows (#116, `c_preprocessor_windows_test.c`):
   240 generated sources of up to 96 KB, of what a window's end can cut (comments
-  and raw string literals over many lines, line splices, `\r\n`, long lines,
-  a byte order mark, constructs left open at the end), each prepared whole by
-  both kernels and a window at a time (`pp_prepare_windows`) in windows of 1 byte
-  to 8 KB, in five language modes: every record must be the whole file's, byte
-  for byte;
+  and raw string literals over many lines, macros continued over hundreds of
+  lines by splices, line splices, `\r\n`, long lines, a byte order mark,
+  constructs left open at the end), each prepared whole by both kernels and a
+  window at a time (`pp_prepare_windows`) in windows of 1 byte to 8 KB, in five
+  language modes: every record must be the whole file's, byte for byte; and the
+  scan for a line end that isn't a splice's (`pp_window_has_line_end`) against a
+  byte at a time, on random bytes ending at a `PROT_NONE` page;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
   `--window-bytes N` (ours alone, like `--location-limit`) sends every file of
