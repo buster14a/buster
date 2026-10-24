@@ -326,11 +326,13 @@ static bool tier0_is_object(const Tier0Function* function, uint64_t local)
     return function->local_sizes != 0 && function->local_sizes[local] != 0;
 }
 
+static bool tier0_parameters_valid(const Tier0Function* function);
 static bool tier0_aggregates_valid(const Tier0Function* function);
 
 // The optional frame descriptors are checked even when unused. The typed stream itself retains tier0_validate's
-// valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata, the
-// aggregates' among it (tier0_aggregates_valid).
+// valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata: the
+// parameters' locations, where an incoming variadic area bounds them or objects may be among them
+// (tier0_parameters_valid), and the aggregates' (tier0_aggregates_valid).
 static bool tier0_frame_input_valid(const Tier0Function* function)
 {
     bool valid = function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
@@ -339,15 +341,6 @@ static bool tier0_frame_input_valid(const Tier0Function* function)
     {
         valid = valid && incoming->integer_registers <= BUSTER_ABI_INTEGER_ARGUMENTS && incoming->vector_registers <= BUSTER_ABI_VECTOR_ARGUMENTS &&
             incoming->stack_alignment_log2 == BUSTER_ABI_STACK_ALIGNMENT_LOG2 && incoming->stack_bytes % BUSTER_ABI_SLOT_BYTES == 0 && incoming->stack_bytes <= INT32_MAX;
-        for (uint32_t p = 0; valid && p < function->parameter_count; p += 1)
-        {
-            // (An aggregate's slots tier0_aggregates_valid checks.)
-            const AbiLocation location = function->parameters[p];
-            if (location.kind == BUSTER_ABI_LOCATION_STACK && !tier0_is_object(function, p))
-            {
-                valid = location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && (uint64_t)location.stack_offset + BUSTER_ABI_SLOT_BYTES <= incoming->stack_bytes;
-            }
-        }
     }
     for (uint32_t local = 0; valid && local < function->local_count; local += 1)
     {
@@ -360,6 +353,7 @@ static bool tier0_frame_input_valid(const Tier0Function* function)
                 (flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 && (role == BUSTER_TYPED_LOCAL_VA_LIST || incoming != 0);
         }
     }
+    valid = valid && ((incoming == 0 && function->local_sizes == 0) || tier0_parameters_valid(function));
     return valid && tier0_aggregates_valid(function);
 }
 
@@ -484,6 +478,15 @@ static const uint8_t tier0_callee_saved[BUSTER_TIER0_CALLEE_SAVED] = {
      1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 |                \
      1u << X86_REGISTER_R11)
 #define BUSTER_TIER0_XMM_ALL 0xffff0000u
+// The convention's registers: arguments and parameters arrive in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7, and
+// results in rax, rdx, xmm0 and xmm1. abi_assign's locations name no others, and the emitters take no others there: the
+// prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters move, and doesn't save a
+// register a parameter stays in; a call sets al and calls through r11; the epilogue loads the result before it pops the
+// callee-saved registers.
+#define BUSTER_TIER0_ARGUMENT_REGISTERS                                                                                \
+    (1u << X86_REGISTER_RDI | 1u << X86_REGISTER_RSI | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX |               \
+     1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 0xffu << BUSTER_TIER0_XMM(0))
+#define BUSTER_TIER0_RESULT_REGISTERS (1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 3u << BUSTER_TIER0_XMM(0))
 
 // The condition codes, as the encoder's Jcc and SETcc rows number them (their 4-bit tttn field).
 #define BUSTER_TIER0_CC_B 2
@@ -675,20 +678,24 @@ static uint32_t tier0_result_parts(AbiReturn result, uint32_t size, Tier0Part* p
     return result.kind == BUSTER_ABI_RESULT_REGISTERS ? tier0_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, size, parts) : 0;
 }
 
-// Whether an ABI register holds an aggregate's part: a general register but rsp, or XMM0 to XMM15.
-static bool tier0_part_register_valid(uint8_t reg)
+// ABI register `reg`'s bit in a register set when it is one of `allowed` (BUSTER_TIER0_ARGUMENT_REGISTERS or
+// BUSTER_TIER0_RESULT_REGISTERS), else 0: none for BUSTER_ABI_REGISTER_NONE, an x87 register or any other.
+static uint32_t tier0_register_bit(uint8_t reg, uint32_t allowed)
 {
-    return (reg & BUSTER_ABI_REGISTER_VECTOR) != 0 ? (reg & ~BUSTER_ABI_REGISTER_VECTOR) < 16 : reg < 16 && reg != X86_REGISTER_RSP;
+    return (reg & ~BUSTER_ABI_REGISTER_VECTOR) < 16 ? (1u << tier0_abi_register(reg)) & allowed : 0;
 }
 
-// Whether two registers hold an aggregate of `size` bytes as eightbytes: each a part's register or none, the first one
-// present (eightbyte 0, or with `high` eightbyte 1 alone), the second only past 8 bytes; with `split`, exactly one present
-// (the other part in a stack slot) and 9 to 16 bytes. A 16-byte aggregate's only XMM part takes the whole register.
-static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, uint32_t size)
+// Whether two registers hold an aggregate of `size` bytes as eightbytes: each one of `allowed` (the argument registers,
+// or the results') or none, and two apart; the first one present (eightbyte 0, or with `high` eightbyte 1 alone), the
+// second only past 8 bytes; with `split`, exactly one present (the other part in a stack slot) and 9 to 16 bytes. A
+// 16-byte aggregate's only XMM part takes the whole register.
+static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, uint32_t size, uint32_t allowed)
 {
     const bool first = registers[0] != BUSTER_ABI_REGISTER_NONE;
     const bool second = registers[1] != BUSTER_ABI_REGISTER_NONE;
-    bool valid = size != 0 && size <= 16 && (!first || tier0_part_register_valid(registers[0])) && (!second || tier0_part_register_valid(registers[1]));
+    const uint32_t first_bit = tier0_register_bit(registers[0], allowed);
+    const uint32_t second_bit = tier0_register_bit(registers[1], allowed);
+    bool valid = size != 0 && size <= 16 && (!first || first_bit != 0) && (!second || second_bit != 0) && (first_bit & second_bit) == 0;
     if (split)
     {
         valid = valid && first != second && !high && size > 8;
@@ -701,8 +708,8 @@ static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, u
 }
 
 // Whether `location` places an aggregate of `size` bytes: ignored, on the stack inside `stack_bytes` (the area its call's
-// arguments take, or an incoming one's) whole, or in registers (tier0_parts_valid), a SPLIT one's stack part in an 8-byte
-// slot, as is the high eightbyte alone on the stack, with no register.
+// arguments take, or an incoming one's) whole, or in argument registers (tier0_parts_valid), a SPLIT one's stack part in
+// an 8-byte slot, as is the high eightbyte alone on the stack, with no register.
 static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes)
 {
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
@@ -717,20 +724,20 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     }
     else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT)
     {
-        valid = valid && tier0_parts_valid(location.registers, high, location.kind == BUSTER_ABI_LOCATION_SPLIT, size);
+        valid = valid && tier0_parts_valid(location.registers, high, location.kind == BUSTER_ABI_LOCATION_SPLIT, size, BUSTER_TIER0_ARGUMENT_REGISTERS);
     }
     return valid;
 }
 
-// Whether `result` returns an aggregate of `size` bytes (16 at most) in registers as eightbytes: two of its registers at
-// most, none x87's, 8-byte parts or a 16-byte one in an XMM register.
+// Whether `result` returns an aggregate of `size` bytes (16 at most) in registers as eightbytes: in two result registers
+// at most (none x87's), 8-byte parts or a 16-byte one in an XMM register.
 static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool vector = result.part_bytes == 16 && result.registers[1] == BUSTER_ABI_REGISTER_NONE && (result.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 &&
                         !high && size == 16;
     return result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || vector) && result.registers[2] == BUSTER_ABI_REGISTER_NONE &&
-           result.registers[3] == BUSTER_ABI_REGISTER_NONE && tier0_parts_valid(result.registers, high, false, size);
+           result.registers[3] == BUSTER_ABI_REGISTER_NONE && tier0_parts_valid(result.registers, high, false, size, BUSTER_TIER0_RESULT_REGISTERS);
 }
 
 // The bytes a call's aggregate result in registers stores into its object (tier0_emit_call): each part's register whole,
@@ -741,10 +748,35 @@ static uint32_t tier0_result_extent(AbiReturn result)
     return result.part_bytes == 16 || high || result.registers[1] != BUSTER_ABI_REGISTER_NONE ? 16 : 8;
 }
 
+// Whether a call's argument or a parameter at `location`, an aggregate of `size` bytes (0 for a value), is one the
+// emitters follow inside `stack_bytes` (its call's stack area, or the incoming one): a value ignored, in an argument
+// register or in an 8-byte slot, and an aggregate as tier0_aggregate_location_valid has it. `registers` gets the
+// argument registers it takes, as a register set.
+static bool tier0_place_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes, uint32_t* registers)
+{
+    const uint32_t first = tier0_register_bit(location.registers[0], BUSTER_TIER0_ARGUMENT_REGISTERS);
+    bool valid = false;
+    if (size == 0)
+    {
+        const bool in_register = location.kind == BUSTER_ABI_LOCATION_REGISTERS;
+        const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 &&
+                          (uint64_t)location.stack_offset + BUSTER_ABI_SLOT_BYTES <= stack_bytes;
+        valid = location.kind == BUSTER_ABI_LOCATION_IGNORE || (in_register && first != 0) || slot;
+        *registers = in_register ? first : 0;
+    }
+    else
+    {
+        const bool parts = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT;
+        valid = tier0_aggregate_location_valid(location, size, stack_bytes);
+        *registers = parts ? first | tier0_register_bit(location.registers[1], BUSTER_TIER0_ARGUMENT_REGISTERS) : 0;
+    }
+    return valid;
+}
+
 // Call `c`'s locations and its aggregates' metadata (argument_sizes and call_result_objects), so that no emitter reads or
-// writes out of place: every argument in a register Tier 0 numbers, none twice in the call, or in its stack area; a
-// result object an object with room for what the call stores, its hidden pointer's rdi no argument's; and no hidden
-// pointer without an object, which would point nowhere.
+// writes out of place: every argument where tier0_place_valid has it in the call's stack area, no register two arguments
+// take, and an aggregate of 64 KB at most; a result object an object with room for what the call stores, its hidden
+// pointer's rdi no argument's; and no hidden pointer without an object, which would point nowhere.
 static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
 {
     const uint32_t first = function->call_first[c];
@@ -759,31 +791,9 @@ static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
     for (uint32_t a = 0; valid && a < count; a += 1)
     {
         const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
-        const AbiLocation location = function->argument_locations[first + a];
         uint32_t registers = 0;
-        if (size == 0)
-        {
-            const uint8_t reg = location.registers[0];
-            const bool in_register = location.kind == BUSTER_ABI_LOCATION_REGISTERS;
-            valid = location.kind == BUSTER_ABI_LOCATION_IGNORE || in_register || location.kind == BUSTER_ABI_LOCATION_STACK;
-            valid = valid && (!in_register || tier0_part_register_valid(reg));
-            valid = valid && (location.kind != BUSTER_ABI_LOCATION_STACK ||
-                              (location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && (uint64_t)location.stack_offset + BUSTER_ABI_SLOT_BYTES <= stack_bytes));
-            registers = valid && in_register ? 1u << tier0_abi_register(reg) : 0;
-        }
-        else
-        {
-            Tier0Part parts[2];
-            valid = size <= BUSTER_TIER0_MAX_ARGUMENT_BYTES && tier0_aggregate_location_valid(location, size, stack_bytes);
-            const uint32_t part_count = valid ? tier0_location_parts(location, size, parts) : 0;
-            for (uint32_t k = 0; k < part_count; k += 1)
-            {
-                const uint32_t bit = parts[k].reg != BUSTER_TIER0_PART_STACK ? 1u << parts[k].reg : 0;
-                valid = valid && (registers & bit) == 0;
-                registers |= bit;
-            }
-        }
-        valid = valid && (taken & registers) == 0;
+        valid = size <= BUSTER_TIER0_MAX_ARGUMENT_BYTES && tier0_place_valid(function->argument_locations[first + a], size, stack_bytes, &registers) &&
+                (taken & registers) == 0;
         taken |= registers;
     }
     if (object != 0)
@@ -820,23 +830,34 @@ static bool tier0_calls_valid(const Tier0Function* function)
     return valid;
 }
 
-// The aggregates' metadata (argument_sizes, call_result_objects and result_size, and the parameters that are objects),
-// checked by both compile paths too, so that no emitter reads or writes out of place: each call of a function that passes
-// or receives aggregates (tier0_call_valid; a function without argument_sizes and call_result_objects has its typed
-// stream's calls, which tier0_validate checks as the compile paths' precondition, at no cost to them), each parameter
-// that is an object, and a function whose result goes through a hidden pointer taking it as parameter 0 (U64, in rdi).
+// The parameters' locations, as tier0_place_valid has them inside the incoming area (a variadic function's, else all of
+// int32), each object's aligned to 16 at most, and no register two parameters take: each arrives in its own, which the
+// prologue reads it from or leaves it in as its home. tier0_validate's check of the parameters, and the compile paths'
+// where an optional part bounds them (incoming_variadic) or may make objects of them (local_sizes).
+static bool tier0_parameters_valid(const Tier0Function* function)
+{
+    const uint64_t incoming = function->incoming_variadic != 0 ? function->incoming_variadic->stack_bytes : INT32_MAX;
+    uint32_t taken = 0;
+    bool valid = true;
+    for (uint32_t p = 0; valid && p < function->parameter_count; p += 1)
+    {
+        const bool object = tier0_is_object(function, p);
+        uint32_t registers = 0;
+        valid = (!object || (function->local_alignments != 0 && function->local_alignments[p] <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)) &&
+                tier0_place_valid(function->parameters[p], object ? function->local_sizes[p] : 0, incoming, &registers) && (taken & registers) == 0;
+        taken |= registers;
+    }
+    return valid;
+}
+
+// The aggregates' metadata (argument_sizes, call_result_objects and result_size; the parameters that are objects
+// tier0_parameters_valid checks), checked by both compile paths too, so that no emitter reads or writes out of place:
+// each call of a function that passes or receives aggregates (tier0_call_valid; a function without argument_sizes and
+// call_result_objects has its typed stream's calls, which tier0_validate checks as the compile paths' precondition, at no
+// cost to them), and a function whose result goes through a hidden pointer taking it as parameter 0 (U64, in rdi).
 static bool tier0_aggregates_valid(const Tier0Function* function)
 {
     bool valid = (function->argument_sizes == 0 && function->call_result_objects == 0) || tier0_calls_valid(function);
-    const uint64_t incoming = function->incoming_variadic != 0 ? function->incoming_variadic->stack_bytes : INT32_MAX;
-    for (uint32_t p = 0; valid && p < function->parameter_count && function->local_sizes != 0; p += 1)
-    {
-        if (tier0_is_object(function, p))
-        {
-            valid = function->local_alignments != 0 && function->local_alignments[p] <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 &&
-                    tier0_aggregate_location_valid(function->parameters[p], function->local_sizes[p], incoming);
-        }
-    }
     if (function->result_size != 0)
     {
         valid = valid && tier0_aggregate_result_valid(function->result, function->result_size);
@@ -5425,9 +5446,9 @@ static Tier0Check tier0_validate(const Tier0Function* function)
     {
         tier0_reject(&validator, 0, "more entries or locals than Tier 0 takes, or more parameters than locals");
     }
-    else if (!tier0_frame_input_valid(function) || !tier0_calls_valid(function))
+    else if (!tier0_frame_input_valid(function) || !tier0_calls_valid(function) || !tier0_parameters_valid(function))
     {
-        tier0_reject(&validator, 0, "invalid incoming variadic metadata, address-only local role, call location or aggregate metadata");
+        tier0_reject(&validator, 0, "invalid incoming variadic metadata, address-only local role, call or parameter location, or aggregate metadata");
     }
     else
     {
@@ -5475,7 +5496,7 @@ static Tier0Check tier0_validate(const Tier0Function* function)
         }
         for (uint32_t p = 0; p < function->parameter_count; p += 1)
         {
-            // (An aggregate's, an object's, tier0_aggregates_valid checks.)
+            // A value in a register of its kind (an object's location, and the registers, tier0_parameters_valid checks).
             const AbiLocation location = function->parameters[p];
             const bool floating = tier0_class_floating(function->local_classes[p]);
             const bool vector = (location.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0;

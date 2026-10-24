@@ -3679,7 +3679,7 @@ struct Tier0TestBreak
     const char* rule;
 };
 
-#define BUSTER_TIER0_TEST_METADATA "invalid incoming variadic metadata, address-only local role, call location or aggregate metadata"
+#define BUSTER_TIER0_TEST_METADATA "invalid incoming variadic metadata, address-only local role, call or parameter location, or aggregate metadata"
 
 static const Tier0TestBreak tier0_test_breaks[] = {
     { "an aggregate past the most bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
@@ -3727,6 +3727,16 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a function with a result size that jumps to its end", 3, true, "a function returning an aggregate in registers that reaches its end" },
     { "a function with a result size that branches to its end", 3, true, "a function returning an aggregate in registers that reaches its end" },
     { "a jump to the end with a value left", 2, true, "values left at the function's end" },
+    { "an object parameter's two parts in one register", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "an object parameter's part in rax", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "two object parameters in one register", 0, true, BUSTER_TIER0_TEST_METADATA },
+    { "a value parameter in an object parameter's register", 12, true, BUSTER_TIER0_TEST_METADATA },
+    { "a value parameter in xmm8", 1, true, BUSTER_TIER0_TEST_METADATA },
+    { "an aggregate argument's two parts in one register", 0, false, BUSTER_TIER0_TEST_METADATA },
+    { "a value argument in rax", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "an aggregate argument's part in xmm8", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a result in rax twice", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "a call's result in rax and rbx", 3, false, BUSTER_TIER0_TEST_METADATA },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -3907,6 +3917,36 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             callee->function.count += 1;
             callee->values[callee->function.count - 1] = callee->function.count;
             break;
+        case 45:
+            callee->parameters[0].registers[1] = BUSTER_ABI_RDI;
+            break;
+        case 46:
+            callee->parameters[0].registers[0] = BUSTER_ABI_RAX;
+            break;
+        case 47:
+            callee->parameters[2].registers[0] = BUSTER_ABI_RDX;
+            break;
+        case 48:
+            callee->parameters[2].registers[0] = BUSTER_ABI_RDX;
+            break;
+        case 49:
+            callee->parameters[6].registers[0] = BUSTER_TIER0_TEST_X(8);
+            break;
+        case 50:
+            locations[0].registers[1] = BUSTER_ABI_RDI;
+            break;
+        case 51:
+            locations[7].registers[0] = BUSTER_ABI_RAX;
+            break;
+        case 52:
+            locations[1].registers[0] = BUSTER_TIER0_TEST_X(8);
+            break;
+        case 53:
+            callee->function.result.registers[1] = BUSTER_ABI_RAX;
+            break;
+        case 54:
+            caller->call.result.registers[1] = BUSTER_ABI_RBX;
+            break;
         default:
             break;
     }
@@ -3947,6 +3987,64 @@ static void tier0_test_aggregate_errors(Tier0TestTally* tally)
         arena_pop_to(&arena, 0);
     }
     arena_release(&arena);
+}
+
+// A change to a function of values alone, with nothing that makes the compile paths check its parameters (tier0_validate,
+// their precondition, does): parameter `parameter` moved to register `reg`, which tier0_validate must refuse by `rule`.
+typedef struct Tier0TestParameterBreak Tier0TestParameterBreak;
+struct Tier0TestParameterBreak
+{
+    const char* name;
+    uint32_t parameter;
+    uint8_t reg;
+    const char* rule;
+};
+
+static const Tier0TestParameterBreak tier0_test_parameter_breaks[] = {
+    { "two parameters in rdi", 1, BUSTER_ABI_RDI, BUSTER_TIER0_TEST_METADATA },
+    { "a parameter in rbx", 1, BUSTER_ABI_RBX, BUSTER_TIER0_TEST_METADATA },
+    { "a parameter in xmm8", 2, BUSTER_TIER0_TEST_X(8), BUSTER_TIER0_TEST_METADATA },
+    { "an F64 parameter in rdx", 2, BUSTER_ABI_RDX, "a parameter's location doesn't fit its class" },
+};
+
+// A function of an I64 in rdi, an I64 in rsi and an F64 in xmm0, which returns: valid, and each break of it refused.
+static void tier0_test_parameter_errors(Tier0TestTally* tally)
+{
+    static const char check[] = "parameter errors";
+    for (uint32_t b = 0; b <= BUSTER_ARRAY_LENGTH(tier0_test_parameter_breaks); b += 1)
+    {
+        const bool broken = b < BUSTER_ARRAY_LENGTH(tier0_test_parameter_breaks);
+        uint8_t kinds[1] = { BUSTER_TYPED_RETURN };
+        uint8_t classes[1] = { BUSTER_TYPED_CLASS_VOID };
+        uint64_t values[1] = { 0 };
+        uint8_t local_classes[3] = { BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_F64 };
+        uint8_t local_flags[3] = { 0, 0, 0 };
+        AbiLocation parameters[3] = {
+            { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+            { .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+            { .registers = { BUSTER_TIER0_TEST_X(0), BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+        };
+        if (broken)
+        {
+            parameters[tier0_test_parameter_breaks[b].parameter].registers[0] = tier0_test_parameter_breaks[b].reg;
+        }
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 1;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = 3;
+        function.parameter_count = 3;
+        function.parameters = parameters;
+        const Tier0Check checked = tier0_validate(&function);
+        const char* rule = broken ? tier0_test_parameter_breaks[b].rule : 0;
+        const bool expected = broken ? checked.error == TIER0_ERROR_INVALID && checked.rule != 0 && strncmp(checked.rule, rule, strlen(rule)) == 0 : checked.error == TIER0_OK;
+        tier0_test_expect(tally, expected, check, "%s: \"%s\"", broken ? tier0_test_parameter_breaks[b].name : "the function itself",
+                          checked.rule != 0 ? checked.rule : "valid");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -4374,6 +4472,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_aggregate_errors(&tally);
                 tier0_test_report("aggregate errors", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_parameter_errors(&tally);
+                tier0_test_report("parameter errors", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

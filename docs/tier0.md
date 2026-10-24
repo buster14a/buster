@@ -77,7 +77,12 @@ Beside them are three tables, and optional parts for aggregates and for the symb
   `SymbolId` s, for each of `symbol_count` symbols. Without it every symbol is direct.
 
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
-vectorized across the unit that way, and Tier 0 needs no type table.
+vectorized across the unit that way, and Tier 0 needs no type table. They name the convention's registers alone, and
+Tier 0 takes no others: a call's arguments and a function's parameters in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7,
+none in a register another argument of the call or another parameter takes, and results in rax, rdx, xmm0 and xmm1.
+The emitters rely on it: the prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters
+move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
+result before it pops the callee-saved registers.
 
 **Expressions** are in postorder, so each entry's last operand is the entry before it, and both paths read that
 operand's class from the entry before (its stack, and the entry's template key and variant). `tier0_validate` refuses
@@ -205,8 +210,9 @@ without aggregates:
   returns the pointer, which rax must hold.
 
 **Parts.** The registers come from `abi_assign`'s locations alone: eightbyte k (at 0 and 8, or the high one alone with
-`BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register, an XMM one taking all 16 bytes when it is a
-16-byte aggregate's only part. A part loads only the aggregate's own bytes, which may end at a page's end:
+`BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
+register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A part loads only the
+aggregate's own bytes, which may end at a page's end:
 
 | Part | Its load |
 | --- | --- |
@@ -235,13 +241,14 @@ passes over the parameters leave out what only objects need without one among th
 
 **Validation.** `tier0_validate`, and both compile paths through `tier0_frame_input_valid`, refuse aggregates' metadata
 no emitter could follow (the compile paths check a function's calls when it has `argument_sizes` or
-`call_result_objects`; without them its calls are the typed stream's, which `tier0_validate` checks, as the compile
-paths' precondition): a location whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a slot
-outside its call's stack area or an incoming one past int32, a register an earlier argument of the call takes, a
-call's stack alignment past 16, a result object that isn't an object with room for the registers' whole widths, a
-hidden pointer without an object or where an argument takes rdi, a function whose hidden result pointer isn't
-parameter 0 in rdi, an aggregate result of more than two registers, an x87 one, and a `RETURN` of another class than
-U64 with `result_size`. `test-tier0`'s aggregate errors break each rule (below).
+`call_result_objects`, and its parameters when it has `local_sizes` or an incoming variadic area; without them its calls
+and parameters are the typed stream's, which `tier0_validate` checks, as the compile paths' precondition): a location
+whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a register outside the convention's or one
+that another part, another argument of the call or another parameter takes, a slot outside its call's stack area or an
+incoming one past int32, a call's stack alignment past 16, a result object that isn't an object with room for the
+registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a function whose hidden
+result pointer isn't parameter 0 in rdi, an aggregate result of more than two registers, and a `RETURN` of another
+class than U64 with `result_size`. `test-tier0`'s aggregate and parameter errors break each rule (below).
 
 The producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)) gives every call site with an aggregate
 result an object of its own, a function with a hidden result pointer its parameter 0, and an aggregate parameter's
@@ -550,9 +557,14 @@ Before the programs, checks of their own:
   - **aggregate functions:** Tier 0's function, by both paths, whose parameters a driver passes from the same bytes,
     copies each parameter's bytes out, each aggregate's address after them (a multiple of its alignment), and returns
     the result in its registers or through the hidden pointer, which must come back in rax;
-  - **aggregate errors:** 45 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
+  - **aggregate errors:** 55 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
     malformed metadata by both compile paths too: among them a function with a result size that reaches its end by
-    falling off it, by a jump and by a branch, and a jump that takes a value to the end.
+    falling off it, by a jump and by a branch, a jump that takes a value to the end, an aggregate's two parts in one
+    register, a register two parameters take, and a part, a value or a result in a register outside the convention's
+    (rax, xmm8, rbx), as an argument and as a parameter.
+- **parameter errors:** a function of values alone, which no optional part makes the compile paths check: two
+  parameters in rdi, one in rbx and one in xmm8, which `tier0_validate` must refuse, and an F64 in rdx, which doesn't
+  fit its class.
 - **stack:**
   - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
     another class or with a value, and a restore of another class or with a value, and take a save restored.
