@@ -813,7 +813,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
-        result = run_check_command(argc - 2, argv + 2);
+        result = run_check_command(argc - 2, argv + 2, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
@@ -1262,7 +1262,7 @@ int main_unit_types(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECKER
 int run_source_check_command(int count, char** arguments)
 {
-    return run_check_command(count, arguments);
+    return run_check_command(count, arguments, true);
 }
 
 int main_unit_checker(int argc, char** argv, bool* found)

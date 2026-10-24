@@ -253,7 +253,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
         }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
-        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch) &&
+        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL) &&
                              check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission);
         snprintf(description, sizeof(description), "%s: shared code/data Link emits through real ABI/Tier0/encoder consumers", name);
         check_test_expect(test, emitted, description);
@@ -355,7 +355,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                     CheckProgramCode failed_code = { 0 };
                     const uint64_t emission_mark = output.length;
                     const bool failed_code_ok = check_program_emit(&failed_code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
-                                                                   &output, &empty, &scratch);
+                                                                   &output, &empty, &scratch, NULL);
                     check_test_expect(test, !failed_code_ok && failed_code.status == CHECK_PROGRAM_RESOURCE && failed_code.link.symbols.count == 0 &&
                                            failed_code.lowered.functions == 0 && output.length == emission_mark && empty.length == 17 && scratch.length == 0,
                                       "code byte exhaustion rolls back Link, ABI, atoms and bytes together");
@@ -446,6 +446,34 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int values[4]={3,7,11,19};struct S{int x;int*p;};struct S saved={5,values};"
         "int tested(volatile int n){struct S*p=&saved;return p->x+saved.p[(unsigned)n%4]+values[2];}", "aggregate-data-body-addresses", clang);
+    // Frame objects: local arrays, structs and unions (#145's c-testsuite programs). dirty() first leaves nonzero bytes
+    // where inner's frame goes, so that an initializer's implicit zeros must be written.
+    check_test_program_source(test,
+        "int tested(int n){int a[8];for(int i=0;i<8;i++)a[i]=i*n;short s[3]={1,2};char c[5]=\"ab\";int m[2][3]={{1},{4,5,6}};"
+        "return a[n&7]+s[2]+s[1]*10+c[1]+c[3]*7+(int)sizeof a+m[0][1]+m[1][2]*3;}", "local-arrays", clang);
+    check_test_program_source(test,
+        "struct P{int x;long y;char z[3];struct{short h;}w;};int dirty(int n){volatile char b[512];for(int i=0;i<512;i++)b[i]=(char)(i|n|1);return b[n&511];}"
+        "int inner(int n){struct P p={.y=n};struct P q={n,2,{3},{4}};char big[300]={'a'};int r[40]={[20]=n};"
+        "return p.x+(int)p.y+p.z[2]+p.w.h+q.z[0]*10+q.z[1]+q.w.h+(int)q.y+big[299]+big[0]+r[19]+r[20]+r[39];}"
+        "int tested(int n){return dirty(n)*0+inner(n);}", "local-initializer-zeros", clang);
+    check_test_program_source(test,
+        "struct A{int v[3];};struct B{unsigned char c[300];};union U{int i;unsigned char c[6];};"
+        "int tested(int n){struct A a={{n,2,3}},b;b=a;a.v[0]=9;struct B x,y;for(int i=0;i<300;i++)x.c[i]=(char)(i+n);y=x;"
+        "union U u,w;u.i=n;w=u;struct A c=b;struct A d;int v=(d=c).v[1];return b.v[0]+b.v[2]+a.v[0]+y.c[299]+y.c[n&255]+w.c[0]+c.v[0]+d.v[2]+v;}",
+        "aggregate-assignment-copies", clang);
+    check_test_program_source(test,
+        "struct S{int a,b;};struct T{struct S s;int c;};int sum(struct S*q){return q->a*10+q->b;}"
+        "int tested(int n){int t=0;for(int i=0;i<3;i++)t+=sum(&(struct S){i,n});struct S s={n,2};struct T u={s,3};struct S arr[3]={{1,2},{3}};"
+        "struct S z=n&1?s:arr[0];struct S e=({struct S w={n,n+1};w;});"
+        "return t+((int[]){5,6,7})[n&1]+u.s.a*7+u.c+arr[1].a+arr[1].b+arr[2].a+z.a+e.b;}", "aggregate-values-and-compounds", clang);
+    check_test_program_source(test,
+        "int add(int a,int b){return a+b;}int mul(int a,int b){return a*b;}int(*pick(int n))(int,int){return n&1?add:mul;}"
+        "int apply(int(*f)(int,int),int x){return (*f)(x,x);}"
+        "int tested(int n){int(*f)(int,int)=n<0?add:mul;int(*t[2])(int,int)={add,mul};"
+        "return f(n,3)+(*t[n&1])(n,4)+pick(n)(2,n)+apply(t[0],n)+apply(&mul,2);}", "indirect-calls", clang);
+    check_test_program_source(test,
+        "int tested(int n){char c=(char)n;unsigned char u=(unsigned char)(n*16);short s=(short)(n*4096);_Bool b=c;_Bool d=s;"
+        "return !c*1000+!u*100+!s*10+b+d*2+(c&&u)*4+(s||u)*8+(c?16:0);}", "narrow-truth-values", clang);
     check_test_program_source(test,
         "int tested(int n){unsigned x=(unsigned)n|1;return __builtin_popcount(x)+__builtin_clz(x)+__builtin_ctz(x)+"
         "__builtin_parity(x)+__builtin_ffs((int)x)+(int)(__builtin_bswap16((unsigned short)x)%101);}", "integer-builtin-runtime", clang);
@@ -719,7 +747,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "inactive-math-has-no-runtime-accessor", true, true, 0, 0);
     check_test_program_boundary(test, "__int128 wide(__int128 x){return x+1;}", "wide-primary-program", true, false, 0, 0);
     check_test_program_boundary(test, "extern int(*callback)(int);int tested(int n){return callback(n);}",
-                                "indirect-function-pointer-call-machine-boundary", true, false, 1, 0);
+                                "indirect-function-pointer-call", true, true, 1, 0);
     check_test_program_boundary(test,
         "typedef union __attribute__((transparent_union)){int value;unsigned bits;} U;int consume(U);int tested(int n){return consume(n);}",
         "transparent-union-call-machine-boundary", true, false, 1, 0);
@@ -747,7 +775,13 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-boundary", true, false, 1, 0);
     check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, false, 0, 1);
     check_test_program_boundary(test, "int global;struct S{int x;int*p;};int tested(int n){struct S s={n,&global};return s.x;}",
-                                "aggregate-primary-initialization", true, false, 1, 1);
+                                "aggregate-primary-initialization", true, true, 1, 1);
+    check_test_program_boundary(test, "struct S{int x;};struct S make(int n);int tested(int n){return make(n).x;}",
+                                "aggregate-result-machine-boundary", true, false, 1, 0);
+    check_test_program_boundary(test, "struct S{int x;};int take(struct S);int tested(int n){struct S s={n};return take(s);}",
+                                "aggregate-argument-machine-boundary", true, false, 1, 1);
+    check_test_program_boundary(test, "struct B{unsigned x:3;};int tested(int n){struct B b;b.x=n;return b.x;}",
+                                "bit-field-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test, "int tested(unsigned n){switch(n){case -1:return 1;case 4294967295U:return 2;}return 0;}",
                                 "case-conversion-collision", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch(n){case 1 ... 5:return 1;case 4 ... 7:return 2;}return 0;}",

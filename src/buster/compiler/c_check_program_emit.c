@@ -8,6 +8,25 @@
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
 // from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers.
 
+// What an executable's link binds against (the direct path, #157): the C runtime, which bind_begin joins between the
+// program's symbols and its atoms, its arrays from `arena` and its atoms' bytes copied into the emission's byte arena.
+// check_program_emit makes room for it in the link and calls bind_begin; its caller adds the static data and calls
+// bind_end. An object's emission has none.
+typedef struct CheckProgramBinding CheckProgramBinding;
+struct CheckProgramBinding
+{
+    const Runtime* runtime;
+    Bind* bind;
+    BindPath path;
+    Arena* arena;
+    // The static data the caller publishes after the code (check_data_prepare's objects): binding takes their symbols,
+    // as the bodies' and the helpers', for the program's definitions before their atoms join.
+    const CheckDataObject* data_objects;
+    uint32_t data_count;
+    // When bind_begin fails about a name (Bind.name), its bytes, since a failed emission rolls its link back.
+    char failed_name[256];
+};
+
 typedef struct CheckProgramCode CheckProgramCode;
 struct CheckProgramCode
 {
@@ -18,13 +37,16 @@ struct CheckProgramCode
     Tier0Error backend_error;
     uint32_t token;
     uint32_t backend_node;
+    // CheckProgramLowered.reason, or the attribute or construct the emission refused.
+    const char* reason;
     uint64_t records;
     uint64_t deferred;
     uint64_t code_bytes;
 };
 
 static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
-                               const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch)
+                               const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
+                               CheckProgramBinding* binding)
 {
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -45,6 +67,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->status = result->lowered.status;
             result->token = result->lowered.token;
             result->backend_node = result->lowered.backend_node;
+            result->reason = result->lowered.reason;
         }
     }
     for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
@@ -55,6 +78,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         {
             // A typed overload selection does not supply the required ABI symbol mangling.
             result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "overloadable functions (their mangled names)";
             result->token = candidate->declaration;
             valid = false;
         }
@@ -120,6 +144,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                         // lists, section properties and weak/visibility semantics are published, refusing code
                         // emission is required. A dropped definition has no object-format obligation of its own.
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->reason = "this attribute (alias, ifunc, constructor, destructor, weak, retain, section, common or a visibility)";
                         result->token = attribute->name_token;
                         valid = false;
                     }
@@ -141,7 +166,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         }
         else
         {
-            result->status = codes[b].error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
+            // Tier 0's own refusals are features it doesn't have yet: an entry without a template (the conversions
+            // between unsigned 64-bit integers and floating values), or values past its depth tables.
+            const bool convert = codes[b].node < function->count && function->kinds[codes[b].node] == BUSTER_TYPED_CONVERT;
+            result->status = codes[b].error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
+                             codes[b].error == TIER0_ERROR_UNSUPPORTED || codes[b].error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
+            result->reason = codes[b].error == TIER0_ERROR_DEPTH ? "expressions with more values live at once than Tier 0 has registers for" :
+                             codes[b].error != TIER0_ERROR_UNSUPPORTED ? NULL :
+                             convert ? "conversions between unsigned 64-bit integers and floating types" : "this operation in Tier 0";
             result->backend_error = codes[b].error;
             result->backend_node = codes[b].node;
             result->token = program->bodies[b].declaration;
@@ -154,18 +186,24 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         result->records += helpers->items[h].code.count;
         result->deferred += helpers->items[h].code.deferred;
     }
-    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count;
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references;
-    const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references;
-    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count;
-    valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX;
+    // An executable's link has room for the runtime's records too.
+    uint64_t name_bytes = 0;
+    uint64_t atom_bytes = 0;
+    const LinkCapacity runtime = binding != NULL && valid ? bind_capacity(binding->runtime, &name_bytes, &atom_bytes) : (LinkCapacity){ 0 };
+    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms;
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups;
+    const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
+    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.symbols;
+    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.names;
+    valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
+            name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities < UINT32_MAX;
     const LinkCapacity capacity = {
-        .names = valid ? (uint32_t)symbol_count : 0,
+        .names = valid ? (uint32_t)name_count : 0,
         .atoms = valid ? (uint32_t)atom_count : 0,
         .symbols = valid ? (uint32_t)symbol_count : 0,
         .fixups = valid ? (uint32_t)fixup_count : 0,
         .wide_addends = valid ? (uint32_t)wide_count : 0,
-        .priorities = data_capacity.priorities,
+        .priorities = valid ? data_capacity.priorities + runtime.priorities : 0,
     };
     valid = valid && link_initialize(&result->link, output, output, capacity);
     for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
@@ -222,6 +260,30 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                 link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                 BUSTER_LINK_SOURCE_NONE) == result->lowered.errno_symbol;
     }
+    // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
+    // symbols this emission and the static data will define marked as the program's definitions (bind.c).
+    for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
+    {
+        const uint32_t object = b < count ? program->bodies[b].object : b >= count + helpers->count ? binding->data_objects[b - count - helpers->count].object : 0;
+        const SymbolId symbol = b >= count && b < count + helpers->count ? helpers->items[b - count].symbol :
+                                object < program->object_count ? program->object_symbols[object] : 0;
+        if (symbol != 0 && symbol < result->link.symbols.count)
+        {
+            result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
+    }
+    if (valid && binding != NULL && !bind_begin(binding->bind, &result->link, binding->runtime, binding->path, bytes, 1, binding->arena))
+    {
+        const NameId name = binding->bind->name;
+        if (name != 0 && name < result->link.names.count)
+        {
+            snprintf(binding->failed_name, sizeof(binding->failed_name), "%.*s", (int)result->link.names.length[name],
+                     (const char*)result->link.names.bytes[name]);
+        }
+        result->status = binding->bind->error == BIND_ERROR_FULL ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
+        result->reason = "binding against the C runtime failed";
+        valid = false;
+    }
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
@@ -274,9 +336,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         const uint32_t token = result->token;
         const Tier0Error backend = result->backend_error;
         const uint32_t backend_node = result->backend_node;
+        const char* reason = result->reason;
         arena_pop_to(output, mark);
         arena_pop_to(bytes, byte_mark);
-        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node };
+        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason };
     }
     arena_pop_to(scratch, temporary);
     return valid;
