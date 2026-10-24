@@ -37,13 +37,21 @@ pids=()
 trap 'rm -rf "${temporary[@]}"' EXIT
 trap 'kill "${pids[@]}" 2> /dev/null; wait; exit 130' INT
 trap 'kill "${pids[@]}" 2> /dev/null; wait; exit 143' TERM
+# Sets the variable $1 to the microseconds since the epoch. Bash writes $EPOCHREALTIME's seconds and microseconds (six
+# digits) apart by the locale's decimal point, a comma in es_ES, so they are its digits alone. This is the script's only
+# reader of $EPOCHREALTIME, as .github/workflows/build-locale.yml checks, with now() and timed() under such locales.
+now()
+{
+    printf -v "$1" %s "${EPOCHREALTIME//[!0-9]/}"
+}
 # Runs "${@:2}" and writes the microseconds it took to the file $1, with its status.
 timed()
 {
-    local start="${EPOCHREALTIME/./}"
-    local status=0
+    local start end status=0
+    now start
     "${@:2}" || status=$?
-    echo "$(("${EPOCHREALTIME/./}" - start))" > "$1"
+    now end
+    echo "$((end - start))" > "$1"
     return "$status"
 }
 # Runs "$2 INDEX" for each source's index at once, each in a process of its own whose standard error goes to the
@@ -96,9 +104,11 @@ build_compiler()
 {
     object_directory="$(mktemp -d)"
     temporary+=("$object_directory")
-    local start="${EPOCHREALTIME/./}"
+    local start end
+    now start
     each_source "$object_directory" compile_source
-    report_times "$object_directory" "$(("${EPOCHREALTIME/./}" - start))"
+    now end
+    report_times "$object_directory" "$((end - start))"
     local linked=()
     for i in "${!sources[@]}"; do
         linked+=("$object_directory/$i.o")
