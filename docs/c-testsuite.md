@@ -79,16 +79,19 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
 ```
 
-`tests/c-testsuite/subset.txt` declares the 218 that must pass. The other two
-are refused by name, each waiting on work of its own:
+`tests/c-testsuite/subset.txt` declares the 219 that must pass. The other one
+is refused by name, waiting on work of its own:
 
 | Test | Refused as | Waits on |
 | --- | --- | --- |
-| 00140 | variadic function definitions | [#136](https://github.com/buster14a/buster/issues/136)'s item 2 and [#137](https://github.com/buster14a/buster/issues/137) |
-| 00204 | structs and unions passed or returned by value | [#136](https://github.com/buster14a/buster/issues/136)'s item 2 and [#137](https://github.com/buster14a/buster/issues/137) |
+| 00204 | `long double` (its values, and structs of them returned in x87 registers) | [#136](https://github.com/buster14a/buster/issues/136)'s item 8 |
 
-With `--cross-check`, `-c` refuses both as the direct path does. A test moves
-into the subset in the change that makes it pass.
+00140 joined the subset with [#137](https://github.com/buster14a/buster/issues/137)'s
+structs and unions by value and variadic function definitions, which 00204 needs
+too, besides `long double`.
+
+With `--cross-check`, `-c` refuses it as the direct path does. A test moves into
+the subset in the change that makes it pass.
 
 The reference runners (`runners/single-exec`) pass no `-lm`: gcc and clang at
 `-O2` fold 00174's `sin(2)`, and Tier 0 folds no library call, so the harness
@@ -100,8 +103,8 @@ and the subset with `--cross-check --jobs 4` among its tests at once.
 
 ## Results
 
-On the cloud VM (Intel, clang 23.1.5), not a 9700X measurement: 220 tests, 218
-passed, 2 unsupported, 0 failed; the vector and scalar paths wrote the same
+On the cloud VM (Intel, clang 23.1.5), not a 9700X measurement: 220 tests, 219
+passed, 1 unsupported, 0 failed; the vector and scalar paths wrote the same
 executable for every test that compiles, and `--cross-check` agreed.
 
 This establishes correct programs, not their speed or size: Tier 0's code
