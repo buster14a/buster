@@ -672,6 +672,14 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     fprintf(stderr, "error: undefined reference to '%s', which a system header declares: its library isn't linked (-lm links "
                                     "libm's functions)\n", name);
                 }
+                else if (bind.error == BIND_ERROR_LIBRARY_UNDEFINED)
+                {
+                    // A needed library's own reference that nothing defines, as GNU ld words it.
+                    const String8 path = named.paths[bind.library];
+                    const ImportReferences* references = &named.libraries[bind.library].references;
+                    fprintf(stderr, "error: %.*s: undefined reference to '%.*s'\n", (int)path.length, path.pointer, (int)references->length[bind.reference],
+                            (const char*)references->name[bind.reference]);
+                }
                 else
                 {
                     check_driver_bind_failed(bind.error, name);

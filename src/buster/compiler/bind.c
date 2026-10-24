@@ -138,6 +138,10 @@ typedef enum BindError
     // A piece of a runtime loaded from a snapshot that binding was about to read doesn't hash as when the snapshot was
     // written (runtime_piece_current): the snapshot is damaged, and the runtime must be imported again.
     BIND_ERROR_SNAPSHOT,
+    // A strong reference of a library the link names with -l and needs that nothing defines: not the executable,
+    // another named library, libc.so.6 or the loader (Bind.library and Bind.reference), as GNU ld and lld refuse it
+    // (--no-allow-shlib-undefined) where the program would fail to load.
+    BIND_ERROR_LIBRARY_UNDEFINED,
 } BindError;
 
 typedef enum BindPath
@@ -211,9 +215,12 @@ struct Bind
     // don't satisfy (bind_needed_libraries).
     const RuntimeLibraries* libraries;
     uint32_t libraries_needed;
-    // The first error, and the link's name it is about (0 for none).
+    // The first error, and the link's name it is about (0 for none); with BIND_ERROR_LIBRARY_UNDEFINED, the library and
+    // its reference.
     BindError error;
     NameId name;
+    uint32_t library;
+    uint32_t reference;
 };
 
 // How many records the runtime adds to a link at most, and how many bytes of names and of atoms (with their
@@ -1114,10 +1121,14 @@ static void bind_shared_exports(Bind* bind, const Link* link)
 
 // The edges of the closure over the libraries the link names with -l (bind_needed_libraries): each a needed library's
 // strong reference to a name that another named library exports, the first on the line that does, unless the
-// referring library's own DT_NEEDED names that library, which the loader then loads for it. By edge: the referring
-// library, its reference, the library it would need, the name's hash, and whether the link's own definition of the
-// name satisfies it, a byte; with the edges by their names' hashes (import_index_build) and a filter of them for the
-// vector path, as RuntimeNames' filter: two bits a name in 2^filter_bits words, chosen by the hash's top bits.
+// referring library's own DT_NEEDED names that library, which the loader then loads for it; and each one to a name no
+// named library, libc.so.6 or the loader exports, which leads to no library (BUSTER_BIND_NO_LIBRARY): only the
+// executable's own definition can satisfy it. By edge: the referring library, its reference, the library it would
+// need, the name's hash, and whether the link's own definition of the name satisfies it, a byte; with the edges by
+// their names' hashes (import_index_build) and a filter of them for the vector path, as RuntimeNames' filter: two bits
+// a name in 2^filter_bits words, chosen by the hash's top bits.
+#define BUSTER_BIND_NO_LIBRARY UINT32_MAX
+
 typedef struct BindLibraryEdges BindLibraryEdges;
 struct BindLibraryEdges
 {
@@ -1133,24 +1144,51 @@ struct BindLibraryEdges
 };
 
 // Adds the edges of library `l`'s strong references and returns the libraries they would need, a bit each.
-static uint32_t bind_library_edges(const RuntimeLibraries* libraries, uint32_t l, BindLibraryEdges* edges)
+static uint32_t bind_library_edges(const Bind* bind, uint32_t l, BindLibraryEdges* edges)
 {
+    const RuntimeLibraries* libraries = bind->libraries;
+    const RuntimeNames* names = &bind->runtime->global_names;
     const ImportReferences* references = &libraries->libraries[l].references;
     uint32_t result = 0;
     for (uint32_t r = 0; r < references->count; r += 1)
     {
         uint32_t export = 0;
-        const uint32_t m = references->weak[r] ? 0 : runtime_libraries_export(libraries, references->name[r], references->length[r], references->hash[r], &export);
+        const bool strong = !references->weak[r];
+        const uint32_t m = strong ? runtime_libraries_export(libraries, references->name[r], references->length[r], references->hash[r], &export) : 0;
         const bool edge = m != 0 && m - 1 != l && !runtime_libraries_lists(libraries, l, m - 1);
+        // A name no named library exports: libc.so.6's or the loader's, or else the executable's to define.
+        const uint32_t entry = strong && m == 0 ? runtime_find_global_name(names, references->name[r], references->length[r], references->hash[r]) : 0;
+        const bool open = strong && m == 0 && (entry == 0 || names->export[entry - 1] == 0);
         edges->from[edges->count] = l;
         edges->reference[edges->count] = r;
-        edges->to[edges->count] = m - 1;
+        edges->to[edges->count] = edge ? m - 1 : BUSTER_BIND_NO_LIBRARY;
         edges->hash[edges->count] = references->hash[r];
         edges->satisfied[edges->count] = 0;
-        edges->count += edge ? 1 : 0;
+        edges->count += edge || open ? 1 : 0;
         result |= edge ? 1u << (m - 1) : 0;
     }
     return result;
+}
+
+// Whether every library that library `l`'s DT_NEEDED entries name is in the link, a named library, libc.so.6 or the
+// loader, so that the definitions its references may bind to are all the link's to see.
+static bool bind_library_dependencies_known(const Bind* bind, uint32_t l)
+{
+    const RuntimeLibraries* libraries = bind->libraries;
+    const String8 runtime[] = { bind->runtime->libc.soname, bind->runtime->loader.soname };
+    bool known = true;
+    for (uint32_t d = 0; known && d < libraries->dependency_count[l]; d += 1)
+    {
+        const String8 dependency = libraries->dependencies[l][d];
+        bool found = false;
+        for (uint32_t m = 0; !found && m < libraries->count + BUSTER_ARRAY_LENGTH(runtime); m += 1)
+        {
+            const String8 name = m < libraries->count ? runtime_libraries_name(libraries, m) : runtime[m - libraries->count];
+            found = dependency.length == name.length && memcmp(dependency.pointer, name.pointer, name.length) == 0;
+        }
+        known = found;
+    }
+    return known;
 }
 
 // Marks the edges whose reference names the name of `symbol`, a definition the executable exports.
@@ -1230,11 +1268,12 @@ static void bind_library_satisfied_exact(const RuntimeLibraries* libraries, cons
 // Marks the edges that the link's own definitions satisfy (#398's review): a definition the executable exports (global
 // or weak, with default or protected visibility, in an atom or absolute: bind_exported_lanes) of the reference's name,
 // which the loader binds the library's reference to (bind_library_exports exports it), so that GNU ld and lld need no
-// library for it. A hidden or internal one satisfies none, since the loader can't see it: GNU ld refuses such a link,
-// lld refuses it without the library that exports the name and drops that library from it otherwise, so that the
-// program fails to load; binding keeps the library, whose definition the loader then binds the reference to. By the
-// vector path or the exact one over every symbol of the link, after the index and the filter of the edges' names are
-// built in `arena`. False if they don't fit.
+// library for it, nor find it undefined. A hidden or internal one satisfies none, since the loader can't see it: GNU
+// ld refuses such a link, lld refuses it without the library that exports the name and drops that library from it
+// otherwise, so that the program fails to load; binding keeps the library, whose definition the loader then binds the
+// reference to, or without one refuses the link (BIND_ERROR_LIBRARY_UNDEFINED). By the vector path or the exact one
+// over every symbol of the link, after the index and the filter of the edges' names are built in `arena`. False if
+// they don't fit.
 static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdges* edges, Arena* arena)
 {
     // As RuntimeNames' filter: a word per four names at most, a power of two of them and 16 at least.
@@ -1273,15 +1312,17 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
 // counts a library's references only against the libraries after it on the line, and refuses a link that names them
 // the other way round (-lB -lA, libA referring to libB's name); this counts them against every library, so that such a
 // link works. The references of libc.so.6 and the loader, which come after every named library on the line, count
-// against none.
+// against none. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
+// loader nor the executable, is an error (BIND_ERROR_LIBRARY_UNDEFINED), as GNU ld and lld refuse it
+// (--no-allow-shlib-undefined), where the program would fail to load (#398's review).
 //
 // The closure goes in rounds, each over the references of the libraries the round before added, at most as many as
-// libraries, which records the edges it follows (BindLibraryEdges). Edges are rare: -lm has none, libm's 16 references
-// being libc.so.6's and the loader's names, which no named library exports, and libmvec's 59 those and libm's, which
-// its DT_NEEDED covers. With any, one scan of the link marks those its definitions satisfy, and the closure goes again
-// from the program's libraries over the others: every library it reaches the first rounds reached, with every edge
-// recorded. The rounds are a scalar pass over the needed libraries' references, a few hundred for libm, shared by both
-// paths, and the scan the paths' own.
+// libraries, which records the edges it follows (BindLibraryEdges), and the references that lead to no library. Both
+// are rare: -lm has none, libm's 16 references being libc.so.6's and the loader's names, which no named library exports,
+// and libmvec's 59 those and libm's, which its DT_NEEDED covers. With any, one scan of the link marks those its
+// definitions satisfy, and the closure goes again from the program's libraries over the others: every library it
+// reaches the first rounds reached, with every edge recorded. The rounds are a scalar pass over the needed libraries'
+// references, a few hundred for libm, shared by both paths, and the scan the paths' own.
 static void bind_needed_libraries(Bind* bind, const Link* link)
 {
     const RuntimeLibraries* libraries = bind->libraries;
@@ -1309,7 +1350,7 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
             uint32_t next = 0;
             for (uint32_t l = 0; l < libraries->count; l += 1)
             {
-                next |= (added & (1u << l)) != 0 ? bind_library_edges(libraries, l, &edges) : 0;
+                next |= (added & (1u << l)) != 0 ? bind_library_edges(bind, l, &edges) : 0;
             }
             added = next & ~needed;
             needed |= added;
@@ -1322,7 +1363,8 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
             uint32_t next = 0;
             for (uint32_t e = 0; e < edges.count; e += 1)
             {
-                next |= (added & (1u << edges.from[e])) != 0 && edges.satisfied[e] == 0 ? 1u << edges.to[e] : 0;
+                const bool leads = (added & (1u << edges.from[e])) != 0 && edges.satisfied[e] == 0 && edges.to[e] != BUSTER_BIND_NO_LIBRARY;
+                next |= leads ? 1u << edges.to[e] : 0;
             }
             added = next & ~needed;
             needed |= added;
@@ -1330,6 +1372,21 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
         if (!fits)
         {
             bind_fail(bind, BIND_ERROR_FULL, 0);
+        }
+        // A needed library's strong reference that nothing defines, the first in the rounds' order, as GNU ld and lld
+        // refuse it (--no-allow-shlib-undefined): unless the library's DT_NEEDED names a library the link doesn't have,
+        // whose definitions it can't see, which lld leaves unchecked too (GNU ld searches the system's directories for
+        // it and checks the reference against it).
+        for (uint32_t e = 0; bind->error == BIND_ERROR_NONE && e < edges.count; e += 1)
+        {
+            const uint32_t l = edges.from[e];
+            const bool open = edges.to[e] == BUSTER_BIND_NO_LIBRARY && edges.satisfied[e] == 0 && (needed & (1u << l)) != 0;
+            if (open && bind_library_dependencies_known(bind, l))
+            {
+                bind->library = l;
+                bind->reference = edges.reference[e];
+                bind_fail(bind, BIND_ERROR_LIBRARY_UNDEFINED, 0);
+            }
         }
         scratch_end(scratch);
     }

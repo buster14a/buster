@@ -2574,7 +2574,13 @@ filter of their names on the vector path, as binding matches the runtime's names
 exact one. Such references are rare (libm's lead to none), so a link without them pays nothing more. A hidden
 definition satisfies none, since the loader can't see it: GNU ld 2.42 refuses such a link, lld 23.1.5 refuses it
 without the library that exports the name and leaves that library out of it otherwise (a program that fails to load),
-and binding keeps the library, whose definition the loader binds the reference to. A weak reference to a library nothing
+and binding keeps the library, whose definition the loader binds the reference to. A needed library's strong
+reference that nothing defines (no named library, `libc.so.6`, the loader or the executable) is refused, naming the
+library and the name (`BIND_ERROR_LIBRARY_UNDEFINED`), as both linkers refuse it by default
+(`--no-allow-shlib-undefined`), where the program would fail to load (#398's review: libA's `b_func` with `-lA`
+alone). The rounds record those references too, which the same pass checks against the executable's definitions. A
+library whose `DT_NEEDED` names a library the link doesn't have is left unchecked, as lld leaves it; GNU ld searches
+the system's directories for that library and checks the reference against it. A weak reference to a library nothing
 needs is left to nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
 a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
 library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
@@ -2606,13 +2612,16 @@ which a snapshot of the named libraries, as the runtime's is kept, would take of
 GOT slot, as the C library's data is reached) by both paths into the same bytes, runs it against this executable's
 libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whose
 `b_func` libB defines, with libA and libB built by clang: `-lA -lB` and `-lB -lA` must need both, in the line's
-order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running, and `-lA -lB` for a
-program that defines `b_func` itself libA alone, `a_func` calling `main`'s; and links one against a library without a
-soname that a script names by its path, which must be its `DT_NEEDED` entry. `test-bind`'s libraries check binds, by
-both paths, links against libraries made by hand, two that refer to `b_func` and one that exports it: without a
-definition of `b_func`, or with a hidden one or a reference, the link needs all three; with a global, weak, protected
-or absolute one, the two alone, and exports it; the global one after 0 to 15 other definitions, at every lane of the
-vector path's batches.
+order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running, and `-lA -lB` and `-lA`
+for a program that defines `b_func` itself libA alone, `a_func` calling `main`'s; `-lA` alone for one that doesn't
+must be refused, naming libA and `b_func`; and links one against a library without a soname that a script names by its
+path, which must be its `DT_NEEDED` entry. `test-bind`'s libraries check binds, by both paths, links against libraries
+made by hand, two that refer to `b_func` and one that exports it: without a definition of `b_func`, or with a hidden
+one or a reference, the link needs all three; with a global, weak, protected or absolute one, the two alone, and
+exports it; the global one after 0 to 15 other definitions, at every lane of the vector path's batches. Without the
+one that exports it, each needed library's reference to `b_func` is refused, naming the library, and with a hidden
+definition too, but not with a global one, nor where neither library is needed; and a library whose `DT_NEEDED` names
+one the link lacks isn't checked.
 
 #### The unwind tables
 

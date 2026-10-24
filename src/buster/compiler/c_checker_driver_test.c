@@ -321,7 +321,9 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
 // it, and the loader loads libB for it; and where main defines b_func itself, which the executable exports and the
 // loader binds libA's reference to, the executable needs libA alone, as GNU ld and lld link it, and a_func calls main's
-// b_func. clang builds the libraries, and each program runs, finding them through LD_LIBRARY_PATH.
+// b_func, with -lB on the line or without it. clang builds the libraries, and each program runs, finding them through
+// LD_LIBRARY_PATH. Then -lA alone for main calling a_func, where nothing defines libA's b_func: refused, naming libA and
+// b_func, as GNU ld and lld refuse it (--no-allow-shlib-undefined), where the program would fail to load.
 static void check_test_driver_dependencies(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char a_source[] = "int b_func(void);\nint a_func(void) { return b_func() + 1; }\n";
@@ -374,6 +376,7 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
         { "-lB -lA: libB for libA's reference", source, "-lB", "-lA", "libB.so libA.so libc.so.6" },
         { "-lAB -lB: libB left to libAB's DT_NEEDED", source, "-lAB", "-lB", "libAB.so libc.so.6" },
         { "-lA -lB, main defining b_func: libA alone, calling main's", defines_source, "-lA", "-lB", "libA.so libc.so.6" },
+        { "-lA, main defining b_func: libA alone, calling main's", defines_source, "-lA", NULL, "libA.so libc.so.6" },
     };
     for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -393,6 +396,19 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
         }
         check_test_expect(test, listed && ran == 0, cases[c].name);
     }
+    // -lA alone, nothing defining libA's b_func: refused, as GNU ld words it.
+    char* const alone[] = { (char*)executable, "-o", output, source, "-L", (char*)directory, "-lA", NULL };
+    const int alone_status = built ? check_test_driver_spawn(alone, &text) : -1;
+    char message[320];
+    snprintf(message, sizeof(message), "%s: undefined reference to 'b_func'", library_a);
+    const bool refused = alone_status == 1 && text != NULL && strstr(text, message) != NULL;
+    if (!refused)
+    {
+        printf("  -lA alone: status %d: %s\n", alone_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    check_test_expect(test, refused, "-lA alone: libA's b_func undefined, refused");
     const char* const files[] = { a_path, b_path, source, defines_source, library_a, library_b, library_ab, output };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {

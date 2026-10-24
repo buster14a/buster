@@ -2194,6 +2194,10 @@ exports and members:
   `b_func`, or with a hidden one or a reference, the link needs all three, and
   with a global, weak, protected or absolute one, which the executable
   exports, the two alone (the global one after 0 to 15 other definitions);
+  without the third, a needed library's reference to `b_func` is
+  `BIND_ERROR_LIBRARY_UNDEFINED` naming the library (but with a global
+  definition, or neither needed), and a library whose `DT_NEEDED` names one
+  the link lacks isn't checked;
 - an atexit program: `main` registers a handler with `atexit` and returns 3,
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`

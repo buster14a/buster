@@ -33,7 +33,8 @@ program's or a needed library's own that its `DT_NEEDED` doesn't cover and no
 definition the executable exports satisfies, as GNU ld links them
 `--as-needed` (the default of Debian's and Ubuntu's GCC);
 `DT_NEEDED` lists them before `libc.so.6` (`runtime_libraries_import`, `bind.c`
-and `dynamic.c`). An empty archive (glibc's `libpthread.a`, `libdl.a` and
+and `dynamic.c`). A needed library's strong reference that nothing defines is
+refused, naming the library, as GNU ld and lld refuse it. An empty archive (glibc's `libpthread.a`, `libdl.a` and
 `librt.a`) adds nothing; one with members is refused by name, since the direct
 path doesn't link archives yet. A call of a function that a system header
 declares and no linked library has gets a named error that points at `-l`
