@@ -1,8 +1,0 @@
-K6 compact tables: 0 failures
-snippets: 240, 0 failures (with clang)
-oracle: 0 failures
-fixtures: 4 trees checked by hand, 0 failures
-files: 220 (254294 tokens), clang accepted 220, rejected 0, 0 mismatches
-paths: 220 units, 0 where the paths or a kernel and its twin differ; the fallback took 17 top-level declarations; K2 left 0 blocks to the twin's loop from random roles, K4 had 126 blocks in 16-bit lanes, K5 left 0 units to its twin, K6 0 blocks
-mutations: 2200 (clang accepted 309, a parse issue first in 1496, another issue first in 395, of which we rejected 258), 0 mismatches
-test-parser: passed

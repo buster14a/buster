@@ -1,3 +1,0 @@
-command sha256sum -c logs/binaries.sha256 
-reference: OK
-experiment: OK

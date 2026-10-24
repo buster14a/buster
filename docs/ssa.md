@@ -312,7 +312,7 @@ reported these medians, with the same phi counts for both constructors:
 | 513-block irreducible | 52.367 | 41.117 | 290.171 | 227.879 | 3,420 |
 | 1,025-block random stress | 860.625 | 736.558 | 4,768.951 | 4,081.660 | 197,087 |
 
-The [retained measurement record](measurements/ssa-2026-10-23/9700x-core.txt)
+The [retained measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/ssa-2026-10-23/9700x-core.txt)
 contains source hashes, build/run conditions, output sizes, sample ranges and
 verbatim log excerpts. This historical target run covers four synthetic inputs
 before the IR adapter and shared-dominator integration. Its timings apply to
@@ -325,7 +325,7 @@ That run tested merge `9f138c89690e9dbbd2ca2f039805d2ca12cab1a2` against IR base
 `7a6ed05745a6b522209005d2423103caedb6c99a`: 2,847 core checks and 2,038 adapter
 checks passed. The default benchmark and three independent processes each for
 scalar, vector and vector after 200 ms of scalar work completed successfully.
-The [adapter target record](measurements/ssa-2026-10-23/9700x-ir-adapter.txt)
+The [adapter target record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/ssa-2026-10-23/9700x-ir-adapter.txt)
 retains the complete SSA benchmark step, source hashes and qualification
 excerpts. It precedes shared-dominator adoption; the revised analysis path
 requires its own protected target result.

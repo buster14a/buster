@@ -577,7 +577,7 @@ acceptance differences explicitly.
 
 The source producer/binding/checker measurement harness, frozen input hashes,
 and reproduction commands are retained in
-[the measurement directory](measurements/c-checker-2026-10-23/README.md).
+[the measurement directory](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-checker-2026-10-23/README.md).
 Whole-corpus semantics, multicore scaling and the runtime backend consumer
 remain acceptance work even when these bounded fixtures pass.
 
