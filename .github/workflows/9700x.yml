@@ -254,6 +254,19 @@ jobs:
           == Test the per-file jobs on the repository's translation units
           # The predefines follow the options as clang's do (c_predefines.c).
           ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Check semantic mutants of the frozen SQLite and musl sources against Clang
+          # #133: each mutant is one edit of a unit's -E text (a type changed, a declaration removed, operands swapped),
+          # checked as a file is: acceptance and the first error's line against clang -fsyntax-only, and both paths
+          # alike. The seed and counts are fixed; docs/c-checker.md has the wider campaigns.
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          system=(-nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          musl="$corpus/libc/musl"
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --semantic-mutations 8 --seed 133 --minimize 0 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 "${system[@]}" "$corpus/sqlite/sqlite3.c"
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --semantic-mutations 96 --seed 133 --minimize 0 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+            -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl"
           == Test the C lexer as C++
           ./build/compiler test-lexer --cplusplus
           ./build/compiler test-lexer --raw-strings

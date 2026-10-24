@@ -1986,8 +1986,6 @@ static void check_input_schedule(CheckInputReader* reader, uint32_t token, uint3
     reader->output->declaration_bodies[token] = reader->function_body;
 }
 
-// Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
-// over each initializer. Identifier uses within them are resolved later at their own source positions.
 // Whether a parameter of main other than the first has clang's type for it: char ** with any qualifiers on the
 // parameter itself, or const (and only const) on the pointer it points to or on the char, as clang extends it.
 static bool check_input_main_arguments(const TypeTable* types, TypeId type)
@@ -2035,6 +2033,8 @@ static uint32_t check_input_main(CheckInputReader* reader, TypeId type, uint32_t
     return result;
 }
 
+// Read a declaration's specifiers and its declarators, using parser group boundaries and subtree ends to pass
+// over each initializer. Identifier uses within them are resolved later at their own source positions.
 static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;

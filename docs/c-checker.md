@@ -113,9 +113,16 @@ acquires a guessed `int` type. Full-corpus and target qualification are tracked
 separately from the existence of these interfaces.
 
 Direct semantic actions keep strict integer folding unless the caller selects
-`BUSTER_CHECK_EXTENSION_GNU_CONSTANT`. GNU source enables that explicit policy:
-wrapped overflow and Clang-compatible shift extensions retain a warning witness
-and clear strict ICE eligibility. Lexical ICE-form provenance remains distinct
+`BUSTER_CHECK_EXTENSION_GNU_CONSTANT`. Source enables that explicit policy in
+every C mode, as clang folds GNU's way in `-std=c99` and `-std=c17` too (only
+`-pedantic` warns): wrapped overflow and Clang-compatible shift extensions
+retain a warning witness and clear strict ICE eligibility. The other GNU
+extensions clang accepts in every C mode (zero-length arrays, `sizeof` and
+`__alignof__` of `void` and of functions, arithmetic on `void *` and function
+pointers, a conditional with one void side, `return` of a void expression from
+a void function, a cast of a record to its own type, `?:` without its middle
+operand, designator ranges, static initialization of flexible array members,
+`__extension__`) are accepted in every mode as well. Lexical ICE-form provenance remains distinct
 from an arbitrary folded value, so `__builtin_choose_expr` does not accidentally
 admit comma expressions or computed floating casts. Declaration-time warnings
 are retained by token and merged with graph warnings before rendering. Warning
@@ -136,9 +143,10 @@ on anonymous members.
 bracketing, body references and shared object/function identities without
 rechecking expressions or rebinding identifiers. The source body-extraction
 benchmark verifies that an extracted body's stream equals its original slice
-before comparing scalar and vector schedules. Acceptance still requires the
-frozen #125 corpora, semantic mutants and 9700X measurements at the qualified
-revision; historical evidence below applies only to its named checkpoints.
+before comparing scalar and vector schedules. The corpora and their semantic
+mutants are compared with clang in "Corpus comparison and semantic mutations"
+below; 9700X measurements at the qualified revision are still required, and
+historical evidence below applies only to its named checkpoints.
 
 ## Entry points and storage ownership
 
@@ -538,12 +546,101 @@ The test command fails if the oracle cannot run. It covers:
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
 
-The source comparisons deliberately use inputs whose errors Clang treats as
-errors under the selected flags. They are not a universal equivalence claim
-for extensions or constraint violations that Clang accepts with a warning.
-The direct semantic fixtures cover rules such as rejecting `int **` to
-`const int **` assignment even when an oracle configuration only warns.
+Where clang accepts a constraint violation with a warning, the checker accepts
+it with clang's warning, as the semantic mutants require: an assignment that
+discards qualifiers, nested pointer qualifiers (`int **` to `const int **`),
+pointees that differ only in signedness, `void *` with a function pointer, a
+comparison of distinct pointers or of a pointer with an integer, and a
+conditional of either. The warnings clang makes errors by default
+(`-Wint-conversion`, `-Wincompatible-pointer-types` and its function-pointer
+group, `-Wreturn-mismatch`) are errors, but in a system header, where clang
+suppresses them and converts as it would have.
 Floating results are compared field by field, never by `long double` padding.
+
+## Corpus comparison and semantic mutations
+
+```sh
+./build/compiler test-checker-corpus --clang clang [--report NEW.tsv] [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]] [--seed N] [--keep] [preprocessor options] file-or-directory...
+./build/compiler test-checker-corpus --clang clang --minimize-mutant FILE... [preprocessor options]
+```
+
+`test-checker-corpus` checks each file (or every `.c` file under a
+directory) as the driver does and compares it with `clang -fsyntax-only` on
+the same options, #125's configuration: acceptance, the first error's presumed
+file and line, and the scalar and vector paths, column by column. It exits with
+status 1 on any difference.
+
+`--semantic-mutations N` then checks N semantic mutants, #133's last "Done
+when" item (`c_check_mutation.c`). Each unit that the comparison found no
+difference in and that clang accepts is printed as `-E` text with line markers,
+its base, which is compared as a file first, so that any later difference
+belongs to a mutation. The scalar parser's tree of the base gives the sites,
+and each mutant is one edit of the base text:
+
+| Family | Kinds |
+| --- | --- |
+| A type changed | a pointer added or removed, signedness or width changed, `const` added or removed, a struct for the type (or `int` for a struct) |
+| A declaration removed | a local, a parameter, a file-scope declaration, a struct member |
+| Operands swapped | a binary operator's operands, or two arguments of a call |
+
+The families take turns, three mutants in four edit the unit's own file and
+the fourth a file it includes, and `--seed N` (133) orders the units and picks
+the sites. A mutant is checked as a file is, with clang reading the same text
+as `-x cpp-output`. The first `--minimize N` (4) differences are minimized
+(top-level declarations, statements, then tokens blanked while both results
+hold, then the line markers dropped) and saved as `checker_mutation_N.c` in the
+current directory; `--minimize-mutant FILE...` minimizes saved mutants again.
+Each difference that was fixed is a fixture in `c_check_mutation_test.c`, which
+`test-checker` checks against clang, which must still give the result recorded
+with it, and through both paths. A difference the checker means to keep would
+go in `check_mutation_intended`, with its reason; there are none. The command
+prints, for each kind, the sites, the mutants, clang's rejections and the
+differences.
+
+### The campaigns
+
+On a cloud VM, with clang 23.1.5, its glibc 2.39 headers and
+`--no-default-config --target=x86_64-linux-gnu -march=znver5`, seeds 201 to
+204. Their first runs found the last two of the differences below (main's
+signature and initialized objects of incomplete type); these are their runs
+after the fixes:
+
+| Corpus | Options | Files compared | Mutants (clang rejects) | Differences |
+| --- | --- | --- | --- | --- |
+| SQLite 3.53.2's `sqlite3.c` | `-std=gnu17` | 322 | 320 (174) | none |
+| musl 1.2.5 (Zig 0.14.1's tree): its 1,587 sources under `src` and `compat` | `-std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os` with the oracle's include path | 4,725 | 1,600 (774) | none |
+| Lua 5.4.8's 34 files in `src` | `-std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX` | 867 | 800 (469) | `lvm.c`'s base |
+| The libc corpus (Zig 0.14.1's `lib/libc`): the 3,832 of its 8,983 C and header files that clang accepts here | `-std=gnu17` | 6,552 | 1,600 (302) | `fmaxl.c`'s and `fminl.c`'s bases |
+
+Files compared counts each corpus's files, the mutated units' bases and the
+mutants. The scalar and vector paths gave identical columns on every one. The
+three differences left are in bases, and mutants aren't made of a unit whose
+base differs:
+
+- Lua's `lvm.c`: GNU's labels as values (`&&L_OP_MOVE`, `goto *`), which the
+  checker doesn't take yet;
+- the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
+  `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
+  floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s
+  families don't have yet.
+
+What the mutants and the bases found, each fixed with its fixture:
+
+- pointer conversions as clang's Sema has them in every mode (qualifiers
+  discarded, nested qualifiers, signedness, `void *` and function pointers),
+  comparisons of distinct pointers and of a pointer with an integer,
+  conditionals of either (to `void *`), and a call's argument errors at the
+  argument and too many arguments at the first extra one;
+- GNU's extensions in every C mode (above);
+- clang's default-error warnings suppressed in system headers;
+- `restrict` on a non-pointer at the qualifier, attribute items kept out of a
+  failed declaration's graph, `const void` results, main's signature, and
+  initialized objects of incomplete type;
+- in the libc corpus's bases: `f16` literals and `align_value`, which clang's
+  `<immintrin.h>` uses.
+
+The 9700X job's test step checks 8 mutants of the frozen SQLite source and 96
+of the oracle's four musl sources with seed 133, on the frozen headers.
 
 ## Benchmark and validation limits
 
