@@ -113,7 +113,8 @@ static bool foreign_link_capacity(const Foreign* foreign, LinkCapacity* capacity
             }
         }
     }
-    const uint64_t aliases = shared * BUSTER_FOREIGN_LINK_COPY_ALIASES;
+    // And _DYNAMIC (foreign_link_dynamic_symbol).
+    const uint64_t aliases = shared * BUSTER_FOREIGN_LINK_COPY_ALIASES + 1;
     capacity->atoms = capacity->atoms + shared < UINT32_MAX ? capacity->atoms + (uint32_t)shared : UINT32_MAX;
     capacity->names = capacity->names + aliases < UINT32_MAX ? capacity->names + (uint32_t)aliases : UINT32_MAX;
     capacity->symbols = capacity->symbols + aliases < UINT32_MAX ? capacity->symbols + (uint32_t)aliases : UINT32_MAX;
@@ -307,6 +308,27 @@ static ImportResult foreign_link_locals(ForeignLink* output, const ForeignObject
 
 #include "buster/compiler/foreign_unwind_link.c"
 
+// The names the linker defines in a foreign executable of `kind`: lld's for any executable, which in a PIE are the
+// static PIE runtime's set (the image's and the sections' bounds, _DYNAMIC) with the dynamic runtime's.
+static bool foreign_link_linker_name(RuntimeKind kind, const uint8_t* bytes, uint32_t length)
+{
+    return runtime_linker_name(kind, bytes, length) || (kind == RUNTIME_KIND_DYNAMIC && runtime_linker_name(RUNTIME_KIND_STATIC_PIE, bytes, length));
+}
+
+// A linker-defined name's visibility, as lld defines it: the end, text and data bounds of the traditional names
+// (end, _end, etext, _etext, edata, _edata and __bss_start) with default visibility, and the others (the ELF header's,
+// the arrays' bounds, _GLOBAL_OFFSET_TABLE_, _DYNAMIC) hidden, which a regular symbol table then has local.
+static uint8_t foreign_link_linker_visibility(const uint8_t* bytes, uint32_t length)
+{
+    static const char* const visible[] = { "end", "_end", "etext", "_etext", "__etext", "edata", "_edata", "__bss_start" };
+    uint8_t result = STV_HIDDEN;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(visible); i += 1)
+    {
+        result = strlen(visible[i]) == length && memcmp(visible[i], bytes, length) == 0 ? STV_DEFAULT : result;
+    }
+    return result;
+}
+
 // A symbol table alone cannot tell whether an undefined reference survived COMDAT selection. Only the surviving
 // sections' relocations require a definition, together with explicit -u roots. The extra scan is needed only when
 // resolution left an ordinary strong name undefined or assigned it to an unneeded DSO; ordinary resolved links
@@ -324,7 +346,7 @@ static uint8_t* foreign_link_undefined(const ForeignLink* output, const Foreign*
         const bool unneeded_shared = foreign->names.resolution[name] == FOREIGN_RESOLUTION_SHARED &&
                                      !foreign->libraries[foreign->names.library[name]].needed && regular;
         unresolved = unresolved || (foreign->names.resolution[name] == FOREIGN_RESOLUTION_UNDEFINED && regular &&
-                                    !runtime_linker_name(kind, foreign->names.bytes[name], foreign->names.length[name])) || unneeded_shared;
+                                    !foreign_link_linker_name(kind, foreign->names.bytes[name], foreign->names.length[name])) || unneeded_shared;
     }
     for (uint32_t id = 0; required != 0 && unresolved && id < foreign->object_count; id += 1)
     {
@@ -400,6 +422,7 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         uint64_t size = 0;
         uint16_t version = 0;
         bool discarded_shared = false;
+        bool linker = false;
         if (names->definitions[name] > 1)
         {
             result.error = FOREIGN_LINK_ERROR_DUPLICATE;
@@ -481,9 +504,11 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
             }
             // A weak reference to an unneeded --as-needed DSO remains unversioned and undefined, retaining its type.
         }
-        else if (runtime_linker_name(kind, names->bytes[name], names->length[name]))
+        else if (foreign_link_linker_name(kind, names->bytes[name], names->length[name]))
         {
+            // With lld's visibility (foreign_link_linker_visibility).
             source = BUSTER_LINK_SOURCE_LINKER;
+            linker = true;
         }
         else if (resolution == FOREIGN_RESOLUTION_UNDEFINED && required[name] != 0 && (names->flags[name] & BUSTER_FOREIGN_NAME_REGULAR_REFERENCED) != 0)
         {
@@ -493,7 +518,8 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
         {
             flags = BUSTER_LINK_SYMBOL_WEAK;
         }
-        flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | names->visibility[name] << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
+        const uint8_t visibility = linker ? foreign_link_linker_visibility(names->bytes[name], names->length[name]) : names->visibility[name];
+        flags = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
         const bool discarded_only = discarded_shared || (resolution == FOREIGN_RESOLUTION_UNDEFINED && source == BUSTER_LINK_SOURCE_NONE && required[name] == 0);
         if (result.error == FOREIGN_LINK_ERROR_NONE && !discarded_only)
         {
@@ -925,6 +951,25 @@ static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign*
     return result;
 }
 
+// _DYNAMIC, which every linker defines in a dynamic image (lld weak and hidden) whether or not anything refers to it,
+// so that a regular symbol table has it: added if the link has no symbol of it.
+static ForeignLinkError foreign_link_dynamic_symbol(ForeignLink* output, const Foreign* foreign)
+{
+    const uint8_t* text = (const uint8_t*)"_DYNAMIC";
+    const uint32_t length = 8;
+    const uint64_t hash = link_hash(text, length);
+    const uint32_t name = foreign_find_name(foreign, text, length, hash);
+    ForeignLinkError result = FOREIGN_LINK_ERROR_NONE;
+    if (name == 0 || output->names[name - 1] == 0)
+    {
+        const uint8_t flags = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_HIDDEN;
+        const NameId named = link_add_name_hashed(&output->link, text, length, hash);
+        const SymbolId symbol = named != 0 ? link_add_symbol(&output->link, named, 0, 0, 0, flags, BUSTER_LINK_SOURCE_LINKER) : 0;
+        result = symbol != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_LINK;
+    }
+    return result;
+}
+
 static SymbolId foreign_link_named(const ForeignLink* output, const Foreign* foreign, const char* text)
 {
     const uint32_t length = (uint32_t)strlen(text);
@@ -1141,6 +1186,10 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
     if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
     {
         result = foreign_link_copies(output, foreign, arena);
+    }
+    if (result.error == FOREIGN_LINK_ERROR_NONE && kind == RUNTIME_KIND_DYNAMIC)
+    {
+        result.error = foreign_link_dynamic_symbol(output, foreign);
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE && link_check(&output->link) != LINK_ERROR_NONE)
     {

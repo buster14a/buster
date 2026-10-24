@@ -260,14 +260,24 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
 }
 
 // Conversion has already checked the Link. Nonzero NameIds denote nonempty names; original STT_FILE rows and
-// unnamed STT_SECTION bookkeeping are not present in this selection. Count/fill read only the final name column.
-static uint32_t foreign_driver_symbols_exact(const NameId* names, Range64 range, SymbolId* ids)
+// unnamed STT_SECTION bookkeeping are not present in this selection. A local named .L... is a temporary label, which
+// the assembler keeps only for relocations into SHF_MERGE sections (GCC's .LC0 strings): GNU ld and lld leave those
+// out of .symtab, and so does the selection. Count/fill read the final name and flags columns, and a local's name.
+static bool foreign_driver_temporary(const Link* link, SymbolId symbol)
 {
+    const NameId name = link->symbols.name[symbol];
+    const bool local = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+    return local && link->names.length[name] >= 2 && link->names.bytes[name][0] == '.' && link->names.bytes[name][1] == 'L';
+}
+
+static uint32_t foreign_driver_symbols_exact(const Link* link, Range64 range, SymbolId* ids)
+{
+    const NameId* names = link->symbols.name;
     uint32_t count = 0;
     #pragma clang loop vectorize(disable) interleave(disable)
     for (uint64_t i = range.begin; i < range.end; i += 1)
     {
-        if (names[i] != 0)
+        if (names[i] != 0 && !foreign_driver_temporary(link, (SymbolId)i))
         {
             if (ids != 0)
             {
@@ -279,8 +289,25 @@ static uint32_t foreign_driver_symbols_exact(const NameId* names, Range64 range,
     return count;
 }
 
-static uint32_t foreign_driver_symbols_vector(const NameId* names, Range64 range, SymbolId* ids)
+// Of eight named locals (their name ids in `named`, the lanes in `lanes`, each name two bytes or more), those named
+// .L...: each name's first two bytes from the aligned eight bytes that hold its first, and for a name that starts in
+// a block's last byte, the next block's, which its second byte is in: a gather never reads outside a block the name
+// has a byte in.
+static __mmask8 foreign_driver_temporaries(const Link* link, __m256i named, __mmask8 lanes)
 {
+    const __m512i pointers = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), lanes, named, (const void*)link->names.bytes, 8);
+    const __m512i shift = _mm512_slli_epi64(_mm512_and_si512(pointers, _mm512_set1_epi64(7)), 3);
+    const __m512i aligned = _mm512_andnot_si512(_mm512_set1_epi64(7), pointers);
+    const __m512i low = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), lanes, aligned, (const void*)0, 1);
+    const __mmask8 crossing = lanes & _mm512_cmpeq_epi64_mask(shift, _mm512_set1_epi64(56));
+    const __m512i high = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), crossing, _mm512_add_epi64(aligned, _mm512_set1_epi64(8)), (const void*)0, 1);
+    const __m512i bytes = _mm512_or_si512(_mm512_srlv_epi64(low, shift), _mm512_sllv_epi64(high, _mm512_sub_epi64(_mm512_set1_epi64(64), shift)));
+    return lanes & _mm512_cmpeq_epi64_mask(_mm512_and_si512(bytes, _mm512_set1_epi64(0xffff)), _mm512_set1_epi64('.' | 'L' << 8));
+}
+
+static uint32_t foreign_driver_symbols_vector(const Link* link, Range64 range, SymbolId* ids)
+{
+    const NameId* names = link->symbols.name;
     uint32_t count = 0;
     const __m512i sequence = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     for (uint64_t first = range.begin; first < range.end; first += 16)
@@ -288,7 +315,18 @@ static uint32_t foreign_driver_symbols_vector(const NameId* names, Range64 range
         const uint32_t length = range.end - first < 16 ? (uint32_t)(range.end - first) : 16;
         const __mmask16 active = (__mmask16)((1u << length) - 1);
         const __m512i named = _mm512_maskz_loadu_epi32(active, names + first);
-        const __mmask16 selected = _mm512_cmpneq_epi32_mask(named, _mm512_setzero_si512());
+        __mmask16 selected = _mm512_cmpneq_epi32_mask(named, _mm512_setzero_si512());
+        // The named locals of two bytes or more, whose names the temporaries' test reads.
+        const __m512i binding = _mm512_and_si512(_mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, link->symbols.flags + first)), _mm512_set1_epi32(BUSTER_LINK_SYMBOL_BINDING));
+        const __mmask16 locals = selected & _mm512_cmpeq_epi32_mask(binding, _mm512_set1_epi32(BUSTER_LINK_SYMBOL_LOCAL));
+        if (locals != 0)
+        {
+            const __m512i lengths = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), locals, named, (const void*)link->names.length, 4);
+            const __mmask16 candidates = _mm512_mask_cmpge_epu32_mask(locals, lengths, _mm512_set1_epi32(2));
+            const __mmask8 low = candidates != 0 ? foreign_driver_temporaries(link, _mm512_castsi512_si256(named), (__mmask8)candidates) : 0;
+            const __mmask8 high = (candidates >> 8) != 0 ? foreign_driver_temporaries(link, _mm512_extracti64x4_epi64(named, 1), (__mmask8)(candidates >> 8)) : 0;
+            selected &= (__mmask16) ~((uint32_t)low | (uint32_t)high << 8);
+        }
         const uint32_t added = (uint32_t)__builtin_popcount((uint32_t)selected);
         if (ids != 0)
         {
@@ -309,8 +347,8 @@ static void foreign_driver_symbols(ForeignDriverWrite* write)
     const Range64 part = lane_range(count);
     const Range64 range = write->options.exact ? (Range64){ .begin = lane == 0 ? 1 : (uint64_t)count + 1, .end = (uint64_t)count + 1 } :
                                                (Range64){ .begin = part.begin + 1, .end = part.end + 1 };
-    const NameId* names = write->link->symbols.name;
-    write->counts[lane] = write->options.exact ? foreign_driver_symbols_exact(names, range, 0) : foreign_driver_symbols_vector(names, range, 0);
+    const Link* link = write->link;
+    write->counts[lane] = write->options.exact ? foreign_driver_symbols_exact(link, range, 0) : foreign_driver_symbols_vector(link, range, 0);
     lane_sync();
     if (lane == 0)
     {
@@ -334,11 +372,11 @@ static void foreign_driver_symbols(ForeignDriverWrite* write)
         SymbolId* ids = write->selected + write->offsets[lane];
         if (write->options.exact)
         {
-            foreign_driver_symbols_exact(names, range, ids);
+            foreign_driver_symbols_exact(link, range, ids);
         }
         else
         {
-            foreign_driver_symbols_vector(names, range, ids);
+            foreign_driver_symbols_vector(link, range, ids);
         }
     }
     lane_sync();

@@ -122,21 +122,51 @@ static uint32_t foreign_driver_symbols_find(const ForeignDriverSymbolsTable* tab
     return found;
 }
 
+// The selection's two paths on name and flags columns that end at a PROT_NONE page, for every length to 65 and every
+// start, over names that each end at a PROT_NONE page of their own: 16 of them, of 1 to 16 bytes, so that each start in an
+// aligned eight-byte block occurs twice, spelled as temporaries (.L...) or near misses ("x", ".", ".l", "L.", ".M"), and
+// symbols local or global by pattern. A read past a column or a name faults.
 static void foreign_driver_symbols_guarded(ForeignTestTally* tally)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* memory = mmap(0, 4 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    const bool mapped = memory != MAP_FAILED && mprotect(memory + page, page, PROT_NONE) == 0 && mprotect(memory + 3 * page, page, PROT_NONE) == 0;
-    foreign_test_expect(tally, mapped, "map guarded final names and exactly sized ID output", 0);
+    uint8_t* memory = mmap(0, 6 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* strings = mmap(0, 32 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool mapped = memory != MAP_FAILED && strings != MAP_FAILED && mprotect(memory + page, page, PROT_NONE) == 0 && mprotect(memory + 3 * page, page, PROT_NONE) == 0 &&
+                  mprotect(memory + 5 * page, page, PROT_NONE) == 0;
+    // Name k (1 to 16) ends at the guard after its page: its bytes are a temporary's for odd k, a near miss's otherwise.
+    const uint8_t* bytes[17] = { 0 };
+    uint32_t lengths[17] = { 0 };
+    static const char* const misses[] = { "x", ".", ".l", "L.", ".M" };
+    for (uint32_t k = 1; mapped && k <= 16; k += 1)
+    {
+        uint8_t* end = strings + (2 * (uint64_t)k - 1) * page;
+        mapped = mprotect(end, page, PROT_NONE) == 0;
+        uint8_t* name = end - k;
+        for (uint32_t i = 0; i < k; i += 1)
+        {
+            name[i] = (uint8_t)('a' + i % 26);
+        }
+        const char* spelling = k % 2 == 1 && k >= 2 ? ".L" : misses[k % BUSTER_ARRAY_LENGTH(misses)];
+        memcpy(name, spelling, strlen(spelling) < k ? strlen(spelling) : k);
+        bytes[k] = name;
+        lengths[k] = k;
+    }
+    foreign_test_expect(tally, mapped, "map guarded final names, flags, name bytes and exactly sized ID output", 0);
     for (uint32_t length = 0; mapped && length <= 65; length += 1)
     {
         NameId* names = (NameId*)(memory + page) - length;
-        for (uint32_t pattern = 0; pattern < 3; pattern += 1)
+        uint8_t* flags = memory + 3 * page - length;
+        for (uint32_t pattern = 0; pattern < 4; pattern += 1)
         {
             for (uint32_t i = 0; i < length; i += 1)
             {
-                names[i] = pattern == 0 ? 0 : pattern == 1 || i % 3 != 0 ? i + 1 : 0;
+                names[i] = pattern == 0 ? 0 : pattern == 1 || i % 3 != 0 ? 1 + (i + pattern) % 16 : 0;
+                flags[i] = (uint8_t)(pattern == 3 && i % 2 == 0 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL);
             }
+            const Link link = {
+                .names = { .bytes = bytes, .length = lengths, .count = 17 },
+                .symbols = { .name = names, .flags = flags, .count = length },
+            };
             for (uint32_t begin = 0; begin <= length; begin += 1)
             {
                 const Range64 range = { .begin = begin, .end = length };
@@ -144,26 +174,31 @@ static void foreign_driver_symbols_guarded(ForeignTestTally* tally)
                 uint32_t count = 0;
                 for (uint32_t i = begin; i < length; i += 1)
                 {
-                    if (names[i] != 0)
+                    const bool temporary = flags[i] == BUSTER_LINK_SYMBOL_LOCAL && lengths[names[i]] >= 2 && bytes[names[i]][0] == '.' && bytes[names[i]][1] == 'L';
+                    if (names[i] != 0 && !temporary)
                     {
                         expected[count++] = i;
                     }
                 }
-                SymbolId* ids = (SymbolId*)(memory + 3 * page) - count;
-                bool same = foreign_driver_symbols_exact(names, range, 0) == count && foreign_driver_symbols_vector(names, range, 0) == count;
+                SymbolId* ids = (SymbolId*)(memory + 5 * page) - count;
+                bool same = foreign_driver_symbols_exact(&link, range, 0) == count && foreign_driver_symbols_vector(&link, range, 0) == count;
                 for (uint32_t path = 0; same && path < 2; path += 1)
                 {
                     memset(ids, 0xcc, count * sizeof(SymbolId));
-                    const uint32_t filled = path == 0 ? foreign_driver_symbols_exact(names, range, ids) : foreign_driver_symbols_vector(names, range, ids);
+                    const uint32_t filled = path == 0 ? foreign_driver_symbols_exact(&link, range, ids) : foreign_driver_symbols_vector(&link, range, ids);
                     same = filled == count && memcmp(ids, expected, count * sizeof(SymbolId)) == 0;
                 }
-                foreign_test_expect(tally, same, "guarded exact/vector counts and compact ordered IDs", 0);
+                foreign_test_expect(tally, same, "guarded exact/vector counts and compact ordered IDs without temporaries", 0);
             }
         }
     }
     if (memory != MAP_FAILED)
     {
-        munmap(memory, 4 * page);
+        munmap(memory, 6 * page);
+    }
+    if (strings != MAP_FAILED)
+    {
+        munmap(strings, 32 * page);
     }
 }
 
@@ -175,10 +210,12 @@ static void foreign_driver_symbols_select_lane(void* argument)
 static void foreign_driver_symbols_capacity(ForeignTestTally* tally)
 {
     NameId names[] = { 0, 1, 0, 2 };
-    // These selection-only inputs provide the valid producer's complete name column, including symbol zero.
+    uint8_t flags[] = { 0, BUSTER_LINK_SYMBOL_GLOBAL, 0, BUSTER_LINK_SYMBOL_GLOBAL };
+    // These selection-only inputs provide the valid producer's complete name and flags columns, including symbol zero;
+    // the named symbols are global, so no name's bytes are read.
     for (uint32_t empty = 0; empty < 2; empty += 1)
     {
-        Link link = { .symbols = { .name = names, .count = empty != 0 ? 1 : BUSTER_ARRAY_LENGTH(names) } };
+        Link link = { .symbols = { .name = names, .flags = flags, .count = empty != 0 ? 1 : BUSTER_ARRAY_LENGTH(names) } };
         for (uint32_t path = 0; path < 2; path += 1)
         {
             for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(foreign_test_lanes); l += 1)
@@ -373,10 +410,10 @@ static void foreign_driver_symbols_test(ForeignTestTally* tally, const char* dir
                         Elf64_Sym imported = { 0 };
                         Elf64_Sym entry = { 0 };
                         foreign_test_expect(tally, foreign_driver_symbols_find(&table, "driver_pick", &imported) == 1 && imported.st_shndx == SHN_UNDEF &&
-                                                  imported.st_value == 0 && imported.st_size == 6 && imported.st_info == ELF64_ST_INFO(STB_GLOBAL, STT_FUNC) &&
+                                                  imported.st_value == 0 && imported.st_size == 0 && imported.st_info == ELF64_ST_INFO(STB_GLOBAL, STT_FUNC) &&
                                                   foreign_driver_symbols_find(&table, "_start", &entry) == 1 && entry.st_size == 14 && entry.st_value == table.image.elf.e_entry &&
                                                   entry.st_info == ELF64_ST_INFO(STB_GLOBAL, STT_FUNC) && entry.st_shndx != SHN_UNDEF,
-                                            "regular table keeps imported function metadata without inventing a definition", name);
+                                            "regular table keeps an import's type and binding, undefined and without a size, as lld writes it", name);
                     }
                     if (path == 0 && l == 0)
                     {

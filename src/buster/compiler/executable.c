@@ -6258,6 +6258,14 @@ static bool executable_symbol_ids_valid(const ExecutableSymbols* symbols, uint32
     return valid;
 }
 
+// Whether a symbol goes among .symtab's locals: a local one, and as GNU ld and lld write them, a hidden or internal one
+// (lld's computeBinding), which keeps its visibility with a local binding.
+static bool executable_symbol_is_local(uint8_t flags)
+{
+    const uint8_t visibility = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
+    return (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL || visibility == BUSTER_LINK_SYMBOL_HIDDEN || visibility == BUSTER_LINK_SYMBOL_INTERNAL;
+}
+
 // Validate/count disjoint selections once; layout and emission consume each lane's published counts. The exact
 // twin retains the scalar lane-zero baseline, including arbitrary debug-function order when no explicit list exists.
 static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* symbols, bool ordered, ExecutableShared* shared, uint32_t lane)
@@ -6285,7 +6293,7 @@ static bool executable_symbols_valid(const Link* link, const ExecutableSymbols* 
                 valid = length == 0 || (link->names.bytes[name] != 0 && memchr(link->names.bytes[name], 0, length) == 0);
                 names += (uint64_t)length + 1;
                 valid &= names <= UINT32_MAX;
-                locals += (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+                locals += executable_symbol_is_local(link->symbols.flags[symbol]);
                 const AtomId atom = link->symbols.atom[symbol];
                 if (atom != 0 && link_class_is_tls(link->atoms.class[atom]))
                 {
@@ -6388,17 +6396,20 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
             address = layout->base + offset;
             section = executable_boundary_section(layout, offset);
         }
-        const bool is_local = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+        const uint8_t flags = link->symbols.flags[symbol];
+        const bool is_local = executable_symbol_is_local(flags);
         const uint32_t index = is_local ? local : global;
         local += is_local ? 1 : 0;
         global += is_local ? 0 : 1;
         symbols[index] = (Elf64_Sym){
             .st_name = name_offset,
-            .st_info = link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_INFO,
+            .st_info = is_local ? flags & BUSTER_LINK_SYMBOL_TYPE : flags & BUSTER_LINK_SYMBOL_INFO,
             .st_other = link->symbols.flags[symbol] >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
             .st_shndx = section,
             .st_value = address,
-            .st_size = link->symbols.size[symbol],
+            // An undefined symbol has no size of its own here, as in GNU ld's and lld's tables: an import's is its
+            // library's definition's.
+            .st_size = section != SHN_UNDEF ? link->symbols.size[symbol] : 0,
         };
         name_offset += length + 1;
     }
