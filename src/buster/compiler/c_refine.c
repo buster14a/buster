@@ -29,9 +29,9 @@
 //      the columns and some source bytes past the scan: the lexer's pass over a whole file has evicted them.
 //   B. refine_pass_b interns the block's identifiers in batches of 64 (RefineVariant has the other sizes the benchmark
 //      compares), pipelined: a batch's stage 1 runs in the middle of the batch before's stages 2 to 3.
-//      1. refine_hash_batch reads each identifier's first 32 bytes with a masked load (never outside the token, so
-//         never outside the source), hashes four at a time (intern_hash_vectors4_short; the rare longer ones again,
-//         whole) and prefetches their buckets. A batch whose loads had a backslash checks each identifier for one
+//      1. refine_hash_batch reads each identifier's first 32 bytes (with plain loads, its bytes past its length
+//         cleared, where they lie in the source, else with a masked load, never outside the token), hashes four at a
+//         time (intern_hash_vectors4_short; the rare longer ones again, whole) and prefetches their buckets. A batch whose loads had a backslash checks each identifier for one
 //         (refine_batch_specials): those, and identifiers past BUSTER_INTERN_FAST_LENGTH, go to the scalar key.
 //      2. Each bucket's four slots are compared with the identifier's first 12 bytes in one compare (refine_probe),
 //         which identifies a spelling of up to 11 bytes outright. The bookkeeping (slow, unmatched, longer) is 16
@@ -514,16 +514,15 @@ BUSTER_INLINE __m128i refine_key(__m128i first)
 
 // The id in the slot of `bucket` whose prefix is the key's (refine_key's), or 0 if no slot's is: the first match, which
 // identifies a spelling of up to BUSTER_INTERN_SHORT_LENGTH bytes and is a candidate for a longer one. The matches are
-// intern_bucket_matches', from a compare without its mask. No branch depends on the outcome: without a match, the id
-// read (the first slot's first dword, tzcnt's 32 masked to 0) is discarded.
+// intern_bucket_matches', from a compare without its mask, worked out in mask registers, and the matching slots' ids are
+// compressed out of the bucket's vector: the first is its lowest lane, which is 0 without a match. No branch depends on
+// the outcome, and no load on the matches.
 BUSTER_INLINE IdentId refine_probe(const uint8_t* bucket, __m128i key)
 {
-    const uint32_t matches = (_mm512_cmpeq_epi32_mask(_mm512_load_si512(bucket), intern_bucket_key(key)) + 0x1111) & 0x8888;
-    IdentId id = intern_slot_id(bucket, _tzcnt_u32(matches) & 15);
-    // A select after the load, not a branch around it, which Clang makes of a plain `?:` (with the matches' zero as the
-    // result): a branch on the outcome would mispredict for every new spelling.
-    __asm__("" : "+r"(id));
-    return id & (uint32_t)-(int32_t)(matches != 0);
+    const __m512i slots = _mm512_load_si512(bucket);
+    const __mmask16 equal = _mm512_cmpeq_epi32_mask(slots, intern_bucket_key(key));
+    const __mmask16 matches = _kand_mask16(_kadd_mask16(equal, 0x1111), 0x8888);
+    return (IdentId)_mm_cvtsi128_si32(_mm512_castsi512_si128(_mm512_maskz_compress_epi32(matches, slots)));
 }
 
 // The identifiers of a batch that have a backslash (or, with trigraphs, a '?'): bit j for identifier j. Out of line,
@@ -649,14 +648,25 @@ struct RefineHashes
     bool special;
 };
 
-// Stage 1 for `count` identifiers (at most 64) of the dense arrays from `starts` and `lengths`: each identifier loaded,
-// hashed and its bucket prefetched. bzhi keeps every bit for an index of 64 to 255 and the low bits of a longer one's, so
-// a load never reads past its identifier; a length past BUSTER_INTERN_FAST_LENGTH makes the identifier slow, and its
-// hash is unused. Four at a time, each identifier's first 32 bytes are hashed (intern_hash_vectors4_short): all of it
-// but in the rare longer ones, which are hashed again from all their bytes after; the rest one at a time.
-BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* source, const uint32_t* starts, const uint32_t* lengths, uint32_t count,
+// Stage 1 for `count` identifiers (at most 64) of the dense arrays from `starts` and `lengths`, of a source of `length`
+// bytes: each identifier loaded, hashed and its bucket prefetched. Four at a time, each identifier's first 32 bytes are
+// hashed (intern_hash_vectors4_short): all of it but in the rare longer ones, which are hashed again from all their bytes
+// after; the rest one at a time. The four are read with plain loads of 32 bytes, and the bytes past each one's length
+// cleared with one compare per two identifiers, when the batch's last one's 32 bytes lie in the source (the starts
+// ascend), as all but a source's last few do; else with masked loads, whose masks bzhi makes: it keeps every bit for an
+// index of 64 to 255 and the low bits of a longer one's, so a load never reads past its identifier. A length past
+// BUSTER_INTERN_FAST_LENGTH makes the identifier slow, and its hash is unused.
+BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* source, uint64_t length, const uint32_t* starts, const uint32_t* lengths, uint32_t count,
                                      RefineHashes* hashes, const bool trigraphs)
 {
+    const bool plain = count != 0 && (uint64_t)starts[count - 1] + 32 <= length;
+    // Byte i of each 32-byte half: i. And the indices that spread a lengths vector's dword 0 (and 1) over the first (and
+    // second) half's bytes for the first two identifiers, and dwords 2 and 3 for the other two.
+    const __m512i positions = _mm512_set_epi8(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+                                              31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __m512i ab_spread = _mm512_set_epi64(0x0404040404040404ll, 0x0404040404040404ll, 0x0404040404040404ll, 0x0404040404040404ll, 0, 0, 0, 0);
+    const __m512i cd_spread = _mm512_set_epi64(0x0c0c0c0c0c0c0c0cll, 0x0c0c0c0c0c0c0c0cll, 0x0c0c0c0c0c0c0c0cll, 0x0c0c0c0c0c0c0c0cll, 0x0808080808080808ll,
+                                               0x0808080808080808ll, 0x0808080808080808ll, 0x0808080808080808ll);
     const uint8_t* const buckets = table->buckets;
     const uint64_t offset_mask = table->bucket_mask * BUSTER_INTERN_BUCKET_BYTES;
     uint64_t* const offsets = hashes->offsets;
@@ -669,13 +679,30 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
     uint32_t j = 0;
     for (; j + 4 <= count; j += 4)
     {
-        __m256i bytes[4];
-        for (uint32_t k = 0; k < 4; k += 1)
+        const __m128i four = _mm_loadu_si128((const __m128i*)(lengths + j));
+        __m512i ab;
+        __m512i cd;
+        if (plain)
         {
-            bytes[k] = _mm256_maskz_loadu_epi8(_bzhi_u32(~0u, lengths[j + k]), source + starts[j + k]);
+            // Each length past 32 keeps all 32 bytes, as bzhi's mask does.
+            const __m512i clamped = _mm512_castsi128_si512(_mm_min_epu32(four, _mm_set1_epi32(32)));
+            const __m512i ab_bytes = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(source + starts[j]))),
+                                                        _mm256_loadu_si256((const __m256i*)(source + starts[j + 1])), 1);
+            const __m512i cd_bytes = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(source + starts[j + 2]))),
+                                                        _mm256_loadu_si256((const __m256i*)(source + starts[j + 3])), 1);
+            ab = _mm512_maskz_mov_epi8(_mm512_cmplt_epu8_mask(positions, _mm512_permutexvar_epi8(ab_spread, clamped)), ab_bytes);
+            cd = _mm512_maskz_mov_epi8(_mm512_cmplt_epu8_mask(positions, _mm512_permutexvar_epi8(cd_spread, clamped)), cd_bytes);
         }
-        const __m512i ab = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[0]), bytes[1], 1);
-        const __m512i cd = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[2]), bytes[3], 1);
+        else
+        {
+            __m256i bytes[4];
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                bytes[k] = _mm256_maskz_loadu_epi8(_bzhi_u32(~0u, lengths[j + k]), source + starts[j + k]);
+            }
+            ab = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[0]), bytes[1], 1);
+            cd = _mm512_inserti64x4(_mm512_castsi256_si512(bytes[2]), bytes[3], 1);
+        }
         backslashes = _mm512_min_epu8(backslashes, _mm512_min_epu8(_mm512_xor_si512(ab, _mm512_set1_epi8('\\')), _mm512_xor_si512(cd, _mm512_set1_epi8('\\'))));
         if (trigraphs)
         {
@@ -683,7 +710,7 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
         }
         // The four lengths in dwords 0, 4, 8 and 12.
         const __m512i spread = _mm512_setr_epi32(0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0);
-        const __m512i group_lengths = _mm512_maskz_permutexvar_epi32(0x1111, spread, _mm512_castsi128_si512(_mm_loadu_si128((const __m128i*)(lengths + j))));
+        const __m512i group_lengths = _mm512_maskz_permutexvar_epi32(0x1111, spread, _mm512_castsi128_si512(four));
         __m512i first_lanes;
         const __m512i group_hashes = intern_hash_vectors4_short(ab, cd, group_lengths, zero_lanes, &first_lanes);
         _mm512_store_si512(keys + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
@@ -762,7 +789,7 @@ BUSTER_INLINE bool refine_pass_b(InternTable* table, const uint8_t* source, uint
     bool result = true;
     if (total != 0)
     {
-        refine_hash_batch(table, source, identifiers->starts, identifiers->lengths, total < batch ? total : batch, &hashes[0], trigraphs);
+        refine_hash_batch(table, source, length, identifiers->starts, identifiers->lengths, total < batch ? total : batch, &hashes[0], trigraphs);
     }
     uint32_t parity = 0;
     for (uint32_t first = 0; result && first < total; first += batch)
@@ -774,7 +801,7 @@ BUSTER_INLINE bool refine_pass_b(InternTable* table, const uint8_t* source, uint
         RefineHashes* const current = &hashes[parity];
         if (current->bucket_mask != table->bucket_mask)
         {
-            refine_hash_batch(table, source, starts, lengths, count, current, trigraphs);
+            refine_hash_batch(table, source, length, starts, lengths, count, current, trigraphs);
         }
         const uint8_t* const buckets = table->buckets;
         const uint8_t* const records = table->records;
@@ -828,7 +855,7 @@ BUSTER_INLINE bool refine_pass_b(InternTable* table, const uint8_t* source, uint
         const uint32_t next = first + count;
         if (next < total)
         {
-            refine_hash_batch(table, source, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1], trigraphs);
+            refine_hash_batch(table, source, length, starts + count, lengths + count, total - next < batch ? total - next : batch, &hashes[parity ^ 1], trigraphs);
         }
 
         // 2b, second half: one masked compare of each candidate's bytes and terminating zero with its record.
