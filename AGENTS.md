@@ -4178,8 +4178,9 @@ misaligned, and results in each kind and order of register, short ones, a
 vector and through a hidden pointer), run natively both ways: as calls, whose
 probe records every register and stack slot it gets from bytes that end or
 start at a `PROT_NONE` page, and as functions, which a driver calls and which
-copy their parameters out; and `tier0_validate` refusing 42 breaks of their
-rules, as both paths do. Every function must pass `tier0_validate`, both
+copy their parameters out; and `tier0_validate` refusing 45 breaks of their
+rules, as both paths do (the end reached without a RETURN of an aggregate
+result, by falling off it, a jump or a branch, among them). Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into
