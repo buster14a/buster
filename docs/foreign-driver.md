@@ -312,7 +312,10 @@ design's generated programs, from one command line, as a process of its own
 with `--lanes=8` and `--lanes=1`. On the 9700X, one lane links the programs of
 1 worker, 2,000 workers and synth's shape in 0.60, 1.12 and 55.2 ms, against
 wild's 1.35, 2.56 and 99.9 ms and mold's 2.44, 3.31 and 99.9 ms on one thread:
-0.89 GB/s of output per lane on the largest, against mold's 0.54. "Foreign
-executables, as built" in the linker design has the tables, the appendix's own
-inputs and where the time goes. GC, string pooling and CIE pooling remain
+0.89 GB/s of output per lane on the largest, against mold's 0.54; as a
+static executable, a static PIE and a shared library, synth's shape takes
+58.3, 59.3 and 65.6 ms on one lane, against mold's 100.1, 106.6 and 116.6 and
+lld's 98.3, 102.5 and 128.2 on one thread. "Foreign executables, as built" in
+the linker design has the tables, the appendix's own inputs and where the time
+goes. GC, string pooling and CIE pooling remain
 disabled by default; their own measurements are in the linker design.
