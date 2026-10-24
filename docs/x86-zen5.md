@@ -150,7 +150,7 @@ It is not a whole-compiler or generated-program speed measurement.
 
 ## Recorded observations
 
-The [2026-10-22 evidence](measurements/x86-zen5-2026-10-22/README.md) retains
+The [2026-10-22 evidence](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-zen5-2026-10-22/README.md) retains
 three complete 9700X processes, their source/binary identities, generated-code
 hashes, reductions and lookup observations. All three agree on every code hash;
 their independent-throughput medians differ by at most 0.0535%.

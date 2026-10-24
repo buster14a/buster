@@ -219,8 +219,8 @@ Three independently started processes of each binary ran each configuration,
 alternating baseline and candidate. Every process held the common experiment
 lock for its own run. Each reports the existing benchmark's 21 calibrated
 samples over 16,384 rows, including complete result stores and scalar-output
-comparison. The [18 original process logs](measurements/simd-301-2026-10-23/builtins.txt)
-and [standalone benchmark entry point](measurements/simd-301-2026-10-23/builtin-benchmark.c)
+comparison. The [18 original process logs](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/builtins.txt)
+and [standalone benchmark entry point](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/builtin-benchmark.c)
 are checked in with the measurement record. The table gives the median of the
 three process medians in ns/row, with their minimum and maximum in brackets:
 
@@ -243,8 +243,8 @@ counts 1, 7, 8, 9 and 16 also compare complete outputs with the scalar twin.
 Across three processes, their median throughput ratios are 1.31–1.46 for bit
 operations and 1.08–1.31 for mixed valid/invalid rows. Overflow remains near
 parity, with overlapping process ranges at the two counts whose medians were
-about 3% slower. The [six small-count process logs](measurements/simd-301-2026-10-23/builtin-tiny.txt)
-and their [standalone harness](measurements/simd-301-2026-10-23/builtin-tiny.c)
+about 3% slower. The [six small-count process logs](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/builtin-tiny.txt)
+and their [standalone harness](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/builtin-tiny.c)
 retain the tested workload and calibration. Both standalone harnesses select
 the baseline or candidate source through `-I<checkout>/src`. No tiny-batch
 dispatch threshold was introduced.

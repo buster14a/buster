@@ -92,7 +92,7 @@ omitted empty restores, translation-unit cleanup and source-less builtins.
 Empty results, exhausted arenas,
 undersized replay capacity, invalid slots and undo underflow are covered.
 
-The [source-pipeline harness](measurements/c-body-bindings-2026-10-23/README.md)
+The [source-pipeline harness](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-body-bindings-2026-10-23/README.md)
 includes the available producer, handoff and body-binding consumer on frozen
 small/large source inputs. Head `2971a85` passed
 [full 9700X CI](https://github.com/buster14a/buster/actions/runs/39963802924)

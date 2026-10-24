@@ -53,7 +53,7 @@ The results below are from the original branch-sizing implementation, before
 measurement. They describe its encode-and-discard lengths phase and are kept
 as historical evidence. The current implementation's comparison and
 reproduction commands are in
-[the lengths-only refinement record](measurements/x86-lengths-2026-10-23/refinement.md).
+[the lengths-only refinement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/refinement.md).
 
 On the Ryzen 7 9700X, CPU 2, `benchmark-branch-sizing`'s medians, in cycles per
 record (instruction). Each row is a pool of about 262,000 records of generated
@@ -480,7 +480,7 @@ machine bytes only after sizing. The scalar measure's bounded one-instruction
 buffer is an independent oracle, not a retained whole-function byte stream.
 `test-branch-sizing` covers exact twins, independent fixed-point expectations,
 GNU as, partial/guarded arrays, exhaustion and long chains. Existing matched
-[qualification](measurements/x86-lengths-2026-10-23/refinement.md) distinguishes
+[qualification](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/refinement.md) distinguishes
 complete sizing/encoding from kernel screens. Future source-driven selection /
 scheduling + sizing + encoding totals remain [#136](https://github.com/buster14a/buster/issues/136)/[#138](https://github.com/buster14a/buster/issues/138)/[#145](https://github.com/buster14a/buster/issues/145), with preparation,
 allocations, scratch, fallback and code quality included.

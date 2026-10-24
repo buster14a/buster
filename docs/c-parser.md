@@ -443,7 +443,7 @@ The separately claimed #126 c-testsuite qualification at `5a9e050` adds all
 with Clang's preprocessor output and syntax acceptance, and the parser paths
 and kernel twins agree. Another 2,200 mutations have zero mismatches under
 the Clang parse-error rules; this mutation run does not compare the two parser
-paths. [The qualification record](measurements/parser-c-testsuite-2026-10-23/README.md)
+paths. [The qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/parser-c-testsuite-2026-10-23/README.md)
 retains the exact corpus revision, manifests, configuration, controls and results.
 
 Locally, on a Ryzen 9 7940HS, at `a04f6c0` (the parser as at `d59d035`, whose
@@ -570,8 +570,8 @@ whole vector path with `--only vector --passes 11 -nostdinc`; the incomplete
 third invocation is excluded. The K6 row shows the median of three medians and
 their range, and the whole-path rows show each complete process's median, in
 nanoseconds per token; hardware counters were unavailable. The
-[K6 raw output and reproduction commands](measurements/simd-301-2026-10-23/parser-k6.txt)
-and [whole-path raw output](measurements/simd-301-2026-10-23/parser-whole.txt)
+[K6 raw output and reproduction commands](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/parser-k6.txt)
+and [whole-path raw output](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/parser-whole.txt)
 retain the experiment's individual results.
 
 | Path | Baseline | Joint class table |
@@ -594,7 +594,7 @@ Seven fresh syntax-driver processes per version also accepted the same input
 without diagnostics; all 14 exit statuses were zero. Their elapsed times varied
 widely (baseline 0.231–0.299 s, joint table 0.248–0.357 s), with mixed paired
 direction, so these runs establish no end-to-end timing effect. The
-[driver raw output and commands](measurements/simd-301-2026-10-23/parser-driver.txt)
+[driver raw output and commands](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/parser-driver.txt)
 isolate the parser change over the same frozen source as the kernel runs.
 
 ## What's left

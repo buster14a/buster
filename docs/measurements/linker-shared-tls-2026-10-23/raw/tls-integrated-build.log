@@ -1,3 +1,0 @@
-exclusive.sh: waiting for the 9700X, held by: 2026-10-23T08:47:20+00:00 codex-linker-foreign86: ./build.sh
-  title: Foreign dynamic and COMDAT unwind #86
-  link: https://github.com/buster14a/buster/issues/86

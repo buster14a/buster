@@ -108,6 +108,16 @@ are unchanged by the repository rename.
 
 ## Issue ownership
 
+Raw measurement evidence lives in
+[buster-performance/docs/measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements).
+Put new logs, captures, receipts, measurement harnesses and campaign artifacts
+there. Keep design summaries and links here. Do not recreate `docs/measurements`
+in this repository; the required `Measurement storage policy` check rejects
+every tracked path there, including force-added ignored files. When updating an
+older branch or PR, migrate its evidence to buster-performance before merging it.
+CI consumers must pin external harnesses to an exact reviewed commit, and a
+harness-pin update must enable the affected qualification in `9700x.yml`.
+
 Every issue being investigated, tackled or fixed must be claimed in the issue
 itself before work begins. Read its latest comments and linked pull requests,
 then post a comment identifying who is taking the work and the scope being
@@ -1470,7 +1480,7 @@ paths with the same harness, and include `size_encode` for the caller's
 combined cost. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/branch-sizing.md` explains the current method and labels the older
 numbers as historical;
-`docs/measurements/x86-lengths-2026-10-23/refinement.md` records the current
+[measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/refinement.md) records the current
 Clang 23 implementation, comparison protocol and initial candidate's evidence.
 The default 9700X job runs the benchmark after the tests, pinned to one allowed
 CPU. For relevant pull requests it also runs three matched process pairs using
@@ -3334,7 +3344,7 @@ changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 ## Preprocessor benchmark
 
 The exact commands, pinned inputs and raw reports for the #117 acceptance
-refresh are in `docs/measurements/preprocessor-117-2026-10-23/README.md`.
+refresh are in [the measurement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md).
 Its invocation scripts take a separate normal shared-host lock for each command.
 
 `./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]

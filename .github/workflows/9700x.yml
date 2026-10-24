@@ -108,10 +108,8 @@ jobs:
               else
                   foreign=false
               fi
-              if grep -Ex 'src/buster/compiler/(x86_64_encoder|branch_sizing(_benchmark|_generate)?)\.c|docs/measurements/x86-lengths-2026-10-23/(benchmark-main|scaling)\.c' files > /dev/null; then
+              if grep -Ex 'src/buster/compiler/(x86_64_encoder|branch_sizing(_benchmark|_generate)?)\.c|\.github/workflows/9700x\.yml' files > /dev/null; then
                   branch_sizing=true
-                  # These retained C fixtures execute in qualification even though they live under docs/.
-                  code=true
               else
                   branch_sizing=false
               fi
@@ -133,7 +131,7 @@ jobs:
           echo "Changes code: $code"
           echo "Changes the baselines' harnesses: $baselines"
           echo "Changes the foreign inputs' benchmark: $foreign"
-          echo "Changes the branch-sizing implementation or measurement fixtures: $branch_sizing"
+          echo "Changes the branch-sizing implementation or pinned harness workflow: $branch_sizing"
           for module in "${modules[@]}"; do
               echo "Changes what $module's conditioned benchmark samples measure: ${measure[$module]}"
           done
@@ -523,6 +521,16 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-assembler
 
+      - name: Check out pinned branch-sizing measurement harnesses
+        if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.branch_sizing != 'false' }}
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster-performance
+          ref: a00d16e47b6f1090b8a0424ab0dd8cb4e6016713 # Initial byte-identical measurement import; see buster-performance/MIGRATION.md.
+          path: build/performance-evidence
+          sparse-checkout: docs/measurements/x86-lengths-2026-10-23
+          persist-credentials: false
+
       - name: Benchmark branch sizing
         timeout-minutes: 3
         env:
@@ -537,7 +545,7 @@ jobs:
               [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
               ab_dir="$(mktemp -d "${RUNNER_TEMP}/branch-sizing-ab.XXXXXX")"
               trap 'rm -rf "$ab_dir"' EXIT
-              fixture=docs/measurements/x86-lengths-2026-10-23
+              fixture=build/performance-evidence/docs/measurements/x86-lengths-2026-10-23
 
               # The normal job lock covers this bounded qualification. Use one allowed logical CPU per physical
               # core for scaling, and record the mapping rather than inferring SMT placement from CPU numbers.

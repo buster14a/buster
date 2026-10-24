@@ -1,6 +1,0 @@
-  527879:	62 f2 7d c9 89 c0    	vpexpandd %zmm0,%zmm0{%k1}{z}
-  528b09:	62 f2 7d c9 89 c0    	vpexpandd %zmm0,%zmm0{%k1}{z}
-  5298c0:	62 52 7d c9 89 ff    	vpexpandd %zmm15,%zmm15{%k1}{z}
-  52a0f2:	62 f2 7d c9 89 ff    	vpexpandd %zmm7,%zmm7{%k1}{z}
-  52ab46:	62 f2 7d c9 89 f6    	vpexpandd %zmm6,%zmm6{%k1}{z}
-  52b868:	62 52 7d c9 89 ed    	vpexpandd %zmm13,%zmm13{%k1}{z}

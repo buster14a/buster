@@ -127,7 +127,7 @@ compiler. The required SQLite/libc/c-testsuite emission comparison and
 `main.c` counts and time saved require the source producer and downstream
 lowering path described above.
 
-[The qualification record](measurements/c-lowering-2026-10-23/README.md)
+[The qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-lowering-2026-10-23/README.md)
 retains the exact compiler revision, host and binary identities, raw test
 outputs and measurement conditions.
 

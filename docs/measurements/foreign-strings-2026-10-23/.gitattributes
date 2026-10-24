@@ -1,2 +1,0 @@
-# Frozen observations retain their original output whitespace and hashes.
-raw/** -whitespace

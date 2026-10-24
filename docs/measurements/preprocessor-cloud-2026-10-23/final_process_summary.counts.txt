@@ -1,4 +1,0 @@
-/workspace/scratch/61c60105fb18/measurement/final_process_pp-main.csv: valid 31 measured pairs + 3 warmups; all 68 child exits successful
-/workspace/scratch/61c60105fb18/measurement/final_process_pp-sqlite.csv: valid 31 measured pairs + 3 warmups; all 68 child exits successful
-/workspace/scratch/61c60105fb18/measurement/final_process_syntax-main.csv: valid 31 measured pairs + 3 warmups; all 68 child exits successful
-/workspace/scratch/61c60105fb18/measurement/final_process_syntax-sqlite.csv: valid 31 measured pairs + 3 warmups; all 68 child exits successful

@@ -1,0 +1,31 @@
+name: Measurement storage
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  storage:
+    name: Measurement storage policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Keep measurement evidence in buster-performance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files -z -- docs/measurements > "$RUNNER_TEMP/measurement-paths"
+          if test -s "$RUNNER_TEMP/measurement-paths"; then
+              echo '::error::Store evidence in buster14a/buster-performance under docs/measurements/.'
+              git ls-files -- docs/measurements
+              exit 1
+          fi

@@ -1,1 +1,0 @@
-command clang -I/home/david/buster-fast-bench/codex-header111/final-probe -O3 -g -march=native -I/home/david/buster-fast-bench/codex-header111/tree/src -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror /home/david/buster-fast-bench/codex-header111/final-probe/experiment.c -o /home/david/buster-fast-bench/codex-header111/experiment 
