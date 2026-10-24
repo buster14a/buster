@@ -9,9 +9,12 @@
 
 #define BUSTER_CHECK_CONSTANT_BOUND_CONTEXT 2u
 
+// clang's Sema has GNU's extensions in every C language mode, -std=c99 as -std=gnu99, and only -pedantic warns about
+// them: folding a constant expression that isn't an ICE among them. GNU still names -std=gnu*, which the vector
+// builtins' index rule reads (c_check_builtin_constant.c's, #148).
 static uint32_t check_input_expression_extensions(const Parser* parser)
 {
-    return parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT : 0;
+    return BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0);
 }
 
 static bool check_input_integer_constant(const CheckInputReader* reader, const CheckValue* value)
@@ -21,7 +24,7 @@ static bool check_input_integer_constant(const CheckInputReader* reader, const C
 
 static bool check_input_integer_ice(const CheckInputReader* reader, const CheckValue* value)
 {
-    const uint32_t forms = BUSTER_CHECK_ICE | (reader->parser->language.gnu ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+    const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
     return check_input_integer_constant(reader, value) && (value->flags & forms) != 0;
 }
 
@@ -701,7 +704,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 valid = check_constant_range_value(input, i + 1, close, &bound) && check_action_is_integer(reader->types, bound.type);
                 if (valid && (check_input_integer_attribute(reader, &bound) || (bound.flags & BUSTER_CHECK_ICE) != 0))
                 {
-                    valid = check_action_i64(reader->types, &bound, &extent) && extent >= 0 && (extent != 0 || parser->language.gnu);
+                    valid = check_action_i64(reader->types, &bound, &extent) && extent >= 0;
                     part.kind = BUSTER_TYPE_KIND_ARRAY;
                     part.extent = (uint64_t)extent;
                     if (valid)
@@ -2103,7 +2106,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             const bool expression = opening > input->first && opening < token && parser->tree.roles[opening] == PARSE_ROLE_OPEN_BLOCK &&
                                     parser->tree.roles[opening - 1] == PARSE_ROLE_OPEN_GROUP &&
                                     parser->tree.parents[opening - 1] == parent && parent == token + 1;
-            valid = parser->language.gnu && reader->function_body < parser->tokens.count &&
+            valid = reader->function_body < parser->tokens.count &&
                     (expression || (input->cached && opening >= input->first && opening < token && parser->tree.roles[opening] == PARSE_ROLE_OPEN_BLOCK));
             CheckValue selected = { .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
             CheckValue selected_proof = selected;
@@ -2143,7 +2146,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         else if (role == PARSE_ROLE_CLOSE_TERNARY)
         {
-            valid = count == 3 || (count == 2 && parser->language.gnu);
+            valid = count == 3 || count == 2;
             if (count == 2)
             {
                 action.operands[2] = action.operands[1];
@@ -2759,7 +2762,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
         {
             if (operand)
             {
-                valid = parser->language.gnu && value_count != 0 && operator_count != 0 && operators[operator_count - 1].marker == 2;
+                valid = value_count != 0 && operator_count != 0 && operators[operator_count - 1].marker == 2;
                 if (valid)
                 {
                     values[value_count] = values[value_count - 1];

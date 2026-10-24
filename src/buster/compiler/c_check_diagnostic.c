@@ -38,6 +38,11 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wexcess-initializers", NULL, "excess elements in initializer" },
     { "-Wunknown-pragmas", "-Wpragmas", "expected 'ON' or 'OFF' or 'DEFAULT' in pragma" },
     { "-Wignored-attributes", "-Wattributes", "attribute declaration must precede definition" },
+    { "-Wpointer-sign", NULL, "converts between pointers to integer types with different sign" },
+    { "-Wpointer-integer-compare", NULL, "comparison between pointer and integer" },
+    { "-Wcompare-distinct-pointer-types", NULL, "comparison of distinct pointer types" },
+    { "-Wconditional-type-mismatch", NULL, "pointer/integer type mismatch in conditional expression" },
+    { "-Wpointer-type-mismatch", NULL, "pointer type mismatch" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
