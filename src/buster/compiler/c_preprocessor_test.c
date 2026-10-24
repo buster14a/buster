@@ -843,6 +843,16 @@ static const PPTestFile pp_test_files_renamed[] = {
     { 0, 0 },
 };
 
+static const PPTestFile pp_test_files_collecting_exit[] = {
+    { "outer.h", "#include \"other.h\"\n" },
+    { 0, 0 },
+};
+
+static const PPTestFile pp_test_files_collecting_return[] = {
+    { "outer.h", "#include \"other.h\"\nb)\nouter_after\n" },
+    { 0, 0 },
+};
+
 static const PPTestFile pp_test_files_stack[] = {
     { "a.h", "a_token\n#include \"b.h\"\na_after\n" },
     { "b.h", "b_token\n" },
@@ -1269,6 +1279,42 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
     { "#include among a macro's arguments", "#define F(x) [x]\nF(a\n#include \"other.h\"\nb)\nafter\n",
       "inside\n", "c17", "[a b]\nafter\n", true, 0, 0, 0 },
+    // Clang's flag for a macro's arguments is one flag, not a depth: an invocation with arguments in a directive among
+    // them clears it, and #pragma and #include are taken after it, the arguments going on past the included file's end
+    // (#109's seed 2106).
+    // #370: FileChanged leaves a header while arguments are collected, before the expansion reaches the printer.
+    // Keep the expansion's presumed line, in the file the callback selected, without changing the actual origins.
+    { "line markers: an invocation crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n[a b]\nafter\n" },
+    { "line markers: an invocation after output crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nbefore F(a", "c17", "before [a b] after", false, 0, 0, 0 },
+    { "line markers: argument collection exits two included files", "#include \"outer.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, pp_test_files_collecting_exit },
+    { "line markers: argument collection returns to an included file", "#include \"outer.h\"\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] outer_after after", false, 0, 0, pp_test_files_collecting_return },
+    { "line markers: crossed files keep builtin and presumed locations", "#line 100 \"logical.c\"\n#include \"other.h\"\n__LINE__ __FILE__)\nafter\n",
+      "#define F(x) [x]\n#line 80 \"logical.h\"\nF(__LINE__ __FILE__\n", "c17", "[80 \"logical.h\" 101 \"logical.c\"] after", false, 0, 0, 0 },
+    { "line markers: an empty expansion crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x)\nF(a\n", "c17", "after", false, 0, 0, 0 },
+    { "line markers: an empty expansion crossing an include leaves no output", "#include \"other.h\"\nb)\n",
+      "#define F(x)\nF(a\n", "c17", "", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n" },
+    { "line markers: a system include ends while collecting arguments", "#include <other.h>\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, "-isystem %d", 0 },
+    { "line markers: a crossed invocation spans printer batches", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x\nF(a\n",
+      "c17", "a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b after", false, 0, 0, 0 },
+    { "an invocation in a #if among a macro's arguments clears clang's flag", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#pragma omp parallel\n#include \"other.h\"\nb)\nafter\n",
+      "inside\n", "c17", "#pragma omp parallel\n[a inside b]\nafter\n", false, 0, 0, 0 },
+    { "an object-like macro in a #if among a macro's arguments keeps clang's flag", "#define F(x) [x]\n#define G 1\nF(a\n#if G\n#endif\n#pragma omp parallel\nb)\nafter\n",
+      0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
+    { "#pragma lines among a macro's arguments after an invocation in a #if", "#define f(x) x\n#define g() 1\n#define h(y) y\nf(a\n#if g()\n#endif\nh(\n#pragma foo\n)\n#pragma bar\nb)\n",
+      0, "c17", "#pragma foo\n#pragma bar\na b\n", false, 0, 0, 0 },
+    { "a file twice by #include among a macro's arguments", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#include \"other.h\"\n#include \"other.h\"\nb)\nafter\n",
+      "inside\n", "c17", "[a inside inside b]\nafter\n", false, 0, 0, 0 },
+    { "fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif", "#\tdefine ppf_190642_b(\\\n ) \n#define ppf_190642_h( )   \n ppf_190642_h       \f (   \\\n     \n#if   \\\n   ( ppf_190642_f ) \\\n!=  \\\nppf_g1\n#endif\n/**/#ifdef\\\n     \t    \t  /**/  /* c */   ppf_190642_bppf_190642_h\n#elif   \\\n  _Pragma(\"ppf_if\") ppf_190642_e\\\n\?       \f /* c */ppf_190642_b(/*\n*/ ) \\\n ppf_190642_d: ( /**/  (ppf_190642_h ) )>/* c */__has_c_attribute(gnu::unused)\\\n \?/**/ppf_190642_a/* c */:__STDC__\n#pragma          \n#if (\f 1u/**/)\n#endif\n#endif /* c */  \n     ) /**/ \n",
+      0, "c23", "#pragma ppf_if\n#pragma\n", false, 0, 0, 0 },
     { "trigraphs in the ISO modes before C23", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
       0, "c17", "1 [ ]\n\"#\" \"[\"\n", false, 0, 0, 0 },
     { "trigraphs ignored in the GNU modes", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
@@ -2604,6 +2650,75 @@ static bool pp_test_final_copy_accounting(void)
     return result;
 }
 
+// An unterminated literal that ends in a line splice is spelled as clang cleans it (pp_trailing_splice): with the
+// character after the splice, the newline that ends the literal, or at the file's end the NUL that ends clang's buffer
+// (#109's seed 3110). Each source's last token, by both kernels, must be clang's spelling, byte for byte (clang 23's
+// -E); the last two keep their own.
+static bool pp_test_trailing_splices(void)
+{
+    typedef struct PPTrailingSplice
+    {
+        const char* source;
+        const char* spelling;
+        uint32_t length;
+    } PPTrailingSplice;
+    static const PPTrailingSplice cases[] = {
+        { "'\\\n", "'\0", 2 },
+        { "'a\\\n", "'a\0", 3 },
+        { "'\\\\\n", "'\\\0", 3 },
+        { "'\\ \n", "'\0", 2 },
+        { "'\\\r\n", "'\0", 2 },
+        { "\"a\\\n\\\n", "\"a\0", 3 },
+        { "u8\"\\\n", "u8\"\0", 4 },
+        { "x '\\\\\n\\\n", "'\\\0", 3 },
+        { "'\\\n\n", "'\n", 2 },
+        { "'\\\nx\n", "'x", 2 },
+        { "'\\", "'\\", 2 },
+    };
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    uint32_t failures = 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const PPOptions options = {
+                .language = {
+                    .standard = 2017,
+                    .gnu = true,
+                },
+                .scalar = k == 1,
+                .no_standard_includes = true,
+                .quiet = true,
+            };
+            Preprocessor* pp = &runs[k];
+            const bool ran = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
+            if (ran)
+            {
+                pp_run_source(pp, "trailing-splice.c", (const uint8_t*)cases[c].source, (uint32_t)strlen(cases[c].source));
+            }
+            const PPTokens* out = &pp->output;
+            uint8_t buffer[16];
+            const uint8_t* spelling = 0;
+            const uint32_t last = ran && out->count != 0 ? out->count - 1 : 0;
+            const bool fits = ran && out->count != 0 && out->kinds[last] == C_TOKEN_UNKNOWN && out->values[last] - out->locations[last] < sizeof(buffer);
+            const uint32_t length = fits ? pp_spelling(pp, out->kinds[last], out->values[last], out->locations[last], buffer, &spelling) : 0;
+            if (!fits || length != cases[c].length || memcmp(spelling, cases[c].spelling, length) != 0)
+            {
+                printf("trailing splices: case %u, %s kernels: spelled with %u bytes, not clang's %u\n", c, k == 0 ? "vectorized" : "scalar", length, cases[c].length);
+                failures += 1;
+            }
+            if (ran)
+            {
+                pp_release(pp);
+            }
+            intern_release(&tables[k]);
+        }
+    }
+    printf("trailing splices: %u of %lu runs fail\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(cases));
+    return failures == 0;
+}
+
 // The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
 // macros, then make every known name's bit disagree with macro_of before each use file. Repeating this after undef
 // and redefine prevents their normal bit updates from hiding a lookup through the cache. The third run selects the
@@ -3745,6 +3860,143 @@ static bool pp_test_raw_recovery_failures(void)
         intern_release(&table);
     }
     printf("opaque recovery failure guards: %s (allocation, data indexes, progress)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
+// #361: a part of the prelude that can't be made (its arena push or virtual file, out of memory or past the files table)
+// is fatal, and the run fails without running the parts after it. Each fault is injected after pp_initialize: the arena's
+// capacity cut below a part's push (a -D or -include of a megabyte makes the part's push the one that fails), or the
+// data table filled to leave the parts before it room. The controls: the same options with nothing taken away, and no
+// -include with room for every other part but none for an include file, which must then not be made.
+static bool pp_test_prelude_failures(void)
+{
+    enum
+    {
+        PP_TEST_PRELUDE_LONG = 1u << 20,
+    };
+    typedef struct
+    {
+        const char* name;
+        // Which long option the run takes: 0 none, 1 a -D, 2 an -include.
+        uint32_t long_option;
+        // Whether the arena's capacity is cut to the reference prelude's bytes and a page, so that the command line's push
+        // fails, or with `past_command_line` the long option's room besides, so that the push of the long part's file fails.
+        bool cut_arena;
+        bool past_command_line;
+        // Data records left free before the run (0 leaves the table).
+        uint32_t free_data;
+        // The fatal error's text, or null for a run that must succeed; strerror(ENOMEM)'s follows it when `out_of_memory`,
+        // as pp_virtual_file_error gives it.
+        const char* message;
+        bool out_of_memory;
+        // Whether -D X=1 must have taken effect.
+        bool defined;
+    } PPTestPreludeFault;
+    static const PPTestPreludeFault faults[] = {
+        { "command line's arena", 1, true, false, 0, "out of memory for the command line's -D, -U and -include options", false, false },
+        { "-D and -U file's arena", 1, true, true, 0, "can't make the file of the command line's -D and -U options: ", true, false },
+        { "-include file's arena", 2, true, true, 0, "can't make the file of the command line's -include options: ", true, true },
+        { "-D and -U file's record", 0, false, false, 1, "can't make the file of the command line's -D and -U options: too many files", false, false },
+        { "-include file's record", 2, false, false, 2, "can't make the file of the command line's -include options: too many files", false, true },
+        { "no -include, no room for its file", 0, false, false, 3, 0, false, true },
+        { "a megabyte's -D, nothing taken away", 1, false, false, 0, 0, false, true },
+    };
+    static const uint8_t source[] = "X Y\n";
+    char* long_text = malloc(PP_TEST_PRELUDE_LONG + 8);
+    bool result = long_text != 0;
+    // The reference: the prelude's bytes with -D X=1 -U Y alone.
+    uint64_t reference = 0;
+    if (result)
+    {
+        static InternTable table;
+        static Preprocessor pp;
+        static const char* const macros[] = { "DX=1", "UY" };
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true, .macros = macros, .macro_count = 2 };
+        result = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        const uint64_t initial = pp.arena.length;
+        result = result && pp_run_prelude(&pp);
+        reference = pp.arena.length - initial;
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    for (uint32_t f = 0; result && f < BUSTER_ARRAY_LENGTH(faults); f += 1)
+    {
+        const PPTestPreludeFault* fault = &faults[f];
+        static InternTable table;
+        static Preprocessor pp;
+        // The long -D's value, or the long -include's name, of PP_TEST_PRELUDE_LONG bytes.
+        memset(long_text, 'v', PP_TEST_PRELUDE_LONG + 7);
+        long_text[PP_TEST_PRELUDE_LONG + 7] = 0;
+        memcpy(long_text, "DLONG=", 6);
+        const char* macros[3] = { "DX=1", "UY", long_text };
+        const char* includes[1] = { long_text + 7 };
+        char* diagnostics = 0;
+        size_t diagnostics_length = 0;
+        FILE* stream = open_memstream(&diagnostics, &diagnostics_length);
+        const PPOptions options = {
+            .language = { .standard = 2017, .gnu = true },
+            .macros = macros,
+            .macro_count = fault->long_option == 1 ? 3 : 2,
+            .includes = includes,
+            .include_count = fault->long_option == 2 ? 1 : 0,
+            .diagnostics = stream,
+        };
+        bool ran = false;
+        bool checked = stream != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        const uint64_t capacity = pp.arena.capacity;
+        const uint32_t data_count = pp.data_count;
+        if (checked)
+        {
+            const uint64_t long_room = PP_TEST_PRELUDE_LONG + 7 + 16;
+            if (fault->cut_arena)
+            {
+                pp.arena.capacity = pp.arena.length + reference + (fault->past_command_line ? long_room + 32 + 32 : 0) + 4096;
+            }
+            if (fault->free_data != 0)
+            {
+                pp.data_count = BUSTER_PP_MAX_FILES - fault->free_data;
+            }
+            ran = pp_run_source(&pp, "prelude.c", source, sizeof(source) - 1);
+            fflush(stream);
+            const IdentId x = intern_find_or_add(&table, (const uint8_t*)"X", 1);
+            const IdentId y = intern_find_or_add(&table, (const uint8_t*)"Y", 1);
+            const IdentId long_name = intern_find_or_add(&table, (const uint8_t*)"LONG", 4);
+            const bool x_defined = x != 0 && pp.macro_of[x] != 0;
+            const bool long_defined = long_name != 0 && pp.macro_of[long_name] != 0;
+            const char* first = diagnostics != 0 ? strstr(diagnostics, "fatal error: ") : 0;
+            if (fault->message == 0)
+            {
+                checked = ran && !pp.fatal && pp.errors == 0 && pp.output.count == 2 && first == 0 && y != 0 && pp.macro_of[y] == 0 &&
+                          long_defined == (fault->long_option == 1);
+            }
+            else
+            {
+                // One fatal error, the part's, and nothing after it: no main file's tokens, no -D after a failed -D file.
+                char message[256];
+                snprintf(message, sizeof(message), "%s%s", fault->message, fault->out_of_memory ? strerror(ENOMEM) : "");
+                checked = !ran && pp.fatal && pp.output.count == 0 && first != 0 && strstr(first, message) != 0 &&
+                          strstr(first + 1, "fatal error: ") == 0 && !long_defined;
+            }
+            checked = checked && x_defined == fault->defined;
+            if (!checked)
+            {
+                printf("prelude failure '%s': ran %u, fatal %u, errors %u, output %u, X %u, LONG %u, diagnostics: %s\n", fault->name, ran, pp.fatal, pp.errors,
+                       pp.output.count, x_defined, long_defined, diagnostics != 0 ? diagnostics : "(none)");
+            }
+        }
+        if (stream != 0)
+        {
+            fclose(stream);
+        }
+        free(diagnostics);
+        pp.arena.capacity = capacity;
+        pp.data_count = data_count;
+        pp_release(&pp);
+        intern_release(&table);
+        result = checked;
+    }
+    free(long_text);
+    printf("prelude failures: %s (%lu faults and controls)\n", result ? "pass" : "FAIL", (unsigned long)BUSTER_ARRAY_LENGTH(faults));
     return result;
 }
 
@@ -5920,6 +6172,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_embed_lookups(directory, with_clang);
         passed_all &= pp_test_lookup_accounting(directory);
         passed_all &= pp_test_final_copy_accounting();
+        passed_all &= pp_test_trailing_splices();
         passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
@@ -5927,6 +6180,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_raw_query_views(directory);
         passed_all &= pp_test_raw_query_capacity(directory, with_clang);
         passed_all &= pp_test_raw_recovery_failures();
+        passed_all &= pp_test_prelude_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {

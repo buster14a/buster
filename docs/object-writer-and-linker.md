@@ -3369,6 +3369,204 @@ reservations and RSS. These are synthetic phase measurements, not complete
 foreign-link throughput, corpus acceptance or evidence that the wider linker
 performance target has been reached.
 
+#### Foreign section garbage collection
+
+`foreign_gc_mark` traverses an unlaid-out `Link` and returns stable maps for
+its live atoms, symbols and fixups. The caller supplies the entry, exported
+or forced symbols and explicitly retained atoms. Init/fini fragments and
+arrays are implicit roots. Defined symbols survive with their atoms;
+atomless symbols survive only when rooted or referenced by a live fixup.
+The pass does not modify the input or its borrowed bytes. Map entry zero
+and every discarded entry are zero; retained IDs follow original order.
+
+Root classification, frontier seeding and map emission have scalar and
+AVX-512 paths. Two atom queues and mark-before-append bound the irregular
+walk to one visit per atom. Target lookup and live-bit updates remain
+scalar. This is a single-lane closure, not the planned per-lane frontier
+exchange; representative scaling and complete-link measurements remain
+separate acceptance work.
+
+`foreign_gc_link` adds the foreign producer's ownership rules. It creates
+temporary graph nodes for FDEs and CIEs, with code-to-FDE and FDE-to-CIE
+dependencies. Personality and LSDA relocations then participate in the same
+closure as ordinary references. An explicit reference to an entire unwind
+atom conservatively retains all its records. Merely retaining a CIE does
+not retain every FDE that uses it. The adapter also adds dynamic exports,
+init/fini entry points, command-line `-u` names and `SHF_GNU_RETAIN` sections
+to the roots.
+
+After marking, the adapter replays the original unwind records with dead
+code sections removed and composes those offsets with prior COMDAT
+pruning. It builds a fresh compact `ForeignLink`, copying retained section
+bytes and the name table, and remaps the original object section/symbol
+maps, resolved names and dynamic imports/exports. Library/version strings
+and original foreign input metadata remain borrowed: the `Foreign`, input
+conversion and both output arenas must outlive writing. Input and output
+must be distinct. Failure restores both arena lengths and leaves the
+output unchanged.
+
+Use `foreign_link_build_for_gc` when dead strong references need deferred
+diagnostics. That explicit producer keeps unresolved references until
+reachability determines whether they survive; validated ordinary unlaid-out
+conversion is also accepted, but reports those references eagerly. The final compact
+link rejects surviving strong undefined references. Unsupported unwind
+formats, references into discarded unwind records and nonzero addends
+into changed unwind fragments are refused. Collection runs before terminal
+string or CIE pooling; a pooled terminal link is not an input to this pass.
+
+`test-foreign --cross-check` compares both marker paths with an independent
+reachability model over chains, branches, cycles, duplicate targets,
+guarded tails and failure cases. Foreign adapter fixtures test ordinary
+and unwind closure, COMDAT composition, forced/retained roots, external
+map remapping, rollback, dead versus surviving undefined references, and
+written executable behavior against GNU ld and lld. The adapter is opt-in:
+`link-foreign --gc-sections` runs it ([the command](foreign-driver.md)).
+
+`benchmark-foreign-gc --counts 8,1024 --runs 21` creates original static
+ET_REL leaf objects with one CIE/FDE each, then compares GC on/off with the
+exact and vector paths. The mixed-dead entry calls alternating leaves; the
+all-live control calls every leaf. An untimed replay checks original ELF
+identities, stable maps, every retained unwind offset and serialized FDE
+addresses/ranges. Every timed output executes and matches complete reference
+bytes outside timing. The all-live byte reference is shared across GC on/off
+as well as both paths; the mixed-dead references are separate by GC state.
+
+Each sample reserves fresh link/name arenas, opens/resolves the frozen
+objects, converts, optionally collects, writes/closes and releases the
+per-link arenas and mappings before its total clock stops. Generated files,
+commands and thread-local scratch caches persist. Generation, output unlink,
+optional scalar conditioning and validation are excluded. This measures
+warm-file fresh links, not cold I/O or compilation. Phase medians need not
+sum to the total median. The report includes wall min/median/max, reference
+TSC ticks, input/output bytes and rates, logical code/CFI bytes, live counts
+and retained arena lengths. Those lengths exclude mapped input files,
+generated fixtures and transient scratch; they are not peak RSS.
+
+Variants rotate by default. `--order` selects their order, `--schedule blocked`
+groups samples, `--only mixed|all` selects a control, and `--after-scalar MS`
+adds excluded conditioning. Run each independently started process under the
+shared 9700X lock on CPU 2, alternating orders and comparing process medians
+against spread before making performance claims. This single-lane static
+fixture supplies no dynamic, COMDAT, personality/LSDA, corpus or scaling
+performance evidence.
+
+The isolated `4cb4936aaef2b980e4b2f29101cf8e86879f8336` source built and
+passed `test-foreign --cross-check` on the shared 9700X: marker 36,694 checks,
+adapter 281, C++ unwind 72, with no failures in those or the earlier groups.
+Three independently started benchmark processes used the command above,
+then reversed variant order, then blocked order. Every map/CFI/runtime/byte
+oracle passed. The table gives the range of process medians in microseconds,
+not a confidence interval or the within-process min/max:
+
+| 1,024-leaf case/path | GC off | GC on | Output bytes off → on | Retained arena bytes off → on |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed-dead, exact | 3,371–3,447 | 2,720–2,908 | 91,040 → 50,080 | 1,830,055 → 2,286,572 |
+| Mixed-dead, vector | 3,523–3,616 | 2,849–2,903 | 91,040 → 50,080 | 1,862,855 → 2,319,372 |
+| All-live, exact | 3,501–3,568 | 2,906–2,971 | 95,136 → 95,136 | 1,814,103 → 2,393,500 |
+| All-live, vector | 3,560–3,640 | 2,992–3,090 | 95,136 → 95,136 | 1,846,903 → 2,426,300 |
+
+The large fixture's reduction exceeds the between-process median spread.
+The eight-leaf cases are near 55 microseconds and do not establish a gain
+beyond observed spread. The all-live control also improves despite removing
+nothing: the adapter's copying changes byte placement and memory access, so
+these results do not isolate a reachability or SIMD speedup. Page-fault/cache
+attribution remains unmeasured. Retained arena growth is real; peak process
+memory was not measured. Default activation, corpus coverage and scaling
+remain separate decisions.
+
+Complete original build/test/benchmark logs and the frozen source manifest
+are retained in [the GC measurement directory](https://github.com/buster14a/buster-performance/tree/85fbcec02dafec90652bc56c24513e2622c06f61/docs/measurements/foreign-gc-2026-10-23).
+
+#### Foreign terminal CIE pooling
+
+`foreign_unwind_dedup_plan` considers EH atoms in their emitted order after
+COMDAT pruning and optional collection. Consecutive eligible fragments can
+share one byte-identical CIE only when its canonical fixup targets, kinds,
+relative offsets and full addends also match. A pool contains at most one
+distinct CIE, preserving the executable writer's single-CIE vector path.
+FDE order and the relative order of non-EH atoms remain unchanged. Variable
+record traversal and ordered pool formation are shared; bounded byte/fixup
+comparisons have exact and vector paths.
+
+Terminators, explicit/automatic roots, observable named anchors, references
+into unwind bytes and incompatible CIEs prevent unsafe pooling. A successful
+no-savings plan remains valid. An aliased CIE is distinct from a discarded
+record: its offset still maps to the retained CIE. Every original section
+has an explicit mapped endpoint, so a one-past symbol does not acquire the
+endpoint of a later fragment in the same pool. Pool alignment preserves the
+maximum input section alignment. Individual translated record positions
+preserve the writer's effective fragment requirement, `min(alignment, 4)`:
+the existing executable writer places EH fragments without inter-fragment
+padding. Tests include mixed 4-, 8- and 16-byte section alignments and
+multiple identical CIE records within one atom.
+
+`foreign_unwind_dedup_link` returns a distinct wrapper with fresh mutable
+Link columns, bytes, object maps, root/export arrays and historical unwind
+record maps. Symbol and name IDs remain stable. The wrapper's section maps
+are authoritative for original-ELF-to-pooled byte offsets; historical unwind
+plans retain pre-pooling coordinates, with remapped code-owner atom IDs.
+Immutable library metadata and historical unwind bytes remain borrowed, so
+the `Foreign`, input and both output arenas must outlive the result. Input
+and output are distinct. Any failure rolls arena lengths back and preserves
+both caller objects. `UNSUPPORTED` permits an unchanged-input fallback; it
+does not authorize ignoring malformed input or memory failures.
+
+The output is terminal: it may go to compatible string pooling and the
+executable writer, never back to GC, original relocation import or ET_REL
+writing. Shared-object output is outside this initial contract. A pooled
+wrapper documents this caller contract; its embedded `Link` is not a runtime
+tag that prevents misuse by an unrelated consumer. A pooled
+EH atom uses unit zero; only an EH pool as the source of a reference may
+refer to its constituent units' locals. A local target inside an EH pool
+does not gain a cross-unit exception. The adapter copies the whole link
+for transactional publication, including successful no-savings cases; that
+cost is part of acceptance rather than assumed negligible.
+
+`test-foreign --cross-check` checks plans, capacities, rollback, exact/vector
+agreement, record and endpoint mappings, fixup signatures, pins and alignment.
+The integrated fixture composes losing COMDAT pruning, GC and CIE pooling,
+then runs an original C++ throw/catch/destructor program with personality
+and LSDA records. That runtime gate is separate from the synthetic timing
+fixture and does not establish general C++ corpus coverage.
+
+`benchmark-foreign-unwind-dedup --counts 8,1024 --runs 21` compares exact and
+vector whole links with pooling on/off. Its original static leaf objects
+have either identical CIEs or different code-alignment factors unused by
+their instruction-free FDEs. An independent original-section/FDE map replay,
+runtime checksum and full output-byte comparison run outside timing. Unique
+CIE outputs must match across pooling states as well as paths. Timed work
+includes fresh arenas, input mapping/resolution, conversion, optional
+pooling, writer close and cleanup. Fixture/command generation, output unlink,
+conditioning and validation are excluded; input files and scratch caches
+are warm. Retained arena lengths exclude mappings and transient scratch and
+are not peak RSS. Wall spread, reference TSC ticks, removed records/bytes
+and output size accompany phase and total medians.
+
+Run independently started repetitions under the shared 9700X lock on CPU 2,
+varying `--order`/`--schedule` and optionally `--after-scalar`. Phase medians
+need not add to the total median. This original single-lane static fixture
+supplies no dynamic, COMDAT, personality/LSDA, corpus or scaling performance
+claim. The isolated slice passed its build, full foreign cross-check and
+call-graph gate on the locked 9700X, including 812 pooling checks, 136
+COMDAT/GC/CIE composition checks and 72 C++ unwind runtime checks. Three
+independently started CPU-2 benchmark processes each passed 1,118 pipeline
+checks. The [retained evidence and precise process-median tables](https://github.com/buster14a/buster-performance/blob/85fbcec02dafec90652bc56c24513e2622c06f61/docs/measurements/foreign-cie-2026-10-23/README.md)
+identify the frozen source/binary and timing boundaries; host input identity
+receipts remain pending.
+
+At 1,024 leaves, duplicate-CIE whole-link medians fall by 18.13% on the exact
+path and 19.14% on the vector path, while retained arena bytes increase.
+The unique-CIE control also gets faster with no records or bytes removed:
+the adapter copies the link and changes memory placement, so these figures
+do not establish a CIE-only or SIMD-only cause. Peak RSS was not measured;
+the eight-leaf changes remain limited observations at the recorded spread.
+These isolated runs use the newer writer's additional 4,096-byte file gap
+and are not mixed with earlier composed-snapshot timings. Performance
+qualification remains pending: all three processes used `--after-scalar 0`;
+bounded repeated `--after-scalar 100` processes and review of the exact
+build's emitted assembly remain before final SIMD-state acceptance. Broader
+corpus and scaling acceptance remain open. Pooling stays opt-in.
+
 #### Steps 1 to 5, as built
 
 `foreign.c` (the first part of step 7) resolves a command line on a group of
@@ -3605,6 +3803,110 @@ run: over four runs, 0.23 to 0.53 ms for the dynamic link of one worker and
 threads and the syncs of up to 13 rounds cost more than the work ("Lanes" has
 those costs), so a small link wants one lane: how many lanes a link takes is
 step 8's question, with the exchange's and the winners' first touches.
+
+#### Foreign executables, as built
+
+`foreign_link.c` turns `foreign_run`'s result into the representation, and
+`executable.c` writes it; `link-foreign` ([the command](foreign-driver.md))
+puts the two behind a GNU ld command line, as GCC's and clang's drivers give
+it. It writes static executables without libc and dynamic PIEs; shared
+libraries, static executables with libc and static PIEs are refused for now.
+
+- **The conversion.** The selected objects' sections become atoms in input
+  order (a COMDAT group's loser's dropped first), each object's locals its
+  symbols, each global name one symbol (its winner's, a common symbol's new
+  atom, a library's import at its version, the linker's, or a weak reference
+  to nothing), and each relocation a fixup, by `import.c`'s readers and their
+  vector paths. The unwind records of discarded sections go
+  ("Foreign COMDAT unwind pruning"); section GC, CIE pooling and string merging
+  are opt-in.
+- **What GNU ld and lld do that the output needs:** each needed library once
+  by its soname; the definitions a library refers to or interposes exported;
+  a library's own references left to the loader, which make no `--as-needed`
+  library needed (lld's rule); copy relocations for a library's data that
+  `-fPIE` code reads by `PC32`, with the library's other names at its address
+  and lld's alignment; `__start_` and `__stop_` over the sections of a
+  C-identifier name; `STB_GNU_UNIQUE` kept; the linker's names with lld's
+  visibilities; and lld's regular symbol table. An IFUNC that a fixup reaches is
+  refused: the dynamic PIE has no stubs for its own IFUNCs yet.
+- **Staged chunks.** The atoms' bytes are the inputs' private mappings, so the
+  writer copies each chunk into a lane's buffer and patches, hashes and writes
+  the copy (`ExecutableOptions.stage`). Patched in place, each page of an input
+  was copied on its first write: in CI's runs of synth's shape on one lane,
+  13,508 page faults and 63.1 ms before staging, 2,253 and 53.5 ms after it
+  ([40088135270](https://github.com/buster14a/buster/actions/runs/40088135270),
+  [40090244483](https://github.com/buster14a/buster/actions/runs/40090244483)).
+
+**The corpus.** `test-foreign-corpus` links each program from one command line
+by `link-foreign`, lld and mold: two programs of its own (C with threads,
+thread-locals, an archive, constructors, a weak reference and a
+`__start_`/`__stop_` registry; C++ with iostream, exceptions across units,
+RTTI, COMDAT templates and a thread) and, with `--sqlite` and `--lua`, SQLite's
+shell and Lua's interpreter, each compiled by gcc and by clang at `-O2`, and
+with `--self` this compiler, by clang. The three executables must run alike,
+have the same `.symtab` symbols with the same sizes, and agree on `.dynamic`,
+`.dynsym`'s versions and the dynamic relocations. On the 9700X every program
+passes: 165 checks, 68 of them the two programs of its own that the job's list
+runs ([the record](https://github.com/buster14a/buster-performance/tree/0e3f0a0708f0c01e8bfd2348beefb7fce400fc16/docs/measurements/foreign-link-2026-10-24)). What a reference linker writes otherwise as
+its own valid choice is counted per program, never dropped: mold leaves weak
+undefined names without a version out of `.dynsym`, keeps COMDAT signatures as
+absolute locals, drops `__FRAME_END__`, binds the names a copy relocation
+defines weakly, writes internal visibility as hidden (374 symbols of Lua's by
+gcc) and the bounds' names local, and keeps a few GOT slots that lld and
+`link-foreign` relax; lld leaves symbolic an `R_X86_64_64` to a library's data
+that it scanned before the reference that copies it, and gives a function that
+code both calls and loads from the GOT a second slot (9 in this compiler).
+
+**Throughput.** `benchmark-link`'s dynamic PIEs, linked from one command line
+by each linker as a process, the output on tmpfs: `link-foreign` with
+`--lanes=1` pinned to CPU 2 and with `--lanes=8`, the others with one thread
+(lld's `--threads=1`, mold's and wild's `--no-threads`) pinned to CPU 2 and
+with their own threads on the 15 CPUs, medians on the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/0e3f0a0708f0c01e8bfd2348beefb7fce400fc16/docs/measurements/foreign-link-2026-10-24)):
+
+| Program | `link-foreign`, 1 lane / 8 | wild, 1 thread / its threads | mold, 1 / its | lld, 1 / its | GNU ld | Direct path, 1 lane |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 worker | **0.60** / 1.71 ms | 1.35 / 2.54 ms | 2.44 / 5.46 ms | 4.45 / 5.73 ms | 5.46 ms | 0.017 ms |
+| 2,000 workers | **1.12** / 2.53 ms | 2.56 / 2.88 ms | 3.31 / 6.54 ms | 5.48 / 6.60 ms | 9.08 ms | 0.091 ms |
+| 102,400 workers | **55.2** / 41.2 ms | 99.9 / 24.8 ms | 99.9 / 37.3 ms | 98.7 / 56.8 ms | 355 ms | 7.32 ms |
+
+On the appendix's own inputs, compiled by real compilers (clang's `hello.o`,
+tcc's objects and archive, and synth's 513 objects), from the appendix's
+matched command line with the output on tmpfs, timed by its harness:
+
+| Input | `link-foreign`, 1 lane / 8 | wild, 1 thread / its threads | mold, 1 / its | lld, 1 / its |
+| --- | ---: | ---: | ---: | ---: |
+| hello world | **0.59** / 1.61 ms | 1.34 / 2.51 ms | 2.45 / 5.30 ms | 4.46 / 5.55 ms |
+| tcc | **1.06** / 2.13 ms | 2.14 / 2.93 ms | 3.29 / 6.66 ms | 5.23 / 6.51 ms |
+| synth | **61.0** / 45.0 ms | 139.9 / 25.1 ms | 96.6 / 38.0 ms | 105.2 / 58.8 ms |
+
+Every output runs and prints what lld's does.
+
+- **Per lane, `link-foreign` writes 0.89 GB/s of output** on synth's shape
+  (49.25 MB in 55.2 ms), where mold writes 0.54 GB/s on one thread (53.74 MB in
+  99.9 ms), wild 0.49 and lld 0.50: 1.66 times mold's rate, in 0.55 of its
+  time, with 2,257 page faults against mold's 16,093 and a peak resident set of
+  235 MB against its 268. On the appendix's synth it writes 0.75 GB/s (45.9 MB
+  in 61.0 ms), against mold's 0.48, lld's 0.44 and wild's 0.33.
+  The estimate of 2 to 5 GB/s per lane is not reached:
+  at 2 GB/s the whole link would take 25 ms, about what the resolution or the
+  conversion takes alone now. `--time`'s medians of seven links on one lane:
+  the resolution 21.2 ms (the symbols' parse 6.6, the resolution itself 7.2,
+  the winners 2.5, the exchange 2.2, the opening 1.4), the conversion 20.3,
+  the write 9.8 (its chunks 7.2) and the release 2.9, 54.4 ms in all. The
+  profile's largest items are the resolution's lane loop (25% of cycles), the
+  conversion's (11%) and its `link_check` (9.6%), the relocations' import
+  (8.7%) and the kernel's clearing of new pages (7.8%).
+- **On eight lanes** synth's link takes 40.1 ms (`--time`): the resolution
+  10.1 and the write 6.5, while the conversion stays at 20.4 ms on the calling
+  thread. wild with its threads takes 24.8 ms and mold 37.3. #87 puts the
+  conversion on lanes.
+- **Small links are the process around them.** `--time` puts a hello world's
+  link at 0.22 ms of the 0.59 ms its process takes; the rest is starting and
+  ending the compiler's executable, which was a PIE until #86: its 366,684
+  relative relocations made a run that does nothing take 8 to 13 ms on the
+  laptop, against 1.5 ms linked at a fixed address. More lanes cost a small
+  link their threads' start: 1.71 ms on eight for one worker.
 
 ### Lanes
 
@@ -4167,7 +4469,8 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
 - **Foreign links,** against lld and mold on the inputs above and a larger
   corpus: same exit status and output when run, the same set of symbols with
   the same sizes, and `readelf` checks of the dynamic section, versions and
-  relocations.
+  relocations. `test-foreign-corpus` does it, for programs compiled by gcc
+  and clang ("Foreign executables, as built").
 
 Invalid input (an object with an out-of-range offset, an undefined symbol, a
 relocation that doesn't fit) is a diagnostic naming the input, symbol and
@@ -4312,10 +4615,16 @@ and with this document updated with what was measured:
    each round's objects parsed, their records exchanged and resolved, the
    members the link needs loaded in rounds, and COMDAT groups picked, as GNU
    ld picks them where its result doesn't depend on the archives' order and
-   as lld does where it does, which the tests check against both. Next, the
-   loaded objects into the representation (atoms, symbols and fixups, from
-   step 7's relocation scan) so that `executable.c` writes them, then garbage
-   collection, merged strings and `.eh_frame`, and the corpus.
+   as lld does where it does, which the tests check against both.
+   The second part is done: the loaded objects into the representation and
+   written by `executable.c` as static executables without libc and dynamic
+   PIEs, by `link-foreign`, with section GC, CIE pooling and string merging
+   opt-in; the differential tests against lld and mold pass on the corpus
+   (`test-foreign-corpus`: two programs of its own, SQLite's shell, Lua and
+   this compiler, each by gcc and clang), and the per-lane throughput is
+   measured against mold's and wild's single thread ("Foreign executables, as
+   built"). Static executables with libc, static PIEs, shared libraries and the
+   dynamic PIE's own IFUNCs remain.
 8. **More than one lane:** measured scaling, and the per-filesystem write
    choice.
 9. **Unwind tables from the code generator's prologues, and DWARF,** then

@@ -5,6 +5,10 @@ native output independently of DWARF. This supplies the writer boundary needed
 for the symbol-name and size comparisons in
 [#86](https://github.com/buster14a/buster/issues/86). It does not itself select
 foreign symbols, enable a command-line mode, or establish corpus equivalence.
+The [raw command adapter](foreign-driver.md) selects named semantic symbols
+from its final transformed link by default, with `-s`/`--strip-all` omitting
+that attachment. Its selection and whole-command qualification remain
+distinct from the writer evidence below.
 
 ## Producer and consumer contract
 
@@ -90,8 +94,9 @@ pending.
 The exact twin retains the scalar lane-zero baseline. The vector path's ID
 classification and lane-partitioned validation/emission must be compared with
 that baseline, including selection construction, validation, name copies,
-output and cleanup, before making a performance claim or enabling foreign CLI
-output. The variable-length name copies and individual ELF row packing remain
+output and cleanup, before making a performance claim or qualifying the
+foreign CLI adapter's default output. The variable-length name copies and
+individual ELF row packing remain
 scalar within each lane; their costs need the same whole-path measurements.
 Large/tiny symbol populations, mixed bindings, TLS, imports, debug coexistence
 and frozen real workloads remain qualification gates.

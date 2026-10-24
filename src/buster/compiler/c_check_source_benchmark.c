@@ -714,8 +714,8 @@ static int run_checker_source_benchmark(int count, char** arguments)
                paths[0].stream.effect_count, reference.effect_count, passes, iterations, after);
         printf("preparation: scalar_validation_ns=%" PRIu64 " vector_validation_ns=%" PRIu64 " extraction_ns=%" PRIu64
                " graph_bytes=%" PRIu64 " binding_events=%u binding_walked_uses=%" PRIu64 " binding_fallback_uses=%" PRIu64 "\n",
-               validation[0], validation[1], selection_ns, graph_arena.length, paths[1].input.parser_binding_event_count,
-               paths[1].input.parser_binding_statistics.walked_uses, paths[1].input.parser_binding_statistics.fallback_uses);
+               validation[0], validation[1], selection_ns, graph_arena.length, paths[1].input.binding_event_count,
+               paths[1].input.binding_statistics.walked_uses, paths[1].input.binding_statistics.fallback_uses);
         for (uint32_t path = 0; path < 2; path += 1)
         {
             if (only == 2 || only == path)

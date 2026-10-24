@@ -170,6 +170,11 @@ jobs:
           test -x build/compiler
           test "$(find build -type f -executable | wc -l)" -eq 1
 
+      - name: Build the external Clang pragma token oracle
+        run: |
+          bash tools/build-preprocessor-pragma-oracle.sh
+          printf 'BUSTER_PPF_PRAGMA_ORACLE=%s/build/preprocessor-pragma-oracle\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
         # flags such as -funsigned-char.
@@ -239,6 +244,11 @@ jobs:
           # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
           # winners, the COMDAT groups and -y's lines with the resolution's.
           ./build/compiler test-foreign --cross-check
+          == Test the foreign linker against lld and mold
+          # Original C and C++ programs, each compiled by gcc and by clang, linked from one command line by
+          # link-foreign, lld and mold: their runs, symbols and sizes, dynamic sections, versions and relocations must
+          # agree but for each reference linker's documented choices.
+          ./build/compiler test-foreign-corpus
           == Test branch sizing
           # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
           # relaxation of them must give the bytes of the sized records.
@@ -757,8 +767,9 @@ jobs:
 
       - name: Benchmark the whole link against GNU ld, lld, mold and wild
         # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
-        # every CPU. Its linkers' side, about 121 s of the step's 122, times GNU ld, lld, mold and wild, which no pull
-        # request changes: it runs where `changes` doesn't rule it out (its baselines).
+        # every CPU. Its linkers' side, most of the step, times GNU ld, lld, mold and wild, which no pull request
+        # changes, and link-foreign on the same command lines: it runs where `changes` doesn't rule it out (its
+        # baselines).
         if: needs.changes.outputs.baselines != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -890,6 +901,55 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only scalar "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
+
+      - name: Benchmark the checker's binding handoff
+        # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
+        # whole source reader is timed per mode, with the handoff's pieces alone and their memory.
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input small
+          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input headers
+          taskset -c 2 ./build/compiler benchmark-checker-bindings --passes 5 "${system[@]}" "$corpus/sqlite/sqlite3.c"
+
+      - name: Benchmark the checker's binding handoff in repeated processes, in isolation and after scalar work
+        # Where `changes` doesn't rule it out (the checker's sources, c_check*.c).
+        if: needs.changes.outputs.checker != 'false'
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          for sample in 1 2 3; do
+            echo "Binding handoff process $sample"
+            taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input large
+            taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
+            # The new default against the old one, each alone and after 100 ms of the scalar twin's reader.
+            for mode in direct parser-batch; do
+              taskset -c 2 ./build/compiler benchmark-checker-bindings --only "$mode" "${system[@]}" "$corpus/sqlite/sqlite3.c"
+              taskset -c 2 ./build/compiler benchmark-checker-bindings --only "$mode" --after-scalar 100 "${system[@]}" "$corpus/sqlite/sqlite3.c"
+            done
+          done
+
+      - name: Benchmark binding handoffs through parsing, checking and cleanup
+        if: needs.changes.outputs.checker != 'false'
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          for sample in 1 2 3; do
+            echo "Binding pipeline process $sample"
+            for input in small headers large; do
+              taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" --input "$input"
+            done
+            taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" "$corpus/sqlite/sqlite3.c"
+            for mode in direct parser-batch; do
+              taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 --only "$mode" --after-scalar 100 "${system[@]}" "$corpus/sqlite/sqlite3.c"
+            done
+          done
 
       - name: Benchmark the backend (Tier 0, branch sizing and encoding)
         run: |
