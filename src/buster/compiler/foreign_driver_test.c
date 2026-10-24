@@ -25,7 +25,10 @@ typedef enum ForeignDriverTestFixture
     FOREIGN_DRIVER_TEST_OPTION_NAMES,
     FOREIGN_DRIVER_TEST_ABSOLUTE,
     FOREIGN_DRIVER_TEST_IFUNC,
+    FOREIGN_DRIVER_TEST_IFUNC_INERT,
+    FOREIGN_DRIVER_TEST_IFUNC_INERT_DYNAMIC,
     FOREIGN_DRIVER_TEST_IFUNC_APPLIED,
+    FOREIGN_DRIVER_TEST_IFUNC_PIE_APPLIED,
     FOREIGN_DRIVER_TEST_FIXTURES,
 } ForeignDriverTestFixture;
 
@@ -127,7 +130,7 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
         .text = ".globl driver_pick\n.set driver_pick,0x7fff000000000000\n.section .note.GNU-stack,\"\",@progbits\n",
     },
     // A program without libc whose _start calls an IFUNC, which returns 42, through its stub: nothing applies the
-    // stub's IRELATIVE relocation, and a static link refuses it.
+    // stub's IRELATIVE relocation, and a static link refuses it (the next five too, but where they say otherwise).
     [FOREIGN_DRIVER_TEST_IFUNC] = {
         .name = "fdriver_ifunc",
         .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
@@ -136,14 +139,55 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
                 ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
                 ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
     },
+    // The same with a pointer to __rela_iplt_start that nothing reads (#405's review): the name's mention isn't startup.
+    [FOREIGN_DRIVER_TEST_IFUNC_INERT] = {
+        .name = "fdriver_ifunc_inert",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".data\n.quad __rela_iplt_start\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // ... and with one to _DYNAMIC, for a static PIE.
+    [FOREIGN_DRIVER_TEST_IFUNC_INERT_DYNAMIC] = {
+        .name = "fdriver_ifunc_inert_dynamic",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".data\n.quad _DYNAMIC\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
     // The same, whose _start first applies the IRELATIVE relocations between __rela_iplt_start and __rela_iplt_end
-    // (each slot at its r_offset gets what the resolver at its r_addend returns), as libc.a's startup applies them.
+    // (each slot at its r_offset gets what the resolver at its r_addend returns), as libc.a's startup applies them: a
+    // static executable takes it with --startup-applies-irelative, and refuses it without.
     [FOREIGN_DRIVER_TEST_IFUNC_APPLIED] = {
         .name = "fdriver_ifunc_applied",
         .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
                 "lea __rela_iplt_start(%rip),%rbx\nlea __rela_iplt_end(%rip),%r12\n1: cmp %r12,%rbx\njae 2f\n"
                 "mov 16(%rbx),%rax\ncall *%rax\nmov (%rbx),%rcx\nmov %rax,(%rcx)\nadd $24,%rbx\njmp 1b\n"
                 "2: call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // A static PIE's: its _start finds .rela.dyn through _DYNAMIC (DT_RELA and DT_RELASZ) and applies each RELATIVE
+    // relocation (the place gets the base plus the addend) and each IRELATIVE one (what the resolver at the base plus
+    // the addend returns), the base being the ELF header's address, as libc.a's _dl_relocate_static_pie does; a static
+    // PIE takes it with --startup-applies-irelative.
+    [FOREIGN_DRIVER_TEST_IFUNC_PIE_APPLIED] = {
+        .name = "fdriver_ifunc_pie_applied",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "lea __ehdr_start(%rip),%r15\nlea _DYNAMIC(%rip),%rbx\nxor %r12d,%r12d\nxor %r13d,%r13d\n"
+                "1: mov (%rbx),%rax\ntest %rax,%rax\nje 3f\ncmp $7,%rax\njne 2f\nmov 8(%rbx),%r12\n"
+                "2: cmp $8,%rax\njne 4f\nmov 8(%rbx),%r13\n4: add $16,%rbx\njmp 1b\n"
+                "3: add %r15,%r12\nlea (%r12,%r13),%r13\n"
+                "5: cmp %r13,%r12\njae 7f\nmov 8(%r12),%eax\nmov (%r12),%rdi\nadd %r15,%rdi\nmov 16(%r12),%rsi\nadd %r15,%rsi\n"
+                "cmp $8,%eax\njne 6f\nmov %rsi,(%rdi)\njmp 8f\n"
+                "6: cmp $37,%eax\njne 8f\nmov %rdi,%r14\ncall *%rsi\nmov %rax,(%r14)\n"
+                "8: add $24,%r12\njmp 5b\n"
+                "7: call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
                 ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
                 ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
                 ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
@@ -862,9 +906,41 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
             },
         },
         {
-            .name = "static_ifunc_applied",
+            .name = "static_ifunc_inert",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_IFUNC_INERT],
+            },
+        },
+        {
+            .name = "static_pie_ifunc_inert",
+            .arguments = {
+                (char*)"-static",
+                (char*)"-pie",
+                files->objects[FOREIGN_DRIVER_TEST_IFUNC_INERT_DYNAMIC],
+            },
+        },
+        {
+            .name = "static_ifunc_unflagged",
             .arguments = {
                 files->objects[FOREIGN_DRIVER_TEST_IFUNC_APPLIED],
+            },
+        },
+        {
+            .name = "static_ifunc_applied",
+            .arguments = {
+                (char*)"--startup-applies-irelative",
+                files->objects[FOREIGN_DRIVER_TEST_IFUNC_APPLIED],
+            },
+            .success = true,
+            .status = 42,
+        },
+        {
+            .name = "static_pie_ifunc_applied",
+            .arguments = {
+                (char*)"-static",
+                (char*)"-pie",
+                (char*)"--startup-applies-irelative",
+                files->objects[FOREIGN_DRIVER_TEST_IFUNC_PIE_APPLIED],
             },
             .success = true,
             .status = 42,
@@ -938,19 +1014,23 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
                                 "strip-looking undefined values remain named GC roots without stripping", test->name);
         }
     }
-    // A static link refuses an IFUNC whose IRELATIVE relocation nothing applies, naming the startup code's missing name.
-    static const char* const unapplied[][2] = {
-        { "static_ifunc_unapplied", "__rela_iplt_start" },
-        { "static_pie_ifunc_unapplied", "_DYNAMIC" },
+    // A static link refuses an IFUNC whose IRELATIVE relocation nothing applies, naming it and saying why.
+    static const char* const unapplied[] = {
+        "static_ifunc_unapplied",
+        "static_pie_ifunc_unapplied",
+        "static_ifunc_inert",
+        "static_pie_ifunc_inert",
+        "static_ifunc_unflagged",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(unapplied); c += 1)
     {
         ForeignTestPath errors;
-        snprintf(errors, sizeof(errors), "%s/fdriver_%s.err", directory, unapplied[c][0]);
+        snprintf(errors, sizeof(errors), "%s/fdriver_%s.err", directory, unapplied[c]);
         const String8 diagnostic = foreign_test_read(arena, errors);
         const bool named = diagnostic.pointer != 0 && memmem(diagnostic.pointer, diagnostic.length, "driver_ifunc", 12) != 0 &&
-                           memmem(diagnostic.pointer, diagnostic.length, unapplied[c][1], strlen(unapplied[c][1])) != 0;
-        foreign_test_expect(tally, named, "a static IFUNC nothing applies is refused, naming it and the startup's missing name", unapplied[c][0]);
+                           memmem(diagnostic.pointer, diagnostic.length, "glibc's startup", 15) != 0 &&
+                           memmem(diagnostic.pointer, diagnostic.length, "--startup-applies-irelative", 27) != 0;
+        foreign_test_expect(tally, named, "a static IFUNC nothing applies is refused, naming it and saying why", unapplied[c]);
     }
     // A refusal's diagnostic is the same from the conversion on lanes as from the calling thread's.
     static const char* const refused[][2] = {
