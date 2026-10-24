@@ -1174,6 +1174,135 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
     arena_release(&scratch);
 }
 
+// Structs and unions by value (#137): a result's size, an argument's and a call's result object, each alone, are refused
+// by both paths before validation or allocation, leaving the caller's result and both arenas as they were. A null input
+// is a structural error, and after a structural or limit error, or an incoming variadic frame, the aggregates' columns
+// aren't read: they point at a PROT_NONE page.
+static void ir_lower_test_aggregates(IrLowerTestTally* tally)
+{
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    const uint8_t kinds[] =
+    {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN
+    };
+    const uint8_t classes[] =
+    {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64
+    };
+    const uint64_t values[] =
+    {
+        7,
+        0
+    };
+    // One call's metadata, which the structural checks require of a call count; the stream never makes the call.
+    const SymbolId call_targets[] =
+    {
+        1
+    };
+    const uint32_t call_first[] =
+    {
+        0
+    };
+    const uint32_t call_argument_counts[] =
+    {
+        1
+    };
+    const uint8_t call_variadic[] =
+    {
+        0
+    };
+    const uint8_t argument_classes[] =
+    {
+        BUSTER_TYPED_CLASS_U64
+    };
+    uint32_t argument_sizes[1] =
+    {
+        0
+    };
+    uint32_t call_result_objects[1] =
+    {
+        0
+    };
+    const AbiCall incoming_variadic =
+    {
+        0
+    };
+    const IrFunction preserved =
+    {
+        .instruction_count = 123,
+        .block_count = 17,
+    };
+    void* page = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ir_lower_test_expect(tally, page != MAP_FAILED, "protected page for the aggregates' columns", 0, 0);
+    // Nonzero marks, so that a rollback to zero would show.
+    const bool ready = page != MAP_FAILED && BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    ir_lower_test_expect(tally, ready, "aggregate arenas", 0, 0);
+    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    {
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        IrFunction result = preserved;
+        IrCheck check = ir_lower_typed_path(0, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
+                                        result.instruction_count == preserved.instruction_count,
+                             "null input refused as a structural error", 0, vector);
+        for (uint32_t part = 0; part < 3; part += 1)
+        {
+            Tier0Function source =
+            {
+                .kinds = kinds,
+                .classes = classes,
+                .values = values,
+                .count = 2,
+                .call_targets = call_targets,
+                .call_first = call_first,
+                .call_argument_counts = call_argument_counts,
+                .call_variadic = call_variadic,
+                .argument_classes = argument_classes,
+                .call_count = 1,
+                .argument_count = 1,
+                .argument_sizes = argument_sizes,
+                .call_result_objects = call_result_objects,
+                .result_size = part == 0 ? 8 : 0,
+            };
+            argument_sizes[0] = part == 1 ? 16 : 0;
+            call_result_objects[0] = part == 2 ? 1 : 0;
+            result = preserved;
+            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == BUSTER_IR_NONE && output.length == output_mark &&
+                                            scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count &&
+                                            result.block_count == preserved.block_count,
+                                 "aggregate refused without allocation", part, vector);
+            // The columns past every earlier error: a count past the limit, a missing column, an incoming variadic frame.
+            source.argument_sizes = (const uint32_t*)page;
+            source.call_result_objects = (const uint32_t*)page;
+            source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
+            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT && output.length == output_mark && scratch.length == scratch_mark,
+                                 "count limit precedes the aggregates' columns", part, vector);
+            source.count = 2;
+            source.call_first = 0;
+            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark,
+                                 "missing column precedes the aggregates' columns", part, vector);
+            source.call_first = call_first;
+            source.incoming_variadic = &incoming_variadic;
+            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && output.length == output_mark && scratch.length == scratch_mark,
+                                 "incoming variadic frame precedes the aggregates' columns", part, vector);
+        }
+    }
+    if (page != MAP_FAILED)
+    {
+        munmap(page, 4096);
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 // #136's frame objects and COPY. Two objects, of 23 bytes (aligned to 8) and 24 (aligned to 16), the first's bytes
 // stored in pieces of every width and copied into the second, whose last byte the copy mustn't reach, then the second
 // copied over itself (the same range); the result folds the second's three words and its address's remainder by 16.
@@ -1654,6 +1783,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_fixtures(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);
+        ir_lower_test_aggregates(&tally);
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);
         ir_lower_test_stack(&tally);
