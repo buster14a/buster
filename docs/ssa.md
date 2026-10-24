@@ -234,7 +234,10 @@ Leak checking was disabled in the sandbox; address and undefined-behavior
 checks remained enabled. These checks are not target-performance acceptance.
 
 `test-ssa-ir` compares generated Tier 0 execution, its all-memory shared IR,
-and both promoted IR forms, including return bits and global memory. Its
+and both promoted IR forms, including return bits and global memory, on
+programs of values and on as many with frame objects and `COPY` between them
+(#136's objects, lowered since #371), which stay in memory while the locals
+around them are promoted. Its
 test-only executor reuses the typed-IR arithmetic model and adds simultaneous
 phi entry, switches and symbolic indirect calls. Execution coverage is limited
 to that model's values of at most 64 bits; wider IR types still have structural

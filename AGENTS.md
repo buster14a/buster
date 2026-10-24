@@ -391,7 +391,7 @@ designs and the compilers already built this way.
   CFGs, including analysis and allocation. `docs/ssa.md` records the view's
   contract. `ssa_ir.c` adapts shared IR slots, rebuilds every operand form and
   verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
-  and both promoted forms. Complete source-corpus/Tier 1 acceptance for #134
+  and both promoted forms, with and without frame objects and copies. Complete source-corpus/Tier 1 acceptance for #134
   still needs the checker and downstream pipeline.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
