@@ -651,7 +651,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         }
         else if (kind == PARSE_KIND_EXTENSION)
         {
-            valid &= parser->language.gnu;
+            // __extension__ is a keyword in every language mode, as clang has it.
         }
         else if (kind == PARSE_KIND_TYPEDEF)
         {
@@ -3120,7 +3120,7 @@ static void check_input_expressions(CheckInputReader* reader)
         }
         else if (role == PARSE_ROLE_CLOSE_TERNARY)
         {
-            supported = count == 3 || (count == 2 && parser->language.gnu);
+            supported = count == 3 || count == 2;
             op = CHECK_OP_CONDITIONAL;
         }
         else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT)
@@ -3173,7 +3173,7 @@ static void check_input_expressions(CheckInputReader* reader)
             if (supported && !builtin)
             {
                 graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT;
-                graph->contexts[a] |= parser->language.gnu ? BUSTER_CHECK_CONTEXT_GNU_CONSTANT : 0;
+                graph->contexts[a] |= BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
             }
         }
         else if (role == PARSE_ROLE_CLOSE_CONDITION)
@@ -3255,10 +3255,10 @@ static void check_input_expressions(CheckInputReader* reader)
             {
                 reader->output->token_nodes[token] = a;
                 reader->output->case_ranges[token] = count == 2 ? b : BUSTER_CHECK_NONE;
-                graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | (parser->language.gnu ? BUSTER_CHECK_CONTEXT_GNU_CONSTANT : 0);
+                graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
                 if (count == 2)
                 {
-                    graph->contexts[b] |= BUSTER_CHECK_CONTEXT_ICE | (parser->language.gnu ? BUSTER_CHECK_CONTEXT_GNU_CONSTANT : 0);
+                    graph->contexts[b] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
                 }
             }
         }

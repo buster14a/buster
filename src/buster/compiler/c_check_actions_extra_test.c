@@ -257,7 +257,8 @@ static void check_test_record_casts(CheckTest* test, TypeTable* table)
             .type = records[i],
         };
         const CheckActionResult strict = check_test_action(test, table, cast);
-        check_test_expect(test, strict.diagnostic == CHECK_DIAG_INCOMPATIBLE, "strict action mode rejects aggregate casts");
+        check_test_expect(test, strict.diagnostic == CHECK_DIAG_NONE && strict.value.type == records[i],
+                          "a same-record cast is GNU's extension, which clang has outside GNU modes too");
         cast.extensions = BUSTER_CHECK_EXTENSION_GNU;
         const CheckActionResult gnu = check_test_action(test, table, cast);
         check_test_expect(test, gnu.diagnostic == CHECK_DIAG_NONE && gnu.value.type == records[i] && gnu.value.category == CHECK_RVALUE &&
@@ -291,7 +292,8 @@ static void check_test_mixed_void_conditional(CheckTest* test, TypeTable* table)
                 .fault_node = 17,
             };
             const CheckActionResult strict = check_test_action(test, table, action);
-            check_test_expect(test, strict.diagnostic == CHECK_DIAG_INCOMPATIBLE, "strict conditional requires both void operands");
+            check_test_expect(test, strict.diagnostic == CHECK_DIAG_NONE && strict.value.type == BUSTER_TYPE_VOID,
+                              "a conditional with one void operand is void outside GNU modes too");
             action.extensions = BUSTER_CHECK_EXTENSION_GNU;
             const CheckActionResult gnu = check_test_action(test, table, action);
             const bool selected_integer = truth == reverse;
@@ -478,7 +480,8 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
         {
             CheckAction action = { .op = operation == 0 ? CHECK_OP_SIZEOF : CHECK_OP_ALIGNOF, .type = types[i] };
             CheckActionResult result = check_test_action(test, table, action);
-            check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPLETE, "void/function layout extensions are disabled by default");
+            check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.integer == (i == 1 && operation == 1 ? 4 : 1),
+                              "void/function layout extensions apply outside GNU modes too");
             action.extensions = BUSTER_CHECK_EXTENSION_GNU;
             result = check_test_action(test, table, action);
             check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && (result.value.flags & BUSTER_CHECK_ICE) != 0 && result.value.integer == (i == 1 && operation == 1 ? 4 : 1), "explicit GNU void/function target layout matches Clang");
@@ -487,7 +490,7 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
         const CheckValue base = { .type = pointer, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_STATIC_OBJECT, .constant_kind = CHECK_CONSTANT_ADDRESS, .object = 31, .offset = 8 };
         CheckAction action = { .op = CHECK_OP_ADD, .operands = { base, check_test_integer(BUSTER_TYPE_INT, 3) } };
         CheckActionResult result = check_test_action(test, table, action);
-        check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPLETE, "void/function pointer arithmetic requires explicit GNU mode");
+        check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.offset == 11, "void/function pointer arithmetic applies outside GNU modes too");
         action.extensions = BUSTER_CHECK_EXTENSION_GNU;
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == pointer && result.value.object == 31 && result.value.offset == 11, "GNU void/function pointer addition uses a one-byte scale");
@@ -875,10 +878,10 @@ static void check_test_void_return_conversion(CheckTest* test, TypeTable* table)
     const CheckActionResult accepted = check_test_action(test, table, action);
     action.operands[0] = check_test_integer(BUSTER_TYPE_INT, 1);
     const CheckActionResult integer = check_test_action(test, table, action);
-    check_test_expect(test, strict.diagnostic == CHECK_DIAG_INCOMPATIBLE && accepted.diagnostic == CHECK_DIAG_NONE &&
+    check_test_expect(test, strict.diagnostic == CHECK_DIAG_NONE && strict.value.type == BUSTER_TYPE_VOID && accepted.diagnostic == CHECK_DIAG_NONE &&
                            accepted.value.type == BUSTER_TYPE_VOID && (accepted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 &&
                            integer.diagnostic == CHECK_DIAG_INCOMPATIBLE,
-                      "GNU return conversion accepts exact void expressions while preserving effects and rejecting integer returns");
+                      "return conversion accepts exact void expressions in every mode, preserving effects and rejecting integer returns");
 }
 
 static __attribute__((noinline)) void check_test_actions_extra(CheckTest* test, TypeTable* table, const char* clang)

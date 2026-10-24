@@ -242,8 +242,9 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token)
 
 static uint32_t check_init_extensions(const CheckInitWalker* walker)
 {
+    // check_input_expression_extensions' (c_check_constant.c, included after this file): GNU's folding in every mode.
     return walker->ignore_excess ? (walker->graph != NULL ? walker->graph->extensions :
-           walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU_CONSTANT | BUSTER_CHECK_EXTENSION_GNU : 0) : 0;
+           BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0)) : 0;
 }
 
 static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part)
@@ -753,8 +754,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
             uint64_t last = 0;
             if ((kind != BUSTER_TYPE_KIND_ARRAY && kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) || close == end ||
                 !check_init_index(walker, token, ellipsis != BUSTER_CHECK_NONE ? ellipsis : close, &index) ||
-                (ellipsis != BUSTER_CHECK_NONE && (!parser->language.gnu ||
-                 !check_init_index(walker, ellipsis, close, &last) || last < index)))
+                (ellipsis != BUSTER_CHECK_NONE && (!check_init_index(walker, ellipsis, close, &last) || last < index)))
             {
                 check_init_fail(walker, CHECK_INIT_INVALID, token);
             }
@@ -1414,8 +1414,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
 
 static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin, uint32_t end)
 {
-    walker->flexible_storage = walker->static_storage && walker->parser->language.gnu &&
-                               walker->parser->tree.roles[begin] != PARSE_ROLE_OPEN_COMPOUND_BODY;
+    walker->flexible_storage = walker->static_storage && walker->parser->tree.roles[begin] != PARSE_ROLE_OPEN_COMPOUND_BODY;
     walker->capacity = 16;
     walker->frames = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitFrame, walker->capacity);
     if (walker->frames == 0 || walker->capacity == 0)

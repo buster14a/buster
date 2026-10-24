@@ -58,6 +58,8 @@ typedef enum CheckFault
 #define BUSTER_CHECK_VECTOR_DUPLICATE 0x2000u
 #define BUSTER_CHECK_GNU_DIVISION 0x4000u
 
+// -std=gnu*. GNU's extensions themselves (void * arithmetic, sizeof(void), a void conditional arm) apply in every
+// language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
 #define BUSTER_CHECK_EXTENSION_GNU 0x01u
 #define BUSTER_CHECK_EXTENSION_GNU_CONSTANT 0x02u
 #define BUSTER_CHECK_FP_ENV_ACCESS 0x01u
@@ -660,7 +662,8 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
     }
     else if (value.category == CHECK_LVALUE)
     {
-        if (!check_action_source_complete(table, value.type, action) && !((action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && kind == BUSTER_TYPE_KIND_VOID))
+        // A void lvalue (*p of a void *) converts as GNU's extension, in every language mode as clang has it.
+        if (!check_action_source_complete(table, value.type, action) && kind != BUSTER_TYPE_KIND_VOID)
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, index);
         }
@@ -1296,9 +1299,7 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
         check_action_promote(table, &right, &result->conversions[2], action->node);
         common = type_usual_arithmetic(table, left.type, right.type);
     }
-    else if ((check_action_kind(table, left.type) == BUSTER_TYPE_KIND_VOID && check_action_kind(table, right.type) == BUSTER_TYPE_KIND_VOID) ||
-             ((action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
-              (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_VOID || check_action_kind(table, right.type) == BUSTER_TYPE_KIND_VOID)))
+    else if (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_VOID || check_action_kind(table, right.type) == BUSTER_TYPE_KIND_VOID)
     {
         common = BUSTER_TYPE_VOID;
     }
@@ -1373,7 +1374,7 @@ static bool check_action_object_pointer(const TypeTable* table, TypeId pointer, 
     {
         const TypeId element = type_element(table, type_strip_aligned(table, pointer));
         const uint8_t kind = check_action_kind(table, element);
-        const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && (kind == BUSTER_TYPE_KIND_VOID || (kind == BUSTER_TYPE_KIND_FUNCTION && action->op != CHECK_OP_SUBSCRIPT));
+        const bool gnu = kind == BUSTER_TYPE_KIND_VOID || (kind == BUSTER_TYPE_KIND_FUNCTION && action->op != CHECK_OP_SUBSCRIPT);
         valid = gnu || (kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && check_action_source_complete(table, element, action));
         if (!valid)
         {
@@ -1391,7 +1392,7 @@ static uint64_t check_action_pointer_stride(const TypeTable* table, TypeId point
 {
     const TypeId element = type_element(table, type_strip_aligned(table, pointer));
     const uint8_t kind = check_action_kind(table, element);
-    const bool gnu_byte = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && (kind == BUSTER_TYPE_KIND_VOID || kind == BUSTER_TYPE_KIND_FUNCTION);
+    const bool gnu_byte = kind == BUSTER_TYPE_KIND_VOID || kind == BUSTER_TYPE_KIND_FUNCTION;
     return gnu_byte ? 1 : type_size(table, element);
 }
 
@@ -1813,7 +1814,7 @@ static void check_action_assignment(TypeTable* table, const CheckAction* action,
     if (type_is_valid(table, target))
     {
         target = type_conversion_operand(table, target);
-        const bool void_return = action->op == CHECK_OP_CONVERT && (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
+        const bool void_return = action->op == CHECK_OP_CONVERT &&
                                  check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID && check_action_kind(table, source.type) == BUSTER_TYPE_KIND_VOID;
         if (!void_return && !check_action_assignable(table, target, &source, action, result))
         {
@@ -1936,8 +1937,7 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
     const bool source_pointer = input_kind == BUSTER_TYPE_KIND_POINTER;
     const bool pointer_float = (target_pointer && !check_action_is_integer(table, source.type) && !source_pointer && input_kind != BUSTER_TYPE_KIND_NULLPTR) || (source_pointer && !target_pointer && !check_action_is_integer(table, target));
     const bool scalar = check_action_is_scalar(table, target) && check_action_is_scalar(table, source.type) && !pointer_float;
-    const bool record = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 &&
-                        (target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) &&
+    const bool record = (target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) &&
                         target_kind == input_kind && check_action_compatible_at(table, target, type_unqualified(source.type), action, result);
     if ((target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) && !check_action_source_complete(table, target, action))
     {
@@ -1976,7 +1976,7 @@ static void check_action_query(TypeTable* table, const CheckAction* action, Chec
     const TypeId target = action->type != 0 ? action->type : action->operands[0].type;
     const uint8_t kind = check_action_kind(table, target);
     const bool bit_field = action->type == 0 && action->operands[0].category == CHECK_LVALUE && (action->operands[0].flags & BUSTER_CHECK_BIT_FIELD) != 0;
-    const bool gnu = (action->extensions & BUSTER_CHECK_EXTENSION_GNU) != 0 && (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID);
+    const bool gnu = kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID;
     if (bit_field || (!gnu && (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID || !check_action_source_complete(table, target, action))))
     {
         check_action_diagnose(result, bit_field ? CHECK_DIAG_BIT_FIELD : CHECK_DIAG_INCOMPLETE, 0);

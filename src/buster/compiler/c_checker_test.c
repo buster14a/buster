@@ -938,7 +938,8 @@ static __attribute__((noinline)) void check_test_update_actions(CheckTest* test,
         .category = CHECK_LVALUE
     };
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPLETE, "pointer update requires a complete object element type");
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == action.operands[0].type,
+                      "pointer update of a void * is GNU's byte arithmetic, which clang has outside GNU modes too");
     action.op = CHECK_OP_SUBTRACT_ASSIGN;
     action.operands[0].type = type_pointer(table, BUSTER_TYPE_INT);
     action.operands[1] = action.operands[0];

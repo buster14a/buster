@@ -224,6 +224,62 @@ static const CheckMutationFixture check_mutation_fixtures[] =
         .line = 5,
     },
     {
+        .name = "musl 1.2.5 include/alltypes.h's pthread_attr_t, a type made void: sizeof(void) is 1 and the array of none GNU's, under -std=c99",
+        .source = "typedef struct { union { int __i[14]; void *__p[sizeof(void) / 12 * sizeof(int)]; } __u; } pthread_attr_t;\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "musl 1.2.5 include/sys/select.h's fd_set, a constant changed: an array of no elements is GNU's extension under -std=c99 too",
+        .source =
+            "typedef struct {\n"
+            "    unsigned long fds_bits[sizeof(long) / 1024 / 8];\n"
+            "} fd_set;\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "an array bound, an enumerator, a case label and a static assertion that fold without being ICEs, under -std=c99",
+        .source =
+            "enum { E = (int)(1.5 * 2) };\n"
+            "int a[(int)(1.5 + 1.0)];\n"
+            "_Static_assert((int)(0.5 + 0.5) == 1, \"folded\");\n"
+            "int f(int x)\n"
+            "{\n"
+            "    switch (x) { case (int)(1.0 + 1): return 1; }\n"
+            "    return 0;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
+        .name = "GNU's other extensions clang has under -std=c99: ?:, ranges, flexible initializers, void arithmetic and conditionals",
+        .source =
+            "struct F { int n; int d[]; };\n"
+            "static struct F flexible = { 1, { 2, 3 } };\n"
+            "int ranges[10] = { [1 ... 3] = 5 };\n"
+            "__extension__ typedef long long wide;\n"
+            "struct S { int a; };\n"
+            "void g(void);\n"
+            "void h(void) { return g(); }\n"
+            "long f(void *p, void *q, int c, struct S s)\n"
+            "{\n"
+            "    c ? g() : c;\n"
+            "    s = (struct S)s;\n"
+            "    return (p + 1 - q) + (c ?: 2) + (long)sizeof(g) + (long)__alignof__(void) + s.a;\n"
+            "}\n",
+        .standard = 1999,
+        .gnu = false,
+        .rejected = false,
+        .line = 0,
+    },
+    {
         .name = "too few arguments are reported at the call's )",
         .source =
             "void h(int, int);\n"
