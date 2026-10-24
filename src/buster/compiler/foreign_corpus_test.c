@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-foreign-corpus: the foreign linker's differential corpus test (#86's "done when"). Each program of the corpus is
-// compiled by each C compiler given (gcc and clang by default) at -O2, as their drivers compile a PIE by default, then
-// linked from one command line by link-foreign (this executable, run as a process of its own), by lld and by mold: the
-// GCC driver's crt objects and libraries around the program's objects and archives. The three executables must:
+// test-foreign-corpus: the foreign linker's differential corpus test (#86's "done when", and #394's output kinds). Each
+// program of the corpus is compiled by each C compiler given (gcc and clang by default) at -O2, as their drivers compile
+// a PIE by default, then linked from one command line by link-foreign (this executable, run as a process of its own), by
+// lld and by mold: the GCC driver's crt objects and libraries around the program's objects and archives, as each kind of
+// output (ForeignCorpusKind) has them: a dynamic PIE, a static executable (-static, with libc.a), a static PIE (GCC's
+// -static-pie line) and a shared library of the program's library part (-shared, its sources compiled with -fPIC), which
+// a PIE of the rest that lld links loads, by each linker's library in turn. The three outputs must:
 //   - run alike: each run's exit status, standard output and standard errors, run as ./program from directories of the
 //     same name, with the same arguments, input and environment;
 //   - have the same symbols with the same sizes: .symtab's named entries, each one's name, binding, type, visibility,
@@ -18,8 +21,9 @@
 //     slot: GLOB_DAT, or the JUMP_SLOT that lld and mold give a call's slot, where link-foreign binds every import at
 //     load with GLOB_DAT; a COPY; an R_X86_64_64; a TPOFF64; a DTPMOD64; a DTPOFF64), as a multiset, and the count of
 //     relative relocations (RELATIVE ones and RELR's) against lld's.
-// And link-foreign's program must come out byte for byte the same when it links on eight lanes, through the
-// resolution's, the conversion's and the writer's lane paths, as on one.
+// And link-foreign's output must come out byte for byte the same when it links on eight lanes, through the resolution's,
+// the conversion's and the writer's lane paths, as on one. A static executable's IRELATIVE relocations are in
+// .rela.iplt (GNU ld's place), lld's and mold's in .rela.dyn: the comparison reads both.
 // What a reference linker writes as its own choice, where link-foreign's choice is lld's or GNU ld's and as valid, is
 // counted and printed as documented rather than as a failure (foreign_corpus_documented): mold leaves a weak undefined
 // name that nothing defines and that has no version out of .dynsym, binds the aliases it copies weakly, writes its own
@@ -60,6 +64,28 @@ struct ForeignCorpusProgram
     // Compiled by these compilers alone (0 for every one given).
     const char* only_compiler;
     ForeignCorpusRun runs[8];
+    // Its library part, for the shared kind: these sources (of `sources` and `archived`), compiled with -fPIC, make
+    // libcorpus.so, which each linker links, and the others a PIE that lld links against it. None leaves the kind out.
+    const char* library[BUSTER_FOREIGN_CORPUS_MAX_SOURCES];
+    // The kinds left out, a bit per ForeignCorpusKind.
+    uint32_t skipped;
+};
+
+// The kinds of output the corpus links (link-foreign's -pie, -static, -static -pie and -shared).
+typedef enum ForeignCorpusKind
+{
+    FOREIGN_CORPUS_PIE,
+    FOREIGN_CORPUS_STATIC,
+    FOREIGN_CORPUS_STATIC_PIE,
+    FOREIGN_CORPUS_SHARED,
+    FOREIGN_CORPUS_KINDS,
+} ForeignCorpusKind;
+
+static const char* const foreign_corpus_kind_names[FOREIGN_CORPUS_KINDS] = {
+    "pie",
+    "static",
+    "static-pie",
+    "shared",
 };
 
 typedef struct ForeignCorpusFixture ForeignCorpusFixture;
@@ -80,6 +106,10 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "extern double corpus_scale(double);\n"
                 "extern int corpus_shared_work(int);\n"
                 "extern void corpus_weak_hook(void) __attribute__((weak));\n"
+                "extern int corpus_pick(int);\n"
+                "extern int corpus_clone(int);\n"
+                "int (*corpus_ifuncs[2])(int) = { corpus_pick, corpus_clone };\n"
+                "int (*volatile corpus_picked)(int);\n"
                 "struct corpus_entry { const char* name; long value; };\n"
                 "static const struct corpus_entry corpus_entry_main __attribute__((used, section(\"corpus_registry\"))) = { \"main\", 3 };\n"
                 "extern const struct corpus_entry __start_corpus_registry[], __stop_corpus_registry[];\n"
@@ -114,6 +144,8 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "    if (setjmp(corpus_jump) == 0) { jumped = 1; longjmp(corpus_jump, 3); }\n"
                 "    printf(\"name %s scale %.3f counter %d shared %d jumped %d\\n\", corpus_name(argc), corpus_scale(2.0), corpus_counter, corpus_shared_work(argc), jumped);\n"
                 "    printf(\"weak %d env %d args %d %s\\n\", corpus_weak_hook == 0, environ != 0 && getenv(\"CORPUS_ENV\") != 0, argc, argc > 1 ? argv[1] : \"-\");\n"
+                "    corpus_picked = corpus_pick;\n"
+                "    printf(\"ifunc %d %d %d %d %d %d\\n\", corpus_pick(argc), corpus_picked(argc), corpus_clone(argc), corpus_ifuncs[0](argc), corpus_ifuncs[1](argc), corpus_ifuncs[0] == corpus_picked);\n"
                 "    char line[128];\n"
                 "    if (fgets(line, sizeof(line), stdin) != 0) printf(\"input %zu\\n\", strlen(line));\n"
                 "    fflush(stdout);\n"
@@ -128,13 +160,17 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "static const struct corpus_entry corpus_entry_counter __attribute__((used, section(\"corpus_registry\"))) = { \"counter\", 5 };\n"
                 "int corpus_counter = 41;\n"
                 "static char corpus_table[4096];\n"
-                "int corpus_shared_work(int n) { memset(corpus_table, n, sizeof(corpus_table)); int total = 0; for (unsigned i = 0; i < sizeof(corpus_table); i += 512) total += corpus_table[i]; return total; }\n",
+                "int corpus_shared_work(int n) { memset(corpus_table, n, sizeof(corpus_table)); int total = 0; for (unsigned i = 0; i < sizeof(corpus_table); i += 512) total += corpus_table[i]; return total; }\n"
+                "static int corpus_pick_one(int x) { return x + 1; }\n"
+                "static int (*corpus_pick_resolver(void))(int) { return corpus_pick_one; }\n"
+                "int corpus_pick(int) __attribute__((ifunc(\"corpus_pick_resolver\")));\n",
     },
     {
         .file = "corpus_names.c",
         .text = "struct corpus_entry { const char* name; long value; };\n"
                 "static const struct corpus_entry corpus_entry_names __attribute__((used, section(\"corpus_registry\"))) = { \"names\", 7 };\n"
-                "const char* corpus_name(int n) { static const char* const names[] = { \"zero\", \"one\", \"two\", \"three\" }; return names[n & 3]; }\n",
+                "const char* corpus_name(int n) { static const char* const names[] = { \"zero\", \"one\", \"two\", \"three\" }; return names[n & 3]; }\n"
+                "__attribute__((target_clones(\"default\", \"avx2\"))) int corpus_clone(int x) { return x * 3; }\n",
     },
     {
         .file = "corpus_scale.c",
@@ -209,10 +245,36 @@ struct ForeignCorpus
     const char* linkers[4];
     uint32_t linker_count;
     ForeignTestSystem system;
+    // Each kind's crt objects, by RuntimeObject, as GCC's driver gives them (empty for none): the PIE's are
+    // runtime.c's, and the others beside them, as GCC installs them (crt1.o and rcrt1.o beside Scrt1.o, crtbeginT.o and
+    // crtend.o beside crtbeginS.o).
+    char objects[FOREIGN_CORPUS_KINDS][RUNTIME_OBJECTS][BUSTER_FOREIGN_TEST_PATH_BYTES];
     ForeignTestTally tally;
     uint32_t jobs;
     Arena* arena;
 };
+
+// `path`'s directory, with `name` in it, into `result`.
+static void foreign_corpus_beside(char* result, const char* path, const char* name)
+{
+    const char* slash = strrchr(path, '/');
+    const int length = slash != 0 ? (int)(slash - path) : 0;
+    snprintf(result, BUSTER_FOREIGN_TEST_PATH_BYTES, "%.*s%s%s", length, path, slash != 0 ? "/" : "", name);
+}
+
+static void foreign_corpus_objects(ForeignCorpus* corpus)
+{
+    for (uint32_t kind = 0; kind < FOREIGN_CORPUS_KINDS; kind += 1)
+    {
+        memcpy(corpus->objects[kind], corpus->system.objects, sizeof(corpus->system.objects));
+    }
+    const char* start = corpus->system.objects[RUNTIME_OBJECT_START];
+    foreign_corpus_beside(corpus->objects[FOREIGN_CORPUS_STATIC][RUNTIME_OBJECT_START], start, "crt1.o");
+    foreign_corpus_beside(corpus->objects[FOREIGN_CORPUS_STATIC][RUNTIME_OBJECT_BEGIN], corpus->system.objects[RUNTIME_OBJECT_BEGIN], "crtbeginT.o");
+    foreign_corpus_beside(corpus->objects[FOREIGN_CORPUS_STATIC][RUNTIME_OBJECT_END], corpus->system.objects[RUNTIME_OBJECT_END], "crtend.o");
+    foreign_corpus_beside(corpus->objects[FOREIGN_CORPUS_STATIC_PIE][RUNTIME_OBJECT_START], start, "rcrt1.o");
+    corpus->objects[FOREIGN_CORPUS_SHARED][RUNTIME_OBJECT_START][0] = 0;
+}
 
 static void foreign_corpus_append(char** arguments, uint32_t* count, const char* argument)
 {
@@ -280,8 +342,8 @@ static bool foreign_corpus_spawn_all(char*** lines, char** logs, uint32_t count,
 }
 
 // A program's run: ./program with `run`'s arguments and input from `directory`, its output and errors into files beside
-// it named after `stem`; its exit status, or -1.
-static int foreign_corpus_execute(const char* directory, const ForeignCorpusRun* run, const char* stem)
+// it named after `stem`, and with `library`, its shared library found in `directory` too; its exit status, or -1.
+static int foreign_corpus_execute(const char* directory, const ForeignCorpusRun* run, const char* stem, bool library)
 {
     char input[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
     char output[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
@@ -295,7 +357,8 @@ static int foreign_corpus_execute(const char* directory, const ForeignCorpusRun*
     {
         arguments[i + 1] = (char*)run->arguments[i];
     }
-    char* environment[] = { (char*)"CORPUS_ENV=1", (char*)"LANG=C", (char*)"LC_ALL=C", (char*)"PATH=/usr/bin:/bin", (char*)"HOME=/nonexistent", 0 };
+    char* environment[] = { (char*)"CORPUS_ENV=1", (char*)"LANG=C", (char*)"LC_ALL=C", (char*)"PATH=/usr/bin:/bin", (char*)"HOME=/nonexistent",
+                            library ? (char*)"LD_LIBRARY_PATH=." : 0, 0 };
     int result = -1;
     posix_spawn_file_actions_t actions;
     if (foreign_test_write(input, text, strlen(text)) && posix_spawn_file_actions_init(&actions) == 0)
@@ -452,18 +515,161 @@ static void foreign_corpus_dynamic_symbols(const DynamicTestImage* image, Foreig
     }
 }
 
-// The dynamic relocations' rows, "class name" for each that names a symbol; and the relative ones' count, RELATIVE
-// entries and those RELR's words encode.
-static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, ForeignCorpusRows* rows)
+// The sections of the dynamic relocations the comparison reads: a static executable's IRELATIVE ones are in .rela.iplt
+// (link-foreign's, as GNU ld's) or .rela.plt.
+static const char* const foreign_corpus_relocation_sections[] = { ".rela.dyn", ".rela.plt", ".rela.iplt" };
+
+// An IRELATIVE relocation: the place it writes and its addend, the IFUNC's resolver.
+typedef struct ForeignCorpusIrelative ForeignCorpusIrelative;
+struct ForeignCorpusIrelative
+{
+    uint64_t destination;
+    uint64_t resolver;
+};
+
+// An image's IRELATIVE relocations, and the names .symtab gives their resolvers' addresses: `at`, a row
+// "address name" for each (the address in 16 hex digits), and `names`, the names alone, each sorted.
+typedef struct ForeignCorpusResolvers ForeignCorpusResolvers;
+struct ForeignCorpusResolvers
+{
+    ForeignCorpusIrelative* irelatives;
+    uint32_t count;
+    ForeignCorpusRows at;
+    ForeignCorpusRows names;
+};
+
+static int foreign_corpus_compare_addresses(const void* a, const void* b)
+{
+    const uint64_t left = *(const uint64_t*)a;
+    const uint64_t right = *(const uint64_t*)b;
+    return (left > right) - (left < right);
+}
+
+// The allocated section that holds `address`, or 0.
+static const Elf64_Shdr* foreign_corpus_section_at(const DynamicTestImage* image, uint64_t address)
+{
+    const Elf64_Shdr* result = 0;
+    for (uint32_t i = 1; result == 0 && i < image->header->e_shnum; i += 1)
+    {
+        const Elf64_Shdr* section = &image->section_headers[i];
+        result = (section->sh_flags & SHF_ALLOC) != 0 && address >= section->sh_addr && address - section->sh_addr < section->sh_size ? section : 0;
+    }
+    return result;
+}
+
+// Whether `address` is in a GOT section (.got or .got.plt) rather than in the image's data.
+static bool foreign_corpus_in_got(const DynamicTestImage* image, uint64_t address)
+{
+    const Elf64_Shdr* section = foreign_corpus_section_at(image, address);
+    return section != 0 && strncmp(image->names + section->sh_name, ".got", 4) == 0;
+}
+
+// An image's ForeignCorpusResolvers.
+static ForeignCorpusResolvers foreign_corpus_resolvers(const DynamicTestImage* image, Arena* arena)
+{
+    ForeignCorpusResolvers result = { .at = foreign_corpus_rows(arena), .names = foreign_corpus_rows(arena) };
+    uint64_t capacity = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(foreign_corpus_relocation_sections); s += 1)
+    {
+        const Elf64_Shdr* section = dynamic_test_section(image, foreign_corpus_relocation_sections[s]);
+        capacity += section != 0 ? section->sh_size / sizeof(Elf64_Rela) : 0;
+    }
+    result.irelatives = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignCorpusIrelative, capacity + 1);
+    uint64_t* addresses = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, capacity + 1);
+    for (uint32_t s = 0; result.irelatives != 0 && addresses != 0 && s < BUSTER_ARRAY_LENGTH(foreign_corpus_relocation_sections); s += 1)
+    {
+        const Elf64_Shdr* section = dynamic_test_section(image, foreign_corpus_relocation_sections[s]);
+        const Elf64_Rela* entries = (const Elf64_Rela*)dynamic_test_bytes(image, section);
+        for (uint64_t i = 0; entries != 0 && i < section->sh_size / sizeof(Elf64_Rela); i += 1)
+        {
+            if (ELF64_R_TYPE(entries[i].r_info) == R_X86_64_IRELATIVE)
+            {
+                result.irelatives[result.count] = (ForeignCorpusIrelative){ .destination = entries[i].r_offset, .resolver = (uint64_t)entries[i].r_addend };
+                addresses[result.count] = (uint64_t)entries[i].r_addend;
+                result.count += 1;
+            }
+        }
+    }
+    if (addresses != 0)
+    {
+        qsort(addresses, result.count, sizeof(uint64_t), foreign_corpus_compare_addresses);
+    }
+    const Elf64_Shdr* table = dynamic_test_section(image, ".symtab");
+    const Elf64_Shdr* strings = table != 0 && table->sh_link < image->header->e_shnum ? &image->section_headers[table->sh_link] : 0;
+    const Elf64_Sym* symbols = (const Elf64_Sym*)dynamic_test_bytes(image, table);
+    for (uint64_t i = 1; result.count != 0 && symbols != 0 && strings != 0 && i < table->sh_size / sizeof(Elf64_Sym); i += 1)
+    {
+        const Elf64_Sym* symbol = &symbols[i];
+        const uint8_t type = ELF64_ST_TYPE(symbol->st_info);
+        const char* name = foreign_corpus_string(image, strings, symbol->st_name);
+        const uint64_t value = symbol->st_value;
+        if (type != STT_FILE && type != STT_SECTION && symbol->st_shndx != SHN_UNDEF && symbol->st_shndx != SHN_ABS && name[0] != 0 &&
+            bsearch(&value, addresses, result.count, sizeof(uint64_t), foreign_corpus_compare_addresses) != 0)
+        {
+            foreign_corpus_row(&result.at, "%016" PRIx64 " %s", value, name);
+            foreign_corpus_row(&result.names, "%s", name);
+        }
+    }
+    qsort(result.at.rows, result.at.count, BUSTER_FOREIGN_CORPUS_ROW_BYTES, foreign_corpus_compare_rows);
+    qsort(result.names.rows, result.names.count, BUSTER_FOREIGN_CORPUS_ROW_BYTES, foreign_corpus_compare_rows);
+    return result;
+}
+
+// The name a row gives the resolver at `address`: of the names the image gives it (`own`), the first that the other
+// image gives one of its resolvers too (`other`), so that the two name a resolver alike though a linker moved some of
+// its names to the IFUNC's stub (lld an IFUNC whose address is taken, mold every IFUNC of a static executable); else
+// its first name, or none.
+static const char* foreign_corpus_resolver_name(const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other, uint64_t address)
+{
+    char prefix[24];
+    snprintf(prefix, sizeof(prefix), "%016" PRIx64 " ", address);
+    const uint64_t length = strlen(prefix);
+    const char* first = 0;
+    const char* shared = 0;
+    for (uint32_t i = 0; shared == 0 && i < own->at.count; i += 1)
+    {
+        const char* name = own->at.rows[i] + length;
+        const bool here = strncmp(own->at.rows[i], prefix, length) == 0;
+        first = first == 0 && here ? name : first;
+        shared = here && bsearch(name, other->names.rows, other->names.count, BUSTER_FOREIGN_CORPUS_ROW_BYTES, foreign_corpus_compare_rows) != 0 ? name : 0;
+    }
+    return shared != 0 ? shared : first != 0 ? first : "";
+}
+
+// Whether each of an image's IRELATIVE relocations writes a place of its own.
+static bool foreign_corpus_distinct(const ForeignCorpusResolvers* resolvers, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    uint64_t* destinations = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)resolvers->count + 1);
+    bool result = destinations != 0 && resolvers->irelatives != 0;
+    for (uint32_t i = 0; result && i < resolvers->count; i += 1)
+    {
+        destinations[i] = resolvers->irelatives[i].destination;
+    }
+    if (result)
+    {
+        qsort(destinations, resolvers->count, sizeof(uint64_t), foreign_corpus_compare_addresses);
+    }
+    for (uint32_t i = 1; result && i < resolvers->count; i += 1)
+    {
+        result = destinations[i] != destinations[i - 1];
+    }
+    arena_pop_to(arena, mark);
+    return result;
+}
+
+// The dynamic relocations' rows, "class name" for each that names a symbol, and "irelative resolver place" for each
+// IRELATIVE one, by its resolver's name (foreign_corpus_resolver_name) and whether it writes a GOT slot ("got") or a
+// pointer in the image's data ("data"); and the relative ones' count, RELATIVE entries and those RELR's words encode.
+static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other, ForeignCorpusRows* rows)
 {
     const Elf64_Shdr* table = dynamic_test_section(image, ".dynsym");
     const Elf64_Shdr* strings = dynamic_test_section(image, ".dynstr");
     const Elf64_Sym* symbols = (const Elf64_Sym*)dynamic_test_bytes(image, table);
-    const char* sections[] = { ".rela.dyn", ".rela.plt" };
     uint64_t relative = 0;
-    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sections); s += 1)
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(foreign_corpus_relocation_sections); s += 1)
     {
-        const Elf64_Shdr* section = dynamic_test_section(image, sections[s]);
+        const Elf64_Shdr* section = dynamic_test_section(image, foreign_corpus_relocation_sections[s]);
         const Elf64_Rela* entries = (const Elf64_Rela*)dynamic_test_bytes(image, section);
         for (uint64_t i = 0; entries != 0 && i < section->sh_size / sizeof(Elf64_Rela); i += 1)
         {
@@ -471,9 +677,14 @@ static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, Foreig
             const uint64_t symbol = ELF64_R_SYM(entries[i].r_info);
             const char* class = type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT ? "slot" : type == R_X86_64_COPY ? "copy" : type == R_X86_64_64 ? "absolute" :
                                 type == R_X86_64_TPOFF64 ? "tpoff" : type == R_X86_64_DTPMOD64 ? "dtpmod" : type == R_X86_64_DTPOFF64 ? "dtpoff" :
-                                type == R_X86_64_IRELATIVE ? "irelative" : type == R_X86_64_RELATIVE ? 0 : "other";
+                                type == R_X86_64_RELATIVE || type == R_X86_64_IRELATIVE ? 0 : "other";
             relative += type == R_X86_64_RELATIVE ? 1 : 0;
-            if (class != 0)
+            if (type == R_X86_64_IRELATIVE)
+            {
+                foreign_corpus_row(rows, "irelative %s %s", foreign_corpus_resolver_name(own, other, (uint64_t)entries[i].r_addend),
+                                   foreign_corpus_in_got(image, entries[i].r_offset) ? "got" : "data");
+            }
+            else if (class != 0)
             {
                 const bool named = symbols != 0 && symbol != 0 && symbol < table->sh_size / sizeof(Elf64_Sym);
                 foreign_corpus_row(rows, "%s %s", class, named ? foreign_corpus_string(image, strings, symbols[symbol].st_name) : "");
@@ -487,6 +698,106 @@ static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, Foreig
         relative += (words[i] & 1) == 0 ? 1 : (uint64_t)__builtin_popcountll(words[i] >> 1);
     }
     return relative;
+}
+
+// An IFUNC's stub: a jmp through a slot that an IRELATIVE relocation writes, and its resolver.
+typedef struct ForeignCorpusStub ForeignCorpusStub;
+struct ForeignCorpusStub
+{
+    uint64_t address;
+    uint64_t resolver;
+};
+
+static int foreign_corpus_compare_stubs(const void* a, const void* b)
+{
+    return foreign_corpus_compare_addresses(&((const ForeignCorpusStub*)a)->address, &((const ForeignCorpusStub*)b)->address);
+}
+
+// The pointer at `place` that a relative relocation gives `value`, if it is to an IFUNC's stub outside the GOT: a row
+// "irelative resolver data" for it.
+static void foreign_corpus_stub_pointer(const DynamicTestImage* image, const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other,
+                                        const ForeignCorpusStub* stubs, uint32_t count, uint64_t place, uint64_t value, ForeignCorpusRows* rows)
+{
+    const ForeignCorpusStub key = { .address = value };
+    const ForeignCorpusStub* stub = count != 0 ? bsearch(&key, stubs, count, sizeof(ForeignCorpusStub), foreign_corpus_compare_stubs) : 0;
+    if (stub != 0 && !foreign_corpus_in_got(image, place))
+    {
+        foreign_corpus_row(rows, "irelative %s data", foreign_corpus_resolver_name(own, other, stub->resolver));
+    }
+}
+
+// The pointers outside the GOT that an image relocates relative to an IFUNC's stub, the IFUNC's address where a fixup
+// other than a call or a GOT load takes it: a row "irelative resolver data" for each, as mold writes such a pointer, an
+// IRELATIVE relocation of its own. The stubs are the jmps through IRELATIVE relocations' slots in the executable
+// sections named for the PLT (link-foreign's .iplt and .plt.got).
+static void foreign_corpus_stub_pointers(const DynamicTestImage* image, const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other, Arena* arena,
+                                         ForeignCorpusRows* rows)
+{
+    const uint64_t mark = arena->length;
+    ForeignCorpusStub* stubs = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignCorpusStub, (uint64_t)own->count + 1);
+    uint32_t count = 0;
+    for (uint32_t i = 1; stubs != 0 && i < image->header->e_shnum; i += 1)
+    {
+        const Elf64_Shdr* section = &image->section_headers[i];
+        const uint8_t* bytes = (section->sh_flags & SHF_EXECINSTR) != 0 && section->sh_type == SHT_PROGBITS && strstr(image->names + section->sh_name, "plt") != 0 &&
+                                       section->sh_offset + section->sh_size <= image->file.length ?
+                                   dynamic_test_bytes(image, section) :
+                                   0;
+        for (uint64_t k = 0; bytes != 0 && k + 6 <= section->sh_size; k += 1)
+        {
+            int32_t displacement = 0;
+            memcpy(&displacement, bytes + k + 2, sizeof(displacement));
+            const uint64_t slot = section->sh_addr + k + 6 + (uint64_t)(int64_t)displacement;
+            for (uint32_t r = 0; bytes[k] == 0xff && bytes[k + 1] == 0x25 && count < own->count && r < own->count; r += 1)
+            {
+                if (own->irelatives[r].destination == slot)
+                {
+                    stubs[count] = (ForeignCorpusStub){ .address = section->sh_addr + k, .resolver = own->irelatives[r].resolver };
+                    count += 1;
+                }
+            }
+        }
+    }
+    if (stubs != 0)
+    {
+        qsort(stubs, count, sizeof(ForeignCorpusStub), foreign_corpus_compare_stubs);
+    }
+    const Elf64_Shdr* section = dynamic_test_section(image, ".rela.dyn");
+    const Elf64_Rela* entries = (const Elf64_Rela*)dynamic_test_bytes(image, section);
+    for (uint64_t i = 0; entries != 0 && i < section->sh_size / sizeof(Elf64_Rela); i += 1)
+    {
+        if (ELF64_R_TYPE(entries[i].r_info) == R_X86_64_RELATIVE)
+        {
+            foreign_corpus_stub_pointer(image, own, other, stubs, count, entries[i].r_offset, (uint64_t)entries[i].r_addend, rows);
+        }
+    }
+    // RELR's places: an even word is one, and an odd word's bits 1 to 63 mark those of the 63 words after the last.
+    const Elf64_Shdr* relr = dynamic_test_section(image, ".relr.dyn");
+    const uint64_t* words = (const uint64_t*)dynamic_test_bytes(image, relr);
+    const Elf64_Shdr* holder = 0;
+    uint64_t base = 0;
+    for (uint64_t i = 0; words != 0 && i < relr->sh_size / sizeof(uint64_t); i += 1)
+    {
+        const bool address = (words[i] & 1) == 0;
+        for (uint32_t bit = 0; bit < (address ? 1u : 63u); bit += 1)
+        {
+            const uint64_t place = address ? words[i] : base + bit * sizeof(uint64_t);
+            if (address || ((words[i] >> (bit + 1)) & 1) != 0)
+            {
+                // The places come in order: the section of the one before holds most.
+                holder = holder != 0 && place >= holder->sh_addr && place - holder->sh_addr < holder->sh_size ? holder : foreign_corpus_section_at(image, place);
+                uint64_t value = 0;
+                if (holder != 0 && holder->sh_type != SHT_NOBITS && place - holder->sh_addr + sizeof(value) <= holder->sh_size &&
+                    holder->sh_offset + holder->sh_size <= image->file.length)
+                {
+                    memcpy(&value, dynamic_test_bytes(image, holder) + (place - holder->sh_addr), sizeof(value));
+                    foreign_corpus_stub_pointer(image, own, other, stubs, count, place, value, rows);
+                }
+            }
+        }
+        base = address ? words[i] + sizeof(uint64_t) : base + 63 * sizeof(uint64_t);
+    }
+    arena_pop_to(arena, mark);
 }
 
 // The dynamic section's rows that the comparison reads.
@@ -513,25 +824,40 @@ static void foreign_corpus_dynamic(const DynamicTestImage* image, ForeignCorpusR
     foreign_corpus_row(rows, "fini_array %d %" PRIu64, dynamic_test_tag(image, DT_FINI_ARRAY, &value), dynamic_test_tag(image, DT_FINI_ARRAYSZ, &value) ? value : 0);
 }
 
-// The link of one program by one linker into `output`: the GCC driver's PIE line around the objects and archives;
-// `lanes`, link-foreign's lanes option.
-static bool foreign_corpus_link(ForeignCorpus* corpus, const ForeignCorpusProgram* program, const char* linker, const char* lanes, char* const* inputs,
-                                uint32_t input_count, const char* output, const char* log)
+// The link of one program by one linker into `output`, as `kind`: the GCC driver's line for it around the objects and
+// archives (a shared library's are the program's library part); `lanes`, link-foreign's lanes option. lld and mold get
+// the options that describe what link-foreign writes anyway: a build ID, .eh_frame_hdr, .gnu.hash, and imports bound
+// at load under RELRO.
+static bool foreign_corpus_link(ForeignCorpus* corpus, const ForeignCorpusProgram* program, const char* linker, const char* lanes, ForeignCorpusKind kind,
+                                char* const* inputs, uint32_t input_count, const char* output, const char* log)
 {
     char* arguments[BUSTER_FOREIGN_CORPUS_MAX_ARGUMENTS] = { 0 };
     uint32_t count = 0;
     const bool ours = strcmp(linker, "buster") == 0;
+    const bool static_kind = kind == FOREIGN_CORPUS_STATIC || kind == FOREIGN_CORPUS_STATIC_PIE;
     foreign_corpus_append(arguments, &count, ours ? "/proc/self/exe" : linker);
     if (ours)
     {
         foreign_corpus_append(arguments, &count, "link-foreign");
         foreign_corpus_append(arguments, &count, lanes);
     }
-    foreign_corpus_append(arguments, &count, "-pie");
+    static const char* const kind_options[FOREIGN_CORPUS_KINDS][6] = {
+        [FOREIGN_CORPUS_PIE] = { "-pie" },
+        [FOREIGN_CORPUS_STATIC] = { "-static" },
+        [FOREIGN_CORPUS_STATIC_PIE] = { "-static", "-pie", "--no-dynamic-linker", "-z", "text" },
+        [FOREIGN_CORPUS_SHARED] = { "-shared", "-soname", "libcorpus.so" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(kind_options[kind]) && kind_options[kind][i] != 0; i += 1)
+    {
+        foreign_corpus_append(arguments, &count, kind_options[kind][i]);
+    }
     foreign_corpus_append(arguments, &count, "-o");
     foreign_corpus_append(arguments, &count, output);
-    foreign_corpus_append(arguments, &count, ours ? "--dynamic-linker" : "-dynamic-linker");
-    foreign_corpus_append(arguments, &count, "/lib64/ld-linux-x86-64.so.2");
+    if (kind == FOREIGN_CORPUS_PIE)
+    {
+        foreign_corpus_append(arguments, &count, ours ? "--dynamic-linker" : "-dynamic-linker");
+        foreign_corpus_append(arguments, &count, "/lib64/ld-linux-x86-64.so.2");
+    }
     if (!ours)
     {
         static const char* const options[] = { "--hash-style=gnu", "--build-id", "--eh-frame-hdr", "-z", "now", "-z", "relro" };
@@ -542,7 +868,10 @@ static bool foreign_corpus_link(ForeignCorpus* corpus, const ForeignCorpusProgra
     }
     for (uint32_t i = 0; i < RUNTIME_OBJECT_END; i += 1)
     {
-        foreign_corpus_append(arguments, &count, corpus->system.objects[i]);
+        if (corpus->objects[kind][i][0] != 0)
+        {
+            foreign_corpus_append(arguments, &count, corpus->objects[kind][i]);
+        }
     }
     for (uint32_t i = 0; i < input_count; i += 1)
     {
@@ -556,17 +885,25 @@ static bool foreign_corpus_link(ForeignCorpus* corpus, const ForeignCorpusProgra
     {
         foreign_corpus_append(arguments, &count, program->libraries[i]);
     }
+    // GCC's driver's libraries: g++'s -lstdc++ -lm before them, and libgcc and libc around them, as an archive group in a
+    // static link.
     static const char* const c_libraries[] = { "-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed", "-lc", "-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed" };
     static const char* const cxx_libraries[] = { "-lstdc++", "-lm", "-lgcc_s", "-lgcc", "-lc", "-lgcc_s", "-lgcc" };
-    const char* const* libraries = program->cxx ? cxx_libraries : c_libraries;
-    const uint32_t library_count = program->cxx ? BUSTER_ARRAY_LENGTH(cxx_libraries) : BUSTER_ARRAY_LENGTH(c_libraries);
+    static const char* const static_libraries[] = { "--start-group", "-lgcc", "-lgcc_eh", "-lc", "--end-group" };
+    if (static_kind && program->cxx)
+    {
+        foreign_corpus_append(arguments, &count, "-lstdc++");
+        foreign_corpus_append(arguments, &count, "-lm");
+    }
+    const char* const* libraries = static_kind ? static_libraries : program->cxx ? cxx_libraries : c_libraries;
+    const uint32_t library_count = static_kind ? BUSTER_ARRAY_LENGTH(static_libraries) : program->cxx ? BUSTER_ARRAY_LENGTH(cxx_libraries) : BUSTER_ARRAY_LENGTH(c_libraries);
     for (uint32_t i = 0; i < library_count; i += 1)
     {
         foreign_corpus_append(arguments, &count, libraries[i]);
     }
     for (uint32_t i = RUNTIME_OBJECT_END; i < RUNTIME_OBJECTS; i += 1)
     {
-        foreign_corpus_append(arguments, &count, corpus->system.objects[i]);
+        foreign_corpus_append(arguments, &count, corpus->objects[kind][i]);
     }
     char* logs[] = { (char*)log };
     char** lines[] = { arguments };
@@ -659,6 +996,83 @@ static uint32_t foreign_corpus_build(ForeignCorpus* corpus, const ForeignCorpusP
     return built ? input_count : 0;
 }
 
+// Whether source `source` is one of the program's library part.
+static bool foreign_corpus_in_library(const ForeignCorpusProgram* program, const char* source)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < BUSTER_FOREIGN_CORPUS_MAX_SOURCES && program->library[i] != 0; i += 1)
+    {
+        result = strcmp(program->library[i], source) == 0;
+    }
+    return result;
+}
+
+// The shared kind's inputs, after foreign_corpus_build: the library part compiled again with -fPIC, as
+// <directory>/pic-<source>.o, into `library` (their count into *library_count), and the objects of the other sources,
+// which foreign_corpus_build made, into `executable` (their count into *executable_count). Whether it compiled.
+static bool foreign_corpus_build_library(ForeignCorpus* corpus, const ForeignCorpusProgram* program, const char* compiler, const char* directory, char** library,
+                                         uint32_t* library_count, char** executable, uint32_t* executable_count)
+{
+    Arena* arena = corpus->arena;
+    char** lines[2 * BUSTER_FOREIGN_CORPUS_MAX_SOURCES];
+    char* logs[2 * BUSTER_FOREIGN_CORPUS_MAX_SOURCES];
+    uint32_t count = 0;
+    bool built = true;
+    *library_count = 0;
+    *executable_count = 0;
+    for (uint32_t part = 0; built && part < 2; part += 1)
+    {
+        const char* const* sources = part == 0 ? program->sources : program->archived;
+        for (uint32_t i = 0; built && i < BUSTER_FOREIGN_CORPUS_MAX_SOURCES && sources[i] != 0; i += 1)
+        {
+            const char* base = strrchr(sources[i], '/') != 0 ? strrchr(sources[i], '/') + 1 : sources[i];
+            char* object = arena_push(arena, BUSTER_FOREIGN_TEST_PATH_BYTES, 1);
+            built = object != 0;
+            const bool pic = built && foreign_corpus_in_library(program, sources[i]);
+            if (built && !pic)
+            {
+                snprintf(object, BUSTER_FOREIGN_TEST_PATH_BYTES, "%s/%s.o", directory, base);
+                executable[*executable_count] = object;
+                *executable_count += 1;
+            }
+            else if (built)
+            {
+                char** line = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_CORPUS_MAX_ARGUMENTS);
+                char* source = arena_push(arena, BUSTER_FOREIGN_TEST_PATH_BYTES, 1);
+                char* log = arena_push(arena, BUSTER_FOREIGN_TEST_PATH_BYTES, 1);
+                built = line != 0 && source != 0 && log != 0;
+                if (built)
+                {
+                    snprintf(source, BUSTER_FOREIGN_TEST_PATH_BYTES, "%s/%s", program->directory != 0 ? program->directory : corpus->directory, sources[i]);
+                    snprintf(object, BUSTER_FOREIGN_TEST_PATH_BYTES, "%s/pic-%s.o", directory, base);
+                    snprintf(log, BUSTER_FOREIGN_TEST_PATH_BYTES, "%s/pic-%s.compile", directory, base);
+                    uint32_t n = 0;
+                    const uint64_t length = strlen(base);
+                    const bool cxx = length > 4 && strcmp(base + length - 4, ".cpp") == 0;
+                    const char* driver = cxx ? (strcmp(compiler, "gcc") == 0 ? "g++" : strcmp(compiler, "clang") == 0 ? "clang++" : compiler) : compiler;
+                    foreign_corpus_append(line, &n, driver);
+                    foreign_corpus_append(line, &n, "-c");
+                    foreign_corpus_append(line, &n, "-O2");
+                    foreign_corpus_append(line, &n, "-fPIC");
+                    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(program->flags) && program->flags[f] != 0; f += 1)
+                    {
+                        foreign_corpus_append(line, &n, program->flags[f]);
+                    }
+                    foreign_corpus_append(line, &n, source);
+                    foreign_corpus_append(line, &n, "-o");
+                    foreign_corpus_append(line, &n, object);
+                    lines[count] = line;
+                    logs[count] = log;
+                    count += 1;
+                    library[*library_count] = object;
+                    *library_count += 1;
+                }
+            }
+        }
+    }
+    return built && *library_count != 0 && foreign_corpus_spawn_all(lines, logs, count, corpus->jobs);
+}
+
 // What a reference linker writes otherwise than link-foreign, where both choices are valid: the comparison counts each
 // row it explains as documented, prints the counts, and fails on any other row one side has alone.
 typedef enum ForeignCorpusReason
@@ -673,19 +1087,31 @@ typedef enum ForeignCorpusReason
     FOREIGN_CORPUS_REASON_SYMBOLIC_COPY,
     FOREIGN_CORPUS_REASON_SECOND_SLOT,
     FOREIGN_CORPUS_REASON_RELATIVE,
+    FOREIGN_CORPUS_REASON_CANONICAL_IFUNC,
+    FOREIGN_CORPUS_REASON_LINK_WARNING,
+    FOREIGN_CORPUS_REASON_LOCAL_VISIBILITY,
+    FOREIGN_CORPUS_REASON_IFUNC_FUNCTION,
+    FOREIGN_CORPUS_REASON_UNREFERENCED_BOUNDS,
+    FOREIGN_CORPUS_REASON_IFUNC_POINTER,
     FOREIGN_CORPUS_REASONS,
 } ForeignCorpusReason;
 
 static const char* const foreign_corpus_reasons[FOREIGN_CORPUS_REASONS] = {
     [FOREIGN_CORPUS_REASON_WEAK_UNDEFINED] = "a weak undefined name that nothing defines and that has no version is left out of .dynsym, with its GOT slot's relocation",
     [FOREIGN_CORPUS_REASON_GROUP_SIGNATURE] = "a COMDAT group's signature, a local of its group section, is kept as an absolute local",
-    [FOREIGN_CORPUS_REASON_FRAME_END] = "crtendS.o's __FRAME_END__ is left out, with the .eh_frame it rebuilds",
+    [FOREIGN_CORPUS_REASON_FRAME_END] = "crtend's __FRAME_END__ and crtbeginT.o's __EH_FRAME_BEGIN__, locals of .eh_frame, are left out, with the .eh_frame it rebuilds",
     [FOREIGN_CORPUS_REASON_WEAK_ALIAS] = "the names a copy relocation defines are bound weakly",
     [FOREIGN_CORPUS_REASON_INTERNAL] = "a symbol of internal visibility is written as hidden",
     [FOREIGN_CORPUS_REASON_BOUNDS] = "the __start_ and __stop_ names are written local, where GNU ld and lld write them global and protected",
     [FOREIGN_CORPUS_REASON_SYMBOLIC_COPY] = "an R_X86_64_64 to a library's data, scanned before the reference that copies it, stays symbolic",
     [FOREIGN_CORPUS_REASON_SECOND_SLOT] = "a function that code both calls and loads from the GOT has two slots, .got.plt's and .got's, where link-foreign's stub reads the one",
     [FOREIGN_CORPUS_REASON_RELATIVE] = "a few GOT slots that lld and link-foreign relax keep relative relocations",
+    [FOREIGN_CORPUS_REASON_CANONICAL_IFUNC] = "an IFUNC whose address is taken is written as a function of no size at its stub, where link-foreign keeps the IFUNC at its resolver",
+    [FOREIGN_CORPUS_REASON_LINK_WARNING] = "the symbols of libc.a's .gnu.warning sections, which GNU ld reads for link-time warnings and link-foreign leaves out with them, are kept",
+    [FOREIGN_CORPUS_REASON_LOCAL_VISIBILITY] = "in a static executable and a static PIE, a symbol of hidden visibility, written local, is written with default visibility",
+    [FOREIGN_CORPUS_REASON_IFUNC_FUNCTION] = "in a static executable, an IFUNC is written as a function at its stub",
+    [FOREIGN_CORPUS_REASON_UNREFERENCED_BOUNDS] = "the __start_ and __stop_ names of every section named as a C identifier are defined, local, though nothing refers to them",
+    [FOREIGN_CORPUS_REASON_IFUNC_POINTER] = "a pointer to an IFUNC outside the GOT gets an IRELATIVE relocation, the IFUNC's address, where link-foreign and lld relocate it relative to the IFUNC's stub",
 };
 
 typedef enum ForeignCorpusCategory
@@ -701,6 +1127,7 @@ struct ForeignCorpusContext
 {
     const char* linker;
     bool mold;
+    bool lld;
     // The names our image defines at a COPY relocation's address, a copy and its aliases.
     ForeignCorpusRows copied;
     uint32_t documented[FOREIGN_CORPUS_REASONS];
@@ -733,6 +1160,49 @@ static bool foreign_corpus_differs_in(const char* a, const char* b, uint32_t fie
     return result;
 }
 
+// A symbol row's six fields ("name binding type visibility size place"): whether it has them.
+static bool foreign_corpus_fields(const char* row, char (*fields)[BUSTER_FOREIGN_CORPUS_ROW_BYTES])
+{
+    return sscanf(row, "%191s %191s %191s %191s %191s %191s", fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]) == 6;
+}
+
+// Whether a symbol row of link-foreign's and one of lld's are an IFUNC whose address is taken, which link-foreign keeps
+// as an IFUNC (type 10) and lld writes as a function (type 2) of no size at its PLT entry: the same name, binding,
+// visibility and place.
+static bool foreign_corpus_canonical_ifunc(const char* ours, const char* theirs)
+{
+    char a[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
+    char b[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
+    return foreign_corpus_fields(ours, a) && foreign_corpus_fields(theirs, b) && strcmp(a[0], b[0]) == 0 && strcmp(a[1], b[1]) == 0 && strcmp(a[3], b[3]) == 0 &&
+           strcmp(a[5], b[5]) == 0 && strcmp(a[2], "10") == 0 && strcmp(b[2], "2") == 0 && strcmp(b[4], "0") == 0;
+}
+
+// Whether one of a row set's unmatched rows differs from `row` in field `field` alone, `row`'s being `value` and the
+// other's `other_value`.
+static bool foreign_corpus_paired(const char* row, const ForeignCorpusRows* rows, const uint32_t* unmatched, uint32_t count, uint32_t field, const char* value,
+                                  const char* other_value)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < count; i += 1)
+    {
+        result = foreign_corpus_differs_in(row, rows->rows[unmatched[i]], field, value, other_value);
+    }
+    return result;
+}
+
+// Whether a row set has a row of symbol `name` among the unmatched ones.
+static bool foreign_corpus_has_name(const ForeignCorpusRows* rows, const uint32_t* unmatched, uint32_t count, const char* name)
+{
+    bool result = false;
+    const uint64_t length = strlen(name);
+    for (uint32_t i = 0; !result && i < count; i += 1)
+    {
+        const char* row = rows->rows[unmatched[i]];
+        result = strncmp(row, name, length) == 0 && row[length] == ' ';
+    }
+    return result;
+}
+
 // The reason a row that one side has alone (ours, or the reference's) is the reference linker's documented choice.
 static ForeignCorpusReason foreign_corpus_reason(const ForeignCorpusContext* context, ForeignCorpusCategory category, bool ours, const char* row,
                                                  const ForeignCorpusRows* other, const uint32_t* other_unmatched, uint32_t other_count)
@@ -742,7 +1212,40 @@ static ForeignCorpusReason foreign_corpus_reason(const ForeignCorpusContext* con
     const char* space = strchr(row, ' ');
     const uint64_t length = space != 0 ? (uint64_t)(space - row) : strlen(row);
     snprintf(name, sizeof(name), "%.*s", (int)length, row);
-    if (category == FOREIGN_CORPUS_SYMBOLS && context->mold)
+    char fields[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
+    const bool parsed = category == FOREIGN_CORPUS_SYMBOLS && foreign_corpus_fields(row, fields);
+    if (category == FOREIGN_CORPUS_SYMBOLS && context->lld)
+    {
+        bool canonical = false;
+        for (uint32_t i = 0; i < other_count; i += 1)
+        {
+            const char* paired = other->rows[other_unmatched[i]];
+            canonical = canonical || (ours ? foreign_corpus_canonical_ifunc(row, paired) : foreign_corpus_canonical_ifunc(paired, row));
+        }
+        result = canonical                                               ? FOREIGN_CORPUS_REASON_CANONICAL_IFUNC :
+                 !ours && strncmp(name, "__evoke_link_warning_", 21) == 0 ? FOREIGN_CORPUS_REASON_LINK_WARNING :
+                                                                         FOREIGN_CORPUS_REASON_NONE;
+    }
+    else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && !ours && strncmp(name, "__evoke_link_warning_", 21) == 0)
+    {
+        result = FOREIGN_CORPUS_REASON_LINK_WARNING;
+    }
+    else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && parsed && strcmp(fields[1], "0") == 0 &&
+             foreign_corpus_paired(row, other, other_unmatched, other_count, 3, ours ? "2" : "0", ours ? "0" : "2"))
+    {
+        result = FOREIGN_CORPUS_REASON_LOCAL_VISIBILITY;
+    }
+    else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && parsed &&
+             foreign_corpus_paired(row, other, other_unmatched, other_count, 2, ours ? "10" : "2", ours ? "2" : "10"))
+    {
+        result = FOREIGN_CORPUS_REASON_IFUNC_FUNCTION;
+    }
+    else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && parsed && !ours && strcmp(fields[1], "0") == 0 &&
+             (strncmp(name, "__start_", 8) == 0 || strncmp(name, "__stop_", 7) == 0) && !foreign_corpus_has_name(other, other_unmatched, other_count, name))
+    {
+        result = FOREIGN_CORPUS_REASON_UNREFERENCED_BOUNDS;
+    }
+    else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold)
     {
         const uint64_t row_length = strlen(row);
         const char* signature = " 0 0 0 0 absolute";
@@ -759,7 +1262,8 @@ static ForeignCorpusReason foreign_corpus_reason(const ForeignCorpusContext* con
             bounds = bounds || (bound_name && strncmp(paired, name, strlen(name)) == 0 && paired[strlen(name)] == ' ');
         }
         alias = alias && foreign_corpus_listed(&context->copied, name);
-        result = absolute_local ? FOREIGN_CORPUS_REASON_GROUP_SIGNATURE : ours && strcmp(name, "__FRAME_END__") == 0 ? FOREIGN_CORPUS_REASON_FRAME_END :
+        const bool frame_label = strcmp(name, "__FRAME_END__") == 0 || strcmp(name, "__EH_FRAME_BEGIN__") == 0;
+        result = absolute_local ? FOREIGN_CORPUS_REASON_GROUP_SIGNATURE : ours && frame_label ? FOREIGN_CORPUS_REASON_FRAME_END :
                  alias ? FOREIGN_CORPUS_REASON_WEAK_ALIAS : internal ? FOREIGN_CORPUS_REASON_INTERNAL : bounds ? FOREIGN_CORPUS_REASON_BOUNDS : FOREIGN_CORPUS_REASON_NONE;
     }
     else if (category == FOREIGN_CORPUS_RELOCATIONS && !ours && strncmp(row, "absolute ", 9) == 0)
@@ -850,7 +1354,149 @@ static void foreign_corpus_copied(const DynamicTestImage* image, ForeignCorpusRo
 
 static void foreign_corpus_compare(ForeignCorpus* corpus, const DynamicTestImage* ours_image, String8 file, bool linked, const char* linker, const char* detail);
 
-// One program, built by one compiler and linked by every linker, compared.
+// An output as dynamic_test_image reads one, but a static executable (ET_EXEC) too, which it doesn't take.
+static DynamicTestImage foreign_corpus_image(String8 file)
+{
+    DynamicTestImage result = { .file = file };
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)file.pointer;
+    result.valid = file.length >= sizeof(Elf64_Ehdr) && memcmp(header->e_ident, ELFMAG, SELFMAG) == 0 && header->e_ident[EI_CLASS] == ELFCLASS64 &&
+                   (header->e_type == ET_DYN || header->e_type == ET_EXEC) && header->e_machine == EM_X86_64 &&
+                   header->e_phoff + header->e_phnum * sizeof(Elf64_Phdr) <= file.length && header->e_shoff + header->e_shnum * sizeof(Elf64_Shdr) <= file.length &&
+                   header->e_shstrndx < header->e_shnum;
+    if (result.valid)
+    {
+        result.header = header;
+        result.program_headers = (const Elf64_Phdr*)(file.pointer + header->e_phoff);
+        result.section_headers = (const Elf64_Shdr*)(file.pointer + header->e_shoff);
+        const Elf64_Shdr* names = &result.section_headers[header->e_shstrndx];
+        result.valid = names->sh_offset + names->sh_size <= file.length;
+        result.names = file.pointer + names->sh_offset;
+    }
+    return result;
+}
+
+// One kind of one program's output, built by one compiler: linked by every linker in <directory>/<kind>/<linker>, run
+// and compared. `inputs` are the program's objects and archive; for the shared kind, `library` is its library part
+// compiled with -fPIC, which each linker links into libcorpus.so, and `executable` the rest, which the first reference
+// linker links into a PIE against its own library, run from each linker's directory with that linker's.
+static void foreign_corpus_kind(ForeignCorpus* corpus, const ForeignCorpusProgram* program, const char* directory, const char* detail, ForeignCorpusKind kind,
+                                char** inputs, uint32_t input_count, char** library, uint32_t library_count, char** executable, uint32_t executable_count)
+{
+    Arena* arena = corpus->arena;
+    const bool shared = kind == FOREIGN_CORPUS_SHARED;
+    char base[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
+    char what[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+    snprintf(base, sizeof(base), "%s/%s", directory, foreign_corpus_kind_names[kind]);
+    snprintf(what, sizeof(what), "%s, %s", detail, foreign_corpus_kind_names[kind]);
+    const bool made = mkdir(base, 0755) == 0;
+    foreign_test_expect(&corpus->tally, made, "make the kind's directory", what);
+    const char* linkers[5] = { "buster" };
+    for (uint32_t l = 0; l < corpus->linker_count; l += 1)
+    {
+        linkers[l + 1] = corpus->linkers[l];
+    }
+    const char* output_name = shared ? "libcorpus.so" : "program";
+    char* const* link_inputs = shared ? library : inputs;
+    const uint32_t link_count = shared ? library_count : input_count;
+    String8 files[5] = { 0 };
+    bool linked[5] = { false };
+    for (uint32_t l = 0; made && l <= corpus->linker_count; l += 1)
+    {
+        char place[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        char output[BUSTER_FOREIGN_TEST_PATH_BYTES + 96];
+        char log[BUSTER_FOREIGN_TEST_PATH_BYTES + 96];
+        snprintf(place, sizeof(place), "%s/%s", base, linkers[l]);
+        snprintf(output, sizeof(output), "%s/%s", place, output_name);
+        snprintf(log, sizeof(log), "%s/link", place);
+        linked[l] = mkdir(place, 0755) == 0 && foreign_corpus_link(corpus, program, linkers[l], "--lanes=1", kind, link_inputs, link_count, output, log);
+        char linked_what[BUSTER_FOREIGN_TEST_PATH_BYTES + 96];
+        snprintf(linked_what, sizeof(linked_what), "%s, linked by %s", what, linkers[l]);
+        foreign_test_expect(&corpus->tally, linked[l], "link the corpus program", linked_what);
+        files[l] = linked[l] ? foreign_test_read(arena, output) : (String8){ 0 };
+    }
+    // link-foreign on eight lanes, the resolution's, the conversion's and the writer's lane paths: the same bytes.
+    if (linked[0])
+    {
+        char place[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        char output[BUSTER_FOREIGN_TEST_PATH_BYTES + 96];
+        char log[BUSTER_FOREIGN_TEST_PATH_BYTES + 96];
+        snprintf(place, sizeof(place), "%s/buster-lanes", base);
+        snprintf(output, sizeof(output), "%s/%s", place, output_name);
+        snprintf(log, sizeof(log), "%s/link", place);
+        const bool laned = mkdir(place, 0755) == 0 && foreign_corpus_link(corpus, program, "buster", "--lanes=8", kind, link_inputs, link_count, output, log);
+        const String8 file = laned ? foreign_test_read(arena, output) : (String8){ 0 };
+        const bool same = file.pointer != 0 && file.length == files[0].length && memcmp(file.pointer, files[0].pointer, file.length) == 0;
+        foreign_test_expect(&corpus->tally, same, "link-foreign writes the same bytes on eight lanes as on one", what);
+    }
+    // The shared kind's PIE, against the first reference linker's library, in every linker's directory.
+    bool runnable = linked[0];
+    if (shared && linked[0] && corpus->linker_count != 0 && linked[1])
+    {
+        char reference[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        char search[BUSTER_FOREIGN_TEST_PATH_BYTES + 72];
+        char program_path[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        char log[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        snprintf(reference, sizeof(reference), "%s/%s", base, linkers[1]);
+        snprintf(search, sizeof(search), "-L%s", reference);
+        snprintf(program_path, sizeof(program_path), "%s/program", base);
+        snprintf(log, sizeof(log), "%s/program-link", base);
+        char* executable_inputs[BUSTER_FOREIGN_CORPUS_MAX_SOURCES + 3];
+        memcpy(executable_inputs, executable, (uint64_t)executable_count * sizeof(char*));
+        executable_inputs[executable_count] = search;
+        executable_inputs[executable_count + 1] = (char*)"-lcorpus";
+        runnable = foreign_corpus_link(corpus, program, linkers[1], "--lanes=1", FOREIGN_CORPUS_PIE, executable_inputs, executable_count + 2, program_path, log);
+        for (uint32_t l = 0; runnable && l <= corpus->linker_count; l += 1)
+        {
+            char copy[BUSTER_FOREIGN_TEST_PATH_BYTES + 96];
+            snprintf(copy, sizeof(copy), "%s/%s/program", base, linkers[l]);
+            runnable = !linked[l] || link(program_path, copy) == 0;
+        }
+        foreign_test_expect(&corpus->tally, runnable, "link the shared kind's program against the reference library", what);
+    }
+    else if (shared)
+    {
+        runnable = false;
+    }
+    // The runs, each by every linker's output.
+    for (uint32_t r = 0; runnable && r < BUSTER_ARRAY_LENGTH(program->runs) && (r == 0 || program->runs[r].arguments[0] != 0 || program->runs[r].input != 0); r += 1)
+    {
+        char stem[32];
+        snprintf(stem, sizeof(stem), "run%u", r);
+        char place[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
+        snprintf(place, sizeof(place), "%s/buster", base);
+        const int status = foreign_corpus_execute(place, &program->runs[r], stem, shared);
+        char path[BUSTER_FOREIGN_TEST_PATH_BYTES + 96];
+        snprintf(path, sizeof(path), "%s/%s.out", place, stem);
+        const String8 output = foreign_test_read(arena, path);
+        snprintf(path, sizeof(path), "%s/%s.err", place, stem);
+        const String8 errors = foreign_test_read(arena, path);
+        for (uint32_t l = 1; l <= corpus->linker_count; l += 1)
+        {
+            if (linked[l])
+            {
+                snprintf(place, sizeof(place), "%s/%s", base, linkers[l]);
+                const int their_status = foreign_corpus_execute(place, &program->runs[r], stem, shared);
+                snprintf(path, sizeof(path), "%s/%s.out", place, stem);
+                const String8 their_output = foreign_test_read(arena, path);
+                snprintf(path, sizeof(path), "%s/%s.err", place, stem);
+                const String8 their_errors = foreign_test_read(arena, path);
+                const bool same = status >= 0 && status == their_status && output.length == their_output.length && errors.length == their_errors.length &&
+                                  memcmp(output.pointer, their_output.pointer, output.length) == 0 && memcmp(errors.pointer, their_errors.pointer, errors.length) == 0;
+                char run_what[512];
+                snprintf(run_what, sizeof(run_what), "%s, run %u: status %d against %s's %d", what, r, status, linkers[l], their_status);
+                foreign_test_expect(&corpus->tally, same, "the program runs as the reference linker's does", run_what);
+            }
+        }
+    }
+    // The files.
+    const DynamicTestImage ours = foreign_corpus_image(files[0]);
+    for (uint32_t l = 1; linked[0] && l <= corpus->linker_count; l += 1)
+    {
+        foreign_corpus_compare(corpus, &ours, files[l], linked[l], linkers[l], what);
+    }
+}
+
+// One program, built by one compiler and linked as each kind of output by every linker, compared.
 static void foreign_corpus_program(ForeignCorpus* corpus, const ForeignCorpusProgram* program, const char* compiler)
 {
     Arena* arena = corpus->arena;
@@ -863,77 +1509,26 @@ static void foreign_corpus_program(ForeignCorpus* corpus, const ForeignCorpusPro
     const bool made = mkdir(directory, 0755) == 0;
     const uint32_t input_count = made ? foreign_corpus_build(corpus, program, compiler, directory, inputs) : 0;
     foreign_test_expect(&corpus->tally, input_count != 0, "compile the corpus program", detail);
-    const char* linkers[5] = { "buster" };
-    for (uint32_t l = 0; l < corpus->linker_count; l += 1)
+    char* library[BUSTER_FOREIGN_CORPUS_MAX_SOURCES];
+    char* executable[2 * BUSTER_FOREIGN_CORPUS_MAX_SOURCES];
+    uint32_t library_count = 0;
+    uint32_t executable_count = 0;
+    const bool library_part = program->library[0] != 0 && (program->skipped & (1u << FOREIGN_CORPUS_SHARED)) == 0;
+    const bool library_built = input_count != 0 && library_part &&
+                               foreign_corpus_build_library(corpus, program, compiler, directory, library, &library_count, executable, &executable_count);
+    if (library_part)
     {
-        linkers[l + 1] = corpus->linkers[l];
+        foreign_test_expect(&corpus->tally, library_built, "compile the corpus program's library part with -fPIC", detail);
     }
-    String8 files[5] = { 0 };
-    bool linked[5] = { false };
-    for (uint32_t l = 0; input_count != 0 && l <= corpus->linker_count; l += 1)
+    for (uint32_t kind = 0; input_count != 0 && kind < FOREIGN_CORPUS_KINDS; kind += 1)
     {
-        char place[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
-        char output[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
-        char log[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
-        snprintf(place, sizeof(place), "%s/%s", directory, linkers[l]);
-        snprintf(output, sizeof(output), "%s/program", place);
-        snprintf(log, sizeof(log), "%s/link", place);
-        linked[l] = mkdir(place, 0755) == 0 && foreign_corpus_link(corpus, program, linkers[l], "--lanes=1", inputs, input_count, output, log);
-        char what[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
-        snprintf(what, sizeof(what), "%s, linked by %s", detail, linkers[l]);
-        foreign_test_expect(&corpus->tally, linked[l], "link the corpus program", what);
-        files[l] = linked[l] ? foreign_test_read(arena, output) : (String8){ 0 };
-    }
-    // link-foreign on eight lanes, the resolution's, the conversion's and the writer's lane paths: the same bytes.
-    if (linked[0])
-    {
-        char place[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
-        char output[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
-        char log[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
-        snprintf(place, sizeof(place), "%s/buster-lanes", directory);
-        snprintf(output, sizeof(output), "%s/program", place);
-        snprintf(log, sizeof(log), "%s/link", place);
-        const bool laned = mkdir(place, 0755) == 0 && foreign_corpus_link(corpus, program, "buster", "--lanes=8", inputs, input_count, output, log);
-        const String8 file = laned ? foreign_test_read(arena, output) : (String8){ 0 };
-        const bool same = file.pointer != 0 && file.length == files[0].length && memcmp(file.pointer, files[0].pointer, file.length) == 0;
-        foreign_test_expect(&corpus->tally, same, "link-foreign writes the same bytes on eight lanes as on one", detail);
-    }
-    // The runs, each by every linker's program.
-    for (uint32_t r = 0; linked[0] && r < BUSTER_ARRAY_LENGTH(program->runs) && (r == 0 || program->runs[r].arguments[0] != 0 || program->runs[r].input != 0); r += 1)
-    {
-        char stem[32];
-        snprintf(stem, sizeof(stem), "run%u", r);
-        char place[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
-        snprintf(place, sizeof(place), "%s/buster", directory);
-        const int status = foreign_corpus_execute(place, &program->runs[r], stem);
-        char path[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
-        snprintf(path, sizeof(path), "%s/%s.out", place, stem);
-        const String8 output = foreign_test_read(arena, path);
-        snprintf(path, sizeof(path), "%s/%s.err", place, stem);
-        const String8 errors = foreign_test_read(arena, path);
-        for (uint32_t l = 1; l <= corpus->linker_count; l += 1)
+        const bool wanted = (program->skipped & (1u << kind)) == 0 && (kind != FOREIGN_CORPUS_SHARED || library_built);
+        if (wanted)
         {
-            if (linked[l])
-            {
-                snprintf(place, sizeof(place), "%s/%s", directory, linkers[l]);
-                const int their_status = foreign_corpus_execute(place, &program->runs[r], stem);
-                snprintf(path, sizeof(path), "%s/%s.out", place, stem);
-                const String8 their_output = foreign_test_read(arena, path);
-                snprintf(path, sizeof(path), "%s/%s.err", place, stem);
-                const String8 their_errors = foreign_test_read(arena, path);
-                const bool same = status >= 0 && status == their_status && output.length == their_output.length && errors.length == their_errors.length &&
-                                  memcmp(output.pointer, their_output.pointer, output.length) == 0 && memcmp(errors.pointer, their_errors.pointer, errors.length) == 0;
-                char what[384];
-                snprintf(what, sizeof(what), "%s, run %u: status %d against %s's %d", detail, r, status, linkers[l], their_status);
-                foreign_test_expect(&corpus->tally, same, "the program runs as the reference linker's does", what);
-            }
+            const uint64_t mark = arena->length;
+            foreign_corpus_kind(corpus, program, directory, detail, (ForeignCorpusKind)kind, inputs, input_count, library, library_count, executable, executable_count);
+            arena_pop_to(arena, mark);
         }
-    }
-    // The files.
-    const DynamicTestImage ours = dynamic_test_image(files[0]);
-    for (uint32_t l = 1; linked[0] && l <= corpus->linker_count; l += 1)
-    {
-        foreign_corpus_compare(corpus, &ours, files[l], linked[l], linkers[l], detail);
     }
     arena_pop_to(arena, saved);
 }
@@ -943,15 +1538,18 @@ static void foreign_corpus_compare(ForeignCorpus* corpus, const DynamicTestImage
 {
     Arena* arena = corpus->arena;
     const uint64_t mark = arena->length;
-    const DynamicTestImage theirs = dynamic_test_image(file);
+    const DynamicTestImage theirs = foreign_corpus_image(file);
     ForeignCorpusContext context = {
         .linker = linker,
         .mold = strstr(linker, "mold") != 0,
+        .lld = strstr(linker, "lld") != 0,
         .copied = foreign_corpus_rows(arena),
     };
     char what[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
     snprintf(what, sizeof(what), "%s, against %s", detail, linker);
-    if (linked)
+    // An output the comparison can't read would compare as nothing against nothing.
+    foreign_test_expect(&corpus->tally, !linked || (ours_image->valid && theirs.valid), "read both outputs' headers", what);
+    if (linked && ours_image->valid && theirs.valid)
     {
         foreign_corpus_copied(ours_image, &context.copied);
         ForeignCorpusRows our_rows = foreign_corpus_rows(arena);
@@ -976,8 +1574,12 @@ static void foreign_corpus_compare(ForeignCorpus* corpus, const DynamicTestImage
                             "the same dynamic symbols at the same versions", what);
         our_rows.count = 0;
         their_rows.count = 0;
-        const uint64_t our_relative = foreign_corpus_relocations(ours_image, &our_rows);
-        const uint64_t their_relative = foreign_corpus_relocations(&theirs, &their_rows);
+        const ForeignCorpusResolvers our_resolvers = foreign_corpus_resolvers(ours_image, arena);
+        const ForeignCorpusResolvers their_resolvers = foreign_corpus_resolvers(&theirs, arena);
+        foreign_test_expect(&corpus->tally, foreign_corpus_distinct(&our_resolvers, arena) && foreign_corpus_distinct(&their_resolvers, arena),
+                            "each IRELATIVE relocation writes a place of its own", what);
+        const uint64_t our_relative = foreign_corpus_relocations(ours_image, &our_resolvers, &their_resolvers, &our_rows);
+        const uint64_t their_relative = foreign_corpus_relocations(&theirs, &their_resolvers, &our_resolvers, &their_rows);
         // Each side's GOT slots of weak undefined names without a version: mold has neither the names nor the slots'
         // relocations.
         const DynamicTestImage* images[2] = { ours_image, &theirs };
@@ -999,11 +1601,40 @@ static void foreign_corpus_compare(ForeignCorpus* corpus, const DynamicTestImage
             }
             sides[side]->count = kept;
         }
+        // mold writes a pointer to an IFUNC outside the GOT with an IRELATIVE relocation of its own, where link-foreign
+        // relocates it relative to the IFUNC's stub: each of mold's such rows is one of link-foreign's stub pointers, one
+        // for one, and any either side has over is a row it has alone.
+        uint32_t stub_pointers = 0;
+        if (context.mold)
+        {
+            ForeignCorpusRows pointers = foreign_corpus_rows(arena);
+            foreign_corpus_stub_pointers(ours_image, &our_resolvers, &their_resolvers, arena, &pointers);
+            for (uint32_t p = 0; p < pointers.count; p += 1)
+            {
+                uint32_t found = their_rows.count;
+                for (uint32_t j = 0; found == their_rows.count && j < their_rows.count; j += 1)
+                {
+                    found = strcmp(their_rows.rows[j], pointers.rows[p]) == 0 ? j : found;
+                }
+                if (found < their_rows.count)
+                {
+                    their_rows.count -= 1;
+                    memcpy(their_rows.rows[found], their_rows.rows[their_rows.count], BUSTER_FOREIGN_CORPUS_ROW_BYTES);
+                    stub_pointers += 1;
+                }
+                else
+                {
+                    foreign_corpus_row(&our_rows, "%s", pointers.rows[p]);
+                }
+            }
+            context.documented[FOREIGN_CORPUS_REASON_IFUNC_POINTER] += stub_pointers;
+        }
         const uint32_t symbolic_copies = context.documented[FOREIGN_CORPUS_REASON_SYMBOLIC_COPY];
         foreign_test_expect(&corpus->tally, foreign_corpus_same_rows(&our_rows, &their_rows, FOREIGN_CORPUS_RELOCATIONS, &context, arena),
                             "the same dynamic relocations by symbol and class", what);
-        // A symbolic R_X86_64_64 to a copy is a relative one in link-foreign's file.
-        const uint64_t expected = their_relative + (context.documented[FOREIGN_CORPUS_REASON_SYMBOLIC_COPY] - symbolic_copies);
+        // A symbolic R_X86_64_64 to a copy is a relative one in link-foreign's file, and so is a pointer to an IFUNC's
+        // stub that mold writes as an IRELATIVE one.
+        const uint64_t expected = their_relative + (context.documented[FOREIGN_CORPUS_REASON_SYMBOLIC_COPY] - symbolic_copies) + stub_pointers;
         if (strstr(linker, "lld") != 0)
         {
             char counts[512];
@@ -1104,6 +1735,7 @@ static int run_foreign_corpus_tests(int argc, char** argv)
         corpus->jobs = online > 0 ? (uint32_t)online : 1;
         foreign_test_system(&corpus->system);
         passed = passed && corpus->system.found;
+        foreign_corpus_objects(corpus);
         for (uint32_t f = 0; passed && f < BUSTER_ARRAY_LENGTH(foreign_corpus_fixtures); f += 1)
         {
             char path[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
@@ -1124,6 +1756,7 @@ static int run_foreign_corpus_tests(int argc, char** argv)
                 { .input = "a line of input\n" },
                 { .arguments = { "first", "second" } },
             },
+            .library = { "corpus_counter.c", "corpus_names.c", "corpus_scale.c", "corpus_unused.c" },
         };
         programs[count++] = (ForeignCorpusProgram){
             .name = "cxx-fixture",
@@ -1133,6 +1766,7 @@ static int run_foreign_corpus_tests(int argc, char** argv)
                 { .arguments = { 0 } },
                 { .arguments = { "x", "y" } },
             },
+            .library = { "corpus_throw.cpp" },
         };
         if (sqlite != 0)
         {
@@ -1153,6 +1787,7 @@ static int run_foreign_corpus_tests(int argc, char** argv)
                     { .input = "select * from missing_table;\n" },
                     { .arguments = { "-version" } },
                 },
+                .library = { "sqlite3.c" },
             };
         }
         if (lua != 0)
@@ -1178,6 +1813,7 @@ static int run_foreign_corpus_tests(int argc, char** argv)
                     { .arguments = { "-e", "print(string.gsub('hello world', 'o', '0'), math.type(1), math.type(1.0), 7 // 2, 7 % -3)" } },
                 },
             };
+            memcpy(program->library, program->archived, sizeof(program->library));
         }
         if (corpus->self != 0)
         {

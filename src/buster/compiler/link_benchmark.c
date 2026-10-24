@@ -41,8 +41,8 @@
 //     wall time from posix_spawn to the wait's return, as the caller sees it: the median of the runs after a warm-up,
 //     with a pause before each, over the output of the run before. Each linker runs with its own threads, and on one
 //     (lld's --threads=1, mold's and wild's --no-threads; GNU ld has one anyway). link-foreign, this executable's own
-//     linker of other compilers' objects (#86), takes the same command line as a process of its own, with --lanes=8
-//     and --lanes=1 for its threads and one, and links the dynamic PIEs alone. Then one more run, with --no-fork for
+//     linker of other compilers' objects (#86, #394), takes the same command line as a process of its own, with
+//     --lanes=8 and --lanes=1 for its threads and one, for every kind. Then one more run, with --no-fork for
 //     mold and wild, which otherwise fork to leave their teardown to a child, through the helper
 //     (link_benchmark_rusage): its page faults and its peak resident set. A program that does nothing, run the same way
 //     first, shows the least the helper can count.
@@ -164,9 +164,8 @@ struct LinkBenchmarkLinker
     const char* no_fork;
     // Whether its runs for an output past BUSTER_LINK_BENCHMARK_LARGE_BYTES are the slow ones.
     bool slow;
-    // The option for its own threads, or 0 if it takes them by default; and whether it links dynamic PIEs alone.
+    // The option for its own threads, or 0 if it takes them by default.
     const char* own_threads;
-    bool dynamic_only;
 };
 
 static const LinkBenchmarkLinker link_benchmark_linkers[] = {
@@ -194,15 +193,14 @@ static const LinkBenchmarkLinker link_benchmark_linkers[] = {
         .no_fork = "--no-fork",
         .slow = false,
     },
-    // This executable's own foreign linker (#86), as a process of its own, on a lane per core of the 9700X or on one;
-    // its static executables of libc aren't there yet.
+    // This executable's own foreign linker (#86, #394), as a process of its own, on a lane per core of the 9700X or on
+    // one.
     {
         .name = "link-foreign",
         .one_thread = "--lanes=1",
         .no_fork = 0,
         .slow = false,
         .own_threads = "--lanes=8",
-        .dynamic_only = true,
     },
 };
 
@@ -1469,8 +1467,8 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Run
         snprintf(output, sizeof(output), "%s/%s", directory, linker->name);
         // GNU ld links on one thread either way.
         const uint32_t ways = linker->one_thread != 0 ? 2 : 1;
-        const bool wrong = (wild_wrong && strcmp(linker->name, "wild") == 0) || (linker->dynamic_only && kind != RUNTIME_KIND_DYNAMIC);
-        if (result && (settings->linkers >> l & 1) != 0 && wrong && !linker->dynamic_only)
+        const bool wrong = wild_wrong && strcmp(linker->name, "wild") == 0;
+        if (result && (settings->linkers >> l & 1) != 0 && wrong)
         {
             printf("  %-24s not run: its %s of this program may fault, its TLS segment off its alignment\n", "wild", kind == RUNTIME_KIND_STATIC ? "static executable" : "static PIE");
         }

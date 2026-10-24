@@ -3879,8 +3879,9 @@ step 8's question, with the exchange's and the winners' first touches.
 `foreign_link.c` turns `foreign_run`'s result into the representation, and
 `executable.c` writes it; `link-foreign` ([the command](foreign-driver.md))
 puts the two behind a GNU ld command line, as GCC's and clang's drivers give
-it. It writes static executables without libc and dynamic PIEs; shared
-libraries, static executables with libc and static PIEs are refused for now.
+it. It writes every kind the direct path writes: static executables (with
+`libc.a`, or without libc), static PIEs, dynamic PIEs and shared libraries
+(#394, after the dynamic PIEs of #86).
 
 - **The conversion.** The selected objects' sections become atoms in input
   order (a COMDAT group's loser's dropped first), each object's locals its
@@ -3897,8 +3898,28 @@ libraries, static executables with libc and static PIEs are refused for now.
   `-fPIE` code reads by `PC32`, with the library's other names at its address
   and lld's alignment; `__start_` and `__stop_` over the sections of a
   C-identifier name; `STB_GNU_UNIQUE` kept; the linker's names with lld's
-  visibilities; and lld's regular symbol table. An IFUNC that a fixup reaches is
-  refused: the dynamic PIE has no stubs for its own IFUNCs yet.
+  visibilities; and lld's regular symbol table. A dynamic PIE's own IFUNCs get
+  stubs beside its imports' and `IRELATIVE` relocations, last in `.rela.dyn`,
+  as lld's `.iplt` entries have them.
+- **The static kinds and shared libraries (#394).** A static executable and a
+  static PIE get what `dynamic.c` gives the direct path's: the start file's
+  ABI note and the link's `__tls_get_addr`, which `libc.a` doesn't define and
+  whose general- and local-dynamic accesses the writer relaxes, with a static
+  PIE's `DT_INIT` and `DT_FINI` and no RELR (lld's `-static-pie` without
+  `-z pack-relative-relocs`); the writer's static runtime handling does the
+  rest (`.iplt` and `IRELATIVE`, prioritized arrays, `libc.a`'s names). A
+  static link takes IFUNCs only from a startup it recognizes as applying their
+  `IRELATIVE` relocations, which the kernel doesn't: glibc's, followed from the
+  entry's object (`crt1.o`'s `_start` to `libc-start.o`'s `__libc_start_main`,
+  which refers to `__rela_iplt_start`; in a static PIE on to
+  `dl-reloc-static-pie.o`, which refers to `_DYNAMIC`), or the program's own
+  with `--startup-applies-irelative`. Otherwise it refuses every IFUNC a fixup
+  reaches, where lld writes a program that faults at the call. A
+  shared library exports every global, weak and unique definition of default
+  or protected visibility, leaves a default-visibility reference to nothing to
+  the loader (lld's `-z undefs`), and refuses an IFUNC that isn't preemptible
+  (one the loader can't bind as a dynamic symbol), which would need an
+  `IRELATIVE` relocation that the writer's shared mode doesn't write.
 - **Staged chunks.** The atoms' bytes are the inputs' private mappings, so the
   writer copies each chunk into a lane's buffer and patches, hashes and writes
   the copy (`ExecutableOptions.stage`). Patched in place, each page of an input
@@ -3908,24 +3929,38 @@ libraries, static executables with libc and static PIEs are refused for now.
   [40090244483](https://github.com/buster14a/buster/actions/runs/40090244483)).
 
 **The corpus.** `test-foreign-corpus` links each program from one command line
-by `link-foreign`, lld and mold: two programs of its own (C with threads,
-thread-locals, an archive, constructors, a weak reference and a
-`__start_`/`__stop_` registry; C++ with iostream, exceptions across units,
-RTTI, COMDAT templates and a thread) and, with `--sqlite` and `--lua`, SQLite's
-shell and Lua's interpreter, each compiled by gcc and by clang at `-O2`, and
-with `--self` this compiler, by clang. The three executables must run alike,
-have the same `.symtab` symbols with the same sizes, and agree on `.dynamic`,
-`.dynsym`'s versions and the dynamic relocations. On the 9700X every program
-passes: 165 checks, 68 of them the two programs of its own that the job's list
-runs ([the record](https://github.com/buster14a/buster-performance/tree/0e3f0a0708f0c01e8bfd2348beefb7fce400fc16/docs/measurements/foreign-link-2026-10-24)). What a reference linker writes otherwise as
+by `link-foreign`, lld and mold, as each kind (a dynamic PIE, a static
+executable, a static PIE, and a shared library of the program's library part
+that a PIE of the rest loads): two programs of its own (C with threads,
+thread-locals, an archive, constructors, a weak reference, a
+`__start_`/`__stop_` registry and two IFUNCs called, loaded from the GOT and
+pointed to from data; C++ with iostream, exceptions across units, RTTI, COMDAT
+templates and a thread) and, with `--sqlite` and `--lua`, SQLite's shell and
+Lua's interpreter, each compiled by gcc and by clang at `-O2`, and with
+`--self` this compiler, by clang. The three outputs must run alike, have the
+same `.symtab` symbols with the same sizes, and agree on `.dynamic`,
+`.dynsym`'s versions and the dynamic relocations, each `IRELATIVE` one by its
+resolver and whether it writes a GOT slot or a pointer in data. On the 9700X
+every program passes in every kind: 843 checks
+([the record](https://github.com/buster14a/buster-performance/tree/121f90b73df4d2f4c1ad92875898b40b06d2932c/docs/measurements/foreign-outputs-394-2026-10-24)), where the dynamic PIEs alone had
+165 ([#86's](https://github.com/buster14a/buster-performance/tree/0e3f0a0708f0c01e8bfd2348beefb7fce400fc16/docs/measurements/foreign-link-2026-10-24)). What a reference linker writes otherwise as
 its own valid choice is counted per program, never dropped: mold leaves weak
 undefined names without a version out of `.dynsym`, keeps COMDAT signatures as
 absolute locals, drops `__FRAME_END__`, binds the names a copy relocation
 defines weakly, writes internal visibility as hidden (374 symbols of Lua's by
 gcc) and the bounds' names local, and keeps a few GOT slots that lld and
-`link-foreign` relax; lld leaves symbolic an `R_X86_64_64` to a library's data
-that it scanned before the reference that copies it, and gives a function that
-code both calls and loads from the GOT a second slot (9 in this compiler).
+`link-foreign` relax; in the static kinds it writes a hidden symbol made local
+with default visibility, and in a static executable an IFUNC as a function at
+its stub; and in the PIEs it relocates a pointer to an IFUNC outside the GOT
+with an `IRELATIVE` relocation of its own (`memset`'s in this compiler's static
+PIE), where `link-foreign` and lld relocate it relative to the IFUNC's stub:
+each such row must be one of `link-foreign`'s stub pointers, one for one. lld
+leaves symbolic an `R_X86_64_64` to a library's data that it scanned before the
+reference that copies it, gives a function that code both calls and loads from
+the GOT a second slot (9 in this compiler), and writes an IFUNC whose address
+is taken as a function of no size at its stub; both keep the symbols of
+`libc.a`'s `.gnu.warning` sections, which `link-foreign` leaves out with
+them.
 
 **Throughput.** `benchmark-link`'s dynamic PIEs, linked from one command line
 by each linker as a process, the output on tmpfs: `link-foreign` with
@@ -3979,6 +4014,34 @@ Every output runs and prints what lld's does.
   relative relocations made a run that does nothing take 8 to 13 ms on the
   laptop, against 1.5 ms linked at a fixed address. More lanes cost a small
   link their threads' start: 1.71 ms on eight for one worker.
+
+**The other kinds (#394).** The same programs as static executables, static
+PIEs and shared libraries, medians on the 9700X, one lane or thread
+([the record](https://github.com/buster14a/buster-performance/tree/121f90b73df4d2f4c1ad92875898b40b06d2932c/docs/measurements/foreign-outputs-394-2026-10-24)); wild isn't run on the static kinds of
+the smallest program, whose TLS segment it starts off its alignment:
+
+| Program, kind | `link-foreign` | wild | mold | lld | GNU ld |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 worker, static | **1.50** ms | | 6.06 ms | 6.58 ms | 12.8 ms |
+| 1 worker, static PIE | **1.53** ms | | 6.27 ms | 6.63 ms | 13.3 ms |
+| 1 worker, shared | **0.61** ms | 1.34 ms | 2.42 ms | 4.44 ms | 5.35 ms |
+| 2,000 workers, static | **2.06** ms | 5.07 ms | 7.45 ms | 7.78 ms | 16.3 ms |
+| 2,000 workers, static PIE | **2.07** ms | 5.05 ms | 7.62 ms | 8.05 ms | 16.9 ms |
+| 2,000 workers, shared | **1.29** ms | 2.90 ms | 3.73 ms | 5.85 ms | 9.96 ms |
+| 102,400 workers, static | **58.3** ms | 103.3 ms | 100.1 ms | 98.3 ms | 308 ms |
+| 102,400 workers, static PIE | **59.3** ms | 103.3 ms | 106.6 ms | 102.5 ms | 342 ms |
+| 102,400 workers, shared | **65.6** ms | 126.6 ms | 116.6 ms | 128.2 ms | 434 ms |
+
+On eight lanes synth's shape takes 32.0, 32.6 and 39.7 ms (static, static PIE,
+shared), where wild's threads take 26.2, 26.7 and 30.8 and mold's 42.7, 42.2
+and 46.7. A small static link is mostly `libc.a`'s members: 1.50 ms for one
+worker, against 0.60 as a dynamic PIE. On the appendix's own hello world and
+tcc, from GCC's driver's `-static` and `-static-pie` command lines, one lane
+links them in 1.50 and 2.09 ms as static executables and 1.54 and 2.06 ms as
+static PIEs, against wild's 3.90 to 5.99, mold's 6.03 to 8.46 and lld's 6.45 to
+8.82 on one thread. The writer's dynamic PIEs, whose passes now count and
+number IFUNCs, take what they took before: within 1.4% at every size
+(`benchmark-executable --only dynamic` against main, three rounds).
 
 ### Lanes
 

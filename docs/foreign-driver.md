@@ -7,16 +7,23 @@ drivers hand them to GNU ld; callers supply startup objects and libraries in
 link order. It does not invoke a system linker to produce its output.
 
 ```text
-build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static|-pie]
-    [--dynamic-linker PATH] [--lanes N] [--scalar] [-s|--strip-all] [--time]
+build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared]
+    [-soname NAME] [--dynamic-linker PATH] [--no-dynamic-linker]
+    [--lanes N] [--scalar] [-s|--strip-all] [--time]
     [--gc-sections|--no-gc-sections]
     [--merge-strings|--no-merge-strings]
-    [--dedup-unwind|--no-dedup-unwind]
+    [--dedup-unwind|--no-dedup-unwind] [--startup-applies-irelative]
     INPUT... [-L DIR] [-l LIB] [-u NAME]
 ```
 
 Defaults are a static executable named `a.out`, entry `_start`, one lane,
-and all optional transformations disabled. Named regular symbols are emitted
+and all optional transformations disabled. `-pie` makes a dynamic PIE,
+`-static` with `-pie` a static PIE (as GNU ld and lld read the two together;
+GCC's `-static-pie` line is `-static -pie --no-dynamic-linker -z text`), and
+`-shared` a shared library, which has no entry point unless `-e` names one,
+with `-soname NAME` (or GNU ld's `-h NAME`, `--soname=NAME`) for its
+`DT_SONAME`. `-shared` with `-static` or `-pie`, and `--no-dynamic-linker`
+without `-static -pie`, are refused. Named regular symbols are emitted
 by default; `-s` and `--strip-all` omit `.symtab` and `.strtab` while preserving
 the dynamic symbol table and runtime dependencies. `--scalar` selects the exact
 resolver, symbol-selection and writer paths. `--lanes N` runs the resolution,
@@ -27,7 +34,9 @@ error after the link, each stage's wall time (the arguments, the interpreter's
 discovery, the resolution with each of its phases on the slowest lane, the
 conversion, the optional passes, the write with each of the writer's phases on
 lane 0, and the release), as wild's `--time` and mold's `--perf` report
-theirs. `--help` describes the supported
+theirs. `--startup-applies-irelative` says that a static link's own startup
+applies its `IRELATIVE` relocations (below, "What a static executable and a
+static PIE hold"). `--help` describes the supported
 command forms. The entry is a forced undefined reference during resolution,
 so an archive can supply it; final entry lookup is repeated after symbol
 remapping.
@@ -35,31 +44,37 @@ remapping.
 The options GCC's driver gives GNU ld that describe what every output of this
 command is already are taken and change nothing: `--build-id`,
 `--eh-frame-hdr`, `--hash-style=gnu`, `-m elf_x86_64` (and `-melf_x86_64`),
-and `-z now`, `-z relro` and `-z noexecstack`. `-dynamic-linker` is
+and `-z now`, `-z relro`, `-z noexecstack` and `-z text` (the writer never
+writes a relocation in read-only memory). `-dynamic-linker` is
 `--dynamic-linker`. Any other `-m` or `-z` keyword is refused, naming it. So
-a driver's command line, as `gcc -###` prints it for GNU ld, links as it is,
-with `-pie` for a PIE.
+a driver's command line, as `gcc -###` prints it for GNU ld, links as it is:
+`-pie` for a PIE, `-static`, `-static -pie` and `-shared` for the others.
 
 ## Input order and output boundary
 
 Driver options are removed without reordering paths, `-L`, `-l`, `-u`,
 `--undefined`, archive groups, whole-archive, as-needed or library-search
-controls. The final static mode starts library search with archives only;
-PIE starts with the resolver's ordinary DSO preference. Explicit ordered
-`-Bstatic`/`-Bdynamic` override that initial choice. An explicit `-static`
-also stays in the input stream, preserving its existing search effect.
-Static output that selects a needed DSO reports the incompatible input.
+controls. The static kinds (a static executable and a static PIE) start
+library search with archives only; a PIE and a shared library start with the
+resolver's ordinary DSO preference. Explicit ordered `-Bstatic`/`-Bdynamic`
+override that initial choice. An explicit `-static` also stays in the input
+stream, preserving its existing search effect. Static output that selects a
+needed DSO reports the incompatible input.
 
-The static output supports no-libc startup. Dynamic PIE accepts explicit C
-runtime startup objects, the program objects, libraries and closing CRT
-objects in the caller's chosen order. `--dynamic-linker PATH` supplies the
-interpreter directly; otherwise the command finds the system interpreter as
-[the interpreter note](foreign-interpreter.md) describes. Neither form inserts
-startup objects or libraries into the foreign command. The caller retains
-responsibility for an appropriate startup/library sequence.
+Every kind accepts explicit C runtime startup objects, the program objects,
+libraries and closing CRT objects in the caller's chosen order: `crt1.o`,
+`crti.o`, `crtbeginT.o` and the archive group `-lgcc -lgcc_eh -lc` with
+`crtend.o` and `crtn.o` for a static executable, `rcrt1.o`, `crtbeginS.o` and
+`crtendS.o` with the same group for a static PIE, and `crti.o`, `crtbeginS.o`,
+`crtendS.o` and `crtn.o` around a shared library's libraries, as GCC's driver
+gives them. A static program without libc links too. `--dynamic-linker PATH`
+supplies a dynamic PIE's interpreter directly; otherwise the command finds the
+system interpreter as [the interpreter note](foreign-interpreter.md)
+describes. Neither form inserts startup objects or libraries into the foreign
+command. The caller retains responsibility for an appropriate startup/library
+sequence.
 
-Shared-library output, static libc startup and static PIE are not supported
-yet. Strip flags take no value; joined forms such as `--strip-all=false` are
+Strip flags take no value; joined forms such as `--strip-all=false` are
 refused. A strip-looking argument consumed by `-u`, `--undefined` or another
 value-taking option remains that option's value.
 
@@ -114,11 +129,68 @@ lld make of them, where the corpus test below compares it:
   visibilities: `end`, `_end`, `etext`, `_etext`, `edata`, `_edata` and
   `__bss_start` default, the others hidden. `_DYNAMIC` is defined whether or
   not anything refers to it.
-- **IFUNCs:** a defined IFUNC that a fixup reaches is refused, by its name
-  and object, rather than written as a plain function, which would call the
-  resolver: the writer's IFUNC stubs and IRELATIVE relocations are the static
-  runtime's, which a dynamic PIE's stubs for its imports don't share yet. One
-  that nothing reaches is written as it is.
+- **IFUNCs:** a defined IFUNC that a fixup reaches gets a stub, as lld's
+  `.iplt` entry, beside the imports' stubs: its calls go through it, and it
+  stands for the IFUNC's address when anything else takes it (lld's canonical
+  PLT entry). Its slot, after the GOT kinds', gets an `R_X86_64_IRELATIVE`
+  relocation whose addend is the resolver, last in `.rela.dyn` (after the
+  copies, as lld's `.rela.dyn` has its `.iplt` relocations last), and an
+  IFUNC loaded through the GOT without a stub gets one for its own slot. The
+  writer numbers the IFUNCs' stubs before the imports', so that a PIE without
+  IFUNCs keeps its layout.
+
+## What a static executable and a static PIE hold
+
+The conversion gives the writer what `dynamic.c` gives the direct path's
+static kinds (`dynamic_static_inputs` and `dynamic_static_pie_inputs`): the
+start file's ABI note (`crt1.o`'s or `rcrt1.o`'s), and the link's
+`__tls_get_addr`, which `libc.a` doesn't define and which stays undefined:
+the writer relaxes each general- and local-dynamic access to local-exec,
+consuming its call, as GNU ld and lld relax them in a static link. Every
+other strong reference that nothing defines is still an error. The writer's
+static runtime handling does the rest: IFUNCs' stubs in `.iplt` with
+`IRELATIVE` relocations, which `libc.a`'s startup applies, in `.rela.iplt`
+between `__rela_iplt_start` and `__rela_iplt_end` (lld and mold put them in
+`.rela.dyn`), the prioritized init and fini array entries, and the names
+`libc.a`'s startup looks for (the ELF header's and the image's bounds). A
+static PIE also gets `DT_INIT` and `DT_FINI` from `crti.o`'s `_init` and
+`_fini` and its `RELATIVE` relocations in `.rela.dyn` without RELR, as lld
+writes `-static-pie` without `-z pack-relative-relocs`; `rcrt1.o`'s startup
+applies them before anything else runs. A static program without libc takes
+the same handling, which changes nothing for it, but for IFUNCs. The kernel
+applies no relocations, so something in the program must apply their
+`IRELATIVE` ones before it calls them, and the conversion takes them only from
+a startup it recognizes (`foreign_link_startup_applies`): glibc's, followed
+from the entry's object. A static executable's entry (`crt1.o`'s `_start`)
+refers to `__libc_start_main`, whose object (`libc.a`'s `libc-start.o`) refers
+to `__rela_iplt_start` and applies the relocations between it and
+`__rela_iplt_end`; a static PIE's (`rcrt1.o`'s) refers to `__libc_start_main`
+too, whose object refers to `_dl_relocate_static_pie`, whose object
+(`dl-reloc-static-pie.o`) refers to `_DYNAMIC` and applies the image's
+relocations through it, `IRELATIVE` ones among them. Another C library's
+startup isn't glibc's (musl's `__libc_start_main` refers to none of these and
+applies no `IRELATIVE` relocation), and a mere mention of those names, a
+pointer to `__rela_iplt_start` that nothing reads, proves nothing. A program
+whose own startup applies them says so with `--startup-applies-irelative`.
+Otherwise the first IFUNC a fixup reaches is refused, naming it and why, where
+lld writes a program whose call through the slot that nothing filled faults.
+
+## What a shared library holds
+
+A shared library's libraries and versions are a dynamic PIE's, without the
+interpreter, the ABI note or copy relocations. Every global, weak and unique
+definition of default or protected visibility is exported, as lld's `-shared`
+exports them without a version script, and the writer makes the default ones
+preemptible: their calls go through stubs reading GOT slots that the loader
+fills, and their initial-exec, general- and local-dynamic TLS accesses get
+their slots' relocations. A strong reference of default visibility to a name
+nothing defines is left for the loader to bind (lld's `-z undefs`, its
+default for `-shared`); one of another visibility is refused. `_init` and
+`_fini` give `DT_INIT` and `DT_FINI`. A preemptible IFUNC binds as a dynamic
+symbol, whose `GLOB_DAT` the loader binds by calling the resolver; one that
+isn't preemptible (local, hidden or protected) needs an `IRELATIVE`
+relocation, which the writer's shared mode doesn't write, and the first one a
+fixup reaches is refused, naming it.
 
 ## Transformation and ownership contract
 
@@ -206,22 +278,45 @@ be ours. `foreign_bounds_test.c` links a table in a section of one name from
 two objects and an archive member that loads (and one that doesn't, whose
 entry mustn't count) at alignments 8 and 16, a section writable in one object
 and read-only in another, which merges into one writable section, a weak
-reference to the bounds of a name no section has, which stays zero, and an
-IFUNC called (refused, naming it) and one that nothing refers to (linked);
-with `--cross-check`, lld's link of the same inputs must run alike and define
-the bounds alike. Its section GC case collects a link after the merge: a
+reference to the bounds of a name no section has, which stays zero, an IFUNC
+called and one that nothing refers to, each linked as a PIE that the loader
+runs, and a shared library's hidden IFUNC called by its exported function
+(refused, naming it); with `--cross-check`, lld's links of the same inputs
+must run alike and define the bounds alike. The driver's own tests link a
+shared library with `-soname` and with `-h`, check its `DT_SONAME`, export,
+missing entry point and interpreter, and run a PIE that calls it; check that
+`-pie` with `-static` writes a static PIE; refuse `-shared` with `-static`,
+`--no-dynamic-linker` with `-pie` and `-soname` without a value; and link
+programs without libc whose `_start` calls an IFUNC. They are refused, naming
+the IFUNC and why, as a static executable and as a static PIE, with a pointer
+to `__rela_iplt_start` or to `_DYNAMIC` that nothing reads, and with a `_start`
+that applies the relocations itself but without `--startup-applies-irelative`.
+With it, a static executable whose `_start` applies those between
+`__rela_iplt_start` and `__rela_iplt_end`, and a static PIE whose `_start`
+applies `.rela.dyn`'s `RELATIVE` and `IRELATIVE` relocations through
+`_DYNAMIC` from wherever the loader put it, link and run with their status;
+the corpus links glibc's startup in both. Its section GC case collects a link
+after the merge: a
 retained section whose bounds only dead code refers to must keep its bytes,
 and a hook in a merged code section its FDE, while the dead code goes.
 
 `test-foreign-corpus` is the differential test against lld and mold: AGENTS.md
 ("Foreign corpus test") has its rules. Each program of the corpus, compiled by
 gcc and by clang at `-O2` as their default PIEs, is linked from one command
-line by `link-foreign`, lld and mold; the three executables must run alike,
-have the same `.symtab` symbols with the same sizes, and agree on the dynamic
-section, `.dynsym`'s versions and the dynamic relocations. What a reference
+line by `link-foreign`, lld and mold as each kind of output: a dynamic PIE, a
+static executable, a static PIE and a shared library of its library part
+(compiled again with `-fPIC`), which a PIE of the rest loads; the three
+outputs must run alike, have the same `.symtab` symbols with the same sizes,
+and agree on the dynamic section, `.dynsym`'s versions and the dynamic
+relocations, `IRELATIVE` ones among them, each by its resolver and whether
+it writes a GOT slot or a pointer in data. What a reference
 linker writes as its own valid choice is classified and counted, never
-dropped silently. The corpus is its two original programs (C, with threads,
-thread-locals, an archive, constructors, a weak reference and a registry, and
+dropped silently: mold's `IRELATIVE` relocation of a pointer to an IFUNC
+outside the GOT in a PIE, where `link-foreign` and lld relocate the pointer
+relative to the IFUNC's stub, must be one of `link-foreign`'s stub pointers,
+one for one. The corpus is its two original programs (C, with threads,
+thread-locals, an archive, constructors, a weak reference, a registry and
+IFUNCs called, loaded from the GOT and pointed to from data, and
 C++, with iostream, exceptions across translation units, RTTI, templates in
 COMDAT groups and a thread), and on request SQLite's shell, Lua's interpreter
 and this repository's compiler, built by clang alone.
@@ -233,7 +328,10 @@ design's generated programs, from one command line, as a process of its own
 with `--lanes=8` and `--lanes=1`. On the 9700X, one lane links the programs of
 1 worker, 2,000 workers and synth's shape in 0.60, 1.12 and 55.2 ms, against
 wild's 1.35, 2.56 and 99.9 ms and mold's 2.44, 3.31 and 99.9 ms on one thread:
-0.89 GB/s of output per lane on the largest, against mold's 0.54. "Foreign
-executables, as built" in the linker design has the tables, the appendix's own
-inputs and where the time goes. GC, string pooling and CIE pooling remain
+0.89 GB/s of output per lane on the largest, against mold's 0.54; as a
+static executable, a static PIE and a shared library, synth's shape takes
+58.3, 59.3 and 65.6 ms on one lane, against mold's 100.1, 106.6 and 116.6 and
+lld's 98.3, 102.5 and 128.2 on one thread. "Foreign executables, as built" in
+the linker design has the tables, the appendix's own inputs and where the time
+goes. GC, string pooling and CIE pooling remain
 disabled by default; their own measurements are in the linker design.
