@@ -1275,12 +1275,15 @@ The 9700X job's test step ("Run the tests at once") runs every test through it,
 with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
 A test goes in its list as a heading and the step's commands, in the order of
 the tests' times in the job, the longest first, so that they start first: put a
-new one where its time puts it. One that needs the machine to itself doesn't
-belong there. On the 9700X its tests' times in the job come to 302 s, and the
-step's bound through the runner is about 38 s, the longest's (the checker's
-group, 33 to 37 s) and the sum's over 8 jobs; with the longest started among
-the last, the step took 64 s. To run the list as the job does (on the 9700X,
-under its lock, as one run):
+new one where its time puts it, and give independent commands a heading each
+rather than one between them. One that needs the machine to itself doesn't
+belong there. On the 9700X its tests' times in the job come to 310 s, and the
+step's bound through the runner is the longest one's and the sum's over 8 jobs,
+about 39 s; with the longest started among the last, the step took 64 s, and
+with them first but the checker's four commands as one heading, 50 s, as they
+slow each other (that heading took 33 to 37 s started late, 50 s started with
+the others). To run the list as the job does (on the 9700X, under its lock, as
+one run):
 
 ```sh
 sed -n "/<<'TESTS'$/,/^ *TESTS$/{//!{s/^ \{10\}//;p}}" .github/workflows/9700x.yml | ./build/compiler parallel
