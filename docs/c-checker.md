@@ -10,7 +10,19 @@ the semantic driver:
 ./build/compiler check [--scalar] [--dump-typed] [--dump-static] [preprocessor options] file.c
 ./build/compiler [--scalar] -fsyntax-only [preprocessor options] file.c
 ./build/compiler [--scalar] -c [-o file.o] [preprocessor options] file.c
+./build/compiler [--scalar] [--verify] [-o a.out] [preprocessor options] file.c
 ```
+
+The last form compiles and links an executable by the direct path (#145): the
+checked program lowered to Tier 0, bound against the C runtime's snapshot
+(`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
+(`executable_write`). A binding that finds the snapshot damaged discards it and
+links once more from a fresh import. `--verify` also checks every function's
+records with `x86_validate`, as the c-testsuite harness asks
+([the c-testsuite guide](c-testsuite.md)). The direct path links `libc.so.6`
+and its loader alone: a call of a function that a system header declares and
+the C library lacks (libm's) and a read or write of the C library's data (which
+needs the GOT) are refused by name; `-c` and a system linker take both.
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check
@@ -414,7 +426,61 @@ supported operations into `Tier0Function` records with explicit conversions,
 loads/stores, scaled pointer operations, control flow, locals, calls and ABI
 classes. `c_check_program_emit.c` compiles those functions, resolves shared
 symbols and publishes code/data together. Backend machine classes never
-replace the full semantic `TypeId` in the checked stream.
+replace the full semantic `TypeId` in the checked stream. It also gives Tier 0
+the unit's access column (`Tier0Function.symbol_access`, docs/tier0.md): a
+symbol the unit doesn't define is reached through its GOT slot, since it may be
+a shared library's and the direct path makes no copy relocations, and a
+thread-local by local-exec where the unit defines it and by initial-exec where
+it doesn't.
+
+What the lowering covers past scalars (#145's programs):
+
+- **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
+  of their own size and alignment (up to 16 bytes, 1 GB), reached through
+  `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+- **Copies.** Struct and union assignment and initialization are `COPY`s of
+  at most 256 bytes each, the source's address kept in a temporary between
+  them; a statement's assignment leaves no address to discard.
+- **Initializers.** A local object's plan is applied in order: the object is
+  cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
+  128 bytes) unless its first part clears it whole, then each part's zeros,
+  bytes or value is stored, an aggregate's copied.
+- **Calls.** A call through a pointer is indirect (callee 0, the address pushed
+  before the arguments), its callee evaluated first.
+- **Bit-fields.** A bit-field is read and written through the bytes that hold
+  its bits and no other member's (C11 makes those other memory locations), as
+  pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
+  its bits to the top and back, sign- or zero-extending them as its type says;
+  a store clears its bits and puts the value's in, and its value is the field's
+  as it now reads. `++`, `--` and compound assignment read, operate and store
+  the same way, and so do initializer parts with a bit width. A field whose bits
+  are spread over more than 8 bytes (a packed one) is refused.
+- **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The control stream puts a `STACK_SAVE` before each block's first array, an
+  `ALLOCATE` at each array's declaration (after its bounds) and a
+  `STACK_RESTORE` at the block's end and before every `break`, `continue` or
+  `goto` that leaves the arrays' scope, restoring the outermost block it
+  leaves; a `return` needs none. The lowering keeps the saved position and each
+  array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
+  `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
+  set once where they were declared, times its constant dimensions and its
+  element's size, and the same extents give `sizeof` and the strides of
+  pointer arithmetic over a pointer to a variable-length array. An array
+  declared in a `for` statement's clause or directly in a statement
+  expression's block, one aligned past 16 and one initialized (C23's `= {}`)
+  are refused by name. The source reader doesn't yet take a bound whose
+  statement expression holds more than expression statements (a declaration,
+  an `if` or a jump: `invalid or unsupported declaration`); the control stream
+  already puts such a jump out of a block's first array's bounds before the
+  block's `STACK_SAVE`, where it needs no restore.
+- **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
+  no compares of those classes.
+
+Everything else the lowering can't express is refused with
+`error: unsupported: FEATURE`, naming the feature: aggregates passed or
+returned by value, variadic definitions, `long double`,
+`_Complex`, thread-locals, inline assembly and so on. The c-testsuite harness
+counts such a test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
 identities and effect requirements. Native helpers are ordinary calls with real

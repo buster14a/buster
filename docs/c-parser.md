@@ -669,3 +669,136 @@ that measurement. `test-parser --clang` checks kernel twins, independent
 postorder, alignments/depth/recovery and tree-only equivalence. [#126](https://github.com/buster14a/buster/issues/126)/[#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)
 retain corpus and source-checker acceptance, including memory and fallback
 costs over real units, rather than assuming a fast kernel satisfies the handoff.
+## Consumer contract for the preprocessing-to-parser handoff (#335)
+
+The retained boundary is `pp_run_main` → `pp_resolve_keywords` →
+`parse_translation_unit` → `parse_tokens_from_output` (or the scalar twins).
+The [preprocessor](../src/buster/compiler/c_preprocessor.c) owns `PPTokens`:
+u8 kinds/flags, u32 values/source locations, a logical `count` and a writable
+`capacity`. Values have kind-dependent meaning; identifiers and keywords keep
+their `IdentId`. Keyword resolution follows `PPOptions.language` and its GNU
+keyword options. The final output has history runs instead of a per-token
+origin column. Source locations, expansion history, interned spellings and
+mapped/borrowed source storage remain owned by the preprocessor/intern/cache
+lifetimes.
+
+The [intern table](../src/buster/compiler/c_intern.c) assigns stable predefined
+identifiers before preprocessing; `c_name_is_keyword` and the preprocessor's
+language-dependent keyword table classify those identities. Fusion does not
+change this table, keyword spelling, or the attribution recorded in
+[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md#clangs-keywords). Repeated expansions may share
+an interned spelling while retaining distinct PP token indices and histories.
+PP capacity does not promise parser sentinels: vector conversion uses its
+existing masked tails and may read only initialized PP columns.
+
+The [parser's input adapter](../src/buster/compiler/c_parser.c) materializes
+four columns: u8 grammar kinds/flags, u32 names and original PP source indices.
+It merges equivalent grammar keywords, removes complete pragma lines into
+ordered `(PP source, parser position)` event columns, and splits one `::` into
+two colons with the same original PP source index. The second colon gets
+`BUSTER_PARSE_COLONCOLON_SECOND`; adjacent colons from separate macro occurrences
+remain separate identities. The original PP columns retain every token in its
+original order. The parser
+allocates for up to twice the PP count, plus 128 initialized entries on each
+side of the logical range: END kinds and zero in the other padded columns.
+Allocation capacity does not authorize a consumer to read past that padding.
+
+| Reader | Columns and lifetime it requires |
+| --- | --- |
+| Parser vector kernels, scalar parser and fallback | Complete grammar columns, initialized sentinels and original PP indices until parsing and diagnostics finish. Only legal special-token boundaries alter a conversion block; arbitrary chunks are not independent parses. |
+| Checker adaptation, pragmas, repair/prefix views and diagnostics | The parser columns/tree/postorder and original PP kinds, values, flags, locations, history and spellings. Pragma events retain their original source order. All borrowed storage outlives checking and diagnostic rendering. |
+| `pp_print` / `-E`, token oracles and preprocessing benchmarks | Complete resolved PP output; no parser-column allocations. Printer spacing and source markers still use the original flags/locations. |
+| `pp_diagnose_output`, macro history and parser diagnostics | Original PP token identity, source locations, flags and expansion runs; repeated occurrences are not deduplicated. Parser indices translate through `ParseTokens.sources`. |
+| [Assembly preprocessing](../src/buster/compiler/assembler_driver.c) | Assembly-mode PP output and `pp_print`; no C parser metadata or deferred C keyword resolution. |
+| Parser tests/benchmarks and fragment adapters | The same logical counts, padding, source identities and completion rules as real parser callers. A timed conversion row does not include preprocessing, storage preparation or downstream parsing. |
+
+The evaluated alternative was explicitly requested with
+`PPOptions.parser_keywords` (`--parser-keywords`) by parsing consumers only.
+A successful nonassembly `pp_run_main` then left its keyword kinds pending;
+the parser resolved each legal run while constructing the same columns, wrote
+the resolved kinds back into the PP output, and handled pragma-only identifiers
+with its scalar twin. No column was removed and no allocation was saved.
+`-E` cleared the request and assembly ignored it. Preprocessing errors and
+parser conversion-allocation failures completed the existing keyword pass;
+the pending interval never extended into checking or diagnostic consumers.
+The experiment patch is preserved with the measurement record.
+
+On the retained path, preprocessing completes classification before returning
+output to any consumer. A failed parse does not turn a partial tree or partially
+filled parser columns into a complete translation unit. Checking may use its
+existing validated repair/prefix view; all other consumers obey the reported
+failure and preserve the original PP storage for diagnostics. This boundary
+does not promise arbitrary transactional rollback of parser scratch storage.
+
+Frozen small, header-heavy and SQLite inputs measure both real drivers with
+preparation, allocation, preprocessing, conversion, parser/checker work and
+cleanup included. `time-runs` reports process RSS separately from the C
+accounting probe's logical arena usage, scratch high-water and mapped virtual
+space. Logical arena high-water is the maximum simultaneous sum of
+`Arena.length`, including alignment and fully pushed column capacity; unpushed
+reservation is excluded. It is neither touched nor resident memory. Mapping
+high-water covers page-rounded compiler-source mappings and excludes the
+loader, libraries, stack and other process mappings. Instrumented RSS covers the
+whole process including the probe itself. The probe's selected logical column bytes describe source-level payload
+traffic; they exclude table reads, exceptional scalar rescans, caches and
+physical DRAM traffic. Its instrumented phase timings are diagnostic; the
+uninstrumented fresh-process matrix determines retention.
+
+The accounting boundary is producer plus handoff plus consumer, including
+preparation and cleanup. Moving keyword work from preprocessing into conversion
+can improve one phase while leaving the complete driver unchanged. The plain
+path remains selected unless repeated whole-driver gains exceed observed
+spread on frozen representative inputs, both sustained and after scalar work,
+with the same correctness and lifetime contract.
+
+## Decision for #335
+
+The shared keyword/conversion experiment is rejected. The complete charged
+matrix did not establish a representative gain beyond observed spread. The
+existing keyword pass and conversion remain selected; the pending state,
+`--parser-keywords` flag and fused production paths were removed. The
+independent guarded handoff oracle (vector and scalar paths), plain combined
+handoff benchmark rows and `time-runs` remain useful for later proposals.
+
+The approved Ryzen 7 9700X campaign used CPU 2 in
+[run 40099391974](https://github.com/buster14a/buster/actions/runs/40099391974),
+from merge commit `1897f1edab59c56112e894a70680b7bf8854936e` (candidate
+`0c55c026cccc7e62b4e8e90c802e31d693a99c89`). Both have tree
+`770064c1604f8dffbf0f5576836ed2e0f6f6ad8f`; all recorded source hashes
+match. The
+[recipe](https://github.com/buster14a/buster-performance/tree/09ca55a91db3cdb4842dfe286fb179a2a6ad1db2/docs/measurements/handoff-335-2026-10-24/ci)
+is frozen independently of the compiler. The
+[published evidence](https://github.com/buster14a/buster-performance/blob/d31c4d99d84a3b016f95fdb0bf2d2e8c2761d8f4/docs/measurements/handoff-335-2026-10-24/README.md)
+preserves the raw process logs, paired CSV, input/source hashes and experiment
+patch separately from the compiler. All 2,520 measured children and 120
+warm-ups exited zero; all source oracles, parser comparisons and 18 accounting
+processes passed and released their tracked storage.
+
+Negative change means fusion was faster. Each round pairs the medians of 21
+fresh processes per path. The middle column is the median of five paired
+changes; the range preserves their spread. Scalar work is an untimed loop
+before each child, on the same CPU.
+
+| Input | Driver | Scalar work ms | Median paired change | Five-round change range | Plain round spread ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| small | parse | 0 | -0.064% | -0.255 to 0.319% | 0.026 |
+| small | parse | 200 | -0.561% | -1.456 to 0.916% | 0.053 |
+| small | checker | 0 | -0.088% | -0.351 to 0.242% | 0.015 |
+| small | checker | 200 | -0.132% | -0.723 to 0.220% | 0.024 |
+| headers | parse | 0 | -0.242% | -0.458 to -0.027% | 0.029 |
+| headers | parse | 200 | -0.350% | -0.808 to 0.108% | 0.023 |
+| headers | checker | 0 | 0.000% | -0.192 to 0.103% | 0.014 |
+| headers | checker | 200 | -0.039% | -0.116 to 0.116% | 0.035 |
+| sqlite | parse | 0 | -0.019% | -0.211 to 0.010% | 0.059 |
+| sqlite | parse | 200 | -0.283% | -0.345 to -0.043% | 0.030 |
+| sqlite | checker | 0 | -0.103% | -0.179 to -0.045% | 0.258 |
+| sqlite | checker | 200 | 0.011% | -0.289 to 0.098% | 0.221 |
+
+The isolated handoff improved by roughly 9–15%, but saved no columns or
+allocations. Small and header-heavy checker results cross zero across rounds.
+Sustained SQLite checking saved 66–261 µs against 258 µs of plain round spread,
+and its after-scalar result crosses zero. SQLite parsing after scalar work was
+the strongest positive cell (9–72 µs in all five rounds); the whole matrix
+still does not support representative gains in both states. No production
+optimization is retained from this prototype. A future alternative must
+qualify the complete boundary again.

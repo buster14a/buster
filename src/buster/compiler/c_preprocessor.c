@@ -13963,7 +13963,11 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
                 pp->fallback_directory = buster_added ? pp->directory_count : BUSTER_PP_NONE;
                 result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
             }
-            result = result && pp_add_directory(pp, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(pp, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
+            // Then the C library's, as clang's Linux toolchain lists them: Debian's multiarch directory and /include
+            // between /usr/local/include and /usr/include. pp_dedupe_directories drops those a system doesn't have.
+            result = result && pp_add_directory(pp, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) &&
+                     pp_add_directory(pp, "/usr/include/x86_64-linux-gnu", BUSTER_PP_EXTERN_C_FILE) &&
+                     pp_add_directory(pp, "/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(pp, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
         }
         for (uint32_t i = 0; result && i < options->after_directory_count; i += 1)
         {

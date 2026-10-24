@@ -1668,6 +1668,297 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
     return same ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The handoff (#335)
+
+// A column of `bytes` bytes ending exactly at a PROT_NONE page, so that a read or write past its last element faults; a
+// column of none points at the page itself. parse_test_handoff_release unmaps it.
+static uint8_t* parse_test_handoff_column(uint64_t bytes)
+{
+    const uint64_t page = 4096;
+    const uint64_t room = (bytes + page - 1) & ~(page - 1);
+    uint8_t* mapping = mmap(0, room + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    uint8_t* result = 0;
+    if (mapping != MAP_FAILED)
+    {
+        if (room == 0 || mprotect(mapping, room, PROT_READ | PROT_WRITE) == 0)
+        {
+            result = mapping + room - bytes;
+        }
+        else
+        {
+            munmap(mapping, room + page);
+        }
+    }
+    return result;
+}
+
+static void parse_test_handoff_release(uint8_t* column, uint64_t bytes)
+{
+    const uint64_t page = 4096;
+    const uint64_t room = (bytes + page - 1) & ~(page - 1);
+    if (column != 0)
+    {
+        munmap(column + bytes - room, room + page);
+    }
+}
+
+// An output stream's tokens, from `state`: identifiers whose ids are keywords' (below the table), other predefined
+// names', and names past them, other tokens, `::`, a '#' inside a line, pragmas ('#' starting a line, its tokens and
+// PRAGMA_END) and a '#' that starts a line with no PRAGMA_END before the next line, as a macro may make. `forced`
+// puts a special token (by `special`) at token `at`, unless at is past the count.
+static void parse_test_handoff_stream(PPTokens* output, uint32_t count, uint64_t* state, uint32_t at, uint32_t special)
+{
+    const uint8_t others[] = { C_TOKEN_L_PAREN, C_TOKEN_R_PAREN, C_TOKEN_SEMI, C_TOKEN_COMMA, C_TOKEN_COLON, C_TOKEN_NUMERIC_CONSTANT, C_TOKEN_STRING_LITERAL };
+    uint32_t i = 0;
+    while (i < count)
+    {
+        const uint64_t r = parse_test_random(state);
+        const uint32_t pick = i == at ? 20 + special : (uint32_t)(r % 24);
+        uint8_t kind = C_TOKEN_RAW_IDENTIFIER;
+        uint32_t value = 0;
+        uint8_t flags = (uint8_t)((r >> 8) % 4 == 0 ? BUSTER_PP_START_OF_LINE : 0) | (uint8_t)((r >> 10) % 2 == 0 ? BUSTER_PP_SPACE : 0);
+        uint32_t length = 1;
+        if (pick < 8)
+        {
+            value = 1 + (uint32_t)((r >> 16) % (BUSTER_PP_KEYWORD_TABLE + 8));
+        }
+        else if (pick < 11)
+        {
+            value = BUSTER_PP_KEYWORD_TABLE + (uint32_t)((r >> 16) % 100000);
+        }
+        else if (pick < 19)
+        {
+            kind = others[(r >> 16) % sizeof(others)];
+        }
+        else if (pick == 19 || pick == 20)
+        {
+            kind = C_TOKEN_COLONCOLON;
+        }
+        else if (pick == 21)
+        {
+            kind = C_TOKEN_HASH;
+            flags &= (uint8_t)~BUSTER_PP_START_OF_LINE;
+        }
+        else
+        {
+            // A pragma, or a '#' starting a line with none, of up to 70 tokens (past a block), some identifiers.
+            kind = C_TOKEN_HASH;
+            flags |= BUSTER_PP_START_OF_LINE;
+            length = 1 + (uint32_t)((r >> 16) % 70);
+        }
+        // A group ends before the forced token.
+        length = at > i && at < i + length ? at - i : length;
+        output->kinds[i] = kind;
+        output->values[i] = value;
+        output->flags[i] = flags;
+        const bool pragma = pick == 22 || (pick == 23 && (r >> 40) % 2 == 0);
+        uint32_t j = 1;
+        while (j < length && i + j < count)
+        {
+            const uint64_t t = parse_test_random(state);
+            const bool last = j + 1 == length || i + j + 1 == count;
+            output->kinds[i + j] = last && pragma ? BUSTER_PP_KIND_PRAGMA_END : t % 3 == 0 ? C_TOKEN_COMMA : C_TOKEN_RAW_IDENTIFIER;
+            output->values[i + j] = output->kinds[i + j] == C_TOKEN_RAW_IDENTIFIER ? 1 + (uint32_t)((t >> 8) % (BUSTER_PP_KEYWORD_TABLE + 8)) : 0;
+            // A pragma's tokens never start a line; a '#' without PRAGMA_END ends where a token does.
+            output->flags[i + j] = !pragma && last ? BUSTER_PP_START_OF_LINE : (uint8_t)((t >> 20) % 2 == 0 ? BUSTER_PP_SPACE : 0);
+            j += 1;
+        }
+        i += j;
+    }
+    output->count = count;
+}
+
+// The handoff's oracle: the output as the keyword pass and the conversion must leave it and give it to the parser,
+// from C's rules for the language mode (c_name_is_keyword, not the preprocessor's table), the pragma's shape, and
+// parse_kind_table and parse_keyword_kinds for the kinds. Writes the resolved kinds to `resolved` and the parser's
+// tokens to `tokens` (unpadded).
+static void parse_test_handoff_oracle(const PPTokens* output, CLanguage language, uint8_t* resolved, ParseTokens* tokens)
+{
+    for (uint32_t i = 0; i < output->count; i += 1)
+    {
+        const uint32_t id = output->values[i];
+        const bool keyword = output->kinds[i] == C_TOKEN_RAW_IDENTIFIER && id != 0 && id < BUSTER_PP_KEYWORD_TABLE && id < C_NAME_COUNT && c_name_is_keyword(id, language);
+        resolved[i] = keyword ? (uint8_t)(BUSTER_PP_KIND_KEYWORD + id - 1) : output->kinds[i];
+    }
+    uint32_t w = 0;
+    tokens->pragma_count = 0;
+    uint32_t i = 0;
+    while (i < output->count)
+    {
+        const uint8_t kind = resolved[i];
+        uint32_t end = i + 1;
+        bool pragma = false;
+        if (kind == C_TOKEN_HASH && (output->flags[i] & BUSTER_PP_START_OF_LINE) != 0)
+        {
+            while (end < output->count && resolved[end] != BUSTER_PP_KIND_PRAGMA_END && (output->flags[end] & BUSTER_PP_START_OF_LINE) == 0)
+            {
+                end += 1;
+            }
+            pragma = end < output->count && resolved[end] == BUSTER_PP_KIND_PRAGMA_END;
+        }
+        if (pragma)
+        {
+            tokens->pragma_sources[tokens->pragma_count] = i;
+            tokens->pragma_positions[tokens->pragma_count] = w;
+            tokens->pragma_count += 1;
+            i = end + 1;
+        }
+        else
+        {
+            uint8_t parse_kind = parse_kind_table[kind];
+            const bool is_keyword = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END;
+            if (is_keyword)
+            {
+                parse_kind = PARSE_KIND_UNKNOWN;
+                for (uint32_t k = 0; k < sizeof(parse_keyword_kinds) / sizeof(parse_keyword_kinds[0]); k += 1)
+                {
+                    parse_kind = parse_keyword_kinds[k].name == output->values[i] ? parse_keyword_kinds[k].kind : parse_kind;
+                }
+            }
+            tokens->kinds[w] = kind == C_TOKEN_COLONCOLON ? PARSE_KIND_COLON : parse_kind;
+            tokens->names[w] = kind == C_TOKEN_RAW_IDENTIFIER || is_keyword ? output->values[i] : 0;
+            tokens->sources[w] = i;
+            tokens->flags[w] = output->flags[i];
+            w += 1;
+            if (kind == C_TOKEN_COLONCOLON)
+            {
+                tokens->kinds[w] = PARSE_KIND_COLON;
+                tokens->names[w] = 0;
+                tokens->sources[w] = i;
+                tokens->flags[w] = BUSTER_PARSE_COLONCOLON_SECOND;
+                w += 1;
+            }
+            i += 1;
+        }
+    }
+    tokens->count = w;
+}
+
+// Whether the conversion's tokens are the oracle's, the padding around them PARSE_KIND_END and zeros.
+static bool parse_test_handoff_same(const ParseTokens* got, const ParseTokens* expected)
+{
+    bool same = parse_test_compare_tokens(got, expected) == BUSTER_PARSE_NONE;
+    for (uint32_t p = 0; same && p < BUSTER_PARSE_TOKEN_PADDING; p += 1)
+    {
+        const int64_t before = -1 - (int64_t)p;
+        const uint64_t after = (uint64_t)got->count + p;
+        same = got->kinds[before] == PARSE_KIND_END && got->kinds[after] == PARSE_KIND_END && got->names[before] == 0 && got->names[after] == 0 &&
+               got->sources[before] == 0 && got->sources[after] == 0 && got->flags[before] == 0 && got->flags[after] == 0;
+    }
+    return same;
+}
+
+// The handoff on generated output streams: every count from 0 to 200 and some to 5,000, with a special token ('#'
+// inside a line, a pragma's '#', a '#' with no PRAGMA_END, or `::`) forced at each of the blocks' edges (0, 62 to 66,
+// 126 to 130, 190 to 194), each stream's columns ending at a PROT_NONE page. Both paths start from the stream as the
+// preprocessor left it: the keyword pass's vector path and the conversion's, and their scalar twins. Each must give
+// the oracle's resolved kinds and parser tokens, with the padding; a read or a write past an input column faults.
+static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
+{
+    uint32_t failures = 0;
+    uint64_t cases = 0;
+    static Preprocessor pp;
+    static Parser parser;
+    memset(&pp, 0, sizeof(pp));
+    pp.vectorized = true;
+    for (uint32_t id = 0; id < BUSTER_PP_KEYWORD_TABLE; id += 1)
+    {
+        pp.keyword_kinds[id] = id < C_NAME_COUNT && c_name_is_keyword(id, language) ? (uint8_t)(BUSTER_PP_KIND_KEYWORD + id - 1) : C_TOKEN_RAW_IDENTIFIER;
+    }
+    const ParseOptions options = { 0 };
+    const uint32_t edges[] = { 0, 62, 63, 64, 65, 66, 126, 127, 128, 129, 130, 190, 191, 192, 193, 194, BUSTER_PARSE_NONE };
+    uint64_t state = seed ^ 0x335335335ull;
+    const bool ready = parse_initialize(&parser, &options, language);
+    failures += !ready;
+    for (uint32_t count = 0; ready && count <= 5000 && failures < 8; count += count < 200 ? 1 : 397)
+    {
+        const uint64_t capacity = 2 * (uint64_t)count + 64;
+        uint8_t* kinds = parse_test_handoff_column(count);
+        uint8_t* flags = parse_test_handoff_column(count);
+        uint8_t* values = parse_test_handoff_column((uint64_t)count * 4);
+        uint8_t* original = malloc((uint64_t)count + 1);
+        uint8_t* resolved = malloc((uint64_t)count + 1);
+        ParseTokens expected = {
+            .kinds = malloc(capacity),
+            .names = malloc(capacity * 4),
+            .sources = malloc(capacity * 4),
+            .flags = malloc(capacity),
+            .pragma_sources = malloc(((uint64_t)count + 1) * 4),
+            .pragma_positions = malloc(((uint64_t)count + 1) * 4),
+        };
+        ParseTokens got = {
+            .kinds = parse_column(&parser, 0, capacity, 1),
+            .names = parse_column(&parser, 1, capacity, 4),
+            .sources = parse_column(&parser, 2, capacity, 4),
+            .pragma_sources = parse_column(&parser, 3, (uint64_t)count + 1, 4),
+            .pragma_positions = parse_column(&parser, 4, (uint64_t)count + 1, 4),
+            .flags = parse_column(&parser, 10, capacity, 1),
+            .capacity = (uint32_t)capacity,
+        };
+        const bool allocated = kinds != 0 && flags != 0 && values != 0 && original != 0 && resolved != 0 && expected.kinds != 0 && expected.names != 0 && expected.sources != 0 &&
+                               expected.flags != 0 && expected.pragma_sources != 0 && expected.pragma_positions != 0 && got.kinds != 0 && got.names != 0 && got.sources != 0 &&
+                               got.pragma_sources != 0 && got.pragma_positions != 0 && got.flags != 0;
+        failures += !allocated;
+        for (uint32_t e = 0; allocated && e < sizeof(edges) / sizeof(edges[0]) && failures < 8; e += 1)
+        {
+            for (uint32_t special = 0; special < (edges[e] == BUSTER_PARSE_NONE ? 1u : 4u); special += 1)
+            {
+                pp.output = (PPTokens){ .kinds = kinds, .flags = flags, .values = (uint32_t*)values, .count = count, .capacity = count };
+                parse_test_handoff_stream(&pp.output, count, &state, edges[e], special);
+                memcpy(original, kinds, count);
+                parse_test_handoff_oracle(&pp.output, language, resolved, &expected);
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    memcpy(kinds, original, count);
+                    const uint64_t padded = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
+                    memset(got.kinds - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded);
+                    memset(got.names - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded * sizeof(*got.names));
+                    memset(got.sources - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded * sizeof(*got.sources));
+                    memset(got.flags - BUSTER_PARSE_TOKEN_PADDING, 0x5a, padded);
+                    memset(got.pragma_sources, 0x5a, ((uint64_t)count + 1) * sizeof(*got.pragma_sources));
+                    memset(got.pragma_positions, 0x5a, ((uint64_t)count + 1) * sizeof(*got.pragma_positions));
+                    switch (path)
+                    {
+                        case 0:
+                            pp_resolve_keywords_vector(&pp);
+                            parse_tokens_from_output(&pp.output, &got);
+                            break;
+                        case 1:
+                            pp_resolve_keywords_scalar(&pp);
+                            parse_tokens_from_output_scalar(&pp.output, &got);
+                            break;
+                    }
+                    const uint32_t kind = parse_test_first_byte(kinds, resolved, count);
+                    if (kind != BUSTER_PARSE_NONE || !parse_test_handoff_same(&got, &expected))
+                    {
+                        static const char* const names[] = { "keyword pass and conversion", "their twins" };
+                        parse_test_report("handoff: %s differs from the oracle on %u tokens (special %u at %u), first resolved kind at %u\n", names[path], count, special,
+                                          edges[e], kind);
+                        failures += 1;
+                    }
+                    cases += 1;
+                }
+            }
+        }
+        parse_test_handoff_release(kinds, count);
+        parse_test_handoff_release(flags, count);
+        parse_test_handoff_release(values, (uint64_t)count * 4);
+        free(original);
+        free(resolved);
+        free(expected.kinds);
+        free(expected.names);
+        free(expected.sources);
+        free(expected.flags);
+        free(expected.pragma_sources);
+        free(expected.pragma_positions);
+    }
+    parse_release(&parser);
+    memset(&pp, 0, sizeof(pp));
+    printf("handoff: %llu streams by 2 paths against the oracle, %u failures\n", (unsigned long long)cases / 2, failures);
+    return failures;
+}
+
 // One file through both paths: preprocessed once, then parsed by the vector path and by the scalar parser alone, which
 // must read the same tokens and give the same outcome, and on a valid unit the same tree, with the tree's invariants
 // and postorders; then each kernel against its twin. *outcome gets the vector path's outcome. Returns the number of
@@ -2936,6 +3227,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     {
         failures += parse_test_check_postorder_self(&arena);
         failures += parse_test_check_k6_tables();
+        failures += parse_test_check_handoff(options.language, seed);
         failures += parse_test_check_snippets(directory, clang);
         failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
         failures += parse_test_check_fixtures(directory);

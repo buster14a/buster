@@ -67,7 +67,7 @@ static bool check_test_driver_run(const char* executable, const char* source, co
                 execvp(executable, arguments);
                 _exit(127);
             }
-            const int code = run_check_command((int)count - 1, arguments + 1);
+            const int code = run_check_command((int)count - 1, arguments + 1, true);
             fflush(NULL);
             _exit(code);
         }

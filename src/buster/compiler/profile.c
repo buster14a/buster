@@ -10,6 +10,7 @@
 //   build/compiler label-spills FUNCTION TAG INPUT.s OUTPUT.s
 //   build/compiler spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]
 //   build/compiler branch-misses BRSTACK [--bias ADDRESS] [--disassembly FILE] [--branches N]
+//   build/compiler time-runs [--runs N] [--warmups N] [--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list ARGUMENT...]...
 //
 // - ab runs `TREE/build/compiler ARGUMENT...` (or TREE itself, when it is a file) for every tree, every argument list
 //   and every round, the trees in an order that rotates by round, each run pinned to --cpu and under --lock (the
@@ -31,6 +32,13 @@
 // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
 //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
 //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
+// - time-runs times whole processes of this executable (or --executable), one per argument list in each run, the lists
+//   in an order that rotates by run, after warm-up runs in list order: each one's wall time from fork to wait4's
+//   return, its user and system time, peak resident set and page faults, from wait4's rusage, every run's line and
+//   each list's medians. With --after-scalar MS, an untimed scalar loop runs MS ms before each timed process, on the
+//   same CPU, the state a compiler starts in after lighter work. Each process's output goes to /dev/null, and its exit
+//   status must be the one its list's first warm-up had. Each list starts at a `--list` (not `--`, which separates
+//   ab's own lists), so that ab, which pins it and takes the lock per run, can run it to compare whole drivers (#335).
 //
 // Each tool's work is a function of its input texts that writes its report into a ProfileReport (profile_hot_loops,
 // profile_label_spills, profile_spill_report, profile_branch_misses), which profile_test.c checks, and ab's order is
@@ -38,7 +46,8 @@
 //
 // Layout, in this order: the report (ProfileReport, profile_print), reading text (profile_line and the others), the
 // disassembly (ProfileDisassembly, profile_disassembly_read, profile_jump_target), hot-loops, label-spills,
-// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), and the commands (run_profile_command).
+// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_runs), and the commands
+// (run_profile_command).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -53,6 +62,8 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
+#include <time.h>
 
 // Every command's arena: the input files and what it builds from them. Its pages are committed only as they are touched.
 #define BUSTER_PROFILE_ARENA_CAPACITY (64ull << 30)
@@ -1599,6 +1610,265 @@ static uint64_t profile_ab_run(Arena* arena, const ProfileAb* ab)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// time-runs
+
+static bool profile_count_option(const char* text, uint64_t* value);
+
+// Where profile_spin's state goes, so that its loop isn't removed.
+static volatile uint64_t profile_spin_sink;
+
+// One timed process: wall time from fork to wait4's return, and wait4's rusage and status.
+typedef struct ProfileTimed ProfileTimed;
+struct ProfileTimed
+{
+    uint64_t wall_ns;
+    uint64_t user_us;
+    uint64_t system_us;
+    uint64_t peak_kb;
+    uint64_t minor_faults;
+    uint64_t major_faults;
+    int status;
+};
+
+typedef struct ProfileTimeRuns ProfileTimeRuns;
+struct ProfileTimeRuns
+{
+    const char* executable;
+    // Argument lists, as ab's: list l is arguments[starts[l]] to arguments[starts[l] + counts[l] - 1].
+    char* const* arguments;
+    const uint64_t* starts;
+    const uint64_t* counts;
+    uint64_t list_count;
+    uint64_t runs;
+    uint64_t warmups;
+    uint64_t after_scalar_ms;
+    int output;
+};
+
+static uint64_t profile_now_ns(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+// Integer work for `ms` milliseconds: lighter code than a compiler's vector phases, which lets the core's clock settle
+// as it does before them.
+static void profile_spin(uint64_t ms)
+{
+    const uint64_t end = profile_now_ns() + ms * 1000000ull;
+    uint64_t state = 0x9e3779b97f4a7c15ull;
+    uint64_t now = ms != 0 ? profile_now_ns() : end;
+    while (now < end)
+    {
+        for (uint32_t i = 0; i < 4096; i += 1)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+        }
+        now = profile_now_ns();
+    }
+    profile_spin_sink = state;
+}
+
+// Runs `executable` with `argv` (argv[0] the executable) once, its standard streams on /dev/null.
+static ProfileTimed profile_time_one(const char* executable, char* const* argv)
+{
+    ProfileTimed result = { .status = -1 };
+    const uint64_t start = profile_now_ns();
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (null != -1 && dup2(null, STDIN_FILENO) != -1 && dup2(null, STDOUT_FILENO) != -1 && dup2(null, STDERR_FILENO) != -1)
+        {
+            execv(executable, argv);
+        }
+        _exit(127);
+    }
+    struct rusage usage;
+    int status = 0;
+    if (child != -1 && wait4(child, &status, 0, &usage) == child)
+    {
+        result = (ProfileTimed){
+            .wall_ns = profile_now_ns() - start,
+            .user_us = (uint64_t)usage.ru_utime.tv_sec * 1000000ull + (uint64_t)usage.ru_utime.tv_usec,
+            .system_us = (uint64_t)usage.ru_stime.tv_sec * 1000000ull + (uint64_t)usage.ru_stime.tv_usec,
+            .peak_kb = (uint64_t)usage.ru_maxrss,
+            .minor_faults = (uint64_t)usage.ru_minflt,
+            .major_faults = (uint64_t)usage.ru_majflt,
+            .status = status,
+        };
+    }
+    return result;
+}
+
+// The median of `count` values, sorted in place (insertion sort: a few dozen runs).
+static uint64_t profile_median(uint64_t* values, uint64_t count)
+{
+    for (uint64_t i = 1; i < count; i += 1)
+    {
+        const uint64_t value = values[i];
+        uint64_t j = i;
+        while (j > 0 && values[j - 1] > value)
+        {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = value;
+    }
+    return count != 0 ? values[count / 2] : 0;
+}
+
+// The warm-ups in list order, then the runs, each with every list in turn from an order that rotates by run
+// (profile_ab_tree's), then each list's medians. Returns how many processes failed: an exit status other than its
+// list's first warm-up's, a signal, or a process that didn't start (status 127, or no wait).
+static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
+{
+    uint64_t failures = 0;
+    const uint64_t mark = arena->length;
+    ProfileTimed* timed = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileTimed, t->runs * t->list_count + 1);
+    int* expected = BUSTER_ARENA_PUSH_ARRAY(arena, int, t->list_count + 1);
+    uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, t->runs + 1);
+    uint64_t longest = 0;
+    for (uint64_t l = 0; l < t->list_count; l += 1)
+    {
+        longest = t->counts[l] > longest ? t->counts[l] : longest;
+    }
+    char** argv = BUSTER_ARENA_PUSH_ARRAY(arena, char*, longest + 2);
+    const bool ready = timed != 0 && expected != 0 && values != 0 && argv != 0;
+    failures += !ready;
+    for (uint64_t run = 0; ready && run < t->warmups + t->runs; run += 1)
+    {
+        const bool warmup = run < t->warmups;
+        for (uint64_t position = 0; position < t->list_count; position += 1)
+        {
+            const uint64_t l = warmup ? position : profile_ab_tree(run - t->warmups, position, t->list_count);
+            argv[0] = (char*)t->executable;
+            for (uint64_t a = 0; a < t->counts[l]; a += 1)
+            {
+                argv[1 + a] = t->arguments[t->starts[l] + a];
+            }
+            argv[1 + t->counts[l]] = 0;
+            profile_spin(warmup ? 0 : t->after_scalar_ms);
+            const ProfileTimed one = profile_time_one(t->executable, argv);
+            const bool exited = one.status != -1 && WIFEXITED(one.status) && WEXITSTATUS(one.status) != 127;
+            if (warmup && run == 0)
+            {
+                expected[l] = one.status;
+            }
+            const bool same = exited && one.status == expected[l];
+            failures += !same;
+            if (!warmup)
+            {
+                timed[(run - t->warmups) * t->list_count + l] = one;
+                dprintf(t->output, "run %llu list %llu: %.3f ms wall, %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major, status %d%s\n",
+                        (unsigned long long)(run - t->warmups + 1), (unsigned long long)(l + 1), (double)one.wall_ns / 1e6, (double)one.user_us / 1e3,
+                        (double)one.system_us / 1e3, (unsigned long long)one.peak_kb, (unsigned long long)one.minor_faults, (unsigned long long)one.major_faults,
+                        exited ? WEXITSTATUS(one.status) : -1, same ? "" : " (FAILED: another status than the first warm-up's)");
+            }
+            else if (!same)
+            {
+                dprintf(t->output, "warm-up %llu list %llu: FAILED (status %d)\n", (unsigned long long)(run + 1), (unsigned long long)(l + 1), exited ? WEXITSTATUS(one.status) : -1);
+            }
+        }
+    }
+    for (uint64_t l = 0; ready && t->runs != 0 && l < t->list_count; l += 1)
+    {
+        uint64_t medians[6];
+        for (uint32_t field = 0; field < 6; field += 1)
+        {
+            for (uint64_t r = 0; r < t->runs; r += 1)
+            {
+                const ProfileTimed* one = &timed[r * t->list_count + l];
+                const uint64_t fields[6] = { one->wall_ns, one->user_us, one->system_us, one->peak_kb, one->minor_faults, one->major_faults };
+                values[r] = fields[field];
+            }
+            medians[field] = profile_median(values, t->runs);
+        }
+        // values holds the sorted major faults now; the wall times' extremes again.
+        for (uint64_t r = 0; r < t->runs; r += 1)
+        {
+            values[r] = timed[r * t->list_count + l].wall_ns;
+        }
+        profile_median(values, t->runs);
+        dprintf(t->output, "list %llu [", (unsigned long long)(l + 1));
+        for (uint64_t a = 0; a < t->counts[l]; a += 1)
+        {
+            dprintf(t->output, "%s%s", a == 0 ? "" : " ", t->arguments[t->starts[l] + a]);
+        }
+        dprintf(t->output, "]: %llu runs, median %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major\n",
+                (unsigned long long)t->runs, (double)medians[0] / 1e6, (double)values[0] / 1e6, (double)values[t->runs - 1] / 1e6, (double)medians[1] / 1e3,
+                (double)medians[2] / 1e3, (unsigned long long)medians[3], (unsigned long long)medians[4], (unsigned long long)medians[5]);
+    }
+    dprintf(t->output, "time-runs: done, %llu failed processes\n", (unsigned long long)failures);
+    arena_pop_to(arena, mark);
+    return failures;
+}
+
+static int run_time_runs_command(Arena* arena, int argc, char** argv)
+{
+    ProfileTimeRuns t = { .executable = "/proc/self/exe", .runs = 21, .warmups = 1, .output = STDOUT_FILENO };
+    bool valid = true;
+    int i = 1;
+    while (valid && i < argc && strcmp(argv[i], "--list") != 0)
+    {
+        uint64_t value = 0;
+        if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc && profile_count_option(argv[i + 1], &value) && value <= 1000)
+        {
+            t.runs = value;
+        }
+        else if (strcmp(argv[i], "--warmups") == 0 && i + 1 < argc && profile_decimal(profile_string(argv[i + 1]), &value) && value >= 1 && value <= 1000)
+        {
+            t.warmups = value;
+        }
+        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc && profile_decimal(profile_string(argv[i + 1]), &value) && value <= 10000)
+        {
+            t.after_scalar_ms = value;
+        }
+        else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
+        {
+            t.executable = argv[i + 1];
+        }
+        else
+        {
+            valid = false;
+        }
+        i += 2;
+    }
+    uint64_t* starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc);
+    uint64_t* counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc);
+    valid = valid && i < argc && starts != 0 && counts != 0;
+    while (valid && i < argc)
+    {
+        // At a `--list`: a list starts after it.
+        starts[t.list_count] = (uint64_t)(i + 1);
+        counts[t.list_count] = 0;
+        i += 1;
+        while (i < argc && strcmp(argv[i], "--list") != 0)
+        {
+            counts[t.list_count] += 1;
+            i += 1;
+        }
+        t.list_count += 1;
+    }
+    t.arguments = argv;
+    t.starts = starts;
+    t.counts = counts;
+    int result = 1;
+    if (!valid || t.list_count == 0)
+    {
+        fprintf(stderr, "usage: time-runs [--runs N] [--warmups N] [--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list ARGUMENT...]...\n");
+    }
+    else
+    {
+        result = profile_time_runs(arena, &t) == 0 ? 0 : 1;
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The commands
 
 // Reads a whole file into the arena. A null pointer if it can't be read.
@@ -1891,6 +2161,10 @@ static int run_profile_command(int argc, char** argv)
     if (strcmp(argv[0], "ab") == 0)
     {
         result = run_ab_command(&arena, argc, argv);
+    }
+    else if (strcmp(argv[0], "time-runs") == 0)
+    {
+        result = run_time_runs_command(&arena, argc, argv);
     }
     else
     {
