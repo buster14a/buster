@@ -73,7 +73,8 @@ reused. Each is fixed in #369 with permanent fixtures.
   per mode): clang's `InMacroArgs` is one flag, and an invocation in a `#if`
   among a macro's arguments clears it, which buster's check didn't model;
   collection then also goes on past an included file's end. Five
-  `pp_test_cases`; #370 is the line-marker placement left.
+  `pp_test_cases`; the line markers for such an expansion followed in #373
+  (#370), which David merged into #369's branch after the freeze.
 - Seed 3110, case 84082, C23 (freeze `94ad3e4`, 9700X, after 9.0 million
   per mode): the comparison dropped a case's last whole token whose spelling
   ends in whitespace. Three end controls; and clang's NUL spelling at a
