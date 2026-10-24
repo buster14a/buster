@@ -358,6 +358,10 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/unwind_test.c"
 #include "buster/compiler/unwind_native_test.c"
 #include "buster/compiler/unwind_benchmark.c"
+// Streaming the output (#88): Tier 0's code written while it compiles, in the data-first order, against the end.
+#include "buster/compiler/streaming.c"
+#include "buster/compiler/streaming_test.c"
+#include "buster/compiler/streaming_benchmark.c"
 int run_backend_benchmark(int argc, char** argv);
 
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
@@ -1057,6 +1061,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-unwind") == 0)
     {
         result = run_unwind_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-streaming") == 0)
+    {
+        result = run_streaming_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-streaming") == 0)
+    {
+        result = run_streaming_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-backend") == 0)
     {
