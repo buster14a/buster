@@ -239,6 +239,7 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
             "unsupported input",
             "unsupported or malformed relocation",
             "invalid link representation",
+            "an IFUNC definition, which a foreign executable doesn't take yet",
         };
         const char* message = (uint32_t)result.error < BUSTER_ARRAY_LENGTH(messages) ? messages[result.error] : "conversion failed";
         fprintf(stderr, "link-foreign: %s", message);

@@ -118,6 +118,9 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_CLASS_COUNT 14
 // An atom's alignment is at most 2^this: 4 GB.
 #define BUSTER_LINK_MAX_ALIGNMENT_LOG2 32
+// The unit of an atom that merges several units' input sections (a foreign link's section of a name that __start_ and
+// __stop_ bound): its locals may be referred to from any unit, and it may refer to any unit's.
+#define BUSTER_LINK_UNIT_SHARED UINT32_MAX
 
 // Symbol flags, laid out so that an Elf64_Sym's st_info is flags & BUSTER_LINK_SYMBOL_INFO and its st_other is
 // flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT: the type (STT_*) in bits 0 to 3, the binding (STB_*) in bits 4 and 5
@@ -1250,7 +1253,9 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     // Only a terminal EH pool as the source gains this allowance; targets in EH pools retain the ordinary rule.
     const bool unwind_pool = link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME && link->atoms.unit[atom] == 0;
     const bool pooled = target_atom != 0 && link->atoms.class[target_atom] == BUSTER_LINK_CLASS_STRINGS && link->atoms.unit[target_atom] == 0;
-    return (size_kind || tls_kind == tls_target) && (!local || absolute || pooled || (target_atom != 0 && (unwind_pool || link->atoms.unit[target_atom] == link->atoms.unit[atom]))) &&
+    const bool merged = link->atoms.unit[atom] == BUSTER_LINK_UNIT_SHARED || (target_atom != 0 && link->atoms.unit[target_atom] == BUSTER_LINK_UNIT_SHARED);
+    return (size_kind || tls_kind == tls_target) &&
+           (!local || absolute || pooled || merged || (target_atom != 0 && (unwind_pool || link->atoms.unit[target_atom] == link->atoms.unit[atom]))) &&
            (!shared || reaches_shared);
 }
 

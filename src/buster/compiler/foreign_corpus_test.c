@@ -78,6 +78,9 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "extern double corpus_scale(double);\n"
                 "extern int corpus_shared_work(int);\n"
                 "extern void corpus_weak_hook(void) __attribute__((weak));\n"
+                "struct corpus_entry { const char* name; long value; };\n"
+                "static const struct corpus_entry corpus_entry_main __attribute__((used, section(\"corpus_registry\"))) = { \"main\", 3 };\n"
+                "extern const struct corpus_entry __start_corpus_registry[], __stop_corpus_registry[];\n"
                 "__thread int corpus_tls = 5;\n"
                 "static __thread char corpus_tls_buffer[64];\n"
                 "static jmp_buf corpus_jump;\n"
@@ -99,6 +102,9 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "    for (long i = 0; i < 3; i += 1) pthread_create(&threads[i], 0, worker, (void*)(i + 1));\n"
                 "    for (int i = 0; i < 3; i += 1) { void* r; pthread_join(threads[i], &r); total += (long)r; }\n"
                 "    printf(\"threads %ld tls %d constructed %d\\n\", total, corpus_tls, constructed);\n"
+                "    long table = 0;\n"
+                "    for (const struct corpus_entry* e = __start_corpus_registry; e < __stop_corpus_registry; e += 1) table = table * 10 + e->value;\n"
+                "    printf(\"table %ld %s\\n\", table, __start_corpus_registry[0].name);\n"
                 "    errno = 0;\n"
                 "    strtol(\"99999999999999999999999\", 0, 10);\n"
                 "    printf(\"errno %d\\n\", errno == ERANGE);\n"
@@ -116,13 +122,17 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
     {
         .file = "corpus_counter.c",
         .text = "#include <string.h>\n"
+                "struct corpus_entry { const char* name; long value; };\n"
+                "static const struct corpus_entry corpus_entry_counter __attribute__((used, section(\"corpus_registry\"))) = { \"counter\", 5 };\n"
                 "int corpus_counter = 41;\n"
                 "static char corpus_table[4096];\n"
                 "int corpus_shared_work(int n) { memset(corpus_table, n, sizeof(corpus_table)); int total = 0; for (unsigned i = 0; i < sizeof(corpus_table); i += 512) total += corpus_table[i]; return total; }\n",
     },
     {
         .file = "corpus_names.c",
-        .text = "const char* corpus_name(int n) { static const char* const names[] = { \"zero\", \"one\", \"two\", \"three\" }; return names[n & 3]; }\n",
+        .text = "struct corpus_entry { const char* name; long value; };\n"
+                "static const struct corpus_entry corpus_entry_names __attribute__((used, section(\"corpus_registry\"))) = { \"names\", 7 };\n"
+                "const char* corpus_name(int n) { static const char* const names[] = { \"zero\", \"one\", \"two\", \"three\" }; return names[n & 3]; }\n",
     },
     {
         .file = "corpus_scale.c",
@@ -655,6 +665,7 @@ typedef enum ForeignCorpusReason
     FOREIGN_CORPUS_REASON_FRAME_END,
     FOREIGN_CORPUS_REASON_WEAK_ALIAS,
     FOREIGN_CORPUS_REASON_INTERNAL,
+    FOREIGN_CORPUS_REASON_BOUNDS,
     FOREIGN_CORPUS_REASON_SYMBOLIC_COPY,
     FOREIGN_CORPUS_REASON_SECOND_SLOT,
     FOREIGN_CORPUS_REASON_RELATIVE,
@@ -667,6 +678,7 @@ static const char* const foreign_corpus_reasons[FOREIGN_CORPUS_REASONS] = {
     [FOREIGN_CORPUS_REASON_FRAME_END] = "crtendS.o's __FRAME_END__ is left out, with the .eh_frame it rebuilds",
     [FOREIGN_CORPUS_REASON_WEAK_ALIAS] = "the names a copy relocation defines are bound weakly",
     [FOREIGN_CORPUS_REASON_INTERNAL] = "a symbol of internal visibility is written as hidden",
+    [FOREIGN_CORPUS_REASON_BOUNDS] = "the __start_ and __stop_ names are written local, where GNU ld and lld write them global and protected",
     [FOREIGN_CORPUS_REASON_SYMBOLIC_COPY] = "an R_X86_64_64 to a library's data, scanned before the reference that copies it, stays symbolic",
     [FOREIGN_CORPUS_REASON_SECOND_SLOT] = "a function that code both calls and loads from the GOT has two slots, .got.plt's and .got's, where link-foreign's stub reads the one",
     [FOREIGN_CORPUS_REASON_RELATIVE] = "a few GOT slots that lld and link-foreign relax keep relative relocations",
@@ -733,15 +745,18 @@ static ForeignCorpusReason foreign_corpus_reason(const ForeignCorpusContext* con
         const bool absolute_local = !ours && row_length > strlen(signature) && strcmp(row + row_length - strlen(signature), signature) == 0;
         bool alias = false;
         bool internal = false;
+        bool bounds = false;
+        const bool bound_name = strncmp(name, "__start_", 8) == 0 || strncmp(name, "__stop_", 7) == 0;
         for (uint32_t i = 0; i < other_count; i += 1)
         {
             const char* paired = other->rows[other_unmatched[i]];
             alias = alias || foreign_corpus_differs_in(row, paired, 1, 0, 0);
             internal = internal || foreign_corpus_differs_in(row, paired, 3, ours ? "1" : "2", ours ? "2" : "1");
+            bounds = bounds || (bound_name && strncmp(paired, name, strlen(name)) == 0 && paired[strlen(name)] == ' ');
         }
         alias = alias && foreign_corpus_listed(&context->copied, name);
         result = absolute_local ? FOREIGN_CORPUS_REASON_GROUP_SIGNATURE : ours && strcmp(name, "__FRAME_END__") == 0 ? FOREIGN_CORPUS_REASON_FRAME_END :
-                 alias ? FOREIGN_CORPUS_REASON_WEAK_ALIAS : internal ? FOREIGN_CORPUS_REASON_INTERNAL : FOREIGN_CORPUS_REASON_NONE;
+                 alias ? FOREIGN_CORPUS_REASON_WEAK_ALIAS : internal ? FOREIGN_CORPUS_REASON_INTERNAL : bounds ? FOREIGN_CORPUS_REASON_BOUNDS : FOREIGN_CORPUS_REASON_NONE;
     }
     else if (category == FOREIGN_CORPUS_RELOCATIONS && !ours && strncmp(row, "absolute ", 9) == 0)
     {
