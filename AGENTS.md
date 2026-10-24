@@ -340,6 +340,13 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units at once, a clang process each, and links
   them in order: the same executable as one clang command for all of them.
+  It reports how long the compiles took, and the three that took longest.
+  `BUSTER_DEBUG_INFO=0` builds without `-g`, which took a fifth of the build's
+  time; the 9700X job builds so, since nothing there reads it (clang's code
+  then differs in a few functions' stack slots). The checker's unit takes
+  longest, and splitting it doesn't help: `check` and the default driver,
+  `test-checker`, and its other commands each reach the whole compiler, so a
+  unit for any one of them took 84 to 88% of its time (clang 18, locally).
   The executable is linked at a fixed address (`-no-pie`), from the same code:
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
@@ -665,8 +672,10 @@ designs and the compilers already built this way.
   aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for libraries'
   own references, lld's regular symbol table, and a dynamic PIE's own IFUNCs
   through the writer's stubs and `IRELATIVE` relocations; a shared library
-  refuses an IFUNC that isn't preemptible. GC, literal pooling and CIE pooling
-  are off by default.
+  refuses an IFUNC that isn't preemptible, and a static link whose startup
+  applies no `IRELATIVE` relocation (nothing refers to `__rela_iplt_start`, or
+  in a static PIE to `_DYNAMIC`: a program without libc) refuses every IFUNC
+  a fixup reaches. GC, literal pooling and CIE pooling are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
@@ -778,7 +787,9 @@ designs and the compilers already built this way.
   reached through their addresses; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry, and so are
   variable-length arrays' allocations and the stack's saved and restored
-  positions, which give their function a frame pointer. The output is
+  positions, which give their function a frame pointer. An optional per-unit
+  access column reaches the symbols a unit doesn't define through their GOT
+  slots, and thread-locals by local-exec or initial-exec. The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
@@ -981,25 +992,30 @@ there at a time, so everything takes one lock:
   Also set `EXCLUSIVE_TITLE` to the session's title and `EXCLUSIVE_LINK` to
   its link (its claude.ai page, or else the PR or issue it works on): whoever
   waits sees them in `/var/lib/buster-9700x/owner`.
-- The runner's job hooks take the same lock for every CI job, and CI goes
-  first: `exclusive.sh` doesn't take the lock while a CI job waits for it or
-  for 20 s after one ends (the runner's next job starts waiting about 8 s
-  later), and gives it back if it got it then. While CI jobs queue, a session's
-  run waits for all of them. A CI job's owner lines give its workflow, job, PR
-  number and title (or a push's first line), the run's link and the PR's.
+- The runner's job hooks take the same lock for every CI job. Sessions and CI
+  jobs wait for it alike: neither goes first. A CI job's owner lines give its
+  workflow, job, PR number and title (or a push's first line), the run's link
+  and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
 - Every pull request's job queues behind every other's, so keep the job short.
-  A benchmark's plain run, which checks its paths against their scalar twins,
-  runs on every pull request; its isolated and after-scalar samples
-  (`--only`, `--after-scalar`, repeated processes), which cost about 200 ms
-  before each of 21 samples per case, go in a step of their own that runs where
-  the `changes` job's output for the module isn't `false`: on the daily
-  scheduled run, dispatched runs and pull requests that change the module's
-  sources (its pattern in `changes`). The same holds for the linkers'
-  baselines and floors and mold's and wild's foreign phases. A push to main
-  runs what a pull request that changes none of them runs: its pull request's
-  run measured what it changes, and the full set took the job past its 10
+  A pull request runs a benchmark's plain run, which checks its paths against
+  their scalar twins, where it changes what the benchmark measures (the
+  `changes` job's `measure`): a file that the benchmark's translation unit
+  includes, for one built as a unit of its own (`build.sh`'s `*_benchmark.c`),
+  or one that its entry in `changes`' `benchmarks` names, for one in `main.c`'s
+  units (the files that define the functions it calls); or the benchmark's own
+  step. A change to `build.sh` runs every one, and so does a push to main, so
+  that main has each benchmark's numbers at every commit. A new benchmark's
+  step gets an entry in `benchmarks` and an `if:` on `MEASURE`, as the others
+  have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
+  repeated processes), which cost about 200 ms before each of 21 samples per
+  case, go in a step of their own that runs where the `changes` job's output
+  for the module isn't `false`: on the daily scheduled run, dispatched runs and
+  pull requests that change the module's sources (its pattern in `changes`).
+  The same holds for the linkers' baselines and floors and mold's and wild's
+  foreign phases. A push to main runs none of them: its pull request's run
+  measured what it changes, and the full set took the job past its 10
   minutes. The daily and dispatched runs have 25 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
@@ -1264,12 +1280,15 @@ The 9700X job's test step ("Run the tests at once") runs every test through it,
 with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
 A test goes in its list as a heading and the step's commands, in the order of
 the tests' times in the job, the longest first, so that they start first: put a
-new one where its time puts it. One that needs the machine to itself doesn't
-belong there. On the 9700X its tests' times in the job come to 302 s, and the
-step's bound through the runner is about 38 s, the longest's (the checker's
-group, 33 to 37 s) and the sum's over 8 jobs; with the longest started among
-the last, the step took 64 s. To run the list as the job does (on the 9700X,
-under its lock, as one run):
+new one where its time puts it, and give independent commands a heading each
+rather than one between them. One that needs the machine to itself doesn't
+belong there. On the 9700X its tests' times in the job come to 310 s, and the
+step's bound through the runner is the longest one's and the sum's over 8 jobs,
+about 39 s; with the longest started among the last, the step took 64 s, and
+with them first but the checker's four commands as one heading, 50 s, as they
+slow each other (that heading took 33 to 37 s started late, 50 s started with
+the others). To run the list as the job does (on the 9700X, under its lock, as
+one run):
 
 ```sh
 sed -n "/<<'TESTS'$/,/^ *TESTS$/{//!{s/^ \{10\}//;p}}" .github/workflows/9700x.yml | ./build/compiler parallel
@@ -3040,9 +3059,14 @@ The three outputs must:
   their versions, and on the dynamic relocations by symbol and class (a GOT
   slot, `GLOB_DAT` or `JUMP_SLOT`; `COPY`; `R_X86_64_64`; `TPOFF64`;
   `DTPMOD64`; `DTPOFF64`; `IRELATIVE`, in `.rela.iplt` too, where a static
-  executable of `link-foreign`'s has them as GNU ld does), with as many relative
-  ones as lld's. The comparison reads static executables (`ET_EXEC`) too, and
-  fails an output it can't read.
+  executable of `link-foreign`'s has them as GNU ld does, each by its
+  resolver's name and whether it writes a GOT slot or a pointer in data, and
+  each writing a place of its own), with as many relative ones as lld's. A
+  resolver's name is the first of the names the image's `.symtab` gives its
+  address that the other image gives one of its resolvers too, since lld
+  moves an IFUNC whose address is taken to its stub, and so does mold every
+  IFUNC of a static executable. The comparison reads static executables
+  (`ET_EXEC`) too, and fails an output it can't read.
 
 And `link-foreign`'s program must come out byte for byte the same when it links
 on eight lanes (`--lanes=8`), through the resolution's, the conversion's and
@@ -3056,9 +3080,12 @@ out of `.dynsym`, keeps COMDAT groups' signatures as absolute locals, drops
 aliases weakly, writes internal visibility as hidden and the
 `__start_`/`__stop_` names local (and defines them for every section named as
 a C identifier, though nothing refers to them), and keeps a few GOT slots that
-lld relaxes; in a static executable it writes a hidden symbol made local with
-default visibility and an IFUNC as a function at its resolver, and gives an
-IFUNC that code both calls and loads from the GOT a second `IRELATIVE` slot;
+lld relaxes; in a static executable and a static PIE it writes a hidden
+symbol made local with default visibility, in a static executable an IFUNC
+as a function at its stub, and in the PIEs a pointer to an IFUNC outside the
+GOT with an `IRELATIVE` relocation of its own, where `link-foreign` and lld
+relocate it relative to the IFUNC's stub (each such row of mold's must be one
+of `link-foreign`'s stub pointers, one for one, by the IFUNC's resolver);
 lld leaves an `R_X86_64_64` to a library's data that it scanned before the
 reference that copies it symbolic, gives a function that code both calls and
 loads from the GOT a second slot, and writes an IFUNC whose address is taken
@@ -3069,7 +3096,9 @@ row one side has alone fails the test, and the first 12 are printed.
 The corpus is two original programs, always: C, of three translation units
 and an archive (two members that load, one that doesn't), with threads,
 thread-locals, libc's and libm's data and functions, constructors and
-destructors, a weak reference and a `__start_`/`__stop_` registry; and C++,
+destructors, a weak reference, a `__start_`/`__stop_` registry and two
+IFUNCs (an `ifunc` attribute's and `target_clones`'), called, loaded from the
+GOT and pointed to from data, whose pointers must compare equal; and C++,
 of two translation units, with iostream, exceptions across them, RTTI,
 templates in COMDAT groups, inline variables and a thread. With `--sqlite DIR`
 the SQLite amalgamation's shell (`sqlite3.c` and `shell.c`), with `--lua DIR`
@@ -3774,7 +3803,8 @@ files in the directory the command makes under `$TMPDIR` (or `/tmp`). On the
 9700X, `sqlite3.c`, the 733 files of the libc corpus that clang accepts and the
 repository's translation units pass with `--clang`, and so does Lua 5.4.8
 locally; `docs/c-parser.md` has the corpora and the mutations' counts. The 9700X job runs
-it without files and on the repository's translation units, both with `--clang`.
+it without files with `--clang`, and on the repository's translation units without:
+the build has compiled each with clang, with `-Wall -Werror`, so clang accepts them.
 
 ## Parser benchmark
 
@@ -4105,16 +4135,26 @@ the records must pass `x86_validate` and the branch columns
 fresh pages and run in a child process on eight inputs (stopped by an alarm
 after 10 s), and its result and every global's bytes must equal what the test's
 interpreter of the typed stream gives (the interpreter converts floating values
-to integers as cvttsd2si does).
+to integers as cvttsd2si does). The shapes but one function's also reach
+symbols through the access column: globals through the GOT and thread-locals
+of both TLS models (`_Thread_local` in C), and functions' addresses through the
+GOT. The native run gives each symbol a GOT slot and the thread-locals a block
+of their own, which FS points at for the entry's call alone. An `access` check
+before the programs compiles every global kind of every class by each access:
+both paths alike, with the access's references, and validation's rule.
 
-With `--cross-check`, which needs clang (`--clang PATH`) and `size`, each of
-`--cross-count` (60) programs of the larger shape, keeping to what C defines
+With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
+`ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
 (with `-fwrapv` and `-fno-strict-aliasing`, as the repository builds), is written as Tier 0's object (the link representation and the object writer)
 and as C, which clang -O0 compiles; a generated harness links both, runs them
 on the same inputs and compares the results and every global (a floating
 one's NaNs alike whatever their bits, as C leaves them), then times both.
 It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
-run times. The files go in a directory under `$TMPDIR` (or `/tmp`), kept with
+run times. A shared library generated beside them (GNU as source, which `as`
+and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so
+that the executable's slots for them are the loader's to fill (`GLOB_DAT`, and
+`TPOFF64` for a thread-local's offset). The
+files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 `--keep` or on a failure. The 9700X job's test step runs it with
 `--cross-check`.
 

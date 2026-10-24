@@ -106,6 +106,10 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "extern double corpus_scale(double);\n"
                 "extern int corpus_shared_work(int);\n"
                 "extern void corpus_weak_hook(void) __attribute__((weak));\n"
+                "extern int corpus_pick(int);\n"
+                "extern int corpus_clone(int);\n"
+                "int (*corpus_ifuncs[2])(int) = { corpus_pick, corpus_clone };\n"
+                "int (*volatile corpus_picked)(int);\n"
                 "struct corpus_entry { const char* name; long value; };\n"
                 "static const struct corpus_entry corpus_entry_main __attribute__((used, section(\"corpus_registry\"))) = { \"main\", 3 };\n"
                 "extern const struct corpus_entry __start_corpus_registry[], __stop_corpus_registry[];\n"
@@ -140,6 +144,8 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "    if (setjmp(corpus_jump) == 0) { jumped = 1; longjmp(corpus_jump, 3); }\n"
                 "    printf(\"name %s scale %.3f counter %d shared %d jumped %d\\n\", corpus_name(argc), corpus_scale(2.0), corpus_counter, corpus_shared_work(argc), jumped);\n"
                 "    printf(\"weak %d env %d args %d %s\\n\", corpus_weak_hook == 0, environ != 0 && getenv(\"CORPUS_ENV\") != 0, argc, argc > 1 ? argv[1] : \"-\");\n"
+                "    corpus_picked = corpus_pick;\n"
+                "    printf(\"ifunc %d %d %d %d %d %d\\n\", corpus_pick(argc), corpus_picked(argc), corpus_clone(argc), corpus_ifuncs[0](argc), corpus_ifuncs[1](argc), corpus_ifuncs[0] == corpus_picked);\n"
                 "    char line[128];\n"
                 "    if (fgets(line, sizeof(line), stdin) != 0) printf(\"input %zu\\n\", strlen(line));\n"
                 "    fflush(stdout);\n"
@@ -154,13 +160,17 @@ static const ForeignCorpusFixture foreign_corpus_fixtures[] = {
                 "static const struct corpus_entry corpus_entry_counter __attribute__((used, section(\"corpus_registry\"))) = { \"counter\", 5 };\n"
                 "int corpus_counter = 41;\n"
                 "static char corpus_table[4096];\n"
-                "int corpus_shared_work(int n) { memset(corpus_table, n, sizeof(corpus_table)); int total = 0; for (unsigned i = 0; i < sizeof(corpus_table); i += 512) total += corpus_table[i]; return total; }\n",
+                "int corpus_shared_work(int n) { memset(corpus_table, n, sizeof(corpus_table)); int total = 0; for (unsigned i = 0; i < sizeof(corpus_table); i += 512) total += corpus_table[i]; return total; }\n"
+                "static int corpus_pick_one(int x) { return x + 1; }\n"
+                "static int (*corpus_pick_resolver(void))(int) { return corpus_pick_one; }\n"
+                "int corpus_pick(int) __attribute__((ifunc(\"corpus_pick_resolver\")));\n",
     },
     {
         .file = "corpus_names.c",
         .text = "struct corpus_entry { const char* name; long value; };\n"
                 "static const struct corpus_entry corpus_entry_names __attribute__((used, section(\"corpus_registry\"))) = { \"names\", 7 };\n"
-                "const char* corpus_name(int n) { static const char* const names[] = { \"zero\", \"one\", \"two\", \"three\" }; return names[n & 3]; }\n",
+                "const char* corpus_name(int n) { static const char* const names[] = { \"zero\", \"one\", \"two\", \"three\" }; return names[n & 3]; }\n"
+                "__attribute__((target_clones(\"default\", \"avx2\"))) int corpus_clone(int x) { return x * 3; }\n",
     },
     {
         .file = "corpus_scale.c",
@@ -505,18 +515,161 @@ static void foreign_corpus_dynamic_symbols(const DynamicTestImage* image, Foreig
     }
 }
 
-// The dynamic relocations' rows, "class name" for each that names a symbol; and the relative ones' count, RELATIVE
-// entries and those RELR's words encode.
-static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, ForeignCorpusRows* rows)
+// The sections of the dynamic relocations the comparison reads: a static executable's IRELATIVE ones are in .rela.iplt
+// (link-foreign's, as GNU ld's) or .rela.plt.
+static const char* const foreign_corpus_relocation_sections[] = { ".rela.dyn", ".rela.plt", ".rela.iplt" };
+
+// An IRELATIVE relocation: the place it writes and its addend, the IFUNC's resolver.
+typedef struct ForeignCorpusIrelative ForeignCorpusIrelative;
+struct ForeignCorpusIrelative
+{
+    uint64_t destination;
+    uint64_t resolver;
+};
+
+// An image's IRELATIVE relocations, and the names .symtab gives their resolvers' addresses: `at`, a row
+// "address name" for each (the address in 16 hex digits), and `names`, the names alone, each sorted.
+typedef struct ForeignCorpusResolvers ForeignCorpusResolvers;
+struct ForeignCorpusResolvers
+{
+    ForeignCorpusIrelative* irelatives;
+    uint32_t count;
+    ForeignCorpusRows at;
+    ForeignCorpusRows names;
+};
+
+static int foreign_corpus_compare_addresses(const void* a, const void* b)
+{
+    const uint64_t left = *(const uint64_t*)a;
+    const uint64_t right = *(const uint64_t*)b;
+    return (left > right) - (left < right);
+}
+
+// The allocated section that holds `address`, or 0.
+static const Elf64_Shdr* foreign_corpus_section_at(const DynamicTestImage* image, uint64_t address)
+{
+    const Elf64_Shdr* result = 0;
+    for (uint32_t i = 1; result == 0 && i < image->header->e_shnum; i += 1)
+    {
+        const Elf64_Shdr* section = &image->section_headers[i];
+        result = (section->sh_flags & SHF_ALLOC) != 0 && address >= section->sh_addr && address - section->sh_addr < section->sh_size ? section : 0;
+    }
+    return result;
+}
+
+// Whether `address` is in a GOT section (.got or .got.plt) rather than in the image's data.
+static bool foreign_corpus_in_got(const DynamicTestImage* image, uint64_t address)
+{
+    const Elf64_Shdr* section = foreign_corpus_section_at(image, address);
+    return section != 0 && strncmp(image->names + section->sh_name, ".got", 4) == 0;
+}
+
+// An image's ForeignCorpusResolvers.
+static ForeignCorpusResolvers foreign_corpus_resolvers(const DynamicTestImage* image, Arena* arena)
+{
+    ForeignCorpusResolvers result = { .at = foreign_corpus_rows(arena), .names = foreign_corpus_rows(arena) };
+    uint64_t capacity = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(foreign_corpus_relocation_sections); s += 1)
+    {
+        const Elf64_Shdr* section = dynamic_test_section(image, foreign_corpus_relocation_sections[s]);
+        capacity += section != 0 ? section->sh_size / sizeof(Elf64_Rela) : 0;
+    }
+    result.irelatives = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignCorpusIrelative, capacity + 1);
+    uint64_t* addresses = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, capacity + 1);
+    for (uint32_t s = 0; result.irelatives != 0 && addresses != 0 && s < BUSTER_ARRAY_LENGTH(foreign_corpus_relocation_sections); s += 1)
+    {
+        const Elf64_Shdr* section = dynamic_test_section(image, foreign_corpus_relocation_sections[s]);
+        const Elf64_Rela* entries = (const Elf64_Rela*)dynamic_test_bytes(image, section);
+        for (uint64_t i = 0; entries != 0 && i < section->sh_size / sizeof(Elf64_Rela); i += 1)
+        {
+            if (ELF64_R_TYPE(entries[i].r_info) == R_X86_64_IRELATIVE)
+            {
+                result.irelatives[result.count] = (ForeignCorpusIrelative){ .destination = entries[i].r_offset, .resolver = (uint64_t)entries[i].r_addend };
+                addresses[result.count] = (uint64_t)entries[i].r_addend;
+                result.count += 1;
+            }
+        }
+    }
+    if (addresses != 0)
+    {
+        qsort(addresses, result.count, sizeof(uint64_t), foreign_corpus_compare_addresses);
+    }
+    const Elf64_Shdr* table = dynamic_test_section(image, ".symtab");
+    const Elf64_Shdr* strings = table != 0 && table->sh_link < image->header->e_shnum ? &image->section_headers[table->sh_link] : 0;
+    const Elf64_Sym* symbols = (const Elf64_Sym*)dynamic_test_bytes(image, table);
+    for (uint64_t i = 1; result.count != 0 && symbols != 0 && strings != 0 && i < table->sh_size / sizeof(Elf64_Sym); i += 1)
+    {
+        const Elf64_Sym* symbol = &symbols[i];
+        const uint8_t type = ELF64_ST_TYPE(symbol->st_info);
+        const char* name = foreign_corpus_string(image, strings, symbol->st_name);
+        const uint64_t value = symbol->st_value;
+        if (type != STT_FILE && type != STT_SECTION && symbol->st_shndx != SHN_UNDEF && symbol->st_shndx != SHN_ABS && name[0] != 0 &&
+            bsearch(&value, addresses, result.count, sizeof(uint64_t), foreign_corpus_compare_addresses) != 0)
+        {
+            foreign_corpus_row(&result.at, "%016" PRIx64 " %s", value, name);
+            foreign_corpus_row(&result.names, "%s", name);
+        }
+    }
+    qsort(result.at.rows, result.at.count, BUSTER_FOREIGN_CORPUS_ROW_BYTES, foreign_corpus_compare_rows);
+    qsort(result.names.rows, result.names.count, BUSTER_FOREIGN_CORPUS_ROW_BYTES, foreign_corpus_compare_rows);
+    return result;
+}
+
+// The name a row gives the resolver at `address`: of the names the image gives it (`own`), the first that the other
+// image gives one of its resolvers too (`other`), so that the two name a resolver alike though a linker moved some of
+// its names to the IFUNC's stub (lld an IFUNC whose address is taken, mold every IFUNC of a static executable); else
+// its first name, or none.
+static const char* foreign_corpus_resolver_name(const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other, uint64_t address)
+{
+    char prefix[24];
+    snprintf(prefix, sizeof(prefix), "%016" PRIx64 " ", address);
+    const uint64_t length = strlen(prefix);
+    const char* first = 0;
+    const char* shared = 0;
+    for (uint32_t i = 0; shared == 0 && i < own->at.count; i += 1)
+    {
+        const char* name = own->at.rows[i] + length;
+        const bool here = strncmp(own->at.rows[i], prefix, length) == 0;
+        first = first == 0 && here ? name : first;
+        shared = here && bsearch(name, other->names.rows, other->names.count, BUSTER_FOREIGN_CORPUS_ROW_BYTES, foreign_corpus_compare_rows) != 0 ? name : 0;
+    }
+    return shared != 0 ? shared : first != 0 ? first : "";
+}
+
+// Whether each of an image's IRELATIVE relocations writes a place of its own.
+static bool foreign_corpus_distinct(const ForeignCorpusResolvers* resolvers, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    uint64_t* destinations = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)resolvers->count + 1);
+    bool result = destinations != 0 && resolvers->irelatives != 0;
+    for (uint32_t i = 0; result && i < resolvers->count; i += 1)
+    {
+        destinations[i] = resolvers->irelatives[i].destination;
+    }
+    if (result)
+    {
+        qsort(destinations, resolvers->count, sizeof(uint64_t), foreign_corpus_compare_addresses);
+    }
+    for (uint32_t i = 1; result && i < resolvers->count; i += 1)
+    {
+        result = destinations[i] != destinations[i - 1];
+    }
+    arena_pop_to(arena, mark);
+    return result;
+}
+
+// The dynamic relocations' rows, "class name" for each that names a symbol, and "irelative resolver place" for each
+// IRELATIVE one, by its resolver's name (foreign_corpus_resolver_name) and whether it writes a GOT slot ("got") or a
+// pointer in the image's data ("data"); and the relative ones' count, RELATIVE entries and those RELR's words encode.
+static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other, ForeignCorpusRows* rows)
 {
     const Elf64_Shdr* table = dynamic_test_section(image, ".dynsym");
     const Elf64_Shdr* strings = dynamic_test_section(image, ".dynstr");
     const Elf64_Sym* symbols = (const Elf64_Sym*)dynamic_test_bytes(image, table);
-    const char* sections[] = { ".rela.dyn", ".rela.plt", ".rela.iplt" };
     uint64_t relative = 0;
-    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sections); s += 1)
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(foreign_corpus_relocation_sections); s += 1)
     {
-        const Elf64_Shdr* section = dynamic_test_section(image, sections[s]);
+        const Elf64_Shdr* section = dynamic_test_section(image, foreign_corpus_relocation_sections[s]);
         const Elf64_Rela* entries = (const Elf64_Rela*)dynamic_test_bytes(image, section);
         for (uint64_t i = 0; entries != 0 && i < section->sh_size / sizeof(Elf64_Rela); i += 1)
         {
@@ -524,9 +677,14 @@ static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, Foreig
             const uint64_t symbol = ELF64_R_SYM(entries[i].r_info);
             const char* class = type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT ? "slot" : type == R_X86_64_COPY ? "copy" : type == R_X86_64_64 ? "absolute" :
                                 type == R_X86_64_TPOFF64 ? "tpoff" : type == R_X86_64_DTPMOD64 ? "dtpmod" : type == R_X86_64_DTPOFF64 ? "dtpoff" :
-                                type == R_X86_64_IRELATIVE ? "irelative" : type == R_X86_64_RELATIVE ? 0 : "other";
+                                type == R_X86_64_RELATIVE || type == R_X86_64_IRELATIVE ? 0 : "other";
             relative += type == R_X86_64_RELATIVE ? 1 : 0;
-            if (class != 0)
+            if (type == R_X86_64_IRELATIVE)
+            {
+                foreign_corpus_row(rows, "irelative %s %s", foreign_corpus_resolver_name(own, other, (uint64_t)entries[i].r_addend),
+                                   foreign_corpus_in_got(image, entries[i].r_offset) ? "got" : "data");
+            }
+            else if (class != 0)
             {
                 const bool named = symbols != 0 && symbol != 0 && symbol < table->sh_size / sizeof(Elf64_Sym);
                 foreign_corpus_row(rows, "%s %s", class, named ? foreign_corpus_string(image, strings, symbols[symbol].st_name) : "");
@@ -540,6 +698,106 @@ static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, Foreig
         relative += (words[i] & 1) == 0 ? 1 : (uint64_t)__builtin_popcountll(words[i] >> 1);
     }
     return relative;
+}
+
+// An IFUNC's stub: a jmp through a slot that an IRELATIVE relocation writes, and its resolver.
+typedef struct ForeignCorpusStub ForeignCorpusStub;
+struct ForeignCorpusStub
+{
+    uint64_t address;
+    uint64_t resolver;
+};
+
+static int foreign_corpus_compare_stubs(const void* a, const void* b)
+{
+    return foreign_corpus_compare_addresses(&((const ForeignCorpusStub*)a)->address, &((const ForeignCorpusStub*)b)->address);
+}
+
+// The pointer at `place` that a relative relocation gives `value`, if it is to an IFUNC's stub outside the GOT: a row
+// "irelative resolver data" for it.
+static void foreign_corpus_stub_pointer(const DynamicTestImage* image, const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other,
+                                        const ForeignCorpusStub* stubs, uint32_t count, uint64_t place, uint64_t value, ForeignCorpusRows* rows)
+{
+    const ForeignCorpusStub key = { .address = value };
+    const ForeignCorpusStub* stub = count != 0 ? bsearch(&key, stubs, count, sizeof(ForeignCorpusStub), foreign_corpus_compare_stubs) : 0;
+    if (stub != 0 && !foreign_corpus_in_got(image, place))
+    {
+        foreign_corpus_row(rows, "irelative %s data", foreign_corpus_resolver_name(own, other, stub->resolver));
+    }
+}
+
+// The pointers outside the GOT that an image relocates relative to an IFUNC's stub, the IFUNC's address where a fixup
+// other than a call or a GOT load takes it: a row "irelative resolver data" for each, as mold writes such a pointer, an
+// IRELATIVE relocation of its own. The stubs are the jmps through IRELATIVE relocations' slots in the executable
+// sections named for the PLT (link-foreign's .iplt and .plt.got).
+static void foreign_corpus_stub_pointers(const DynamicTestImage* image, const ForeignCorpusResolvers* own, const ForeignCorpusResolvers* other, Arena* arena,
+                                         ForeignCorpusRows* rows)
+{
+    const uint64_t mark = arena->length;
+    ForeignCorpusStub* stubs = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignCorpusStub, (uint64_t)own->count + 1);
+    uint32_t count = 0;
+    for (uint32_t i = 1; stubs != 0 && i < image->header->e_shnum; i += 1)
+    {
+        const Elf64_Shdr* section = &image->section_headers[i];
+        const uint8_t* bytes = (section->sh_flags & SHF_EXECINSTR) != 0 && section->sh_type == SHT_PROGBITS && strstr(image->names + section->sh_name, "plt") != 0 &&
+                                       section->sh_offset + section->sh_size <= image->file.length ?
+                                   dynamic_test_bytes(image, section) :
+                                   0;
+        for (uint64_t k = 0; bytes != 0 && k + 6 <= section->sh_size; k += 1)
+        {
+            int32_t displacement = 0;
+            memcpy(&displacement, bytes + k + 2, sizeof(displacement));
+            const uint64_t slot = section->sh_addr + k + 6 + (uint64_t)(int64_t)displacement;
+            for (uint32_t r = 0; bytes[k] == 0xff && bytes[k + 1] == 0x25 && count < own->count && r < own->count; r += 1)
+            {
+                if (own->irelatives[r].destination == slot)
+                {
+                    stubs[count] = (ForeignCorpusStub){ .address = section->sh_addr + k, .resolver = own->irelatives[r].resolver };
+                    count += 1;
+                }
+            }
+        }
+    }
+    if (stubs != 0)
+    {
+        qsort(stubs, count, sizeof(ForeignCorpusStub), foreign_corpus_compare_stubs);
+    }
+    const Elf64_Shdr* section = dynamic_test_section(image, ".rela.dyn");
+    const Elf64_Rela* entries = (const Elf64_Rela*)dynamic_test_bytes(image, section);
+    for (uint64_t i = 0; entries != 0 && i < section->sh_size / sizeof(Elf64_Rela); i += 1)
+    {
+        if (ELF64_R_TYPE(entries[i].r_info) == R_X86_64_RELATIVE)
+        {
+            foreign_corpus_stub_pointer(image, own, other, stubs, count, entries[i].r_offset, (uint64_t)entries[i].r_addend, rows);
+        }
+    }
+    // RELR's places: an even word is one, and an odd word's bits 1 to 63 mark those of the 63 words after the last.
+    const Elf64_Shdr* relr = dynamic_test_section(image, ".relr.dyn");
+    const uint64_t* words = (const uint64_t*)dynamic_test_bytes(image, relr);
+    const Elf64_Shdr* holder = 0;
+    uint64_t base = 0;
+    for (uint64_t i = 0; words != 0 && i < relr->sh_size / sizeof(uint64_t); i += 1)
+    {
+        const bool address = (words[i] & 1) == 0;
+        for (uint32_t bit = 0; bit < (address ? 1u : 63u); bit += 1)
+        {
+            const uint64_t place = address ? words[i] : base + bit * sizeof(uint64_t);
+            if (address || ((words[i] >> (bit + 1)) & 1) != 0)
+            {
+                // The places come in order: the section of the one before holds most.
+                holder = holder != 0 && place >= holder->sh_addr && place - holder->sh_addr < holder->sh_size ? holder : foreign_corpus_section_at(image, place);
+                uint64_t value = 0;
+                if (holder != 0 && holder->sh_type != SHT_NOBITS && place - holder->sh_addr + sizeof(value) <= holder->sh_size &&
+                    holder->sh_offset + holder->sh_size <= image->file.length)
+                {
+                    memcpy(&value, dynamic_test_bytes(image, holder) + (place - holder->sh_addr), sizeof(value));
+                    foreign_corpus_stub_pointer(image, own, other, stubs, count, place, value, rows);
+                }
+            }
+        }
+        base = address ? words[i] + sizeof(uint64_t) : base + 63 * sizeof(uint64_t);
+    }
+    arena_pop_to(arena, mark);
 }
 
 // The dynamic section's rows that the comparison reads.
@@ -834,7 +1092,7 @@ typedef enum ForeignCorpusReason
     FOREIGN_CORPUS_REASON_LOCAL_VISIBILITY,
     FOREIGN_CORPUS_REASON_IFUNC_FUNCTION,
     FOREIGN_CORPUS_REASON_UNREFERENCED_BOUNDS,
-    FOREIGN_CORPUS_REASON_IFUNC_SECOND_SLOT,
+    FOREIGN_CORPUS_REASON_IFUNC_POINTER,
     FOREIGN_CORPUS_REASONS,
 } ForeignCorpusReason;
 
@@ -850,10 +1108,10 @@ static const char* const foreign_corpus_reasons[FOREIGN_CORPUS_REASONS] = {
     [FOREIGN_CORPUS_REASON_RELATIVE] = "a few GOT slots that lld and link-foreign relax keep relative relocations",
     [FOREIGN_CORPUS_REASON_CANONICAL_IFUNC] = "an IFUNC whose address is taken is written as a function of no size at its stub, where link-foreign keeps the IFUNC at its resolver",
     [FOREIGN_CORPUS_REASON_LINK_WARNING] = "the symbols of libc.a's .gnu.warning sections, which GNU ld reads for link-time warnings and link-foreign leaves out with them, are kept",
-    [FOREIGN_CORPUS_REASON_LOCAL_VISIBILITY] = "in a static executable, a symbol of hidden visibility, written local, is written with default visibility",
-    [FOREIGN_CORPUS_REASON_IFUNC_FUNCTION] = "in a static executable, an IFUNC is written as a function at its resolver",
+    [FOREIGN_CORPUS_REASON_LOCAL_VISIBILITY] = "in a static executable and a static PIE, a symbol of hidden visibility, written local, is written with default visibility",
+    [FOREIGN_CORPUS_REASON_IFUNC_FUNCTION] = "in a static executable, an IFUNC is written as a function at its stub",
     [FOREIGN_CORPUS_REASON_UNREFERENCED_BOUNDS] = "the __start_ and __stop_ names of every section named as a C identifier are defined, local, though nothing refers to them",
-    [FOREIGN_CORPUS_REASON_IFUNC_SECOND_SLOT] = "an IFUNC that code both calls and loads from the GOT has two IRELATIVE slots, where link-foreign's loads read its stub's, as lld's do",
+    [FOREIGN_CORPUS_REASON_IFUNC_POINTER] = "a pointer to an IFUNC outside the GOT gets an IRELATIVE relocation, the IFUNC's address, where link-foreign and lld relocate it relative to the IFUNC's stub",
 };
 
 typedef enum ForeignCorpusCategory
@@ -1011,10 +1269,6 @@ static ForeignCorpusReason foreign_corpus_reason(const ForeignCorpusContext* con
     else if (category == FOREIGN_CORPUS_RELOCATIONS && !ours && strncmp(row, "absolute ", 9) == 0)
     {
         result = foreign_corpus_listed(&context->copied, row + 9) ? FOREIGN_CORPUS_REASON_SYMBOLIC_COPY : FOREIGN_CORPUS_REASON_NONE;
-    }
-    else if (category == FOREIGN_CORPUS_RELOCATIONS && context->mold && !ours && strcmp(row, "irelative ") == 0)
-    {
-        result = FOREIGN_CORPUS_REASON_IFUNC_SECOND_SLOT;
     }
     else if (category == FOREIGN_CORPUS_RELOCATIONS && !ours && strncmp(row, "slot ", 5) == 0)
     {
@@ -1320,8 +1574,12 @@ static void foreign_corpus_compare(ForeignCorpus* corpus, const DynamicTestImage
                             "the same dynamic symbols at the same versions", what);
         our_rows.count = 0;
         their_rows.count = 0;
-        const uint64_t our_relative = foreign_corpus_relocations(ours_image, &our_rows);
-        const uint64_t their_relative = foreign_corpus_relocations(&theirs, &their_rows);
+        const ForeignCorpusResolvers our_resolvers = foreign_corpus_resolvers(ours_image, arena);
+        const ForeignCorpusResolvers their_resolvers = foreign_corpus_resolvers(&theirs, arena);
+        foreign_test_expect(&corpus->tally, foreign_corpus_distinct(&our_resolvers, arena) && foreign_corpus_distinct(&their_resolvers, arena),
+                            "each IRELATIVE relocation writes a place of its own", what);
+        const uint64_t our_relative = foreign_corpus_relocations(ours_image, &our_resolvers, &their_resolvers, &our_rows);
+        const uint64_t their_relative = foreign_corpus_relocations(&theirs, &their_resolvers, &our_resolvers, &their_rows);
         // Each side's GOT slots of weak undefined names without a version: mold has neither the names nor the slots'
         // relocations.
         const DynamicTestImage* images[2] = { ours_image, &theirs };
@@ -1343,11 +1601,40 @@ static void foreign_corpus_compare(ForeignCorpus* corpus, const DynamicTestImage
             }
             sides[side]->count = kept;
         }
+        // mold writes a pointer to an IFUNC outside the GOT with an IRELATIVE relocation of its own, where link-foreign
+        // relocates it relative to the IFUNC's stub: each of mold's such rows is one of link-foreign's stub pointers, one
+        // for one, and any either side has over is a row it has alone.
+        uint32_t stub_pointers = 0;
+        if (context.mold)
+        {
+            ForeignCorpusRows pointers = foreign_corpus_rows(arena);
+            foreign_corpus_stub_pointers(ours_image, &our_resolvers, &their_resolvers, arena, &pointers);
+            for (uint32_t p = 0; p < pointers.count; p += 1)
+            {
+                uint32_t found = their_rows.count;
+                for (uint32_t j = 0; found == their_rows.count && j < their_rows.count; j += 1)
+                {
+                    found = strcmp(their_rows.rows[j], pointers.rows[p]) == 0 ? j : found;
+                }
+                if (found < their_rows.count)
+                {
+                    their_rows.count -= 1;
+                    memcpy(their_rows.rows[found], their_rows.rows[their_rows.count], BUSTER_FOREIGN_CORPUS_ROW_BYTES);
+                    stub_pointers += 1;
+                }
+                else
+                {
+                    foreign_corpus_row(&our_rows, "%s", pointers.rows[p]);
+                }
+            }
+            context.documented[FOREIGN_CORPUS_REASON_IFUNC_POINTER] += stub_pointers;
+        }
         const uint32_t symbolic_copies = context.documented[FOREIGN_CORPUS_REASON_SYMBOLIC_COPY];
         foreign_test_expect(&corpus->tally, foreign_corpus_same_rows(&our_rows, &their_rows, FOREIGN_CORPUS_RELOCATIONS, &context, arena),
                             "the same dynamic relocations by symbol and class", what);
-        // A symbolic R_X86_64_64 to a copy is a relative one in link-foreign's file.
-        const uint64_t expected = their_relative + (context.documented[FOREIGN_CORPUS_REASON_SYMBOLIC_COPY] - symbolic_copies);
+        // A symbolic R_X86_64_64 to a copy is a relative one in link-foreign's file, and so is a pointer to an IFUNC's
+        // stub that mold writes as an IRELATIVE one.
+        const uint64_t expected = their_relative + (context.documented[FOREIGN_CORPUS_REASON_SYMBOLIC_COPY] - symbolic_copies) + stub_pointers;
         if (strstr(linker, "lld") != 0)
         {
             char counts[512];

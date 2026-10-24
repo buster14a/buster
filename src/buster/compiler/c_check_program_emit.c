@@ -154,6 +154,52 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             }
         }
     }
+    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: a symbol this unit doesn't
+    // define may be a shared library's, which the direct path, without copy relocations, reaches only through its GOT
+    // slot (an executable's writer relaxes the load where the symbol is in the image), and a thread-local is the image's
+    // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
+    // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
+    // helpers are the unit's, and the C runtime's errno function isn't.
+    const uint32_t access_count = program->symbol_count + result->lowered.helpers.count + result->lowered.runtime_symbol_count + 1;
+    uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
+    uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
+    valid = valid && access != 0 && defined != 0;
+    if (valid)
+    {
+        memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
+        memset(defined, 0, (uint64_t)program->object_count + 1);
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            defined[program->bodies[b].object] = 1;
+        }
+        for (uint32_t token = 0; token < program->input->token_count; token += 1)
+        {
+            const uint32_t object = program->input->objects[token];
+            if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                (program->input->defined[token] || program->input->tentative[token]))
+            {
+                defined[object] = 1;
+            }
+        }
+        for (uint32_t s = 0; s < program->symbol_count; s += 1)
+        {
+            const uint32_t object = program->symbol_objects[s];
+            const uint32_t declaration = program->object_declarations[object];
+            const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
+            const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
+            const bool thread_local = !literal && program->input->thread_local[declaration];
+            access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
+        }
+        if (result->lowered.runtime_symbol_count != 0)
+        {
+            access[result->lowered.errno_symbol] = BUSTER_TIER0_ACCESS_GOT;
+        }
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            result->lowered.functions[b].symbol_access = access;
+            result->lowered.functions[b].symbol_count = access_count;
+        }
+    }
     uint64_t references = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
     {

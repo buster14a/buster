@@ -155,7 +155,14 @@ static PIE also gets `DT_INIT` and `DT_FINI` from `crti.o`'s `_init` and
 `_fini` and its `RELATIVE` relocations in `.rela.dyn` without RELR, as lld
 writes `-static-pie` without `-z pack-relative-relocs`; `rcrt1.o`'s startup
 applies them before anything else runs. A static program without libc takes
-the same handling, which changes nothing for it.
+the same handling, which changes nothing for it, but for IFUNCs: the kernel
+applies no relocations, and a static link in which nothing refers to
+`__rela_iplt_start` (in a static PIE, to `_DYNAMIC`) has no startup code that
+applies their `IRELATIVE` relocations. The first IFUNC a fixup reaches there
+is refused, naming it and the startup's missing name, where lld writes a
+program whose call through the slot that nothing filled faults. A `_start` of
+its own that applies the relocations between `__rela_iplt_start` and
+`__rela_iplt_end`, as `libc.a`'s does, makes the link take them.
 
 ## What a shared library holds
 
@@ -267,8 +274,13 @@ runs, and a shared library's hidden IFUNC called by its exported function
 must run alike and define the bounds alike. The driver's own tests link a
 shared library with `-soname` and with `-h`, check its `DT_SONAME`, export,
 missing entry point and interpreter, and run a PIE that calls it; check that
-`-pie` with `-static` writes a static PIE; and refuse `-shared` with
-`-static`, `--no-dynamic-linker` with `-pie` and `-soname` without a value. Its section GC case collects a link after the merge: a
+`-pie` with `-static` writes a static PIE; refuse `-shared` with `-static`,
+`--no-dynamic-linker` with `-pie` and `-soname` without a value; and link a
+program without libc whose `_start` calls an IFUNC, refused as a static
+executable and as a static PIE, naming the IFUNC and the startup's missing
+name, and linked and run with its status when its `_start` applies the
+relocations between `__rela_iplt_start` and `__rela_iplt_end` first. Its
+section GC case collects a link after the merge: a
 retained section whose bounds only dead code refers to must keep its bytes,
 and a hook in a merged code section its FDE, while the dead code goes.
 
@@ -280,10 +292,15 @@ static executable, a static PIE and a shared library of its library part
 (compiled again with `-fPIC`), which a PIE of the rest loads; the three
 outputs must run alike, have the same `.symtab` symbols with the same sizes,
 and agree on the dynamic section, `.dynsym`'s versions and the dynamic
-relocations, `IRELATIVE` ones among them. What a reference
+relocations, `IRELATIVE` ones among them, each by its resolver and whether
+it writes a GOT slot or a pointer in data. What a reference
 linker writes as its own valid choice is classified and counted, never
-dropped silently. The corpus is its two original programs (C, with threads,
-thread-locals, an archive, constructors, a weak reference and a registry, and
+dropped silently: mold's `IRELATIVE` relocation of a pointer to an IFUNC
+outside the GOT in a PIE, where `link-foreign` and lld relocate the pointer
+relative to the IFUNC's stub, must be one of `link-foreign`'s stub pointers,
+one for one. The corpus is its two original programs (C, with threads,
+thread-locals, an archive, constructors, a weak reference, a registry and
+IFUNCs called, loaded from the GOT and pointed to from data, and
 C++, with iostream, exceptions across translation units, RTTI, templates in
 COMDAT groups and a thread), and on request SQLite's shell, Lua's interpreter
 and this repository's compiler, built by clang alone.

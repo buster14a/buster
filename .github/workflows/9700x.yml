@@ -32,25 +32,32 @@ concurrency:
 
 jobs:
   # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
-  # GitHub-hosted runner so that it doesn't wait for the 9700X. When this job fails, `test` runs. And whether it changes
-  # the harnesses of the baselines, the linkers' times and the floors (link_benchmark.c and floors_benchmark.c): they
-  # measure other programs and the machine, the same for every pull request, so `test` measures them on the daily and
-  # dispatched runs and on pull requests that change these harnesses, as when this job is skipped or fails. The same for
-  # benchmark-foreign's mold and wild (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the
-  # foreign path's phases. And, per module, whether it changes the sources of a benchmark whose isolated and
-  # after-scalar samples (`--only`, `--after-scalar 200`, repeated in separate processes) cost far more than its plain
-  # run: about 200 ms before each of 21 samples per case, 150 s of a pull request's job in all. Every run has the plain
-  # benchmark, with its checks against the scalar twins; those samples run on the daily and dispatched runs and on pull
-  # requests that change what they measure.
+  # GitHub-hosted runner so that it doesn't wait for the 9700X: the files the merge changes against its base. When this
+  # job fails, `test` runs, with every benchmark. And whether it changes the harnesses of the baselines, the linkers'
+  # times and the floors (link_benchmark.c and floors_benchmark.c): they measure other programs and the machine, the same
+  # for every pull request, so `test` measures them on the daily and dispatched runs and on pull requests that change
+  # these harnesses, as when this job is skipped or fails. The same for benchmark-foreign's mold and wild
+  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases. And, per
+  # module, whether it changes the sources of a benchmark whose isolated and after-scalar samples (`--only`,
+  # `--after-scalar 200`, repeated in separate processes) cost far more than its plain run: about 200 ms before each of
+  # 21 samples per case, 150 s of a pull request's job in all. Those samples run on the daily and dispatched runs and on
+  # pull requests that change what they measure.
+  # And which plain benchmarks, with their checks against the scalar twins, a pull request runs (`measure`): those whose
+  # sources it changes, and those whose steps it changes (the branch-sizing qualification too: its steps or its
+  # sources). A benchmark built as a translation unit of its own (build.sh's *_benchmark.c) measures what that unit
+  # includes, which this job reads from the #include lines; one in main.c's units measures the files that define the
+  # functions it calls, as `benchmarks` names them. The plain runs took about 105 s of a pull request's 230, most of them
+  # measuring code the pull request doesn't change; a change to build.sh runs every one.
   # On a push to main, whose pull request's run measured what it changes, every output but `code` is `false`: the full
   # set took the job past its 10 minutes on every push, which then failed, having kept the 9700X from every pull
-  # request's job meanwhile. The daily and dispatched runs, which skip this job, have the full set.
+  # request's job meanwhile. A push runs every plain benchmark (`measure` is `all`), so that main has each one's numbers
+  # at every commit. The daily and dispatched runs, which skip this job, have the full set.
   changes:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      pull-requests: read
+      contents: read
     outputs:
       code: ${{ steps.files.outputs.code }}
       baselines: ${{ steps.files.outputs.baselines }}
@@ -64,13 +71,16 @@ jobs:
       ir_lowering: ${{ steps.files.outputs.ir_lowering }}
       ir_optimize: ${{ steps.files.outputs.ir_optimize }}
       checker: ${{ steps.files.outputs.checker }}
+      measure: ${{ steps.files.outputs.measure }}
     steps:
+      - name: Check out the triggering commit and its parents
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
       - id: files
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          NUMBER: ${{ github.event.pull_request.number }}
-          COUNT: ${{ github.event.pull_request.changed_files }}
         shell: bash
         run: |
           set -euo pipefail
@@ -86,6 +96,80 @@ jobs:
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
               [checker]='c_check[a-z_]*'
           )
+          # The plain benchmarks, each by the name its commands take after benchmark- or measure-, and the sources it
+          # measures: `unit:FILE`, the translation unit of its own whose includes it measures, or for one in main.c's
+          # units a pattern of the files under src/buster/compiler/ that define the functions it calls, transitively.
+          declare -A benchmarks=(
+              [lexer]='unit:c_lexer_benchmark.c'
+              [x86-zen5]='x86_64_encoder|x86_zen5[a-z_]*'
+              [x86-disassembler]='unit:x86_64_disassembler_benchmark.c'
+              [x86-encoder]='unit:x86_64_encoder_benchmark.c'
+              [assembler]='assembler[a-z_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|object_writer|x86_64_encoder|x86_match|x86_target[a-z_]*'
+              [branch-sizing]='unit:branch_sizing_benchmark.c'
+              [x86-semantics]='unit:x86_semantics_benchmark.c'
+              [lanes]='unit:lane_benchmark.c'
+              [dataflow]='unit:dataflow_benchmark.c'
+              [ssa]='dataflow|dominators|lane|ssa|ssa_benchmark|ssa_program'
+              [preprocessor-fuzz]='preprocessor_fuzz[a-z_]*|c_preprocessor[a-z_]*|c_predefines[a-z_]*|c_builtin_catalog|c_intern|c_lexer|c_refine|lane|x86_target'
+              [object-writer]='unit:object_writer_benchmark.c'
+              [debug]='debug[a-z_]*|lane'
+              [import]='unit:import_benchmark.c'
+              [bind]='unit:bind_benchmark.c'
+              [executable]='unit:executable_benchmark.c'
+              [snapshot]='unit:snapshot_benchmark.c'
+              [foreign]='unit:foreign_benchmark.c'
+              [foreign-strings]='foreign[a-z_]*|bind[a-z_]*|dynamic[a-z_]*|executable[a-z_]*|import[a-z_]*|link[a-z_]*|object_writer[a-z_]*|runtime|c_lexer[a-z_]*|lane|x86_64_encoder[a-z_]*'
+              [link]='unit:link_benchmark.c'
+              [refinement]='unit:c_refine_benchmark.c'
+              [preprocessor]='unit:c_preprocessor_benchmark.c'
+              [files]='unit:c_files_benchmark.c'
+              [parser]='unit:c_parser_benchmark.c'
+              [lowering]='c_lowering[a-z_]*|lane'
+              [gnu]='c_bindings|c_gnu[a-z_]*|c_intern|c_lexer[a-z_]*|c_parser|c_parser_binding_trace|c_predefines|c_preprocessor|c_refine|lane|x86_target'
+              [parser-bindings]='c_bindings[a-z_]*|c_gnu|c_intern|c_lexer[a-z_]*|c_parser[a-z_]*|c_predefines|c_preprocessor|c_refine|lane|x86_target'
+              [types]='unit:c_types_benchmark.c'
+              [environments]='c_bindings[a-z_]*|c_environment[a-z_]*|c_types[a-z_]*|lane'
+              [calling-convention]='unit:calling_convention_benchmark.c'
+              [checker]='unit:c_checker_benchmark.c'
+              [checker-source]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
+              [checker-bindings]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
+              [backend]='unit:tier0_benchmark.c'
+              [unwind]='unwind[a-z_]*|debug[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
+              [streaming]='streaming[a-z_]*|unwind[a-z_]*|debug|executable|link[a-z_]*|object_writer[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
+              [ir]='ir|ir_validate|ir_benchmark|lane'
+              [ir-lowering]='ir|ir_validate|ir_benchmark|ir_lower[a-z_]*|ssa|ssa_ir|dataflow|dominators|tier0[a-z_]*|c_types|calling_convention|link|object_writer|lane|x86_64_encoder|x86_semantics'
+              [ir-optimize]='ir|ir_validate|ir_optimize|ir_optimize_benchmark|ir_optimize_test|dominators|lane'
+              [ir-optimize-passes]='ir|ir_validate|ir_optimize[a-z_]*|ssa|ssa_ir|dataflow|dominators|lane'
+          )
+          # Prints the repository's files that the translation unit $1 includes ("buster/..." under src/),
+          # transitively, itself among them.
+          includes()
+          {
+              local -A seen=()
+              local queue=("$1")
+              while [ "${#queue[@]}" -gt 0 ]; do
+                  local file="${queue[0]}"
+                  queue=("${queue[@]:1}")
+                  if [ -z "${seen[$file]-}" ] && [ -f "$file" ]; then
+                      seen[$file]=1
+                      echo "$file"
+                      while read -r included; do
+                          queue+=("src/$included")
+                      done < <(sed -n 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*"\(buster\/[^"]*\)".*/\1/p' "$file")
+                  fi
+              done
+          }
+          # Writes each step of the workflow on standard input to a file of its own in the directory $1, named by the
+          # step's name, so that a step a pull request changes is a file that differs.
+          split_steps()
+          {
+              mkdir -p "$1"
+              awk -v directory="$1" '
+                  /^  [^ ]/ || /^      - / { if (file != "") close(file); file = "" }
+                  /^      - name: / { name = substr($0, 15); gsub(/[^A-Za-z0-9]+/, "-", name); file = directory "/" name }
+                  file != "" { print >> file }
+              '
+          }
           declare -A measure
           if [ "$GITHUB_EVENT_NAME" = push ]; then
               # push's paths-ignore leaves out documentation alone.
@@ -96,19 +180,10 @@ jobs:
               for module in "${modules[@]}"; do
                   measure[$module]=false
               done
-          # The API lists at most 3,000 files of a pull request: past that, take it as changing code and the harnesses.
-          elif [ "$COUNT" -ge 3000 ]; then
-              code=true
-              baselines=true
-              foreign=true
-              branch_sizing=true
-              for module in "${modules[@]}"; do
-                  measure[$module]=true
-              done
+              selected=all
           else
-              gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" \
-                  --jq '.[] | .filename, (.previous_filename // empty)' > files
-              test "$(sort -u files | wc -l)" -ge 1
+              # The merge's changes against its base, both names of a file renamed.
+              git diff --no-renames --name-only HEAD^1 HEAD > files
               if grep -Ev '^docs/|\.md$' files > /dev/null; then
                   code=true
               else
@@ -124,7 +199,7 @@ jobs:
               else
                   foreign=false
               fi
-              if grep -Ex 'src/buster/compiler/(x86_64_encoder|branch_sizing(_benchmark|_generate)?)\.c|\.github/workflows/9700x\.yml' files > /dev/null; then
+              if grep -Ex 'src/buster/compiler/(x86_64_encoder|branch_sizing(_benchmark|_generate)?)\.c' files > /dev/null; then
                   branch_sizing=true
               else
                   branch_sizing=false
@@ -136,6 +211,41 @@ jobs:
                       measure[$module]=false
                   fi
               done
+              # The steps of this workflow that the merge changes or adds, and the commands they run.
+              workflow=.github/workflows/9700x.yml
+              if git cat-file -e "HEAD^1:$workflow" 2> /dev/null; then
+                  git show "HEAD^1:$workflow" | split_steps steps/base
+              else
+                  mkdir -p steps/base
+              fi
+              split_steps steps/head < "$workflow"
+              : > commands
+              for step in steps/head/*; do
+                  if ! cmp -s "$step" "steps/base/${step##*/}"; then
+                      echo "Changes the step ${step##*/}"
+                      grep -ohE '\./build/compiler (benchmark|measure)-[a-z0-9-]+' "$step" | sed 's/.* //' >> commands || true
+                      case "${step##*/}" in
+                          Check-out-pinned-branch-sizing-measurement-harnesses|Benchmark-branch-sizing) branch_sizing=true ;;
+                      esac
+                  fi
+              done
+              if grep -Fx build.sh files > /dev/null; then
+                  selected=all
+              else
+                  selected=,
+                  for name in $(printf '%s\n' "${!benchmarks[@]}" | sort); do
+                      spec="${benchmarks[$name]}"
+                      if [[ "$spec" == unit:* ]]; then
+                          includes "src/buster/compiler/${spec#unit:}" > closure
+                          changed=$(grep -Fxf closure files || true)
+                      else
+                          changed=$(grep -Ex "src/buster/compiler/($spec)\.c" files || true)
+                      fi
+                      if [ -n "$changed" ] || grep -Ex "(benchmark|measure)-$name" commands > /dev/null; then
+                          selected="$selected$name,"
+                      fi
+                  done
+              fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "baselines=$baselines" >> "$GITHUB_OUTPUT"
@@ -144,13 +254,15 @@ jobs:
           for module in "${modules[@]}"; do
               echo "$module=${measure[$module]}" >> "$GITHUB_OUTPUT"
           done
+          echo "measure=$selected" >> "$GITHUB_OUTPUT"
           echo "Changes code: $code"
           echo "Changes the baselines' harnesses: $baselines"
           echo "Changes the foreign inputs' benchmark: $foreign"
-          echo "Changes the branch-sizing implementation or pinned harness workflow: $branch_sizing"
+          echo "Changes the branch-sizing implementation or its qualification's steps: $branch_sizing"
           for module in "${modules[@]}"; do
               echo "Changes what $module's conditioned benchmark samples measure: ${measure[$module]}"
           done
+          echo "Runs the plain benchmarks: $selected"
 
   test:
     name: Build and execute on Ryzen 7 9700X
@@ -166,6 +278,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    # The plain benchmarks this run measures, by the names their commands take after benchmark- or measure-: `changes`'
+    # list for a pull request (",lexer,parser,"), and on any other run, or when `changes` failed, all of them.
+    env:
+      MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
     steps:
       - name: Verify host and bootstrap compiler
         run: |
@@ -181,16 +297,22 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Build only the compiler executable
+      - name: Build only the compiler executable, and beside it the external Clang pragma token oracle
+        # Without debug information, which nothing here reads: it took a fifth of the build's time (BUSTER_DEBUG_INFO,
+        # build.sh). The build waits for its longest unit with CPUs to spare, so the oracle builds meanwhile, outside
+        # build/, which build.sh makes anew and which must hold the compiler alone.
         run: |
-          ./build.sh
+          oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
+          bash tools/build-preprocessor-pragma-oracle.sh "$oracle" > "$RUNNER_TEMP/oracle.log" 2>&1 &
+          building=$!
+          BUSTER_DEBUG_INFO=0 ./build.sh
           test -x build/compiler
           test "$(find build -type f -executable | wc -l)" -eq 1
-
-      - name: Build the external Clang pragma token oracle
-        run: |
-          bash tools/build-preprocessor-pragma-oracle.sh
-          printf 'BUSTER_PPF_PRAGMA_ORACLE=%s/build/preprocessor-pragma-oracle\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          status=0
+          wait "$building" || status=$?
+          cat "$RUNNER_TEMP/oracle.log"
+          test "$status" -eq 0
+          printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
 
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
@@ -217,22 +339,19 @@ jobs:
         # lanes of their own), and prints each test's output in a group of its own in this order, then names the tests
         # that failed. A test still running after 180 s is killed and fails. They come in the order of their times
         # in the job, the longest first, so that they start first: in the order before, the longest started among
-        # the last and the step took 64 s, where its bound is about 38 s (the longest test, and the tests' 302 s on
-        # 8 jobs). A new test goes where its time puts it.
+        # the last and the step took 64 s. Started together, the longest run slower (the checker's four commands took
+        # 50 s as one entry, where they had taken 33 to 37 s), so a test is one command where it can be, and the
+        # step's bound is its longest one and the tests' 310 s on 8 jobs, about 39 s. A new test goes where its time
+        # puts it.
         run: |
           ./build/compiler parallel --github --timeout 180 <<'TESTS'
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
-          ./build/compiler test-checker-asm
-          ./build/compiler test-checker-driver --executable ./build/compiler
-          ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
           == Test the preprocessor's cases against clang
-          # --clang also preprocesses each case with clang -E and compares the tokens.
-          ./build/compiler test-preprocessor --clang
-          == Test the parser on the repository's translation units against clang
-          # Both paths, which must agree kernel by kernel, and accept each unit build.sh compiles as clang -fsyntax-only
-          # does, but main_unit_*.c, which are main.c again with another BUSTER_UNIT.
-          ./build/compiler test-parser --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+          # --clang also preprocesses each case with clang -E and compares the tokens. Two workers share the fuzz
+          # batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of this, the longest test, at the
+          # qualification runs' 3 ms of a thread per case.
+          ./build/compiler test-preprocessor --clang --jobs 2
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang
@@ -240,17 +359,6 @@ jobs:
           # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
           # tokens. -target and its triple (clang's default) go to both.
           ./build/compiler test-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-          == Test the static executables with libc
-          # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
-          # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
-          # does, and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's
-          # alignment and init and fini arrays' sizes.
-          ./build/compiler test-static --cross-check
-          == Test the foreign inputs
-          # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
-          # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
-          # winners, the COMDAT groups and -y's lines with the resolution's.
-          ./build/compiler test-foreign --cross-check
           == Test the per-file jobs on the repository's translation units
           # The predefines follow the options as clang's do (c_predefines.c).
           ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
@@ -263,32 +371,10 @@ jobs:
           # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both
           # ways.
           ./build/compiler test-calling-convention --cross-check
-          == Check the no-recursion rule on the call graph
-          # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
-          ./build/compiler test-call-graph
-          ./build.sh check-call-graph
-          == Test c-testsuite's programs end to end
-          # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
-          # the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links.
-          # The declared subset must pass. The self-test checks the harness's timeouts, relative paths (as given here)
-          # and cross-check rule with a stand-in compiler.
-          ./build/compiler test-c-testsuite --self-test
-          ./build/compiler test-c-testsuite --cross-check --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
-          == Test the object writer
-          # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
-          # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
-          # and runs them.
-          ./build/compiler test-object-writer --cross-check
-          == Test the runner
-          ./build/compiler test-parallel
-          == Test the IR and typed-stream lowering
-          ./build/compiler test-ir
-          ./build/compiler test-ir-lowering
-          ./build/compiler test-ir-parse
-          ./build/compiler test-interpreter
-          ./build/compiler test-interpreter-native
-          ./build/compiler test-interpreter-link
-          ./build/compiler test-ir-interpreter
+          == Test the semantic driver's diagnostics and emission against clang
+          ./build/compiler test-checker-driver --executable ./build/compiler
+          == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
+          ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins
           ./build/compiler test-builtin-intrinsic-types
@@ -318,62 +404,105 @@ jobs:
           ./build/compiler test-builtin-atomic-rmw-helpers
           ./build/compiler test-builtin-rounds-helper
           ./build/compiler test-builtin-math-helpers
-          == Test branch sizing
-          # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
-          # relaxation of them must give the bytes of the sized records.
-          ./build/compiler test-branch-sizing --cross-check
+          == Check the no-recursion rule on the call graph
+          # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
+          ./build/compiler test-call-graph
+          ./build.sh check-call-graph
+          == Test c-testsuite's programs end to end
+          # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
+          # the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links.
+          # The declared subset must pass. The self-test checks the harness's timeouts, relative paths (as given here)
+          # and cross-check rule with a stand-in compiler.
+          ./build/compiler test-c-testsuite --self-test
+          ./build/compiler test-c-testsuite --cross-check --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
+          == Test the parser on the repository's translation units
+          # Both paths, which must agree kernel by kernel, and accept each unit build.sh compiles, but main_unit_*.c,
+          # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
+          # so asking clang -fsyntax-only again (--clang) only repeats that.
+          ./build/compiler test-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+          == Test the runner
+          ./build/compiler test-parallel
+          == Test the foreign inputs
+          # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
+          # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
+          # winners, the COMDAT groups and -y's lines with the resolution's.
+          ./build/compiler test-foreign --cross-check
+          == Test the object writer
+          # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
+          # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
+          # and runs them.
+          ./build/compiler test-object-writer --cross-check
+          == Test GNU inline assembly's semantic fixtures against clang
+          ./build/compiler test-checker-asm
+          == Test the static executables with libc
+          # Each program bound against the system's static runtime and written as a static executable by 1, 2, 3 and 8
+          # lanes and by the writer's exact twins must be the same file, run as cc -static's link of the same object
+          # does, and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's
+          # alignment and init and fini arrays' sizes.
+          ./build/compiler test-static --cross-check
           == Test Tier 0
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C.
           ./build/compiler test-tier0 --cross-check
-          == Test the dynamic PIEs
-          # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
-          # dynamic symbols and relocations.
-          ./build/compiler test-dynamic --cross-check
-          == Test the C lexer without digraphs and // comments, as c89
-          ./build/compiler test-lexer --no-digraphs --no-line-comments
-          == Test the C lexer without // comments, as C94
-          ./build/compiler test-lexer --no-line-comments
-          == Compare source binding columns on main.c
-          ./build/compiler test-parser-bindings --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
           == Test the C lexer
           ./build/compiler test-lexer
+          == Test branch sizing
+          # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
+          # relaxation of them must give the bytes of the sized records.
+          ./build/compiler test-branch-sizing --cross-check
+          == Test the C lexer without // comments, as C94
+          ./build/compiler test-lexer --no-line-comments
+          == Test the C lexer without digraphs and // comments, as c89
+          ./build/compiler test-lexer --no-digraphs --no-line-comments
           == Test the C lexer without digraphs, as -fno-digraphs
           ./build/compiler test-lexer --no-digraphs
-          == Test the independent preprocessor fuzz harness in C23
-          ./build/compiler test-preprocessor-fuzz --std c23
-          == Test the x86-64 encoder
-          ./build/compiler test-x86-encoder
-          == Test token refinement
-          ./build/compiler test-refinement src
-          == Test the x86-64 disassembler against GNU tools
-          corpus="$(mktemp -d)"
-          trap 'rm -rf "$corpus"' EXIT
-          clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o "$corpus/corpus.o"
-          objcopy -O binary -j .text "$corpus/corpus.o" "$corpus/corpus.text"
-          ./build/compiler test-x86-disassembler --objdump --file "$corpus/corpus.text"
           == Test the per-file jobs
           # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
           # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
           # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
           # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
+          == Test the x86-64 encoder
+          ./build/compiler test-x86-encoder
+          == Test the IR and typed-stream lowering
+          ./build/compiler test-ir
+          ./build/compiler test-ir-lowering
+          ./build/compiler test-ir-parse
+          ./build/compiler test-interpreter
+          ./build/compiler test-interpreter-native
+          ./build/compiler test-interpreter-link
+          ./build/compiler test-ir-interpreter
+          == Test the dynamic PIEs
+          # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
+          # dynamic symbols and relocations.
+          ./build/compiler test-dynamic --cross-check
+          == Test the x86-64 disassembler against GNU tools
+          corpus="$(mktemp -d)"
+          trap 'rm -rf "$corpus"' EXIT
+          clang -O3 -march=znver5 -c examples/disassembler/corpus.c -o "$corpus/corpus.o"
+          objcopy -O binary -j .text "$corpus/corpus.o" "$corpus/corpus.text"
+          ./build/compiler test-x86-disassembler --objdump --file "$corpus/corpus.text"
           == Test binding
           # --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
           # found with lld's link of the programs' own objects.
           ./build/compiler test-bind --cross-check
-          == Test the independent preprocessor fuzz harness in C17
-          ./build/compiler test-preprocessor-fuzz --std c17
+          == Compare source binding columns on main.c
+          ./build/compiler test-parser-bindings --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          == Test token refinement
+          ./build/compiler test-refinement src
           == Test the foreign linker against lld and mold
           # Original C and C++ programs, each compiled by gcc and by clang, linked from one command line by
           # link-foreign, lld and mold: their runs, symbols and sizes, dynamic sections, versions and relocations must
           # agree but for each reference linker's documented choices.
           ./build/compiler test-foreign-corpus
+          == Test the independent preprocessor fuzz harness in C23
+          ./build/compiler test-preprocessor-fuzz --std c23
           == Test differential harness accounting, subprocesses and failure preservation
           ./build/compiler test-differential-harness
-          == Test DWARF source lines and late address finalization
-          # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
-          ./build/compiler test-debug --cross-check
+          == Test the independent preprocessor fuzz harness in C17
+          ./build/compiler test-preprocessor-fuzz --std c17
+          == Test the experimental scalar fragment sink
+          ./build/compiler test-fragments
           == Test Tier 1 selection, liveness and native fragments
           ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
           ./build/compiler test-tier1-liveness
@@ -381,12 +510,20 @@ jobs:
           ./build/compiler test-tier1-pipeline --cross-check
           ./build/compiler test-tier1-model
           ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
-          == Test the experimental scalar fragment sink
-          ./build/compiler test-fragments
           == Test shared IR local promotion and typed-stream semantics
           ./build/compiler test-ssa-ir
+          == Test DWARF source lines and late address finalization
+          # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
+          ./build/compiler test-debug --cross-check
           == Test selective lowering against its independent oracle and Clang symbols
           ./build/compiler test-lowering --clang
+          == Check the frozen SQLite source against Clang
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+          == Test the direct path's executables
+          ./build/compiler test-executable
           == Compare a frozen preprocessor corpus subset with Clang
           # The runner hooks hold the shared host lock for this whole job. This copy is readable by the runner, unlike
           # the original bundle under /home/david. Verify the manifests and every input/header byte first.
@@ -421,20 +558,19 @@ jobs:
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl" --report build/oracle-musl.tsv
           awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
-          == Test the runtime snapshot
-          ./build/compiler test-snapshot
           == Test generated-code ISA policy
           ./build/compiler test-x86-target
-          == Check the frozen SQLite source against Clang
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+          == Test the runtime snapshot
+          ./build/compiler test-snapshot
           == Test the C type table
           # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
           # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and
           # run, and clang's AST dump.
           ./build/compiler test-types
+          == Test local SSA construction and its memory interpreter
+          ./build/compiler test-ssa
+          == Test the lanes
+          ./build/compiler test-lanes
           == Test C-source binding identities and scope semantics
           ./build/compiler test-parser-bindings --clang
           == Compare source binding columns on the frozen SQLite input
@@ -448,18 +584,14 @@ jobs:
           ./build/compiler test-assembler --cross-check
           == Test native fixed-frame CFI and generated GDB/perf consumers
           ./build/compiler test-unwind --cross-check
-          == Test the direct path's executables
-          ./build/compiler test-executable
-          == Test local SSA construction and its memory interpreter
-          ./build/compiler test-ssa
           == Test GNU syntax metadata against clang
           ./build/compiler test-gnu --clang
           == Test experimental Tier 1 scheduling and model coverage
           ./build/compiler test-tier1-schedule
           # This bounded smoke also executes original and reordered machine code against its independent reference.
           ./build/compiler benchmark-tier1-schedule --blocks 4 --records 64
-          == Test the lanes
-          ./build/compiler test-lanes
+          == Test streaming the output against writing it at the end, with GDB, perf and llvm-dwarfdump on the data-first layout
+          ./build/compiler test-streaming --cross-check
           == Test the x86 semantics
           # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
           # with GNU as and compares the bytes.
@@ -502,8 +634,6 @@ jobs:
           ./build/compiler test-dominators
           == Test fragment byte interleave and protected-page tails
           ./build/compiler test-fragment-interleave
-          == Test streaming the output against writing it at the end, with GDB, perf and llvm-dwarfdump on the data-first layout
-          ./build/compiler test-streaming --cross-check
           == Test the link representation
           ./build/compiler test-link
           == Test the partial Zen 5 model and instruction harness
@@ -511,6 +641,7 @@ jobs:
           TESTS
 
       - name: Benchmark the C lexer on the repository sources
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lexer,')
         run: |
           # Pin to one permitted CPU to avoid migration noise in throughput measurements.
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -520,6 +651,7 @@ jobs:
         # The job hook holds the shared lock. Each process interleaves its experiments, in three separate processes
         # where `changes` doesn't rule out the next step. These observations are informational; counter/protocol
         # failures still fail the step.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-zen5,')
         run: |
           sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
           echo "Zen 5 observation process 1"
@@ -535,6 +667,7 @@ jobs:
           done
 
       - name: Benchmark Zen 5 cost lookup
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-zen5,')
         run: taskset -c 2 ./build/compiler benchmark-x86-zen5
 
       - name: Benchmark Zen 5 cost lookup in isolation and after scalar work
@@ -553,16 +686,19 @@ jobs:
           done
 
       - name: Benchmark x86-64 disassembly
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-disassembler,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-x86-disassembler
 
       - name: Benchmark the x86-64 encoder
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-encoder,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
 
       - name: Benchmark assembly phases
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',assembler,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-assembler
@@ -578,6 +714,7 @@ jobs:
           persist-credentials: false
 
       - name: Benchmark branch sizing
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',branch-sizing,') || needs.changes.outputs.branch_sizing == 'true'
         timeout-minutes: 3
         env:
           AB_ENABLED: ${{ github.event_name == 'pull_request' && needs.changes.outputs.branch_sizing != 'false' }}
@@ -715,20 +852,24 @@ jobs:
           fi
 
       - name: Benchmark the x86 semantics
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-semantics,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-x86-semantics
 
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lanes,')
         run: ./build/compiler benchmark-lanes
 
       - name: Benchmark dataflow bitsets
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',dataflow,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-dataflow
 
       - name: Benchmark local SSA construction on synthetic CFGs
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ssa,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ssa
@@ -747,36 +888,43 @@ jobs:
           done
 
       - name: Benchmark the preprocessor fuzz harness
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor-fuzz,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor-fuzz
 
       - name: Benchmark the object writer
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',object-writer,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-object-writer
 
       - name: Benchmark DWARF validation, sizing, emission and final addresses
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',debug,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-debug
 
       - name: Benchmark the import path
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',import,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-import
 
       - name: Benchmark binding
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',bind,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-bind
 
       - name: Benchmark the direct path's executables
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',executable,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-executable
 
       - name: Benchmark the runtime snapshot
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',snapshot,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-snapshot
@@ -791,12 +939,13 @@ jobs:
 
       - name: Benchmark the foreign inputs
         # Every other pull request's: the resolution's times by the vector path and the exact one.
-        if: needs.changes.outputs.foreign == 'false'
+        if: needs.changes.outputs.foreign == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',foreign,'))
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-foreign
 
       - name: Benchmark foreign string pooling through executable output
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',foreign-strings,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-foreign-strings --counts 64,4096 --runs 3
@@ -813,7 +962,7 @@ jobs:
 
       - name: Benchmark the whole link by the direct path
         # Every other pull request's: the direct path's times, and its programs must still run as their models predict.
-        if: needs.changes.outputs.baselines == 'false'
+        if: needs.changes.outputs.baselines == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',link,'))
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           ./build/compiler benchmark-link --cpus "$cpu" --only direct
@@ -827,6 +976,7 @@ jobs:
           ./build/compiler benchmark-floors --cpu "$cpu"
 
       - name: Benchmark token refinement on the repository sources
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',refinement,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-refinement src
@@ -834,20 +984,24 @@ jobs:
       - name: Benchmark the preprocessor on main.c
         # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
         # -funsigned-char's among them.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Benchmark the directive tables on the repository sources
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --tables src
 
       - name: Benchmark the per-file jobs on the repository's translation units
         # Without taskset: it pins each lane to an allowed CPU of its own.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
         run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the parser on main.c
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
@@ -857,16 +1011,19 @@ jobs:
       - name: Benchmark selective lowering on synthetic graphs
         # Includes independent result checks. These unconditioned single-operation samples are informational;
         # source-corpus lowering and conditioned multi-process measurements remain separate acceptance work.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lowering,')
         run: |
           cpu="$(awk '/Cpus_allowed_list/ {split($2,a,/[-,]/); print a[1]}' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-lowering
 
       - name: Benchmark GNU syntax metadata and parser handoff
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',gnu,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-gnu -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 
       - name: Benchmark C-source binding production and resolution
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser-bindings,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser-bindings -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
@@ -887,6 +1044,7 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch --after-scalar 200 "${system[@]}" "$corpus/sqlite/sqlite3.c"
 
       - name: Benchmark the C type table
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',types,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-types
@@ -895,6 +1053,7 @@ jobs:
         # Synthetic environment handoff only; actual deferred checker/corpus acceptance stays with #113.
         # The runner hook already holds the 9700X lock. Isolate both vector states in independent processes.
         # This step also checks every benchmark result against its scalar twin.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',environments,')
         run: taskset -c 2 ./build/compiler benchmark-environments
 
       - name: Benchmark source-position environments in isolation and after scalar work
@@ -910,17 +1069,20 @@ jobs:
           done
 
       - name: Benchmark the calling convention
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',calling-convention,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-calling-convention
 
       - name: Benchmark typed postorder checking on synthetic graphs
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-checker --shape wide
           taskset -c "$cpu" ./build/compiler benchmark-checker --shape chain --nodes 4096
 
       - name: Benchmark typed checking on frozen SQLite bodies
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker-source,')
         run: |
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
@@ -943,6 +1105,7 @@ jobs:
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
         # whole source reader is timed per mode, with the handoff's pieces alone and their memory.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker-bindings,')
         run: |
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
@@ -990,6 +1153,7 @@ jobs:
           done
 
       - name: Benchmark the backend (Tier 0, branch sizing and encoding)
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend,') || contains(env.MEASURE, ',unwind,') || contains(env.MEASURE, ',streaming,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
@@ -997,6 +1161,7 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-streaming --units 100 --runs 5
 
       - name: Benchmark the IR verifier and derived arrays
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir
@@ -1009,6 +1174,7 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
 
       - name: Benchmark typed-stream lowering through IR verification
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-lowering,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
@@ -1021,6 +1187,7 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
 
       - name: Benchmark the verified Tier 1 optimization passes
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize
