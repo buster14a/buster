@@ -1154,11 +1154,23 @@ static uint32_t bind_library_edges(const Bind* bind, uint32_t l, BindLibraryEdge
     {
         uint32_t export = 0;
         const bool strong = !references->weak[r];
-        const uint32_t m = strong ? runtime_libraries_export(libraries, references->name[r], references->length[r], references->hash[r], &export) : 0;
+        // The version the reference requires, if any, which only an export at it satisfies (or one without a version), as
+        // the loader matches it: of libc.so.6 or the loader, theirs, unchecked, since the runtime keeps only their
+        // default exports and the loader checks it at load; of another library, a named library's.
+        const String8 version = libraries->reference_versions[l][r];
+        const String8 file = libraries->reference_files[l][r];
+        const String8 libc = bind->runtime->libc.soname;
+        const String8 loader = bind->runtime->loader.soname;
+        const bool runtime_version = version.length != 0 && ((file.length == libc.length && memcmp(file.pointer, libc.pointer, libc.length) == 0) ||
+                                                             (file.length == loader.length && memcmp(file.pointer, loader.pointer, loader.length) == 0));
+        const uint32_t m = !strong || runtime_version ? 0
+                           : version.length != 0      ? runtime_libraries_export_at(libraries, references->name[r], references->length[r], references->hash[r], version)
+                                                      : runtime_libraries_export(libraries, references->name[r], references->length[r], references->hash[r], &export);
         const bool edge = m != 0 && m - 1 != l && !runtime_libraries_lists(libraries, l, m - 1);
-        // A name no named library exports: libc.so.6's or the loader's, or else the executable's to define.
-        const uint32_t entry = strong && m == 0 ? runtime_find_global_name(names, references->name[r], references->length[r], references->hash[r]) : 0;
-        const bool open = strong && m == 0 && (entry == 0 || names->export[entry - 1] == 0);
+        // An unversioned name no named library exports: libc.so.6's or the loader's, or else the executable's to define;
+        // a versioned one no named library exports at its version, the executable's to define.
+        const uint32_t entry = strong && m == 0 && version.length == 0 ? runtime_find_global_name(names, references->name[r], references->length[r], references->hash[r]) : 0;
+        const bool open = strong && m == 0 && !runtime_version && (version.length != 0 || entry == 0 || names->export[entry - 1] == 0);
         edges->from[edges->count] = l;
         edges->reference[edges->count] = r;
         edges->to[edges->count] = edge ? m - 1 : BUSTER_BIND_NO_LIBRARY;

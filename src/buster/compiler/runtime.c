@@ -346,6 +346,18 @@ static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
 // as GCC's driver links them on Debian and Ubuntu (--as-needed).
 #define BUSTER_RUNTIME_LIBRARIES 32
 
+// A library's exports at a version other than their name's default (name@VERSION, a .gnu.version entry with the hidden
+// bit), which import_library leaves out of its exports: their names and their versions' names.
+typedef struct RuntimeHiddenExports RuntimeHiddenExports;
+struct RuntimeHiddenExports
+{
+    const uint8_t** name;
+    uint32_t* length;
+    uint64_t* hash;
+    String8* version;
+    uint32_t count;
+};
+
 typedef struct RuntimeLibraries RuntimeLibraries;
 struct RuntimeLibraries
 {
@@ -358,6 +370,12 @@ struct RuntimeLibraries
     String8 paths[BUSTER_RUNTIME_LIBRARIES];
     // By library: whether the -l search found it, rather than a script naming its path (runtime_libraries_name).
     bool searched[BUSTER_RUNTIME_LIBRARIES];
+    // By library: each reference's required version and the file its .gnu.version_r entry requires it of, beside
+    // libraries[l].references (both empty for a reference without one); and its exports at other versions than their
+    // names' defaults (runtime_libraries_versions).
+    String8* reference_versions[BUSTER_RUNTIME_LIBRARIES];
+    String8* reference_files[BUSTER_RUNTIME_LIBRARIES];
+    RuntimeHiddenExports hidden[BUSTER_RUNTIME_LIBRARIES];
     uint32_t count;
     // The files' bytes, which the libraries' names point into, and their columns and indices.
     Arena arena;
@@ -388,6 +406,11 @@ static __attribute__((unused)) bool runtime_libraries_refer(const RuntimeLibrari
 static __attribute__((unused)) String8 runtime_libraries_name(const RuntimeLibraries* libraries, uint32_t l);
 // Whether library `l`'s own DT_NEEDED entries name library `m`, which the loader then loads for it.
 static __attribute__((unused)) bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m);
+// The first library, in link order, that exports `name` at `version`, as the loader matches a reference that requires
+// that version: a default export at it or without a version, or an export at it that isn't its name's default
+// (RuntimeHiddenExports). Its index plus 1, or 0.
+static __attribute__((unused)) uint32_t runtime_libraries_export_at(const RuntimeLibraries* libraries, const uint8_t* name, uint32_t length, uint64_t hash,
+                                                                   String8 version);
 // Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
 // st_size, st_mtim and st_ctim.
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
@@ -1838,6 +1861,133 @@ static RuntimeError runtime_libraries_dependencies(RuntimeLibraries* libraries, 
     return result;
 }
 
+// The name of library `l`'s version definition that `index` (import_library's, moved past the libraries' before it)
+// names, or nothing for VER_NDX_LOCAL and VER_NDX_GLOBAL, which are no version.
+static String8 runtime_libraries_version_name(const RuntimeLibraries* libraries, uint32_t l, uint16_t index)
+{
+    const ImportLibrary* library = &libraries->libraries[l];
+    String8 result = { 0 };
+    for (uint32_t v = 0; index > VER_NDX_GLOBAL && result.length == 0 && v < library->version_count; v += 1)
+    {
+        result = library->versions[v].index == index && !library->versions[v].base ? library->versions[v].name : result;
+    }
+    return result;
+}
+
+// Reads what import_library leaves out of library `l`'s versions, from `bytes`: each reference's required version and
+// the file it requires it of (its .gnu.version entry's index is a vna_other of the .gnu.version_r entry that names
+// them), in the references' order, and its exports at a version other than their name's default (a .gnu.version entry
+// with the hidden bit), with their versions' names (its definitions', whose indices moved by `shift`). RUNTIME_ERROR_IMPORT
+// if they can't be read, or RUNTIME_ERROR_MEMORY. A library without .gnu.version has neither. A pass over the library's
+// dynamic symbols and its few version needs, beside its import.
+static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint32_t l, String8 bytes, uint16_t shift)
+{
+    const ImportLibrary* library = &libraries->libraries[l];
+    ImportElf elf;
+    ImportLibrarySections sections = { 0 };
+    ImportDynamicSymbols symbols = { 0 };
+    RuntimeError result = import_elf(&elf, bytes, ET_DYN).error == IMPORT_ERROR_NONE ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_IMPORT;
+    uint32_t verneed = 0;
+    for (uint32_t index = 1; result == RUNTIME_ERROR_NONE && index < elf.section_count; index += 1)
+    {
+        const uint32_t type = import_section_header(&elf, index).sh_type;
+        sections.dynsym = type == SHT_DYNSYM && sections.dynsym == 0 ? index : sections.dynsym;
+        sections.versym = type == SHT_GNU_versym && sections.versym == 0 ? index : sections.versym;
+        verneed = type == SHT_GNU_verneed && verneed == 0 ? index : verneed;
+    }
+    result = result == RUNTIME_ERROR_NONE && import_library_symbols(&elf, &sections, &symbols).error != IMPORT_ERROR_NONE ? RUNTIME_ERROR_IMPORT : result;
+    const uint32_t reference_count = library->references.count;
+    String8* versions = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, (uint64_t)reference_count + 1) : 0;
+    String8* files = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, (uint64_t)reference_count + 1) : 0;
+    RuntimeHiddenExports hidden = {
+        .name = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, const uint8_t*, symbols.count + 1) : 0,
+        .length = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, uint32_t, symbols.count + 1) : 0,
+        .hash = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, uint64_t, symbols.count + 1) : 0,
+        .version = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, symbols.count + 1) : 0,
+    };
+    const bool room = versions != 0 && files != 0 && hidden.name != 0 && hidden.length != 0 && hidden.hash != 0 && hidden.version != 0;
+    result = result == RUNTIME_ERROR_NONE && !room ? RUNTIME_ERROR_MEMORY : result;
+    // The version needs: each file's entries, and each entry's index (vna_other), name and file, in place.
+    const Elf64_Shdr needs_header = verneed != 0 ? import_section_header(&elf, verneed) : (Elf64_Shdr){ 0 };
+    const bool needs_linked = verneed != 0 && needs_header.sh_link != SHN_UNDEF && needs_header.sh_link < elf.section_count &&
+                              import_section_header(&elf, needs_header.sh_link).sh_type == SHT_STRTAB;
+    result = result == RUNTIME_ERROR_NONE && verneed != 0 && !needs_linked ? RUNTIME_ERROR_IMPORT : result;
+    const Elf64_Shdr needs_strings_header = needs_linked ? import_section_header(&elf, needs_header.sh_link) : needs_header;
+    const String8 needs = needs_linked ? import_section_bytes(&elf, &needs_header) : (String8){ 0 };
+    const String8 needs_strings = needs_linked ? import_section_bytes(&elf, &needs_strings_header) : (String8){ 0 };
+    uint32_t reference = 0;
+    for (uint64_t i = 1; result == RUNTIME_ERROR_NONE && i < symbols.count; i += 1)
+    {
+        Elf64_Sym symbol;
+        memcpy(&symbol, symbols.entries.pointer + i * sizeof(symbol), sizeof(symbol));
+        uint16_t version = VER_NDX_GLOBAL;
+        if (symbols.versions.length != 0)
+        {
+            memcpy(&version, symbols.versions.pointer + i * sizeof(version), sizeof(version));
+        }
+        String8 name = { 0 };
+        const uint32_t binding = ELF64_ST_BIND(symbol.st_info);
+        const uint32_t visibility = ELF64_ST_VISIBILITY(symbol.st_other);
+        const bool global = binding == STB_GLOBAL || binding == STB_WEAK || binding == STB_GNU_UNIQUE;
+        const uint16_t index = (uint16_t)(version & 0x7fff);
+        result = import_string(symbols.names, symbol.st_name, &name) ? result : RUNTIME_ERROR_IMPORT;
+        // A reference, as import_library takes them, in its order: the version need its index names, if any.
+        const bool referred = result == RUNTIME_ERROR_NONE && symbol.st_shndx == SHN_UNDEF && global && name.length != 0;
+        String8 required = { 0 };
+        String8 file = { 0 };
+        uint64_t offset = 0;
+        bool walking = referred && index > VER_NDX_GLOBAL && needs.length != 0;
+        for (uint64_t n = 0; walking && n < needs_header.sh_info; n += 1)
+        {
+            Elf64_Verneed need = { 0 };
+            walking = import_within(needs.length, offset, sizeof(need));
+            if (walking)
+            {
+                memcpy(&need, needs.pointer + offset, sizeof(need));
+            }
+            uint64_t at = offset + (walking ? need.vn_aux : 0);
+            for (uint32_t a = 0; walking && required.length == 0 && a < need.vn_cnt; a += 1)
+            {
+                Elf64_Vernaux auxiliary = { 0 };
+                walking = import_within(needs.length, at, sizeof(auxiliary));
+                if (walking)
+                {
+                    memcpy(&auxiliary, needs.pointer + at, sizeof(auxiliary));
+                }
+                const bool match = walking && auxiliary.vna_other == index;
+                walking = !match || (import_string(needs_strings, auxiliary.vna_name, &required) && import_string(needs_strings, need.vn_file, &file));
+                at += walking ? auxiliary.vna_next : 0;
+            }
+            walking = walking && required.length == 0 && need.vn_next != 0;
+            offset += walking ? need.vn_next : 0;
+        }
+        if (referred && reference < reference_count)
+        {
+            versions[reference] = required;
+            files[reference] = file;
+        }
+        reference += referred ? 1 : 0;
+        // An export at a version that isn't its name's default.
+        const bool hidden_export = result == RUNTIME_ERROR_NONE && symbol.st_shndx != SHN_UNDEF && global && name.length != 0 && (version & 0x8000) != 0 &&
+                                   index > VER_NDX_GLOBAL && (visibility == STV_DEFAULT || visibility == STV_PROTECTED);
+        const String8 defined = hidden_export ? runtime_libraries_version_name(libraries, l, (uint16_t)(index + shift)) : (String8){ 0 };
+        if (defined.length != 0)
+        {
+            hidden.name[hidden.count] = (const uint8_t*)name.pointer;
+            hidden.length[hidden.count] = (uint32_t)name.length;
+            hidden.hash[hidden.count] = link_hash((const uint8_t*)name.pointer, name.length);
+            hidden.version[hidden.count] = defined;
+            hidden.count += 1;
+        }
+    }
+    // The references import_library took, one for one.
+    result = result == RUNTIME_ERROR_NONE && reference != reference_count ? RUNTIME_ERROR_IMPORT : result;
+    libraries->reference_versions[l] = versions;
+    libraries->reference_files[l] = files;
+    libraries->hidden[l] = hidden;
+    return result;
+}
+
 // Imports the shared library `bytes` (at `path`, which the -l search found when `searched`) as the next library, its
 // version indices moved past `*base`, which moves past its own; with an index of the names it refers to and the names
 // its DT_NEEDED entries give. A library named twice (by its soname, whatever the
@@ -1874,10 +2024,12 @@ static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const cha
             const uint16_t version = library->exports.version[e];
             library->exports.version[e] = version > VER_NDX_GLOBAL ? (uint16_t)(version + *base) : version;
         }
+        const uint16_t shift = *base;
         *base = (uint16_t)(*base + top);
         const ImportReferences* references = &library->references;
         result = import_index_build(&libraries->references[libraries->count], references->hash, references->count, &libraries->arena) ? result : RUNTIME_ERROR_MEMORY;
         result = result == RUNTIME_ERROR_NONE ? runtime_libraries_dependencies(libraries, libraries->count, bytes) : result;
+        result = result == RUNTIME_ERROR_NONE ? runtime_libraries_versions(libraries, libraries->count, bytes, shift) : result;
     }
     if (result == RUNTIME_ERROR_NONE && !repeated)
     {
@@ -2011,6 +2163,27 @@ static String8 runtime_libraries_name(const RuntimeLibraries* libraries, uint32_
             .pointer = path.pointer + at + (path.pointer[at] == '/' ? 1 : 0),
             .length = path.length - at - (path.pointer[at] == '/' ? 1 : 0),
         } : result;
+    }
+    return result;
+}
+
+static uint32_t runtime_libraries_export_at(const RuntimeLibraries* libraries, const uint8_t* name, uint32_t length, uint64_t hash, String8 version)
+{
+    uint32_t result = 0;
+    for (uint32_t m = 0; libraries != 0 && result == 0 && m < libraries->count; m += 1)
+    {
+        const ImportLibrary* library = &libraries->libraries[m];
+        const uint32_t found = import_library_find(library, name, length, hash);
+        const String8 at = found != 0 ? runtime_libraries_version_name(libraries, m, library->exports.version[found - 1]) : (String8){ 0 };
+        // A default export without a version matches any, as the loader takes it.
+        bool exported = found != 0 && (at.length == 0 || (at.length == version.length && memcmp(at.pointer, version.pointer, version.length) == 0));
+        const RuntimeHiddenExports* hidden = &libraries->hidden[m];
+        for (uint32_t h = 0; !exported && h < hidden->count; h += 1)
+        {
+            exported = hidden->hash[h] == hash && hidden->length[h] == length && memcmp(hidden->name[h], name, length) == 0 &&
+                       hidden->version[h].length == version.length && memcmp(hidden->version[h].pointer, version.pointer, version.length) == 0;
+        }
+        result = exported ? m + 1 : 0;
     }
     return result;
 }

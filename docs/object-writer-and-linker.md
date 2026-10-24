@@ -2580,7 +2580,15 @@ library and the name (`BIND_ERROR_LIBRARY_UNDEFINED`), as both linkers refuse it
 (`--no-allow-shlib-undefined`), where the program would fail to load (#398's review: libA's `b_func` with `-lA`
 alone). The rounds record those references too, which the same pass checks against the executable's definitions. A
 library whose `DT_NEEDED` names a library the link doesn't have is left unchecked, as lld leaves it; GNU ld searches
-the system's directories for that library and checks the reference against it. A weak reference to a library nothing
+the system's directories for that library and checks the reference against it. A reference that requires a version
+(its `.gnu.version_r` entry, which the import reads beside `import_library`'s records: `runtime_libraries_versions`)
+binds as the loader binds it: to an export at that version, its name's default or not (`name@VERSION`, which
+`import_library` leaves out of its exports and the import keeps apart), or to one without a version; an unversioned
+reference only to a default export. So libA's `foo@V1` links against a libB whose `foo@V1` isn't its name's default,
+and is refused against one whose `foo` is `foo@@V2` alone, as GNU ld and lld link them (#398's review). A version a
+library requires of `libc.so.6` or the loader isn't checked: the runtime keeps their default exports alone, and a
+library built against an older glibc requires older versions, `memcpy@GLIBC_2.2.5` among them; the loader checks them
+at load. A weak reference to a library nothing
 needs is left to nothing (`bind_keep_libraries`, as `bind_keep_loader` leaves the loader's). The executable exports its definitions of names
 a needed library defines or refers to (`bind_library_exports`), as GNU ld and lld export a definition a shared
 library on the line defines or refers to. `dynamic_inputs` lists the libraries before `libc.so.6` in `DT_NEEDED`,
@@ -2615,7 +2623,10 @@ libm, and reads `DT_NEEDED` back; and links a program that calls only libA, whos
 order, and `-lAB -lB`, where libAB's own `DT_NEEDED` names libB, libAB alone, each running, and `-lA -lB` and `-lA`
 for a program that defines `b_func` itself libA alone, `a_func` calling `main`'s; `-lA` alone for one that doesn't
 must be refused, naming libA and `b_func`; and links one against a library without a soname that a script names by its
-path, which must be its `DT_NEEDED` entry. `test-bind`'s libraries check binds, by both paths, links against libraries
+path, which must be its `DT_NEEDED` entry; and links a program against libA, built against a libB whose `foo` is
+`foo@@V1`, with three libBs: one whose `foo@V1` isn't its name's default and one with a default `foo@@V2` beside it, by
+both paths into the same bytes, which run, and one of `foo@@V2` alone, refused naming `foo@V1`. `test-bind`'s libraries
+check binds, by both paths, links against libraries
 made by hand, two that refer to `b_func` and one that exports it: without a definition of `b_func`, or with a hidden
 one or a reference, the link needs all three; with a global, weak, protected or absolute one, the two alone, and
 exports it; the global one after 0 to 15 other definitions, at every lane of the vector path's batches. Without the

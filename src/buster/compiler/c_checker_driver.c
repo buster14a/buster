@@ -674,11 +674,12 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 }
                 else if (bind.error == BIND_ERROR_LIBRARY_UNDEFINED)
                 {
-                    // A needed library's own reference that nothing defines, as GNU ld words it.
+                    // A needed library's own reference that nothing defines, as GNU ld words it, with the version it requires.
                     const String8 path = named.paths[bind.library];
                     const ImportReferences* references = &named.libraries[bind.library].references;
-                    fprintf(stderr, "error: %.*s: undefined reference to '%.*s'\n", (int)path.length, path.pointer, (int)references->length[bind.reference],
-                            (const char*)references->name[bind.reference]);
+                    const String8 version = named.reference_versions[bind.library][bind.reference];
+                    fprintf(stderr, "error: %.*s: undefined reference to '%.*s%s%.*s'\n", (int)path.length, path.pointer, (int)references->length[bind.reference],
+                            (const char*)references->name[bind.reference], version.length != 0 ? "@" : "", (int)version.length, version.pointer);
                 }
                 else
                 {
