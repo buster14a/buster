@@ -1907,15 +1907,15 @@ static bool foreign_link_left_to_linker(const Foreign* foreign, uint32_t id)
 // be defined by the system's start file (crt1.o, or rcrt1.o for a static PIE: the first library directory's, where
 // GCC's driver finds it, runtime_library_identity), whose _start calls __libc_start_main. That must be defined by a
 // member of the system's libc.a (found the same way, so that one only in GCC's installation isn't recognized, which
-// can only refuse), whose libc-start.o applies a static executable's relocations between __rela_iplt_start and __rela_iplt_end,
-// and for a static PIE calls _dl_relocate_static_pie, from libc.a too, which applies the image's relocations through
-// _DYNAMIC; glibc 2.44's also calls _dl_relocate_static_pie_ifunc for the IRELATIVE ones, which must then come from
-// libc.a as well, not be an empty one like crt1.o's. Each step refers to the next name, as glibc's files do, and the
-// names whose places the startup reads must be left to the linker, which defines them where the relocations are.
-// Another C library's startup isn't these files (musl's applies no IRELATIVE relocation), nor is a copy of them
-// elsewhere: such a link needs the caller's word. The inputs' identities are the files the resolution read, and only
-// a link with an IFUNC that a fixup reaches asks (foreign_link_build_end): a few stats, and none for a static link
-// without one.
+// can only refuse), whose libc-start.o applies a static executable's relocations between __rela_iplt_start and
+// __rela_iplt_end, and for a static PIE calls _dl_relocate_static_pie, from libc.a too, which applies the image's
+// relocations through _DYNAMIC; glibc 2.44's also calls _dl_relocate_static_pie_ifunc for the IRELATIVE ones, which
+// must then come from libc.a as well, not be an empty one like crt1.o's. Each step refers to the next name, as glibc's
+// files do, and the names whose places the startup reads must be left to the linker, which defines them where the
+// relocations are. Another C library's startup isn't these files (musl's applies no IRELATIVE relocation), nor is a
+// copy of them elsewhere: such a link needs the caller's word. The inputs' identities are the files the resolution
+// read, and only a link with an IFUNC that a fixup reaches asks (foreign_link_build_end): a few stats, and none for a
+// static link without one.
 static bool foreign_link_startup_applies(const Foreign* foreign, RuntimeKind kind, ForeignLinkStartup startup)
 {
     ForeignFileIdentity start_file = { 0 };

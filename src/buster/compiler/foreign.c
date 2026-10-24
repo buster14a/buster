@@ -229,8 +229,8 @@ struct ForeignInput
     String8 name;
     String8 path;
     String8 bytes;
-    // The identity of the file mapped (from the open's fstat, so a later rename over the path changes nothing), or 0 and
-    // 0 for bytes given in memory.
+    // The identity of the file mapped (from the open's fstat, so a later rename over the path changes nothing), or 0
+    // and 0 for bytes given in memory.
     ForeignFileIdentity identity;
     // Whether `bytes` are the caller's, which foreign_release leaves alone.
     bool given;

@@ -197,7 +197,8 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
                 ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
                 ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
     },
-    // main, which glibc's startup calls, returning what an IFUNC returns (42) through its stub (foreign_driver_test_startup).
+    // main, which glibc's startup calls, returning what an IFUNC returns (42) through its stub
+    // (foreign_driver_test_startup).
     [FOREIGN_DRIVER_TEST_IFUNC_MAIN] = {
         .name = "fdriver_ifunc_main",
         .text = ".text\n.globl main\n.type main,@function\nmain:\nsub $8,%rsp\ncall driver_ifunc\nadd $8,%rsp\nret\n.size main,.-main\n"
