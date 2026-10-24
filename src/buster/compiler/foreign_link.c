@@ -97,8 +97,8 @@ static bool foreign_link_bounded(const ForeignLinkBounds* plan, uint32_t name);
 static __attribute__((unused)) ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena);
 static __attribute__((unused)) ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter);
 // What a static link takes for the startup that applies its IRELATIVE relocations (foreign_link_startup_applies): the
-// entry's name, from whose object glibc's startup is followed, and the caller's word that the output's own startup
-// applies them (link-foreign's --startup-applies-irelative).
+// entry's name, and the caller's word that the output's own startup applies them (link-foreign's
+// --startup-applies-irelative).
 typedef struct ForeignLinkStartup ForeignLinkStartup;
 struct ForeignLinkStartup
 {
@@ -1496,10 +1496,11 @@ static ImportResult foreign_link_bounds_relocations(ForeignLink* output, const F
 // relocation, which something must apply before the IFUNC is called: in a dynamic PIE the loader, which applies them
 // all; in a static executable the startup code that reads them between __rela_iplt_start and __rela_iplt_end (libc.a's
 // __libc_start_main), and in a static PIE the one that relocates the image through _DYNAMIC (libc.a's
-// _dl_relocate_static_pie). A static link in which nothing refers to those names (a program without libc, whose own
-// _start applies nothing) has no such code, and the kernel applies no relocations: every IFUNC is refused there
-// (`every`), as GNU ld and lld would write a program whose first call faults. A shared library can't take one the loader
-// can't bind as a dynamic symbol yet: one that isn't preemptible (local, or of hidden or protected visibility) needs an
+// _dl_relocate_static_pie). Other static startup (a program without libc, whose own _start applies nothing) may have
+// no such code, and the kernel applies no relocations, where GNU ld and lld would write a program whose first call
+// faults: so for a static link every IFUNC a fixup reaches is found (`every`), and the conversion refuses it unless the
+// startup applies it (foreign_link_startup_applies, asked only then). A shared library can't take one the loader can't
+// bind as a dynamic symbol yet: one that isn't preemptible (local, or of hidden or protected visibility) needs an
 // IRELATIVE relocation, which the writer's shared mode doesn't write, while a preemptible one's GOT slot gets a GLOB_DAT
 // that the loader binds by calling its resolver, as it binds an IFUNC that another library defines. The first refused
 // IFUNC a fixup reaches is refused, by its name and object, rather than written as a plain function, which calls the
@@ -1881,24 +1882,64 @@ static bool foreign_link_refers(const Foreign* foreign, uint32_t definer, uint32
     return result;
 }
 
+// Whether the object the link takes name `definer`'s definition from (a name id from 1) was read from `file`: an object
+// file of that identity, or a member of an archive of that identity (the archive's input, even for a thin archive's),
+// as the resolution opened it (ForeignInput.identity).
+static bool foreign_link_defined_in(const Foreign* foreign, uint32_t definer, ForeignFileIdentity file)
+{
+    const uint8_t resolution = definer != 0 ? foreign->names.resolution[definer - 1] : FOREIGN_RESOLUTION_UNDEFINED;
+    const bool by_object = file.inode != 0 && (resolution == FOREIGN_RESOLUTION_STRONG || resolution == FOREIGN_RESOLUTION_WEAK);
+    const ForeignObject* object = by_object ? &foreign->objects[foreign_symbol_object(foreign, foreign->names.symbol[definer - 1])] : 0;
+    const ForeignInput* input = object != 0 && object->input < foreign->input_count ? &foreign->inputs[object->input] : 0;
+    return input != 0 && input->identity.inode != 0 && input->identity.device == file.device && input->identity.inode == file.inode;
+}
+
+// Whether no input defines name `id` (from 1), which the linker then defines; false for a name no input has.
+static bool foreign_link_left_to_linker(const Foreign* foreign, uint32_t id)
+{
+    const uint8_t resolution = id != 0 ? foreign->names.resolution[id - 1] : FOREIGN_RESOLUTION_STRONG;
+    return resolution == FOREIGN_RESOLUTION_UNDEFINED || resolution == FOREIGN_RESOLUTION_WEAK_UNDEFINED;
+}
+
 // Whether a static link's startup applies its IRELATIVE relocations, which the kernel doesn't: the caller says the
-// output's own does (link-foreign's --startup-applies-irelative), or glibc's does, followed from the entry's object as
-// glibc's start file and libc.a chain to it. A static executable's entry (crt1.o's _start) refers to __libc_start_main,
-// whose object (libc.a's libc-start.o) refers to __rela_iplt_start, and applies the relocations between it and
-// __rela_iplt_end; a static PIE's (rcrt1.o's) too, whose __libc_start_main refers to _dl_relocate_static_pie, whose
-// object (dl-reloc-static-pie.o) refers to _DYNAMIC, through which it applies the image's relocations, IRELATIVE ones
-// among them. A mention of those names anywhere else proves nothing (#405's review), and neither does another C
-// library's startup: musl's __libc_start_main refers to none of them, and applies no IRELATIVE relocation.
+// output's own does (link-foreign's --startup-applies-irelative), or it is glibc's, recognized by the files its code
+// comes from, not by names, which any input may mention without running what they name (#405's reviews). The entry must
+// be defined by the system's start file (crt1.o, or rcrt1.o for a static PIE: the first library directory's, where
+// GCC's driver finds it, runtime_library_identity), whose _start calls __libc_start_main. That must be defined by a
+// member of the system's libc.a (found the same way, so that one only in GCC's installation isn't recognized, which
+// can only refuse), whose libc-start.o applies a static executable's relocations between __rela_iplt_start and __rela_iplt_end,
+// and for a static PIE calls _dl_relocate_static_pie, from libc.a too, which applies the image's relocations through
+// _DYNAMIC; glibc 2.44's also calls _dl_relocate_static_pie_ifunc for the IRELATIVE ones, which must then come from
+// libc.a as well, not be an empty one like crt1.o's. Each step refers to the next name, as glibc's files do, and the
+// names whose places the startup reads must be left to the linker, which defines them where the relocations are.
+// Another C library's startup isn't these files (musl's applies no IRELATIVE relocation), nor is a copy of them
+// elsewhere: such a link needs the caller's word. The inputs' identities are the files the resolution read, and only
+// a link with an IFUNC that a fixup reaches asks (foreign_link_build_end): a few stats, and none for a static link
+// without one.
 static bool foreign_link_startup_applies(const Foreign* foreign, RuntimeKind kind, ForeignLinkStartup startup)
 {
+    ForeignFileIdentity start_file = { 0 };
+    ForeignFileIdentity libc_archive = { 0 };
+    if (!startup.applies_irelative)
+    {
+        runtime_library_identity(runtime_object_names[kind][RUNTIME_OBJECT_START], &start_file.device, &start_file.inode);
+        runtime_library_identity("libc.a", &libc_archive.device, &libc_archive.inode);
+    }
     const uint32_t start = foreign_link_name_id(foreign, startup.entry);
     const uint32_t main_start = foreign_link_name_id(foreign, foreign_string("__libc_start_main"));
     const uint32_t relocator = foreign_link_name_id(foreign, foreign_string("_dl_relocate_static_pie"));
-    const bool glibc = foreign_link_refers(foreign, start, main_start) &&
-                       (kind == RUNTIME_KIND_STATIC ? foreign_link_refers(foreign, main_start, foreign_link_name_id(foreign, foreign_string("__rela_iplt_start"))) :
-                                                      foreign_link_refers(foreign, main_start, relocator) &&
-                                                          foreign_link_refers(foreign, relocator, foreign_link_name_id(foreign, foreign_string("_DYNAMIC"))));
-    return startup.applies_irelative || glibc;
+    const uint32_t ifunc_relocator = foreign_link_name_id(foreign, foreign_string("_dl_relocate_static_pie_ifunc"));
+    const uint32_t first = foreign_link_name_id(foreign, foreign_string("__rela_iplt_start"));
+    const uint32_t last = foreign_link_name_id(foreign, foreign_string("__rela_iplt_end"));
+    const uint32_t dynamic = foreign_link_name_id(foreign, foreign_string("_DYNAMIC"));
+    const bool entered = foreign_link_defined_in(foreign, start, start_file) && foreign_link_refers(foreign, start, main_start) &&
+                         foreign_link_defined_in(foreign, main_start, libc_archive);
+    const bool applies = kind == RUNTIME_KIND_STATIC ? foreign_link_refers(foreign, main_start, first) && foreign_link_left_to_linker(foreign, first) &&
+                                                           foreign_link_left_to_linker(foreign, last) :
+                                                       foreign_link_refers(foreign, main_start, relocator) && foreign_link_defined_in(foreign, relocator, libc_archive) &&
+                                                           foreign_link_refers(foreign, relocator, dynamic) && foreign_link_left_to_linker(foreign, dynamic) &&
+                                                           (!foreign_link_refers(foreign, main_start, ifunc_relocator) || foreign_link_defined_in(foreign, ifunc_relocator, libc_archive));
+    return startup.applies_irelative || (entered && applies);
 }
 
 // The steps after the relocations but the check: the __start_ and __stop_ sections' relocations, a dynamic PIE's copies,
@@ -1919,15 +1960,20 @@ static void foreign_link_build_end(ForeignLinkBuild* build)
     {
         result = foreign_link_copies(output, foreign, build->arena);
     }
-    // From the resolution's names and objects: _DYNAMIC's own symbol, which the conversion adds below, isn't one.
-    const bool applied = !runtime_kind_is_static(build->kind) || foreign_link_startup_applies(foreign, build->kind, build->startup);
     if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind != RUNTIME_KIND_STATIC)
     {
         result.error = foreign_link_dynamic_symbol(output, foreign);
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && (build->kind == RUNTIME_KIND_SHARED || !applied))
+    const bool static_kind = runtime_kind_is_static(build->kind);
+    if (result.error == FOREIGN_LINK_ERROR_NONE && (build->kind == RUNTIME_KIND_SHARED || static_kind))
     {
-        result = foreign_link_refuse_ifuncs(output, foreign, build->arena, !applied);
+        result = foreign_link_refuse_ifuncs(output, foreign, build->arena, static_kind);
+    }
+    // A static link's IFUNCs stand when its startup applies their IRELATIVE relocations, which only a link with one
+    // reached asks (from the resolution's names and objects: _DYNAMIC's own symbol, added above, isn't one).
+    if (result.error == FOREIGN_LINK_ERROR_IFUNC && static_kind && foreign_link_startup_applies(foreign, build->kind, build->startup))
+    {
+        result = (ForeignLinkResult){ 0 };
     }
     build->result = result;
 }

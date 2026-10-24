@@ -29,6 +29,11 @@ typedef enum ForeignDriverTestFixture
     FOREIGN_DRIVER_TEST_IFUNC_INERT_DYNAMIC,
     FOREIGN_DRIVER_TEST_IFUNC_APPLIED,
     FOREIGN_DRIVER_TEST_IFUNC_PIE_APPLIED,
+    FOREIGN_DRIVER_TEST_IFUNC_MAIN,
+    FOREIGN_DRIVER_TEST_INERT_START,
+    FOREIGN_DRIVER_TEST_INERT_START_PIE,
+    FOREIGN_DRIVER_TEST_OWN_LIBC_START,
+    FOREIGN_DRIVER_TEST_OWN_RELOCATOR,
     FOREIGN_DRIVER_TEST_FIXTURES,
 } ForeignDriverTestFixture;
 
@@ -191,6 +196,62 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
                 ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
                 ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
                 ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // main, which glibc's startup calls, returning what an IFUNC returns (42) through its stub (foreign_driver_test_startup).
+    [FOREIGN_DRIVER_TEST_IFUNC_MAIN] = {
+        .name = "fdriver_ifunc_main",
+        .text = ".text\n.globl main\n.type main,@function\nmain:\nsub $8,%rsp\ncall driver_ifunc\nadd $8,%rsp\nret\n.size main,.-main\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // A _start of its own in crt1.o's place, which calls an IFUNC with nothing applying its relocation and mentions
+    // __libc_start_main only in data (#405's second review), with crt1.o's empty _dl_relocate_static_pie and
+    // _dl_relocate_static_pie_ifunc: libc.a's __libc_start_main joins and refers to __rela_iplt_start, but never runs.
+    [FOREIGN_DRIVER_TEST_INERT_START] = {
+        .name = "fdriver_inert_start",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".globl _dl_relocate_static_pie\n.type _dl_relocate_static_pie,@function\n_dl_relocate_static_pie:\nret\n"
+                ".size _dl_relocate_static_pie,.-_dl_relocate_static_pie\n"
+                ".globl _dl_relocate_static_pie_ifunc\n.type _dl_relocate_static_pie_ifunc,@function\n_dl_relocate_static_pie_ifunc:\nret\n"
+                ".size _dl_relocate_static_pie_ifunc,.-_dl_relocate_static_pie_ifunc\n"
+                ".data\n.balign 8\n.quad __libc_start_main\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // ... and in rcrt1.o's place, without them, as rcrt1.o has none: libc.a's _dl_relocate_static_pie joins too, and
+    // refers to _DYNAMIC.
+    [FOREIGN_DRIVER_TEST_INERT_START_PIE] = {
+        .name = "fdriver_inert_start_pie",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "call driver_ifunc\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                ".data\n.balign 8\n.quad __libc_start_main\n"
+                ".text\n.type driver_ifunc_one,@function\ndriver_ifunc_one:\nmov $42,%eax\nret\n.size driver_ifunc_one,.-driver_ifunc_one\n"
+                ".globl driver_ifunc\n.type driver_ifunc,@gnu_indirect_function\ndriver_ifunc:\nlea driver_ifunc_one(%rip),%rax\nret\n"
+                ".size driver_ifunc,.-driver_ifunc\n.section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // A __libc_start_main of its own, which calls main and exits with its result, applying nothing, and mentions the
+    // names libc.a's refers to.
+    [FOREIGN_DRIVER_TEST_OWN_LIBC_START] = {
+        .name = "fdriver_own_libc_start",
+        .text = ".text\n.globl __libc_start_main\n.type __libc_start_main,@function\n__libc_start_main:\n"
+                "call *%rdi\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size __libc_start_main,.-__libc_start_main\n"
+                ".weak __rela_iplt_start\n.weak __rela_iplt_end\n"
+                ".data\n.balign 8\n.quad __rela_iplt_start,__rela_iplt_end,_dl_relocate_static_pie\n"
+                ".section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // A static PIE's _dl_relocate_static_pie and _dl_relocate_static_pie_ifunc of its own, which mention _DYNAMIC and
+    // apply nothing: with them, a static PIE needs nothing of libc.a's (whose libc-start.o, which libc.a's relocator
+    // needs, defines __libc_start_main too).
+    [FOREIGN_DRIVER_TEST_OWN_RELOCATOR] = {
+        .name = "fdriver_own_relocator",
+        .text = ".text\n.globl _dl_relocate_static_pie\n.type _dl_relocate_static_pie,@function\n_dl_relocate_static_pie:\nret\n"
+                ".size _dl_relocate_static_pie,.-_dl_relocate_static_pie\n"
+                ".globl _dl_relocate_static_pie_ifunc\n.type _dl_relocate_static_pie_ifunc,@function\n_dl_relocate_static_pie_ifunc:\nret\n"
+                ".size _dl_relocate_static_pie_ifunc,.-_dl_relocate_static_pie_ifunc\n"
+                ".data\n.balign 8\n.quad _DYNAMIC\n.section .note.GNU-stack,\"\",@progbits\n",
     },
 };
 
@@ -919,6 +980,25 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
                 files->objects[FOREIGN_DRIVER_TEST_IFUNC_INERT_DYNAMIC],
             },
         },
+        // #405's second review's chain without libc: a _start that mentions __libc_start_main only in data, and a
+        // __libc_start_main of its own that mentions what libc.a's refers to (and a static PIE's relocator, _DYNAMIC).
+        {
+            .name = "static_ifunc_inert_chain",
+            .arguments = {
+                files->objects[FOREIGN_DRIVER_TEST_INERT_START],
+                files->objects[FOREIGN_DRIVER_TEST_OWN_LIBC_START],
+            },
+        },
+        {
+            .name = "static_pie_ifunc_inert_chain",
+            .arguments = {
+                (char*)"-static",
+                (char*)"-pie",
+                files->objects[FOREIGN_DRIVER_TEST_INERT_START_PIE],
+                files->objects[FOREIGN_DRIVER_TEST_OWN_LIBC_START],
+                files->objects[FOREIGN_DRIVER_TEST_OWN_RELOCATOR],
+            },
+        },
         {
             .name = "static_ifunc_unflagged",
             .arguments = {
@@ -1020,6 +1100,8 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
         "static_pie_ifunc_unapplied",
         "static_ifunc_inert",
         "static_pie_ifunc_inert",
+        "static_ifunc_inert_chain",
+        "static_pie_ifunc_inert_chain",
         "static_ifunc_unflagged",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(unapplied); c += 1)
@@ -1064,6 +1146,107 @@ static void foreign_driver_test_cases(ForeignTestTally* tally, const char* direc
 
 // The original fixtures put two relocated addresses in their only DATA atom and read them at runtime. This oracle
 // inspects those addresses independently of the regular symbol table, so it cannot pass from metadata alone.
+// A static link's IFUNCs need glibc's own startup files (#405's reviews), checked in both static modes with GCC's
+// line around them (crti.o, crtbegin, libgcc and libc.a in a group, crtend, crtn.o): main calling an IFUNC after the
+// system's start file (crt1.o, or rcrt1.o for a static PIE) links and runs, and so it does through a symbolic link to
+// the start file, on 3 lanes; a copy of the start file elsewhere is refused, as are a _start of its own in its place
+// that mentions __libc_start_main only in data (on 3 lanes too), and the system's start file with a __libc_start_main
+// of the test's own (and for a static PIE, a relocator of its own), each naming the reason.
+static void foreign_driver_test_startup(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
+{
+    static const char* const variants[] = {
+        "glibc",
+        "linked",
+        "copied",
+        "inert",
+        "own_libc_start",
+    };
+    for (uint32_t pie = 0; pie < 2; pie += 1)
+    {
+        const char* kind = pie != 0 ? "static_pie" : "static";
+        Runtime system;
+        const bool found = (pie != 0 ? runtime_import_static_pie(&system) : runtime_import_static(&system)) == RUNTIME_ERROR_NONE;
+        ForeignTestPath objects[RUNTIME_OBJECTS] = { 0 };
+        ForeignTestPath archives[BUSTER_RUNTIME_ARCHIVES] = { 0 };
+        const uint32_t archive_count = found ? system.archive_count : 0;
+        for (uint32_t i = 0; found && i < RUNTIME_OBJECTS; i += 1)
+        {
+            snprintf(objects[i], sizeof(objects[i]), "%.*s", (int)system.object_paths[i].length, system.object_paths[i].pointer);
+        }
+        for (uint32_t i = 0; i < archive_count; i += 1)
+        {
+            snprintf(archives[i], sizeof(archives[i]), "%.*s", (int)system.archives[i].path.length, system.archives[i].path.pointer);
+        }
+        runtime_release(&system);
+        ForeignTestPath copied;
+        ForeignTestPath linked;
+        snprintf(copied, sizeof(copied), "%s/fdriver_%s_copied_start.o", directory, kind);
+        snprintf(linked, sizeof(linked), "%s/fdriver_%s_linked_start.o", directory, kind);
+        const String8 start = found ? foreign_test_read(arena, objects[RUNTIME_OBJECT_START]) : (String8){ 0 };
+        unlink(linked);
+        const bool placed = start.pointer != 0 && foreign_test_write(copied, start.pointer, start.length) && symlink(objects[RUNTIME_OBJECT_START], linked) == 0;
+        foreign_test_expect(tally, found && archive_count != 0 && placed, "find the system's static start file and archives, copied and linked", kind);
+        for (uint32_t v = 0; placed && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+        {
+            char* arguments[BUSTER_FOREIGN_DRIVER_TEST_ARGUMENTS];
+            uint32_t count = 0;
+            if (pie != 0)
+            {
+                arguments[count++] = (char*)"-static";
+                arguments[count++] = (char*)"-pie";
+                arguments[count++] = (char*)"--no-dynamic-linker";
+                arguments[count++] = (char*)"-z";
+                arguments[count++] = (char*)"text";
+            }
+            if (v == 1 || v == 3)
+            {
+                arguments[count++] = (char*)"--lanes";
+                arguments[count++] = (char*)"3";
+            }
+            arguments[count++] = v == 1 ? linked : v == 2 ? copied : v == 3 ? files->objects[pie != 0 ? FOREIGN_DRIVER_TEST_INERT_START_PIE : FOREIGN_DRIVER_TEST_INERT_START] : objects[RUNTIME_OBJECT_START];
+            for (uint32_t i = RUNTIME_OBJECT_INIT_PROLOGUE; i < RUNTIME_OBJECT_END; i += 1)
+            {
+                arguments[count++] = objects[i];
+            }
+            if (v != 3)
+            {
+                arguments[count++] = files->objects[FOREIGN_DRIVER_TEST_IFUNC_MAIN];
+            }
+            if (v == 4)
+            {
+                arguments[count++] = files->objects[FOREIGN_DRIVER_TEST_OWN_LIBC_START];
+            }
+            if (v == 4 && pie != 0)
+            {
+                arguments[count++] = files->objects[FOREIGN_DRIVER_TEST_OWN_RELOCATOR];
+            }
+            arguments[count++] = (char*)"--start-group";
+            for (uint32_t i = 0; i < archive_count; i += 1)
+            {
+                arguments[count++] = archives[i];
+            }
+            arguments[count++] = (char*)"--end-group";
+            for (uint32_t i = RUNTIME_OBJECT_END; i < RUNTIME_OBJECTS; i += 1)
+            {
+                arguments[count++] = objects[i];
+            }
+            char name[64];
+            snprintf(name, sizeof(name), "%s_startup_%s", kind, variants[v]);
+            const bool success = v < 2;
+            foreign_driver_test_invoke(tally, directory, name, "-o", arguments, count, success, 42, arena);
+            if (!success)
+            {
+                ForeignTestPath errors;
+                snprintf(errors, sizeof(errors), "%s/fdriver_%s.err", directory, name);
+                const String8 diagnostic = foreign_test_read(arena, errors);
+                const bool reason = diagnostic.pointer != 0 && memmem(diagnostic.pointer, diagnostic.length, "glibc's startup", 15) != 0 &&
+                                    memmem(diagnostic.pointer, diagnostic.length, "--startup-applies-irelative", 27) != 0;
+                foreign_test_expect(tally, reason, "a static IFUNC is refused unless glibc's own startup files apply it, saying why", name);
+            }
+        }
+    }
+}
+
 static bool foreign_driver_test_string_values(String8 bytes, uint64_t* first, uint64_t* second)
 {
     const ExecutableTestImage image = executable_test_image(bytes);
@@ -1516,6 +1699,7 @@ static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_
         foreign_driver_test_paths(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_symbols_test(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_test_cases(&tally, directory, &files, arena);
+        foreign_driver_test_startup(&tally, directory, &files, arena);
         foreign_driver_test_shared(&tally, directory, &files, arena, runtime.loader_path);
         foreign_driver_test_time(&tally, directory, &files, arena);
         foreign_driver_test_strings(&tally, directory, &files, arena);

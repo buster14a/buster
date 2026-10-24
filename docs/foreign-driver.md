@@ -160,20 +160,33 @@ applies them before anything else runs. A static program without libc takes
 the same handling, which changes nothing for it, but for IFUNCs. The kernel
 applies no relocations, so something in the program must apply their
 `IRELATIVE` ones before it calls them, and the conversion takes them only from
-a startup it recognizes (`foreign_link_startup_applies`): glibc's, followed
-from the entry's object. A static executable's entry (`crt1.o`'s `_start`)
-refers to `__libc_start_main`, whose object (`libc.a`'s `libc-start.o`) refers
-to `__rela_iplt_start` and applies the relocations between it and
-`__rela_iplt_end`; a static PIE's (`rcrt1.o`'s) refers to `__libc_start_main`
-too, whose object refers to `_dl_relocate_static_pie`, whose object
-(`dl-reloc-static-pie.o`) refers to `_DYNAMIC` and applies the image's
-relocations through it, `IRELATIVE` ones among them. Another C library's
-startup isn't glibc's (musl's `__libc_start_main` refers to none of these and
-applies no `IRELATIVE` relocation), and a mere mention of those names, a
-pointer to `__rela_iplt_start` that nothing reads, proves nothing. A program
-whose own startup applies them says so with `--startup-applies-irelative`.
-Otherwise the first IFUNC a fixup reaches is refused, naming it and why, where
-lld writes a program whose call through the slot that nothing filled faults.
+a startup it recognizes (`foreign_link_startup_applies`): glibc's, by the files
+its code comes from. The entry must be defined by the system's start file,
+`crt1.o` for a static executable and `rcrt1.o` for a static PIE, the first
+library directory's, where GCC's driver finds it (`runtime_library_identity`),
+compared by identity with the file the resolution opened (device and inode,
+from the open's `fstat`: a symbolic link to it counts, a copy elsewhere
+doesn't), whose `_start` calls `__libc_start_main`. That must be defined by a
+member of the system's `libc.a`, found the same way (one only in GCC's
+installation isn't recognized, which can only refuse), whose `libc-start.o`
+applies a static executable's relocations between `__rela_iplt_start` and
+`__rela_iplt_end`,
+which no input may define (the linker puts them around `.rela.iplt`). In a
+static PIE it calls `_dl_relocate_static_pie`, which must come from `libc.a`
+too (`dl-reloc-static-pie.o`) and applies the image's relocations through
+`_DYNAMIC`, the linker's; glibc 2.44's also calls
+`_dl_relocate_static_pie_ifunc` for the `IRELATIVE` ones, which must then come
+from `libc.a` as well rather than be an empty one like `crt1.o`'s. Each step's
+reference to the next name is checked too. Names alone prove nothing (#405's
+reviews): a `_start` of its own that mentions `__libc_start_main` only in data
+makes `libc.a`'s join, which refers on to everything above, but never runs it.
+Another C library's startup isn't these files (musl's `__libc_start_main`
+applies no `IRELATIVE` relocation), nor is a glibc installed elsewhere (a
+sysroot's): a program whose startup applies them otherwise says so with
+`--startup-applies-irelative`. The system's files are looked up (a few `stat`
+calls) only for a static link with an IFUNC that a fixup reaches. Otherwise the
+first IFUNC a fixup reaches is refused, naming it and why, where lld writes a
+program whose call through the slot that nothing filled faults.
 
 ## What a shared library holds
 
@@ -289,13 +302,23 @@ missing entry point and interpreter, and run a PIE that calls it; check that
 `--no-dynamic-linker` with `-pie` and `-soname` without a value; and link
 programs without libc whose `_start` calls an IFUNC. They are refused, naming
 the IFUNC and why, as a static executable and as a static PIE, with a pointer
-to `__rela_iplt_start` or to `_DYNAMIC` that nothing reads, and with a `_start`
-that applies the relocations itself but without `--startup-applies-irelative`.
+to `__rela_iplt_start` or to `_DYNAMIC` that nothing reads, with a pointer to
+`__libc_start_main` that nothing reads and a `__libc_start_main` of their own
+that mentions what `libc.a`'s refers to (and a static PIE's relocator, which
+mentions `_DYNAMIC`), and with a `_start` that applies the relocations itself
+but without `--startup-applies-irelative`.
 With it, a static executable whose `_start` applies those between
 `__rela_iplt_start` and `__rela_iplt_end`, and a static PIE whose `_start`
 applies `.rela.dyn`'s `RELATIVE` and `IRELATIVE` relocations through
 `_DYNAMIC` from wherever the loader put it, link and run with their status;
-the corpus links glibc's startup in both. Its section GC case collects a link
+the corpus links glibc's startup in both. With GCC's line around them in both
+static modes (`foreign_driver_test_startup`: `crti.o`, crtbegin, libgcc and
+`libc.a` in a group, crtend, `crtn.o`), `main` calling an IFUNC after the
+system's start file links and runs, and so it does through a symbolic link to
+the start file on 3 lanes, while a copy of the start file, a `_start` of its
+own that mentions `__libc_start_main` only in data (on 3 lanes too) and the
+system's start file with a `__libc_start_main` of the test's own are refused,
+saying why. Its section GC case collects a link
 after the merge: a
 retained section whose bounds only dead code refers to must keep its bytes,
 and a hook in a merged code section its FDE, while the dead code goes.

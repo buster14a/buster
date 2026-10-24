@@ -3909,12 +3909,13 @@ it. It writes every kind the direct path writes: static executables (with
   `-z pack-relative-relocs`); the writer's static runtime handling does the
   rest (`.iplt` and `IRELATIVE`, prioritized arrays, `libc.a`'s names). A
   static link takes IFUNCs only from a startup it recognizes as applying their
-  `IRELATIVE` relocations, which the kernel doesn't: glibc's, followed from the
-  entry's object (`crt1.o`'s `_start` to `libc-start.o`'s `__libc_start_main`,
-  which refers to `__rela_iplt_start`; in a static PIE on to
-  `dl-reloc-static-pie.o`, which refers to `_DYNAMIC`), or the program's own
-  with `--startup-applies-irelative`. Otherwise it refuses every IFUNC a fixup
-  reaches, where lld writes a program that faults at the call. A
+  `IRELATIVE` relocations, which the kernel doesn't: glibc's, recognized by its
+  files rather than by names (the entry defined by the system's `crt1.o` or
+  `rcrt1.o`, by identity, as GCC's driver finds them; `__libc_start_main` by a
+  member of the system's `libc.a`, and in a static PIE `_dl_relocate_static_pie`
+  too, with the names whose places they read left to the linker), or the
+  program's own with `--startup-applies-irelative`. Otherwise it refuses every
+  IFUNC a fixup reaches, where lld writes a program that faults at the call. A
   shared library exports every global, weak and unique definition of default
   or protected visibility, leaves a default-visibility reference to nothing to
   the loader (lld's `-z undefs`), and refuses an IFUNC that isn't preemptible
