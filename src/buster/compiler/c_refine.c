@@ -25,14 +25,16 @@
 //      compressed (vpcompressd) into dense arrays, and per 64 a mask of the identifiers. A gap that is only line splices
 //      needs a backslash, so a step of 64 tokens whose gaps lie in chunks without one is done; the others go to
 //      refine_step_splices, where a non-first-of-line token whose gap ends in a newline byte (only a line splice can do
-//      that) has the scalar refine_gap_is_splices decide its bit. Each step also prefetches the next block's step of
-//      the columns and some source bytes past the scan: the lexer's pass over a whole file has evicted them.
+//      that) has the scalar refine_gap_is_splices decide its bit. For a file lexed whole first, each step also
+//      prefetches the columns' step BUSTER_REFINE_PREFETCH_TOKENS on and some source bytes past the scan: the lexer's
+//      pass over the file has evicted them.
 //   B. refine_pass_b interns the block's identifiers in batches of 64 (RefineVariant has the other sizes the benchmark
 //      compares), pipelined: a batch's stage 1 runs in the middle of the batch before's stages 2 to 3.
 //      1. refine_hash_batch reads each identifier's first 32 bytes (with plain loads, its bytes past its length
 //         cleared, where they lie in the source, else with a masked load, never outside the token), hashes four at a
-//         time (intern_hash_vectors4_short; the rare longer ones again, whole) and prefetches their buckets. A batch whose loads had a backslash checks each identifier for one
-//         (refine_batch_specials): those, and identifiers past BUSTER_INTERN_FAST_LENGTH, go to the scalar key.
+//         time (intern_hash_vectors4_short; the rare longer ones again, whole), then prefetches their buckets. A batch
+//         whose loads had a backslash checks each identifier for one (refine_batch_specials): those, and identifiers
+//         past BUSTER_INTERN_FAST_LENGTH, go to the scalar key.
 //      2. Each bucket's four slots are compared with the identifier's first 12 bytes in one compare (refine_probe),
 //         which identifies a spelling of up to 11 bytes outright. The bookkeeping (slow, unmatched, longer) is 16
 //         identifiers at a time from their lengths and ids, as bits of masks.
@@ -61,8 +63,8 @@
 
 // Tokens per block: pass A's dense identifier arrays for a block (about 20 KB) stay in the L1 cache, and pass B's
 // pipeline, which starts and drains with each block, does so once per 1,600 identifiers or so. On the 9700X, sqlite3.c's
-// windowed refinement took 1.548 ms with blocks of 1,024 tokens, 1.528 with 2,048, 1.514 with 4,096, 1.516 with 8,192
-// and 1.533 with 16,384.
+// windowed refinement took about 1.55 ms with blocks of 1,024 tokens, 1.53 with 2,048, 1.51-1.52 with 4,096 and 8,192,
+// and 1.53 with 16,384 (docs/c-refinement.md).
 #define BUSTER_REFINE_BLOCK_TOKENS 4096
 // How far ahead pass A prefetches the columns of a whole file lexed before its refinement: a step 1,024 tokens on.
 #define BUSTER_REFINE_PREFETCH_TOKENS 1024
@@ -691,21 +693,16 @@ struct RefineHashes
 // bytes: each identifier loaded, hashed and its bucket prefetched. Four at a time, each identifier's first 32 bytes are
 // hashed (intern_hash_vectors4_short): all of it but in the rare longer ones, which are hashed again from all their bytes
 // after; the rest one at a time. The four are read with plain loads of 32 bytes, and the bytes past each one's length
-// cleared with one compare per two identifiers, when the batch's last one's 32 bytes lie in the source (the starts
-// ascend), as all but a source's last few do; else with masked loads, whose masks bzhi makes: it keeps every bit for an
-// index of 64 to 255 and the low bits of a longer one's, so a load never reads past its identifier. A length past
-// BUSTER_INTERN_FAST_LENGTH makes the identifier slow, and its hash is unused.
+// cleared with a masked move per two identifiers, when the batch's last one's 32 bytes lie in the source (the starts
+// ascend), as all but a source's last few do; else with masked loads. bzhi makes the masks in general registers from the
+// lengths: it keeps every bit for an index (its low byte) of 32 to 255, and fewer for some longer ones, so a masked load
+// never reads past its identifier. (The pairs' masks made in vectors, by a byte permute and a compare of each pair's
+// lengths, made sqlite3.c's windowed refinement take 0.01 ms more on the 9700X.) A length past BUSTER_INTERN_FAST_LENGTH
+// makes the identifier slow, and its bytes and hash are unused.
 BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* source, uint64_t length, const uint32_t* starts, const uint32_t* lengths, uint32_t count,
                                      RefineHashes* hashes, const bool trigraphs)
 {
     const bool plain = count != 0 && (uint64_t)starts[count - 1] + 32 <= length;
-    // Byte i of each 32-byte half: i. And the indices that spread a lengths vector's dword 0 (and 1) over the first (and
-    // second) half's bytes for the first two identifiers, and dwords 2 and 3 for the other two.
-    const __m512i positions = _mm512_set_epi8(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-                                              31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-    const __m512i ab_spread = _mm512_set_epi64(0x0404040404040404ll, 0x0404040404040404ll, 0x0404040404040404ll, 0x0404040404040404ll, 0, 0, 0, 0);
-    const __m512i cd_spread = _mm512_set_epi64(0x0c0c0c0c0c0c0c0cll, 0x0c0c0c0c0c0c0c0cll, 0x0c0c0c0c0c0c0c0cll, 0x0c0c0c0c0c0c0c0cll, 0x0808080808080808ll,
-                                               0x0808080808080808ll, 0x0808080808080808ll, 0x0808080808080808ll);
     const uint8_t* const buckets = table->buckets;
     const uint64_t offset_mask = table->bucket_mask * BUSTER_INTERN_BUCKET_BYTES;
     uint64_t* const offsets = hashes->offsets;
@@ -723,14 +720,15 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
         __m512i cd;
         if (plain)
         {
-            // Each length past 32 keeps all 32 bytes, as bzhi's mask does.
-            const __m512i clamped = _mm512_castsi128_si512(_mm_min_epu32(four, _mm_set1_epi32(32)));
+            // Each pair's mask from its two lengths: bzhi keeps all 32 bits for a length of 32 to 255.
+            const uint64_t ab_mask = (uint64_t)_bzhi_u32(~0u, lengths[j]) | ((uint64_t)_bzhi_u32(~0u, lengths[j + 1]) << 32);
+            const uint64_t cd_mask = (uint64_t)_bzhi_u32(~0u, lengths[j + 2]) | ((uint64_t)_bzhi_u32(~0u, lengths[j + 3]) << 32);
             const __m512i ab_bytes = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(source + starts[j]))),
                                                         _mm256_loadu_si256((const __m256i*)(source + starts[j + 1])), 1);
             const __m512i cd_bytes = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(source + starts[j + 2]))),
                                                         _mm256_loadu_si256((const __m256i*)(source + starts[j + 3])), 1);
-            ab = _mm512_maskz_mov_epi8(_mm512_cmplt_epu8_mask(positions, _mm512_permutexvar_epi8(ab_spread, clamped)), ab_bytes);
-            cd = _mm512_maskz_mov_epi8(_mm512_cmplt_epu8_mask(positions, _mm512_permutexvar_epi8(cd_spread, clamped)), cd_bytes);
+            ab = _mm512_maskz_mov_epi8(_cvtu64_mask64(ab_mask), ab_bytes);
+            cd = _mm512_maskz_mov_epi8(_cvtu64_mask64(cd_mask), cd_bytes);
         }
         else
         {

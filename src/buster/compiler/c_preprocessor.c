@@ -2398,9 +2398,6 @@ BUSTER_INLINE bool pp_is_unterminated_comment(const uint8_t* bytes, uint8_t kind
     return (kind & 0x7F) == C_TOKEN_UNKNOWN && bytes[start] == '/';
 }
 
-// A file's directive table (#118) from its refined tokens, in `arena`, by the kernels `vectorized` picks: the
-// directives (pp_scan_directives_*), their kinds, line ends, pairing and notes (pp_finish_directives), and the include
-// guard. Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
 // The directive table's arrays for `count` directives, in `arena`. Returns false if memory runs out.
 static bool pp_directive_arrays(Arena* arena, PPFileData* data, uint32_t count)
 {
@@ -2412,6 +2409,9 @@ static bool pp_directive_arrays(Arena* arena, PPFileData* data, uint32_t count)
     return data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
 }
 
+// A file's directive table (#118) from its refined tokens, in `arena`, by the kernels `vectorized` picks: the
+// directives (pp_scan_directives_*), their kinds, line ends, pairing and notes (pp_finish_directives), and the include
+// guard. Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
 static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
 {
     Scratch scratch = scratch_begin(0);
