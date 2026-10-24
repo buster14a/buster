@@ -899,6 +899,9 @@ struct PredefinesOptions
     const char* optimization_invalid;
     const char* gnuc_invalid;
     const char* cf_protection_invalid;
+    // The first -ffp-model= value clang doesn't know: an error only when the last -O isn't -Ofast, which ignores every
+    // model but aggressive without reading its value.
+    const char* fp_model_invalid;
     bool openmp_enabled;
     const char* openmp_runtime;
     bool blocks;
@@ -1932,11 +1935,10 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
                           : strcmp(value, "precise") == 0    ? PREDEFINES_FLOAT_MODEL_PRECISE
                           : strcmp(value, "strict") == 0     ? PREDEFINES_FLOAT_MODEL_STRICT
                                                              : -1;
-        if (event < 0)
-        {
-            fprintf(stderr, "error: unsupported argument '%s' to option '-ffp-model='\n", value);
-        }
-        result = event >= 0 && predefines_push_float(options, (PredefinesFloat)event) ? result : PREDEFINES_PARSE_ERROR;
+        // An unknown value resets the state as precise does, then goes no further (predefines_finish_options).
+        options->fp_model_invalid = event < 0 && options->fp_model_invalid == 0 ? value : options->fp_model_invalid;
+        const PredefinesFloat model = event < 0 ? PREDEFINES_FLOAT_MODEL_PRECISE : (PredefinesFloat)event;
+        result = predefines_push_float(options, model) ? result : PREDEFINES_PARSE_ERROR;
     }
     else if (predefines_starts(argument, "-ffp-exception-behavior="))
     {
@@ -2753,6 +2755,11 @@ static bool predefines_finish_options(PredefinesOptions* options)
     if (options->gnuc_invalid != 0)
     {
         fprintf(stderr, "error: invalid value '%s' in '%s'\n", options->gnuc_invalid + 15, options->gnuc_invalid);
+        result = false;
+    }
+    if (options->fp_model_invalid != 0 && !options->ofast)
+    {
+        fprintf(stderr, "error: unsupported argument '%s' to option '-ffp-model='\n", options->fp_model_invalid);
         result = false;
     }
     if (options->cf_protection_invalid != 0)

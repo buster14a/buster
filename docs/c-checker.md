@@ -81,11 +81,13 @@ assertions receive semantic checks. Assembly operands/constraints and source
 attribute applicability have separate bounded consumers.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
-order, including the scope of a name in its own initializer. The adapter consumes
-#128's parser declaration-resolution column and retains declare/use/restore
-history for source-dependent semantic environments. `c_check_binding.c`
-validates this handoff; `--scalar` uses its independent scalar oracle. Every
-ordinary use retains its exact declaration identity. It also retains the
+order, including the scope of a name in its own initializer. The reader
+records declare/use/restore events as it elaborates, and each use's event
+retains the declaration it sees; `c_check_binding.c` publishes those answers
+directly, and `--scalar` replays the events independently
+([the binding handoff](c-check-bindings.md), #336). The events are also the
+history for source-dependent semantic environments. Every ordinary use retains
+its exact declaration identity. It also retains the
 composite declaration types, canonical object identities, linkage, storage
 duration, actual and tentative definitions, and each selected initializer node.
 Linked declarations also retain translation-unit identity across closed blocks.
@@ -169,8 +171,8 @@ its temporary scratch allocations before returning. `CheckInput.resource`
 distinguishes capacity failure from the adapter's ordinary diagnostics. A false
 adapter result is not a usable, successfully checked graph.
 
-`CheckInput.binding_event_count` and `binding_statistics` describe the actual
-resolver path. Its declaration, type, object, linkage, definition, tentative
+`CheckInput.binding_event_count` and `binding_statistics` describe the
+reader's events in every binding mode; only the batch sort counts walks. Its declaration, type, object, linkage, definition, tentative
 definition and initializer-node columns all have `token_count` entries. Only
 declaration tokens (`declarations[token] == token`) define objects; uses map to
 those tokens. An object identity is nonzero and stable across compatible
@@ -639,7 +641,7 @@ Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
 | Producer → consumer | Status and boundary |
 | --- | --- |
 | Full parser tree/postorder and PP spelling → `check_input` | Implemented supported-source reader; declarations/types are elaborated in source order, expressions in postorder. Parser/PP source IDs are retained. |
-| Declaration elaboration → binding event resolver → expression graph | Implemented checker-side events and exact declaration/type columns; [#336](https://github.com/buster14a/buster/issues/336) tracks reuse of pending parser metadata without replacing typed elaboration. |
+| Declaration elaboration → binding event resolver → expression graph | Implemented checker-side events and exact declaration/type columns. Since [#336](https://github.com/buster14a/buster/issues/336), each use's retained answer is published directly, without the parser's second grammar replay ([the binding handoff](c-check-bindings.md)). |
 | Literal spelling → `c_check_literals.c` → leaf `CheckValue` | Counted physical/logical spelling is decoded once for its graph value; invalid/unsupported literals are errors. Macro occurrence remains the diagnostic identity. |
 | `CheckGraph` → dependency scheduler → `check_actions` / scalar actions | Implemented earlier-node operands, call argument slices, source tokens and contexts; actual operand heights define readiness. Type-interning actions form ordered barriers. |
 | Actions/constants/conversions → `CheckStream` → typed dump/diagnostics/static selection | Implemented node-indexed values, explicit operand/store/argument conversions and stable source-ordered reports. Faults in unevaluated branches remain conditional as described above. |
@@ -665,7 +667,8 @@ are not valid. Aggregate/string/TLS emission remains outside this implementation
 
 Observed extra work: source reader's event construction/replay, operand-height
 construction/grouping, and scans over declaration columns to select objects.
-The first has [#336](https://github.com/buster14a/buster/issues/336). Heights are semantic dependencies, so parser depth cannot
+[#336](https://github.com/buster14a/buster/issues/336) removed the replay: the
+reader's events are the one producer, and their retained answers the column. Heights are semantic dependencies, so parser depth cannot
 replace them. Retaining heights/selected-definition lists is a candidate only
 if producer maintenance and downstream savings beat the existing complete
 path; future selective emission must include real body references ([#129](https://github.com/buster14a/buster/issues/129)).

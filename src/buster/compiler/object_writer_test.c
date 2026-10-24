@@ -897,9 +897,10 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
 // Running programs
 
 // Runs `arguments` (a program on PATH and its arguments, null-terminated) with stdout and stderr in the files at
-// `output_path` and `error_path`, for up to BUSTER_OBJECT_TEST_RUN_SECONDS, and returns its exit status: -1 if it
-// couldn't start, was killed by a signal or ran out of time.
-static int object_test_run(char* const* arguments, const char* output_path, const char* error_path)
+// `output_path` and `error_path`, using the null-terminated `environment`, for up to BUSTER_OBJECT_TEST_RUN_SECONDS,
+// and returns its exit status: -1 if it couldn't start, was killed by a signal or ran out of time. The arguments and
+// environment are borrowed until this synchronous call returns.
+static int object_test_run_environment(char* const* arguments, const char* output_path, const char* error_path, char* const* environment)
 {
     int result = -1;
     posix_spawn_file_actions_t actions;
@@ -908,7 +909,7 @@ static int object_test_run(char* const* arguments, const char* output_path, cons
         pid_t child = 0;
         const bool ready = posix_spawn_file_actions_addopen(&actions, 1, output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644) == 0 &&
                            posix_spawn_file_actions_addopen(&actions, 2, error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644) == 0;
-        if (ready && posix_spawnp(&child, arguments[0], &actions, 0, arguments, environ) == 0)
+        if (ready && posix_spawnp(&child, arguments[0], &actions, 0, arguments, environment) == 0)
         {
             int status = 0;
             pid_t waited = 0;
@@ -937,6 +938,11 @@ static int object_test_run(char* const* arguments, const char* output_path, cons
         posix_spawn_file_actions_destroy(&actions);
     }
     return result;
+}
+
+static int object_test_run(char* const* arguments, const char* output_path, const char* error_path)
+{
+    return object_test_run_environment(arguments, output_path, error_path, environ);
 }
 
 // A file's bytes, NUL-terminated, from `arena`; a null pointer if it can't be read.

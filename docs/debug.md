@@ -46,10 +46,14 @@ output, and one `uint64_t` final address per function. It checks all
 address-plus-size additions before patching anything. The caller may finalize
 again for a different layout. It must keep the unit and output metadata alive
 until finalization completes. Different units and their buffers are independent.
-Their contributions cannot simply be concatenated: abbreviation offset zero,
-statement-list offset zero, address base eight and range-list offset twelve
-refer to the start of each unit's own sections. Multiple contributions need
-section-offset rebasing in addition to address finalization.
+A unit alone points its header and DIE at the starts of its own sections
+(abbreviation offset zero, statement-list offset zero, address base eight and
+range-list offset twelve). A unit written after others gives
+`DebugOutput.bases`, where its contribution starts in each section of the file,
+and those four offsets point there instead, so that units concatenate; every
+other byte is the unit's alone, and a base that would carry a contribution past
+DWARF32 is refused before anything is written. `test-debug` compares a unit
+written at bases with the same unit alone, byte for byte but the four offsets.
 
 ## Native executable attachment
 
@@ -180,10 +184,10 @@ standalone-head consumer evidence, separate from the hosted merge result.
 ## Remaining integration for #88
 
 `Link` has no debug-section atom classes and the importer still drops
-nonallocated sections: the new native attachment takes explicit caller bytes.
-Preserving arbitrary foreign DWARF and rebasing multiple independent units
-remain follow-ups. This module does not modify the assembler-owned CFI/section
-adapter in #233.
+nonallocated sections: the new native attachment takes explicit caller bytes,
+one unit. Preserving arbitrary foreign DWARF and attaching several units through
+`executable_write` remain follow-ups. This module does not modify the
+assembler-owned CFI/section adapter in #233.
 
 The merged [Tier 0 PR #303](https://github.com/buster14a/buster/pull/303),
 rechecked on main at `9857e71781447f697da87809f3262b15a82145f6`, contains real
@@ -205,7 +209,11 @@ backend-chain benchmark. The producer itself is unchanged.
 Main already merges `.eh_frame` and indexes it with `.eh_frame_hdr`, including
 scalar/vector validation and runtime unwind tests. The native unwind module
 supplies per-function CIE/FDE contributions for that existing path; its guide
-records validation and measurement status. Data-first segment
-ordering, writing while compilation is in progress, its gdb/perf checks and
-the comparison against writing at the end remain separate work. Issue #88
-remains open for these integration and measurement requirements.
+records validation and measurement status. `streaming.c` (#88) writes a Tier 0
+program while it compiles, in the data-first segment order, with these
+sections: a unit per 256 functions, made as they compile and finalized at
+their addresses, written after the units before it. `test-streaming
+--cross-check` has `llvm-dwarfdump --verify` check the units together, gdb
+give every frame its function's line and perf's samples lines; the linker
+design's "Streaming the output" has the comparison against writing at the
+end. Its rows are a line per function, until Tier 0 gives source rows.

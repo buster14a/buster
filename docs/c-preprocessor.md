@@ -565,7 +565,14 @@ macro's expansion, an argument being expanded, or a directive's line):
   (`pp_collect_step`), from the contexts below (popping the ones they exhaust,
   which enables their macros again), and runs any directive on the way. A
   directive among a macro's arguments is undefined behavior that clang accepts
-  (and warns about only with `-pedantic`), so we accept it too.
+  (and warns about only with `-pedantic`), so we accept it too. Clang refuses
+  `#include`, `#pragma` and the like there while one flag says arguments are
+  being collected (`InMacroArgs`, `Preprocessor.in_macro_arguments`); any
+  macro's collection clears it when it ends, so after an invocation with
+  arguments in a `#if` line among them, clang takes those directives, and the
+  collection goes on past an included file's end into the includer (#109's
+  seed 2106). If collection leaves the file where an expansion started, -E
+  replays that exit before printing the expansion, as clang does (#370).
 - **Nothing nests through calls.** An argument that names an enabled macro is
   expanded before substitution by pushing it as a barrier context with a
   capture. The main loop fills the capture until the barrier ends, and then
@@ -1200,7 +1207,7 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 | Options | Macros |
 | --- | --- |
 | `-O0` to `-O3` (higher is 3), `-O`, `-Og`, `-Os`, `-Oz`, `-Ofast`; `-fno-inline`, `-finline`, `-f[no-]inline-functions`, `-finline-hint-functions` | `__OPTIMIZE__`, `__OPTIMIZE_SIZE__`, `__NO_INLINE__` (at -O0, or when only always-inline functions inline) |
-| The floating-point options, through clang's state machine (`RenderFloatingPointOptions`): `-f[no-]fast-math`, `-ffp-model=`, `-f[no-]finite-math-only`, `-f[no-]math-errno`, `-f[no-]honor-infinities`, `-f[no-]honor-nans`, `-f[no-]signed-zeros`, `-f[no-]associative-math`, `-f[no-]reciprocal-math`, `-f[no-]approx-func`, `-f[no-]trapping-math`, `-ffp-exception-behavior=`, `-f[no-]rounding-math`, `-f[no-]unsafe-math-optimizations`, `-Ofast` (when it is the last `-O`) | `__FAST_MATH__`, `__FINITE_MATH_ONLY__`, `__NO_MATH_ERRNO__` |
+| The floating-point options, through clang's state machine (`RenderFloatingPointOptions`): `-f[no-]fast-math`, `-ffp-model=`, `-f[no-]finite-math-only`, `-f[no-]math-errno`, `-f[no-]honor-infinities`, `-f[no-]honor-nans`, `-f[no-]signed-zeros`, `-f[no-]associative-math`, `-f[no-]reciprocal-math`, `-f[no-]approx-func`, `-f[no-]trapping-math`, `-ffp-exception-behavior=`, `-f[no-]rounding-math`, `-f[no-]unsafe-math-optimizations`, `-Ofast` (when it is the last `-O`, which ignores every `-ffp-model=` but `aggressive` without checking its value) | `__FAST_MATH__`, `__FINITE_MATH_ONLY__`, `__NO_MATH_ERRNO__` |
 | `-ffp-eval-method=` | `__FLT_EVAL_METHOD__`'s value |
 | `-f[no-]signed-char`, `-f[no-]unsigned-char` | `__CHAR_UNSIGNED__` |
 | `-f[no-]short-wchar` | the `wchar_t` macros |
@@ -1437,6 +1444,29 @@ most expansions start lines (`assert`, `testcase`), and the records cost 0.4
 instructions per input token. The common line start (the same file, no new
 line note, and a jump of up to 8 lines) is decided inline. With that, `-E`
 costs fewer instructions than before markers gave presumed positions.
+
+When argument collection reaches an included file's end, `pp_collect_step`
+records a `PPIncludeExit` for the marker printers: the current output boundary,
+the inclusion's range and the includer's resume location. This is an ordered,
+arena-owned list, allocated only for these exceptional exits and only with
+`expansion_starts`. There is at most one record per inclusion. An empty list
+allocates nothing; allocation failure is fatal, and `pp_release` releases the
+records with their arena. `PPRange.collected_exit` holds the output boundary
+plus one (zero means no such exit), within the output's existing u32 limit.
+The records and source ranges remain valid through printing, including a
+boundary at the output's end when an expansion produces no tokens.
+
+Both printers replay these exits through `pp_print_include_exits` before the
+next token. The vector printer keeps its 64-token spelling and separation
+batches, flushing buffered bytes only when it reaches an exit. A header with
+no earlier output gets an entry marker before the exit. Subsequent expansion
+tokens keep their original presumed line number, but use the printer's current
+file after the exit, matching clang's `FileChanged` followed by `MoveToLine`.
+This metadata changes neither token locations nor expansion history, and `-P`
+ignores it. The #370 fixtures cover both printers, nested exits, earlier output,
+empty expansions including EOF, system headers, `#line`/builtin locations and
+an expansion crossing a printer batch. Target-host performance remains subject
+to the normal 9700X checks; this change makes no throughput claim.
 
 ### Expansion history and diagnostics
 
@@ -1840,7 +1870,8 @@ full-corpus reproduction and frozen CI subset.
     before C23 and both in C23, a paste that would form `u8'a'` before C23, and
     trigraphs in the ISO modes and in the GNU ones;
   - `#pragma` and `#include` among a macro's arguments, which fail as clang's
-    do and must then give clang's output;
+    do and must then give clang's output, and are taken after an invocation in
+    a `#if` line among them, as clang takes them;
   - the cases from #202's review: a line splice before the quote of a split
     literal (with `u`, `U` and `u8`, and a trigraph splice), and a trigraph a
     stringized argument spells, which stays, beside one a paste forms, which is

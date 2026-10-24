@@ -37,9 +37,11 @@ For each, the harness:
 
 A test passes when everything it was put through gave the expected status and
 output. A refusal that names a feature (`error: unsupported: FEATURE`) makes it
-unsupported, with that feature. Anything else fails it: another error, a crash
-or a timeout of the compiler or the program, a wrong status or output, the two
-paths disagreeing.
+unsupported, with that feature, when both paths exit as the compiler does for a
+unit with errors (status 1). Anything else fails it: another error, a crash or a
+timeout of the compiler or the program, even after it named a feature, a wrong
+status or output, the two paths disagreeing. `-c`'s refusals in the cross-check
+count only when they exit so too.
 
 The tests run `--jobs` at a time (one per core by default), in worker
 processes that write into a shared mapping; the report lists every test in name
@@ -50,13 +52,17 @@ the harness can't run. `--compiler PATH` tests another compiler executable with
 the same options, and `--keep` keeps the work directory (under `$TMPDIR` or
 `/tmp`), which a failure keeps anyway.
 
-`--self-test` (about 3 s) runs the harness on three tests of its own with a
-stand-in compiler, a shell script: from a DIR and a `$TMPDIR` relative to the
-current directory (the processes run elsewhere, so the harness makes every
-path absolute), waiting by polling as it does where `pidfd_open` fails, and
-with `--cross-check` where `-c` refuses a test the direct path compiles, which
-must fail. Each time the stand-in's third program, which sleeps 30 s, must be
-killed at a one-second timeout.
+`--self-test` (about 6 s) runs the harness on three tests of its own with a
+stand-in compiler, a shell script, in five scenarios: from a DIR and a `$TMPDIR`
+relative to the current directory (the processes run elsewhere, so the harness
+makes every path absolute); waiting by polling as it does where `pidfd_open`
+fails; with `--cross-check` where `-c` refuses a test the direct path compiles,
+which must fail; with refusals that name their feature but are then killed (by
+a signal in the scalar path alone and in both, and for their time in both),
+each of which must fail; and with `--cross-check` where `-c`'s refusals are
+then killed, which must fail whether or not the direct path compiled the test.
+The stand-in's third program, which sleeps 30 s, must be killed at a one-second
+timeout, and so must its compiles where they sleep.
 
 The harness is test tooling outside the compile path and has no vector path.
 

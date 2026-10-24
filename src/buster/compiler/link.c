@@ -118,10 +118,14 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_CLASS_COUNT 14
 // An atom's alignment is at most 2^this: 4 GB.
 #define BUSTER_LINK_MAX_ALIGNMENT_LOG2 32
+// The unit of an atom that merges several units' input sections (a foreign link's section of a name that __start_ and
+// __stop_ bound): its locals may be referred to from any unit, and it may refer to any unit's.
+#define BUSTER_LINK_UNIT_SHARED UINT32_MAX
 
 // Symbol flags, laid out so that an Elf64_Sym's st_info is flags & BUSTER_LINK_SYMBOL_INFO and its st_other is
 // flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT: the type (STT_*) in bits 0 to 3, the binding (STB_*) in bits 4 and 5
-// and the visibility (STV_*) in bits 6 and 7. The object writer makes the section and file symbols itself.
+// and the visibility (STV_*) in bits 6 and 7, but for BUSTER_LINK_SYMBOL_UNIQUE, which an Elf64_Sym writes as
+// STB_GNU_UNIQUE (link_symbol_elf_info). The object writer makes the section and file symbols itself.
 #define BUSTER_LINK_SYMBOL_TYPE 0x0f
 #define BUSTER_LINK_SYMBOL_NOTYPE 0x00
 #define BUSTER_LINK_SYMBOL_OBJECT 0x01
@@ -134,6 +138,9 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_LOCAL 0x00
 #define BUSTER_LINK_SYMBOL_GLOBAL 0x10
 #define BUSTER_LINK_SYMBOL_WEAK 0x20
+// STB_GNU_UNIQUE, which GCC gives C++'s inline variables and the static data of templates and inline functions: a
+// definition that binds as a global one does, kept unique in the process by the loader, and written back as it came.
+#define BUSTER_LINK_SYMBOL_UNIQUE 0x30
 #define BUSTER_LINK_SYMBOL_VISIBILITY 0xc0
 #define BUSTER_LINK_SYMBOL_DEFAULT 0x00
 #define BUSTER_LINK_SYMBOL_INTERNAL 0x40
@@ -873,13 +880,19 @@ static AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, u
     return result;
 }
 
-// Flags whose type is one the representation has and whose binding exists.
+// Flags whose type is one the representation has: each of its bindings exists.
 static bool link_symbol_flags_are_valid(uint8_t flags)
 {
     const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
-    const bool type_valid = type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
-                            type == BUSTER_LINK_SYMBOL_IFUNC;
-    return type_valid && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_BINDING;
+    return type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
+           type == BUSTER_LINK_SYMBOL_IFUNC;
+}
+
+// An Elf64_Sym's st_info for symbol flags: their type and binding, BUSTER_LINK_SYMBOL_UNIQUE's STB_GNU_UNIQUE (10).
+static __attribute__((unused)) uint8_t link_symbol_elf_info(uint8_t flags)
+{
+    const bool unique = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE;
+    return (uint8_t)(unique ? 10u << 4 | (flags & BUSTER_LINK_SYMBOL_TYPE) : flags & BUSTER_LINK_SYMBOL_INFO);
 }
 
 // Whether a symbol with `flags` can be defined in `atom`, which exists, at `value` with `size`: within the atom, and a
@@ -1218,7 +1231,8 @@ static bool link_check_fixups(const Link* link, AtomId atom, uint64_t* owned)
 
 // Whether a fixup of `kind` in `atom` can refer to `target`: a TLS kind to a TLS symbol and no other kind to one (but
 // a size of either), a local symbol only from its own unit (or an absolute one or an interned STRINGS pool at unit
-// zero, which are shared across units), and a shared library's
+// zero, which are shared across units), except that terminal EH_FRAME pools at unit zero can refer to the locals of
+// their combined units, and a shared library's
 // symbol only through the GOT, by its absolute address (which the executable relocates when it loads), or for a function
 // by a call (through a stub).
 static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, SymbolId target)
@@ -1236,8 +1250,12 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     const bool call = kind == BUSTER_LINK_FIXUP_CALL && (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
     const bool reaches_shared = through_got || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_ABS64 || call;
     const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
+    // Only a terminal EH pool as the source gains this allowance; targets in EH pools retain the ordinary rule.
+    const bool unwind_pool = link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME && link->atoms.unit[atom] == 0;
     const bool pooled = target_atom != 0 && link->atoms.class[target_atom] == BUSTER_LINK_CLASS_STRINGS && link->atoms.unit[target_atom] == 0;
-    return (size_kind || tls_kind == tls_target) && (!local || absolute || pooled || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) &&
+    const bool merged = link->atoms.unit[atom] == BUSTER_LINK_UNIT_SHARED || (target_atom != 0 && link->atoms.unit[target_atom] == BUSTER_LINK_UNIT_SHARED);
+    return (size_kind || tls_kind == tls_target) &&
+           (!local || absolute || pooled || merged || (target_atom != 0 && (unwind_pool || link->atoms.unit[target_atom] == link->atoms.unit[atom]))) &&
            (!shared || reaches_shared);
 }
 
