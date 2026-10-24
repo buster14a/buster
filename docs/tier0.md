@@ -789,9 +789,10 @@ path's 11.1.
 
 ## Follow-ups
 
-- **Spilling deep values:** expressions past the depth tables are refused (`TIER0_ERROR_DEPTH`), among them a call of
-  more than 15 integer or 16 floating arguments, which are all on the stacks at the call. The issue defers them to the
-  scalar path, with frame slots.
+- **Spilling deep values:** expressions past the depth tables are refused (`TIER0_ERROR_DEPTH`), among them a call
+  whose arguments, with the values under them and the scratch register its aggregates' copies take, need more than the
+  15 integer or 16 floating depths: every argument is on the stacks at the call. The issue defers them to the scalar
+  path, with frame slots.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - conversions between U64 and floating values;
   - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
