@@ -454,7 +454,26 @@ What the lowering covers past scalars (#145's programs):
   128 bytes) unless its first part clears it whole, then each part's zeros,
   bytes or value is stored, an aggregate's copied.
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
-  before the arguments), its callee evaluated first.
+  before the arguments), its callee evaluated first. A struct or union argument
+  is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
+  where `abi_assign` puts them; a struct or union result lands in a frame object
+  of the call site's own (`call_result_objects`), whose address is the call's
+  value.
+- **Structs and unions by value (#137).** A parameter of one is a frame object
+  of its size and alignment, which Tier 0's prologue fills. A function that
+  returns one in registers returns its bytes' address (`result_size`); one that
+  returns it through a hidden pointer takes the pointer as parameter 0, copies
+  the bytes there and returns it. Those aligned past 16 bytes or larger than
+  64 KB are refused, and so are results in x87 registers (`long double`).
+- **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
+  expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
+  frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
+  `va_start`, two anchors give the register save area's and the overflow area's
+  addresses, and `va_start`'s offsets follow the named parameters (8 bytes per
+  general register, 48 plus 16 per vector register, from the function's own
+  signature through `abi_assign`). `va_arg` of a struct or a union copies its
+  eightbytes from the save area into a frame object of its own, or finds them
+  in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -485,10 +504,9 @@ What the lowering covers past scalars (#145's programs):
   no compares of those classes.
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: aggregates passed or
-returned by value, variadic definitions, `long double`,
-`_Complex`, thread-locals, inline assembly and so on. The c-testsuite harness
-counts such a test as unsupported, not failed.
+`error: unsupported: FEATURE`, naming the feature: `long double`, `_Complex`,
+thread-locals, inline assembly and so on. The c-testsuite harness counts such a
+test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
 identities and effect requirements. Native helpers are ordinary calls with real

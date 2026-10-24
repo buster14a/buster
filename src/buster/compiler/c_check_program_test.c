@@ -840,15 +840,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "file-assembly-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test,
         "extern int missing;int tested(int n,...){__builtin_va_list ap;__builtin_va_start(ap,(missing++,n));"
-        "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, false, 0, 1);
+        "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, true, 0, 1);
     check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, false, 0, 1);
     check_test_program_boundary(test, "int global;struct S{int x;int*p;};int tested(int n){struct S s={n,&global};return s.x;}",
                                 "aggregate-primary-initialization", true, true, 1, 1);
     check_test_program_boundary(test, "struct S{int x;};struct S make(int n);int tested(int n){return make(n).x;}",
-                                "aggregate-result-machine-boundary", true, false, 1, 0);
+                                "aggregate-result-lowering", true, true, 1, 0);
     check_test_program_boundary(test, "struct S{int x;};int take(struct S);int tested(int n){struct S s={n};return take(s);}",
-                                "aggregate-argument-machine-boundary", true, false, 1, 1);
+                                "aggregate-argument-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "struct B{unsigned x:3;};int tested(int n){struct B b;b.x=n;return b.x;}",
                                 "bit-field-lowering", true, true, 0, 0);
     check_test_program_boundary(test,

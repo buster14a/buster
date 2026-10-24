@@ -265,7 +265,8 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 //     (IGNORE). A load reads only the aggregate's own bytes, whatever its size. An empty aggregate has size 0 here: it
 //     passes as the value its address is, which a register or a slot then holds and no callee reads.
 //   - A parameter that is an object: an aggregate passed by value. Its location says where its bytes arrive, and the
-//     prologue stores a register's in its home; one on the stack (STACK) keeps its incoming bytes as its home.
+//     prologue stores a register's in its home; one on the stack whole (STACK) keeps its incoming bytes as its home at a
+//     multiple of its alignment, and the prologue copies the others' slots into their homes (tier0_parameter_in_place).
 //   - call_result_objects[c] (call_count of them): 1 + the local index of the object that receives call c's aggregate
 //     result, or 0. Its result (AbiCall.result) is REGISTERS, whose parts the call stores in the object, or MEMORY, the
 //     object's address the hidden pointer it passes in rdi. The call's class is VOID: its result is the object's.
@@ -3797,11 +3798,11 @@ static uint32_t tier0_part_records(Tier0Part part)
     return part.load == BUSTER_TIER0_PART_OVERLAP ? 2 : 1;
 }
 
-// A register's part stored whole at [rsp + displacement]: 8 bytes, or 16 for a vector's XMM register.
-static void tier0_store_part(Tier0Writer* writer, uint8_t reg, uint32_t bytes, int32_t displacement)
+// A register's part stored whole at `offset` in the object at `home`: 8 bytes, or 16 for a vector's XMM register.
+static void tier0_store_part(Tier0Writer* writer, uint8_t reg, uint32_t bytes, Tier0Home home, uint32_t offset)
 {
     const uint32_t form = reg >= 16 ? (bytes == 16 ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOVSD_XM64_X) : X86_FORM_MOV_RM64_R64;
-    tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, displacement, 0));
+    tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), home.reg, home.mode, home.displacement + (int32_t)offset, 0));
 }
 
 // What a call's aggregates need besides its moves (selection's touches): its integer stack's first free register, the
@@ -4065,7 +4066,7 @@ static void tier0_emit_call(const Tier0Function* function, const Tier0Entries* e
             if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
             {
                 const uint32_t offset = high ? 8 : 8 * k;
-                tier0_store_part(writer, tier0_abi_register(returned.registers[k]), returned.part_bytes == 16 ? 16 : 8, home.displacement + (int32_t)offset);
+                tier0_store_part(writer, tier0_abi_register(returned.registers[k]), returned.part_bytes == 16 ? 16 : 8, home, offset);
             }
         }
     }
@@ -4483,12 +4484,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             if (parts[k].reg == BUSTER_TIER0_PART_STACK)
             {
                 tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, incoming, 0));
-                tier0_store_part(writer, X86_REGISTER_RAX, 8, homes[p].displacement + parts[k].offset);
+                tier0_store_part(writer, X86_REGISTER_RAX, 8, homes[p], parts[k].offset);
             }
         }
         if (object && tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p))
         {
-            tier0_copy(writer, X86_REGISTER_RSP, homes[p].displacement, X86_REGISTER_RSP, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15);
+            tier0_copy(writer, homes[p].reg, homes[p].displacement, X86_REGISTER_RSP, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15);
         }
     }
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -4504,7 +4505,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             {
                 if (parts[k].reg != BUSTER_TIER0_PART_STACK)
                 {
-                    tier0_store_part(writer, parts[k].reg, parts[k].bytes, homes[p].displacement + parts[k].offset);
+                    tier0_store_part(writer, parts[k].reg, parts[k].bytes, homes[p], parts[k].offset);
                 }
             }
         }

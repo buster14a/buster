@@ -130,8 +130,15 @@ stream. `va_start` requires real producer-supplied register-save-area and
 overflow-argument addresses, plus the named prefix's GP/FP offsets. `va_arg`
 advances exactly the selected cursor, `va_copy` copies exactly 24 bytes after
 snapshotting its source, and `va_end` needs no machine operation. The supported
-plans cover ordinary integer/pointer and F32/F64 register or stack slots;
-aggregates, high-half plans and wider classes are explicit refusals.
+plans cover ordinary integer/pointer and F32/F64 register or stack slots, and
+structs and unions (#137): with `CBuiltinVaLowerCall.size` and `.object`, a
+register plan checks both cursors against the eightbytes it needs, copies them
+from the save area into the frame object (both general, both vector, one of
+each in either order, or the high eightbyte alone) and advances both cursors;
+otherwise, and for a stack plan, the value is the aligned overflow area's
+address, which advances past the aggregate's slots. An ignored (empty) one's
+value is its object's address. Wider classes, such as `long double`, are
+explicit refusals.
 
 The ordinary Tier 0 live-value spill area is not a SysV variadic register-save
 area. The optional [incoming variadic frame](tier0.md#incoming-variadic-frames)
