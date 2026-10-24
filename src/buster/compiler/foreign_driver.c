@@ -168,6 +168,25 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         {
             driver->path = FOREIGN_PATH_EXACT;
         }
+        else if (strcmp(argument, "--build-id") == 0 || strcmp(argument, "--eh-frame-hdr") == 0 || strcmp(argument, "--hash-style=gnu") == 0 ||
+                 strcmp(argument, "-melf_x86_64") == 0)
+        {
+            // What every output has already, as GCC's and clang's drivers ask GNU ld for it: a build ID, .eh_frame_hdr,
+            // .gnu.hash, and x86-64.
+        }
+        else if ((strcmp(argument, "-m") == 0 || strcmp(argument, "-z") == 0) && i + 1 < argc)
+        {
+            // The emulation, x86-64's alone, and the -z keywords that describe what the output does already: its
+            // imports bound at load (now), RELRO over the GOT (relro) and a stack that doesn't execute (noexecstack).
+            i += 1;
+            const char* keyword = argv[i];
+            valid = strcmp(argument, "-m") == 0 ? strcmp(keyword, "elf_x86_64") == 0 :
+                                                  strcmp(keyword, "now") == 0 || strcmp(keyword, "relro") == 0 || strcmp(keyword, "noexecstack") == 0;
+            if (!valid)
+            {
+                fprintf(stderr, "link-foreign: unsupported option: %s %s\n", argument, keyword);
+            }
+        }
         else if (strcmp(argument, "-s") == 0 || strcmp(argument, "--strip-all") == 0)
         {
             driver->strip_all = true;

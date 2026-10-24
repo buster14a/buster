@@ -30,7 +30,7 @@
 //     resets). The floor is one pwrite of the output's bytes over it.
 //   - The objects: each unit's, as -c writes them, by object_prepare and object_write_units on the same lanes, over the
 //     files of the run before, with their bytes, symbols and relocations.
-//   - Each linker of --linkers (ld.bfd, ld.lld, mold and wild by default) links the objects with the appendix's
+//   - Each linker of --linkers (ld.bfd, ld.lld, mold, wild and link-foreign by default) links the objects with the appendix's
 //     command, the clang driver's with the matched options: --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64
 //     -z now --no-gc-sections, -pie and the loader, Scrt1.o, crti.o and crtbeginS.o, -L for GCC's directory and
 //     libc.so's, the objects, -lgcc --as-needed -lgcc_s --no-as-needed -lc -lgcc --as-needed -lgcc_s --no-as-needed,
@@ -40,7 +40,9 @@
 //     crti.o and crtbeginS.o, the same -L options, objects and group, then crtendS.o and crtn.o. Each figure is the
 //     wall time from posix_spawn to the wait's return, as the caller sees it: the median of the runs after a warm-up,
 //     with a pause before each, over the output of the run before. Each linker runs with its own threads, and on one
-//     (lld's --threads=1, mold's and wild's --no-threads; GNU ld has one anyway). Then one more run, with --no-fork for
+//     (lld's --threads=1, mold's and wild's --no-threads; GNU ld has one anyway). link-foreign, this executable's own
+//     linker of other compilers' objects (#86), takes the same command line as a process of its own, with --lanes=8
+//     and --lanes=1 for its threads and one, and links the dynamic PIEs alone. Then one more run, with --no-fork for
 //     mold and wild, which otherwise fork to leave their teardown to a child, through the helper
 //     (link_benchmark_rusage): its page faults and its peak resident set. A program that does nothing, run the same way
 //     first, shows the least the helper can count.
@@ -162,6 +164,9 @@ struct LinkBenchmarkLinker
     const char* no_fork;
     // Whether its runs for an output past BUSTER_LINK_BENCHMARK_LARGE_BYTES are the slow ones.
     bool slow;
+    // The option for its own threads, or 0 if it takes them by default; and whether it links dynamic PIEs alone.
+    const char* own_threads;
+    bool dynamic_only;
 };
 
 static const LinkBenchmarkLinker link_benchmark_linkers[] = {
@@ -188,6 +193,16 @@ static const LinkBenchmarkLinker link_benchmark_linkers[] = {
         .one_thread = "--no-threads",
         .no_fork = "--no-fork",
         .slow = false,
+    },
+    // This executable's own foreign linker (#86), as a process of its own, on a lane per core of the 9700X or on one;
+    // its static executables of libc aren't there yet.
+    {
+        .name = "link-foreign",
+        .one_thread = "--lanes=1",
+        .no_fork = 0,
+        .slow = false,
+        .own_threads = "--lanes=8",
+        .dynamic_only = true,
     },
 };
 
@@ -1145,7 +1160,12 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
         "--no-as-needed",
     };
     uint32_t count = 0;
-    arguments[count++] = (char*)linker;
+    const bool ours = strcmp(linker, "link-foreign") == 0;
+    arguments[count++] = ours ? (char*)"/proc/self/exe" : (char*)linker;
+    if (ours)
+    {
+        arguments[count++] = (char*)"link-foreign";
+    }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(matched); i += 1)
     {
         arguments[count++] = (char*)matched[i];
@@ -1281,7 +1301,7 @@ static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const R
     uint64_t pinned[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     pinned[settings->cpus[0] / 64] = 1ull << (settings->cpus[0] % 64);
     bool result = link_benchmark_set_cpus(one_thread ? pinned : settings->allowed);
-    const char* thread_option = one_thread ? linker->one_thread : 0;
+    const char* thread_option = one_thread ? linker->one_thread : linker->own_threads;
     char** command = arguments + BUSTER_LINK_BENCHMARK_HELPER_ARGUMENTS;
     link_benchmark_arguments(command, linker->name, thread_option, 0, runtime, search, objects, object_count, output);
     int status = -1;
@@ -1449,8 +1469,8 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Run
         snprintf(output, sizeof(output), "%s/%s", directory, linker->name);
         // GNU ld links on one thread either way.
         const uint32_t ways = linker->one_thread != 0 ? 2 : 1;
-        const bool wrong = wild_wrong && strcmp(linker->name, "wild") == 0;
-        if (result && (settings->linkers >> l & 1) != 0 && wrong)
+        const bool wrong = (wild_wrong && strcmp(linker->name, "wild") == 0) || (linker->dynamic_only && kind != RUNTIME_KIND_DYNAMIC);
+        if (result && (settings->linkers >> l & 1) != 0 && wrong && !linker->dynamic_only)
         {
             printf("  %-24s not run: its %s of this program may fault, its TLS segment off its alignment\n", "wild", kind == RUNTIME_KIND_STATIC ? "static executable" : "static PIE");
         }
@@ -1853,7 +1873,7 @@ int run_link_benchmark(int argc, char** argv)
     }
     for (uint32_t l = 0; made && result && settings.linking && l < BUSTER_LINK_BENCHMARK_LINKERS; l += 1)
     {
-        if ((settings.linkers >> l & 1) != 0)
+        if ((settings.linkers >> l & 1) != 0 && strcmp(link_benchmark_linkers[l].name, "link-foreign") != 0)
         {
             result = link_benchmark_version(&settings, link_benchmark_linkers[l].name);
         }
