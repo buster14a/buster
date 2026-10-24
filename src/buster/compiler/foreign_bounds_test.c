@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// __start_ and __stop_ in foreign executables (foreign_link_bounds_plan and foreign_link_bounds_merge), and the refusal
-// of an IFUNC that a foreign executable defines and refers to (foreign_link_refuse_ifuncs). Include from foreign_test.c
-// after foreign_copy_test.c, whose run helper it takes. The fixtures are original: a table of 16-byte entries in a
-// section named fb_table from two objects and an archive member that loads (and one that doesn't, whose entry mustn't
-// count), at alignments 8 and 16; a section named fb_bytes, writable in one object and read-only in another, which
-// merges into one writable section of their bytes; a weak reference to the bounds of a name no section has, which stays
-// zero; then an IFUNC called (refused, naming it) and one that nothing refers to (linked). Each resolution, on both paths
-// and 1/2/3/8 lanes, writes a PIE the loader runs, byte for byte alike, whose symbols the test reads; with --cross-check,
-// lld links the same inputs, which must run alike and define the bounds alike. And section GC after the merge
-// (foreign_bounds_test_gc): a retained section whose bounds only dead code refers to, and a hook's FDE in a merged code
-// section, both of which must survive.
+// __start_ and __stop_ in foreign executables (foreign_link_bounds_plan and foreign_link_bounds_merge), a PIE's own
+// IFUNCs (the writer's stubs and IRELATIVE relocations beside its imports'), and a shared library's refusal of an IFUNC
+// the loader can't bind as a dynamic symbol (foreign_link_refuse_ifuncs). Include from foreign_test.c after
+// foreign_copy_test.c, whose run helper it takes. The fixtures are original: a table of 16-byte entries in a section
+// named fb_table from two objects and an archive member that loads (and one that doesn't, whose entry mustn't count), at
+// alignments 8 and 16; a section named fb_bytes, writable in one object and read-only in another, which merges into one
+// writable section of their bytes; a weak reference to the bounds of a name no section has, which stays zero; then an
+// IFUNC called and one that nothing refers to, and a shared library's hidden IFUNC that its exported function calls
+// (refused, naming it). Each resolution, on both paths and 1/2/3/8 lanes, writes a PIE the loader runs, byte for byte
+// alike, whose symbols the test reads; with --cross-check, lld links the same inputs, which must run alike and define
+// the bounds alike. And section GC after the merge (foreign_bounds_test_gc): a retained section whose bounds only dead
+// code refers to, and a hook's FDE in a merged code section, both of which must survive.
 
 static const ForeignCopyTestSource foreign_bounds_test_sources[] = {
     {
@@ -84,6 +85,13 @@ static const ForeignCopyTestSource foreign_bounds_test_sources[] = {
                 "int fb_unused(void) __attribute__((ifunc(\"fb_resolve\")));\n"
                 "__attribute__((noreturn)) void _start(void) { __asm__ volatile(\"syscall\" : : \"a\"(60), \"D\"(42)); __builtin_unreachable(); }\n",
     },
+    {
+        .file = "fb_ifunc_hidden.c",
+        .text = "static int fb_hidden_one(void) { return 42; }\n"
+                "static int (*fb_hidden_resolve(void))(void) { return fb_hidden_one; }\n"
+                "__attribute__((visibility(\"hidden\"))) int fb_hidden(void) __attribute__((ifunc(\"fb_hidden_resolve\")));\n"
+                "int fb_call_hidden(void) { return fb_hidden(); }\n",
+    },
 };
 
 typedef enum ForeignBoundsTestCase
@@ -91,6 +99,7 @@ typedef enum ForeignBoundsTestCase
     FOREIGN_BOUNDS_TEST_TABLE,
     FOREIGN_BOUNDS_TEST_IFUNC,
     FOREIGN_BOUNDS_TEST_IFUNC_UNUSED,
+    FOREIGN_BOUNDS_TEST_IFUNC_SHARED,
     FOREIGN_BOUNDS_TEST_GC,
     FOREIGN_BOUNDS_TEST_CASES,
 } ForeignBoundsTestCase;
@@ -165,7 +174,14 @@ static void foreign_bounds_test_case(ForeignTestTally* tally, const char* direct
     const uint64_t saved = arena->length;
     ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
     bool ready = line != 0;
-    if (ready)
+    const bool shared = test == FOREIGN_BOUNDS_TEST_IFUNC_SHARED;
+    if (ready && shared)
+    {
+        *line = (ForeignTestLine){ 0 };
+        foreign_test_add(line, (char*)"-shared", false, true);
+        foreign_test_add(line, foreign_test_path(directory, "fb_ifunc_hidden.o", arena), true, true);
+    }
+    else if (ready)
     {
         *line = (ForeignTestLine){ 0 };
         foreign_test_add(line, (char*)"-pie", false, true);
@@ -202,15 +218,16 @@ static void foreign_bounds_test_case(ForeignTestTally* tally, const char* direct
             foreign_run(&foreign, &command, path == 0 ? FOREIGN_PATH_EXACT : FOREIGN_PATH_VECTOR, foreign_test_lanes[l], 0);
             Arena names = arena_reserve(1ull << 28);
             ForeignLink converted = { 0 };
-            const ForeignLinkResult built = foreign_link_build_dynamic(&converted, &foreign, arena, &names, interpreter);
+            const ForeignLinkResult built = shared ? foreign_link_build_kind(&converted, &foreign, arena, &names, RUNTIME_KIND_SHARED, (String8){ 0 }, (ForeignLinkStartup){ .entry = foreign_string("_start") }) :
+                                                     foreign_link_build_dynamic(&converted, &foreign, arena, &names, interpreter);
             char detail[192];
             snprintf(detail, sizeof(detail), "case %u %s %u lanes: resolve %u convert %u name %u", (unsigned)test, path == 0 ? "exact" : "vector",
                      foreign_test_lanes[l], (unsigned)foreign.failure.error, (unsigned)built.error, built.name);
-            if (test == FOREIGN_BOUNDS_TEST_IFUNC)
+            if (shared)
             {
-                const uint32_t wanted = foreign.failure.error == FOREIGN_ERROR_NONE ? foreign_test_name(&foreign, "fb_add") : 0;
+                const uint32_t wanted = foreign.failure.error == FOREIGN_ERROR_NONE ? foreign_test_name(&foreign, "fb_hidden") : 0;
                 foreign_test_expect(tally, wanted != 0 && built.error == FOREIGN_LINK_ERROR_IFUNC && built.name == wanted && built.object != 0,
-                                    "an IFUNC a fixup reaches is refused, naming it", detail);
+                                    "a shared library's hidden IFUNC that a fixup reaches is refused, naming it", detail);
             }
             else
             {
@@ -273,12 +290,12 @@ static void foreign_bounds_test_case(ForeignTestTally* tally, const char* direct
             }
         }
     }
-    if (ready && cross_check && test == FOREIGN_BOUNDS_TEST_TABLE)
+    if (ready && cross_check && !shared)
     {
         ForeignTestPath executable;
         ForeignTestPath output;
         ForeignTestPath errors;
-        snprintf(executable, sizeof(executable), "%s/fb_reference", directory);
+        snprintf(executable, sizeof(executable), "%s/fb_reference_%u", directory, (unsigned)test);
         snprintf(output, sizeof(output), "%s/fb_reference_link.out", directory);
         snprintf(errors, sizeof(errors), "%s/fb_reference_link.err", directory);
         char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)line->their_count + 4);
@@ -292,8 +309,10 @@ static void foreign_bounds_test_case(ForeignTestTally* tally, const char* direct
             arguments[line->their_count + 3] = 0;
             linked = object_test_run(arguments, output, errors) == 0;
         }
-        foreign_test_expect(tally, linked && foreign_copy_test_run(directory, executable, FOREIGN_COPY_TEST_DATA, arena), "lld links and runs the __start_ and __stop_ fixture", 0);
-        if (linked)
+        char detail[64];
+        snprintf(detail, sizeof(detail), "case %u", (unsigned)test);
+        foreign_test_expect(tally, linked && foreign_copy_test_run(directory, executable, FOREIGN_COPY_TEST_DATA, arena), "lld links and runs the fixture", detail);
+        if (linked && test == FOREIGN_BOUNDS_TEST_TABLE)
         {
             foreign_bounds_test_structure(tally, foreign_test_read(arena, executable), "lld");
         }
@@ -329,7 +348,7 @@ static void foreign_bounds_test_gc(ForeignTestTally* tally, const char* director
             Arena names = arena_reserve(1ull << 28);
             ForeignLink input = { 0 };
             ForeignLink output = { 0 };
-            const ForeignLinkResult built = foreign.failure.error == FOREIGN_ERROR_NONE ? foreign_link_build_for_gc(&input, &foreign, arena, &names, RUNTIME_KIND_STATIC, (String8){ 0 }) :
+            const ForeignLinkResult built = foreign.failure.error == FOREIGN_ERROR_NONE ? foreign_link_build_for_gc(&input, &foreign, arena, &names, RUNTIME_KIND_STATIC, (String8){ 0 }, (ForeignLinkStartup){ .entry = foreign_string("_start") }) :
                                                                                       (ForeignLinkResult){ .error = FOREIGN_LINK_ERROR_INPUT };
             const ForeignGcRoots roots = {
                 .entry = built.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_test_symbol(&foreign, &input, "_start") : 0,

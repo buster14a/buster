@@ -528,7 +528,7 @@ static ForeignGcBenchmarkSample foreign_gc_benchmark_sample(const ForeignGcBench
     Arena names = arena_reserve(1ull << 30);
     foreign_run(&foreign, &input->command, variant->path, 1, 0);
     const uint64_t resolved = foreign_now();
-    sample.built = variant->collect ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, RUNTIME_KIND_STATIC, (String8){ 0 }) :
+    sample.built = variant->collect ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, RUNTIME_KIND_STATIC, (String8){ 0 }, (ForeignLinkStartup){ .entry = foreign_string("_start") }) :
                                      foreign_link_build(&converted, &foreign, &arena, &names);
     const uint64_t converted_at = foreign_now();
     ForeignLink* result = &converted;

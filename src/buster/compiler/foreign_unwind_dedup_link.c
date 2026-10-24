@@ -254,6 +254,7 @@ static ForeignLinkResult foreign_unwind_dedup_link_external(ForeignUnwindDedupLi
         }
         built->dynamic = input->dynamic;
         built->dynamic.exports = exports;
+        built->runtime = input->runtime;
         built->library_versions = input->library_versions;
         for (uint32_t i = 0; i < input->dynamic.export_count; i += 1)
         {
