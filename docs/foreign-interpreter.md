@@ -29,8 +29,11 @@ PIE execution checks. Script failures publish no partial interpreter path.
 The first source checkpoint is based on the qualified foreign-driver snapshot
 whose source manifest has SHA256
 `0e69e4d9b905156c4fbefe998cc49cdf47c659f0af308cbd03639905241c75ed`.
-Target-host correctness and matched whole-command measurements are pending.
-Measurements must include lookup, linking, output and cleanup, with an
-explicit-interpreter control, frozen inputs and repeated alternating processes.
-All builds, tests and measurements use the shared 9700X lock; single-lane timing
-uses CPU 2. No speedup is claimed from the source change alone.
+On the 9700X, with the tree of [#380](https://github.com/buster14a/buster/pull/380)'s
+head `b3c7bf1` ([the record](https://github.com/buster14a/buster-performance/tree/0e3f0a0708f0c01e8bfd2348beefb7fce400fc16/docs/measurements/foreign-link-2026-10-24)), the driver tests pass, and `--time`
+puts the lookup at 10 to 11 µs of a hello world's 0.22 ms link. 41 alternating
+pairs of whole processes (lookup, linking, output and cleanup, each timed by
+the shell around `taskset -c 2`) took medians of 937 µs with the lookup and
+943 µs with an explicit `--dynamic-linker /lib64/ld-linux-x86-64.so.2`, a
+difference inside the processes' spread. Both outputs run; their `PT_INTERP`
+paths differ, since glibc's script names `/usr/lib/ld-linux-x86-64.so.2`.

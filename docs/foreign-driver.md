@@ -219,6 +219,10 @@ and this repository's compiler, built by clang alone.
 
 `benchmark-link` times `link-foreign` beside GNU ld, lld, mold and wild on the
 design's generated programs, from one command line, as a process of its own
-with `--lanes=8` and `--lanes=1` ("The whole link" in the linker design, where
-the 9700X's numbers are). GC, string pooling and CIE pooling remain disabled
-by default; their own measurements are in the linker design.
+with `--lanes=8` and `--lanes=1`. On the 9700X, one lane links the programs of
+1 worker, 2,000 workers and synth's shape in 0.60, 1.12 and 55.2 ms, against
+wild's 1.35, 2.56 and 99.9 ms and mold's 2.44, 3.31 and 99.9 ms on one thread:
+0.89 GB/s of output per lane on the largest, against mold's 0.54. "Foreign
+executables, as built" in the linker design has the tables, the appendix's own
+inputs and where the time goes. GC, string pooling and CIE pooling remain
+disabled by default; their own measurements are in the linker design.

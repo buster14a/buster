@@ -3804,6 +3804,110 @@ threads and the syncs of up to 13 rounds cost more than the work ("Lanes" has
 those costs), so a small link wants one lane: how many lanes a link takes is
 step 8's question, with the exchange's and the winners' first touches.
 
+#### Foreign executables, as built
+
+`foreign_link.c` turns `foreign_run`'s result into the representation, and
+`executable.c` writes it; `link-foreign` ([the command](foreign-driver.md))
+puts the two behind a GNU ld command line, as GCC's and clang's drivers give
+it. It writes static executables without libc and dynamic PIEs; shared
+libraries, static executables with libc and static PIEs are refused for now.
+
+- **The conversion.** The selected objects' sections become atoms in input
+  order (a COMDAT group's loser's dropped first), each object's locals its
+  symbols, each global name one symbol (its winner's, a common symbol's new
+  atom, a library's import at its version, the linker's, or a weak reference
+  to nothing), and each relocation a fixup, by `import.c`'s readers and their
+  vector paths. The unwind records of discarded sections go
+  ("Foreign COMDAT unwind pruning"); section GC, CIE pooling and string merging
+  are opt-in.
+- **What GNU ld and lld do that the output needs:** each needed library once
+  by its soname; the definitions a library refers to or interposes exported;
+  a library's own references left to the loader, which make no `--as-needed`
+  library needed (lld's rule); copy relocations for a library's data that
+  `-fPIE` code reads by `PC32`, with the library's other names at its address
+  and lld's alignment; `__start_` and `__stop_` over the sections of a
+  C-identifier name; `STB_GNU_UNIQUE` kept; the linker's names with lld's
+  visibilities; and lld's regular symbol table. An IFUNC that a fixup reaches is
+  refused: the dynamic PIE has no stubs for its own IFUNCs yet.
+- **Staged chunks.** The atoms' bytes are the inputs' private mappings, so the
+  writer copies each chunk into a lane's buffer and patches, hashes and writes
+  the copy (`ExecutableOptions.stage`). Patched in place, each page of an input
+  was copied on its first write: in CI's runs of synth's shape on one lane,
+  13,508 page faults and 63.1 ms before staging, 2,253 and 53.5 ms after it
+  ([40088135270](https://github.com/buster14a/buster/actions/runs/40088135270),
+  [40090244483](https://github.com/buster14a/buster/actions/runs/40090244483)).
+
+**The corpus.** `test-foreign-corpus` links each program from one command line
+by `link-foreign`, lld and mold: two programs of its own (C with threads,
+thread-locals, an archive, constructors, a weak reference and a
+`__start_`/`__stop_` registry; C++ with iostream, exceptions across units,
+RTTI, COMDAT templates and a thread) and, with `--sqlite` and `--lua`, SQLite's
+shell and Lua's interpreter, each compiled by gcc and by clang at `-O2`, and
+with `--self` this compiler, by clang. The three executables must run alike,
+have the same `.symtab` symbols with the same sizes, and agree on `.dynamic`,
+`.dynsym`'s versions and the dynamic relocations. On the 9700X every program
+passes: 165 checks, 68 of them the two programs of its own that the job's list
+runs ([the record](https://github.com/buster14a/buster-performance/tree/0e3f0a0708f0c01e8bfd2348beefb7fce400fc16/docs/measurements/foreign-link-2026-10-24)). What a reference linker writes otherwise as
+its own valid choice is counted per program, never dropped: mold leaves weak
+undefined names without a version out of `.dynsym`, keeps COMDAT signatures as
+absolute locals, drops `__FRAME_END__`, binds the names a copy relocation
+defines weakly, writes internal visibility as hidden (374 symbols of Lua's by
+gcc) and the bounds' names local, and keeps a few GOT slots that lld and
+`link-foreign` relax; lld leaves symbolic an `R_X86_64_64` to a library's data
+that it scanned before the reference that copies it, and gives a function that
+code both calls and loads from the GOT a second slot (9 in this compiler).
+
+**Throughput.** `benchmark-link`'s dynamic PIEs, linked from one command line
+by each linker as a process, the output on tmpfs: `link-foreign` with
+`--lanes=1` pinned to CPU 2 and with `--lanes=8`, the others with one thread
+(lld's `--threads=1`, mold's and wild's `--no-threads`) pinned to CPU 2 and
+with their own threads on the 15 CPUs, medians on the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/0e3f0a0708f0c01e8bfd2348beefb7fce400fc16/docs/measurements/foreign-link-2026-10-24)):
+
+| Program | `link-foreign`, 1 lane / 8 | wild, 1 thread / its threads | mold, 1 / its | lld, 1 / its | GNU ld | Direct path, 1 lane |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 worker | **0.60** / 1.71 ms | 1.35 / 2.54 ms | 2.44 / 5.46 ms | 4.45 / 5.73 ms | 5.46 ms | 0.017 ms |
+| 2,000 workers | **1.12** / 2.53 ms | 2.56 / 2.88 ms | 3.31 / 6.54 ms | 5.48 / 6.60 ms | 9.08 ms | 0.091 ms |
+| 102,400 workers | **55.2** / 41.2 ms | 99.9 / 24.8 ms | 99.9 / 37.3 ms | 98.7 / 56.8 ms | 355 ms | 7.32 ms |
+
+On the appendix's own inputs, compiled by real compilers (clang's `hello.o`,
+tcc's objects and archive, and synth's 513 objects), from the appendix's
+matched command line with the output on tmpfs, timed by its harness:
+
+| Input | `link-foreign`, 1 lane / 8 | wild, 1 thread / its threads | mold, 1 / its | lld, 1 / its |
+| --- | ---: | ---: | ---: | ---: |
+| hello world | **0.59** / 1.61 ms | 1.34 / 2.51 ms | 2.45 / 5.30 ms | 4.46 / 5.55 ms |
+| tcc | **1.06** / 2.13 ms | 2.14 / 2.93 ms | 3.29 / 6.66 ms | 5.23 / 6.51 ms |
+| synth | **61.0** / 45.0 ms | 139.9 / 25.1 ms | 96.6 / 38.0 ms | 105.2 / 58.8 ms |
+
+Every output runs and prints what lld's does.
+
+- **Per lane, `link-foreign` writes 0.89 GB/s of output** on synth's shape
+  (49.25 MB in 55.2 ms), where mold writes 0.54 GB/s on one thread (53.74 MB in
+  99.9 ms), wild 0.49 and lld 0.50: 1.66 times mold's rate, in 0.55 of its
+  time, with 2,257 page faults against mold's 16,093 and a peak resident set of
+  235 MB against its 268. On the appendix's synth it writes 0.75 GB/s (45.9 MB
+  in 61.0 ms), against mold's 0.48, lld's 0.44 and wild's 0.33.
+  The estimate of 2 to 5 GB/s per lane is not reached:
+  at 2 GB/s the whole link would take 25 ms, about what the resolution or the
+  conversion takes alone now. `--time`'s medians of seven links on one lane:
+  the resolution 21.2 ms (the symbols' parse 6.6, the resolution itself 7.2,
+  the winners 2.5, the exchange 2.2, the opening 1.4), the conversion 20.3,
+  the write 9.8 (its chunks 7.2) and the release 2.9, 54.4 ms in all. The
+  profile's largest items are the resolution's lane loop (25% of cycles), the
+  conversion's (11%) and its `link_check` (9.6%), the relocations' import
+  (8.7%) and the kernel's clearing of new pages (7.8%).
+- **On eight lanes** synth's link takes 40.1 ms (`--time`): the resolution
+  10.1 and the write 6.5, while the conversion stays at 20.4 ms on the calling
+  thread. wild with its threads takes 24.8 ms and mold 37.3. #87 puts the
+  conversion on lanes.
+- **Small links are the process around them.** `--time` puts a hello world's
+  link at 0.22 ms of the 0.59 ms its process takes; the rest is starting and
+  ending the compiler's executable, which was a PIE until #86: its 366,684
+  relative relocations made a run that does nothing take 8 to 13 ms on the
+  laptop, against 1.5 ms linked at a fixed address. More lanes cost a small
+  link their threads' start: 1.71 ms on eight for one worker.
+
 ### Lanes
 
 Fleury's model, adapted to this repository's style: every phase is one
@@ -4511,10 +4615,16 @@ and with this document updated with what was measured:
    each round's objects parsed, their records exchanged and resolved, the
    members the link needs loaded in rounds, and COMDAT groups picked, as GNU
    ld picks them where its result doesn't depend on the archives' order and
-   as lld does where it does, which the tests check against both. Next, the
-   loaded objects into the representation (atoms, symbols and fixups, from
-   step 7's relocation scan) so that `executable.c` writes them, then garbage
-   collection, merged strings and `.eh_frame`, and the corpus.
+   as lld does where it does, which the tests check against both.
+   The second part is done: the loaded objects into the representation and
+   written by `executable.c` as static executables without libc and dynamic
+   PIEs, by `link-foreign`, with section GC, CIE pooling and string merging
+   opt-in; the differential tests against lld and mold pass on the corpus
+   (`test-foreign-corpus`: two programs of its own, SQLite's shell, Lua and
+   this compiler, each by gcc and clang), and the per-lane throughput is
+   measured against mold's and wild's single thread ("Foreign executables, as
+   built"). Static executables with libc, static PIEs, shared libraries and the
+   dynamic PIE's own IFUNCs remain.
 8. **More than one lane:** measured scaling, and the per-filesystem write
    choice.
 9. **Unwind tables from the code generator's prologues, and DWARF,** then
