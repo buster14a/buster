@@ -1,2 +1,0 @@
-lengths only: 136660 generated form/operand cases, 300000 random instructions, boundaries and partitions, 0 differ
-lengths-only page edges: counts 0 to 199 and 1023 to 1025, 16 alignments, 0 differ

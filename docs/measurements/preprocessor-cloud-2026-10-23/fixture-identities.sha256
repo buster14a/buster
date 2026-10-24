@@ -1,6 +1,0 @@
-89a1f4b4fb9784a4e3a28e295483cecc8cec6ac9ae58dde84423f8453b2860f8  /workspace/scratch/61c60105fb18/pp-ablation/fixtures/flat-unused.c
-5fbfeec58668815642ab8d8cb2eaaddebd7fc6d8e427e9cb552871d13df72572  /workspace/scratch/61c60105fb18/pp-ablation/fixtures/nested-unused.c
-74f82f492b23dd3f8179b14864a9ca03724589ccc6f750f47c041424cb1fe4fe  /workspace/scratch/61c60105fb18/pp-ablation/fixtures/literal-runs.c
-d7276359c3c1d79ba48c5b1c4b0fc48b8dd5c88acf40451d532c81eef57ef992  /workspace/scratch/61c60105fb18/pp-ablation/fixtures/argument-copies.c
-a043173e7e55d9e718b67f668f4b5569ccde83bf41aaedfaf7af346904fa798f  /workspace/scratch/61c60105fb18/pp-ablation/07-paste-ascii/fixtures/paste-repeated.c
-cc7219b0d93d060d6d4c46b917c6b241d3a1c5a2efd73de0c5313ddec91dc0c7  /workspace/scratch/61c60105fb18/pp-ablation/07-paste-ascii/fixtures/paste-unique.c

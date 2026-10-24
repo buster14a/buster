@@ -1,7 +1,0 @@
-The read-only writer-byte command completed both WRITER_END markers and its
-final remote timestamp. Its local zsh receipt wrapper then exited 1 because
-status is a read-only shell variable. No .status file was written. The original
-output and command remain unchanged. This wrapper failure affects no benchmark
-or identity receipt; the follow-up disassembly uses strings_inspect_status.
-The differing raw writer hashes require disassembly review, not an assumption
-of identical writer bytes.

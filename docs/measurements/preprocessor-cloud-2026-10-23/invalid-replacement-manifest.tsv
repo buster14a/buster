@@ -1,6 +1,0 @@
-round	workload	variant	invalid_observation_id	invalid_exit_status	invalid_reason	replacement_observation_id	replacement_exit_status	replacement_metrics_valid
-2	sqlite	05-substitution	round-2-sqlite-05-substitution.txt	0	only_perf_warning_no_metrics	replacement-round-2-sqlite-05-substitution.txt	0	1
-1	sqlite	06-allpp-min16	round-1-sqlite-06-allpp-min16.txt	0	only_perf_warning_no_metrics	replacement-round-1-sqlite-06-allpp-min16.txt	0	1
-3	nested-unused	00-baseline	round-3-nested-unused-00-baseline.txt	0	only_perf_warning_no_metrics	replacement-round-3-nested-unused-00-baseline.txt	0	1
-2	nested-unused	05-substitution	round-2-nested-unused-05-substitution.txt	0	only_perf_warning_no_metrics	replacement-round-2-nested-unused-05-substitution.txt	0	1
-2	literal-runs	03-allpp	round-2-literal-runs-03-allpp.txt	0	only_perf_warning_no_metrics	replacement-round-2-literal-runs-03-allpp.txt	0	1

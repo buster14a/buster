@@ -1,1 +1,4 @@
 build/
+
+# Raw evidence belongs in https://github.com/buster14a/buster-performance.
+/docs/measurements

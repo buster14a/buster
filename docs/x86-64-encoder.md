@@ -451,7 +451,7 @@ its discarded-byte scratch buffer, encode chunks and offset-rebasing pass
 ([branch sizing](branch-sizing.md#lengths-and-memory)). The caller then
 encodes the sized records once. The implementation comparison, benchmark
 commands and host qualification are recorded in
-[the lengths-only refinement record](measurements/x86-lengths-2026-10-23/refinement.md).
+[the lengths-only refinement record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/refinement.md).
 
 ### Fixups
 
