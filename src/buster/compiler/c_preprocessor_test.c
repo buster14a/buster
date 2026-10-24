@@ -335,6 +335,55 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
     return result;
 }
 
+// Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
+// takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
+// the statistics (but the timing ones) must agree in this configuration too. Returns whether they do.
+static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name)
+{
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    bool ready[2];
+    bool ran[2];
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        PPOptions run = *options;
+        run.scalar = k == 1;
+        run.expansion_starts = false;
+        run.timing = true;
+        ready[k] = intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
+        ran[k] = ready[k] && pp_run(&runs[k], path);
+    }
+    char label[4200];
+    snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
+    bool result = ready[0] && ready[1] && pp_same_streams(&runs[0], &runs[1], label);
+    if (result && (ran[0] != ran[1] || runs[0].errors != runs[1].errors || runs[0].warnings != runs[1].warnings))
+    {
+        printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, runs[0].errors, runs[1].errors, runs[0].warnings,
+               runs[1].warnings);
+        result = false;
+    }
+    PPStatistics statistics[2] = { runs[0].statistics, runs[1].statistics };
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        statistics[k].include_ticks = 0;
+        statistics[k].embed_ticks = 0;
+    }
+    if (result && memcmp(&statistics[0], &statistics[1], sizeof(PPStatistics)) != 0)
+    {
+        printf("%s: the vectorized and scalar kernels count different statistics\n", label);
+        result = false;
+    }
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        if (ready[k])
+        {
+            pp_release(&runs[k]);
+        }
+        intern_release(&tables[k]);
+    }
+    return result;
+}
+
 // The text one of the printers gives for a run, in memory (null if it fails); `free` it.
 static char* pp_test_print(Preprocessor* pp, bool vector, bool markers, size_t* length)
 {
@@ -2268,7 +2317,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     if (result)
     {
         result = pp_same_streams(&runs[0], &runs[1], test->name) && pp_same_directive_tables(&runs[0], &runs[1], test->name) && ran[0] == ran[1] &&
-                 ran[0] != test->fails;
+                 ran[0] != test->fails && pp_test_compile_kernels(&options, path, test->name);
         if (ran[0] == test->fails)
         {
             printf("%s: %s\n", test->name, test->fails ? "should fail but doesn't" : "fails");
@@ -3076,7 +3125,8 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
         options.scalar = k == 1;
         ran[k] = pp_test_run(&runs[k], &tables[k], &options, path);
     }
-    bool result = ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], path) && pp_same_directive_tables(&runs[0], &runs[1], path);
+    bool result = ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], path) && pp_same_directive_tables(&runs[0], &runs[1], path) &&
+                  pp_test_compile_kernels(&options, path, path);
     *tokens += runs[0].output.count;
     PPSpellings ours = { 0 };
     result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path);

@@ -142,7 +142,13 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks
 // Token arrays get whole-vector stores past their last token.
 #define BUSTER_PP_TOKEN_SLACK 64
 // The arrays of records, each reserved in an arena of its own.
-#define BUSTER_PP_ARRAYS 32
+#define BUSTER_PP_ARRAYS 40
+// The base pages before the huge pages of the tables that a translation unit usually fills to a few hundred kilobytes:
+// the macros and their names' index, the compiled bodies, and the history's substitutions and generated tokens. On
+// sqlite3.c (with glibc's headers) each would otherwise take a huge page the kernel clears whole (2 MB, about 86 us on
+// the 9700X) for 86 to 530 KB, which base pages cover for 0.46 us per 4 KB; on this compiler's main.c, whose tables
+// are larger, the first megabyte in base pages costs about as much as the huge pages it replaces.
+#define BUSTER_PP_TABLE_SMALL_BYTES (1ull << 20)
 // Records: location ranges, files, macros, compiled body items and parameters.
 #define BUSTER_PP_MAX_RANGES (1u << 22)
 #define BUSTER_PP_MAX_FILES (1u << 20)
@@ -1328,6 +1334,7 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
 }
 
 static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
+static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 
 #include "c_preprocessor_history.c"
 
@@ -7135,6 +7142,229 @@ static void pp_substitute_simple(Preprocessor* pp, const PPInvocation* invocatio
     pp->history_current = saved_history;
 }
 
+// Whether an enabled object-like macro's expansion goes straight into the target (pp_expand_object's `direct`): it isn't
+// a builtin, its body has tokens and no ##, and none of them names a macro.
+static bool pp_direct_object(const Preprocessor* pp, const PPMacro* macro)
+{
+    const PPFileData* body = &pp->datas[macro->data];
+    bool result = (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->body_begin < macro->body_end;
+    for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
+    {
+        result = (body->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[t]);
+    }
+    return result;
+}
+
+// The output's columns while pp_emit_simple writes into them, in locals: with -fno-strict-aliasing, a store through a
+// byte pointer would have the compiler load the PPTokens' pointers and count again for the next token.
+typedef struct PPEmitter PPEmitter;
+struct PPEmitter
+{
+    uint8_t* kinds;
+    uint8_t* flags;
+    uint32_t* values;
+    uint32_t* locations;
+    uint32_t count;
+    // The origin of the token before, where the next run of the history begins if the next one's differs.
+    uint32_t previous;
+};
+
+// One token of a simple invocation's expansion into the output (pp_emit_simple).
+BUSTER_INLINE void pp_emit_expanded(Preprocessor* pp, PPEmitter* emitter, uint8_t kind, uint8_t flags, uint32_t value, uint32_t location, uint32_t origin)
+{
+    if (origin != emitter->previous)
+    {
+        pp_history_change(pp, emitter->count, origin);
+        emitter->previous = origin;
+    }
+    emitter->kinds[emitter->count] = kind;
+    emitter->flags[emitter->count] = flags;
+    emitter->values[emitter->count] = value;
+    emitter->locations[emitter->count] = location;
+    emitter->count += 1;
+}
+
+// The expansion of a simple invocation (pp_finish_simple) that names no macro but disabled ones and object-like ones
+// that go straight into the target, written into the output at once: what pp_substitute_simple, the push of its buffer
+// (with its macro disabled), the main loop's steps over the buffer and its pop would write (pp_step_buffer, whose runs
+// paint the disabled macros' names, and pp_expand_object, which writes the others' bodies), with the same history and
+// statistics. Leaves its trailing space in `*trailing`. Returns false, having changed nothing, when it isn't so, or the
+// tokens go to a capture or -E's markers need their starts.
+static bool pp_emit_simple(Preprocessor* pp, const PPInvocation* invocation, uint8_t* trailing)
+{
+    const PPMacro* macro = &pp->macros[invocation->macro];
+    const PPItem* items = pp->items + macro->items_begin;
+    const uint32_t count = macro->item_count;
+    const PPFileData* data = &pp->datas[macro->data];
+    PPTokens* out = &pp->output;
+    const PPTokens* arguments = &pp->arguments;
+    bool result = pp->capture_count == 0 && !pp->options.expansion_starts;
+    // The expansion's size, and whether each name of a macro in the body is painted or expands straight in.
+    uint64_t size = 0;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        const PPItem* item = &items[i];
+        if (item->kind == PP_ITEM_TOKEN)
+        {
+            const uint32_t last = i + item->parameter;
+            for (uint32_t t = item->token; result && t <= items[last].token; t += 1)
+            {
+                size += 1;
+                if ((data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && pp_is_macro_vector(pp, data->values[t]))
+                {
+                    const PPMacroId id = pp->macro_of[data->values[t]];
+                    const PPMacro* nested = &pp->macros[id];
+                    const bool expands = id != invocation->macro && nested->disabled == 0;
+                    result = !expands || pp_direct_object(pp, nested);
+                    size += expands && result ? nested->body_end - nested->body_begin - 1 : 0;
+                }
+            }
+            i = last;
+        }
+        else
+        {
+            const PPArgument* argument = &pp->argument_records[invocation->arguments + item->parameter];
+            size += argument->raw_end - argument->raw_begin;
+        }
+    }
+    // The buffer's runs check for room for BUSTER_PP_TOKEN_SLACK tokens: so does this.
+    result = result && size != 0 && out->count + size + BUSTER_PP_TOKEN_SLACK <= out->capacity;
+    if (result)
+    {
+        // The substitutions belong to this expansion, as in pp_substitute_simple.
+        const uint32_t saved_history = pp->history_current;
+        pp->history_current = invocation->history;
+        const bool history = !pp->options.no_history;
+        const uint32_t begin = out->count;
+        const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
+        // Without history every origin is 0, so no run of it begins.
+        PPEmitter emitter = {
+            .kinds = out->kinds,
+            .flags = out->flags,
+            .values = out->values,
+            .locations = out->locations,
+            .count = begin,
+            .previous = history ? BUSTER_PP_NONE : 0,
+        };
+        // The buffer's tokens copied by its runs, and the bodies written straight in, for the statistics.
+        uint32_t run_tokens = 0;
+        uint32_t directs = 0;
+        uint32_t direct_tokens = 0;
+        bool after_direct = false;
+        bool next_space = false;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const PPItem* item = &items[i];
+            pp->history_anchor = macro->base + data->starts[item->token];
+            pp->history_spelling = pp->history_anchor;
+            next_space |= (item->flags & BUSTER_PP_ITEM_SPACE) != 0;
+            if (item->kind == PP_ITEM_TOKEN)
+            {
+                const uint32_t last = i + item->parameter;
+                for (uint32_t t = item->token; t <= items[last].token; t += 1)
+                {
+                    // The token as the buffer would hold it: pp_append_file_tokens's flags, the run's first space, and
+                    // the expansion's first token the name's flags (pp_finish_invocation).
+                    const uint8_t kind = data->kinds[t] & 0x7F;
+                    uint8_t flags = (uint8_t)((pp_file_space(data, t) ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+                    flags = t == item->token ? (uint8_t)((flags & ~BUSTER_PP_SPACE) | (next_space ? BUSTER_PP_SPACE : 0)) : flags;
+                    flags = emitter.count == begin ? (uint8_t)((flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE)
+                                                   : flags;
+                    const uint32_t value = kind == C_TOKEN_RAW_IDENTIFIER ? data->values[t] : macro->base + data->values[t];
+                    const uint32_t location = macro->base + data->starts[t];
+                    const PPMacroId id = kind == C_TOKEN_RAW_IDENTIFIER && pp_is_macro_vector(pp, value) ? pp->macro_of[value] : 0;
+                    if (id != 0 && id != invocation->macro && pp->macros[id].disabled == 0)
+                    {
+                        // A body straight into the target, its first token with the name's flags (pp_expand_object): it
+                        // ends the buffer's run, and another starts after it if the buffer has more tokens.
+                        const PPMacro* nested = &pp->macros[id];
+                        const PPFileData* nested_data = &pp->datas[nested->data];
+                        const uint32_t expansion = history ? pp_history_expansion(pp, id, location, invocation->history) : 0;
+                        for (uint32_t b = nested->body_begin; b < nested->body_end; b += 1)
+                        {
+                            const uint8_t body_kind = nested_data->kinds[b] & 0x7F;
+                            uint8_t body_flags = (uint8_t)((pp_file_space(nested_data, b) ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+                            body_flags = b == nested->body_begin ? (uint8_t)((body_flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) |
+                                                                             (flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | BUSTER_PP_NAME_SPACE)
+                                                                 : body_flags;
+                            const uint32_t body_value = body_kind == C_TOKEN_RAW_IDENTIFIER ? nested_data->values[b] : nested->base + nested_data->values[b];
+                            pp_emit_expanded(pp, &emitter, body_kind, body_flags, body_value, nested->base + nested_data->starts[b], expansion);
+                        }
+                        directs += 1;
+                        direct_tokens += nested->body_end - nested->body_begin;
+                        after_direct = true;
+                    }
+                    else
+                    {
+                        // A name of a disabled macro is painted, as the buffer's run paints it.
+                        flags |= id != 0 ? BUSTER_PP_NO_EXPAND : 0;
+                        after_direct = false;
+                        run_tokens += 1;
+                        pp_emit_expanded(pp, &emitter, kind, flags, value, location, invocation->history);
+                    }
+                }
+                i = last;
+                next_space = false;
+            }
+            else
+            {
+                const PPArgument* argument = &pp->argument_records[invocation->arguments + item->parameter];
+                for (uint32_t a = argument->raw_begin; a < argument->raw_end;)
+                {
+                    // A substitution per run of tokens of one origin (pp_history_argument), as pp_append_tokens gives them.
+                    const uint32_t source = history ? arguments->origins[a] : 0;
+                    uint32_t stop = a + 1;
+                    while (history && stop < argument->raw_end && arguments->origins[stop] == source)
+                    {
+                        stop += 1;
+                    }
+                    stop = history ? stop : argument->raw_end;
+                    const uint32_t substitution = history ? pp_history_substitution(pp, source, pp->history_anchor) : 0;
+                    for (; a < stop; a += 1)
+                    {
+                        uint8_t flags = arguments->flags[a];
+                        flags = (uint8_t)((flags & ~BUSTER_PP_START_OF_LINE) | ((flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+                        flags = a == argument->raw_begin
+                                    ? (uint8_t)((flags & ~(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE)) | (next_space ? BUSTER_PP_SPACE : 0))
+                                    : flags;
+                        flags = emitter.count == begin ? (uint8_t)((flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE)
+                                                       : flags;
+                        const uint8_t kind = arguments->kinds[a];
+                        const uint32_t value = arguments->values[a];
+                        // An argument names no enabled macro (pp_needs_expansion): a macro's name in it is a disabled one's.
+                        flags |= kind == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp_is_macro_vector(pp, value) ? BUSTER_PP_NO_EXPAND : 0;
+                        after_direct = false;
+                        run_tokens += 1;
+                        pp_emit_expanded(pp, &emitter, kind, flags, value, arguments->locations[a], substitution);
+                    }
+                }
+                next_space = argument->raw_begin == argument->raw_end && next_space;
+            }
+        }
+        out->count = emitter.count;
+        if (history)
+        {
+            pp_history_change(pp, out->count, 0);
+            // The buffer's origins would have reached its whole substituted expansion (pp_history_fill's peak).
+            const uint32_t peak = pp->expansions.count + (uint32_t)size - (direct_tokens - directs);
+            pp->origin_peak[2] = pp->origin_peak[2] < peak ? peak : pp->origin_peak[2];
+        }
+        *trailing = next_space ? BUSTER_PP_SPACE : 0;
+        if (pp->options.timing)
+        {
+            // Each body written straight in ends a run (an empty one before it, too), and one more run copies the
+            // tokens after the last one, unless it ends the buffer.
+            pp->statistics.buffer_runs += directs + !after_direct;
+            pp->statistics.buffer_run_tokens += run_tokens;
+            pp->statistics.final_buffer_run_tokens += run_tokens;
+            pp->statistics.direct_expansions += directs;
+            pp->statistics.final_direct_object_tokens += direct_tokens;
+        }
+        pp->history_current = saved_history;
+    }
+    return result;
+}
+
 // Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
 // pp_finish_invocation would, when that is simple: a BUSTER_PP_MACRO_SIMPLE macro given as many arguments as it takes,
 // none of the ones it uses naming an enabled macro (so each is its own expansion), read while no stream or capture
@@ -7175,10 +7405,15 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
         // pp_close_invocation's place for diagnostics while it substitutes (a stack that overflows).
         const uint32_t saved_origin = pp->diagnostic_origin;
         pp->diagnostic_origin = invocation->history != 0 ? pp->history[invocation->history - 1].parent : 0;
-        uint32_t begin;
+        uint32_t begin = 0;
+        uint32_t end = 0;
         uint8_t trailing;
-        pp_substitute_simple(pp, invocation, &begin, &trailing);
-        const uint32_t end = pp->expansions.count;
+        const bool emitted = pp_emit_simple(pp, invocation, &trailing);
+        if (!emitted)
+        {
+            pp_substitute_simple(pp, invocation, &begin, &trailing);
+            end = pp->expansions.count;
+        }
         const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
         if (begin < end)
         {
@@ -7187,7 +7422,12 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
         }
         pp->arguments.count = invocation->arguments_begin;
         pp->argument_record_count = invocation->arguments;
-        if (begin < end)
+        if (emitted)
+        {
+            // The buffer's pop would pass its trailing space on to the context below it.
+            pp->contexts[pp->context_count - 1].pending_flags |= trailing;
+        }
+        else if (begin < end)
         {
             PPContext* context = pp_push_buffer(pp, &pp->expansions, begin, end, invocation->macro, invocation->expansion_end, false, true);
             if (context != 0)
@@ -11005,8 +11245,11 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
     const PPFileData* data = &pp->datas[context->data];
     const uint8_t kind = data->directive_kind[directive];
     const bool text = kind == PP_DIRECTIVE_ERROR || kind == PP_DIRECTIVE_WARNING;
-    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && pp_recover_direct_raw(pp, context, directive) &&
-        pp_recover_direct_header_comment(pp, context, directive))
+    // Only a header name's line can need the raw or comment repairs (pp_recover_direct_raw and
+    // pp_recover_direct_header_comment test the kind first themselves).
+    const bool header = kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT || kind == PP_DIRECTIVE_EMBED;
+    if ((!text || pp_recover_diagnostic_line(pp, context, directive)) && (!header || (pp_recover_direct_raw(pp, context, directive) &&
+                                                                                      pp_recover_direct_header_comment(pp, context, directive))))
     {
         // Recovery resumes a capture after its directive; this caller still has to dispatch that directive itself.
         context->next_directive = directive;
@@ -13740,18 +13983,25 @@ static void pp_dedupe_directories(Preprocessor* pp)
 // An array of `count` records of `size` bytes, in an arena of its own (address space, touched as it is used).
 // An array of its own of `count` entries of `size` bytes, while `*reserved` (which becomes false if it can't be): the
 // reservations stop at the first that fails.
-static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
+// pp_array whose first `small` bytes are base pages (arena_reserve_small): for a table a translation unit usually fills
+// to a few hundred kilobytes, where the first huge page past them would cost more than the base pages it replaces.
+static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
 {
     void* result = 0;
     if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
         Arena* arena = &pp->arrays[pp->array_count];
-        *arena = arena_reserve(count * size + 64);
+        *arena = arena_reserve_small(count * size + 64, small);
         result = arena_push_array(arena, count, size, 64);
         pp->array_count += 1;
     }
     *reserved = result != 0;
     return result;
+}
+
+static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
+{
+    return pp_array_small(pp, reserved, count, size, BUSTER_ARENA_SMALL_BYTES);
 }
 
 // SOURCE_DATE_EPOCH is a complete, nonnegative decimal integer. strtoll handles overflow; the first-byte and end
@@ -13815,7 +14065,8 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;
     // The memory, reserved in turn until a reservation fails (pp_release releases what was).
-    pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
+    // Paths and the predefines' text, about 40 KB on sqlite3.c and 90 KB on this compiler's main.c: base pages.
+    pp->arena = arena_reserve_small(BUSTER_PP_ARENA_BYTES, 256ull << 10);
     bool result = pp->arena.base != 0;
     for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
@@ -13844,11 +14095,11 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->expansion_starts = pp_array(pp, &result, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
     pp->silent_pragmas = pp_array(pp, &result, BUSTER_PP_MAX_SILENT_PRAGMAS, sizeof(PPExpansionStart));
     pp->embeds = pp_array(pp, &result, BUSTER_PP_MAX_EMBEDS, sizeof(PPEmbed));
-    pp->macro_of = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
+    pp->macro_of = pp_array_small(pp, &result, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId), BUSTER_PP_TABLE_SMALL_BYTES);
     pp->is_macro = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
     pp->poisoned = pp_array(pp, &result, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
-    pp->macros = pp_array(pp, &result, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
-    pp->items = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(PPItem));
+    pp->macros = pp_array_small(pp, &result, BUSTER_PP_MAX_MACROS, sizeof(PPMacro), BUSTER_PP_TABLE_SMALL_BYTES);
+    pp->items = pp_array_small(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(PPItem), BUSTER_PP_TABLE_SMALL_BYTES);
     pp->parameters = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
     pp->pushed_names = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
     pp->pushed_macros = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
@@ -13880,7 +14131,9 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->cache = options->files;
     if (pp->cache == 0)
     {
-        pp->cache = arena_push(&pp->arena, sizeof(FileCache), 64);
+        // A reservation of its own: its 41 KB (with every lane's arenas) would take the arena past its first 64 KB, and
+        // its later pushes into a huge page the kernel clears whole.
+        pp->cache = result ? pp_array(pp, &result, 1, sizeof(FileCache)) : 0;
         pp->owns_cache = pp->cache != 0;
         result = result && pp->cache != 0 && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
     }
@@ -14083,9 +14336,12 @@ static bool pp_run_prelude(Preprocessor* pp)
     }
     else
     {
-        char* text = arena_push(&pp->arena, BUSTER_PP_PREDEFINES_BYTES, 1);
+        // Made in scratch memory, which only pp_virtual_file's copy of the text outlives.
+        Scratch scratch = scratch_begin(&pp->arena);
+        char* text = arena_push(scratch.arena, BUSTER_PP_PREDEFINES_BYTES, 1);
         const uint32_t length = text != 0 ? pp_predefines(&pp->options, text, &pp->flt_eval_method) : BUSTER_PP_PREDEFINES_BYTES + 1;
         const uint32_t file = length <= BUSTER_PP_PREDEFINES_BYTES ? pp_virtual_file(pp, "<built-in>", text, length, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
+        scratch_end(scratch);
         result = file != BUSTER_PP_NONE;
         if (result)
         {
