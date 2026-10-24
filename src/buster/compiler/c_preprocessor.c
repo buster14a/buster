@@ -690,6 +690,9 @@ struct PPEmbed
 #define BUSTER_PP_MACRO_IN_ORDER 0x20
 // #pragma push_macro pushed it: a redefinition is no warning (clang's isAllowRedefinitionsWithoutWarning).
 #define BUSTER_PP_MACRO_REDEFINABLE 0x40
+// A compiled BUSTER_PP_MACRO_IN_ORDER macro whose body has only tokens and parameters (no #, ## or __VA_OPT__): its
+// invocations can be finished without the invocation stack (pp_finish_simple).
+#define BUSTER_PP_MACRO_SIMPLE 0x80
 
 // The built-in macros.
 typedef enum PPBuiltin
@@ -2584,10 +2587,16 @@ static uint32_t pp_count_lines(const PPFileData* data, uint32_t begin, uint32_t 
         const __m512i bytes = _mm512_maskz_loadu_epi8(valid, data->bytes + i);
         const uint64_t newlines = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n'));
         const uint64_t returns = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r'));
-        // The byte after the block's last one, if the counted bytes go on past the block.
-        const uint64_t next_newline = remaining > 64 && data->bytes[i + 64] == '\n';
-        const uint64_t followed = (newlines >> 1) | (next_newline << 63);
-        result += (uint32_t)__builtin_popcountll((newlines | (returns & ~followed)) & valid);
+        if (BUSTER_UNLIKELY(returns != 0))
+        {
+            // The byte after the block's last one, if the counted bytes go on past the block: a '\r' before a '\n'
+            // ends a line at the '\n'.
+            const uint64_t next_newline = remaining > 64 && data->bytes[i + 64] == '\n';
+            const uint64_t followed = (newlines >> 1) | (next_newline << 63);
+            result += (uint32_t)__builtin_popcountll(returns & ~followed);
+        }
+        // The masked load zeroed the bytes past the end.
+        result += (uint32_t)__builtin_popcountll(newlines);
     }
     return result;
 }
@@ -2631,11 +2640,11 @@ static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range)
 }
 
 // The physical line and column of `location` in its range's file: lines counted from the file's cursor (or from its
-// start, for a place before the cursor), and the column from the line's start before it.
+// start, for a place before the cursor), and the column from the line's start before it, unless `column` is null.
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column)
 {
     uint32_t result = 1;
-    *column = 1;
+    uint32_t found = 1;
     const PPRange* record = &pp->ranges[range];
     if (record->file != BUSTER_PP_NONE)
     {
@@ -2658,7 +2667,7 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
                 }
             }
             result = low + 1;
-            *column = offset - data->diagnostic_lines[low] + 1;
+            found = offset - data->diagnostic_lines[low] + 1;
         }
         else
         {
@@ -2671,12 +2680,16 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
             data->line_cursor = offset;
             data->line_cursor_line = result;
             uint32_t line_start = offset;
-            while (line_start > 0 && data->bytes[line_start - 1] != '\n' && data->bytes[line_start - 1] != '\r')
+            while (column != 0 && line_start > 0 && data->bytes[line_start - 1] != '\n' && data->bytes[line_start - 1] != '\r')
             {
                 line_start -= 1;
             }
-            *column = offset - line_start + 1;
+            found = offset - line_start + 1;
         }
+    }
+    if (column != 0)
+    {
+        *column = found;
     }
     return result;
 }
@@ -4605,7 +4618,13 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     }
     scratch_end(scratch);
     in_order = in_order && result;
+    bool simple = in_order;
+    for (uint32_t i = 0; simple && i < count; i += 1)
+    {
+        simple = items[i].kind == PP_ITEM_TOKEN || items[i].kind == PP_ITEM_PARAMETER;
+    }
     macro->flags |= in_order ? BUSTER_PP_MACRO_IN_ORDER : 0;
+    macro->flags |= simple ? BUSTER_PP_MACRO_SIMPLE : 0;
     macro->order_count = (uint16_t)(in_order ? order_count : 0);
     pp->item_count += in_order ? order_count : 0;
     macro->item_count = result ? count : 0;
@@ -4924,8 +4943,11 @@ BUSTER_INLINE uint32_t pp_run_limit(const PPFileData* data, const PPContext* con
 // with whole-vector stores (the lanes `valid` leaves out get junk, which the slack past a stack's capacity has room
 // for): kinds without the start-of-line bit, flags from the leading-space bits and either the start-of-line bits or, for
 // a macro's body (`from_macro`), BUSTER_PP_FROM_MACRO, values and locations, the values of non-identifiers and the
-// locations offset by the base. `kinds` are the file's kinds p to p + 63, loaded with `valid`.
-BUSTER_INLINE void pp_store_file_tokens(PPTokens* out, uint32_t index, const PPFileData* data, uint32_t base, uint32_t p, uint32_t available, __m512i kinds, bool from_macro)
+// locations offset by the base. `kinds` are the file's kinds p to p + 63, loaded with `valid`. Only the groups of 16
+// values and locations that hold the first `stored` tokens (at most `available`) are written: a run that stops at a
+// macro's name keeps only the tokens before it.
+BUSTER_INLINE void pp_store_file_tokens(PPTokens* out, uint32_t index, const PPFileData* data, uint32_t base, uint32_t p, uint32_t available, uint32_t stored, __m512i kinds,
+                                        bool from_macro)
 {
     const __mmask64 valid = _bzhi_u64(~0ull, available);
     const __m512i plain = _mm512_and_si512(kinds, _mm512_set1_epi8(0x7F));
@@ -4944,7 +4966,7 @@ BUSTER_INLINE void pp_store_file_tokens(PPTokens* out, uint32_t index, const PPF
     _mm512_storeu_si512(out->flags + index, flags);
     const __m512i bases = _mm512_set1_epi32((int)base);
     // Only the groups of 16 that hold tokens: most runs are short.
-    for (uint32_t group = 0; group * 16 < available; group += 1)
+    for (uint32_t group = 0; group * 16 < stored; group += 1)
     {
         const __mmask16 lanes = (__mmask16)(valid >> (group * 16));
         const __mmask16 others = (__mmask16)~(identifiers >> (group * 16));
@@ -4966,7 +4988,7 @@ static bool pp_append_file_tokens(Preprocessor* pp, PPTokens* out, const PPFileD
         for (uint32_t p = begin; p < end; p += 64)
         {
             const uint32_t available = end - p < 64 ? end - p : 64;
-            pp_store_file_tokens(out, count, data, base, p, available, _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), data->kinds + p), from_macro);
+            pp_store_file_tokens(out, count, data, base, p, available, available, _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), data->kinds + p), from_macro);
             count += available;
         }
         pp_history_fill(pp, out, out->count, count, from_macro ? pp->history_current : 0);
@@ -5029,7 +5051,10 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
                 break;
             }
         }
-        pp_store_file_tokens(target, target->count, data, base, p, available, kinds, false);
+        if (take != 0)
+        {
+            pp_store_file_tokens(target, target->count, data, base, p, available, take, kinds, false);
+        }
         target->count += take;
         p += take;
     }
@@ -5095,7 +5120,8 @@ static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* toke
         const uint32_t out = target->count;
         _mm512_storeu_si512(target->kinds + out, kinds);
         _mm512_storeu_si512(target->flags + out, _mm512_mask_mov_epi8(flags, paint, _mm512_or_si512(flags, _mm512_set1_epi8(BUSTER_PP_NO_EXPAND))));
-        for (uint32_t group = 0; group * 16 < available; group += 1)
+        // Only the groups of 16 that hold the tokens taken.
+        for (uint32_t group = 0; group * 16 < take; group += 1)
         {
             const __mmask16 lanes = (__mmask16)(valid >> (group * 16));
             _mm512_storeu_si512(target->values + out + group * 16, _mm512_maskz_loadu_epi32(lanes, tokens->values + p + group * 16));
@@ -7062,6 +7088,157 @@ static void pp_collect_step(Preprocessor* pp)
 // Invokes a function-like macro whose name was just read and whose '(' is next: collects its arguments, then expands
 // and substitutes them. When they are all in the top context, pp_collect_arguments collects them at once; else the main
 // loop collects them a token at a time (pp_collect_step), as it does for the scalar kernels.
+// pp_substitute for a BUSTER_PP_MACRO_SIMPLE macro whose arguments expand to themselves: its body's runs of tokens, and
+// each parameter's raw argument, with the leading spaces pp_substitute gives them, into pp->expansions from `*begin`.
+static void pp_substitute_simple(Preprocessor* pp, const PPInvocation* invocation, uint32_t* begin, uint8_t* trailing)
+{
+    const uint32_t saved_history = pp->history_current;
+    pp->history_current = invocation->history;
+    const PPMacro* macro = &pp->macros[invocation->macro];
+    const PPItem* items = pp->items + macro->items_begin;
+    const uint32_t count = macro->item_count;
+    const PPFileData* data = &pp->datas[macro->data];
+    PPTokens* out = &pp->expansions;
+    *begin = out->count;
+    bool next_space = false;
+    for (uint32_t i = 0; i < count && !pp->fatal; i += 1)
+    {
+        const PPItem* item = &items[i];
+        pp->history_anchor = macro->base + data->starts[item->token];
+        pp->history_spelling = pp->history_anchor;
+        next_space |= (item->flags & BUSTER_PP_ITEM_SPACE) != 0;
+        if (item->kind == PP_ITEM_TOKEN)
+        {
+            // A run of consecutive body tokens with their own leading spaces (pp_compile_macro's suffix counts).
+            const uint32_t at = out->count;
+            const uint32_t last = i + item->parameter;
+            pp_append_file_tokens(pp, out, data, macro->base, item->token, items[last].token + 1, true);
+            i = last;
+            if (at < out->count)
+            {
+                pp_set_space(out, at, next_space);
+            }
+            next_space = false;
+        }
+        else
+        {
+            const PPArgument* argument = &pp->argument_records[invocation->arguments + item->parameter];
+            if (argument->raw_begin != argument->raw_end)
+            {
+                pp_append_tokens(pp, &pp->arguments, argument->raw_begin, argument->raw_end, true, next_space ? BUSTER_PP_SPACE : 0);
+                next_space = false;
+            }
+        }
+    }
+    *trailing = next_space ? BUSTER_PP_SPACE : 0;
+    pp->history_current = saved_history;
+}
+
+// Whether a buffer's tokens [begin, end) name no macro but where a painted name does: a rescan copies them all, as they are.
+static bool pp_names_no_macro(const Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end)
+{
+    bool result = true;
+    for (uint32_t p = begin; result && p < end; p += 64)
+    {
+        const __mmask64 valid = _bzhi_u64(~0ull, end - p < 64 ? end - p : 64);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, tokens->kinds + p);
+        const __m512i flags = _mm512_maskz_loadu_epi8(valid, tokens->flags + p);
+        const uint64_t unpainted = _mm512_mask_testn_epi8_mask(valid, flags, _mm512_set1_epi8(BUSTER_PP_NO_EXPAND));
+        for (uint64_t bits = _mm512_mask_cmpeq_epi8_mask(unpainted, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER)); result && bits != 0; bits &= bits - 1)
+        {
+            result = !pp_is_macro_vector(pp, tokens->values[p + (uint32_t)__builtin_ctzll(bits)]);
+        }
+    }
+    return result;
+}
+
+// Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
+// pp_finish_invocation would, when that is simple: a BUSTER_PP_MACRO_SIMPLE macro given as many arguments as it takes,
+// none of the ones it uses naming an enabled macro (so each is its own expansion), read while no stream or capture
+// with a limit is open. Then it isn't pushed on the invocation stack: its expansion is substituted at once
+// (pp_substitute_simple) and pushed as a buffer, or when no name in it is a macro's, copied to the target at once, as
+// the main loop's step over the buffer and its pop would (pp_step_buffer, pp_pop_context). Returns false, having
+// changed nothing, when the invocation isn't simple.
+static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
+{
+    const PPMacro* macro = &pp->macros[invocation->macro];
+    const PPArgument* records = &pp->argument_records[invocation->arguments];
+    // pp_close_invocation's count: f() has no argument when f has no parameter, and a variadic macro's variadic
+    // argument may be omitted altogether (it gets an empty one).
+    uint32_t count = pp->argument_record_count - invocation->arguments;
+    count = macro->parameter_count == 0 && count == 1 && records[0].raw_begin == records[0].raw_end ? 0 : count;
+    const bool omitted = (macro->flags & BUSTER_PP_MACRO_VARIADIC) && count + 1 == macro->parameter_count;
+    bool result = (macro->flags & BUSTER_PP_MACRO_SIMPLE) && (pp->stream_count | pp->limit_count) == 0 && !pp->fatal && count + omitted == macro->parameter_count &&
+                  pp->argument_record_count < BUSTER_PP_MAX_STACK_TOKENS;
+    const PPItem* order = pp->items + macro->items_begin + macro->item_count;
+    for (uint32_t k = 0; result && k < macro->order_count; k += 1)
+    {
+        const uint32_t parameter = order[k].parameter;
+        result = parameter >= count || !pp_needs_expansion(pp, &pp->arguments, records[parameter].raw_begin, records[parameter].raw_end);
+    }
+    if (result)
+    {
+        if (omitted)
+        {
+            pp_new_argument(pp);
+        }
+        pp->in_macro_arguments = false;
+        invocation->argument_count = count + omitted;
+        if (pp->options.timing)
+        {
+            pp->statistics.invocations += 1;
+            pp->statistics.arguments += count + omitted;
+        }
+        // pp_close_invocation's place for diagnostics while it substitutes (a stack that overflows).
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        pp->diagnostic_origin = invocation->history != 0 ? pp->history[invocation->history - 1].parent : 0;
+        uint32_t begin;
+        uint8_t trailing;
+        pp_substitute_simple(pp, invocation, &begin, &trailing);
+        const uint32_t end = pp->expansions.count;
+        const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
+        if (begin < end)
+        {
+            uint8_t* flags = &pp->expansions.flags[begin];
+            *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+        }
+        pp->arguments.count = invocation->arguments_begin;
+        pp->argument_record_count = invocation->arguments;
+        if (begin < end && pp->context_count < BUSTER_PP_MAX_CONTEXTS && !pp->fatal && pp_names_no_macro(pp, &pp->expansions, begin, end))
+        {
+            // The buffer's step copies it all, and its pop passes its trailing space on.
+            PPTokens* target = pp_target(pp);
+            const uint32_t at = target->count;
+            const uint32_t stop = pp_copy_buffer_run_vector(pp, &pp->expansions, begin, end);
+            pp_history_copy(pp, target, at, &pp->expansions, begin, stop);
+            if (pp->options.timing)
+            {
+                pp->statistics.buffer_runs += 1;
+                pp->statistics.buffer_run_tokens += stop - begin;
+                pp->statistics.final_buffer_run_tokens += target == &pp->output ? stop - begin : 0;
+            }
+            pp->expansions.count = begin;
+            pp->contexts[pp->context_count - 1].pending_flags |= trailing;
+        }
+        else if (begin < end)
+        {
+            PPContext* context = pp_push_buffer(pp, &pp->expansions, begin, end, invocation->macro, invocation->expansion_end, false, true);
+            if (context != 0)
+            {
+                context->trailing_flags = trailing;
+            }
+        }
+        else
+        {
+            // An empty expansion: the next token read after the invocation's ')' takes its name's flags.
+            const uint8_t name_space = (name_flags & BUSTER_PP_SPACE) && !(trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
+            pp->contexts[pp->context_count - 1].pending_flags |= (uint8_t)((name_flags & ~(name_space != 0 ? 0 : BUSTER_PP_NAME_LINE)) | trailing | name_space);
+        }
+        pp->diagnostic_origin = saved_origin;
+    }
+    return result;
+}
+
 static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
 {
     PPMacro* macro = &pp->macros[id];
@@ -7089,6 +7266,8 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
     }
     valid = valid && pp_new_argument(pp);
     const bool collected = valid && pp->vectorized && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count);
+    const bool finished = collected && pp_finish_simple(pp, &invocation);
+    valid = valid && !finished;
     if (valid && !collected)
     {
         PPToken token;
@@ -7103,7 +7282,7 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
         pp->invocation_count += 1;
         pp->in_macro_arguments = !collected;
     }
-    if (collected)
+    if (valid && collected)
     {
         pp_close_invocation(pp, true);
     }
@@ -7254,8 +7433,7 @@ static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** na
     *name_length = (uint32_t)strlen(*name);
     if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
     {
-        uint32_t column;
-        result = pp_line_of(pp, range, location, &column);
+        result = pp_line_of(pp, range, location, 0);
         const PPFile* file = &pp->files[pp->ranges[range].file];
         *name = file->path;
         *name_length = file->path_length;
@@ -9803,8 +9981,7 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         const bool made = (tokens->flags[begin] & BUSTER_PP_FROM_MACRO) || pp_find_range(pp, digits) != context->range;
         const uint32_t place = pp_lexed_start(pp, made && anchor != BUSTER_PP_NONE ? anchor : digits);
         const uint32_t note = pp_find_range(pp, place) == context->range ? place : location + 1;
-        uint32_t column;
-        const uint32_t physical = pp_line_of(pp, context->range, note, &column) + 1;
+        const uint32_t physical = pp_line_of(pp, context->range, note, 0) + 1;
         // A #line without a name keeps the presumed one.
         pp_add_line_note(pp, context->range, note, (int64_t)number - (int64_t)physical, name, name_length, system);
         pp->file_change_token = pp->output.count;
@@ -14251,9 +14428,8 @@ static PPPresumed pp_print_presumed(const Preprocessor* pp, PPMarkers* markers, 
 // marker that goes back to it.
 static PPPresumed pp_print_includer(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t child, bool after)
 {
-    uint32_t column;
     const uint32_t location = pp->ranges[child].include_location;
-    PPPresumed result = pp_print_presumed(pp, markers, range, location, pp_line_of(pp, range, location, &column));
+    PPPresumed result = pp_print_presumed(pp, markers, range, location, pp_line_of(pp, range, location, 0));
     result.line += after;
     return result;
 }
@@ -14512,8 +14688,7 @@ static __attribute__((noinline)) bool pp_print_include_exits(Preprocessor* pp, P
             *line_start = *line_start || markers->length != 0;
         }
         const uint32_t parent = pp_print_parent(pp, markers, event->range);
-        uint32_t column;
-        const PPPresumed back = pp_print_presumed(pp, markers, parent, event->location, pp_line_of(pp, parent, event->location, &column));
+        const PPPresumed back = pp_print_presumed(pp, markers, parent, event->location, pp_line_of(pp, parent, event->location, 0));
         result = result && pp_print_marker_line(markers, line_start, back.line, back.name, back.name_length, " 2", back.system);
         markers->range = parent;
         markers->line = back.line;
@@ -14756,8 +14931,7 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
             {
                 place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base, pp->options.trigraphs);
-                uint32_t column;
-                breaks = pp_print_place(pp, &marked, range, place, pp_line_of(pp, range, place, &column), line_start, &result);
+                breaks = pp_print_place(pp, &marked, range, place, pp_line_of(pp, range, place, 0), line_start, &result);
                 fwrite(marked.text, 1, marked.length, stream);
             }
             for (uint32_t n = 0; n < breaks; n += 1)
@@ -14912,8 +15086,7 @@ static uint32_t pp_print_line(Preprocessor* pp, PPPrintLines* lines, uint32_t ra
     }
     else
     {
-        uint32_t column;
-        result = pp_line_of(pp, range, location, &column);
+        result = pp_line_of(pp, range, location, 0);
     }
     *lines = (PPPrintLines){ .range = range, .offset = offset, .line = result };
     return result;
