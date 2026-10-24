@@ -652,8 +652,9 @@ designs and the compilers already built this way.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
-  #87), into the exact path's link; `--time` reports the resolution's,
-  the conversion's and the writer's phases.
+  #87), into the exact path's link; the command runs at most a lane per CPU it
+  may run on, and `--time` reports the lanes and the resolution's, the
+  conversion's and the writer's phases.
   [The command contract](docs/foreign-driver.md) has the details. Its tests
   (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
   run through `test-foreign --cross-check`, and `test-foreign-corpus`

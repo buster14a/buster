@@ -1181,7 +1181,8 @@ static void foreign_driver_test_interpreter(ForeignTestTally* tally, const char*
 }
 
 // --time: a link reports every stage and the phases of the resolution, the conversion and the writer on standard error,
-// at 1 and 3 lanes, and still writes the program; a link that fails reports no stages, only its diagnostic.
+// at 1 and 3 lanes, and still writes the program; a link that fails reports no stages, only its diagnostic; and one of 8
+// lanes started on one CPU runs on one lane, the most the command takes (foreign_driver_cpus).
 static void foreign_driver_test_time(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
 {
     static const char* const expected[] = {
@@ -1202,9 +1203,11 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
         " finish ",
         "  release ",
     };
-    for (uint32_t way = 0; way < 3; way += 1)
+    const uint32_t cpus = foreign_driver_cpus();
+    for (uint32_t way = 0; way < 4; way += 1)
     {
         const bool fails = way == 2;
+        const bool pinned = way == 3;
         ForeignTestPath executable;
         ForeignTestPath output;
         ForeignTestPath errors;
@@ -1215,15 +1218,31 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
             (char*)"/proc/self/exe",
             (char*)"link-foreign",
             (char*)"--time",
-            way == 1 ? (char*)"--lanes=3" : (char*)"--lanes=1",
+            way == 1 ? (char*)"--lanes=3" : pinned ? (char*)"--lanes=8" : (char*)"--lanes=1",
             (char*)"-o",
             executable,
             fails ? files->objects[FOREIGN_DRIVER_TEST_POISON] : files->objects[FOREIGN_DRIVER_TEST_START],
             0,
         };
-        const int status = object_test_run(arguments, output, errors);
+        // The pinned way's child starts on this thread's first CPU alone, as posix_spawn gives it this thread's mask.
+        uint64_t saved[16] = { 0 };
+        const bool masked = pinned && syscall(SYS_sched_getaffinity, 0, sizeof(saved), saved) > 0;
+        uint64_t one[16] = { 0 };
+        uint32_t word = 0;
+        while (masked && word + 1 < BUSTER_ARRAY_LENGTH(saved) && saved[word] == 0)
+        {
+            word += 1;
+        }
+        one[word] = saved[word] & (~saved[word] + 1);
+        const bool narrowed = masked && syscall(SYS_sched_setaffinity, 0, sizeof(one), one) == 0;
+        const int status = !pinned || narrowed ? object_test_run(arguments, output, errors) : -1;
+        const bool restored = !narrowed || syscall(SYS_sched_setaffinity, 0, sizeof(saved), saved) == 0;
         const String8 report = foreign_test_read(arena, errors);
-        bool complete = report.pointer != 0;
+        // The lanes it ran on: 1, 3 (or fewer CPUs') and, pinned, 1.
+        const uint32_t lanes = way == 1 ? (cpus < 3 ? cpus : 3) : 1;
+        char header[64];
+        snprintf(header, sizeof(header), " ms on %u lane%s\n", lanes, lanes == 1 ? "" : "s");
+        bool complete = report.pointer != 0 && memmem(report.pointer, report.length, header, strlen(header)) != 0;
         bool none = report.pointer != 0;
         for (uint32_t i = 0; report.pointer != 0 && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
         {
@@ -1237,7 +1256,7 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
         }
         else
         {
-            foreign_test_expect(tally, status == 0 && complete, "--time reports every stage and phase", errors);
+            foreign_test_expect(tally, status == 0 && complete && restored, "--time reports every stage and phase, and the lanes it ran on", errors);
             foreign_test_expect(tally, status == 0 && foreign_driver_test_run(directory, executable, output, errors, arena) == 42, "a link with --time runs", executable);
         }
     }
