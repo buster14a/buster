@@ -290,8 +290,8 @@ benchmark.
 Run target measurements through the shared 9700X lock, pinned to one permitted
 CPU, with the ownership variables from AGENTS.md. CI includes `test-ssa`,
 `test-ssa-ir` and the synthetic benchmark in its existing 9700X job.
-The workflow runs the normal interleaved benchmark; on pushes to main,
-dispatched runs and pull requests that change `ssa.c`, `ssa_program.c`,
+The workflow runs the normal interleaved benchmark; on the daily and
+dispatched runs and on pull requests that change `ssa.c`, `ssa_program.c`,
 `ssa_benchmark.c` or `dominators.c`, it then runs three separate processes per
 mode: scalar alone, vector alone, and vector samples immediately after 200 ms
 of scalar work. This follows the coding style's requirement to
