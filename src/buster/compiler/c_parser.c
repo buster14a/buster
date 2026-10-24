@@ -567,40 +567,35 @@ static void parse_tokens_from_output_fused_scalar(PPTokens* output, const uint8_
     parse_tokens_pad(tokens);
 }
 
-// The keyword kinds of the identifiers among the `live` tokens from `i`, whose kinds are `kinds`, as
-// pp_resolve_keywords_vector looks them up: stored back into the output, and returned with the block's other kinds.
-static inline __attribute__((always_inline)) __m512i parse_resolve_keywords_block(PPTokens* output, const uint8_t* keyword_kinds, uint32_t i, __mmask64 live, __m512i kinds)
+// The keyword kinds of the identifiers among the `live` tokens from `i`, `identifiers` of them, whose values are
+// `values` (16 a group), as pp_resolve_keywords_vector looks them up: stored back into the output, and returned with
+// the block's other kinds from `kinds`.
+static inline __attribute__((always_inline)) __m512i parse_resolve_keywords_block(PPTokens* output, const uint8_t* keyword_kinds, uint32_t i, uint64_t identifiers,
+                                                                                  const __m512i* values, __m512i kinds)
 {
-    __m512i result = kinds;
-    const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
-    if (identifiers != 0)
+    const __m512i table0 = _mm512_loadu_si512(keyword_kinds);
+    const __m512i table1 = _mm512_loadu_si512(keyword_kinds + 64);
+    const __m512i table2 = _mm512_loadu_si512(keyword_kinds + 128);
+    const __m512i table3 = _mm512_loadu_si512(keyword_kinds + 192);
+    __m512i looked = _mm512_setzero_si512();
+    uint64_t small = 0;
+    for (uint32_t group = 0; group < 4; group += 1)
     {
-        const __m512i table0 = _mm512_loadu_si512(keyword_kinds);
-        const __m512i table1 = _mm512_loadu_si512(keyword_kinds + 64);
-        const __m512i table2 = _mm512_loadu_si512(keyword_kinds + 128);
-        const __m512i table3 = _mm512_loadu_si512(keyword_kinds + 192);
-        __m512i looked = _mm512_setzero_si512();
-        uint64_t small = 0;
-        for (uint32_t group = 0; group < 4; group += 1)
-        {
-            const __mmask16 lanes = (__mmask16)(identifiers >> (group * 16));
-            const __m512i values = _mm512_maskz_loadu_epi32(lanes, output->values + i + group * 16);
-            const __mmask16 keywords = _mm512_mask_cmplt_epu32_mask(lanes, values, _mm512_set1_epi32(BUSTER_PP_KEYWORD_TABLE));
-            const __m128i indices = _mm512_cvtepi32_epi8(values);
-            const __m512i wide = _mm512_zextsi128_si512(indices);
-            const __m128i lower = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table0, wide, table1));
-            const __m128i upper = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table2, wide, table3));
-            const __m128i kinds_here = _mm_mask_blend_epi8(_mm_movepi8_mask(indices), lower, upper);
-            looked = group == 0 ? _mm512_inserti32x4(looked, kinds_here, 0)
-                   : group == 1 ? _mm512_inserti32x4(looked, kinds_here, 1)
-                   : group == 2 ? _mm512_inserti32x4(looked, kinds_here, 2)
-                                : _mm512_inserti32x4(looked, kinds_here, 3);
-            small |= (uint64_t)keywords << (group * 16);
-        }
-        _mm512_mask_storeu_epi8(output->kinds + i, small, looked);
-        result = _mm512_mask_blend_epi8(small, kinds, looked);
+        const __mmask16 lanes = (__mmask16)(identifiers >> (group * 16));
+        const __mmask16 keywords = _mm512_mask_cmplt_epu32_mask(lanes, values[group], _mm512_set1_epi32(BUSTER_PP_KEYWORD_TABLE));
+        const __m128i indices = _mm512_cvtepi32_epi8(values[group]);
+        const __m512i wide = _mm512_zextsi128_si512(indices);
+        const __m128i lower = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table0, wide, table1));
+        const __m128i upper = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table2, wide, table3));
+        const __m128i kinds_here = _mm_mask_blend_epi8(_mm_movepi8_mask(indices), lower, upper);
+        looked = group == 0 ? _mm512_inserti32x4(looked, kinds_here, 0)
+               : group == 1 ? _mm512_inserti32x4(looked, kinds_here, 1)
+               : group == 2 ? _mm512_inserti32x4(looked, kinds_here, 2)
+                            : _mm512_inserti32x4(looked, kinds_here, 3);
+        small |= (uint64_t)keywords << (group * 16);
     }
-    return result;
+    _mm512_mask_storeu_epi8(output->kinds + i, small, looked);
+    return _mm512_mask_blend_epi8(small, kinds, looked);
 }
 
 // The output's tokens as the parser's: kinds through parse_kind_table, names for identifiers and each token's index in
@@ -626,31 +621,36 @@ static inline __attribute__((always_inline)) void parse_tokens_convert(PPTokens*
     {
         const uint32_t left = output->count - i;
         const __mmask64 live = left >= 64 ? ~(__mmask64)0 : _bzhi_u64(~0ull, left);
-        __m512i kinds = _mm512_maskz_loadu_epi8(live, output->kinds + i);
-        if (fused)
-        {
-            kinds = parse_resolve_keywords_block(output, keyword_kinds, i, live, kinds);
-        }
+        // The block's ends, its identifiers and their values come from the kinds as they are, so that only the grammar
+        // kinds wait for the fused conversion's keyword lookup (a keyword's kind is past the specials' and in the
+        // identifiers' range: what an earlier block resolved reads alike).
+        const __m512i kinds = _mm512_maskz_loadu_epi8(live, output->kinds + i);
         const uint64_t special = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_HASH)) |
                                  _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)) |
                                  _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_COLONCOLON));
         // The run before the first special token, or the whole block.
         const uint32_t run = special != 0 ? (uint32_t)__builtin_ctzll(special) : (left >= 64 ? 64 : left);
         const __mmask64 stored = _bzhi_u64(~0ull, run);
-        const __m512i low = _mm512_permutex2var_epi8(table0, kinds, table1);
-        const __m512i high = _mm512_permutex2var_epi8(table2, kinds, table3);
-        const __m512i parse = _mm512_mask_blend_epi8(_mm512_movepi8_mask(kinds), low, high);
+        // Identifiers' and keywords' values are their IdentIds. The fused conversion resolves the run's: every other token
+        // is a special, a pragma's (resolved one by one below) or the next block's.
+        const uint64_t raw = _mm512_mask_cmpeq_epi8_mask(stored, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+        const uint64_t identifiers = raw | (_mm512_mask_cmpge_epu8_mask(stored, kinds, _mm512_set1_epi8(BUSTER_PP_KIND_KEYWORD)) &
+                                            _mm512_mask_cmplt_epu8_mask(stored, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)));
+        __m512i values[4];
+        for (uint32_t group = 0; group < 4; group += 1)
+        {
+            values[group] = _mm512_maskz_loadu_epi32((__mmask16)(identifiers >> (16 * group)), output->values + i + 16 * group);
+        }
+        const __m512i resolved = fused && raw != 0 ? parse_resolve_keywords_block(output, keyword_kinds, i, raw, values, kinds) : kinds;
+        const __m512i low = _mm512_permutex2var_epi8(table0, resolved, table1);
+        const __m512i high = _mm512_permutex2var_epi8(table2, resolved, table3);
+        const __m512i parse = _mm512_mask_blend_epi8(_mm512_movepi8_mask(resolved), low, high);
         _mm512_mask_storeu_epi8(tokens->kinds + written, stored, parse);
         _mm512_mask_storeu_epi8(tokens->flags + written, stored, _mm512_maskz_loadu_epi8(live, output->flags + i));
-        // Identifiers' and keywords' values are their IdentIds.
-        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(stored, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER)) |
-                                     (_mm512_mask_cmpge_epu8_mask(stored, kinds, _mm512_set1_epi8(BUSTER_PP_KIND_KEYWORD)) &
-                                      _mm512_mask_cmplt_epu8_mask(stored, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)));
         for (uint32_t group = 0; group < 4; group += 1)
         {
             const __mmask16 in_run = (__mmask16)(stored >> (16 * group));
-            const __m512i names = _mm512_maskz_loadu_epi32((__mmask16)(identifiers >> (16 * group)), output->values + i + 16 * group);
-            _mm512_mask_storeu_epi32(tokens->names + written + 16 * group, in_run, names);
+            _mm512_mask_storeu_epi32(tokens->names + written + 16 * group, in_run, values[group]);
             _mm512_mask_storeu_epi32(tokens->sources + written + 16 * group, in_run, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(i + 16 * group))));
         }
         written += run;
