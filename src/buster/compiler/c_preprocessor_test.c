@@ -3885,19 +3885,21 @@ static bool pp_test_prelude_failures(void)
         bool past_command_line;
         // Data records left free before the run (0 leaves the table).
         uint32_t free_data;
-        // The fatal error's text, or null for a run that must succeed.
+        // The fatal error's text, or null for a run that must succeed; strerror(ENOMEM)'s follows it when `out_of_memory`,
+        // as pp_virtual_file_error gives it.
         const char* message;
+        bool out_of_memory;
         // Whether -D X=1 must have taken effect.
         bool defined;
     } PPTestPreludeFault;
     static const PPTestPreludeFault faults[] = {
-        { "command line's arena", 1, true, false, 0, "out of memory for the command line's -D, -U and -include options", false },
-        { "-D and -U file's arena", 1, true, true, 0, "can't make the file of the command line's -D and -U options: Cannot allocate memory", false },
-        { "-include file's arena", 2, true, true, 0, "can't make the file of the command line's -include options: Cannot allocate memory", true },
-        { "-D and -U file's record", 0, false, false, 1, "can't make the file of the command line's -D and -U options: too many files", false },
-        { "-include file's record", 2, false, false, 2, "can't make the file of the command line's -include options: too many files", true },
-        { "no -include, no room for its file", 0, false, false, 3, 0, true },
-        { "a megabyte's -D, nothing taken away", 1, false, false, 0, 0, true },
+        { "command line's arena", 1, true, false, 0, "out of memory for the command line's -D, -U and -include options", false, false },
+        { "-D and -U file's arena", 1, true, true, 0, "can't make the file of the command line's -D and -U options: ", true, false },
+        { "-include file's arena", 2, true, true, 0, "can't make the file of the command line's -include options: ", true, true },
+        { "-D and -U file's record", 0, false, false, 1, "can't make the file of the command line's -D and -U options: too many files", false, false },
+        { "-include file's record", 2, false, false, 2, "can't make the file of the command line's -include options: too many files", false, true },
+        { "no -include, no room for its file", 0, false, false, 3, 0, false, true },
+        { "a megabyte's -D, nothing taken away", 1, false, false, 0, 0, false, true },
     };
     static const uint8_t source[] = "X Y\n";
     char* long_text = malloc(PP_TEST_PRELUDE_LONG + 8);
@@ -3970,7 +3972,9 @@ static bool pp_test_prelude_failures(void)
             else
             {
                 // One fatal error, the part's, and nothing after it: no main file's tokens, no -D after a failed -D file.
-                checked = !ran && pp.fatal && pp.output.count == 0 && first != 0 && strstr(first, fault->message) != 0 &&
+                char message[256];
+                snprintf(message, sizeof(message), "%s%s", fault->message, fault->out_of_memory ? strerror(ENOMEM) : "");
+                checked = !ran && pp.fatal && pp.output.count == 0 && first != 0 && strstr(first, message) != 0 &&
                           strstr(first + 1, "fatal error: ") == 0 && !long_defined;
             }
             checked = checked && x_defined == fault->defined;
