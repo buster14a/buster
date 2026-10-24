@@ -310,6 +310,9 @@ struct PPOptions
     bool no_guard_skip;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
     uint32_t location_limit;
+    // The bytes of the windows a large file is lexed and refined in (pp_prepare_windows): 0 for BUSTER_PP_WINDOW_BYTES.
+    // Tests make them small, so that small files take the windows too.
+    uint32_t window_bytes;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
 };
@@ -360,6 +363,9 @@ static __attribute__((unused)) void pp_release(Preprocessor* pp);
 // The state
 
 #define BUSTER_PP_NONE UINT32_MAX
+// The bytes of the windows pp_prepare_windows lexes and refines a file of at least two of them in: a window's source and
+// columns, about 280 KB, fit the 9700X's 1 MB L2 cache beside the intern table's lines that refinement reads.
+#define BUSTER_PP_WINDOW_BYTES (128u << 10)
 // The bytes of scratch spellings per location range, and the most the scratch arena holds.
 #define BUSTER_PP_SCRATCH_CHUNK_BYTES (64u << 10)
 #define BUSTER_PP_SCRATCH_BYTES (1ull << 32)
@@ -572,8 +578,9 @@ struct FileCacheArenas
 };
 
 // How files are prepared: the lexer's and refinement's flags (trigraphs, and raw strings: pp_raw_strings), the literal
-// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and whether
-// by the vectorized kernels or by their scalar twins, which prepare the same records.
+// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), whether by the
+// vectorized kernels or by their scalar twins, which prepare the same records, and the bytes of the windows a large file
+// is lexed and refined in (pp_prepare_windows; 0 for BUSTER_PP_WINDOW_BYTES).
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
@@ -581,6 +588,7 @@ struct PPPrepare
     uint64_t split_kinds;
     bool dollar_punctuation;
     bool vectorized;
+    uint32_t window_bytes;
 };
 
 struct FileCache
@@ -2489,10 +2497,8 @@ static bool pp_prepare_raw_errors(const PPPrepare* prepare, Arena* arena, PPFile
     return result;
 }
 
-// Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
-// leading-space bits, directive table and guard, in `columns` (kinds, starts and values, an arena each) and `arena` (the
-// directive table). Adds each phase's TSC ticks to `ticks` (by PPPhase) unless it is null.
-static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
+// pp_prepare_into for the whole file at once: lexed, then refined, then indexed.
+static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)data->length);
     data->kinds = arena_push(&columns[0], capacity, 64);
@@ -2570,6 +2576,144 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
         }
     }
     return result;
+}
+
+// pp_prepare_into for a file of at least two windows (`window` bytes) that the vectorized kernels lex: lexed a window at
+// a time (c_tokenize_lines), each window's tokens kept up to the last one that starts a logical line (that line is lexed
+// again with the next window, and a line that takes a whole window doubles it), and each completed block of
+// BUSTER_REFINE_BLOCK_TOKENS refined at once (refine_tokens_blocks), while the lexer's columns and the source are still
+// in the caches: a whole file lexed before its refinement had refinement read them from memory again
+// (docs/c-refinement.md). The records are pp_prepare_whole's, byte for byte. The leading-space words, whose place after
+// the kinds waits for the count, are refined into scratch memory and copied there.
+static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t window,
+                                          uint64_t* ticks)
+{
+    const uint64_t length = data->length;
+    const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
+    data->kinds = arena_push(&columns[0], capacity, 64);
+    data->starts = arena_push_array(&columns[1], capacity, sizeof(uint32_t), 64);
+    data->values = arena_push_array(&columns[2], capacity, sizeof(uint32_t), 64);
+    uint64_t tick = ticks != 0 ? __rdtsc() : 0;
+    Scratch scratch = scratch_begin(0);
+    uint64_t* backslash_chunks = arena_push_array(scratch.arena, refine_progress_words(length), sizeof(uint64_t), 64);
+    // A word for every 64 of the most tokens the file can have; refinement writes those of the tokens it has.
+    uint64_t* space = arena_push_array(scratch.arena, capacity / 64 + 2, sizeof(uint64_t), 64);
+    RefineProgress progress;
+    refine_progress_begin(&progress, backslash_chunks);
+    const bool pushed = data->kinds != 0 && data->starts != 0 && data->values != 0;
+    PPPrepareStatus result = !pushed ? PP_PREPARE_NO_COLUMNS : backslash_chunks == 0 || space == 0 ? PP_PREPARE_NO_MEMORY : PP_PREPARE_DONE;
+    // The next window starts at `at`, the start of the file or of a token that starts a logical line, and takes `size`
+    // bytes; the tokens before it are kept (`count`), and those before `refined` are refined.
+    uint64_t at = 0;
+    uint64_t size = window;
+    uint64_t count = 0;
+    uint64_t refined = 0;
+    bool last = false;
+    while (result == PP_PREPARE_DONE && !last)
+    {
+        const uint64_t end = length - at <= size ? length : at + size;
+        last = end == length;
+        const int64_t lexed = c_tokenize_lines(data->bytes, end, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags);
+        int64_t kept = last ? lexed : 0;
+        for (int64_t i = lexed - 1; !last && kept == 0 && i > 0; i -= 1)
+        {
+            kept = (data->kinds[count + i] & BUSTER_C_TOKEN_START_OF_LINE) != 0 ? i : 0;
+        }
+        const uint64_t next = kept > 0 && !last ? data->starts[count + kept] : end;
+        if (lexed < 0)
+        {
+            result = PP_PREPARE_TOO_BIG;
+        }
+        else if (kept == 0 && !last)
+        {
+            size *= 2;
+        }
+        else
+        {
+            kept = pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds + count, data->starts + count, data->values + count, (uint32_t)kept, true);
+            result = kept < 0 ? PP_PREPARE_NO_MEMORY : PP_PREPARE_DONE;
+            // An unterminated block comment (pp_is_unterminated_comment), reported when this inclusion reads it.
+            const uint64_t final = count + (uint64_t)kept - 1;
+            if (last && kept > 0 && pp_is_unterminated_comment(data->bytes, data->kinds[final], data->starts[final]))
+            {
+                data->unterminated_comment = data->starts[final] + 1;
+                data->unterminated_comment_starts_line = (data->kinds[final] & BUSTER_C_TOKEN_START_OF_LINE) != 0;
+                kept -= 1;
+            }
+            count += kept > 0 ? (uint64_t)kept : 0;
+            at = next;
+            size = window;
+        }
+        if (ticks != 0)
+        {
+            const uint64_t now = __rdtsc();
+            ticks[PP_PHASE_LEX] += now - tick;
+            tick = now;
+        }
+        const uint64_t complete = last ? count : count - count % BUSTER_REFINE_BLOCK_TOKENS;
+        if (result == PP_PREPARE_DONE && complete > refined)
+        {
+            result = refine_tokens_blocks(table, data->bytes, length, data->kinds, data->starts, data->values, space, prepare->refine_flags, refined, complete, &progress)
+                         ? PP_PREPARE_DONE
+                         : PP_PREPARE_NO_MEMORY;
+            refined = complete;
+        }
+        if (ticks != 0)
+        {
+            const uint64_t now = __rdtsc();
+            ticks[PP_PHASE_REFINE] += now - tick;
+            tick = now;
+        }
+    }
+    if (result == PP_PREPARE_DONE)
+    {
+        // Each column keeps what the file has, with the lexer's slack, and the leading-space words go after the kinds, as
+        // pp_prepare_whole places them.
+        data->token_count = (uint32_t)count;
+        const uint64_t kept = count + BUSTER_C_TOKENIZER_OUTPUT_SLACK;
+        arena_pop_to(&columns[0], (uint64_t)(data->kinds - columns[0].base) + kept);
+        arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
+        arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
+        data->space = arena_push_array(&columns[0], count / 64 + 2, sizeof(uint64_t), 64);
+        if (data->space != 0)
+        {
+            // The words past the last token's are zero: an earlier window's tokens may have been written there.
+            const uint64_t words = (count + 63) / 64;
+            memcpy(data->space, space, words * sizeof(uint64_t));
+            memset(data->space + words, 0, (count / 64 + 2 - words) * sizeof(uint64_t));
+        }
+        result = data->space != 0 && pp_prepare_raw_errors(prepare, arena, data) ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+    }
+    scratch_end(scratch);
+    if (ticks != 0)
+    {
+        const uint64_t now = __rdtsc();
+        ticks[PP_PHASE_REFINE] += now - tick;
+        tick = now;
+    }
+    if (result == PP_PREPARE_DONE)
+    {
+        data->prepared = pp_directive_table(prepare->vectorized, arena, data);
+        result = data->prepared ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+    }
+    if (ticks != 0)
+    {
+        ticks[PP_PHASE_DIRECTIVES] += __rdtsc() - tick;
+    }
+    return result;
+}
+
+// Lexes, refines and indexes a file's bytes, `data`: its tokens, values (its identifiers interned in `table`),
+// leading-space bits, directive table and guard, in `columns` (kinds, starts and values, an arena each) and `arena` (the
+// directive table). Adds each phase's TSC ticks to `ticks` (by PPPhase) unless it is null. A file of at least two windows
+// (BUSTER_PP_WINDOW_BYTES, or the options' size) that the vectorized kernels lex is lexed and refined a window at a time
+// (pp_prepare_windows), into the same records.
+static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
+{
+    const uint64_t window = prepare->window_bytes != 0 ? prepare->window_bytes : BUSTER_PP_WINDOW_BYTES;
+    const bool windows = prepare->vectorized && !prepare->dollar_punctuation && data->length >= 2 * window &&
+                         data->length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK && !c_tokenize_scalar_only(data->bytes, data->length, prepare->refine_flags);
+    return windows ? pp_prepare_windows(prepare, table, columns, arena, data, window, ticks) : pp_prepare_whole(prepare, table, columns, arena, data, ticks);
 }
 
 // The line ends in bytes [begin, end) of a file: "\n", "\r\n" (at its '\n') and a '\r' that no '\n' follows, 64 bytes at
@@ -3072,6 +3216,7 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
         .vectorized = !options->scalar,
+        .window_bytes = options->window_bytes,
     };
 }
 
@@ -3083,6 +3228,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
         .split_kinds = pp->split_kinds,
         .dollar_punctuation = pp_dollar_punctuation(&pp->options),
         .vectorized = pp->vectorized,
+        .window_bytes = pp->options.window_bytes,
     };
 }
 
