@@ -112,6 +112,689 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     return ready;
 }
 
+// Runs `arguments` (arguments[0] the executable) with standard output to /dev/null and its errors into *text, which
+// the caller frees: its exit status, or -1 if it didn't exit.
+static int check_test_driver_spawn(char* const* arguments, char** text)
+{
+    FILE* errors = tmpfile();
+    int status = 0;
+    pid_t child = -1;
+    size_t length = 0;
+    *text = NULL;
+    if (errors != NULL)
+    {
+        fflush(NULL);
+        child = fork();
+        if (child == 0)
+        {
+            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0)
+            {
+                execvp(arguments[0], arguments);
+            }
+            _exit(127);
+        }
+    }
+    pid_t waited = -1;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    }
+    while (waited < 0 && child > 0 && errno == EINTR);
+    const bool read = errors != NULL && waited == child && pp_test_read_output(errors, text, &length);
+    if (errors != NULL)
+    {
+        fclose(errors);
+    }
+    return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Whether the files at `a` and `b` can be read and have the same bytes.
+static bool check_test_driver_same_files(const char* a, const char* b)
+{
+    FILE* files[2] = { fopen(a, "rb"), fopen(b, "rb") };
+    bool same = files[0] != NULL && files[1] != NULL;
+    bool reading = same;
+    while (reading)
+    {
+        char first[4096];
+        char second[4096];
+        const size_t got = fread(first, 1, sizeof(first), files[0]);
+        same = fread(second, 1, sizeof(second), files[1]) == got && memcmp(first, second, got) == 0;
+        reading = same && got != 0;
+    }
+    for (uint32_t f = 0; f < 2; f += 1)
+    {
+        if (files[f] != NULL)
+        {
+            fclose(files[f]);
+        }
+    }
+    return same;
+}
+
+// The DT_NEEDED names of the executable at `path`, in order, joined by spaces into `names`: whether its dynamic section
+// could be read (a PIE's file offsets are its addresses' in its first PT_LOAD, as the direct path lays one out).
+static bool check_test_driver_needed(const char* path, char* names, uint64_t capacity)
+{
+    uint64_t length = 0;
+    FILE* file = fopen(path, "rb");
+    uint8_t* bytes = NULL;
+    if (file != NULL && fseek(file, 0, SEEK_END) == 0)
+    {
+        const long size = ftell(file);
+        bytes = size > (long)sizeof(Elf64_Ehdr) && fseek(file, 0, SEEK_SET) == 0 ? malloc((uint64_t)size) : NULL;
+        length = bytes != NULL && fread(bytes, 1, (uint64_t)size, file) == (uint64_t)size ? (uint64_t)size : 0;
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    names[0] = 0;
+    Elf64_Ehdr header = { 0 };
+    bool valid = length != 0;
+    if (valid)
+    {
+        memcpy(&header, bytes, sizeof(header));
+        valid = memcmp(header.e_ident, ELFMAG, SELFMAG) == 0 && header.e_phoff + (uint64_t)header.e_phnum * sizeof(Elf64_Phdr) <= length;
+    }
+    uint64_t dynamic_offset = 0;
+    uint64_t dynamic_size = 0;
+    uint64_t load_offset = 0;
+    uint64_t load_address = 0;
+    bool load = false;
+    for (uint32_t p = 0; valid && p < header.e_phnum; p += 1)
+    {
+        Elf64_Phdr segment;
+        memcpy(&segment, bytes + header.e_phoff + p * sizeof(Elf64_Phdr), sizeof(segment));
+        dynamic_offset = segment.p_type == PT_DYNAMIC ? segment.p_offset : dynamic_offset;
+        dynamic_size = segment.p_type == PT_DYNAMIC ? segment.p_filesz : dynamic_size;
+        load_offset = segment.p_type == PT_LOAD && !load ? segment.p_offset : load_offset;
+        load_address = segment.p_type == PT_LOAD && !load ? segment.p_vaddr : load_address;
+        load = load || segment.p_type == PT_LOAD;
+    }
+    valid = valid && dynamic_size != 0 && dynamic_offset + dynamic_size <= length;
+    uint64_t strings = 0;
+    for (uint64_t at = 0; valid && at + sizeof(Elf64_Dyn) <= dynamic_size; at += sizeof(Elf64_Dyn))
+    {
+        Elf64_Dyn entry;
+        memcpy(&entry, bytes + dynamic_offset + at, sizeof(entry));
+        strings = entry.d_tag == DT_STRTAB ? entry.d_un.d_ptr - load_address + load_offset : strings;
+    }
+    valid = valid && strings != 0 && strings < length;
+    uint64_t used = 0;
+    for (uint64_t at = 0; valid && at + sizeof(Elf64_Dyn) <= dynamic_size; at += sizeof(Elf64_Dyn))
+    {
+        Elf64_Dyn entry;
+        memcpy(&entry, bytes + dynamic_offset + at, sizeof(entry));
+        if (entry.d_tag == DT_NEEDED)
+        {
+            const uint64_t name = strings + entry.d_un.d_val;
+            valid = name < length && memchr(bytes + name, 0, length - name) != NULL;
+            const int written = valid ? snprintf(names + used, capacity - used, "%s%s", used != 0 ? " " : "", (const char*)bytes + name) : 0;
+            valid = valid && written > 0 && used + (uint64_t)written < capacity;
+            used += valid ? (uint64_t)written : 0;
+        }
+    }
+    free(bytes);
+    return valid;
+}
+
+// The direct path's -l libraries, through the production command (#145): a program that calls libm's functions, takes
+// one's address and reads libm's signgam (data, through its GOT slot), linked with -lm by both paths into the same bytes,
+// that runs and prints what this executable's own libm computes, needing libm.so.6 before libc.so.6; one that calls
+// none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm, a library no directory has, and an
+// archive with members.
+static void check_test_driver_libraries(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <math.h>\n#include <stdio.h>\ndouble (*pick)(double) = cos;\n"
+                                  "int main(void) { double logarithm = lgamma(-0.5); printf(\"%f %f %f %f %f %d\\n\", sin(2), sqrt(2.0), pow(2.0, 10.0), "
+                                  "pick(0.5), logarithm, signgam); return 0; }\n";
+    static const char plain[] = "int puts(const char*);\nint main(void) { puts(\"plain\"); return 0; }\n";
+    static const char archive[] = "!<arch>\n/               0           0     0     644     4         `\n\0\0\0\0";
+    char source[256];
+    char plain_source[256];
+    char archive_path[256];
+    char outputs[2][256];
+    char plain_output[256];
+    snprintf(source, sizeof(source), "%s/math.c", directory);
+    snprintf(plain_source, sizeof(plain_source), "%s/plain.c", directory);
+    snprintf(archive_path, sizeof(archive_path), "%s/libbuster_members.a", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/math", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/math-scalar", directory);
+    snprintf(plain_output, sizeof(plain_output), "%s/plain", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1) && parse_test_write(plain_source, plain, sizeof(plain) - 1) &&
+                         parse_test_write(archive_path, archive, sizeof(archive) - 1);
+    check_test_expect(test, written, "library programs written");
+    char* text = NULL;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-o", outputs[0], source, "-lm", NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", outputs[1], source, "-lm", NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "-lm links libm's functions" : "-lm links libm's functions, scalar");
+        free(text);
+    }
+    check_test_expect(test, written && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable with -lm");
+    char needed[256] = { 0 };
+    check_test_expect(test, written && check_test_driver_needed(outputs[0], needed, sizeof(needed)) && strcmp(needed, "libm.so.6 libc.so.6") == 0,
+                      "libm.so.6 needed before libc.so.6");
+    char expected[256];
+    const double logarithm = lgamma(-0.5);
+    snprintf(expected, sizeof(expected), "%f %f %f %f %f %d\n", sin(2), sqrt(2.0), pow(2.0, 10.0), cos(0.5), logarithm, signgam);
+    char captured[256] = { 0 };
+    FILE* output = written ? popen(outputs[0], "r") : NULL;
+    const size_t got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
+    const int closed = output != NULL ? pclose(output) : -1;
+    check_test_expect(test, closed == 0 && got == strlen(expected) && memcmp(captured, expected, got) == 0, "the program prints libm's results");
+    char* const plain_arguments[] = { (char*)executable, "-o", plain_output, plain_source, "-lm", NULL };
+    const int plain_status = written ? check_test_driver_spawn(plain_arguments, &text) : -1;
+    free(text);
+    check_test_expect(test, plain_status == 0 && check_test_driver_needed(plain_output, needed, sizeof(needed)) && strcmp(needed, "libc.so.6") == 0,
+                      "-lm unused needs libc.so.6 alone (as needed)");
+    struct
+    {
+        const char* name;
+        const char* message;
+        char* arguments[8];
+    } const refusals[] = {
+        { "no -lm", "undefined reference to 'cos'", { (char*)executable, "-o", outputs[0], source, NULL } },
+        { "a library nowhere", "cannot find -lbuster_nowhere", { (char*)executable, "-o", outputs[0], source, "-lm", "-lbuster_nowhere", NULL } },
+        { "an archive with members", "unsupported: static libraries", { (char*)executable, "-o", outputs[0], source, "-L", (char*)directory, "-lbuster_members", NULL } },
+    };
+    for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
+    {
+        const int status = check_test_driver_spawn(refusals[r].arguments, &text);
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, refusals[r].message) != NULL, refusals[r].name);
+        free(text);
+    }
+    unlink(source);
+    unlink(plain_source);
+    unlink(archive_path);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+    unlink(plain_output);
+}
+
+// A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
+// b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
+// either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
+// it, and the loader loads libB for it; and where main defines b_func itself, which the executable exports and the
+// loader binds libA's reference to, the executable needs libA alone, as GNU ld and lld link it, and a_func calls main's
+// b_func, with -lB on the line or without it. clang builds the libraries, and each program runs, finding them through
+// LD_LIBRARY_PATH. Then -lA alone for main calling a_func, where nothing defines libA's b_func: refused, naming libA and
+// b_func, as GNU ld and lld refuse it (--no-allow-shlib-undefined), where the program would fail to load.
+static void check_test_driver_dependencies(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char a_source[] = "int b_func(void);\nint a_func(void) { return b_func() + 1; }\n";
+    static const char b_source[] = "int b_func(void) { return 41; }\n";
+    static const char program[] = "int a_func(void);\nint main(void) { return a_func() == 42 ? 0 : 1; }\n";
+    static const char defines_b[] = "int a_func(void);\nint b_func(void) { return 9; }\nint main(void) { return a_func() == 10 ? 0 : 1; }\n";
+    char a_path[256];
+    char b_path[256];
+    char source[256];
+    char defines_source[256];
+    char library_a[256];
+    char library_b[256];
+    char library_ab[256];
+    char output[256];
+    char search[300];
+    snprintf(a_path, sizeof(a_path), "%s/a.c", directory);
+    snprintf(b_path, sizeof(b_path), "%s/b.c", directory);
+    snprintf(source, sizeof(source), "%s/uses_a.c", directory);
+    snprintf(defines_source, sizeof(defines_source), "%s/defines_b.c", directory);
+    snprintf(library_a, sizeof(library_a), "%s/libA.so", directory);
+    snprintf(library_b, sizeof(library_b), "%s/libB.so", directory);
+    snprintf(library_ab, sizeof(library_ab), "%s/libAB.so", directory);
+    snprintf(output, sizeof(output), "%s/uses_a", directory);
+    snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s", directory);
+    const bool written = parse_test_write(a_path, a_source, sizeof(a_source) - 1) && parse_test_write(b_path, b_source, sizeof(b_source) - 1) &&
+                         parse_test_write(source, program, sizeof(program) - 1) && parse_test_write(defines_source, defines_b, sizeof(defines_b) - 1);
+    // libB.so, libA.so without a DT_NEEDED for libB, and libAB.so with one (libB.so, which has no soname).
+    char* const build_b[] = { (char*)clang, "-shared", "-fPIC", "-o", library_b, b_path, NULL };
+    char* const build_a[] = { (char*)clang, "-shared", "-fPIC", "-o", library_a, a_path, NULL };
+    char* const build_ab[] = { (char*)clang, "-shared", "-fPIC", "-o", library_ab, a_path, "-L", (char*)directory, "-lB", NULL };
+    char* text = NULL;
+    bool built = written;
+    char* const* const builds[] = { build_b, build_a, build_ab };
+    for (uint32_t b = 0; built && b < BUSTER_ARRAY_LENGTH(builds); b += 1)
+    {
+        built = check_test_driver_spawn(builds[b], &text) == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, built, "libraries a needed library refers to: clang builds them");
+    struct
+    {
+        const char* name;
+        const char* source;
+        const char* first;
+        const char* second;
+        const char* needed;
+    } const cases[] = {
+        { "-lA -lB: libB for libA's reference", source, "-lA", "-lB", "libA.so libB.so libc.so.6" },
+        { "-lB -lA: libB for libA's reference", source, "-lB", "-lA", "libB.so libA.so libc.so.6" },
+        { "-lAB -lB: libB left to libAB's DT_NEEDED", source, "-lAB", "-lB", "libAB.so libc.so.6" },
+        { "-lA -lB, main defining b_func: libA alone, calling main's", defines_source, "-lA", "-lB", "libA.so libc.so.6" },
+        { "-lA, main defining b_func: libA alone, calling main's", defines_source, "-lA", NULL, "libA.so libc.so.6" },
+    };
+    for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char* const link[] = { (char*)executable, "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].first, (char*)cases[c].second, NULL };
+        char* const run[] = { "env", search, output, NULL };
+        const int linked = check_test_driver_spawn(link, &text);
+        free(text);
+        text = NULL;
+        char needed[256] = { 0 };
+        const bool listed = linked == 0 && check_test_driver_needed(output, needed, sizeof(needed)) && strcmp(needed, cases[c].needed) == 0;
+        const int ran = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+        free(text);
+        text = NULL;
+        if (!listed || ran != 0)
+        {
+            printf("  %s: link status %d, DT_NEEDED \"%s\", run status %d\n", cases[c].name, linked, needed, ran);
+        }
+        check_test_expect(test, listed && ran == 0, cases[c].name);
+    }
+    // -lA alone, nothing defining libA's b_func: refused, as GNU ld words it.
+    char* const alone[] = { (char*)executable, "-o", output, source, "-L", (char*)directory, "-lA", NULL };
+    const int alone_status = built ? check_test_driver_spawn(alone, &text) : -1;
+    char message[320];
+    snprintf(message, sizeof(message), "%s: undefined reference to 'b_func'", library_a);
+    const bool refused = alone_status == 1 && text != NULL && strstr(text, message) != NULL;
+    if (!refused)
+    {
+        printf("  -lA alone: status %d: %s\n", alone_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    check_test_expect(test, refused, "-lA alone: libA's b_func undefined, refused");
+    const char* const files[] = { a_path, b_path, source, defines_source, library_a, library_b, library_ab, output };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+}
+
+// A library that a linker script names by its path, without a soname (#398's review): its DT_NEEDED entry is that
+// path, as GNU ld and lld write it, so that the program loads it with no search path.
+static void check_test_driver_script_path(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char c_source[] = "int c_func(void) { return 7; }\n";
+    static const char program[] = "int c_func(void);\nint main(void) { return c_func() == 7 ? 0 : 1; }\n";
+    char private_directory[256];
+    char scripts[256];
+    char c_path[256];
+    char library_c[256];
+    char script[256];
+    char source[256];
+    char output[256];
+    char script_text[320];
+    char expected[320];
+    snprintf(private_directory, sizeof(private_directory), "%s/private", directory);
+    snprintf(scripts, sizeof(scripts), "%s/scripts", directory);
+    snprintf(c_path, sizeof(c_path), "%s/c.c", directory);
+    snprintf(library_c, sizeof(library_c), "%s/libC.so", private_directory);
+    snprintf(script, sizeof(script), "%s/libwrap.so", scripts);
+    snprintf(source, sizeof(source), "%s/uses_c.c", directory);
+    snprintf(output, sizeof(output), "%s/uses_c", directory);
+    snprintf(script_text, sizeof(script_text), "INPUT(%s)\n", library_c);
+    snprintf(expected, sizeof(expected), "%s libc.so.6", library_c);
+    const bool made = mkdir(private_directory, 0755) == 0 && mkdir(scripts, 0755) == 0 && parse_test_write(c_path, c_source, sizeof(c_source) - 1) &&
+                      parse_test_write(script, script_text, strlen(script_text)) && parse_test_write(source, program, sizeof(program) - 1);
+    char* const build[] = { (char*)clang, "-shared", "-fPIC", "-o", library_c, c_path, NULL };
+    char* const link[] = { (char*)executable, "-o", output, source, "-L", scripts, "-lwrap", NULL };
+    char* const run[] = { output, NULL };
+    char* text = NULL;
+    const int built = made ? check_test_driver_spawn(build, &text) : -1;
+    free(text);
+    text = NULL;
+    const int linked = built == 0 ? check_test_driver_spawn(link, &text) : -1;
+    free(text);
+    text = NULL;
+    char needed[512] = { 0 };
+    const bool listed = linked == 0 && check_test_driver_needed(output, needed, sizeof(needed)) && strcmp(needed, expected) == 0;
+    const int ran = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    if (!listed || ran != 0)
+    {
+        printf("  a script's library by its path: build status %d, link status %d, DT_NEEDED \"%s\", run status %d\n", built, linked, needed, ran);
+    }
+    check_test_expect(test, listed && ran == 0, "a script's library without a soname needed by its path");
+    const char* const files[] = { c_path, library_c, script, source, output };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+    rmdir(private_directory);
+    rmdir(scripts);
+}
+
+// The ways check_test_driver_versions changes libA's version need of V1 (#398's review).
+typedef enum CheckTestNeed
+{
+    // vna_other's top bit set (VER_NEED_HIDDEN), which glibc's loader and lld mask from its index.
+    CHECK_TEST_NEED_HIDDEN,
+    // The entry's vn_aux past its section.
+    CHECK_TEST_NEED_AUXILIARY,
+    // The auxiliary entry's vna_name past the string table.
+    CHECK_TEST_NEED_NAME,
+    // The auxiliary entry's vna_other an index that no .gnu.version entry has, so that foo's names nothing.
+    CHECK_TEST_NEED_INDEX,
+    // The entry's vn_next, 0 as the last entry's, to the section's end, where the loader would read one more.
+    CHECK_TEST_NEED_NEXT,
+} CheckTestNeed;
+
+// Copies the library at `from` to `to` with the .gnu.version_r auxiliary entry that requires `version` changed as
+// `change` says: false if the file doesn't read or has no such entry.
+static bool check_test_driver_change_need(const char* from, const char* to, const char* version, CheckTestNeed change)
+{
+    uint64_t length = 0;
+    uint8_t* bytes = NULL;
+    FILE* file = fopen(from, "rb");
+    if (file != NULL && fseek(file, 0, SEEK_END) == 0)
+    {
+        const long size = ftell(file);
+        bytes = size > (long)sizeof(Elf64_Ehdr) && fseek(file, 0, SEEK_SET) == 0 ? malloc((uint64_t)size) : NULL;
+        length = bytes != NULL && fread(bytes, 1, (uint64_t)size, file) == (uint64_t)size ? (uint64_t)size : 0;
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    Elf64_Ehdr header = { 0 };
+    bool valid = length != 0;
+    if (valid)
+    {
+        memcpy(&header, bytes, sizeof(header));
+        valid = memcmp(header.e_ident, ELFMAG, SELFMAG) == 0 && header.e_shentsize == sizeof(Elf64_Shdr) &&
+                header.e_shoff + (uint64_t)header.e_shnum * sizeof(Elf64_Shdr) <= length;
+    }
+    Elf64_Shdr needs = { 0 };
+    for (uint32_t s = 0; valid && s < header.e_shnum; s += 1)
+    {
+        Elf64_Shdr section;
+        memcpy(&section, bytes + header.e_shoff + s * sizeof(Elf64_Shdr), sizeof(section));
+        needs = section.sh_type == SHT_GNU_verneed ? section : needs;
+    }
+    Elf64_Shdr strings = { 0 };
+    valid = valid && needs.sh_type == SHT_GNU_verneed && needs.sh_link < header.e_shnum && needs.sh_offset + needs.sh_size <= length;
+    if (valid)
+    {
+        memcpy(&strings, bytes + header.e_shoff + needs.sh_link * sizeof(Elf64_Shdr), sizeof(strings));
+        valid = strings.sh_offset + strings.sh_size <= length;
+    }
+    bool changed = false;
+    uint64_t offset = 0;
+    bool more = valid;
+    while (more)
+    {
+        Elf64_Verneed need = { 0 };
+        more = offset + sizeof(need) <= needs.sh_size;
+        if (more)
+        {
+            memcpy(&need, bytes + needs.sh_offset + offset, sizeof(need));
+        }
+        uint64_t at = offset + need.vn_aux;
+        for (uint32_t a = 0; more && !changed && a < need.vn_cnt && at + sizeof(Elf64_Vernaux) <= needs.sh_size; a += 1)
+        {
+            Elf64_Vernaux auxiliary;
+            memcpy(&auxiliary, bytes + needs.sh_offset + at, sizeof(auxiliary));
+            const char* name = (const char*)bytes + strings.sh_offset + auxiliary.vna_name;
+            const bool named = auxiliary.vna_name < strings.sh_size && memchr(name, 0, strings.sh_size - auxiliary.vna_name) != NULL && strcmp(name, version) == 0;
+            if (named)
+            {
+                need.vn_aux = change == CHECK_TEST_NEED_AUXILIARY ? (uint32_t)needs.sh_size : need.vn_aux;
+                need.vn_next = change == CHECK_TEST_NEED_NEXT ? (uint32_t)(needs.sh_size - offset) : need.vn_next;
+                auxiliary.vna_name = change == CHECK_TEST_NEED_NAME ? (uint32_t)strings.sh_size + 64 : auxiliary.vna_name;
+                auxiliary.vna_other = change == CHECK_TEST_NEED_HIDDEN ? (uint16_t)(auxiliary.vna_other | 0x8000)
+                                      : change == CHECK_TEST_NEED_INDEX ? 0x7ff0
+                                                                        : auxiliary.vna_other;
+                memcpy(bytes + needs.sh_offset + offset, &need, sizeof(need));
+                memcpy(bytes + needs.sh_offset + at, &auxiliary, sizeof(auxiliary));
+                changed = true;
+            }
+            at += auxiliary.vna_next;
+        }
+        more = more && !changed && need.vn_next != 0;
+        offset += more ? need.vn_next : 0;
+    }
+    FILE* output = changed ? fopen(to, "wb") : NULL;
+    bool written = output != NULL && fwrite(bytes, 1, length, output) == length;
+    if (output != NULL)
+    {
+        written = fclose(output) == 0 && written;
+    }
+    free(bytes);
+    return written;
+}
+
+// A needed library's reference that requires a symbol version (#398's reviews): libA, linked against a libB whose foo
+// is foo@@V1, requires foo@V1 of libB.so. It links (by both paths into the same bytes) and runs, a_func calling foo@V1,
+// against a libB that exports foo@V1 only as a version that isn't its name's default, and one that exports it beside a
+// default foo@@V2, as GNU ld and lld link it and the loader binds it. It is refused, naming foo@V1, as both linkers
+// refuse it: against a libB whose foo is foo@@V2 alone, also where main defines foo (the loader would then find libB
+// without V1); and against one whose foo has no version (which has .gnu.version, for libc's names), which glibc's
+// loader would bind it to. Where main defines foo, against the libB of foo@V1, it links and runs, as both linkers link
+// it. Then copies of libA with its need changed (check_test_driver_change_need): hidden (vna_other's top bit), which
+// links and runs against the libB of foo@V1, as lld links it (GNU ld refuses the bit) and the loader binds it, and is
+// refused against foo@@V2 alone and against foo without a version, as lld refuses it; and needs that don't read (an
+// entry or a name outside its section) or that foo's index doesn't name, refused as GNU ld and lld refuse them, where
+// the loader would take foo as unversioned, and a last entry's vn_next to the section's end, past which the loader would
+// read another, which GNU ld refuses too (lld counts the entries by sh_info). clang builds the libraries with version
+// scripts.
+static void check_test_driver_versions(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char a_source[] = "int foo(void);\nint a_func(void) { return foo(); }\n";
+    static const char program[] = "int a_func(void);\nint main(void) { return a_func() == 11 ? 0 : 1; }\n";
+    static const char defines_foo[] = "int a_func(void);\nint foo(void) { return 11; }\nint main(void) { return a_func() == 11 ? 0 : 1; }\n";
+    // The libB the libA is built against, then four to link with: a name, source and version script each.
+    static const char* const variants[][3] = {
+        { "old", "int foo(void) { return 1; }\n", "V1 { global: foo; local: *; };\n" },
+        { "v1only", "int foo_v1(void) { return 11; }\n__asm__(\".symver foo_v1,foo@V1\");\n", "V1 { global: foo; local: *; };\n" },
+        { "v1v2", "int foo_v1(void) { return 11; }\nint foo_v2(void) { return 22; }\n__asm__(\".symver foo_v1,foo@V1\");\n__asm__(\".symver foo_v2,foo@@V2\");\n",
+          "V1 { global: foo; local: *; };\nV2 { global: foo; } V1;\n" },
+        { "v2only", "int foo(void) { return 2; }\n", "V2 { global: foo; local: *; };\n" },
+        { "plain", "int foo(void) { return 11; }\n", "" },
+    };
+    // The copies of libA, each in a directory of its own.
+    static const struct
+    {
+        const char* name;
+        CheckTestNeed change;
+    } changes[] = {
+        { "hidden", CHECK_TEST_NEED_HIDDEN },
+        { "auxiliary", CHECK_TEST_NEED_AUXILIARY },
+        { "name", CHECK_TEST_NEED_NAME },
+        { "index", CHECK_TEST_NEED_INDEX },
+        { "next", CHECK_TEST_NEED_NEXT },
+    };
+    enum
+    {
+        CHECK_TEST_VERSIONS_LINKED,
+        CHECK_TEST_VERSIONS_REFUSED,
+        CHECK_TEST_VERSIONS_UNREAD,
+    };
+    // libA's directory under the test's ("" for libA as built), libB's, whether main defines foo, and what must come of
+    // it.
+    static const struct
+    {
+        const char* name;
+        const char* a;
+        const char* b;
+        bool defines;
+        int outcome;
+    } cases[] = {
+        { "libA's foo@V1 against a libB of foo@V1 alone: linked and run", "", "v1only", false, CHECK_TEST_VERSIONS_LINKED },
+        { "libA's foo@V1 against a libB of foo@V1 and foo@@V2: linked and run", "", "v1v2", false, CHECK_TEST_VERSIONS_LINKED },
+        { "libA's foo@V1 against a libB of foo@@V2 alone: refused", "", "v2only", false, CHECK_TEST_VERSIONS_REFUSED },
+        { "libA's foo@V1 against a libB of foo without a version: refused", "", "plain", false, CHECK_TEST_VERSIONS_REFUSED },
+        { "libA's foo@V1, main defining foo, against a libB of foo@V1: linked and run", "", "v1only", true, CHECK_TEST_VERSIONS_LINKED },
+        { "libA's foo@V1, main defining foo, against a libB of foo@@V2 alone: refused", "", "v2only", true, CHECK_TEST_VERSIONS_REFUSED },
+        { "a hidden foo@V1 against a libB of foo@V1 alone: linked and run", "hidden", "v1only", false, CHECK_TEST_VERSIONS_LINKED },
+        { "a hidden foo@V1 against a libB of foo@@V2 alone: refused", "hidden", "v2only", false, CHECK_TEST_VERSIONS_REFUSED },
+        { "a hidden foo@V1 against a libB of foo without a version: refused", "hidden", "plain", false, CHECK_TEST_VERSIONS_REFUSED },
+        { "libA's need of V1 with vn_aux past its section: refused", "auxiliary", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
+        { "libA's need of V1 with vna_name past the strings: refused", "name", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
+        { "libA's foo at an index that names no need: refused", "index", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
+        { "libA's last need's vn_next to its section's end: refused", "next", "v1only", false, CHECK_TEST_VERSIONS_UNREAD },
+    };
+    char path[3][320];
+    char a_path[256];
+    char library_a[256];
+    char sources[2][256];
+    char outputs[2][256];
+    snprintf(a_path, sizeof(a_path), "%s/versioned_a.c", directory);
+    snprintf(library_a, sizeof(library_a), "%s/libA.so", directory);
+    snprintf(sources[0], sizeof(sources[0]), "%s/versioned.c", directory);
+    snprintf(sources[1], sizeof(sources[1]), "%s/versioned_defines.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/versioned", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/versioned-scalar", directory);
+    bool built = parse_test_write(a_path, a_source, sizeof(a_source) - 1) && parse_test_write(sources[0], program, sizeof(program) - 1) &&
+                 parse_test_write(sources[1], defines_foo, sizeof(defines_foo) - 1);
+    char* text = NULL;
+    for (uint32_t v = 0; built && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        // DIRECTORY/NAME/libB.so, from NAME.c and NAME.map beside it.
+        snprintf(path[0], sizeof(path[0]), "%s/%s", directory, variants[v][0]);
+        snprintf(path[1], sizeof(path[1]), "%s/%s.c", directory, variants[v][0]);
+        snprintf(path[2], sizeof(path[2]), "%s/%s.map", directory, variants[v][0]);
+        char library[352];
+        char script[352];
+        snprintf(library, sizeof(library), "%s/libB.so", path[0]);
+        snprintf(script, sizeof(script), "-Wl,--version-script=%s", path[2]);
+        const bool scripted = variants[v][2][0] != 0;
+        built = mkdir(path[0], 0755) == 0 && parse_test_write(path[1], variants[v][1], strlen(variants[v][1])) &&
+                (!scripted || parse_test_write(path[2], variants[v][2], strlen(variants[v][2])));
+        char* const build[] = { (char*)clang, "-shared", "-fPIC", "-o", library, path[1], "-Wl,-soname,libB.so", scripted ? script : NULL, NULL };
+        built = built && check_test_driver_spawn(build, &text) == 0;
+        free(text);
+        text = NULL;
+        // libA against the first: its foo is then foo@V1 of libB.so.
+        char old[352];
+        snprintf(old, sizeof(old), "%s/old", directory);
+        char* const build_a[] = { (char*)clang, "-shared", "-fPIC", "-o", library_a, a_path, "-L", old, "-lB", "-Wl,-soname,libA.so", NULL };
+        built = built && (v != 0 || check_test_driver_spawn(build_a, &text) == 0);
+        free(text);
+        text = NULL;
+    }
+    for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(changes); c += 1)
+    {
+        char copy[352];
+        snprintf(path[0], sizeof(path[0]), "%s/%s", directory, changes[c].name);
+        snprintf(copy, sizeof(copy), "%s/libA.so", path[0]);
+        built = mkdir(path[0], 0755) == 0 && check_test_driver_change_need(library_a, copy, "V1", changes[c].change);
+    }
+    check_test_expect(test, built, "versioned libraries: clang builds them, and the copies of libA");
+    for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char a_directory[320];
+        char b_directory[320];
+        char a_library[352];
+        char search[700];
+        snprintf(a_directory, sizeof(a_directory), "%s%s%s", directory, cases[c].a[0] != 0 ? "/" : "", cases[c].a);
+        snprintf(b_directory, sizeof(b_directory), "%s/%s", directory, cases[c].b);
+        snprintf(a_library, sizeof(a_library), "%s/libA.so", a_directory);
+        snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s:%s", a_directory, b_directory);
+        const bool linking = cases[c].outcome == CHECK_TEST_VERSIONS_LINKED;
+        int linked[2] = { -1, -1 };
+        char message[700] = { 0 };
+        for (uint32_t scalar = 0; scalar < (linking ? 2u : 1u); scalar += 1)
+        {
+            char* const source = sources[cases[c].defines ? 1 : 0];
+            char* const link[] = { (char*)executable, "-o", outputs[scalar], source, "-L", a_directory, "-L", b_directory, "-lA", "-lB", NULL };
+            char* const link_scalar[] = { (char*)executable, "--scalar", "-o", outputs[scalar], source, "-L", a_directory, "-L", b_directory, "-lA", "-lB", NULL };
+            linked[scalar] = check_test_driver_spawn(scalar == 0 ? link : link_scalar, &text);
+            snprintf(message, sizeof(message), "%s", text != NULL ? text : "");
+            free(text);
+            text = NULL;
+        }
+        char* const run[] = { "env", search, outputs[0], NULL };
+        const int ran = linking && linked[0] == 0 ? check_test_driver_spawn(run, &text) : -1;
+        free(text);
+        text = NULL;
+        char expected[400];
+        snprintf(expected, sizeof(expected), cases[c].outcome == CHECK_TEST_VERSIONS_REFUSED ? "%s: undefined reference to 'foo@V1'" : "%s isn't a shared library", a_library);
+        const bool right = linking ? linked[0] == 0 && linked[1] == 0 && ran == 0 && check_test_driver_same_files(outputs[0], outputs[1])
+                                   : linked[0] == 1 && strstr(message, expected) != NULL;
+        if (!right)
+        {
+            printf("  %s: link status %d and %d, run status %d: %s\n", cases[c].name, linked[0], linked[1], ran, message);
+        }
+        check_test_expect(test, right, cases[c].name);
+    }
+    for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        char file[352];
+        snprintf(file, sizeof(file), "%s/%s/libB.so", directory, variants[v][0]);
+        unlink(file);
+        snprintf(file, sizeof(file), "%s/%s.c", directory, variants[v][0]);
+        unlink(file);
+        snprintf(file, sizeof(file), "%s/%s.map", directory, variants[v][0]);
+        unlink(file);
+        snprintf(file, sizeof(file), "%s/%s", directory, variants[v][0]);
+        rmdir(file);
+    }
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(changes); c += 1)
+    {
+        char file[352];
+        snprintf(file, sizeof(file), "%s/%s/libA.so", directory, changes[c].name);
+        unlink(file);
+        snprintf(file, sizeof(file), "%s/%s", directory, changes[c].name);
+        rmdir(file);
+    }
+    const char* const files[] = { a_path, library_a, sources[0], sources[1], outputs[0], outputs[1] };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+}
+
+// Options that take the next argument as their value keep it, however it is spelled (#398's review): run in the test's
+// directory (env -C), `-o -lresult -include -local.h -I -Lheaders` writes -lresult from a program that needs the forced
+// include's macro and a header that only -Lheaders has, and the program runs.
+static void check_test_driver_option_values(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char header_text[] = "#define VALUE 3\n";
+    static const char forced_text[] = "#define LOCAL 4\n";
+    static const char program[] = "#include \"h.h\"\nint main(void) { return VALUE + LOCAL == 7 ? 0 : 1; }\n";
+    char compiler[PATH_MAX];
+    char headers[256];
+    char header[256];
+    char forced[256];
+    char source[256];
+    char output[256];
+    snprintf(headers, sizeof(headers), "%s/-Lheaders", directory);
+    snprintf(header, sizeof(header), "%s/-Lheaders/h.h", directory);
+    snprintf(forced, sizeof(forced), "%s/-local.h", directory);
+    snprintf(source, sizeof(source), "%s/values.c", directory);
+    snprintf(output, sizeof(output), "%s/-lresult", directory);
+    // The compiler runs in the test's directory, so its path must not be relative to this one.
+    const bool made = realpath(executable, compiler) != NULL && mkdir(headers, 0755) == 0 && parse_test_write(header, header_text, sizeof(header_text) - 1) &&
+                      parse_test_write(forced, forced_text, sizeof(forced_text) - 1) && parse_test_write(source, program, sizeof(program) - 1);
+    char* const link[] = { "env", "-C", (char*)directory, compiler, "values.c", "-o", "-lresult", "-include", "-local.h", "-I", "-Lheaders", NULL };
+    char* const run[] = { output, NULL };
+    char* text = NULL;
+    const int linked = made ? check_test_driver_spawn(link, &text) : -1;
+    if (linked != 0)
+    {
+        printf("  option values: link status %d: %s\n", linked, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    const int ran = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, linked == 0 && ran == 0, "-o -lresult, -include -local.h and -I -Lheaders keep their values");
+    const char* const files[] = { header, forced, source, output };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+    rmdir(headers);
+}
+
 static void check_test_driver_diagnostic_capacity(CheckTest* test)
 {
     Arena scratch = arena_reserve(64);
@@ -638,6 +1321,14 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary)
     {
         check_test_driver_lazy(&test, clang, executable, directory);
+        if (executable != NULL)
+        {
+            check_test_driver_libraries(&test, executable, directory);
+            check_test_driver_dependencies(&test, clang, executable, directory);
+            check_test_driver_script_path(&test, clang, executable, directory);
+            check_test_driver_versions(&test, clang, executable, directory);
+            check_test_driver_option_values(&test, executable, directory);
+        }
         rmdir(directory);
     }
     printf("checker-driver: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
