@@ -1,7 +1,0 @@
-exclusive.sh: waiting for the 9700X, held by: 2026-10-23T16:11:25+00:00 codex-linker-foreign86: /home/david/buster-fast-bench/codex-linker-foreign86-metadata-v1/build/compiler test-import --cross-check
-  title: Metadata v1 full importer differential gate
-  link: https://github.com/buster14a/buster/issues/86
-allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_conditional -> main_unit_frontend.ll:preprocessor_fuzz_random_group -> main_unit_frontend.ll:preprocessor_fuzz_random_statement -> main_unit_frontend.ll:preprocessor_fuzz_random_conditional
-allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_expression -> main_unit_frontend.ll:preprocessor_fuzz_random_expression
-allowed cycle: main_unit_frontend.ll:preprocessor_fuzz_random_invocation -> main_unit_frontend.ll:preprocessor_fuzz_random_argument -> main_unit_frontend.ll:preprocessor_fuzz_random_invocation
-call graph: 38 translation units, 20486 functions, 113686 calls between them, 0 cycles, 3 allowed

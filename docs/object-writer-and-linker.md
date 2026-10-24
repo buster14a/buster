@@ -3475,7 +3475,7 @@ memory was not measured. Default activation, corpus coverage and scaling
 remain separate decisions.
 
 Complete original build/test/benchmark logs and the frozen source manifest
-are retained in [the GC measurement directory](measurements/foreign-gc-2026-10-23/).
+are retained in [the GC measurement directory](https://github.com/buster14a/buster-performance/tree/85fbcec02dafec90652bc56c24513e2622c06f61/docs/measurements/foreign-gc-2026-10-23).
 
 #### Foreign terminal CIE pooling
 
@@ -3550,7 +3550,7 @@ claim. The isolated slice passed its build, full foreign cross-check and
 call-graph gate on the locked 9700X, including 812 pooling checks, 136
 COMDAT/GC/CIE composition checks and 72 C++ unwind runtime checks. Three
 independently started CPU-2 benchmark processes each passed 1,118 pipeline
-checks. The [retained evidence and precise process-median tables](measurements/foreign-cie-2026-10-23/README.md)
+checks. The [retained evidence and precise process-median tables](https://github.com/buster14a/buster-performance/blob/85fbcec02dafec90652bc56c24513e2622c06f61/docs/measurements/foreign-cie-2026-10-23/README.md)
 identify the frozen source/binary and timing boundaries; host input identity
 receipts remain pending.
 
