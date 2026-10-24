@@ -843,6 +843,16 @@ static const PPTestFile pp_test_files_renamed[] = {
     { 0, 0 },
 };
 
+static const PPTestFile pp_test_files_collecting_exit[] = {
+    { "outer.h", "#include \"other.h\"\n" },
+    { 0, 0 },
+};
+
+static const PPTestFile pp_test_files_collecting_return[] = {
+    { "outer.h", "#include \"other.h\"\nb)\nouter_after\n" },
+    { 0, 0 },
+};
+
 static const PPTestFile pp_test_files_stack[] = {
     { "a.h", "a_token\n#include \"b.h\"\na_after\n" },
     { "b.h", "b_token\n" },
@@ -1272,6 +1282,29 @@ static const PPTestCase pp_test_cases[] = {
     // Clang's flag for a macro's arguments is one flag, not a depth: an invocation with arguments in a directive among
     // them clears it, and #pragma and #include are taken after it, the arguments going on past the included file's end
     // (#109's seed 2106).
+    // #370: FileChanged leaves a header while arguments are collected, before the expansion reaches the printer.
+    // Keep the expansion's presumed line, in the file the callback selected, without changing the actual origins.
+    { "line markers: an invocation crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n[a b]\nafter\n" },
+    { "line markers: an invocation after output crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nbefore F(a", "c17", "before [a b] after", false, 0, 0, 0 },
+    { "line markers: argument collection exits two included files", "#include \"outer.h\"\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, pp_test_files_collecting_exit },
+    { "line markers: argument collection returns to an included file", "#include \"outer.h\"\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] outer_after after", false, 0, 0, pp_test_files_collecting_return },
+    { "line markers: crossed files keep builtin and presumed locations", "#line 100 \"logical.c\"\n#include \"other.h\"\n__LINE__ __FILE__)\nafter\n",
+      "#define F(x) [x]\n#line 80 \"logical.h\"\nF(__LINE__ __FILE__\n", "c17", "[80 \"logical.h\" 101 \"logical.c\"] after", false, 0, 0, 0 },
+    { "line markers: an empty expansion crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x)\nF(a\n", "c17", "after", false, 0, 0, 0 },
+    { "line markers: an empty expansion crossing an include leaves no output", "#include \"other.h\"\nb)\n",
+      "#define F(x)\nF(a\n", "c17", "", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n" },
+    { "line markers: a system include ends while collecting arguments", "#include <other.h>\nb)\nafter\n",
+      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, "-isystem %d", 0 },
+    { "line markers: a crossed invocation spans printer batches", "#include \"other.h\"\nb)\nafter\n",
+      "#define F(x) x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x\nF(a\n",
+      "c17", "a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b after", false, 0, 0, 0 },
     { "an invocation in a #if among a macro's arguments clears clang's flag", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#pragma omp parallel\n#include \"other.h\"\nb)\nafter\n",
       "inside\n", "c17", "#pragma omp parallel\n[a inside b]\nafter\n", false, 0, 0, 0 },
     { "an object-like macro in a #if among a macro's arguments keeps clang's flag", "#define F(x) [x]\n#define G 1\nF(a\n#if G\n#endif\n#pragma omp parallel\nb)\nafter\n",
