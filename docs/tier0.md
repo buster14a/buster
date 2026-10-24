@@ -778,12 +778,14 @@ path's 11.1.
 - **The chosen forms applied on the records' halves** (the compiler had split the fields into byte loads and
   stores): 75.6 to 74.8 cycles per entry, 163.5 to 162.0 instructions, in four rounds run in turn, each 1.0 to 1.2%.
 - **Aggregates by value (#137)** at no cost to code without them. On these programs, which have no records, the 9700X
-  job measured the vector path at 182.2 instructions per entry when the aggregates' code was inline in every call's
-  emission and count, in selection's loop and in the passes over the parameters, against main's 166.8 (15.18 against
-  14.19 ns per entry), and the scalar path at 604.6 against 588.6. Intel SDE's counts on a VM, a measure of their own
-  (each path's run of `benchmark-backend` less its sizing run), put the vector path at 144.8 instructions per entry
-  inline, 132.5 specialized and out of line ("At no cost to the rest" above) and 130.8 without aggregates, and the
-  scalar path at 541.5, 528.1 and 527.3; after #407's scalar fusion, at 513.1 against 512.2.
+  job measured the vector path at 182.2 instructions per entry (84.1 cycles, 15.18 ns) when the aggregates' code was
+  inline in every call's emission and count, in selection's loop and in the passes over the parameters, against main's
+  166.8 (78.6 cycles, 14.19 ns), and the scalar path at 604.6 instructions against 588.6. Specialized and out of line
+  ("At no cost to the rest" above), the vector path took 168.8 instructions per entry (79.2 cycles, 14.28 ns) against
+  main's 166.8 (78.1 and 78.9 cycles, 14.10 and 14.23 ns, in its two runs before), and the scalar path, after #407's
+  fusion, 574.5 against 572.8 (230.8 cycles against 230.2 and 232.7). The cycles' differences are within main's own
+  spread; the 2 instructions per entry left on the vector path are each call's setup and each function's checks of its
+  optional columns.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
