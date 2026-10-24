@@ -54,6 +54,8 @@ typedef enum CheckLowerTaskKind
     // The value on the stack stored into a bit-field (check_lower_bit_store): `type` its packed place, `value` the local
     // that holds the address of its first byte. The field's new value stays unless `discard`.
     CHECK_LOWER_BIT_STORE,
+    // The size of `type`, a variable-length array's, computed from its extents (an I64: a pointer's runtime stride).
+    CHECK_LOWER_SIZE,
 } CheckLowerTaskKind;
 
 typedef struct CheckLowerTask CheckLowerTask;
@@ -101,6 +103,12 @@ struct CheckLowerWriter
     uint32_t* local_map;
     uint32_t* switch_locals;
     uint32_t* extent_locals;
+    // Each variable-length array's identity plus one, by its bound's first token (0 for none), for its extent's local;
+    // each block's local that holds the stack's position its arrays came after (CHECK_CONTROL_STACK_SAVE's), by its
+    // closing token; and each local's role as a variable-length array's address (BUSTER_CHECK_LOWER_VLA_*).
+    uint32_t* vla_identities;
+    uint32_t* save_locals;
+    uint8_t* indirect;
     uint32_t* initializer_declarations;
     uint8_t* local_classes;
     uint8_t* local_flags;
@@ -137,6 +145,13 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
 };
+
+// A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
+// its object's references read where an array's take LOCAL_ADDRESS; and allocated, once its CHECK_CONTROL_ALLOCATE
+// came, which every declared array's must have.
+#define BUSTER_CHECK_LOWER_VLA_NONE 0
+#define BUSTER_CHECK_LOWER_VLA_DECLARED 1
+#define BUSTER_CHECK_LOWER_VLA_ALLOCATED 2
 
 static void check_lower_fail(CheckLowerWriter* writer, CheckProgramStatus status)
 {
@@ -249,14 +264,16 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     return feature;
 }
 
+// A pointer's stride: its pointee's size, or 0 for a variable-length array's, which its extents give at run time
+// (check_lower_scale and CHECK_LOWER_SIZE).
 static uint64_t check_lower_stride(CheckLowerWriter* writer, TypeId pointer)
 {
+    const TypeTable* types = writer->program->types;
     const CheckAction action = { .extensions = writer->program->input->graph.extensions };
-    const uint64_t size = check_action_pointer_stride(writer->program->types, pointer, &action);
-    if (size == 0)
+    const uint64_t size = check_action_pointer_stride(types, pointer, &action);
+    if (size == 0 && !check_action_runtime_size(types, type_element(types, type_strip_aligned(types, pointer))))
     {
-        // Runtime-sized pointees require saved extent values. Tier0's immediate scale cannot stand in for them.
-        check_lower_unsupported(writer, "pointer arithmetic over variable-length arrays");
+        check_lower_unsupported(writer, "pointer arithmetic over types of no size");
     }
     return size;
 }
@@ -273,11 +290,11 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
     }
     uint32_t pop = 0;
     bool push = false;
-    if (kind <= BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_DUP)
+    if (kind <= BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_STACK_SAVE)
     {
         push = true;
     }
-    else if (kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_CONVERT || kind == BUSTER_TYPED_LOAD)
+    else if (kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_CONVERT || kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_ALLOCA)
     {
         pop = 1;
         push = true;
@@ -298,7 +315,7 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
         pop = value < writer->call_count ? writer->call_counts[value] + (writer->call_targets[value] == 0) : 0;
         push = class != BUSTER_TYPED_CLASS_VOID;
     }
-    else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
+    else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_STACK_RESTORE)
     {
         pop = 1;
     }
@@ -386,7 +403,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
     {
         const bool operand = (kind >= BUSTER_TYPED_NEG && kind <= BUSTER_TYPED_SET_GLOBAL) ||
                              (kind >= BUSTER_TYPED_DISCARD && kind <= BUSTER_TYPED_BRANCH_TRUE) || kind == BUSTER_TYPED_JUMP_VALUE ||
-                             (kind == BUSTER_TYPED_RETURN && class != BUSTER_TYPED_CLASS_VOID);
+                             (kind == BUSTER_TYPED_RETURN && class != BUSTER_TYPED_CLASS_VOID) || kind == BUSTER_TYPED_ALLOCA || kind == BUSTER_TYPED_STACK_RESTORE;
         const uint8_t top = writer->stack_head != 0 ? writer->stack_classes[writer->stack_head] : BUSTER_TYPED_CLASS_VOID;
         if (writer->track && writer->reachable && operand && top != BUSTER_TYPED_CLASS_VOID && writer->count != 0 && writer->classes[writer->count - 1] != top)
         {
@@ -538,6 +555,7 @@ static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
         writer->local_flags[local] = 0;
         writer->local_sizes[local] = 0;
         writer->local_alignments[local] = 0;
+        writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_NONE;
         writer->local_count += 1;
     }
     else if (class >= BUSTER_TYPED_CLASSES)
@@ -566,6 +584,7 @@ static uint32_t check_lower_object(CheckLowerWriter* writer, uint64_t size, uint
         writer->local_flags[local] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
         writer->local_sizes[local] = size != 0 ? (uint32_t)size : 1;
         writer->local_alignments[local] = (uint8_t)alignment_log2;
+        writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_NONE;
         writer->local_count += 1;
         writer->objects = true;
     }
@@ -600,7 +619,12 @@ static void check_lower_address(CheckLowerWriter* writer, uint32_t object, int64
     {
         const uint32_t local = writer->local_map[object];
         const SymbolId symbol = writer->program->object_symbols[object];
-        if (local != BUSTER_CHECK_NONE)
+        if (local != BUSTER_CHECK_NONE && writer->indirect[local] != BUSTER_CHECK_LOWER_VLA_NONE)
+        {
+            // A variable-length array's address, which its local holds.
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+        }
+        else if (local != BUSTER_CHECK_NONE)
         {
             writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
@@ -628,6 +652,76 @@ static void check_lower_offset(CheckLowerWriter* writer, uint64_t offset)
     {
         check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
         check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    }
+}
+
+// The size in bytes of `type`, an array with variable-length dimensions, onto the stack as `class` (U64, or I64 for a
+// stride): the extents' locals, which their bounds set where they were declared (VLA_BOUND), multiplied, then by the
+// product of the constant dimensions and the element's size. A variable-length dimension's type holds its bound's first
+// token plus one, by which its array (and its extent's local) is found.
+static void check_lower_vla_size(CheckLowerWriter* writer, TypeId type, uint8_t class)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    uint64_t factor = 1;
+    uint32_t extents = 0;
+    bool valid = true;
+    TypeId at = type_strip_aligned(types, type);
+    for (uint32_t depth = 0; valid && type_kind_is_array(type_kind(types, at)) && depth < types->types.count; depth += 1)
+    {
+        const uint64_t extent = types->types.extent[type_index(at)];
+        if (type_kind(types, at) == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
+        {
+            const uint32_t identity = extent != 0 && extent <= program->input->token_count ? writer->vla_identities[extent - 1] : 0;
+            const uint32_t local = identity != 0 ? writer->extent_locals[identity - 1] : BUSTER_CHECK_NONE;
+            valid = local != BUSTER_CHECK_NONE;
+            if (valid)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+                if (extents != 0)
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                extents += 1;
+            }
+        }
+        else
+        {
+            factor *= extent;
+        }
+        at = type_strip_aligned(types, type_element(types, at));
+    }
+    factor *= type_size(types, at);
+    if (valid && extents != 0)
+    {
+        if (factor != 1)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, factor);
+            check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        if (class != BUSTER_TYPED_CLASS_U64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+        }
+    }
+    else
+    {
+        // A dimension whose bound this function hasn't evaluated: the checker's scopes make that impossible.
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+}
+
+// The index on top of the stack scaled by `pointer`'s stride (`size`, check_lower_stride's), as instructions pushed
+// after the index's: a PTR_ADD by the stride, or for a pointer to a variable-length array, by 1 after the index's
+// product with its size, computed from its extents (CHECK_LOWER_SIZE).
+static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t size)
+{
+    const TypeTable* types = writer->program->types;
+    check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, size != 0 ? size : 1);
+    if (size == 0)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I64, 0);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_SIZE, .type = type_element(types, type_strip_aligned(types, pointer)) });
     }
 }
 
@@ -1373,7 +1467,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     check_lower_convert(writer, calculated, stored);
     if (pointer)
     {
-        check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_lower_stride(writer, stored));
+        check_lower_scale(writer, stored, check_lower_stride(writer, stored));
         if (subtract)
         {
             check_lower_instruction(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
@@ -2343,7 +2437,15 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             if (left_pointer && right_pointer && op == CHECK_OP_SUBTRACT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_DIV, BUSTER_TYPED_CLASS_I64, 0);
-                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size);
+                if (size != 0)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size);
+                }
+                else
+                {
+                    const TypeId pointee = type_element(types, type_strip_aligned(types, pointer_type));
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_SIZE, .type = pointee });
+                }
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
                 check_lower_instruction(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_operand(writer, node, 1, false, type_b);
@@ -2355,7 +2457,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
                 }
-                check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, size);
+                check_lower_scale(writer, pointer_type, size);
                 if (op == CHECK_OP_SUBTRACT)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
@@ -2452,6 +2554,10 @@ static void check_lower_drain(CheckLowerWriter* writer)
         else if (task.kind == CHECK_LOWER_BIT_STORE)
         {
             check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+        }
+        else if (task.kind == CHECK_LOWER_SIZE)
+        {
+            check_lower_vla_size(writer, task.type, BUSTER_TYPED_CLASS_I64);
         }
         else
         {
@@ -2652,6 +2758,75 @@ static void check_lower_case(CheckLowerWriter* writer, const CheckProgramCase* i
     }
 }
 
+// A block's stack position, saved into a local of its own before its first variable-length array
+// (CHECK_CONTROL_STACK_SAVE, once per block in the control stream), and restored from it at the block's end and before
+// the jumps out of it (CHECK_CONTROL_STACK_RESTORE, which come after the save). `target` is the block's closing token.
+static void check_lower_stack(CheckLowerWriter* writer, CheckControl control)
+{
+    const bool save = control.kind == CHECK_CONTROL_STACK_SAVE;
+    const bool block = control.target < writer->program->input->token_count;
+    if (save && block)
+    {
+        writer->save_locals[control.target] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    }
+    const uint32_t local = block ? writer->save_locals[control.target] : BUSTER_CHECK_NONE;
+    if (local >= writer->local_count)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (save)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+    }
+    else
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_emit(writer, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+    }
+}
+
+// A variable-length array's object at its declaration (CHECK_CONTROL_ALLOCATE): its size from its type's extents,
+// taken from the stack (ALLOCA) into its local. Refused in a block whose end has no control entry of its own (a for
+// statement's declaration, a statement expression's block), aligned past 16 bytes, or initialized (C23's = {}).
+static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const uint32_t declaration = control.token;
+    const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
+    const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
+    const uint8_t role = control.target < input->token_count ? program->parser->tree.roles[control.target] : 0;
+    const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
+    const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
+    const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? input->attributes[declaration] : 0;
+    const bool aligned = type != 0 && (type_alignment_log2(program->types, type) > 4 || (attributes != 0 && attributes->alignment_log2 > 5));
+    const bool initialized = program->initializers != 0 && program->initializers->declaration_plans[object - 1] != 0;
+    if (local >= writer->local_count || writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_NONE)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (!block)
+    {
+        check_lower_unsupported(writer, "variable-length arrays declared in a for statement or in a statement expression's block");
+    }
+    else if (aligned)
+    {
+        check_lower_unsupported(writer, "variable-length arrays aligned past 16 bytes");
+    }
+    else if (initialized)
+    {
+        check_lower_unsupported(writer, "initialized variable-length arrays");
+    }
+    else
+    {
+        check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_U64);
+        check_lower_emit(writer, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+        writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_ALLOCATED;
+    }
+}
+
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
 {
     const CheckProgram* program = writer->program;
@@ -2669,6 +2844,14 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_VLA)
     {
         check_lower_expression(writer, control.node, false, BUSTER_TYPE_VOID);
+    }
+    else if (control.kind == CHECK_CONTROL_STACK_SAVE || control.kind == CHECK_CONTROL_STACK_RESTORE)
+    {
+        check_lower_stack(writer, control);
+    }
+    else if (control.kind == CHECK_CONTROL_ALLOCATE)
+    {
+        check_lower_allocate(writer, control);
     }
     else if (control.kind == CHECK_CONTROL_ASM)
     {
@@ -2899,6 +3082,9 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_COLUMN(local_map, uint32_t, (uint64_t)count + 1);
     BUSTER_CHECK_LOWER_COLUMN(switch_locals, uint32_t, (uint64_t)count + 1);
     BUSTER_CHECK_LOWER_COLUMN(extent_locals, uint32_t, (uint64_t)input->vla_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(vla_identities, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
+    BUSTER_CHECK_LOWER_COLUMN(save_locals, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
+    BUSTER_CHECK_LOWER_COLUMN(indirect, uint8_t, local_capacity);
     BUSTER_CHECK_LOWER_COLUMN(initializer_declarations, uint32_t, (uint64_t)nodes + 1);
     BUSTER_CHECK_LOWER_COLUMN(local_classes, uint8_t, local_capacity);
     BUSTER_CHECK_LOWER_COLUMN(local_flags, uint8_t, local_capacity);
@@ -2927,6 +3113,18 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         memset(writer.initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
         memset(writer.local_map, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(writer.switch_locals, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (input->vla_count != 0)
+        {
+            memset(writer.vla_identities, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(writer.save_locals, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            for (uint32_t v = 0; v < input->vla_count; v += 1)
+            {
+                if (input->vlas[v].bound_begin < count)
+                {
+                    writer.vla_identities[input->vlas[v].bound_begin] = v + 1;
+                }
+            }
+        }
         memset(local_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t token = count; token-- > 0;)
         {
@@ -3027,10 +3225,20 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                 const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
                 uint32_t local = BUSTER_CHECK_NONE;
                 writer.token = declaration;
-                if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+                if (check_action_runtime_size(types, local_type))
+                {
+                    // A variable-length array lives on the stack from its declaration (CHECK_CONTROL_ALLOCATE) to its
+                    // block's end: its local holds its address.
+                    local = check_lower_temporary(&writer, BUSTER_TYPED_CLASS_U64);
+                    if (local < writer.local_count)
+                    {
+                        writer.indirect[local] = BUSTER_CHECK_LOWER_VLA_DECLARED;
+                    }
+                }
+                else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
                 {
                     // Arrays, structs and unions are frame objects, at most aligned to 16 (a frame pointer would take
-                    // more). A variable-length array has no size until it runs, and an incomplete type none at all.
+                    // more). An incomplete type has no size at all.
                     if (!type_is_complete(types, local_type))
                     {
                         check_lower_unsupported(&writer, "local objects of incomplete type");
@@ -3039,7 +3247,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                 }
                 else if (type_kind_is_array(kind) || alignment > 3)
                 {
-                    check_lower_unsupported(&writer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? "variable-length arrays" : "local values aligned past 8 bytes");
+                    check_lower_unsupported(&writer, "local values aligned past 8 bytes");
                 }
                 else
                 {
@@ -3058,6 +3266,14 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             check_lower_drain(&writer);
         }
         check_lower_place(&writer, body.count);
+        for (uint32_t local = 0; local < writer.local_count; local += 1)
+        {
+            if (writer.indirect[local] == BUSTER_CHECK_LOWER_VLA_DECLARED)
+            {
+                // A variable-length array the control stream never allocated: its address would be garbage.
+                check_lower_fail(&writer, CHECK_PROGRAM_INVALID);
+            }
+        }
         // C specifies zero for main's implicit return. Other non-void fallthrough remains undefined behavior.
         if (result == BUSTER_TYPE_VOID)
         {

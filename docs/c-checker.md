@@ -450,12 +450,30 @@ What the lowering covers past scalars (#145's programs):
   as it now reads. `++`, `--` and compound assignment read, operate and store
   the same way, and so do initializer parts with a bit width. A field whose bits
   are spread over more than 8 bytes (a packed one) is refused.
+- **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The control stream puts a `STACK_SAVE` before each block's first array, an
+  `ALLOCATE` at each array's declaration (after its bounds) and a
+  `STACK_RESTORE` at the block's end and before every `break`, `continue` or
+  `goto` that leaves the arrays' scope, restoring the outermost block it
+  leaves; a `return` needs none. The lowering keeps the saved position and each
+  array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
+  `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
+  set once where they were declared, times its constant dimensions and its
+  element's size, and the same extents give `sizeof` and the strides of
+  pointer arithmetic over a pointer to a variable-length array. An array
+  declared in a `for` statement's clause or directly in a statement
+  expression's block, one aligned past 16 and one initialized (C23's `= {}`)
+  are refused by name. The source reader doesn't yet take a bound whose
+  statement expression holds more than expression statements (a declaration,
+  an `if` or a jump: `invalid or unsupported declaration`); the control stream
+  already puts such a jump out of a block's first array's bounds before the
+  block's `STACK_SAVE`, where it needs no restore.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: aggregates passed or
-returned by value, variadic definitions, variable-length arrays, `long double`,
+returned by value, variadic definitions, `long double`,
 `_Complex`, thread-locals, inline assembly and so on. The c-testsuite harness
 counts such a test as unsupported, not failed.
 
