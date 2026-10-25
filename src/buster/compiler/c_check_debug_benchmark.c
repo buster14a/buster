@@ -19,7 +19,8 @@
 //
 // Before timing, each pass's paths must give the same rows, lines, kept rows and sections. Each sample takes the pass
 // over every function once; the report gives the medians of --runs (21) runs, the paths taking turns. --path times one
-// path alone, back to back, and --after-scalar MS runs the exact twin for MS ms before each sample of the vector path
+// path alone, back to back (the other path's median, and the emission's change, then read n/a), and --after-scalar MS
+// runs the exact twin for MS ms before each sample of the vector path
 // (the state a compiler's vector phases run in after lighter code, #199). Run it under the 9700X's lock with taskset -c 2.
 
 #define BUSTER_CHECK_DEBUG_BENCHMARK_ENTRIES 300
@@ -430,17 +431,40 @@ static int run_check_debug_benchmark(int argc, char** argv)
                 const double denominator = pass == CHECK_DEBUG_BENCHMARK_ROWS ? (double)functions * BUSTER_CHECK_DEBUG_BENCHMARK_ENTRIES :
                                            pass == CHECK_DEBUG_BENCHMARK_EMIT ? (double)benchmark.unit.code.lowered.entries : (double)rows->count;
                 const char* unit = pass == CHECK_DEBUG_BENCHMARK_ROWS || pass == CHECK_DEBUG_BENCHMARK_EMIT ? "entry" : "raw row";
+                // A path --path left out has no median, and the emission's change needs both.
                 const double scalar = alone == 1 ? 0 : (double)check_source_median(samples, runs);
                 const double vector = alone == 0 ? 0 : (double)check_source_median(samples + runs, runs);
+                char scalar_text[96] = "n/a";
+                char vector_text[96] = "n/a";
                 if (pass == CHECK_DEBUG_BENCHMARK_EMIT)
                 {
-                    printf("  emit: %.3f ms without the raw rows, %.3f ms with (%.2f ns per %s with, %+.1f%%)\n", scalar / 1e6, vector / 1e6, vector / denominator, unit,
-                           scalar != 0 ? (vector - scalar) * 100 / scalar : 0);
+                    char change[32] = "n/a";
+                    if (alone != 1)
+                    {
+                        snprintf(scalar_text, sizeof(scalar_text), "%.3f ms", scalar / 1e6);
+                    }
+                    if (alone != 0)
+                    {
+                        snprintf(vector_text, sizeof(vector_text), "%.3f ms (%.2f ns per %s)", vector / 1e6, vector / denominator, unit);
+                    }
+                    if (alone < 0 && scalar != 0)
+                    {
+                        snprintf(change, sizeof(change), "%+.1f%%", (vector - scalar) * 100 / scalar);
+                    }
+                    printf("  emit: without the raw rows %s, with them %s, change %s\n", scalar_text, vector_text, change);
                 }
                 else
                 {
-                    printf("  %s: vector %.3f ns per %s (%.3f ms), exact %.3f ns per %s (%.3f ms)%s\n", check_debug_benchmark_names[pass], vector / denominator, unit,
-                           vector / 1e6, scalar / denominator, unit, scalar / 1e6, after_scalar != 0 ? ", each vector sample after the exact path" : "");
+                    if (alone != 1)
+                    {
+                        snprintf(scalar_text, sizeof(scalar_text), "%.3f ns per %s (%.3f ms)", scalar / denominator, unit, scalar / 1e6);
+                    }
+                    if (alone != 0)
+                    {
+                        snprintf(vector_text, sizeof(vector_text), "%.3f ns per %s (%.3f ms)", vector / denominator, unit, vector / 1e6);
+                    }
+                    printf("  %s: vector %s, exact %s%s\n", check_debug_benchmark_names[pass], vector_text, scalar_text,
+                           after_scalar != 0 ? ", each vector sample after the exact path" : "");
                 }
             }
         }
