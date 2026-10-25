@@ -4032,8 +4032,8 @@ mutants of the units it found no difference in (#133's last "Done when" item,
 It prints each kind's sites, mutants, clang's rejections and differences, and
 exits with status 1 on any difference. `docs/c-checker.md` ("Corpus comparison
 and semantic mutations") has the four corpora's configurations, the campaigns'
-counts and the three base differences left (Lua's labels as values, and two
-of #148's builtins in the libc corpus). The 9700X job's test step checks 8
+counts and the two base differences left (two of #148's builtins in the libc
+corpus; Lua's labels as values agree since #133 took them). The 9700X job's test step checks 8
 mutants of the frozen SQLite source and 96 of the oracle's four musl sources
 with seed 133; a run that differs fails it, and `--keep` with `--minimize`
 reproduces it locally.

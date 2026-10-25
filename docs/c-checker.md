@@ -724,11 +724,11 @@ after the fixes:
 
 Files compared counts each corpus's files, the mutated units' bases and the
 mutants. The scalar and vector paths gave identical columns on every one. The
-three differences left are in bases, and mutants aren't made of a unit whose
-base differs:
+differences left are in bases, and mutants aren't made of a unit whose base
+differs. Lua's `lvm.c`, GNU's labels as values (`&&L_OP_MOVE`, `goto *`), was
+one: since the checker takes them (#133), Lua's 34 files agree with clang (the
+corpus comparison, without mutants, on a laptop's clang 23). Two are left:
 
-- Lua's `lvm.c`: GNU's labels as values (`&&L_OP_MOVE`, `goto *`), which the
-  checker doesn't take yet;
 - the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
   `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
   floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s
