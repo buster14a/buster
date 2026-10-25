@@ -68,6 +68,57 @@ static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagF
     return valid;
 }
 
+// An enumerator of an enum with a fixed underlying type (complete from its base): its value, explicit or the one before
+// plus 1, must be representable in that type, and is converted to it; its type is that type in its list, as clang 23
+// types it (Sema::CheckEnumConstant), and after the list the enum's in C23 alone (check_input_enum_complete). Explicit
+// values are representable as clang's isRepresentableIntegerValue has it: a negative one by its significant bits, the
+// others by their active bits, less the sign bit for a signed type. An error is reported at the enumerator's name, as
+// clang reports it.
+static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTagFrame* frame, uint32_t name, bool explicit_value, CheckValue* value)
+{
+    const TypeTable* types = reader->types;
+    const TypeId underlying = types->types.base[type_index(frame->type)];
+    uint32_t width = 0;
+    bool sign = false;
+    bool valid = check_action_integer_type(types, underlying, &width, &sign);
+    if (valid && explicit_value)
+    {
+        uint32_t value_width = 0;
+        bool value_sign = false;
+        valid = check_action_integer_type(types, value->type, &value_width, &value_sign);
+        const unsigned __int128 mask = check_action_mask(value_width);
+        const unsigned __int128 bits = value->integer & mask;
+        const bool negative = valid && value_sign && (bits >> (value_width - 1)) != 0;
+        const uint32_t needed = negative ? check_input_enum_active_bits(~bits & mask) + 1 : check_input_enum_active_bits(bits);
+        valid = valid && needed <= (negative || !sign ? width : width - 1);
+        if (valid)
+        {
+            check_action_convert_plain(types, value, underlying, name);
+        }
+    }
+    else if (valid)
+    {
+        const unsigned __int128 mask = check_action_mask(width);
+        const unsigned __int128 maximum = sign ? mask >> 1 : mask;
+        const unsigned __int128 previous = frame->enumerator & mask;
+        valid = frame->count == 0 || previous != maximum;
+        *value = (CheckValue)
+        {
+            .type = underlying,
+            .category = CHECK_RVALUE,
+            .flags = BUSTER_CHECK_ICE,
+            .constant_kind = CHECK_CONSTANT_INTEGER,
+            .integer = frame->count == 0 ? 0 : (previous + 1) & mask,
+        };
+    }
+    value->type = underlying;
+    if (!valid)
+    {
+        check_input_report(reader, name, CHECK_INPUT_DECLARATION);
+    }
+    return valid;
+}
+
 static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame, CheckTagMember* members, uint32_t* member_count, uint32_t* nested_tag)
 {
     const Parser* parser = reader->parser;
@@ -78,6 +129,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     bool valid = name < frame->close && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
     CheckValue value = { 0 };
     CheckInputAttributes* attributes = frame->enumerator_attributes;
+    // An enum with a fixed underlying type is complete from its base on (check_input_tag_identity).
+    const bool fixed = type_is_complete(reader->types, frame->type);
     *nested_tag = BUSTER_CHECK_NONE;
     const bool resumed = frame->enum_job != 0;
     if (!resumed)
@@ -139,10 +192,18 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 arena_pop_to(reader->scratch, mark);
             }
         }
-        if (valid && *nested_tag == BUSTER_CHECK_NONE && check_input_enum_fits_int(reader->types, &value))
+        if (valid && *nested_tag == BUSTER_CHECK_NONE && fixed)
+        {
+            valid = check_input_enum_fixed_value(reader, frame, name, true, &value);
+        }
+        else if (valid && *nested_tag == BUSTER_CHECK_NONE && check_input_enum_fits_int(reader->types, &value))
         {
             check_action_convert_plain(reader->types, &value, BUSTER_TYPE_INT, name);
         }
+    }
+    else if (valid && fixed)
+    {
+        valid = check_input_enum_fixed_value(reader, frame, name, false, &value);
     }
     else if (valid)
     {
@@ -227,28 +288,49 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
 {
     const bool packed = frame->attributes != 0 && frame->attributes->packed;
     const uint8_t alignment = frame->attributes != 0 ? frame->attributes->alignment_log2 : 0;
-    const TypeId underlying = type_enum_underlying(packed, frame->negative_bits, frame->positive_bits);
-    bool valid = frame->count != 0 && type_enum_complete(reader->types, frame->type, underlying, alignment);
-    reader->output->resource |= !valid && reader->types->last_error == TYPE_ERROR_FULL;
-    if (valid)
+    const uint32_t tag = reader->types->types.index[type_index(frame->type)];
+    bool valid = frame->count != 0;
+    if (reader->enum_fixed[tag] != BUSTER_CHECK_ENUM_NONE)
     {
-        if (frame->negative_bits > 64 || frame->positive_bits > 64 || (frame->negative_bits != 0 && frame->positive_bits == 64))
+        // Complete from its base, with its enumerators of the base's type in its list; an alignment after its body comes
+        // too late for that (one before its name was applied there). After the list, its enumerators are of its own type
+        // in C23 and keep the base's before it, as clang 23 types them (Sema::ActOnEnumBody, C23 6.7.3.3p16).
+        if (valid && alignment != 0 && alignment != reader->types->tags.alignment_log2[tag])
         {
-            reader->output->constant_warnings[frame->token] |= CHECK_WARNING_ENUM_TOO_LARGE;
+            check_input_report(reader, frame->close, CHECK_INPUT_UNSUPPORTED);
+            valid = false;
         }
-        const TypeId type = !frame->wide_enumerators ? BUSTER_TYPE_INT : reader->parser->language.standard >= 2023 ? frame->type : underlying;
-        for (uint32_t member = frame->first; member != BUSTER_CHECK_NONE; member = members[member].next)
+        for (uint32_t member = frame->first; valid && reader->parser->language.standard >= 2023 && member != BUSTER_CHECK_NONE; member = members[member].next)
         {
-            const uint32_t token = members[member].member.name;
-            CheckValue value =
+            reader->declared_types[members[member].member.name] = frame->type;
+        }
+        reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_LISTED;
+    }
+    else
+    {
+        const TypeId underlying = type_enum_underlying(packed, frame->negative_bits, frame->positive_bits);
+        valid = valid && type_enum_complete(reader->types, frame->type, underlying, alignment);
+        reader->output->resource |= !valid && reader->types->last_error == TYPE_ERROR_FULL;
+        if (valid)
+        {
+            if (frame->negative_bits > 64 || frame->positive_bits > 64 || (frame->negative_bits != 0 && frame->positive_bits == 64))
             {
-                .type = members[member].member.type,
-                .integer = reader->enum_values[token],
-                .constant_kind = CHECK_CONSTANT_INTEGER,
-            };
-            check_action_convert_plain(reader->types, &value, type, token);
-            reader->declared_types[token] = type;
-            reader->enum_values[token] = value.integer;
+                reader->output->constant_warnings[frame->token] |= CHECK_WARNING_ENUM_TOO_LARGE;
+            }
+            const TypeId type = !frame->wide_enumerators ? BUSTER_TYPE_INT : reader->parser->language.standard >= 2023 ? frame->type : underlying;
+            for (uint32_t member = frame->first; member != BUSTER_CHECK_NONE; member = members[member].next)
+            {
+                const uint32_t token = members[member].member.name;
+                CheckValue value =
+                {
+                    .type = members[member].member.type,
+                    .integer = reader->enum_values[token],
+                    .constant_kind = CHECK_CONSTANT_INTEGER,
+                };
+                check_action_convert_plain(reader->types, &value, type, token);
+                reader->declared_types[token] = type;
+                reader->enum_values[token] = value.integer;
+            }
         }
     }
     return valid;

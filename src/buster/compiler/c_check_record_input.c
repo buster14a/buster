@@ -4,7 +4,7 @@
 // Anonymous members introduce their named members into the containing record's namespace. Validate that expanded
 // namespace with an explicit stack and a bounded hash table before layout; named aggregate fields do not expand.
 
-static bool check_input_record_names(CheckInputReader* reader, const TypeMember* members, uint32_t count, uint32_t bound, uint32_t* names, uint32_t* failed_member)
+static bool check_input_record_names(CheckInputReader* reader, const TypeMember* members, uint32_t count, uint32_t bound, uint32_t* failed_member)
 {
     typedef struct CheckRecordNameFrame CheckRecordNameFrame;
     struct CheckRecordNameFrame
@@ -24,7 +24,6 @@ static bool check_input_record_names(CheckInputReader* reader, const TypeMember*
     CheckRecordNameFrame* stack = arena_push_array(reader->scratch, (uint64_t)bound + 1, sizeof(CheckRecordNameFrame), 4);
     bool valid = identifiers != 0 && stack != 0;
     reader->output->resource |= !valid;
-    *names = 0;
     *failed_member = BUSTER_CHECK_NONE;
     if (valid)
     {
@@ -55,7 +54,6 @@ static bool check_input_record_names(CheckInputReader* reader, const TypeMember*
                     }
                     valid = identifiers[slot] == 0;
                     identifiers[slot] = name;
-                    *names += 1;
                 }
                 else if (!bit_field)
                 {

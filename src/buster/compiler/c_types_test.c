@@ -2405,9 +2405,8 @@ struct TypeTestWorld
     uint32_t* name_lengths;
     TypeNames names;
     uint32_t next_name;
-    // A world whose C this compiler compiles (the calling convention's compiled worlds, #137), whose front end takes
-    // neither C23's enums of a fixed underlying type nor an attribute after a bit-field's width: its enums' types are
-    // their values', and a bit-field's attributes go before its type.
+    // A world whose C this compiler compiles (the calling convention's compiled worlds, #137), whose front end doesn't
+    // take an attribute after a bit-field's width: a bit-field's attributes go before its type.
     bool compiled;
 };
 
@@ -2528,7 +2527,7 @@ static void type_test_world_enum(TypeTestWorld* world, uint64_t* random)
     const uint8_t alignment = type_test_below(random, 5) == 0 ? (uint8_t)(1 + type_test_below(random, 6)) : 0;
     world->enum_begin[tag] = world->enum_value_count;
     TypeId underlying = 0;
-    if (type_test_below(random, 3) == 0 && !world->compiled)
+    if (type_test_below(random, 3) == 0)
     {
         const TypeId fixed[] = {
             BUSTER_TYPE_BOOL,
