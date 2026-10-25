@@ -382,7 +382,7 @@ jobs:
           == Test the calling convention
           # --cross-check also links random signatures between our side, encoded and written as objects, and C that
           # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both
-          # ways.
+          # ways; in its compiled runs (#137), our side is C that this compiler compiles, by both paths into one object.
           ./build/compiler test-calling-convention --cross-check
           == Test the semantic driver's diagnostics and emission against clang
           ./build/compiler test-checker-driver --executable ./build/compiler
@@ -455,7 +455,8 @@ jobs:
           ./build/compiler test-static --cross-check
           == Test Tier 0
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
-          # --cross-check also runs them beside clang -O0's builds of the same programs as C.
+          # --cross-check also runs them beside clang -O0's builds of the same programs as C, and links those that pass
+          # structs and unions by value with clang's functions, calls crossing both ways.
           ./build/compiler test-tier0 --cross-check
           == Test the C lexer
           ./build/compiler test-lexer

@@ -267,8 +267,10 @@ designs and the compilers already built this way.
   existing-stream runtime expansion. `test-check-builtins`,
   `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
   `test-builtin-varargs` distinguish semantic constraints from emitted execution.
-  Source hooks belong to the active #133 owner. Incoming variadic frame setup,
-  full Tier 1 coverage and corpus acceptance remain separate requirements.
+  #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
+  structs and unions too), `va_copy` and `va_end` through them over Tier 0's
+  incoming variadic frames (#137); full Tier 1 coverage and corpus acceptance
+  remain separate requirements.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -316,8 +318,9 @@ designs and the compilers already built this way.
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
   Tier 0 ([the checker guide](docs/c-checker.md)); and with neither option it
   links an executable (`-o`, `a.out` by default) by the direct path, bound
-  against the C runtime's snapshot, `--verify` checking every function's
-  records with `x86_validate`. `./build/compiler parse
+  against the C runtime's snapshot and the shared libraries `-lNAME` names
+  (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
+  checking every function's records with `x86_validate`. `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -2040,11 +2043,11 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   an index of several of the vector path's batches with a member's symbols
   across them, and no members), then malformed ones;
 - a shared library made by hand: version definitions, a name at a default
-  version and at a hidden one, IFUNC, `GNU_UNIQUE`, `COMMON`, TLS and
-  absolute symbols, weak and protected ones, hidden and local ones and one at
-  `VER_NDX_LOCAL`, which aren't exported, references, and a name exported
-  twice (the index finds the first); the same without `.gnu.version`; then
-  malformed ones;
+  version and at a hidden one (kept apart, with its version's index), IFUNC,
+  `GNU_UNIQUE`, `COMMON`, TLS and absolute symbols, weak and protected ones,
+  hidden and local ones and one at `VER_NDX_LOCAL`, which aren't exported,
+  references (with their versions' indices), and a name exported twice (the
+  index finds the first); the same without `.gnu.version`; then malformed ones;
 - linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
   and `OUTPUT_FORMAT`, then each error at its offset;
 - page edges: every prefix of each input made by hand (the object also with
@@ -2211,6 +2214,19 @@ exports and members:
   not for a name left to `crtendS.o`), a name left to `crtendS.o` with source
   `RUNTIME_ARCHIVE`, and an import a member came to define dropped from the
   imports;
+- libraries named with `-l`: links made by hand bound with this system's libm
+  (`runtime_libraries_import`): references to libm's names imports of libm's
+  at their versions, `ldexp`'s before libc.so.6's, a weak reference alone
+  needing no library, and a definition of a name libm exports exported; the
+  import's refusals and an empty archive; and libraries made by hand, two that
+  refer to `b_func` and one that exports it: without a definition of
+  `b_func`, or with a hidden one or a reference, the link needs all three, and
+  with a global, weak, protected or absolute one, which the executable
+  exports, the two alone (the global one after 0 to 15 other definitions);
+  without the third, a needed library's reference to `b_func` is
+  `BIND_ERROR_LIBRARY_UNDEFINED` naming the library (but with a global
+  definition, or neither needed), and a library whose `DT_NEEDED` names one
+  the link lacks isn't checked;
 - an atexit program: `main` registers a handler with `atexit` and returns 3,
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`
@@ -2324,14 +2340,18 @@ removed at the end unless `--keep`. The 9700X job's test step runs it with
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
 translation units have, by each path, against the dynamic PIE's runtime, a
-static executable's, a static PIE's and a shared library's, and reports
-21-run medians (time,
-cycles, instructions, IPC) of the match (the program's global symbols looked
+static executable's, a static PIE's and a shared library's, and against the
+dynamic PIE's with libm on the line as `-lm` puts it there, which these
+programs don't need (each name looked up in libm's and libmvec's exports too),
+and reports 21-run medians (time,
+cycles, instructions, IPC) of libm's import (`runtime_libraries_import`), the
+match (the program's global symbols looked
 up in the runtime's names, per global symbol), `bind_begin`, the static
 runtimes' closure (the members the link needs, per member) and `bind_end`,
 each run on the same link put back as it was. The paths must make the same
 links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
-5's phases, data-parallel" and "Static links, as built" have the numbers. The
+5's phases, data-parallel", "Static links, as built" and "Libraries named with
+`-l`" have the numbers. The
 default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
 
@@ -4037,8 +4057,9 @@ reproduces it locally.
 ## Calling convention tests
 
 `./build/compiler test-calling-convention [--seed N] [--count N]
-[--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--keep]`
-(about 0.05 s on the 9700X, and 4.8 s with `--cross-check`) checks
+[--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--buster PATH]
+[--keep]` (about 0.05 s on the 9700X, and 4.8 s with `--cross-check` before
+its compiled runs) checks
 `calling_convention.c`, by its vector paths and their twins at 16-, 32- and
 64-byte vectors:
 
@@ -4109,9 +4130,21 @@ result's bytes, a C callee and a C caller of ours) and as our side, a caller
 and a callee per signature as `X86Instruction` records through `x86_encode`,
 `link_add_code_fixups` and the object writer. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
-`al` and `va_arg` value against the bytes, both ways. The six runs (clang's,
-then GCC's, each at 16, 32 and 64 bytes) go at once, a child process each, and
-the test prints their lines in that order; a run that fails keeps its files.
+`al` and `va_arg` value against the bytes, both ways. Two compiled runs
+(#137), against clang and against GCC at 16 bytes, put this compiler on our
+side: a world of what its C passes (integers to 64 bits, enums, pointers,
+`float`, `double` and the records, arrays and aligned typedefs of them, aligned
+to 16 at most), without what its front end doesn't take yet (C23's enums of a
+fixed underlying type, an attribute after a bit-field's width, which goes
+before its type instead, a struct of a flexible array member alone), and
+signatures within Tier 0's depths (13 integer and 15 floating arguments); our
+caller and callee per signature as C, which this executable (or `--buster
+PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
+and the C side checks every argument and result both ways (the al and the
+hidden pointer, which C doesn't name, are the record runs' checks). The eight
+runs (clang's, then GCC's, each at 16, 32 and 64 bytes, then the compiled
+ones) go at once, a child process each, and the test prints their lines in
+that order; a run that fails keeps its files.
 GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
@@ -4170,16 +4203,24 @@ informational.
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
 [--cross-count N] [--clang PATH] [--keep]]` (about 0.8 s on the 9700X, and
 2.9 s with `--cross-check`) checks `tier0.c` on programs from
-`tier0_generate.c`, `--count` (300) of each of four shapes: one function of
+`tier0_generate.c`, `--count` (300) of each of five shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
-address-taken locals, objects); and larger. Their calls pass up to 12
+address-taken locals, objects); larger; and larger with structs and unions
+passed and returned by value (#137), from a catalog of records whose parts
+load every way (byte arrays of 1 to 17 bytes, floats and doubles mixed with
+integers both ways round, unions, a member aligned to 16, the empty struct,
+records past 16 bytes), whose programs must reach every kind of part,
+location and result the catalog makes, and functions with a frame pointer
+(variable-length arrays) that pass, take or return records. Their calls pass up to 12
 arguments, past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
 into, copied (twins' bytes, all or a prefix, in statements and before a call's
 arguments, its C sequenced), each address's remainder by its alignment a value,
-and every object's bits folded into a global at its function's end. In the
+and every object's bits folded into a global at its function's end (a
+floating part's masked to zero for a NaN, and a union's floating members
+written only with integers' values, since C leaves a NaN's bits open). In the
 last two shapes they have variable-length arrays too, whose sizes and addresses
 are values, with the stack's position saved and restored around the loops'
 constructs that declare them, as a producer does. Before them
@@ -4201,7 +4242,20 @@ which both paths read for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for
 `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
 depths, and a function that allocates 64 KB and up a thousand times, each in a
-scope of its own, around calls with stack arguments, run natively. Every function must pass `tier0_validate`, both
+scope of its own, around calls with stack arguments, run natively; and the
+aggregates at locations written by hand, 13 fixtures (each kind of general and
+XMM part, the high eightbyte alone in each kind of register and on the stack,
+SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
+misaligned, and results in each kind and order of register, short ones, a
+vector and through a hidden pointer), run natively both ways: as calls, whose
+probe records every register and stack slot it gets from bytes that end or
+start at a `PROT_NONE` page, and as functions, which a driver calls and which
+copy their parameters out; and `tier0_validate` refusing 57 breaks of their
+rules, as both paths do (the end reached without a RETURN of an aggregate
+result, by falling off it, a jump or a branch, a hidden result's RETURN of
+nothing, two parts or two parameters in one register, and registers outside
+the convention's, among them), and a function of value parameters in one
+register or outside the convention's. Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`. Each program is then sized, encoded, loaded into
@@ -4221,7 +4275,10 @@ With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 (with `-fwrapv` and `-fno-strict-aliasing`, as the repository builds), is written as Tier 0's object (the link representation and the object writer)
 and as C, which clang -O0 compiles; a generated harness links both, runs them
 on the same inputs and compares the results and every global (a floating
-one's NaNs alike whatever their bits, as C leaves them), then times both.
+one's NaNs alike whatever their bits, as C leaves them), then times both; then
+as many programs of the records shape linked mixed, their even functions Tier
+0's and their odd ones clang's, so that calls pass and return structs and
+unions by value between the two compilers both ways.
 It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
 run times. A shared library generated beside them (GNU as source, which `as`
 and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so

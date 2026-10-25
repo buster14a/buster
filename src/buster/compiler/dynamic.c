@@ -78,27 +78,34 @@ static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic*
     };
 }
 
-// Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`: libc.so.6's, then
-// the loader's. False if the arena has no room for them.
+// Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`: the libraries the
+// link names with -l (Bind.libraries), in their order, each needed when a strong reference binds to it; then libc.so.6's,
+// then the loader's, as GCC's driver puts them on the line. False if the arena has no room for them.
 static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, const Runtime* runtime, const Bind* bind, Arena* arena)
 {
-    const ImportLibrary* libraries[] = {
-        &runtime->libc,
-        &runtime->loader,
-    };
-    ExecutableVersion* versions = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableVersion, (uint64_t)runtime->libc.version_count + runtime->loader.version_count + 1);
-    ExecutableLibrary* needed = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableLibrary, BUSTER_ARRAY_LENGTH(libraries));
+    const RuntimeLibraries* named = bind->libraries;
+    const uint32_t named_count = named != 0 ? named->count : 0;
+    const uint32_t library_count = named_count + 2;
+    uint64_t version_room = (uint64_t)runtime->libc.version_count + runtime->loader.version_count + 1;
+    for (uint32_t l = 0; l < named_count; l += 1)
+    {
+        version_room += named->libraries[l].version_count;
+    }
+    ExecutableVersion* versions = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableVersion, version_room);
+    ExecutableLibrary* needed = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableLibrary, library_count);
     uint32_t count = 0;
     uint16_t relr_version = 0;
-    for (uint32_t l = 0; versions != 0 && needed != 0 && l < BUSTER_ARRAY_LENGTH(libraries); l += 1)
+    for (uint32_t l = 0; versions != 0 && needed != 0 && l < library_count; l += 1)
     {
+        const bool libc = l == named_count;
+        const ImportLibrary* library = l < named_count ? &named->libraries[l] : libc ? &runtime->libc : &runtime->loader;
         needed[l] = (ExecutableLibrary){
-            .name = libraries[l]->soname,
-            .required = l == 0,
+            .name = l < named_count ? runtime_libraries_name(named, l) : library->soname,
+            .required = l < named_count ? (bind->libraries_needed & (1u << l)) != 0 : libc,
         };
-        for (uint32_t v = 0; v < libraries[l]->version_count; v += 1)
+        for (uint32_t v = 0; v < library->version_count; v += 1)
         {
-            const ImportVersion* version = &libraries[l]->versions[v];
+            const ImportVersion* version = &library->versions[v];
             versions[count] = (ExecutableVersion){
                 .name = version->name,
                 .hash = version->hash,
@@ -107,7 +114,7 @@ static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, c
             };
             count += version->base ? 0 : 1;
             // libc.so.6's GLIBC_ABI_DT_RELR.
-            relr_version = l == 0 && !version->base && import_equal(version->name, BUSTER_DYNAMIC_RELR_VERSION) ? version->index : relr_version;
+            relr_version = libc && !version->base && import_equal(version->name, BUSTER_DYNAMIC_RELR_VERSION) ? version->index : relr_version;
         }
     }
     *dynamic = (ExecutableDynamic){
@@ -116,7 +123,7 @@ static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, c
             .length = sizeof(dynamic_interpreter) - 1,
         },
         .libraries = needed,
-        .library_count = BUSTER_ARRAY_LENGTH(libraries),
+        .library_count = library_count,
         .versions = versions,
         .version_count = count,
         .note = runtime->abi_note,

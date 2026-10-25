@@ -313,15 +313,18 @@ static void import_test_paths(ImportTestTally* tally, String8 bytes, ImportTestP
     tally->exact += vector ? 0 : 1;
 }
 
-// Whether two reads of a library are the same: its soname, versions, exports, references and index, column by column.
+// Whether two reads of a library are the same: its soname, versions, exports, references, hidden exports and index,
+// column by column.
 static bool import_test_same_library(const ImportLibrary* a, const ImportLibrary* b)
 {
     const ImportExports* x = &a->exports;
     const ImportExports* y = &b->exports;
     const ImportReferences* p = &a->references;
     const ImportReferences* q = &b->references;
+    const ImportHiddenExports* g = &a->hidden;
+    const ImportHiddenExports* k = &b->hidden;
     bool result = a->soname.pointer == b->soname.pointer && a->soname.length == b->soname.length && a->version_count == b->version_count && x->count == y->count &&
-                  p->count == q->count && a->index.bucket_bits == b->index.bucket_bits && (a->index.start == 0) == (b->index.start == 0);
+                  p->count == q->count && g->count == k->count && a->index.bucket_bits == b->index.bucket_bits && (a->index.start == 0) == (b->index.start == 0);
     for (uint32_t v = 0; result && v < a->version_count; v += 1)
     {
         const ImportVersion* c = &a->versions[v];
@@ -336,7 +339,11 @@ static bool import_test_same_library(const ImportLibrary* a, const ImportLibrary
     }
     for (uint32_t i = 0; result && i < p->count; i += 1)
     {
-        result = p->name[i] == q->name[i] && p->length[i] == q->length[i] && p->hash[i] == q->hash[i] && p->weak[i] == q->weak[i];
+        result = p->name[i] == q->name[i] && p->length[i] == q->length[i] && p->hash[i] == q->hash[i] && p->weak[i] == q->weak[i] && p->version[i] == q->version[i];
+    }
+    for (uint32_t i = 0; result && i < g->count; i += 1)
+    {
+        result = g->name[i] == k->name[i] && g->version[i] == k->version[i];
     }
     const uint64_t buckets = a->index.start != 0 ? (uint64_t)1 << a->index.bucket_bits : 0;
     result = result && (buckets == 0 || memcmp(a->index.start, b->index.start, (buckets + 1) * sizeof(uint32_t)) == 0);
@@ -2218,8 +2225,9 @@ struct ImportTestLibrary
     // .dynsym: each symbol's export flags (BUSTER_IMPORT_TEST_NONE when it isn't exported), version index and reference.
     ImportTestSymbols symbols;
     uint32_t version_names[BUSTER_IMPORT_TEST_VERSIONS];
-    // The symbol the malformed cases change.
+    // The symbols the malformed cases change: an export and one at a version other than its name's default.
     uint32_t variable;
+    uint32_t hidden;
 };
 
 static const char* const import_test_version_names[BUSTER_IMPORT_TEST_VERSIONS] = {
@@ -2270,7 +2278,7 @@ static bool import_test_library(ImportTestLibrary* test, Arena* arena)
     const uint16_t data_section = IMPORT_TEST_LIBRARY_DATA;
     import_test_add_dynamic(test, "", 0, 0, SHN_UNDEF, 0, 0, 0, none, 0);
     import_test_add_dynamic(test, "local_function", ELF64_ST_INFO(STB_LOCAL, STT_FUNC), 0, text_section, 56, 8, 0, none, 0);
-    import_test_add_dynamic(test, "old_function", ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), 0, text_section, 0, 16, 2 | BUSTER_IMPORT_TEST_HIDDEN_VERSION, none, 0);
+    test->hidden = import_test_add_dynamic(test, "old_function", ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), 0, text_section, 0, 16, 2 | BUSTER_IMPORT_TEST_HIDDEN_VERSION, none, 0);
     import_test_add_dynamic(test, "old_function", ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), 0, text_section, 16, 16, 3, global | BUSTER_LINK_SYMBOL_FUNCTION, 0);
     test->variable = import_test_add_dynamic(test, "variable", ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), 0, data_section, 0, 8, 2, global | BUSTER_LINK_SYMBOL_OBJECT, 0);
     import_test_add_dynamic(test, "ifunc", ELF64_ST_INFO(STB_GLOBAL, STT_GNU_IFUNC), 0, text_section, 32, 8, 2, global | BUSTER_LINK_SYMBOL_FUNCTION, 0);
@@ -2337,7 +2345,7 @@ static uint32_t import_test_library_find(const ImportLibrary* library, const cha
 }
 
 // Reads the library made by hand (with .gnu.version or, `versioned` false, as if without it) and checks its soname,
-// versions, exports, the exports' table, and references.
+// versions, exports, the exports' table, references with their versions' indices, and hidden exports.
 static void import_test_library_check(ImportTestTally* tally, const ImportTestLibrary* test, String8 bytes, bool versioned, const char* what, Arena* arena)
 {
     const uint64_t length = arena->length;
@@ -2351,9 +2359,11 @@ static void import_test_library_check(ImportTestTally* tally, const ImportTestLi
         same = import_equal(version->name, import_test_version_names[v]) && version->hash == import_test_elf_hash(import_test_version_names[v]) && version->index == v + 1 &&
                version->base == (v == 0);
     }
-    // The exports in .dynsym's order, each found in the table at its name's first export, and the references.
+    // The exports in .dynsym's order, each found in the table at its name's first export, the references and the hidden
+    // exports.
     uint32_t exports = 0;
     uint32_t references = 0;
+    uint32_t hiddens = 0;
     for (uint32_t i = 1; same && i < s->count; i += 1)
     {
         const Elf64_Sym* entry = &s->entries[i];
@@ -2379,12 +2389,22 @@ static void import_test_library_check(ImportTestTally* tally, const ImportTestLi
         if (s->references[i] != 0)
         {
             const ImportReferences* r = &library.references;
+            const uint16_t version = versioned ? (uint16_t)(s->versions[i] & 0x7fff) : VER_NDX_GLOBAL;
             same = same && references < r->count && import_test_name_is(r->name[references], r->length[references], name) &&
-                   r->hash[references] == link_hash((const uint8_t*)name, strlen(name)) && r->weak[references] == (s->references[i] == 2 ? 1 : 0);
+                   r->hash[references] == link_hash((const uint8_t*)name, strlen(name)) && r->weak[references] == (s->references[i] == 2 ? 1 : 0) &&
+                   r->version[references] == version;
             references += 1;
         }
+        // A definition at a version other than its name's default (old_function@V1), with its version's index.
+        const uint16_t index = (uint16_t)(s->versions[i] & 0x7fff);
+        if (versioned && defined && (s->versions[i] & BUSTER_IMPORT_TEST_HIDDEN_VERSION) != 0 && index > VER_NDX_GLOBAL)
+        {
+            const ImportHiddenExports* h = &library.hidden;
+            same = same && hiddens < h->count && strcmp((const char*)h->name[hiddens], name) == 0 && h->version[hiddens] == index;
+            hiddens += 1;
+        }
     }
-    same = same && library.exports.count == exports && library.references.count == references;
+    same = same && library.exports.count == exports && library.references.count == references && library.hidden.count == hiddens && hiddens == (versioned ? 1 : 0);
     // The first export of a name exported twice, and names that aren't exported.
     same = same && import_test_library_find(&library, "old_function") == (versioned ? 0 : 0) && import_test_library_find(&library, "hidden_function") == UINT32_MAX &&
            import_test_library_find(&library, "local_function") == UINT32_MAX && import_test_library_find(&library, "reference") == UINT32_MAX &&
@@ -2425,6 +2445,7 @@ static bool import_test_libraries(Arena* arena)
         const uint64_t definitions = f->contents[IMPORT_TEST_LIBRARY_VERDEF];
         const uint64_t variable = f->contents[IMPORT_TEST_LIBRARY_DYNSYM] + (uint64_t)test->variable * sizeof(Elf64_Sym);
         const uint64_t variable_version = f->contents[IMPORT_TEST_LIBRARY_VERSYM] + (uint64_t)test->variable * sizeof(uint16_t);
+        const uint64_t hidden_version = f->contents[IMPORT_TEST_LIBRARY_VERSYM] + (uint64_t)test->hidden * sizeof(uint16_t);
         const ImportResult symbols_bounds = import_test_result(IMPORT_ERROR_BOUNDS, f->contents[IMPORT_TEST_LIBRARY_DYNSYM], IMPORT_TEST_LIBRARY_DYNSYM, 0, 0, 0);
         const ImportResult verdef_bounds = import_test_result(IMPORT_ERROR_BOUNDS, verdef, IMPORT_TEST_LIBRARY_VERDEF, 0, 0, 0);
         const ImportResult dynamic_bounds = import_test_result(IMPORT_ERROR_BOUNDS, f->contents[IMPORT_TEST_LIBRARY_DYNAMIC], IMPORT_TEST_LIBRARY_DYNAMIC, 0, 0, 0);
@@ -2448,6 +2469,9 @@ static bool import_test_libraries(Arena* arena)
                          import_test_result(IMPORT_ERROR_BOUNDS, definitions, IMPORT_TEST_LIBRARY_VERDEF, 0, 0, 0), arena);
         import_test_case(&tally, l, f, "an export at a version not defined", variable_version, 2, 9,
                          import_test_result(IMPORT_ERROR_BOUNDS, variable_version, 0, test->variable, 0, 0), arena);
+        // old_function@V1 at a version past the definitions (0x8002 as 0x8007), which GNU ld and lld refuse too.
+        import_test_case(&tally, l, f, "a non-default export at a version not defined", hidden_version, 2, 7 | BUSTER_IMPORT_TEST_HIDDEN_VERSION,
+                         import_test_result(IMPORT_ERROR_BOUNDS, hidden_version, 0, test->hidden, 0, 0), arena);
         import_test_case(&tally, l, f, "a name outside .dynstr", variable + offsetof(Elf64_Sym, st_name), 4, 0xffff,
                          import_test_result(IMPORT_ERROR_BOUNDS, variable, 0, test->variable, 0, 0), arena);
         import_test_case(&tally, l, f, "a soname outside .dynstr", f->contents[IMPORT_TEST_LIBRARY_DYNAMIC] + offsetof(Elf64_Dyn, d_un), 8, 0xffff, dynamic_bounds, arena);

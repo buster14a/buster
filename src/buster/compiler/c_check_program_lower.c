@@ -54,6 +54,8 @@ typedef enum CheckLowerTaskKind
     // The value on the stack stored into a bit-field (check_lower_bit_store): `type` its packed place, `value` the local
     // that holds the address of its first byte. The field's new value stays unless `discard`.
     CHECK_LOWER_BIT_STORE,
+    // va_start, va_arg, va_copy or va_end's recipe (CBuiltinVaLowerCall `node`), `type` its value's.
+    CHECK_LOWER_VARARGS,
     // The size of `type`, a variable-length array's, computed from its extents (an I64: a pointer's runtime stride).
     CHECK_LOWER_SIZE,
 } CheckLowerTaskKind;
@@ -120,6 +122,11 @@ struct CheckLowerWriter
     uint32_t* call_counts;
     uint8_t* call_variadic;
     uint8_t* argument_classes;
+    // Structs and unions by value (#137): each argument's bytes for an aggregate (0 for a value) and each call's result
+    // object (1 + its local, or 0), Tier0Function's optional columns, which a function takes when it has one
+    // (`aggregates`).
+    uint32_t* argument_sizes;
+    uint32_t* call_result_objects;
     CBuiltinLowerCall* builtins;
     CBuiltinMiscLowerCall* miscellaneous;
     CBuiltinFloatLowerCall* floating;
@@ -140,8 +147,23 @@ struct CheckLowerWriter
     bool reachable;
     // Whether the function has a frame object, whose columns it then takes.
     bool objects;
+    bool aggregates;
     const CheckProgramBody* body;
     TypeId result;
+    // Every type's classification, made before the bodies, so that a function's own result (in registers, or through
+    // the hidden pointer that is then local `hidden`, parameter 0) decides its returns.
+    const AbiTable* abi_table;
+    uint32_t hidden;
+    // A variadic definition's (#137): va_start's offsets past the named registers, from the function's own call as
+    // abi_assign gives it, and the anchors of its incoming frame (the register save area and the overflow area), made at
+    // its first va_start.
+    bool variadic;
+    uint32_t gp_offset;
+    uint32_t fp_offset;
+    uint32_t save_anchor;
+    uint32_t overflow_anchor;
+    CBuiltinVaLowerCall* varargs;
+    uint32_t varargs_count;
     bool scalar;
     bool track;
 };
@@ -260,6 +282,46 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     else if (kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
     {
         feature = "variable-length arrays";
+    }
+    return feature;
+}
+
+// Why a struct or union can't be passed or returned by value, or NULL. Tier 0 takes every location abi_assign gives one
+// as an argument or a parameter, of up to BUSTER_TIER0_MAX_ARGUMENT_BYTES aligned to 16 at most, and every result in
+// registers but an x87 one.
+static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId type, bool result)
+{
+    const TypeTable* types = writer->program->types;
+    const AbiReturn returned = writer->abi_table->results[type_index(type)];
+    const bool x87 = ((returned.registers[0] | returned.registers[1]) & BUSTER_ABI_REGISTER_X87) != 0;
+    const char* feature = NULL;
+    if (type_alignment_log2(types, type) > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+    {
+        feature = "structs and unions aligned past 16 bytes, by value";
+    }
+    else if (type_size(types, type) > BUSTER_TIER0_MAX_ARGUMENT_BYTES)
+    {
+        feature = "structs and unions larger than 64 KB, by value";
+    }
+    else if (result && returned.kind == BUSTER_ABI_RESULT_REGISTERS && !tier0_aggregate_result_valid(returned, (uint32_t)type_size(types, type)))
+    {
+        feature = x87 ? "long double" : "structs and unions returned in these registers";
+    }
+    return feature;
+}
+
+// Why an argument or a parameter of this type can't be passed, or NULL: a value of a class, or a struct or a union.
+static const char* check_lower_passed(const CheckLowerWriter* writer, TypeId type)
+{
+    const TypeTable* types = writer->program->types;
+    const char* feature = NULL;
+    if (check_lower_aggregate(types, type))
+    {
+        feature = check_lower_by_value(writer, type, false);
+    }
+    else if (check_lower_class(types, type) == UINT8_MAX)
+    {
+        feature = check_lower_type_feature(types, type);
     }
     return feature;
 }
@@ -1205,27 +1267,31 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     const uint8_t flags = types->types.flags[type_index(type)];
     const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 || (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
     CheckLowerAbi* abi = writer->abi;
-    bool scalar_parameters = true;
-    for (uint32_t a = 0; a < parameters; a += 1)
+    // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
+    // its address, and its bytes go where abi_assign puts them).
+    const char* passed = NULL;
+    for (uint32_t a = 0; a < parameters && passed == NULL; a += 1)
     {
-        scalar_parameters &= check_lower_class(types, parameter_types[a]) != UINT8_MAX;
+        passed = check_lower_passed(writer, parameter_types[a]);
     }
-    for (uint32_t a = 0; a < count; a += 1)
+    for (uint32_t a = 0; a < count && passed == NULL; a += 1)
     {
         const CheckConversion* conversion = stream->argument_conversions + first + a;
-        scalar_parameters &= (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) == 0 && check_lower_class(types, conversion->type) != UINT8_MAX;
+        passed = (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 ? "transparent unions" : check_lower_passed(writer, conversion->type);
     }
+    // A struct or union result lands in a frame object of the call's own, whose address is the call's value.
+    const TypeId result = stream->values[node].type;
+    const bool aggregate_result = check_lower_aggregate(types, result);
+    const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(types, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
     // A callee that is a function's own symbol is called directly; any other (a pointer's value, a function designator
     // through one) is evaluated before the arguments and called through: Tier 0's indirect call, callee 0.
     const bool direct = value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
-    if (mangled || !scalar_parameters || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || check_lower_class(types, stream->values[node].type) == UINT8_MAX)
+    if (mangled || passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
     {
-        check_lower_unsupported(writer, mangled ? "calls of overloadable functions" :
-                                        count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 64 arguments" :
-                                        !scalar_parameters ? "arguments of this type (structs and unions by value, transparent unions, long double)" :
-                                                             check_lower_type_feature(types, stream->values[node].type));
+        check_lower_unsupported(writer, mangled ? "calls of overloadable functions" : count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 64 arguments" :
+                                        passed != NULL ? passed : returned);
     }
     else if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)
     {
@@ -1234,22 +1300,32 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     else
     {
         const uint32_t call = writer->call_count++;
+        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), type_alignment_log2(types, result)) : BUSTER_CHECK_NONE;
         writer->call_targets[call] = direct ? writer->program->object_symbols[value.object] : 0;
         writer->call_first[call] = writer->argument_count;
         writer->call_counts[call] = count;
         writer->call_variadic[call] = variadic;
+        writer->call_result_objects[call] = aggregate_result ? object + 1 : 0;
+        writer->aggregates |= aggregate_result;
         abi->first[abi->count] = abi->argument_count;
-        abi->results[abi->count] = stream->values[node].type;
+        abi->results[abi->count] = result;
         abi->counts[abi->count] = count;
         abi->named[abi->count] = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? parameters : count;
         abi->variadic[abi->count++] = variadic;
         for (uint32_t a = 0; a < count; a += 1)
         {
             const TypeId argument = stream->argument_conversions[first + a].type;
+            const bool aggregate = check_lower_aggregate(types, argument);
             abi->arguments[abi->argument_count++] = argument;
-            writer->argument_classes[writer->argument_count++] = check_lower_class(types, argument);
+            writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, argument) : 0;
+            writer->aggregates |= aggregate;
+            writer->argument_classes[writer->argument_count++] = check_lower_value_class(types, argument);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(types, stream->values[node].type), call);
+        if (aggregate_result)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, aggregate_result ? BUSTER_TYPED_CLASS_VOID : check_lower_class(types, result), call);
         for (uint32_t a = count; a-- > 0;)
         {
             check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
@@ -1293,6 +1369,7 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             writer->call_first[call] = writer->argument_count;
             writer->call_counts[call] = count;
             writer->call_variadic[call] = 0;
+            writer->call_result_objects[call] = 0;
             abi->first[abi->count] = abi->argument_count;
             abi->results[abi->count] = helper->result_type;
             abi->counts[abi->count] = count;
@@ -1302,6 +1379,7 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             {
                 const TypeId type = helper->parameter_types[a];
                 abi->arguments[abi->argument_count++] = type;
+                writer->argument_sizes[writer->argument_count] = 0;
                 writer->argument_classes[writer->argument_count++] = check_lower_class(program->types, type);
             }
             if (helper->terminates)
@@ -1342,6 +1420,7 @@ static uint32_t check_lower_native_call(CheckLowerWriter* writer, SymbolId symbo
         writer->call_first[call] = writer->argument_count;
         writer->call_counts[call] = count;
         writer->call_variadic[call] = 0;
+        writer->call_result_objects[call] = 0;
         abi->first[abi->count] = abi->argument_count;
         abi->results[abi->count] = result;
         abi->counts[abi->count] = count;
@@ -1350,6 +1429,7 @@ static uint32_t check_lower_native_call(CheckLowerWriter* writer, SymbolId symbo
         for (uint32_t i = 0; i < count; i += 1)
         {
             abi->arguments[abi->argument_count++] = arguments[i];
+            writer->argument_sizes[writer->argument_count] = 0;
             writer->argument_classes[writer->argument_count++] = check_lower_class(writer->program->types, arguments[i]);
         }
     }
@@ -1676,6 +1756,11 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
         uint32_t labels[BUSTER_CBUILTIN_LOWER_ENTRIES + 1];
         memset(labels, 0xff, ((uint64_t)result.count + 1) * sizeof(uint32_t));
         const uint32_t first = writer->count;
+        // The recipe's temporaries are values, not frame objects or variable-length arrays (the buffer writes only their
+        // classes and flags).
+        memset(writer->local_sizes + writer->local_count, 0, ((uint64_t)buffer->local_count - writer->local_count) * sizeof(uint32_t));
+        memset(writer->local_alignments + writer->local_count, 0, (uint64_t)buffer->local_count - writer->local_count);
+        memset(writer->indirect + writer->local_count, BUSTER_CHECK_LOWER_VLA_NONE, (uint64_t)buffer->local_count - writer->local_count);
         writer->local_count = buffer->local_count;
         // External builtin recipes use absolute typed-entry offsets. Convert only their local branches into
         // this writer's symbolic labels before the ordinary whole-function patch, retaining every branch join.
@@ -1716,7 +1801,7 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
         {
             check_lower_place(writer, labels[result.count]);
         }
-        const uint8_t class = check_lower_class(writer->program->types, type);
+        const uint8_t class = check_lower_value_class(writer->program->types, type);
         if (class != result.result_class)
         {
             check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
@@ -1733,6 +1818,103 @@ static void check_lower_builtin_emit(CheckLowerWriter* writer, CheckLowerTask ta
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
     };
     const CBuiltinLowerResult result = writer->scalar ? cbuiltin_lower_scalar(&buffer, writer->builtins + task.node) : cbuiltin_lower(&buffer, writer->builtins + task.node);
+    check_lower_builtin_finish(writer, &buffer, result, task.type);
+}
+
+// A variadic definition's incoming frame anchors, made at its first va_start: address-only locals whose addresses are
+// the register save area's and the overflow area's (Tier0Function.incoming_variadic).
+static void check_lower_anchors(CheckLowerWriter* writer)
+{
+    if (writer->save_anchor == BUSTER_CHECK_NONE)
+    {
+        writer->save_anchor = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        writer->overflow_anchor = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        if (writer->output->status == CHECK_PROGRAM_OK)
+        {
+            writer->local_flags[writer->save_anchor] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA;
+            writer->local_flags[writer->overflow_anchor] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA;
+        }
+    }
+}
+
+// va_start, va_arg, va_copy and va_end (#137), by c_builtin_varargs_lower.c's recipes: each list operand's value (a
+// va_list's address) evaluated once into a local of its own, va_start's anchors' addresses into two more, then the
+// recipe. va_start's offsets are the function's own (CheckLowerWriter.gp_offset), and va_arg's plan abi_va_arg's.
+static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const uint32_t effect = graph->argument_offsets[node];
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool start = id == CBUILTIN_VA_START || id == CBUILTIN_C23_VA_START;
+    const bool argument = id == CBUILTIN_VA_ARG;
+    const bool copy = id == CBUILTIN_VA_COPY;
+    const TypeId requested = effect < stream->varargs_count ? stream->varargs[effect].requested_type : 0;
+    if (effect >= stream->varargs_count || stream->varargs[effect].node != node || (start && !writer->variadic))
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (argument && check_lower_passed(writer, requested) != NULL)
+    {
+        check_lower_unsupported(writer, check_lower_passed(writer, requested));
+    }
+    else
+    {
+        const uint32_t index = writer->varargs_count++;
+        CBuiltinVaLowerCall* call = writer->varargs + index;
+        *call = (CBuiltinVaLowerCall){ .id = id };
+        call->list = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        if (start)
+        {
+            check_lower_anchors(writer);
+            call->register_save_area = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            call->overflow_arg_area = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            call->gp_offset = writer->gp_offset;
+            call->fp_offset = writer->fp_offset;
+        }
+        if (argument)
+        {
+            // A struct or union's bytes are copied from the save area into a frame object of its own (with room for
+            // whole eightbytes), or read in the overflow area; its value is their address.
+            const bool aggregate = check_lower_aggregate(types, requested);
+            const uint64_t size = aggregate ? type_size(types, requested) : 0;
+            call->plan = abi_va_arg(writer->abi_table, types, requested);
+            call->result_class = check_lower_value_class(types, requested);
+            // (An empty one, which the call ignores, still names its object: 1 byte, as its frame object takes.)
+            call->size = aggregate && size == 0 ? 1 : (uint32_t)size;
+            call->object = aggregate ? check_lower_object(writer, (size + 7) & ~UINT64_C(7), type_alignment_log2(types, requested)) : 0;
+        }
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_VARARGS, .node = index, .type = stream->values[node].type });
+        if (start)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->overflow_arg_area);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, writer->overflow_anchor);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->register_save_area);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, writer->save_anchor);
+        }
+        if (copy)
+        {
+            call->source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->source);
+            check_lower_operand(writer, node, 1, false, stream->conversions[node].operands[1].type);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->list);
+        check_lower_operand(writer, node, 0, false, stream->conversions[node].operands[0].type);
+    }
+}
+
+static void check_lower_varargs_emit(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    CBuiltinLowerBuffer buffer = {
+        .kinds = writer->kinds, .classes = writer->classes, .values = writer->values,
+        .count = writer->count, .capacity = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES,
+        .local_classes = writer->local_classes, .local_flags = writer->local_flags, .local_count = writer->local_count,
+        .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
+    };
+    const CBuiltinVaLowerCall* call = writer->varargs + task.node;
+    const CBuiltinLowerResult result = writer->scalar ? cbuiltin_varargs_lower_scalar(&buffer, call) : cbuiltin_varargs_lower(&buffer, call);
     check_lower_builtin_finish(writer, &buffer, result, task.type);
 }
 
@@ -2372,6 +2554,10 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     {
         check_lower_call(writer, node);
     }
+    else if (op == CHECK_OP_VARARGS)
+    {
+        check_lower_varargs_prepare(writer, node);
+    }
     else if (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
         check_lower_bit_assign(writer, node, task.discard);
@@ -2554,6 +2740,10 @@ static void check_lower_drain(CheckLowerWriter* writer)
         else if (task.kind == CHECK_LOWER_BIT_STORE)
         {
             check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+        }
+        else if (task.kind == CHECK_LOWER_VARARGS)
+        {
+            check_lower_varargs_emit(writer, task);
         }
         else if (task.kind == CHECK_LOWER_SIZE)
         {
@@ -2758,6 +2948,49 @@ static void check_lower_case(CheckLowerWriter* writer, const CheckProgramCase* i
     }
 }
 
+// A return of a struct or a union (`node` its value, the bytes' address; or none, for the end of the function): through
+// the hidden pointer, its bytes copied where parameter 0 points and that address returned; in registers, the bytes'
+// address, which Tier 0's epilogue loads them from (a frame object's of its own at the end); and an empty one's
+// nothing, as a void function's. The end's frame object is there only for a function whose end is reached.
+static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node)
+{
+    const TypeTable* types = writer->program->types;
+    const uint64_t size = type_size(types, writer->result);
+    const AbiReturn returned = writer->abi_table->results[type_index(writer->result)];
+    if (writer->hidden != BUSTER_CHECK_NONE)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false });
+            check_lower_expression(writer, node, false, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
+        }
+    }
+    else if (returned.kind == BUSTER_ABI_RESULT_REGISTERS)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            check_lower_expression(writer, node, false, 0);
+        }
+        else
+        {
+            const uint32_t object = check_lower_object(writer, size, type_alignment_log2(types, writer->result));
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        }
+    }
+    else
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            check_lower_expression(writer, node, false, BUSTER_TYPE_VOID);
+        }
+    }
+}
+
 // A block's stack position, saved into a local of its own before its first variable-length array
 // (CHECK_CONTROL_STACK_SAVE, once per block in the control stream), and restored from it at the block's end and before
 // the jumps out of it (CHECK_CONTROL_STACK_RESTORE, which come after the save). `target` is the block's closing token.
@@ -2869,6 +3102,10 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_CASE)
     {
         check_lower_case(writer, program->cases + control.target);
+    }
+    else if (control.kind == CHECK_CONTROL_RETURN && check_lower_aggregate(program->types, writer->result))
+    {
+        check_lower_return_aggregate(writer, control.node);
     }
     else if (control.kind != CHECK_CONTROL_END)
     {
@@ -3021,8 +3258,14 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW ||
                          input->graph.ops[node] == CHECK_OP_BUILTIN_MISC || input->graph.ops[node] == CHECK_OP_BUILTIN_FLOAT;
     }
-    const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES + 32;
-    const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 2 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_TEMPORARIES + 1;
+    // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
+    // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
+    // no stream, and is refused below without reading one.
+    const uint64_t varargs = program->status == CHECK_PROGRAM_OK && program->stream != 0 ? program->stream->varargs_count : 0;
+    const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
+                                varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + 32;
+    const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 2 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
+                                      varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 4 + 1;
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     if (valid && !check_program_helpers(&lowered->helpers, program, output, scratch))
@@ -3095,15 +3338,35 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_COLUMN(call_counts, uint32_t, abi_capacity);
     BUSTER_CHECK_LOWER_COLUMN(call_variadic, uint8_t, abi_capacity);
     BUSTER_CHECK_LOWER_COLUMN(argument_classes, uint8_t, argument_capacity);
+    BUSTER_CHECK_LOWER_COLUMN(argument_sizes, uint32_t, argument_capacity);
+    BUSTER_CHECK_LOWER_COLUMN(call_result_objects, uint32_t, abi_capacity);
+    BUSTER_CHECK_LOWER_COLUMN(varargs, CBuiltinVaLowerCall, (uint64_t)program->stream->varargs_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(builtins, CBuiltinLowerCall, (uint64_t)builtin_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(miscellaneous, CBuiltinMiscLowerCall, (uint64_t)program->stream->misc_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(floating, CBuiltinFloatLowerCall, (uint64_t)program->stream->floating_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
+    // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
+    // and a variadic definition's named registers its va_start; abi_assign takes every signature together after.
+    AbiTable table;
+    valid = valid && abi_initialize(&table, scratch, types, 16);
+    if (valid)
+    {
+        if (scalar)
+        {
+            abi_classify_all_scalar(&table, types);
+        }
+        else
+        {
+            abi_classify_all(&table, types);
+        }
+    }
+    writer.abi_table = &table;
     uint32_t* signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
+    uint8_t* incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
     uint32_t* local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
-    valid = valid && signatures != 0 && local_first != 0 && local_next != 0 && (program->body_count == 0 || lowered->functions != 0);
+    valid = valid && signatures != 0 && incoming != 0 && local_first != 0 && local_next != 0 && (program->body_count == 0 || lowered->functions != 0);
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -3160,10 +3423,16 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.stack_head = 0;
         writer.reachable = true;
         writer.objects = false;
+        writer.aggregates = false;
         writer.track = body.count != body.entry_count || terminal;
         writer.body = program->bodies + b;
         writer.result = result;
         writer.token = body.declaration;
+        writer.hidden = BUSTER_CHECK_NONE;
+        writer.variadic = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        writer.save_anchor = BUSTER_CHECK_NONE;
+        writer.overflow_anchor = BUSTER_CHECK_NONE;
+        writer.varargs_count = 0;
         memset(writer.extent_locals, 0xff, ((uint64_t)input->vla_count + 1) * sizeof(uint32_t));
         memset(writer.labels, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
         if (writer.track)
@@ -3173,26 +3442,45 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         signatures[b] = abi.count;
         abi.first[abi.count] = abi.argument_count;
         abi.results[abi.count] = result;
-        abi.variadic[abi.count] = 0;
-        if ((types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0 || check_lower_class(types, result) == UINT8_MAX)
+        abi.variadic[abi.count] = writer.variadic;
+        // A struct or union result goes through a hidden pointer (parameter 0, in rdi) or comes back in registers from
+        // the address each return gives (Tier0Function.result_size).
+        const bool aggregate_result = check_lower_aggregate(types, result);
+        const char* returned = aggregate_result ? check_lower_by_value(&writer, result, true) : check_lower_class(types, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
+        if (returned != NULL)
         {
-            check_lower_unsupported(&writer, (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0 ? "variadic function definitions" : check_lower_type_feature(types, result));
+            check_lower_unsupported(&writer, returned);
         }
+        else if (aggregate_result && table.results[type_index(result)].kind == BUSTER_ABI_RESULT_MEMORY)
+        {
+            writer.hidden = check_lower_temporary(&writer, BUSTER_TYPED_CLASS_U64);
+            function->parameter_count += 1;
+        }
+        else if (aggregate_result && table.results[type_index(result)].kind == BUSTER_ABI_RESULT_REGISTERS)
+        {
+            function->result_size = (uint32_t)type_size(types, result);
+        }
+        uint32_t declared = 0;
         for (uint32_t parameter = input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
         {
             const TypeId parameter_type = input->declared_types[parameter];
             const CheckInputAttributes* attributes = input->attributes[parameter];
-            if (type_alignment_log2(types, parameter_type) > 3 || (attributes != 0 && attributes->alignment_log2 > 4))
+            // A struct or union parameter is a frame object, at most aligned to 16, whose bytes the prologue places.
+            const bool aggregate = check_lower_aggregate(types, parameter_type);
+            const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+            const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
+            const char* passed = check_lower_passed(&writer, parameter_type);
+            writer.token = parameter;
+            if (alignment > (aggregate ? BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 : 3u))
             {
-                writer.token = parameter;
-                check_lower_unsupported(&writer, "parameters aligned past 8 bytes");
+                check_lower_unsupported(&writer, aggregate ? "parameters aligned past 16 bytes" : "parameters aligned past 8 bytes");
             }
-            if (check_lower_class(types, parameter_type) == UINT8_MAX)
+            if (passed != NULL)
             {
-                writer.token = parameter;
-                check_lower_unsupported(&writer, check_lower_type_feature(types, parameter_type));
+                check_lower_unsupported(&writer, passed);
             }
-            const uint32_t local = check_lower_temporary(&writer, check_lower_class(types, parameter_type));
+            const uint32_t local = aggregate ? check_lower_object(&writer, type_size(types, parameter_type), alignment) :
+                                               check_lower_temporary(&writer, check_lower_class(types, parameter_type));
             if ((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer.local_count)
             {
                 writer.local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
@@ -3200,9 +3488,39 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             writer.local_map[input->objects[parameter]] = local;
             abi.arguments[abi.argument_count++] = parameter_type;
             function->parameter_count += 1;
+            declared += 1;
         }
-        abi.counts[abi.count] = function->parameter_count;
-        abi.named[abi.count++] = function->parameter_count;
+        writer.token = body.declaration;
+        abi.counts[abi.count] = declared;
+        abi.named[abi.count++] = declared;
+        if (writer.variadic && lowered->status == CHECK_PROGRAM_OK)
+        {
+            // va_start's offsets: the named arguments' registers, as abi_assign gives the function's own call (the batch
+            // below gives it the same).
+            const uint64_t mark = scratch->length;
+            AbiLocation* named = BUSTER_ARENA_PUSH_ARRAY(scratch, AbiLocation, (uint64_t)declared + 1);
+            AbiCall own = { 0 };
+            if (named == 0)
+            {
+                check_lower_fail(&writer, CHECK_PROGRAM_RESOURCE);
+            }
+            else
+            {
+                const uint8_t variadic = 1;
+                const AbiSignatures signature = {
+                    .results = abi.results + signatures[b],
+                    .counts = &declared,
+                    .named = &declared,
+                    .variadic = &variadic,
+                    .count = 1,
+                    .arguments = abi.arguments + abi.first[signatures[b]],
+                };
+                abi_assign_scalar(&table, signature, named, &own);
+            }
+            arena_pop_to(scratch, mark);
+            writer.gp_offset = BUSTER_ABI_SLOT_BYTES * own.integer_registers;
+            writer.fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers;
+        }
         for (uint32_t declaration = local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = local_next[declaration])
         {
             if (writer.local_map[input->objects[declaration]] == BUSTER_CHECK_NONE)
@@ -3255,6 +3573,9 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             check_lower_control(&writer, i);
             check_lower_drain(&writer);
         }
+        // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
+        const bool falls = writer.track ? writer.reachable || writer.label_heads[body.count] != BUSTER_CHECK_NONE :
+                                          writer.count == 0 || writer.kinds[writer.count - 1] != BUSTER_TYPED_RETURN;
         check_lower_place(&writer, body.count);
         for (uint32_t local = 0; local < writer.local_count; local += 1)
         {
@@ -3264,7 +3585,8 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                 check_lower_fail(&writer, CHECK_PROGRAM_INVALID);
             }
         }
-        // C specifies zero for main's implicit return. Other non-void fallthrough remains undefined behavior.
+        // C specifies zero for main's implicit return. Other non-void fallthrough remains undefined behavior, but a
+        // struct or union result's return there must still give Tier 0 an address (or the hidden pointer) to return.
         if (result == BUSTER_TYPE_VOID)
         {
             check_lower_emit(&writer, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
@@ -3273,6 +3595,11 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         {
             check_lower_emit(&writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
             check_lower_emit(&writer, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        else if (aggregate_result && falls)
+        {
+            check_lower_return_aggregate(&writer, BUSTER_CHECK_NONE);
+            check_lower_drain(&writer);
         }
         for (uint32_t i = 0; i < writer.count && lowered->status == CHECK_PROGRAM_OK; i += 1)
         {
@@ -3318,7 +3645,15 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         BUSTER_CHECK_LOWER_COPY(call_argument_counts, call_counts, uint32_t, writer.call_count);
         BUSTER_CHECK_LOWER_COPY(call_variadic, call_variadic, uint8_t, writer.call_count);
         BUSTER_CHECK_LOWER_COPY(argument_classes, argument_classes, uint8_t, writer.argument_count);
+        if (writer.aggregates)
+        {
+            BUSTER_CHECK_LOWER_COPY(argument_sizes, argument_sizes, uint32_t, writer.argument_count);
+            BUSTER_CHECK_LOWER_COPY(call_result_objects, call_result_objects, uint32_t, writer.call_count);
+        }
 #undef BUSTER_CHECK_LOWER_COPY
+        // A variadic definition that starts its list has its incoming frame (Tier0Function.incoming_variadic): its own
+        // call, which abi_assign gives below.
+        incoming[b] = writer.save_anchor != BUSTER_CHECK_NONE;
         function->count = writer.count;
         function->local_count = writer.local_count;
         function->call_count = writer.call_count;
@@ -3333,20 +3668,11 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             writer.local_map[input->objects[parameter]] = BUSTER_CHECK_NONE;
         }
     }
-    AbiTable table;
     AbiLocation* locations = valid && lowered->status == CHECK_PROGRAM_OK ? BUSTER_ARENA_PUSH_ARRAY(output, AbiLocation, (uint64_t)abi.argument_count + 1) : 0;
     AbiCall* calls = valid && lowered->status == CHECK_PROGRAM_OK ? BUSTER_ARENA_PUSH_ARRAY(output, AbiCall, (uint64_t)abi.count + 1) : 0;
-    valid = valid && lowered->status == CHECK_PROGRAM_OK && locations != 0 && calls != 0 && abi_initialize(&table, scratch, types, 16);
+    valid = valid && lowered->status == CHECK_PROGRAM_OK && locations != 0 && calls != 0;
     if (valid)
     {
-        if (scalar)
-        {
-            abi_classify_all_scalar(&table, types);
-        }
-        else
-        {
-            abi_classify_all(&table, types);
-        }
         for (uint32_t i = 0; i < abi.argument_count + abi.count; i += 1)
         {
             const TypeId type = i < abi.argument_count ? abi.arguments[i] : abi.results[i - abi.argument_count];
@@ -3380,11 +3706,28 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             Tier0Function* function = &lowered->functions[b];
             const uint32_t signature = signatures[b];
             const uint32_t first = abi.first[signature];
+            const uint32_t declared = abi.counts[signature];
             function->parameters = locations + first;
             function->result = calls[signature].result;
             function->calls = calls + signature + 1;
-            function->argument_locations = locations + first + function->parameter_count;
-            const Tier0Check check = tier0_validate(function);
+            function->argument_locations = locations + first + declared;
+            function->incoming_variadic = incoming[b] ? calls + signature : 0;
+            if (function->parameter_count != declared)
+            {
+                // The hidden pointer, parameter 0, in rdi before the declared parameters' locations.
+                AbiLocation* parameters = BUSTER_ARENA_PUSH_ARRAY(output, AbiLocation, function->parameter_count);
+                if (parameters == 0)
+                {
+                    lowered->status = CHECK_PROGRAM_RESOURCE;
+                }
+                else
+                {
+                    parameters[0] = (AbiLocation){ .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+                    memcpy(parameters + 1, locations + first, (uint64_t)declared * sizeof(AbiLocation));
+                    function->parameters = parameters;
+                }
+            }
+            const Tier0Check check = lowered->status == CHECK_PROGRAM_OK ? tier0_validate(function) : (Tier0Check){ .error = TIER0_OK };
             if (check.error != TIER0_OK)
             {
                 lowered->status = CHECK_PROGRAM_INVALID;

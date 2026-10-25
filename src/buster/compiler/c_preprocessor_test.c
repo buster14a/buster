@@ -335,6 +335,55 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
     return result;
 }
 
+// Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
+// takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
+// the statistics (but the timing ones) must agree in this configuration too. Returns whether they do.
+static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name)
+{
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    bool ready[2];
+    bool ran[2];
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        PPOptions run = *options;
+        run.scalar = k == 1;
+        run.expansion_starts = false;
+        run.timing = true;
+        ready[k] = intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
+        ran[k] = ready[k] && pp_run(&runs[k], path);
+    }
+    char label[4200];
+    snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
+    bool result = ready[0] && ready[1] && pp_same_streams(&runs[0], &runs[1], label);
+    if (result && (ran[0] != ran[1] || runs[0].errors != runs[1].errors || runs[0].warnings != runs[1].warnings))
+    {
+        printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, runs[0].errors, runs[1].errors, runs[0].warnings,
+               runs[1].warnings);
+        result = false;
+    }
+    PPStatistics statistics[2] = { runs[0].statistics, runs[1].statistics };
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        statistics[k].include_ticks = 0;
+        statistics[k].embed_ticks = 0;
+    }
+    if (result && memcmp(&statistics[0], &statistics[1], sizeof(PPStatistics)) != 0)
+    {
+        printf("%s: the vectorized and scalar kernels count different statistics\n", label);
+        result = false;
+    }
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        if (ready[k])
+        {
+            pp_release(&runs[k]);
+        }
+        intern_release(&tables[k]);
+    }
+    return result;
+}
+
 // The text one of the printers gives for a run, in memory (null if it fails); `free` it.
 static char* pp_test_print(Preprocessor* pp, bool vector, bool markers, size_t* length)
 {
@@ -1073,6 +1122,21 @@ static const PPTestCase pp_test_cases[] = {
     // An empty expansion's or empty argument's leading space goes to the next token, as clang does.
     { "spaces through empty expansions", "#define EMPTY\n#define S(x) #x\n#define EXPAND(x) S(x)\nEXPAND(a EMPTY+b)\n#define F(x) a x+b\nEXPAND(F())\n#define G()\nEXPAND(a G()+b)\n#define H(x) a x\nEXPAND(H()+b)\n#define E2 EMPTY\nEXPAND(a E2+b)\n#define J(x, y) [x y]\nEXPAND(J(, +))\n#define K(x) x\nEXPAND(a K()+b)\n#define V(...) a __VA_OPT__(b)c\nEXPAND(V() V(1))\n",
       0, "c23", "\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"[ +]\"\n\"a +b\"\n\"a c a bc\"\n", false, 0, 0, 0 },
+    // #if and #elif lines that pp_condition_direct evaluates without a capture: names through chains of object-like
+    // macros to numbers and to names of no macro, defined X and defined(X), C23's true through a macro, and a
+    // self-referential name, which it leaves to the capture.
+    { "#if lines without a capture", "#define ONE 1\n#define TWO 2\n#define CHAIN ONE\n#define CHAIN2 CHAIN\n#define NAME undefined_name\n#define TRUE_NAME true\n#define SELF SELF\n#if CHAIN2 + TWO == 3 && defined(ONE) && defined TWO && !defined(THREE)\na\n#elif CHAIN\nb\n#endif\n#if NAME || SELF\nc\n#elif defined CHAIN2 && CHAIN2 > 0\nd\n#endif\n#if TRUE_NAME\ne\n#endif\n#if 0\n#elif TWO*TWO == 4\nf\n#endif\n#ifdef ONE\n#if ONE ? CHAIN : TWO\ng\n#endif\n#endif\n",
+      0, "c23", "a\nd\ne\nf\ng\n", false },
+    // Names on such lines that pp_condition_direct leaves to the capture without reading their bodies (#410's review): an
+    // empty object-like macro, one defined at the end of an included file (its body begins at the file's last token), a
+    // builtin, a function-like macro and one that pastes; and an empty one alone, an error.
+    { "#if lines of macros without a body of one token", "#include \"other.h\"\n#define EMPTY\n#define ZERO 0\n#define F() 1\n#define P 1 ## 0\n#if EMPTY 1\na\n#endif\n#if EMPTY_LAST 2 == 2 && ZERO == 0\nb\n#endif\n#if __LINE__ > 0\nc\n#endif\n#if F() == 1\nd\n#endif\n#if P == 10\ne\n#endif\n",
+      "#define EMPTY_LAST\n", "c17", "a\nb\nc\nd\ne\n", false },
+    { "#if of an empty macro", "#define EMPTY\n#if EMPTY\nx\n#endif\ny\n", 0, "c17", "y\n", true, 0, 0, 0, 0, 1 },
+    // Invocations read from a file's text whose names have no space before them: an empty expansion's trailing space, and
+    // a nonempty one's, go to the next token (pp_invoke_file's, as pp_finish_simple's).
+    { "spaces after invocations in a file's text", "#define E(a, b) a b\n#define F(a, b, c) [a b c]\n#define G(a)\n#define H(a, b) a b\nx=E(,)+1;\ny=E( , )-2;\nz=F(,,)*3;\nw=G(1)+4;\nv=H(,)H(,)5;\nu=H(1,)+6;\n",
+      0, "c17", "x= +1;\ny= -2;\nz=[ ]*3;\nw=+4;\nv= 5;\nu=1 +6;\n", false },
     { "__has_include in a macro's argument in #if", "#define ID(x) x\n#if ID(__has_include(\"other.h\")) && ID(!__has_include(\"missing.h\"))\npresent\n#else\nabsent\n#endif\n",
       "x\n", "c17", "present\n", false, 0, 0, 0 },
     { "header names with line splices", "#include \"oth\\\ner.h\"\n#include <oth\\\ner.h>\n",
@@ -2268,7 +2332,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     if (result)
     {
         result = pp_same_streams(&runs[0], &runs[1], test->name) && pp_same_directive_tables(&runs[0], &runs[1], test->name) && ran[0] == ran[1] &&
-                 ran[0] != test->fails;
+                 ran[0] != test->fails && pp_test_compile_kernels(&options, path, test->name);
         if (ran[0] == test->fails)
         {
             printf("%s: %s\n", test->name, test->fails ? "should fail but doesn't" : "fails");
@@ -3076,7 +3140,8 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
         options.scalar = k == 1;
         ran[k] = pp_test_run(&runs[k], &tables[k], &options, path);
     }
-    bool result = ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], path) && pp_same_directive_tables(&runs[0], &runs[1], path);
+    bool result = ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], path) && pp_same_directive_tables(&runs[0], &runs[1], path) &&
+                  pp_test_compile_kernels(&options, path, path);
     *tokens += runs[0].output.count;
     PPSpellings ours = { 0 };
     result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path);

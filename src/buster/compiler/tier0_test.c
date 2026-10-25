@@ -28,6 +28,10 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
+// The calling convention's compiled worlds keep their calls within Tier 0's depths (calling_convention_test.c).
+_Static_assert(BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS == BUSTER_TIER0_INTEGER_DEPTHS && BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS == BUSTER_TIER0_FLOATING_DEPTHS,
+               "the compiled worlds' depths must be Tier 0's");
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
 
@@ -342,7 +346,9 @@ static uint64_t tier0_test_compare(uint32_t kind, uint32_t class, uint64_t a, ui
 }
 
 // A frame of the interpreter: the function, where it is, its locals' slots, its objects' memory, its stack's base, and
-// how much of the allocations' area was taken when it began, which its return gives back.
+// how much of the allocations' area was taken when it began, which its return gives back; and for its return, whether
+// its caller's call pushes a value, and where a record it returns in registers goes (its caller's result object,
+// `result_size` bytes).
 typedef struct Tier0TestFrame Tier0TestFrame;
 struct Tier0TestFrame
 {
@@ -352,13 +358,17 @@ struct Tier0TestFrame
     uint8_t* objects;
     uint32_t stack_base;
     uint32_t allocated;
+    bool push;
+    uint8_t* result_object;
+    uint32_t result_size;
 };
 
 #define BUSTER_TIER0_TEST_FRAMES 256
 #define BUSTER_TIER0_TEST_STACK 4096
 #define BUSTER_TIER0_TEST_SLOTS (BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_GENERATE_MAX_LOCALS)
-// A frame's objects' bytes, each object at a multiple of 16 (the generator's take a few hundred at most).
-#define BUSTER_TIER0_TEST_OBJECT_BYTES 2048
+// A frame's objects' bytes, each object at a multiple of 16 (the generator's take a few hundred at most, and its records'
+// objects up to 136 each).
+#define BUSTER_TIER0_TEST_OBJECT_BYTES 8192
 // A function's address in the interpreter: its index under this tag.
 #define BUSTER_TIER0_TEST_FUNCTION_TAG 0xf0f0000000000000ull
 #define BUSTER_TIER0_TEST_STEPS 200000000ull
@@ -398,7 +408,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
         }
         *fault |= offset > BUSTER_TIER0_TEST_OBJECT_BYTES;
     }
-    frames[0] = (Tier0TestFrame){ entry, 0, slots, objects, 0, 0 };
+    frames[0] = (Tier0TestFrame){ entry, 0, slots, objects, 0, 0, false, 0, 0 };
     memset(slots, 0, sizeof(uint64_t) * BUSTER_TIER0_GENERATE_MAX_LOCALS);
     memset(objects, 0, BUSTER_TIER0_TEST_OBJECT_BYTES);
     for (uint32_t p = 0; p < 3 && p < functions->functions[entry].parameter_count; p += 1)
@@ -508,29 +518,58 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             memset(locals, 0, sizeof(uint64_t) * BUSTER_TIER0_GENERATE_MAX_LOCALS);
             memset(callee_objects, 0, BUSTER_TIER0_TEST_OBJECT_BYTES);
             top -= arguments;
-            for (uint32_t a = 0; a < arguments; a += 1)
-            {
-                locals[a] = stack[top + a];
-            }
+            const uint32_t base = top;
             if (f->call_targets[value] == 0)
             {
                 // An indirect call's callee, under its arguments: a function's tagged index, the one the pointer holds
                 // when the call runs. Its type must be the call's, checked here apart from the generator's choice of
-                // candidates: its result's class the call's, and each parameter's class its argument's.
+                // candidates: its result's class and record the call's callee's, and each parameter's class and record
+                // its argument's (a record's argument is its address, U64).
                 top -= 1;
                 const uint64_t address = stack[top];
                 const uint32_t held = (uint32_t)(address & 0xffff);
                 const bool function_held = (address & ~0xffffull) == BUSTER_TIER0_TEST_FUNCTION_TAG && held < program->function_count;
                 const Tier0GeneratedFunction* target = &program->functions[function_held ? held : callee];
-                bool typed = function_held && target->parameter_count == arguments && target->result_class == class;
+                const uint32_t spelled = target->hidden ? 1 : 0;
+                bool typed = function_held && target->parameter_count == arguments + spelled && target->result_class == class &&
+                             target->result_record == program->functions[callee].result_record;
                 for (uint32_t a = 0; a < arguments && typed; a += 1)
                 {
-                    typed = program->local_classes[target->first_local + a] == f->argument_classes[f->call_first[value] + a];
+                    const uint32_t at = target->first_local + spelled + a;
+                    const uint32_t record = program->local_records != 0 ? program->local_records[at] : BUSTER_TIER0_GENERATE_NO_RECORD;
+                    const uint32_t argument = f->call_first[value] + a;
+                    typed = record != BUSTER_TIER0_GENERATE_NO_RECORD ? program->argument_records[argument] == record
+                                                                      : program->local_classes[at] == f->argument_classes[argument];
                 }
                 *fault |= !typed;
                 callee = function_held ? held : callee;
             }
-            frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top, allocated };
+            // The arguments into the callee's parameters: a value into its local, a record's bytes from its address
+            // into the parameter's object; a hidden pointer, parameter 0, is the call's result object's address.
+            const Tier0GeneratedFunction* target = &program->functions[callee];
+            const uint32_t spelled = target->hidden ? 1 : 0;
+            const uint32_t object = f->call_result_objects != 0 ? f->call_result_objects[value] : 0;
+            uint8_t* result_object = object != 0 ? frame->objects + object_offsets[program->functions[frame->function].first_local + object - 1] : 0;
+            for (uint32_t a = 0; a < arguments; a += 1)
+            {
+                const uint32_t size = f->argument_sizes != 0 ? f->argument_sizes[f->call_first[value] + a] : 0;
+                const uint32_t at = target->first_local + spelled + a;
+                if (size != 0)
+                {
+                    memcpy(callee_objects + object_offsets[at], (const void*)(uintptr_t)stack[base + a], size);
+                }
+                else
+                {
+                    locals[spelled + a] = stack[base + a];
+                }
+            }
+            if (target->hidden)
+            {
+                locals[0] = (uint64_t)(uintptr_t)result_object;
+            }
+            const Tier0Function* callee_function = &functions->functions[callee];
+            frames[depth] = (Tier0TestFrame){ callee, 0, locals, callee_objects, top, allocated, class != BUSTER_TYPED_CLASS_VOID, result_object,
+                                              callee_function->result_size };
             depth += 1;
             break;
         }
@@ -573,11 +612,16 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             break;
         case BUSTER_TYPED_RETURN:
         {
+            // A record returned in registers is its bytes' address (result_size), copied into the caller's object.
             const uint64_t returned = class != BUSTER_TYPED_CLASS_VOID ? stack[top - 1] : 0;
+            if (frame->result_size != 0 && frame->result_object != 0)
+            {
+                memcpy(frame->result_object, (const void*)(uintptr_t)returned, frame->result_size);
+            }
             depth -= 1;
             top = frame->stack_base;
             allocated = frame->allocated;
-            if (depth != 0 && class != BUSTER_TYPED_CLASS_VOID)
+            if (depth != 0 && frame->push && class != BUSTER_TYPED_CLASS_VOID)
             {
                 stack[top++] = returned;
             }
@@ -873,8 +917,68 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
 // The checks
 
 // Programs from consecutive seeds: generated, compiled by both paths, run natively and by the interpreter, compared.
+// What the programs' records exercise (#137), as tier0_emit_call, the prologue and the epilogue take them: arguments on
+// the stack and ignored, each kind of part loaded (a general register's exactly, overlapping, through a temporary; an XMM
+// register's exactly and through a temporary), results stored in registers and through a hidden pointer, parameters
+// arriving in registers and on the stack, and functions returning records in registers and through a hidden pointer.
+// And functions with a frame pointer (variable-length arrays, #136's item 8) that pass, take or return a record, whose
+// homes the frame pointer addresses and whose calls' outgoing area is below what the body allocated.
+#define BUSTER_TIER0_TEST_COVERAGE 15
+static const char* const tier0_test_coverage_names[BUSTER_TIER0_TEST_COVERAGE] = {
+    "stack arguments", "ignored arguments", "general exact", "general overlap", "general temporary", "xmm exact", "xmm temporary",
+    "register results", "hidden results", "register parameters", "stack parameters", "returned in registers", "returned hidden", "empty arguments",
+    "frame pointers with records",
+};
+
+static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* coverage)
+{
+    for (uint32_t f = 0; f < functions->count; f += 1)
+    {
+        const Tier0Function* t = &functions->functions[f];
+        bool records = t->result_size != 0 || t->result.kind == BUSTER_ABI_RESULT_MEMORY;
+        bool pointer = false;
+        for (uint32_t i = 0; i < t->count; i += 1)
+        {
+            pointer |= t->kinds[i] == BUSTER_TYPED_ALLOCA || t->kinds[i] == BUSTER_TYPED_STACK_SAVE || t->kinds[i] == BUSTER_TYPED_STACK_RESTORE;
+        }
+        for (uint32_t c = 0; c < t->call_count; c += 1)
+        {
+            for (uint32_t a = 0; a < t->call_argument_counts[c]; a += 1)
+            {
+                const uint32_t argument = t->call_first[c] + a;
+                const uint32_t size = t->argument_sizes != 0 ? t->argument_sizes[argument] : 0;
+                records |= size != 0;
+                const AbiLocation location = t->argument_locations[argument];
+                Tier0Part parts[2];
+                const uint32_t count = size != 0 ? tier0_location_parts(location, size, parts) : 0;
+                coverage[0] += size != 0 && location.kind == BUSTER_ABI_LOCATION_STACK ? 1 : 0;
+                coverage[1] += size != 0 && location.kind == BUSTER_ABI_LOCATION_IGNORE ? 1 : 0;
+                for (uint32_t k = 0; k < count; k += 1)
+                {
+                    const bool xmm = parts[k].reg != BUSTER_TIER0_PART_STACK && parts[k].reg >= 16;
+                    coverage[xmm ? 5 + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? 1 : 0) : 2 + parts[k].load] += parts[k].reg != BUSTER_TIER0_PART_STACK ? 1 : 0;
+                }
+            }
+            const uint32_t object = t->call_result_objects != 0 ? t->call_result_objects[c] : 0;
+            coverage[7] += object != 0 && t->calls[c].result.kind == BUSTER_ABI_RESULT_REGISTERS ? 1 : 0;
+            coverage[8] += object != 0 && t->calls[c].result.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : 0;
+            records |= object != 0;
+        }
+        for (uint32_t p = 0; p < t->parameter_count; p += 1)
+        {
+            const bool object = tier0_is_object(t, p);
+            coverage[9] += object && t->parameters[p].kind == BUSTER_ABI_LOCATION_REGISTERS ? 1 : 0;
+            coverage[10] += object && t->parameters[p].kind == BUSTER_ABI_LOCATION_STACK ? 1 : 0;
+            records |= object;
+        }
+        coverage[11] += t->result_size != 0 ? 1 : 0;
+        coverage[12] += t->result.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : 0;
+        coverage[14] += pointer && records ? 1 : 0;
+    }
+}
+
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* coverage)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -896,6 +1000,16 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             code->records = 0;
             code->entries = 0;
             code->deferred = 0;
+            if (ok)
+            {
+                tier0_test_coverage(functions, coverage);
+                // An empty record's arguments: values (its address), whose location is IGNORE.
+                for (uint32_t a = 0; program->argument_records != 0 && a < program->argument_count; a += 1)
+                {
+                    const uint32_t record = program->argument_records[a];
+                    coverage[13] += record != BUSTER_TIER0_GENERATE_NO_RECORD && program->records->records[record].size == 0 ? 1 : 0;
+                }
+            }
             ok = ok && tier0_test_build(tally, functions, &arena, code, program_seed);
             *records += code->records;
             *entries += code->entries;
@@ -945,8 +1059,10 @@ static bool tier0_test_defined(const Tier0Program* program, uint32_t g)
 // t0_entry and t0_g<k> (symbols in the streams' order: the globals, then the functions), with a fixup per symbolic field
 // of the code's kind (CALL for a call, PC32 for a global's address or value, and the GOT's and TLS's kinds), each addend
 // the field's distance from its instruction's end taken off for a kind measured from the field, as link_add_code_fixups
-// makes them.
-static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* code, const char* path)
+// makes them. A mixed object (#137's cross-linking) is named with `prefix` and defines only the even functions: the
+// globals and the odd functions are references, which clang's build of the program defines, so that calls cross between
+// the two both ways, with their arguments and results by value.
+static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* code, const char* path, const char* prefix, bool mixed)
 {
     const uint32_t globals = program->global_count;
     const uint32_t functions = program->function_count;
@@ -964,20 +1080,21 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
     Arena objects = arena_reserve(4 * (uint64_t)BUSTER_TIER0_TEST_CODE_BYTES);
     Link link;
     bool result = tables.base != 0 && names.base != 0 && bytes.base != 0 && objects.base != 0 && link_initialize(&link, &tables, &names, capacity);
+    // With `mixed`, what clang's object defines (the globals and the odd functions) is a reference here.
     for (uint32_t g = 0; result && g < globals; g += 1)
     {
         char name[32];
-        const int length = snprintf(name, sizeof(name), "t0_g%u", g);
+        const int length = snprintf(name, sizeof(name), "%sg%u", prefix, g);
         const uint8_t type = tier0_test_thread_local(program, g) ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
         result = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, type | BUSTER_LINK_SYMBOL_GLOBAL,
-                                 tier0_test_defined(program, g) ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == g + 1;
+                                 !mixed && tier0_test_defined(program, g) ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == g + 1;
     }
     for (uint32_t f = 0; result && f < functions; f += 1)
     {
         char name[32];
-        const int length = f + 1 == functions ? snprintf(name, sizeof(name), "t0_entry") : snprintf(name, sizeof(name), "t0_f%u", f);
+        const int length = f + 1 == functions ? snprintf(name, sizeof(name), "%sentry", prefix) : snprintf(name, sizeof(name), "%sf%u", prefix, f);
         result = link_add_symbol(&link, link_add_name(&link, (const uint8_t*)name, (uint32_t)length), 0, 0, 0, BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL,
-                                 BUSTER_LINK_SOURCE_PROGRAM) == globals + 1 + f;
+                                 mixed && f % 2 != 0 ? BUSTER_LINK_SOURCE_NONE : BUSTER_LINK_SOURCE_PROGRAM) == globals + 1 + f;
     }
     // The functions' atoms, each with its fixups (the code's fixups are in function order).
     uint32_t fixup = 0;
@@ -985,6 +1102,15 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
     {
         const uint32_t start = code->offsets[f];
         const uint32_t length = code->lengths[f];
+        if (mixed && f % 2 != 0)
+        {
+            // clang's: this object only refers to it, and has none of its code.
+            while (fixup < code->fixup_count && code->fields[fixup] < start + length)
+            {
+                fixup += 1;
+            }
+            continue;
+        }
         uint8_t* atom_bytes = arena_push(&bytes, length + 1, 16);
         result = atom_bytes != 0;
         if (result)
@@ -1004,7 +1130,7 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
             }
         }
     }
-    for (uint32_t g = 0; result && g < globals; g += 1)
+    for (uint32_t g = 0; result && g < globals && !mixed; g += 1)
     {
         const uint32_t class_bytes = tier0_class_bytes(program->global_classes[g]);
         const uint32_t size = class_bytes * program->global_elements[g];
@@ -1040,8 +1166,9 @@ static bool tier0_test_object(const Tier0Program* program, const Tier0TestCode* 
 }
 
 // The harness: both programs' globals saved at start and put back before each run, every input run by clang's build and
-// by Tier 0's, the results and every global compared, then each build timed over the inputs.
-static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3], const char* path)
+// by Tier 0's, the results and every global compared, then each build timed over the inputs. With `mixed`, the mixed
+// build too (m_: Tier 0's even functions and clang's odd ones), which must agree with clang's.
+static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3], const char* path, bool mixed)
 {
     FILE* file = fopen(path, "w");
     bool result = file != 0;
@@ -1049,6 +1176,10 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
     {
         fprintf(file, "#include <stdio.h>\n#include <string.h>\n#include <time.h>\n\n");
         fprintf(file, "unsigned long c_entry(unsigned long, unsigned long, unsigned long);\nunsigned long t0_entry(unsigned long, unsigned long, unsigned long);\n");
+        if (mixed)
+        {
+            fprintf(file, "unsigned long m_entry(unsigned long, unsigned long, unsigned long);\n");
+        }
         for (uint32_t g = 0; g < program->global_count; g += 1)
         {
             const char* type = tier0_c_type(program->global_classes[g]);
@@ -1056,11 +1187,19 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
             const char* thread_local = tier0_test_thread_local(program, g) ? "_Thread_local " : "";
             fprintf(file, "extern %s%s c_g%u%s;\nextern %s%s t0_g%u%s;\nstatic unsigned char c_s%u[sizeof c_g%u], t0_s%u[sizeof t0_g%u];\n", thread_local, type, g,
                     array, thread_local, type, g, array, g, g, g, g);
+            if (mixed)
+            {
+                fprintf(file, "extern %s%s m_g%u%s;\nstatic unsigned char m_s%u[sizeof m_g%u];\n", thread_local, type, g, array, g, g);
+            }
         }
         fprintf(file, "static void reset(void)\n{\n");
         for (uint32_t g = 0; g < program->global_count; g += 1)
         {
             fprintf(file, "    memcpy(&c_g%u, c_s%u, sizeof c_s%u);\n    memcpy(&t0_g%u, t0_s%u, sizeof t0_s%u);\n", g, g, g, g, g, g);
+            if (mixed)
+            {
+                fprintf(file, "    memcpy(&m_g%u, m_s%u, sizeof m_s%u);\n", g, g, g);
+            }
         }
         // A floating global's elements compare as their bytes, but any two NaNs are the same: C leaves a NaN's sign and
         // payload to the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where divsd makes -NaN.
@@ -1080,24 +1219,37 @@ static bool tier0_test_harness(const Tier0Program* program, uint64_t inputs[BUST
         for (uint32_t g = 0; g < program->global_count; g += 1)
         {
             fprintf(file, "    memcpy(c_s%u, &c_g%u, sizeof c_s%u);\n    memcpy(t0_s%u, &t0_g%u, sizeof t0_s%u);\n", g, g, g, g, g, g);
+            if (mixed)
+            {
+                fprintf(file, "    memcpy(m_s%u, &m_g%u, sizeof m_s%u);\n", g, g, g);
+            }
         }
         fprintf(file, "    for (int r = 0; r < %u; r += 1)\n    {\n        reset();\n", BUSTER_TIER0_TEST_INPUTS);
         fprintf(file, "        unsigned long c = c_entry(inputs[r][0], inputs[r][1], inputs[r][2]);\n");
         fprintf(file, "        unsigned long t = t0_entry(inputs[r][0], inputs[r][1], inputs[r][2]);\n");
         fprintf(file, "        if (c != t)\n        {\n            printf(\"mismatch input %%d: clang %%016lx tier0 %%016lx\\n\", r, c, t);\n            failures += 1;\n        }\n");
-        for (uint32_t g = 0; g < program->global_count; g += 1)
+        if (mixed)
         {
-            const uint32_t class = program->global_classes[g];
-            if (tier0_class_floating(class))
+            fprintf(file, "        unsigned long m = m_entry(inputs[r][0], inputs[r][1], inputs[r][2]);\n");
+            fprintf(file, "        if (c != m)\n        {\n            printf(\"mismatch input %%d: clang %%016lx mixed %%016lx\\n\", r, c, m);\n            failures += 1;\n        }\n");
+        }
+        for (uint32_t side = 0; side < (mixed ? 2u : 1u); side += 1)
+        {
+            const char* other = side == 0 ? "t0" : "m";
+            for (uint32_t g = 0; g < program->global_count; g += 1)
             {
-                const char* same = class == BUSTER_TYPED_CLASS_F32 ? "same_float" : "same_double";
-                fprintf(file, "        if (!%s((const void*)&c_g%u, (const void*)&t0_g%u, sizeof c_g%u / %u))\n", same, g, g, g, tier0_class_bytes(class));
+                const uint32_t class = program->global_classes[g];
+                if (tier0_class_floating(class))
+                {
+                    const char* same = class == BUSTER_TYPED_CLASS_F32 ? "same_float" : "same_double";
+                    fprintf(file, "        if (!%s((const void*)&c_g%u, (const void*)&%s_g%u, sizeof c_g%u / %u))\n", same, g, other, g, g, tier0_class_bytes(class));
+                }
+                else
+                {
+                    fprintf(file, "        if (memcmp(&c_g%u, &%s_g%u, sizeof c_g%u) != 0)\n", g, other, g, g);
+                }
+                fprintf(file, "        {\n            printf(\"mismatch input %%d: %s global %u\\n\", r);\n            failures += 1;\n        }\n", other, g);
             }
-            else
-            {
-                fprintf(file, "        if (memcmp(&c_g%u, &t0_g%u, sizeof c_g%u) != 0)\n", g, g, g);
-            }
-            fprintf(file, "        {\n            printf(\"mismatch input %%d: global %u\\n\", r);\n            failures += 1;\n        }\n", g);
         }
         fprintf(file, "    }\n    long long times[2] = { 0, 0 };\n    for (int side = 0; side < 2; side += 1)\n    {\n        long long start = now();\n");
         fprintf(file, "        for (int k = 0; k < 64; k += 1)\n        {\n            for (int r = 0; r < %u; r += 1)\n            {\n                reset();\n", BUSTER_TIER0_TEST_INPUTS);
@@ -1170,10 +1322,13 @@ static int tier0_test_shell(const char* command, const char* prefix, char* line,
 
 // The cross-check: `count` programs, each compiled by clang -O0 (as C) and by Tier 0 (as an object), linked into one
 // harness that runs both on the same inputs; their results and globals must agree. Also reports the code's sizes (clang's
-// .text, Tier 0's functions) and the harness's times.
+// .text, Tier 0's functions) and the harness's times. With records (#137), each program is also linked mixed, its even
+// functions Tier 0's and its odd ones clang's (whose own copies of the even ones objcopy makes weak), so that its calls
+// pass and return structs and unions by value between the two compilers both ways; it must agree with clang's build too.
 static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, const char* clang,
                              bool keep)
 {
+    const bool mixed = options.records != 0;
     const char* temporary = getenv("TMPDIR");
     char directory[512];
     snprintf(directory, sizeof(directory), "%s/tier0-cross-XXXXXX", temporary != 0 ? temporary : "/tmp");
@@ -1203,11 +1358,15 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
             char harness[600];
             char library[600];
             char executable[600];
+            char mixed_source[600];
+            char mixed_object[600];
             snprintf(source, sizeof(source), "%s/program_%u.c", directory, p);
             snprintf(object, sizeof(object), "%s/tier0_%u.o", directory, p);
             snprintf(harness, sizeof(harness), "%s/harness_%u.c", directory, p);
             snprintf(library, sizeof(library), "%s/library_%u.s", directory, p);
             snprintf(executable, sizeof(executable), "%s/run_%u", directory, p);
+            snprintf(mixed_source, sizeof(mixed_source), "%s/mixed_%u.c", directory, p);
+            snprintf(mixed_object, sizeof(mixed_object), "%s/tier0_mixed_%u.o", directory, p);
             if (ok)
             {
                 FILE* file = fopen(source, "w");
@@ -1215,12 +1374,22 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 ok = file != 0 && fclose(file) == 0 && ok;
                 uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3];
                 tier0_test_inputs(program_seed, inputs);
-                ok = ok && tier0_test_object(program, code, object) && tier0_test_harness(program, inputs, harness) && tier0_test_library(program, library);
+                ok = ok && tier0_test_object(program, code, object, "t0_", false) && tier0_test_harness(program, inputs, harness, mixed) &&
+                     tier0_test_library(program, library);
+                if (ok && mixed)
+                {
+                    // The same program's C named m_, and Tier 0's mixed object.
+                    Tier0Program* named = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0Program, 1);
+                    ok = named != 0 && tier0_generate_program(named, &arena, program_seed, options, "m_") && tier0_test_object(program, code, mixed_object, "m_", true);
+                    file = ok ? fopen(mixed_source, "w") : 0;
+                    ok = file != 0 && fwrite(named->text, 1, named->text_length, file) == named->text_length;
+                    ok = file != 0 && fclose(file) == 0 && ok;
+                }
                 ok = tier0_test_expect(tally, ok, "cross-check", "seed %" PRIu64 ": the files can't be written", program_seed);
             }
             if (ok)
             {
-                char command[4096];
+                char command[8192];
                 char line[512];
                 // -fwrapv and -fno-strict-aliasing, this repository's own dialect: signed arithmetic wraps, as Tier 0's
                 // does, and the objects' checksums read floating parts' bits through integer lvalues. The library of the
@@ -1230,6 +1399,26 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                          "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
                          "%s -O0 -w -o %s %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
                          clang, source, source, library, library, library, library, clang, executable, harness, source, object, library, directory);
+                if (mixed)
+                {
+                    // The mixed build's: clang's object with its even functions weak, Tier 0's even ones taking their
+                    // place in the link. Its globals are all clang's object's, those Tier 0 reaches through the GOT too.
+                    char weaken[2048];
+                    uint64_t length = 0;
+                    weaken[0] = 0;
+                    for (uint32_t f = 0; f < program->function_count && length + 32 < sizeof(weaken); f += 2)
+                    {
+                        const int written = f + 1 == program->function_count ? snprintf(weaken + length, sizeof(weaken) - length, " --weaken-symbol=m_entry")
+                                                                             : snprintf(weaken + length, sizeof(weaken) - length, " --weaken-symbol=m_f%u", f);
+                        length += written > 0 ? (uint64_t)written : 0;
+                    }
+                    snprintf(command, sizeof(command),
+                             "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
+                             "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && objcopy%s %s.o 2>&1 && "
+                             "%s -O0 -w -o %s %s %s.o %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
+                             clang, source, source, library, library, library, library, clang, mixed_source, mixed_source, weaken, mixed_source, clang, executable,
+                             harness, source, object, mixed_source, mixed_object, library, directory);
+                }
                 ok = tier0_test_expect(tally, tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
                                        program_seed, directory);
                 snprintf(command, sizeof(command), "size -A %s.o", source);
@@ -2638,6 +2827,1240 @@ static void tier0_test_access(Tier0TestTally* tally)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Aggregates at hand-made locations, run natively
+
+// What abi_assign makes rarely or never on its own, and the edges of the parts (#137): arguments and parameters (an
+// aggregate of `size` bytes aligned to 2^alignment_log2, or for size 0 a value of `class`) at locations written by
+// hand, and results. Each fixture runs both ways: as a call, Tier 0's caller passing its aggregates' bytes from pages
+// that end or start at a PROT_NONE page to a probe that records the registers and the stack slots it gets
+// (tier0_test_aggregate_calls); and as a function, Tier 0's, whose parameters a driver passes from the same bytes and
+// which copies them out (tier0_test_aggregate_functions). tier0_test_aggregate_errors breaks them for tier0_validate.
+typedef struct Tier0TestPassed Tier0TestPassed;
+struct Tier0TestPassed
+{
+    uint32_t size;
+    uint8_t class;
+    uint8_t alignment_log2;
+    AbiLocation location;
+};
+
+#define BUSTER_TIER0_TEST_PASSED 10
+
+typedef struct Tier0TestPassing Tier0TestPassing;
+struct Tier0TestPassing
+{
+    const char* name;
+    uint32_t count;
+    uint32_t stack_bytes;
+    Tier0TestPassed passed[BUSTER_TIER0_TEST_PASSED];
+    AbiReturn result;
+    uint32_t result_size;
+};
+
+#define BUSTER_TIER0_TEST_N BUSTER_ABI_REGISTER_NONE
+#define BUSTER_TIER0_TEST_X(n) (BUSTER_ABI_REGISTER_VECTOR | (n))
+#define BUSTER_TIER0_TEST_HIGH BUSTER_ABI_FLAG_HIGH
+// An aggregate of `bytes` aligned to 2^`log2`, in registers `first` and `second` and at `offset` on the stack; a value
+// of `class` in register `first` or at `offset`; a result in registers `first` and `second`.
+#define BUSTER_TIER0_TEST_AGGREGATE(bytes, log2, kind, flags, first, second, offset)                                     \
+    { (bytes), BUSTER_TYPED_CLASS_U64, (log2), { (offset), { (first), (second) }, BUSTER_ABI_LOCATION_##kind, (flags) } }
+#define BUSTER_TIER0_TEST_VALUE(class, kind, first, offset)                                                             \
+    { 0, BUSTER_TYPED_CLASS_##class, 0, { (offset), { (first), BUSTER_TIER0_TEST_N }, BUSTER_ABI_LOCATION_##kind, 0 } }
+#define BUSTER_TIER0_TEST_RESULT(kind, flags, part_bytes, first, second)                                                \
+    { BUSTER_ABI_RESULT_##kind, (flags), (part_bytes), { (first), (second), BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N }, 0 }
+#define BUSTER_TIER0_TEST_NO_RESULT BUSTER_TIER0_TEST_RESULT(IGNORE, 0, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N)
+
+static const Tier0TestPassing tier0_test_passings[] = {
+    // Each kind of general part, and aggregates on the stack whole: a 24-byte one aligned to 16 in a slot at 56, which
+    // a callee copies into its own object, beside one in place at 16.
+    { "general parts", 9, 96, {
+        BUSTER_TIER0_TEST_AGGREGATE(16, 3, REGISTERS, 0, BUSTER_ABI_RDI, BUSTER_ABI_RSI, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(11, 0, REGISTERS, 0, BUSTER_ABI_RDX, BUSTER_ABI_RCX, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(3, 0, REGISTERS, 0, BUSTER_ABI_R8, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(6, 1, REGISTERS, 0, BUSTER_ABI_R9, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(13, 0, STACK, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(40, 4, STACK, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 16),
+        BUSTER_TIER0_TEST_AGGREGATE(24, 4, STACK, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 56),
+        BUSTER_TIER0_TEST_AGGREGATE(7, 0, STACK, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 80),
+        BUSTER_TIER0_TEST_VALUE(I64, STACK, BUSTER_TIER0_TEST_N, 88),
+    }, BUSTER_TIER0_TEST_NO_RESULT, 0 },
+    // Each kind of vector part, and parts of both kinds in one aggregate.
+    { "vector parts", 9, 0, {
+        BUSTER_TIER0_TEST_AGGREGATE(16, 4, REGISTERS, 0, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(12, 2, REGISTERS, 0, BUSTER_TIER0_TEST_X(1), BUSTER_TIER0_TEST_X(2), 0),
+        BUSTER_TIER0_TEST_AGGREGATE(6, 1, REGISTERS, 0, BUSTER_TIER0_TEST_X(3), BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(14, 1, REGISTERS, 0, BUSTER_TIER0_TEST_X(4), BUSTER_ABI_RDI, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(10, 1, REGISTERS, 0, BUSTER_ABI_RSI, BUSTER_TIER0_TEST_X(5), 0),
+        BUSTER_TIER0_TEST_AGGREGATE(2, 1, REGISTERS, 0, BUSTER_TIER0_TEST_X(6), BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_VALUE(F64, REGISTERS, BUSTER_TIER0_TEST_X(7), 0),
+        BUSTER_TIER0_TEST_VALUE(I64, REGISTERS, BUSTER_ABI_RDX, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(5, 0, REGISTERS, 0, BUSTER_ABI_RCX, BUSTER_TIER0_TEST_N, 0),
+    }, BUSTER_TIER0_TEST_NO_RESULT, 0 },
+    // A high eightbyte alone in each kind of register and on the stack, SPLIT both ways in both kinds, and an aggregate
+    // the call ignores.
+    { "high, split and ignored", 10, 40, {
+        BUSTER_TIER0_TEST_AGGREGATE(16, 3, REGISTERS, BUSTER_TIER0_TEST_HIGH, BUSTER_ABI_RDI, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(11, 0, REGISTERS, BUSTER_TIER0_TEST_HIGH, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(13, 0, REGISTERS, BUSTER_TIER0_TEST_HIGH, BUSTER_ABI_RSI, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(12, 2, SPLIT, 0, BUSTER_ABI_RDX, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(15, 0, SPLIT, 0, BUSTER_TIER0_TEST_N, BUSTER_ABI_RCX, 8),
+        BUSTER_TIER0_TEST_AGGREGATE(24, 3, IGNORE, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(12, 2, STACK, BUSTER_TIER0_TEST_HIGH, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 16),
+        BUSTER_TIER0_TEST_VALUE(I64, REGISTERS, BUSTER_ABI_R8, 0),
+        BUSTER_TIER0_TEST_AGGREGATE(9, 0, SPLIT, 0, BUSTER_TIER0_TEST_X(1), BUSTER_TIER0_TEST_N, 24),
+        BUSTER_TIER0_TEST_AGGREGATE(10, 1, SPLIT, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_X(2), 32),
+    }, BUSTER_TIER0_TEST_NO_RESULT, 0 },
+    // Results, in each kind of register and both orders, a high eightbyte alone, parts that load through a temporary,
+    // and through a hidden pointer.
+    { "a result in rax and rdx", 1, 0, {
+        BUSTER_TIER0_TEST_AGGREGATE(16, 3, REGISTERS, 0, BUSTER_ABI_RDI, BUSTER_ABI_RSI, 0),
+    }, BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 8, BUSTER_ABI_RAX, BUSTER_ABI_RDX), 16 },
+    { "a result in xmm0 and xmm1", 1, 0, {
+        BUSTER_TIER0_TEST_AGGREGATE(12, 2, REGISTERS, 0, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_X(1), 0),
+    }, BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 8, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_X(1)), 12 },
+    { "a result in rax and xmm0", 0, 0, { { 0 } }, BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 8, BUSTER_ABI_RAX, BUSTER_TIER0_TEST_X(0)), 16 },
+    { "a result in xmm0 and rax", 0, 0, { { 0 } }, BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 8, BUSTER_TIER0_TEST_X(0), BUSTER_ABI_RAX), 13 },
+    { "a result's high eightbyte in rax", 0, 0, { { 0 } }, BUSTER_TIER0_TEST_RESULT(REGISTERS, BUSTER_TIER0_TEST_HIGH, 8, BUSTER_ABI_RAX, BUSTER_TIER0_TEST_N), 16 },
+    { "a result's high eightbyte in xmm0", 0, 0, { { 0 } },
+      BUSTER_TIER0_TEST_RESULT(REGISTERS, BUSTER_TIER0_TEST_HIGH, 8, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_N), 11 },
+    { "a vector result", 0, 0, { { 0 } }, BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 16, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_N), 16 },
+    { "a result of 5 bytes in rax", 0, 0, { { 0 } }, BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 8, BUSTER_ABI_RAX, BUSTER_TIER0_TEST_N), 5 },
+    { "a result of 6 bytes in xmm0", 0, 0, { { 0 } }, BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 8, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_N), 6 },
+    { "a hidden result", 2, 0, {
+        BUSTER_TIER0_TEST_AGGREGATE(16, 3, REGISTERS, 0, BUSTER_ABI_RSI, BUSTER_ABI_RDX, 0),
+        BUSTER_TIER0_TEST_VALUE(I64, REGISTERS, BUSTER_ABI_RCX, 0),
+    }, BUSTER_TIER0_TEST_RESULT(MEMORY, 0, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N), 40 },
+};
+
+// The words of the stack a probe records and a driver passes, a hidden result's bytes, each parameter's place in the out
+// bytes a function copies them to, and where in it an aggregate's address goes, after its bytes.
+#define BUSTER_TIER0_TEST_STACK_WORDS 16
+#define BUSTER_TIER0_TEST_HIDDEN_BYTES 40
+#define BUSTER_TIER0_TEST_SLOT_BYTES 48
+#define BUSTER_TIER0_TEST_ADDRESS_AT 40
+// Two placements of the bytes (ending at a PROT_NONE page, and starting after one) by each encoder.
+#define BUSTER_TIER0_TEST_AGGREGATE_RUNS 4
+
+// What a probe saw, or a driver's call returned (rax, rdx, xmm0 and xmm1), and the bytes a caller copied its result
+// object to or a function its parameters: the run in progress's (runs[0]), copied to its own after it.
+typedef struct Tier0TestSeen Tier0TestSeen;
+struct Tier0TestSeen
+{
+    uint64_t general[BUSTER_ABI_INTEGER_ARGUMENTS];
+    uint64_t rax;
+    uint64_t rdx;
+    uint8_t vectors[BUSTER_ABI_VECTOR_ARGUMENTS][16];
+    uint8_t stack[8 * BUSTER_TIER0_TEST_STACK_WORDS];
+    uint8_t out[BUSTER_TIER0_TEST_PASSED * BUSTER_TIER0_TEST_SLOT_BYTES];
+    uint8_t hidden[BUSTER_TIER0_TEST_HIDDEN_BYTES];
+};
+
+// What a probe returns (rax, rdx, xmm0 and xmm1, and with hidden_flag the bytes it writes where rdi points, or else
+// into the sink), and what a driver passes (the argument registers and the stack's slots).
+typedef struct Tier0TestPreset Tier0TestPreset;
+struct Tier0TestPreset
+{
+    uint64_t general[BUSTER_ABI_INTEGER_ARGUMENTS];
+    uint64_t rax;
+    uint64_t rdx;
+    uint8_t vectors[BUSTER_ABI_VECTOR_ARGUMENTS][16];
+    uint8_t stack[8 * BUSTER_TIER0_TEST_STACK_WORDS];
+    uint64_t hidden_flag;
+    uint8_t hidden[BUSTER_TIER0_TEST_HIDDEN_BYTES];
+    uint8_t sink[BUSTER_TIER0_TEST_HIDDEN_BYTES];
+};
+
+typedef struct Tier0TestShared Tier0TestShared;
+struct Tier0TestShared
+{
+    Tier0TestPreset preset;
+    Tier0TestSeen runs[1 + BUSTER_TIER0_TEST_AGGREGATE_RUNS];
+};
+
+// The bytes of an argument register (Tier 0's numbering: rdi to r9, xmm0 to xmm7), or with `result` of a result
+// register (rax, rdx, xmm0 and xmm1), as a probe recorded or a driver passes them; 0 for another.
+static uint8_t* tier0_test_register_bytes(uint64_t* general, uint64_t* rax, uint64_t* rdx, uint8_t (*vectors)[16], uint8_t reg, bool result)
+{
+    uint8_t* bytes = reg >= 16 && reg < 16 + BUSTER_ABI_VECTOR_ARGUMENTS ? vectors[reg - 16] : 0;
+    for (uint32_t g = 0; g < BUSTER_ABI_INTEGER_ARGUMENTS; g += 1)
+    {
+        bytes = !result && abi_integer_arguments[g] == reg ? (uint8_t*)&general[g] : bytes;
+    }
+    bytes = result && reg == X86_REGISTER_RAX ? (uint8_t*)rax : result && reg == X86_REGISTER_RDX ? (uint8_t*)rdx : bytes;
+    return bytes;
+}
+
+static const uint8_t* tier0_test_seen_register(Tier0TestSeen* seen, uint8_t reg, bool result)
+{
+    return tier0_test_register_bytes(seen->general, &seen->rax, &seen->rdx, seen->vectors, reg, result);
+}
+
+static uint8_t* tier0_test_preset_register(Tier0TestPreset* preset, uint8_t reg, bool result)
+{
+    return tier0_test_register_bytes(preset->general, &preset->rax, &preset->rdx, preset->vectors, reg, result);
+}
+
+// Byte `i` of passed `a`'s bytes (a 10 for a result's) in placement `placement`.
+static uint8_t tier0_test_passed_byte(uint32_t a, uint32_t i, uint32_t placement)
+{
+    const uint32_t mixed = (a * 131u + i * 29u + placement * 71u + 13u) * 2654435761u;
+    return (uint8_t)(mixed >> 24);
+}
+
+// A value argument's or parameter's bits.
+static uint64_t tier0_test_passed_value(const Tier0TestPassed* passed, uint32_t a)
+{
+    const double floating = 3.25 + (double)a;
+    uint64_t bits = 0x0123456789abcdefull ^ ((uint64_t)a << 56);
+    if (passed->class == BUSTER_TYPED_CLASS_F64)
+    {
+        memcpy(&bits, &floating, sizeof(bits));
+    }
+    return bits;
+}
+
+// Whether `recorded` holds `bytes` bytes of `expected` from `offset`, for an error's message too.
+static bool tier0_test_same_bytes(const uint8_t* recorded, const uint8_t* expected, uint32_t bytes)
+{
+    return recorded != 0 && memcmp(recorded, expected, bytes) == 0;
+}
+
+// The probe: every register a call passes in recorded into `seen` (Tier0TestSeen: movabs r10, then a store each), the
+// stack's slots past its return address too (through r11), then what `preset` holds returned in rax, rdx, xmm0 and
+// xmm1, and with its hidden_flag `hidden_bytes` of its hidden bytes written where rdi points (or into its sink: a cmovne
+// picks the place) and rdi returned in rax. Returns the count.
+static uint32_t tier0_test_aggregate_probe(X86Instruction* records, uint64_t seen, uint64_t preset, uint32_t hidden_bytes)
+{
+    uint32_t count = 0;
+    records[count] = tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_R10, 0, (int32_t)(seen >> 32), (int32_t)(uint32_t)seen);
+    count += 1;
+    for (uint32_t g = 0; g < BUSTER_ABI_INTEGER_ARGUMENTS; g += 1)
+    {
+        const int32_t at = (int32_t)(offsetof(Tier0TestSeen, general) + 8 * g);
+        records[count] = tier0_instruction(X86_FORM_MOV_RM64_R64, abi_integer_arguments[g], X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, at, 0);
+        count += 1;
+    }
+    records[count] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestSeen, rax), 0);
+    count += 1;
+    for (uint32_t v = 0; v < BUSTER_ABI_VECTOR_ARGUMENTS; v += 1)
+    {
+        const int32_t at = (int32_t)(offsetof(Tier0TestSeen, vectors) + 16 * v);
+        records[count] = tier0_instruction(X86_FORM_MOVUPS_XM_X, (uint8_t)v, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, at, 0);
+        count += 1;
+    }
+    for (uint32_t w = 0; w < BUSTER_TIER0_TEST_STACK_WORDS; w += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_R11, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)(8 + 8 * w), 0);
+        records[count + 1] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_R11, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE,
+                                               (int32_t)(offsetof(Tier0TestSeen, stack) + 8 * w), 0);
+        count += 2;
+    }
+    records[count] = tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_R10, 0, (int32_t)(preset >> 32), (int32_t)(uint32_t)preset);
+    records[count + 1] = tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_R11, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, sink), 0);
+    records[count + 2] = tier0_instruction(X86_FORM_CMP_RM64_IMM8, 0, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, hidden_flag), 0);
+    records[count + 3] = tier0_instruction(X86_FORM_CMOVNE_R64_RM64, X86_REGISTER_R11, X86_REGISTER_RDI, BUSTER_X86_REGISTER_DIRECT, 0, 0);
+    count += 4;
+    for (uint32_t w = 0; w < hidden_bytes / 8; w += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestPreset, hidden) + 8 * w), 0);
+        records[count + 1] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_R11, BUSTER_X86_MEMORY_BASE, (int32_t)(8 * w), 0);
+        count += 2;
+    }
+    records[count] = tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, rax), 0);
+    records[count + 1] = tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, rdx), 0);
+    records[count + 2] = tier0_instruction(X86_FORM_MOVUPS_X_XM, 0, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, vectors), 0);
+    records[count + 3] = tier0_instruction(X86_FORM_MOVUPS_X_XM, 1, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestPreset, vectors) + 16), 0);
+    records[count + 4] = tier0_instruction(X86_FORM_CMOVNE_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RDI, BUSTER_X86_REGISTER_DIRECT, 0, 0);
+    records[count + 5] = tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0);
+    return count + 6;
+}
+
+// The driver: `stack_words` of `preset`'s stack slots stored below a frame that leaves rsp a multiple of 16 at the call,
+// every argument register loaded from it (the general ones through r10, last), the function at `callee` called through
+// r11, and rax, rdx, xmm0 and xmm1 recorded into `seen`. Returns the count.
+static uint32_t tier0_test_aggregate_driver(X86Instruction* records, uint64_t preset, uint64_t seen, uint64_t callee, uint32_t stack_words)
+{
+    const int32_t frame = (int32_t)((8 * stack_words + 15) / 16 * 16 + 8);
+    uint32_t count = 0;
+    records[count] = tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, frame);
+    records[count + 1] = tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_R10, 0, (int32_t)(preset >> 32), (int32_t)(uint32_t)preset);
+    count += 2;
+    for (uint32_t w = 0; w < stack_words; w += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestPreset, stack) + 8 * w), 0);
+        records[count + 1] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)(8 * w), 0);
+        count += 2;
+    }
+    for (uint32_t v = 0; v < BUSTER_ABI_VECTOR_ARGUMENTS; v += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOVUPS_X_XM, (uint8_t)v, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestPreset, vectors) + 16 * v), 0);
+        count += 1;
+    }
+    for (uint32_t g = 0; g < BUSTER_ABI_INTEGER_ARGUMENTS; g += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOV_R64_RM64, abi_integer_arguments[g], X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestPreset, general) + 8 * g), 0);
+        count += 1;
+    }
+    records[count] = tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_R11, 0, (int32_t)(callee >> 32), (int32_t)(uint32_t)callee);
+    records[count + 1] = tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0);
+    records[count + 2] = tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_R10, 0, (int32_t)(seen >> 32), (int32_t)(uint32_t)seen);
+    records[count + 3] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestSeen, rax), 0);
+    records[count + 4] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RDX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestSeen, rdx), 0);
+    records[count + 5] = tier0_instruction(X86_FORM_MOVUPS_XM_X, 0, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestSeen, vectors), 0);
+    records[count + 6] = tier0_instruction(X86_FORM_MOVUPS_XM_X, 1, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestSeen, vectors) + 16), 0);
+    records[count + 7] = tier0_instruction(X86_FORM_ADD_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, frame);
+    records[count + 8] = tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0);
+    return count + 9;
+}
+
+// A fixture's caller: the probe's address (the callee, pushed first), each aggregate's address (`addresses`) and each
+// value, the call, its result object (local 0) copied to `out`, and a return. Its columns are its own.
+typedef struct Tier0TestCaller Tier0TestCaller;
+struct Tier0TestCaller
+{
+    uint8_t kinds[16];
+    uint8_t classes[16];
+    uint64_t values[16];
+    uint8_t argument_classes[BUSTER_TIER0_TEST_PASSED];
+    uint32_t argument_sizes[BUSTER_TIER0_TEST_PASSED];
+    AbiLocation locations[BUSTER_TIER0_TEST_PASSED];
+    AbiCall call;
+    uint8_t local_classes[1];
+    uint8_t local_flags[1];
+    uint32_t local_sizes[1];
+    uint8_t local_alignments[1];
+    SymbolId target;
+    uint32_t first;
+    uint32_t argument_count;
+    uint8_t variadic;
+    uint32_t result_object;
+    Tier0Function function;
+};
+
+static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0TestPassing* fixture, const uint64_t* addresses, uint64_t probe, uint64_t out)
+{
+    memset(caller, 0, sizeof(*caller));
+    uint32_t count = 0;
+    caller->kinds[count] = BUSTER_TYPED_CONST;
+    caller->classes[count] = BUSTER_TYPED_CLASS_U64;
+    caller->values[count] = probe;
+    count += 1;
+    for (uint32_t a = 0; a < fixture->count; a += 1)
+    {
+        const Tier0TestPassed* passed = &fixture->passed[a];
+        caller->kinds[count] = BUSTER_TYPED_CONST;
+        caller->classes[count] = passed->class;
+        caller->values[count] = passed->size != 0 ? addresses[a] : tier0_test_passed_value(passed, a);
+        count += 1;
+        caller->argument_classes[a] = passed->class;
+        caller->argument_sizes[a] = passed->size;
+        caller->locations[a] = passed->location;
+    }
+    caller->kinds[count] = BUSTER_TYPED_CALL;
+    caller->classes[count] = BUSTER_TYPED_CLASS_VOID;
+    count += 1;
+    if (fixture->result_size != 0)
+    {
+        caller->kinds[count] = BUSTER_TYPED_CONST;
+        caller->classes[count] = BUSTER_TYPED_CLASS_U64;
+        caller->values[count] = out;
+        caller->kinds[count + 1] = BUSTER_TYPED_LOCAL_ADDRESS;
+        caller->classes[count + 1] = BUSTER_TYPED_CLASS_U64;
+        caller->kinds[count + 2] = BUSTER_TYPED_COPY;
+        caller->classes[count + 2] = BUSTER_TYPED_CLASS_VOID;
+        caller->values[count + 2] = fixture->result_size;
+        count += 3;
+    }
+    caller->kinds[count] = BUSTER_TYPED_RETURN;
+    caller->classes[count] = BUSTER_TYPED_CLASS_VOID;
+    count += 1;
+    caller->call = (AbiCall){
+        .stack_bytes = fixture->stack_bytes,
+        .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+        .result = fixture->result,
+    };
+    caller->local_classes[0] = BUSTER_TYPED_CLASS_VOID;
+    caller->local_flags[0] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+    caller->local_sizes[0] = fixture->result_size != 0 ? fixture->result_size : 8;
+    caller->local_alignments[0] = 3;
+    caller->argument_count = fixture->count;
+    caller->result_object = fixture->result_size != 0 ? 1 : 0;
+    Tier0Function* function = &caller->function;
+    function->kinds = caller->kinds;
+    function->classes = caller->classes;
+    function->values = caller->values;
+    function->count = count;
+    function->local_classes = caller->local_classes;
+    function->local_flags = caller->local_flags;
+    function->local_sizes = caller->local_sizes;
+    function->local_alignments = caller->local_alignments;
+    function->local_count = 1;
+    function->result = (AbiReturn)BUSTER_TIER0_TEST_NO_RESULT;
+    function->call_targets = &caller->target;
+    function->call_first = &caller->first;
+    function->call_argument_counts = &caller->argument_count;
+    function->call_variadic = &caller->variadic;
+    function->calls = &caller->call;
+    function->argument_locations = caller->locations;
+    function->argument_classes = caller->argument_classes;
+    function->argument_sizes = caller->argument_sizes;
+    function->call_result_objects = &caller->result_object;
+    function->call_count = 1;
+    function->argument_count = fixture->count;
+}
+
+// A fixture's function: its parameters (after the hidden pointer, for a result through one), each aggregate's bytes
+// and each value copied to its slot of `out`, with each aggregate's address after its bytes (at
+// BUSTER_TIER0_TEST_ADDRESS_AT, so that its alignment shows), and its result, whose bytes are at `source`: the address
+// returned for one in registers, copied where the hidden pointer points (and it returned) for one through it.
+typedef struct Tier0TestCallee Tier0TestCallee;
+struct Tier0TestCallee
+{
+    uint8_t kinds[80];
+    uint8_t classes[80];
+    uint64_t values[80];
+    uint8_t local_classes[1 + BUSTER_TIER0_TEST_PASSED];
+    uint8_t local_flags[1 + BUSTER_TIER0_TEST_PASSED];
+    uint32_t local_sizes[1 + BUSTER_TIER0_TEST_PASSED];
+    uint8_t local_alignments[1 + BUSTER_TIER0_TEST_PASSED];
+    AbiLocation parameters[1 + BUSTER_TIER0_TEST_PASSED];
+    Tier0Function function;
+};
+
+static void tier0_test_aggregate_callee(Tier0TestCallee* callee, const Tier0TestPassing* fixture, uint64_t out, uint64_t source)
+{
+    memset(callee, 0, sizeof(*callee));
+    const bool hidden = fixture->result.kind == BUSTER_ABI_RESULT_MEMORY;
+    const uint32_t first = hidden ? 1 : 0;
+    if (hidden)
+    {
+        callee->local_classes[0] = BUSTER_TYPED_CLASS_U64;
+        callee->parameters[0] = (AbiLocation){ .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+    }
+    uint32_t count = 0;
+    for (uint32_t a = 0; a < fixture->count; a += 1)
+    {
+        const Tier0TestPassed* passed = &fixture->passed[a];
+        const uint32_t local = first + a;
+        const bool object = passed->size != 0;
+        callee->local_classes[local] = object ? BUSTER_TYPED_CLASS_VOID : passed->class;
+        callee->local_flags[local] = object ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+        callee->local_sizes[local] = passed->size;
+        callee->local_alignments[local] = object ? passed->alignment_log2 : 0;
+        callee->parameters[local] = passed->location;
+        callee->kinds[count] = BUSTER_TYPED_CONST;
+        callee->classes[count] = BUSTER_TYPED_CLASS_U64;
+        callee->values[count] = out + BUSTER_TIER0_TEST_SLOT_BYTES * a;
+        callee->kinds[count + 1] = object ? BUSTER_TYPED_LOCAL_ADDRESS : BUSTER_TYPED_LOCAL;
+        callee->classes[count + 1] = object ? BUSTER_TYPED_CLASS_U64 : passed->class;
+        callee->values[count + 1] = local;
+        callee->kinds[count + 2] = object ? BUSTER_TYPED_COPY : BUSTER_TYPED_SET;
+        callee->classes[count + 2] = object ? BUSTER_TYPED_CLASS_VOID : passed->class;
+        callee->values[count + 2] = passed->size;
+        count += 3;
+        if (object)
+        {
+            callee->kinds[count] = BUSTER_TYPED_CONST;
+            callee->classes[count] = BUSTER_TYPED_CLASS_U64;
+            callee->values[count] = out + BUSTER_TIER0_TEST_SLOT_BYTES * a + BUSTER_TIER0_TEST_ADDRESS_AT;
+            callee->kinds[count + 1] = BUSTER_TYPED_LOCAL_ADDRESS;
+            callee->classes[count + 1] = BUSTER_TYPED_CLASS_U64;
+            callee->values[count + 1] = local;
+            callee->kinds[count + 2] = BUSTER_TYPED_SET;
+            callee->classes[count + 2] = BUSTER_TYPED_CLASS_U64;
+            count += 3;
+        }
+    }
+    if (hidden)
+    {
+        static const uint8_t kinds[5] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_COPY, BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN };
+        static const uint8_t classes[5] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+        const uint64_t values[5] = { 0, source, fixture->result_size, 0, 0 };
+        memcpy(callee->kinds + count, kinds, sizeof(kinds));
+        memcpy(callee->classes + count, classes, sizeof(classes));
+        memcpy(callee->values + count, values, sizeof(values));
+        count += 5;
+    }
+    else if (fixture->result_size != 0)
+    {
+        callee->kinds[count] = BUSTER_TYPED_CONST;
+        callee->classes[count] = BUSTER_TYPED_CLASS_U64;
+        callee->values[count] = source;
+        callee->kinds[count + 1] = BUSTER_TYPED_RETURN;
+        callee->classes[count + 1] = BUSTER_TYPED_CLASS_U64;
+        count += 2;
+    }
+    else
+    {
+        callee->kinds[count] = BUSTER_TYPED_RETURN;
+        callee->classes[count] = BUSTER_TYPED_CLASS_VOID;
+        count += 1;
+    }
+    Tier0Function* function = &callee->function;
+    function->kinds = callee->kinds;
+    function->classes = callee->classes;
+    function->values = callee->values;
+    function->count = count;
+    function->local_classes = callee->local_classes;
+    function->local_flags = callee->local_flags;
+    function->local_sizes = callee->local_sizes;
+    function->local_alignments = callee->local_alignments;
+    function->local_count = first + fixture->count;
+    function->parameter_count = first + fixture->count;
+    function->parameters = callee->parameters;
+    function->result = fixture->result;
+    function->result_size = hidden ? 0 : fixture->result_size;
+}
+
+// A function's code by both paths, which must agree and be valid, encoded by each path's encoder of its own (the vector
+// path's by x86_encode, the scalar's by its twin) into `images` (a page each), which must agree too.
+static bool tier0_test_aggregate_encode(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, Arena* arena, uint8_t* images)
+{
+    const Tier0Check validation = tier0_validate(function);
+    const Tier0Code scalar = tier0_compile_scalar(function, arena);
+    const Tier0Code vector = tier0_compile(function, arena);
+    bool ready = tier0_test_expect(tally, validation.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), check,
+                                   "%s: rule \"%s\" at %u, error %d, or the paths differ", name, validation.rule != 0 ? validation.rule : "", validation.node, scalar.error);
+    ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0 && scalar.reference_count == 0,
+                                       check, "%s: an invalid record, a branch or a reference", name);
+    int64_t lengths[2] = { -1, -1 };
+    for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+    {
+        const Tier0Code* code = encoder == 0 ? &vector : &scalar;
+        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(code->count);
+        uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, room);
+        lengths[encoder] = bytes == 0 ? -1 : encoder == 0 ? x86_encode(code->records, code->count, bytes, room, 0, 0) : x86_encode_scalar(code->records, code->count, bytes, room, 0, 0);
+        ready = tier0_test_expect(tally, lengths[encoder] > 0 && lengths[encoder] <= BUSTER_TIER0_TEST_PAGE, check, "%s: encoder %u failed", name, encoder);
+        if (ready)
+        {
+            memcpy(images + encoder * BUSTER_TIER0_TEST_PAGE, bytes, (size_t)lengths[encoder]);
+        }
+    }
+    return ready && tier0_test_expect(tally, lengths[0] == lengths[1] && memcmp(images, images + BUSTER_TIER0_TEST_PAGE, (size_t)lengths[0]) == 0, check,
+                                      "%s: the encoders differ", name);
+}
+
+// Records encoded by the scalar encoder into a page.
+static bool tier0_test_aggregate_load(const X86Instruction* records, uint32_t count, uint8_t* page)
+{
+    return x86_validate(records, count) == count && x86_encode_scalar(records, count, page, BUSTER_TIER0_TEST_PAGE, 0, 0) > 0;
+}
+
+// The pages for the passed bytes: for each of a fixture's passed aggregates and its result, a page between two
+// PROT_NONE ones, its bytes at its end (placement 0) and at its start (placement 1).
+#define BUSTER_TIER0_TEST_DATA_SLOTS (BUSTER_TIER0_TEST_PASSED + 1)
+
+static uint8_t* tier0_test_aggregate_data(void)
+{
+    uint8_t* data = mmap(0, 3 * BUSTER_TIER0_TEST_DATA_SLOTS * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool guarded = data != MAP_FAILED;
+    for (uint32_t s = 0; s < BUSTER_TIER0_TEST_DATA_SLOTS && guarded; s += 1)
+    {
+        guarded = mprotect(data + 3 * s * BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0 &&
+                  mprotect(data + (3 * s + 2) * BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0;
+    }
+    if (data != MAP_FAILED && !guarded)
+    {
+        munmap(data, 3 * BUSTER_TIER0_TEST_DATA_SLOTS * BUSTER_TIER0_TEST_PAGE);
+    }
+    return guarded ? data : 0;
+}
+
+// Where slot `s`'s `size` bytes are in `placement`, and the bytes there written.
+static uint8_t* tier0_test_aggregate_place(uint8_t* data, uint32_t s, uint32_t size, uint32_t placement)
+{
+    uint8_t* page = data + (3 * s + 1) * BUSTER_TIER0_TEST_PAGE;
+    uint8_t* bytes = placement == 0 ? page + BUSTER_TIER0_TEST_PAGE - size : page;
+    for (uint32_t i = 0; i < size; i += 1)
+    {
+        bytes[i] = tier0_test_passed_byte(s, i, placement);
+    }
+    return bytes;
+}
+
+// Runs `count` pages of `code` in a child, each from runs[0] poisoned, which is then copied to its own run's: the
+// function at page `first + r`'s address, called with no arguments. Returns whether the child exited with status 0.
+static bool tier0_test_aggregate_run(Tier0TestShared* shared, uint8_t* code, uint32_t first)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        for (uint32_t r = 0; r < BUSTER_TIER0_TEST_AGGREGATE_RUNS; r += 1)
+        {
+            typedef void (*Tier0TestEntryPoint)(void);
+            Tier0TestEntryPoint entry = 0;
+            void* address = code + (first + r) * BUSTER_TIER0_TEST_PAGE;
+            memcpy(&entry, &address, sizeof(entry));
+            memset(&shared->runs[0], 0xa5, sizeof(shared->runs[0]));
+            entry();
+            shared->runs[1 + r] = shared->runs[0];
+        }
+        _exit(0);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// Each fixture as a call: the caller, for each placement of the aggregates' bytes, by both paths, called in a child,
+// passes them to the probe, which records what it gets: each value and each part in its register, each part on the
+// stack and each aggregate on the stack whole in its slots. A result in registers that the probe returns must land in
+// the caller's object, which it copies out, as must one the probe writes through the hidden pointer.
+static void tier0_test_aggregate_calls(Tier0TestTally* tally)
+{
+    static const char check[] = "aggregate calls";
+    Tier0TestShared* shared = mmap(0, sizeof(Tier0TestShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t* data = tier0_test_aggregate_data();
+    // Per fixture: the callers (2 placements by 2 encoders), then the probe.
+    const uint64_t pages = (BUSTER_TIER0_TEST_AGGREGATE_RUNS + 1) * BUSTER_TIER0_TEST_PAGE;
+    uint8_t* code = mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Arena arena = arena_reserve(1ull << 26);
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && data != 0 && code != MAP_FAILED && arena.base != 0, check, "no memory");
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(tier0_test_passings) && ready; f += 1)
+    {
+        const Tier0TestPassing* fixture = &tier0_test_passings[f];
+        arena_pop_to(&arena, 0);
+        ready = mprotect(code, pages, PROT_READ | PROT_WRITE) == 0;
+        const uint8_t* bytes[2][BUSTER_TIER0_TEST_PASSED];
+        for (uint32_t placement = 0; placement < 2 && ready; placement += 1)
+        {
+            uint64_t addresses[BUSTER_TIER0_TEST_PASSED];
+            for (uint32_t a = 0; a < fixture->count; a += 1)
+            {
+                bytes[placement][a] = fixture->passed[a].size != 0 ? tier0_test_aggregate_place(data, a, fixture->passed[a].size, placement) : 0;
+                addresses[a] = (uint64_t)(uintptr_t)bytes[placement][a];
+            }
+            Tier0TestCaller caller;
+            tier0_test_aggregate_caller(&caller, fixture, addresses, (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_AGGREGATE_RUNS * BUSTER_TIER0_TEST_PAGE),
+                                        (uint64_t)(uintptr_t)shared->runs[0].out);
+            ready = tier0_test_aggregate_encode(tally, check, fixture->name, &caller.function, &arena, code + 2 * placement * BUSTER_TIER0_TEST_PAGE);
+        }
+        // What the probe returns: registers of bytes of their own, and for a hidden result its bytes.
+        memset(&shared->preset, 0, sizeof(shared->preset));
+        shared->preset.rax = 0xa1a2a3a4a5a6a7a8ull;
+        shared->preset.rdx = 0xb1b2b3b4b5b6b7b8ull;
+        for (uint32_t i = 0; i < 16; i += 1)
+        {
+            shared->preset.vectors[0][i] = (uint8_t)(0xc0 + i);
+            shared->preset.vectors[1][i] = (uint8_t)(0xd0 + i);
+        }
+        const bool hidden = fixture->result.kind == BUSTER_ABI_RESULT_MEMORY;
+        shared->preset.hidden_flag = hidden ? 1 : 0;
+        for (uint32_t i = 0; i < BUSTER_TIER0_TEST_HIDDEN_BYTES; i += 1)
+        {
+            shared->preset.hidden[i] = (uint8_t)(0xe0 ^ (7 * i));
+        }
+        X86Instruction probe[128];
+        const uint32_t probe_count = tier0_test_aggregate_probe(probe, (uint64_t)(uintptr_t)&shared->runs[0], (uint64_t)(uintptr_t)&shared->preset,
+                                                                hidden ? fixture->result_size : 0);
+        ready = ready && tier0_test_expect(tally, tier0_test_aggregate_load(probe, probe_count, code + BUSTER_TIER0_TEST_AGGREGATE_RUNS * BUSTER_TIER0_TEST_PAGE) &&
+                                                      mprotect(code, pages, PROT_READ | PROT_EXEC) == 0,
+                                           check, "%s: the probe can't be loaded", fixture->name);
+        ready = ready && tier0_test_expect(tally, tier0_test_aggregate_run(shared, code, 0), check, "%s: the child failed", fixture->name);
+        for (uint32_t r = 0; r < BUSTER_TIER0_TEST_AGGREGATE_RUNS && ready; r += 1)
+        {
+            Tier0TestSeen* seen = &shared->runs[1 + r];
+            const uint32_t placement = r / 2;
+            for (uint32_t a = 0; a < fixture->count; a += 1)
+            {
+                const Tier0TestPassed* passed = &fixture->passed[a];
+                const AbiLocation location = passed->location;
+                bool same = true;
+                if (passed->size == 0)
+                {
+                    uint8_t value[8];
+                    const uint64_t bits = tier0_test_passed_value(passed, a);
+                    memcpy(value, &bits, sizeof(value));
+                    const uint8_t* recorded = location.kind == BUSTER_ABI_LOCATION_STACK ? seen->stack + location.stack_offset
+                                                                                       : tier0_test_seen_register(seen, tier0_abi_register(location.registers[0]), false);
+                    same = tier0_test_same_bytes(recorded, value, 8);
+                }
+                else if (tier0_aggregate_whole(location))
+                {
+                    same = tier0_test_same_bytes(seen->stack + location.stack_offset, bytes[placement][a], passed->size);
+                }
+                else
+                {
+                    Tier0Part parts[2];
+                    const uint32_t part_count = tier0_location_parts(location, passed->size, parts);
+                    for (uint32_t k = 0; k < part_count; k += 1)
+                    {
+                        const uint8_t* recorded = parts[k].reg == BUSTER_TIER0_PART_STACK ? seen->stack + location.stack_offset : tier0_test_seen_register(seen, parts[k].reg, false);
+                        same &= tier0_test_same_bytes(recorded, bytes[placement][a] + parts[k].offset, parts[k].bytes);
+                    }
+                }
+                tier0_test_expect(tally, same, check, "%s, run %u: argument %u isn't where its location says", fixture->name, r, a);
+            }
+            if (hidden)
+            {
+                tier0_test_expect(tally, memcmp(seen->out, shared->preset.hidden, fixture->result_size) == 0, check, "%s, run %u: the hidden result isn't the object's", fixture->name,
+                                  r);
+            }
+            else if (fixture->result_size != 0)
+            {
+                Tier0Part parts[2];
+                const uint32_t part_count = tier0_result_parts(fixture->result, fixture->result_size, parts);
+                bool same = part_count != 0;
+                for (uint32_t k = 0; k < part_count; k += 1)
+                {
+                    same &= tier0_test_same_bytes(seen->out + parts[k].offset, tier0_test_preset_register(&shared->preset, parts[k].reg, true), parts[k].bytes);
+                }
+                tier0_test_expect(tally, same, check, "%s, run %u: the result's registers aren't the object's bytes", fixture->name, r);
+            }
+        }
+    }
+    arena_release(&arena);
+    if (code != MAP_FAILED)
+    {
+        munmap(code, pages);
+    }
+    if (data != 0)
+    {
+        munmap(data, 3 * BUSTER_TIER0_TEST_DATA_SLOTS * BUSTER_TIER0_TEST_PAGE);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(Tier0TestShared));
+    }
+}
+
+// Each fixture as a function: a driver passes the aggregates' bytes as its locations say (each register's and each
+// slot's other bytes their own, which no parameter may read), and the function, by both paths, copies each parameter
+// out, which must be its bytes; it returns bytes placed at a PROT_NONE page's edge, both ways, in registers, which the
+// driver records, or through the hidden pointer it passes, which must come back in rax.
+static void tier0_test_aggregate_functions(Tier0TestTally* tally)
+{
+    static const char check[] = "aggregate functions";
+    Tier0TestShared* shared = mmap(0, sizeof(Tier0TestShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t* data = tier0_test_aggregate_data();
+    // Per fixture: the functions (2 placements of the result by 2 encoders), then a driver of each.
+    const uint64_t pages = 2 * BUSTER_TIER0_TEST_AGGREGATE_RUNS * BUSTER_TIER0_TEST_PAGE;
+    uint8_t* code = mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Arena arena = arena_reserve(1ull << 26);
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && data != 0 && code != MAP_FAILED && arena.base != 0, check, "no memory");
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(tier0_test_passings) && ready; f += 1)
+    {
+        const Tier0TestPassing* fixture = &tier0_test_passings[f];
+        const bool hidden = fixture->result.kind == BUSTER_ABI_RESULT_MEMORY;
+        arena_pop_to(&arena, 0);
+        ready = mprotect(code, pages, PROT_READ | PROT_WRITE) == 0;
+        // The parameters' bytes (placement 0's), and the registers and slots that pass them, every other byte its own.
+        const uint8_t* bytes[BUSTER_TIER0_TEST_PASSED];
+        memset(&shared->preset, 0, sizeof(shared->preset));
+        for (uint32_t i = 0; i < sizeof(shared->preset.general) + 16 + sizeof(shared->preset.vectors) + sizeof(shared->preset.stack); i += 1)
+        {
+            ((uint8_t*)&shared->preset)[i] = (uint8_t)(0x5c ^ (3 * i));
+        }
+        for (uint32_t a = 0; a < fixture->count; a += 1)
+        {
+            const Tier0TestPassed* passed = &fixture->passed[a];
+            const AbiLocation location = passed->location;
+            bytes[a] = passed->size != 0 ? tier0_test_aggregate_place(data, a, passed->size, 0) : 0;
+            if (passed->size == 0)
+            {
+                const uint64_t bits = tier0_test_passed_value(passed, a);
+                uint8_t* place = location.kind == BUSTER_ABI_LOCATION_STACK ? shared->preset.stack + location.stack_offset
+                                                                            : tier0_test_preset_register(&shared->preset, tier0_abi_register(location.registers[0]), false);
+                memcpy(place, &bits, sizeof(bits));
+            }
+            else if (tier0_aggregate_whole(location))
+            {
+                memcpy(shared->preset.stack + location.stack_offset, bytes[a], passed->size);
+            }
+            else
+            {
+                Tier0Part parts[2];
+                const uint32_t part_count = tier0_location_parts(location, passed->size, parts);
+                for (uint32_t k = 0; k < part_count; k += 1)
+                {
+                    uint8_t* place = parts[k].reg == BUSTER_TIER0_PART_STACK ? shared->preset.stack + location.stack_offset : tier0_test_preset_register(&shared->preset, parts[k].reg, false);
+                    memcpy(place, bytes[a] + parts[k].offset, parts[k].bytes);
+                }
+            }
+        }
+        if (hidden)
+        {
+            shared->preset.general[0] = (uint64_t)(uintptr_t)shared->runs[0].hidden;
+        }
+        const uint8_t* source[2];
+        for (uint32_t placement = 0; placement < 2 && ready; placement += 1)
+        {
+            source[placement] = tier0_test_aggregate_place(data, BUSTER_TIER0_TEST_PASSED, fixture->result_size != 0 ? fixture->result_size : 1, placement);
+            Tier0TestCallee callee;
+            tier0_test_aggregate_callee(&callee, fixture, (uint64_t)(uintptr_t)shared->runs[0].out, (uint64_t)(uintptr_t)source[placement]);
+            ready = tier0_test_aggregate_encode(tally, check, fixture->name, &callee.function, &arena, code + 2 * placement * BUSTER_TIER0_TEST_PAGE);
+        }
+        for (uint32_t r = 0; r < BUSTER_TIER0_TEST_AGGREGATE_RUNS && ready; r += 1)
+        {
+            X86Instruction driver[128];
+            const uint32_t driver_count = tier0_test_aggregate_driver(driver, (uint64_t)(uintptr_t)&shared->preset, (uint64_t)(uintptr_t)&shared->runs[0],
+                                                                      (uint64_t)(uintptr_t)(code + r * BUSTER_TIER0_TEST_PAGE), (fixture->stack_bytes + 7) / 8);
+            ready = tier0_test_expect(tally, tier0_test_aggregate_load(driver, driver_count, code + (BUSTER_TIER0_TEST_AGGREGATE_RUNS + r) * BUSTER_TIER0_TEST_PAGE), check,
+                                      "%s: the driver can't be loaded", fixture->name);
+        }
+        ready = ready && tier0_test_expect(tally, mprotect(code, pages, PROT_READ | PROT_EXEC) == 0 && tier0_test_aggregate_run(shared, code, BUSTER_TIER0_TEST_AGGREGATE_RUNS),
+                                           check, "%s: the child failed", fixture->name);
+        for (uint32_t r = 0; r < BUSTER_TIER0_TEST_AGGREGATE_RUNS && ready; r += 1)
+        {
+            Tier0TestSeen* seen = &shared->runs[1 + r];
+            for (uint32_t a = 0; a < fixture->count; a += 1)
+            {
+                const Tier0TestPassed* passed = &fixture->passed[a];
+                const AbiLocation location = passed->location;
+                const uint8_t* out = seen->out + BUSTER_TIER0_TEST_SLOT_BYTES * a;
+                bool same = true;
+                if (passed->size == 0)
+                {
+                    const uint64_t bits = tier0_test_passed_value(passed, a);
+                    same = memcmp(out, &bits, sizeof(bits)) == 0;
+                }
+                else if (tier0_aggregate_whole(location))
+                {
+                    same = memcmp(out, bytes[a], passed->size) == 0;
+                }
+                else
+                {
+                    Tier0Part parts[2];
+                    const uint32_t part_count = tier0_location_parts(location, passed->size, parts);
+                    for (uint32_t k = 0; k < part_count; k += 1)
+                    {
+                        same &= memcmp(out + parts[k].offset, bytes[a] + parts[k].offset, parts[k].bytes) == 0;
+                    }
+                }
+                uint64_t address = 0;
+                memcpy(&address, out + BUSTER_TIER0_TEST_ADDRESS_AT, sizeof(address));
+                same &= passed->size == 0 || address % (1u << passed->alignment_log2) == 0;
+                tier0_test_expect(tally, same, check, "%s, run %u: parameter %u isn't what its location passed, or isn't aligned", fixture->name, r, a);
+            }
+            const uint8_t* expected = source[r / 2];
+            if (hidden)
+            {
+                tier0_test_expect(tally, seen->rax == (uint64_t)(uintptr_t)shared->runs[0].hidden && memcmp(seen->hidden, expected, fixture->result_size) == 0, check,
+                                  "%s, run %u: the hidden result isn't the function's, or its pointer isn't returned", fixture->name, r);
+            }
+            else if (fixture->result_size != 0)
+            {
+                Tier0Part parts[2];
+                const uint32_t part_count = tier0_result_parts(fixture->result, fixture->result_size, parts);
+                bool same = part_count != 0;
+                for (uint32_t k = 0; k < part_count; k += 1)
+                {
+                    same &= tier0_test_same_bytes(tier0_test_seen_register(seen, parts[k].reg, true), expected + parts[k].offset, parts[k].bytes);
+                }
+                tier0_test_expect(tally, same, check, "%s, run %u: the result's registers aren't its bytes", fixture->name, r);
+            }
+        }
+    }
+    arena_release(&arena);
+    if (code != MAP_FAILED)
+    {
+        munmap(code, pages);
+    }
+    if (data != 0)
+    {
+        munmap(data, 3 * BUSTER_TIER0_TEST_DATA_SLOTS * BUSTER_TIER0_TEST_PAGE);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(Tier0TestShared));
+    }
+}
+
+// A change to a fixture's caller (or with `callee`, its function) that tier0_validate must refuse, and whether it is
+// one of the aggregates' metadata, which both compile paths refuse too (tier0_frame_input_valid); else the rule it
+// breaks, which `rule` begins.
+typedef struct Tier0TestBreak Tier0TestBreak;
+struct Tier0TestBreak
+{
+    const char* name;
+    uint8_t fixture;
+    bool callee;
+    const char* rule;
+};
+
+#define BUSTER_TIER0_TEST_METADATA "invalid incoming variadic metadata, address-only local role, call or parameter location, or aggregate metadata"
+
+static const Tier0TestBreak tier0_test_breaks[] = {
+    { "an aggregate past the most bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "17 bytes in registers", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a missing first part without HIGH", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a second part of 8 bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "HIGH of 8 bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "HIGH in two registers", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "SPLIT in two registers", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "SPLIT in no register", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "SPLIT of 8 bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "SPLIT with HIGH", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a slot at an offset not a multiple of 8", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a high eightbyte's slot past the call's area", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a SPLIT's slot past the call's area", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a high eightbyte on the stack with a register", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a high eightbyte on the stack of 8 bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a high eightbyte on the stack of 17 bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a register two aggregates take", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a register an aggregate and a value take", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "rsp as a part's register", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "xmm16 as a part's register", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "an aggregate whole past the call's area", 0, false, BUSTER_TIER0_TEST_METADATA },
+    { "a call's area aligned to 32", 0, false, BUSTER_TIER0_TEST_METADATA },
+    { "an aggregate's address of class I64", 2, false, "a call's argument whose class doesn't fit its location" },
+    { "a value's class unlike its register", 2, false, "a call's argument whose class doesn't fit its location" },
+    { "a result object that is a value", 3, false, BUSTER_TIER0_TEST_METADATA },
+    { "a result object past the locals", 3, false, BUSTER_TIER0_TEST_METADATA },
+    { "a result object too small for its registers", 3, false, BUSTER_TIER0_TEST_METADATA },
+    { "a result in an x87 register", 3, false, BUSTER_TIER0_TEST_METADATA },
+    { "a result in three registers", 3, false, BUSTER_TIER0_TEST_METADATA },
+    { "a call with a result object, of class I64", 3, false, "a call whose result goes to its object, with a class" },
+    { "a hidden result with rdi an argument's", 12, false, BUSTER_TIER0_TEST_METADATA },
+    { "a hidden result without an object", 12, false, BUSTER_TIER0_TEST_METADATA },
+    { "a result size with a hidden result", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "a result size of 17 bytes", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "a return of I64 with a result size", 3, true, "a return of an aggregate that isn't an address (U64)" },
+    { "a function with a result size that reaches its end", 3, true, "a function returning an aggregate that reaches its end" },
+    { "an object parameter aligned to 32", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "an object parameter of 17 bytes in registers", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "an object parameter of class I64", 3, true, "an object that isn't an address-taken local of class VOID" },
+    { "a hidden result without its pointer in rdi", 12, true, BUSTER_TIER0_TEST_METADATA },
+    { "a hidden result whose pointer is an object", 12, true, BUSTER_TIER0_TEST_METADATA },
+    { "a variadic function's SPLIT slot past its incoming area", 2, true, BUSTER_TIER0_TEST_METADATA },
+    { "a function with a result size that jumps to its end", 3, true, "a function returning an aggregate that reaches its end" },
+    { "a function with a result size that branches to its end", 3, true, "a function returning an aggregate that reaches its end" },
+    { "a jump to the end with a value left", 2, true, "values left at the function's end" },
+    { "an object parameter's two parts in one register", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "an object parameter's part in rax", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "two object parameters in one register", 0, true, BUSTER_TIER0_TEST_METADATA },
+    { "a value parameter in an object parameter's register", 12, true, BUSTER_TIER0_TEST_METADATA },
+    { "a value parameter in xmm8", 1, true, BUSTER_TIER0_TEST_METADATA },
+    { "an aggregate argument's two parts in one register", 0, false, BUSTER_TIER0_TEST_METADATA },
+    { "a value argument in rax", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "an aggregate argument's part in xmm8", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a result in rax twice", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "a call's result in rax and rbx", 3, false, BUSTER_TIER0_TEST_METADATA },
+    { "a return of VOID with a hidden result", 12, true, "a return of an aggregate that isn't an address (U64)" },
+    { "a function with a hidden result that reaches its end", 12, true, "a function returning an aggregate that reaches its end" },
+};
+
+// Applies break `b` to a caller or a function built from its fixture.
+static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier0TestCallee* callee, AbiCall* incoming)
+{
+    uint32_t* sizes = caller->argument_sizes;
+    AbiLocation* locations = caller->locations;
+    switch (b)
+    {
+        case 0:
+            sizes[5] = BUSTER_TIER0_MAX_ARGUMENT_BYTES + 1;
+            break;
+        case 1:
+            sizes[0] = 17;
+            break;
+        case 2:
+            locations[0] = (AbiLocation){ .registers = { BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_R9 }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+            break;
+        case 3:
+            locations[0] = (AbiLocation){ .registers = { BUSTER_ABI_RDI, BUSTER_ABI_R9 }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+            sizes[0] = 8;
+            break;
+        case 4:
+            sizes[0] = 8;
+            break;
+        case 5:
+            locations[0].registers[1] = BUSTER_ABI_R9;
+            break;
+        case 6:
+            locations[3].registers[1] = BUSTER_ABI_R9;
+            break;
+        case 7:
+            locations[3].registers[0] = BUSTER_ABI_REGISTER_NONE;
+            break;
+        case 8:
+            sizes[3] = 8;
+            break;
+        case 9:
+            locations[3].flags = BUSTER_ABI_FLAG_HIGH;
+            break;
+        case 10:
+            locations[6].stack_offset = 12;
+            break;
+        case 11:
+            locations[6].stack_offset = 40;
+            break;
+        case 12:
+            locations[9].stack_offset = 40;
+            break;
+        case 13:
+            locations[6].registers[0] = BUSTER_ABI_R9;
+            break;
+        case 14:
+            sizes[6] = 8;
+            break;
+        case 15:
+            sizes[6] = 17;
+            break;
+        case 16:
+            locations[2].registers[0] = BUSTER_ABI_RDI;
+            break;
+        case 17:
+            locations[7].registers[0] = BUSTER_ABI_RSI;
+            break;
+        case 18:
+            locations[0].registers[0] = BUSTER_ABI_RSP;
+            break;
+        case 19:
+            locations[1].registers[0] = BUSTER_TIER0_TEST_X(16);
+            break;
+        case 20:
+            locations[6].stack_offset = 80;
+            break;
+        case 21:
+            caller->call.stack_alignment_log2 = 5;
+            break;
+        case 22:
+            caller->argument_classes[0] = BUSTER_TYPED_CLASS_I64;
+            caller->classes[1] = BUSTER_TYPED_CLASS_I64;
+            break;
+        case 23:
+            caller->argument_classes[7] = BUSTER_TYPED_CLASS_F64;
+            caller->classes[8] = BUSTER_TYPED_CLASS_F64;
+            break;
+        case 24:
+            caller->local_sizes[0] = 0;
+            caller->local_classes[0] = BUSTER_TYPED_CLASS_U64;
+            break;
+        case 25:
+            caller->result_object = 2;
+            break;
+        case 26:
+            caller->local_sizes[0] = 4;
+            break;
+        case 27:
+            caller->call.result.registers[0] = BUSTER_ABI_REGISTER_X87;
+            break;
+        case 28:
+            caller->call.result.registers[2] = BUSTER_ABI_RCX;
+            break;
+        case 29:
+            caller->classes[2] = BUSTER_TYPED_CLASS_I64;
+            break;
+        case 30:
+            locations[1].registers[0] = BUSTER_ABI_RDI;
+            break;
+        case 31:
+            caller->result_object = 0;
+            break;
+        case 32:
+            callee->function.result.kind = BUSTER_ABI_RESULT_MEMORY;
+            break;
+        case 33:
+            callee->function.result_size = 17;
+            break;
+        case 34:
+            callee->classes[callee->function.count - 2] = BUSTER_TYPED_CLASS_I64;
+            callee->classes[callee->function.count - 1] = BUSTER_TYPED_CLASS_I64;
+            break;
+        case 35:
+            callee->kinds[callee->function.count - 1] = BUSTER_TYPED_DISCARD;
+            break;
+        case 36:
+            callee->local_alignments[0] = 5;
+            break;
+        case 37:
+            callee->local_sizes[0] = 17;
+            break;
+        case 38:
+            callee->local_classes[0] = BUSTER_TYPED_CLASS_I64;
+            break;
+        case 39:
+            callee->parameters[0].registers[0] = BUSTER_ABI_R9;
+            break;
+        case 40:
+            callee->local_sizes[0] = 8;
+            callee->local_classes[0] = BUSTER_TYPED_CLASS_VOID;
+            callee->local_flags[0] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+            callee->local_alignments[0] = 3;
+            break;
+        case 41:
+            *incoming = (AbiCall){ .stack_bytes = 32, .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 6, .vector_registers = 3 };
+            callee->function.incoming_variadic = incoming;
+            break;
+        case 42:
+            // A jump to the end in place of the RETURN and its address.
+            callee->function.count -= 1;
+            callee->kinds[callee->function.count - 1] = BUSTER_TYPED_JUMP;
+            callee->classes[callee->function.count - 1] = BUSTER_TYPED_CLASS_VOID;
+            callee->values[callee->function.count - 1] = callee->function.count;
+            break;
+        case 43:
+        {
+            // A branch to the end before the RETURN and its address, which only the branch passes by.
+            const uint32_t at = callee->function.count - 2;
+            for (uint32_t i = callee->function.count + 1; i >= at + 2; i -= 1)
+            {
+                callee->kinds[i] = callee->kinds[i - 2];
+                callee->classes[i] = callee->classes[i - 2];
+                callee->values[i] = callee->values[i - 2];
+            }
+            callee->function.count += 2;
+            callee->kinds[at] = BUSTER_TYPED_CONST;
+            callee->classes[at] = BUSTER_TYPED_CLASS_I32;
+            callee->values[at] = 0;
+            callee->kinds[at + 1] = BUSTER_TYPED_BRANCH_FALSE;
+            callee->classes[at + 1] = BUSTER_TYPED_CLASS_I32;
+            callee->values[at + 1] = callee->function.count;
+            break;
+        }
+        case 44:
+            // A value in place of the RETURN, taken to the end by JUMP_VALUE.
+            callee->kinds[callee->function.count - 1] = BUSTER_TYPED_CONST;
+            callee->classes[callee->function.count - 1] = BUSTER_TYPED_CLASS_I64;
+            callee->values[callee->function.count - 1] = 1;
+            callee->kinds[callee->function.count] = BUSTER_TYPED_JUMP_VALUE;
+            callee->classes[callee->function.count] = BUSTER_TYPED_CLASS_I64;
+            callee->function.count += 1;
+            callee->values[callee->function.count - 1] = callee->function.count;
+            break;
+        case 45:
+            callee->parameters[0].registers[1] = BUSTER_ABI_RDI;
+            break;
+        case 46:
+            callee->parameters[0].registers[0] = BUSTER_ABI_RAX;
+            break;
+        case 47:
+            callee->parameters[2].registers[0] = BUSTER_ABI_RDX;
+            break;
+        case 48:
+            callee->parameters[2].registers[0] = BUSTER_ABI_RDX;
+            break;
+        case 49:
+            callee->parameters[6].registers[0] = BUSTER_TIER0_TEST_X(8);
+            break;
+        case 50:
+            locations[0].registers[1] = BUSTER_ABI_RDI;
+            break;
+        case 51:
+            locations[7].registers[0] = BUSTER_ABI_RAX;
+            break;
+        case 52:
+            locations[1].registers[0] = BUSTER_TIER0_TEST_X(8);
+            break;
+        case 53:
+            callee->function.result.registers[1] = BUSTER_ABI_RAX;
+            break;
+        case 54:
+            caller->call.result.registers[1] = BUSTER_ABI_RBX;
+            break;
+        case 55:
+            // A RETURN of nothing in place of the pointer and its RETURN.
+            callee->function.count -= 1;
+            callee->kinds[callee->function.count - 1] = BUSTER_TYPED_RETURN;
+            callee->classes[callee->function.count - 1] = BUSTER_TYPED_CLASS_VOID;
+            callee->values[callee->function.count - 1] = 0;
+            break;
+        case 56:
+            // The pointer and its RETURN left out, so that the copy falls off the end.
+            callee->function.count -= 2;
+            break;
+        default:
+            break;
+    }
+}
+
+// Each break of the fixtures' callers and functions, built afresh: tier0_validate must refuse it by its rule, and for
+// the metadata both compile paths must refuse it too; the fixtures themselves must be valid.
+static void tier0_test_aggregate_errors(Tier0TestTally* tally)
+{
+    static const char check[] = "aggregate errors";
+    static uint8_t bytes[64];
+    Arena arena = arena_reserve(1ull << 24);
+    uint64_t addresses[BUSTER_TIER0_TEST_PASSED];
+    for (uint32_t a = 0; a < BUSTER_TIER0_TEST_PASSED; a += 1)
+    {
+        addresses[a] = (uint64_t)(uintptr_t)bytes;
+    }
+    for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(tier0_test_breaks) && arena.base != 0; b += 1)
+    {
+        const Tier0TestBreak* broken = &tier0_test_breaks[b];
+        const Tier0TestPassing* fixture = &tier0_test_passings[broken->fixture];
+        Tier0TestCaller caller;
+        Tier0TestCallee callee;
+        AbiCall incoming;
+        tier0_test_aggregate_caller(&caller, fixture, addresses, 0x1000, 0x2000);
+        tier0_test_aggregate_callee(&callee, fixture, 0x3000, 0x4000);
+        const Tier0Function* function = broken->callee ? &callee.function : &caller.function;
+        const Tier0Check before = tier0_validate(function);
+        tier0_test_aggregate_break(b, &caller, &callee, &incoming);
+        const Tier0Check after = tier0_validate(function);
+        const bool metadata = strcmp(broken->rule, BUSTER_TIER0_TEST_METADATA) == 0;
+        const Tier0Code scalar = metadata ? tier0_compile_scalar(function, &arena) : (Tier0Code){ .error = TIER0_ERROR_UNSUPPORTED };
+        const Tier0Code vector = metadata ? tier0_compile(function, &arena) : (Tier0Code){ .error = TIER0_ERROR_UNSUPPORTED };
+        const bool refused = after.error == TIER0_ERROR_INVALID && after.rule != 0 && strncmp(after.rule, broken->rule, strlen(broken->rule)) == 0;
+        tier0_test_expect(tally, before.error == TIER0_OK && refused && scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == TIER0_ERROR_UNSUPPORTED, check,
+                          "%s: before it, \"%s\"; after it, \"%s\" at %u, and the paths' errors %d and %d", broken->name, before.rule != 0 ? before.rule : "valid",
+                          after.rule != 0 ? after.rule : "valid", after.node, scalar.error, vector.error);
+        arena_pop_to(&arena, 0);
+    }
+    arena_release(&arena);
+}
+
+// A change to a function of values alone, with nothing that makes the compile paths check its parameters (tier0_validate,
+// their precondition, does): parameter `parameter` moved to register `reg`, which tier0_validate must refuse by `rule`.
+typedef struct Tier0TestParameterBreak Tier0TestParameterBreak;
+struct Tier0TestParameterBreak
+{
+    const char* name;
+    uint32_t parameter;
+    uint8_t reg;
+    const char* rule;
+};
+
+static const Tier0TestParameterBreak tier0_test_parameter_breaks[] = {
+    { "two parameters in rdi", 1, BUSTER_ABI_RDI, BUSTER_TIER0_TEST_METADATA },
+    { "a parameter in rbx", 1, BUSTER_ABI_RBX, BUSTER_TIER0_TEST_METADATA },
+    { "a parameter in xmm8", 2, BUSTER_TIER0_TEST_X(8), BUSTER_TIER0_TEST_METADATA },
+    { "an F64 parameter in rdx", 2, BUSTER_ABI_RDX, "a parameter's location doesn't fit its class" },
+};
+
+// A function of an I64 in rdi, an I64 in rsi and an F64 in xmm0, which returns: valid, and each break of it refused.
+static void tier0_test_parameter_errors(Tier0TestTally* tally)
+{
+    static const char check[] = "parameter errors";
+    for (uint32_t b = 0; b <= BUSTER_ARRAY_LENGTH(tier0_test_parameter_breaks); b += 1)
+    {
+        const bool broken = b < BUSTER_ARRAY_LENGTH(tier0_test_parameter_breaks);
+        uint8_t kinds[1] = { BUSTER_TYPED_RETURN };
+        uint8_t classes[1] = { BUSTER_TYPED_CLASS_VOID };
+        uint64_t values[1] = { 0 };
+        uint8_t local_classes[3] = { BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_F64 };
+        uint8_t local_flags[3] = { 0, 0, 0 };
+        AbiLocation parameters[3] = {
+            { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+            { .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+            { .registers = { BUSTER_TIER0_TEST_X(0), BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+        };
+        if (broken)
+        {
+            parameters[tier0_test_parameter_breaks[b].parameter].registers[0] = tier0_test_parameter_breaks[b].reg;
+        }
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 1;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = 3;
+        function.parameter_count = 3;
+        function.parameters = parameters;
+        const Tier0Check checked = tier0_validate(&function);
+        const char* rule = broken ? tier0_test_parameter_breaks[b].rule : 0;
+        const bool expected = broken ? checked.error == TIER0_ERROR_INVALID && checked.rule != 0 && strncmp(checked.rule, rule, strlen(rule)) == 0 : checked.error == TIER0_OK;
+        tier0_test_expect(tally, expected, check, "%s: \"%s\"", broken ? tier0_test_parameter_breaks[b].name : "the function itself",
+                          checked.rule != 0 ? checked.rule : "valid");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The stack's allocations
 
 // The stack check's program: f0(a0 ... a7) = ((a0 * 31 + a1) * 31 + ...) * 31 + a7, which takes two arguments on the
@@ -2992,6 +4415,9 @@ static int run_tier0_tests(int argc, char** argv)
                   .access = true, .vlas = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
+            // The larger shape with records passed and returned by value (#137): a program of its own seed for seed.
+            Tier0ProgramOptions records = shapes[3];
+            records.records = &tables.records;
             {
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_moves(&tally);
@@ -3055,15 +4481,56 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
-            for (uint32_t s = 0; s < 4; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
-                uint64_t records = 0;
+                tier0_test_aggregate_errors(&tally);
+                tier0_test_report("aggregate errors", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_parameter_errors(&tally);
+                tier0_test_report("parameter errors", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_aggregate_calls(&tally);
+                tier0_test_report("aggregate calls", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_aggregate_functions(&tally);
+                tier0_test_report("aggregate functions", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            for (uint32_t s = 0; s < 5; s += 1)
+            {
+                Tier0TestTally tally = { 0, 0 };
+                uint64_t instructions = 0;
                 uint64_t entries = 0;
                 uint64_t deferred = 0;
-                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, shapes[s], &records, &entries, &deferred);
-                tier0_test_report(names[s], tally);
-                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred\n", entries, records, deferred);
+                uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
+                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : records, &instructions, &entries, &deferred, coverage);
+                if (s == 4)
+                {
+                    // With the default count, every kind of part, location and result the catalog can make shows: the
+                    // shape is meant to (but an ignored argument with bytes, and an XMM part through a temporary, which
+                    // need unnamed bit-fields and halves: the hand-made locations' checks have them).
+                    printf("   ");
+                    for (uint32_t k = 0; k < BUSTER_TIER0_TEST_COVERAGE; k += 1)
+                    {
+                        printf(" %s %" PRIu64 "%s", tier0_test_coverage_names[k], coverage[k], k + 1 < BUSTER_TIER0_TEST_COVERAGE ? "," : "\n");
+                        tier0_test_expect(&tally, count < 300 || k == 1 || k == 6 || coverage[k] != 0, "records by value", "no %s", tier0_test_coverage_names[k]);
+                    }
+                }
+                tier0_test_report(s < 4 ? names[s] : "programs: records by value", tally);
+                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred\n", entries, instructions, deferred);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -3076,6 +4543,12 @@ static int run_tier0_tests(int argc, char** argv)
                 tier0_test_report("cross-check: clang -O0", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
+                Tier0TestTally mixed = { 0, 0 };
+                defined.records = &tables.records;
+                tier0_test_cross(&mixed, &tables, seed + 1000003ull, cross_count, defined, clang, keep);
+                tier0_test_report("cross-check: records, mixed with clang", mixed);
+                total.checks += mixed.checks;
+                total.failures += mixed.failures;
             }
             tier0_tables_close(&tables);
         }

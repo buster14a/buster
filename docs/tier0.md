@@ -17,6 +17,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
 - **Indirect calls,** through `r11`.
 - **Block copies** (`COPY`) of up to 256 bytes, a struct's assignment.
+- **Structs and unions passed and returned by value** (#137), in registers, on the stack and through a hidden pointer,
+  from #137's locations ("Structs and unions by value", below), and **variadic functions' incoming frames** (#356).
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
   (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer.
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
@@ -29,9 +31,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
-- **c-testsuite (#145):** 217 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+- **c-testsuite (#145):** 219 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
-  ([the c-testsuite guide](c-testsuite.md)). The other three wait on item 2 of #136's plan and on libm.
+  ([the c-testsuite guide](c-testsuite.md)). The other one, 00204, waits on item 8 of #136's plan (`long double`).
 
 **Waits for #133, #145 and #146:**
 
@@ -50,7 +52,7 @@ exact rules):
 - `classes`: `BUSTER_TYPED_CLASS_*`, the machine class;
 - `values`: 64 bits each.
 
-Beside them are three tables:
+Beside them are three tables, and optional parts for aggregates and for the symbols' access:
 
 - **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`). Two optional columns
   make some of them **objects** in the frame: arrays, structs and unions.
@@ -58,7 +60,8 @@ Beside them are three tables:
   - `local_alignments`: its alignment's log2, at most 4 (16 bytes).
 
   An object:
-  - is a local of class VOID with `ADDRESS_TAKEN`, and not a parameter;
+  - is a local of class VOID with `ADDRESS_TAKEN`, and a parameter only when it is a struct or union passed by value
+    ("Structs and unions by value", below);
   - is reached only through `LOCAL_ADDRESS`: its elements and members are loads and stores through that address
     (`PTR_ADD`, `LOAD`, `SET`), as a front end lowers `a[i]` and `s.m`;
   - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), so that every frame displacement fits a disp32.
@@ -68,11 +71,18 @@ Beside them are three tables:
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
   `AbiCall`. A callee of 0 makes the call indirect: the stream pushes the address it calls (U64) before its
   arguments, and the `CALL` pops it after them.
+- **Aggregates by value,** three optional parts: the arguments' sizes, the objects that receive the calls' results,
+  and the function's own result's size ("Structs and unions by value", below).
 - **The symbols' access** (optional, see "Symbols outside the image" below): `symbol_access[s]`, how the code reaches
   `SymbolId` s, for each of `symbol_count` symbols. Without it every symbol is direct.
 
 The ABI's locations come from `abi_assign`, which the front end runs once per unit over every signature. Calls are
-vectorized across the unit that way, and Tier 0 needs no type table.
+vectorized across the unit that way, and Tier 0 needs no type table. They name the convention's registers alone, and
+Tier 0 takes no others: a call's arguments and a function's parameters in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7,
+none in a register another argument of the call or another parameter takes, and results in rax, rdx, xmm0 and xmm1.
+The emitters rely on it: the prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters
+move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
+result before it pops the callee-saved registers.
 
 **Expressions** are in postorder, so each entry's last operand is the entry before it, and both paths read that
 operand's class from the entry before (its stack, and the entry's template key and variant). `tier0_validate` refuses
@@ -173,6 +183,80 @@ and the call, at a multiple of 16, apart from the lists, the canaries and the
 save area and below the overflow area. Run builds and tests only on
 the approved 9700X, each through its own shared lock. This description records
 the test contract; qualification results are reported with the exact revision.
+
+## Structs and unions by value (#137)
+
+A front end evaluates a struct or a union as its address, and so does the typed stream: an aggregate's value on the
+integer stack is its address (U64). Three optional parts of `Tier0Function` say what passes by value, 0 for a function
+without aggregates:
+
+- **Arguments:** `argument_sizes[a]`, argument a's bytes, nonzero for an aggregate (class U64), to 64 KB
+  (`BUSTER_TIER0_MAX_ARGUMENT_BYTES`). The call reads the bytes where its location says: copied into the outgoing
+  stack area (STACK), its eightbytes loaded into registers (REGISTERS, or SPLIT: one in a register and one in an 8-byte
+  slot), or nothing (IGNORE). An empty aggregate has size 0 here: it passes as the value its address is, which no
+  callee reads.
+- **Parameters:** a parameter that is an object is an aggregate passed by value. The prologue stores its register
+  parts into its home. One on the stack whole keeps its incoming bytes as its home when its slot is a multiple of its
+  alignment (the incoming area starts at a multiple of 16); the prologue copies the others' slots into homes of their
+  own: a misaligned whole one, the high eightbyte alone in a slot, and a SPLIT one's slot.
+- **Calls' results:** `call_result_objects[c]`, 1 + the local index of the object that receives call c's aggregate
+  result, or 0. A result in registers is stored into the object after the call; for one through a hidden pointer, the
+  object's address goes in rdi. The call's class is VOID: its result is the object, which the stream reads through
+  `LOCAL_ADDRESS`.
+- **The function's own result:** `result_size`, its bytes when it returns in registers, else 0. Every `RETURN` then
+  returns the address of the bytes (U64), from which the epilogue loads the result registers while the frame they may
+  be in is still there, and control reaches the function's end only through a `RETURN`. A result through a hidden
+  pointer is the front end's: the pointer is parameter 0 (U64, in rdi), the bytes are copied there, and each `RETURN`
+  returns the pointer (U64), which rax must hold; here too, control reaches the end only through a `RETURN`.
+
+**Parts.** The registers come from `abi_assign`'s locations alone: eightbyte k (at 0 and 8, or the high one alone with
+`BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
+register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A part loads only the
+aggregate's own bytes, which may end at a page's end:
+
+| Part | Its load |
+| --- | --- |
+| a general register's 1, 2, 4 or 8 bytes, an XMM register's 4, 8 or 16 (exact) | one load of its width, zero-extended |
+| a general register's high part of 3, 5, 6 or 7 bytes (overlap) | the 8 bytes that end where it ends, shifted right past those before it |
+| the rest (temporary): a general register's only part of 3, 5, 6 or 7 bytes, an XMM register's of 1, 2, 3, 5, 6 or 7 | 8 bytes from a red-zone temporary, its bytes copied there first |
+
+A store from a register (a parameter's arrival, a call's result) writes its whole width, 8 bytes or 16, which an
+object's frame space, its size rounded up to 8, has room for.
+
+**At a call,** the parts load after every value they would overwrite has moved: the XMM moves first, then the XMM
+parts; then the general moves at once, an address that a move or a part would overwrite moved first into the register
+of its aggregate's last general part, where it waits; then each aggregate's general parts, the one in the register that
+holds its address last. Without XMM parts, both kinds of moves go at once, as a call without aggregates has them. An
+aggregate on the stack, and a temporary part's bytes, are copied after the values' stores, through each stack's first
+free register (the copies' scratch, which selection counts as reached). The vector path's measuring counts the records
+as it counts every call's (`tier0_count_deferred`), from the parts, the copies' sizes and the waits.
+
+**At no cost to the rest.** A function without aggregates compiles as it did before them. Its calls take the emitter's
+and the counter's loops over the values alone: each is specialized on whether the function has `argument_sizes`
+(`tier0_emit_call` and `tier0_count_call`, always inlined, the flag a constant at each use). The aggregates' placement
+and moves (`tier0_place_aggregates`, `tier0_aggregate_moves`) and the result's loads (`tier0_load_result`) are passes
+of their own, out of line, and so are the optional parts' checks (`tier0_frame_input_valid`, once per function), whose
+code, inline, changed clang's code for the paths' shared passes. Selection takes the copies' scratch in a pass of its
+own (`tier0_select_scratch`), and the
+passes over the parameters leave out what only objects need without one among them (`Tier0Frame.object_parameters`).
+[Measurements](#measurements) has what this saves on code without aggregates.
+
+**Validation.** `tier0_validate`, and both compile paths through `tier0_frame_input_valid`, refuse aggregates' metadata
+no emitter could follow (the compile paths check a function's calls when it has `argument_sizes` or
+`call_result_objects`, and its parameters when it has `local_sizes` or an incoming variadic area; without them its calls
+and parameters are the typed stream's, which `tier0_validate` checks, as the compile paths' precondition): a location
+whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a register outside the convention's or one
+that another part, another argument of the call or another parameter takes, a slot outside its call's stack area or an
+incoming one past int32, a call's stack alignment past 16, a result object that isn't an object with room for the
+registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a function whose hidden
+result pointer isn't parameter 0 in rdi, and an aggregate result of more than two registers. A function returning an
+aggregate, in registers or through the hidden pointer, must leave rax an address at every `RETURN`, which must be of
+U64, and mustn't reach its end without one. `test-tier0`'s aggregate and parameter errors break each rule (below).
+
+The producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)) gives every call site with an aggregate
+result an object of its own, a function with a hidden result pointer its parameter 0, and an aggregate parameter's
+object its alignment, to 16; `docs/calling-convention.md` has the cross-check of C that this compiler compiles against
+clang's and GCC's.
 
 ## Symbols outside the image
 
@@ -298,7 +382,10 @@ selection:
 - the epilogue sets rsp back from rbp (`lea rsp, [rbp - 8 * pushes]`, or `mov rsp, rbp`), past whatever the body
   allocated, before its pops and `pop rbp`.
 
-A function without them keeps the rsp-relative frame, record for record.
+Structs and unions by value (below) need nothing more: the prologue reads their incoming slots from rsp before anything
+is allocated, their homes and a call's result objects are addressed from rbp as the other homes are, a call copies them
+into the outgoing area at rsp and its red-zone temporaries are below rsp, and the epilogue loads a result's registers
+before it releases the frame. A function without them keeps the rsp-relative frame, record for record.
 
 **Templates.** A template is up to four records, one per (kind, class, variant). The variant says what the entry
 absorbed (`BUSTER_TIER0_VARIANT_*`); a home-dependent slot holds four templates, one per home case. A pointer
@@ -405,8 +492,9 @@ chooses with `x86_choose_forms_scalar` and applies each choice with `x86_choice_
 
 ## Tests
 
-`test-tier0` (about 0.8 s, or 2.9 s with `--cross-check`, on the 9700X) generates programs of four shapes: one function
-of integers, integers and calls, everything, and larger, 300 each by default. Each program:
+`test-tier0` (about 0.8 s, or 2.9 s with `--cross-check`, on the 9700X, before the records' shape) generates programs of
+five shapes: one function of integers, integers and calls, everything, larger, and larger with structs and unions by
+value (#137), 300 each by default. Each program:
 
 1. Every function must pass `tier0_validate`.
 2. Both paths must compile it to the same records, branch columns and references.
@@ -460,6 +548,27 @@ Before the programs, checks of their own:
     values below make of the result, which must come back right.
 
   Both paths must compile each alike, and each encoder's bytes run in a child.
+- **aggregates** (#137), at locations written by hand: 13 fixtures of what `abi_assign` makes rarely or never on its
+  own and of the parts' edges (each kind of general and XMM part, both kinds in one aggregate, the high eightbyte alone
+  in each kind of register and on the stack, SPLIT both ways in both kinds, an ignored aggregate, aggregates on the stack
+  whole, in place and in a slot misaligned for them, and results in rax and rdx, xmm0 and xmm1, both mixed orders, the
+  high eightbyte alone in each kind, a vector, 5 and 6 bytes, and through a hidden pointer), each run natively both
+  ways:
+  - **aggregate calls:** Tier 0's caller, by both paths, passes the aggregates' bytes from pages that end or start at a
+    `PROT_NONE` page to a probe, records of the test's own, which records every argument register and its stack slots:
+    each value and part must be where its location says, and a result the probe returns must land in its object;
+  - **aggregate functions:** Tier 0's function, by both paths, whose parameters a driver passes from the same bytes,
+    copies each parameter's bytes out, each aggregate's address after them (a multiple of its alignment), and returns
+    the result in its registers or through the hidden pointer, which must come back in rax;
+  - **aggregate errors:** 57 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
+    malformed metadata by both compile paths too: among them a function with a result size that reaches its end by
+    falling off it, by a jump and by a branch, a jump that takes a value to the end, a function with a hidden result
+    that returns nothing or falls off its end, an aggregate's two parts in one register, a register two parameters
+    take, and a part, a value or a result in a register outside the convention's (rax, xmm8, rbx), as an argument and
+    as a parameter.
+- **parameter errors:** a function of values alone, which no optional part makes the compile paths check: two
+  parameters in rdi, one in rbx and one in xmm8, which `tier0_validate` must refuse, and an F64 in rdx, which doesn't
+  fit its class.
 - **stack:**
   - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
     another class or with a value, and a restore of another class or with a value, and take a save restored.
@@ -528,6 +637,15 @@ Before the programs, checks of their own:
   whose first 8 bytes hold its own address as the C library's thread control block does. Each run copies the
   thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone, and copies
   them back beside the other globals, whose bytes it compares with the interpreter's.
+- with the `records` option (the fifth shape, #137), structs and unions passed and returned by value, from a catalog
+  that `tier0_tables_open` builds in the type table and classifies: byte arrays of 1 to 17 bytes, whose parts load in
+  every way and the largest of which goes on the stack; floats and doubles, mixed with integers both ways round; unions;
+  a member aligned to 16 (one part of 16 bytes); the empty struct; and records past 16 bytes, on the stack and returned
+  through a hidden pointer. Functions take records as parameters and return them, calls pass the scope's objects of
+  them and their results land in objects of their own. With the default count, the programs must reach every kind of
+  part, location and result the catalog makes (`tier0_test_coverage`: all but an ignored argument with bytes and an XMM
+  part through a temporary, which need unnamed bit-fields and halves, as the fixtures have them), and functions with a
+  frame pointer (the shape's variable-length arrays) that pass, take or return records.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
 printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
@@ -539,12 +657,20 @@ dialect, `-fwrapv` (signed arithmetic wraps, as Tier 0's does) and `-fno-strict-
 floating parts' bits through integer pointers). These programs keep to what that defines: clang folds an out-of-range
 floating conversion of a constant its own way, so a floating value converts to an integer only from a short's value. A
 floating global's elements compare as their bytes, but any two NaNs are the same: C leaves a NaN's sign and payload to
-the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN. Tier 0's object defines the
+the implementation, and clang folds a constant 0.0 / 0.0 to +NaN where `divsd` makes −NaN, and `a + -b` into `a - b`,
+whose NaN keeps `b`'s sign where Tier 0's flips it. The objects' checksums treat NaNs alike too: a floating part's bits
+are masked by whether it holds a number (`& -(unsigned long)(x == x)`), and a union's floating member is written only
+with an integer's value, so that no union holds a NaN whose bits its other members would read. The masks take no
+random draw: every seed gives the program it gave before them, but for the masks' entries. Tier 0's object defines the
 direct globals and the thread-locals of the image's (in `.tdata`), and a shared library generated beside it defines
 the ones Tier 0 reaches through the GOT, so that the executable's slots for them are the loader's to fill: `GLOB_DAT`,
 and `TPOFF64` for a thread-local's offset. The library is GNU as source, which `as` and `ld -shared` link in a few
 milliseconds a program, where `clang -shared` of the same data as C took tens: in the 9700X job's test step, `test-tier0
 --cross-check` took 5.8 s with clang's libraries and 4.6 s with these, against 4.2 s before it had any.
+
+Then as many programs of the records shape are linked **mixed**: their even functions Tier 0's and their odd ones
+clang's (clang's own copies of the even ones made weak), so that calls pass and return structs and unions by value
+between the two compilers both ways; each must give what clang's own build gives.
 
 **Robustness:**
 
@@ -594,6 +720,13 @@ milliseconds a program, where `clang -shared` of the same data as C took tens: i
 
     Counting the callee as a live depth in selection gives a frame one slot larger, which no check sees, as it
     changes no value.
+  - and on the aggregates (#137), by the fixtures alone (`--count 2`):
+    - the high eightbyte alone on the stack taken as an aggregate whole: aggregate calls and functions of the high,
+      split and ignored fixture;
+    - a parameter's misaligned incoming slot taken as its home: the general parts fixture's parameter 6;
+    - a general register's part of 3, 5, 6 or 7 bytes taken as exact, one load of its width (one byte): the general
+      parts fixture's arguments 1 to 3;
+    - the epilogue's copy of a temporary part left out: the result's high eightbyte in xmm0.
   - and absorbed lanes looking their value up as a local, past 32 locals (on main): the errors check's 40 locals,
     whose stray gather faults.
   - and on the operands' classes:
@@ -660,6 +793,20 @@ path's 11.1.
   The scalar path, which shares the call emitter, went from 233.2 to 226.2 (589.0 to 559.8 instructions).
 - **The chosen forms applied on the records' halves** (the compiler had split the fields into byte loads and
   stores): 75.6 to 74.8 cycles per entry, 163.5 to 162.0 instructions, in four rounds run in turn, each 1.0 to 1.2%.
+- **Aggregates by value (#137)** at no cost to code without them. On these programs, which have no records, the 9700X
+  job measured the vector path at 182.2 instructions per entry (84.1 cycles, 15.18 ns) when the aggregates' code was
+  inline in every call's emission and count, in selection's loop and in the passes over the parameters, against main's
+  166.8 (78.6 cycles, 14.19 ns), and the scalar path at 604.6 instructions against 588.6. Specialized and out of line
+  ("At no cost to the rest" above), the vector path took 168.8 instructions per entry (79.2 cycles, 14.28 ns) against
+  main's 166.8 (78.1 and 78.9 cycles, 14.10 and 14.23 ns, in its two runs before), and the scalar path, after #407's
+  fusion, 574.5 against 572.8 (230.8 cycles against 230.2 and 232.7). The cycles' differences are within main's own
+  spread; the 2 instructions per entry left on the vector path are each call's setup and each function's checks of its
+  optional columns. #400's last head (`42dd119`), whose stricter checks of the parameters' registers don't run on these
+  programs, measured 169.22 and 576.86 instructions per entry against main's 166.77 and 572.82 at `04dcadb`: inline
+  in the paths' shared passes, the checks' code changed clang's code for the passes. With the checks out of line
+  (#411), the job measured 169.31 and 574.35, the cycles (80.27 and 232.97, against 80.11 and 229.83) within the runs'
+  spread. Under Intel SDE, no variant of the passes tried brought the vector path back to the 0.5 instructions per entry
+  fewer that `ac4ccbd`'s inlining happened to give.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
@@ -683,16 +830,17 @@ path's 11.1.
 
 ## Follow-ups
 
-- **Spilling deep values:** expressions past the depth tables are refused (`TIER0_ERROR_DEPTH`). The issue defers
-  them to the scalar path, with frame slots.
+- **Spilling deep values:** expressions past the depth tables are refused (`TIER0_ERROR_DEPTH`), among them a call
+  whose arguments, with the values under them and the scratch register its aggregates' copies take, need more than the
+  15 integer or 16 floating depths: every argument is on the stacks at the call. The issue defers them to the scalar
+  path, with frame slots.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - conversions between U64 and floating values;
-  - aggregates passed and returned by value (the objects they live in and copies of up to 256 bytes are done);
   - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
     whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
-  - general `va_arg` classes beyond the scalar builtin recipes, `long double` and `_Complex`;
+  - `va_arg` of `long double` and `_Complex` (the scalar classes and structs and unions have recipes);
   - inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table).
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
