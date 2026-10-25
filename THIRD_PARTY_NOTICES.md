@@ -379,6 +379,22 @@ references. These modules contain no copied LLVM implementation or fixtures.
 
 ## Review limits and distribution
 
+### Performance publication tools
+
+`tools/performance/bmf*.c`, `tools/performance/build.sh` and the accompanying
+format/tool documentation are original project contributions under the default
+terms. They use the existing manifest schema as their contract. Arrow IPC is
+decoded by Apache nanoarrow 0.7.0 at
+`2cfba631b40886f1418a463f3b7c4552c8ae0dc7`; its unmodified amalgamation and
+flatcc runtime remain **Apache-2.0 without the LLVM exception**. Their licenses,
+ASF NOTICE, embedded copyrights, generator procedure and source digests are
+retained under `tools/performance/vendor/nanoarrow` and its parent README.
+Unmodified yyjson 0.12.0 at `8b4a38dc994a110abaec8a400615567bd996105f` retains
+YaoYuan's MIT terms and copyright in `tools/performance/vendor/yyjson`.
+OpenSSL, PCRE2 and libcurl are external dynamic dependencies, not incorporated
+source. The retained buster-performance examples are independent validation
+inputs produced by Arrow JavaScript 21.1.0, not fixtures copied into Buster.
+
 The record covers the pinned tree and this adoption's changes. Unmerged PRs,
 future imports and external system libraries are not silently covered.
 Unrecorded original tool hashes are identified above; the retained compatible
