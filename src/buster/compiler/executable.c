@@ -1842,7 +1842,10 @@ struct ExecutableSegmentLayout
 #define BUSTER_EXECUTABLE_MAX_PROGRAM_HEADERS 12
 // Section headers: the null one, the sections with bytes or memory, and .shstrtab.
 #define BUSTER_EXECUTABLE_MAX_SECTION_HEADERS (EXECUTABLE_SECTION_COUNT + 2)
-#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 368
+// .shstrtab's bytes: room for every section's name with its NUL (594 bytes with its first NUL and its own name, the 50
+// names of executable_section_names; .iplt is shorter than .plt.got, which it replaces), which test-executable checks,
+// and which executable_lay_out refuses a layout past.
+#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 640
 
 // What every lane computes alike from the counts: where the sections, the segments and each bucket go.
 typedef struct ExecutableLayout ExecutableLayout;
@@ -2148,7 +2151,7 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     layout->file_size = layout->section_headers_offset + layout->section_header_count * sizeof(Elf64_Shdr);
     layout->piece_count = piece + 2;
     layout->chunk_count = (layout->file_size + BUSTER_EXECUTABLE_CHUNK_BYTES - 1) / BUSTER_EXECUTABLE_CHUNK_BYTES;
-    return layout->base + layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS && tls_fits;
+    return layout->base + layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS && tls_fits && layout->shstrtab_size <= BUSTER_EXECUTABLE_SHSTRTAB_BYTES;
 }
 
 // The file offset of an image offset in a section: sections keep their offset's place in a page.
