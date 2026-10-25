@@ -11,6 +11,11 @@
 // prototype declarations are not graph definitions. C99 inline-only bodies have an external symbol but no local
 // emission/dependencies. GNU inline uses the retained declaration spelling and gnu_inline attribute. There is no
 // inliner here; any future inliner must attribute its retained dependencies to the emitted caller before this pass.
+// A body also selects its own block-scope statics, referenced or not, as clang emits every static local of a function
+// it emits, even at -O0 (#129's comparison with clang's objects, c_lowering_symbols.c).
+//
+// check_program_select_mode with C_LOWERING_ALL selects every definition that may be emitted, referenced or not (an
+// inline-only one is never emitted): the driver's --lower-all, #129's test option for what the selection saves.
 //
 // The result borrows the full typed graph/control stream and immutable initializer plans. It owns compact body,
 // reference, data and builtin views plus a deterministic object-ID-ordered symbol map. Source inputs outlive it;
@@ -52,8 +57,8 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
     return flags;
 }
 
-static bool check_program_select(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data,
-                                 bool scalar, Arena* output, Arena* scratch)
+static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
+                                      bool scalar, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
@@ -61,7 +66,8 @@ static bool check_program_select(CheckProgramSelection* result, const CheckProgr
     const CheckInput* input = full->input;
     const uint32_t objects = full->object_count;
     const uint64_t definitions64 = (uint64_t)full->body_count + data->count;
-    const uint64_t references64 = (uint64_t)full->reference_count + data->reference_count;
+    // A reference of each body and each object, and an edge from a body to each of its block-scope statics.
+    const uint64_t references64 = (uint64_t)full->reference_count + data->reference_count + data->count;
     bool valid = output != scratch && full->status == CHECK_PROGRAM_OK && data->status == CHECK_DATA_INPUT_OK && input != 0 &&
                  objects == data->object_count && objects == (uint64_t)input->token_count + 1 && definitions64 < UINT32_MAX && references64 < UINT32_MAX;
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
@@ -187,12 +193,28 @@ static bool check_program_select(CheckProgramSelection* result, const CheckProgr
                     kinds[edges++] = target != 0 ? C_LOWERING_REFERENCE_EVALUATED : C_LOWERING_REFERENCE_EXTERNAL;
                 }
             }
+            // A block-scope static (declared in a body, without linkage, not a compound literal), from its body.
+            const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
+            const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
+            const uint32_t body = declaration < input->token_count && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE &&
+                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] ? token_bodies[declaration] : 0;
+            if (valid && body != 0)
+            {
+                const uint32_t source = object_definitions[full->bodies[body - 1].object];
+                valid = source != 0 && edges < reference_capacity;
+                if (valid)
+                {
+                    sources[edges] = source - 1;
+                    targets[edges] = definition;
+                    kinds[edges++] = C_LOWERING_REFERENCE_EVALUATED;
+                }
+            }
         }
         const CLoweringInput graph = { .definition_count = definitions, .reference_count = edges, .definition_flags = definition_flags,
                                       .reference_source = sources, .reference_target = targets, .reference_kind = kinds };
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
-        valid = valid && (scalar ? c_lowering_scalar(&plan, C_LOWERING_REACHABLE) : c_lowering_vector(&plan, C_LOWERING_REACHABLE)) == C_LOWERING_OK;
+        valid = valid && (scalar ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
         if (valid)
         {
             for (uint32_t selected = 0; selected < plan.selected_count; selected += 1)
@@ -337,6 +359,13 @@ static bool check_program_select(CheckProgramSelection* result, const CheckProgr
     }
     arena_pop_to(scratch, temporary);
     return valid;
+}
+
+// The definitions reachable from the unit's roots: what -c and the direct path lower.
+static bool check_program_select(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, bool scalar,
+                                 Arena* output, Arena* scratch)
+{
+    return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, scalar, output, scratch);
 }
 
 #endif

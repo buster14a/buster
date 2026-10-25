@@ -3395,12 +3395,9 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     // no stream, and is refused below without reading one.
     const uint64_t varargs = program->status == CHECK_PROGRAM_OK && program->stream != 0 ? program->stream->varargs_count : 0;
     // Each long double constant a function's table holds comes from a node of that type (a constant's, or ++ and --'s
-    // 1.0), so no function has more than they are, besides +0.0.
-    uint64_t x87_capacity64 = 1;
-    for (uint32_t node = 0; program->status == CHECK_PROGRAM_OK && program->stream != 0 && node < program->stream->count; node += 1)
-    {
-        x87_capacity64 += type_unqualified(type_strip_aligned(types, program->stream->values[node].type)) == BUSTER_TYPE_LONG_DOUBLE;
-    }
+    // 1.0), so no function has more than the program has nodes, besides +0.0: a bound without a pass over the nodes'
+    // types, which every program would pay for (#423's review). Only a function with long double values writes the table.
+    const uint64_t x87_capacity64 = (uint64_t)nodes + 1;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + 32;
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 2 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_TEMPORARIES +

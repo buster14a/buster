@@ -76,16 +76,23 @@ index (`4*rsi`, as LLVM writes it, or `rsi*4`), and a term can carry a sign
 (`[rax + -8]`); a register term takes only unary pluses (`[rax + +rsi]`). As in
 GNU as, without register prefixes a register's name is never a symbol: in an
 expression (`.quad rsi`, `dword ptr eax`, `[rax + -rsi]`) it is refused as an
-invalid use of a register, and so is a parenthesized one (`(rsi)`), which GNU
-as reads as the register. Intel memory can specify `byte` through `zmmword ptr`.
+invalid use of a register. Address expressions retain registers through
+parentheses: `[rax+(rsi)]` and `[rax+2*(rsi)]` have their usual addressing
+meaning. Subtracting registers, multiplying registers together and scales
+outside 1/2/4/8 are rejected. Intel memory can specify `byte` through
+`zmmword ptr`, including GCC's uppercase `QWORD PTR`. Both `[rip+symbol]`
+and `symbol[rip]` are accepted.
 Ambiguous memory width is an error. Intel `offset symbol` requests an
-immediate address; a bare symbol in an ordinary operand denotes memory, and in
+immediate address, as does GCC's `OFFSET FLAT:symbol`; a bare symbol in an ordinary operand denotes memory, and in
 a branch its destination, unless a width asks for memory: `call qword ptr
 callback` calls through the pointer at `callback`. AT&T uses `%register`,
 `$immediate`, displacement/base/index/scale, and `*` for indirect calls/jumps.
 Integer width suffixes are checked; LEA's sizes only its destination, and a
 complete alias (`jnb`, `jnl`, `sal`) is never read as a suffix. `pushw` covers
-the 16-bit register and memory forms as well as immediates.
+the 16-bit register and memory forms as well as immediates. AT&T extension
+spellings (`movzbl`, `movzwl`, `movsbl`, `movsbq`, `movslq`, and their other
+source/destination widths) check both widths. `cbtw/cwtl/cltq/cwtd/cltd/cqto`
+name the corresponding sign-extension instructions.
 
 The admitted families are:
 
@@ -103,8 +110,8 @@ The admitted families are:
 
 Only forms covered by the frontend's operand-role grammar are admitted.
 Missing families, rounding/SAE, explicit instruction-prefix syntax, far
-branches, 16/32-bit execution modes, other segment registers, VSIB, arbitrary
-sections, GOT/TLS relocation modifiers, CFI/debug directives and macro-assembler
+branches, 16/32-bit execution modes, other segment registers, VSIB, section
+groups, GOT/TLS relocation modifiers, debug directives and macro-assembler
 directives are diagnosed. An unsupported form never reaches the trusted encoder.
 
 Statements end at newline or semicolon. `#` and `//` start line comments;
@@ -115,26 +122,36 @@ report the physical source line and byte column of the first error in `.s`.
 For `.S`, line markers recover the presumed filename and line, including
 includes and `#line`; the column refers to the expanded assembly line.
 
-Named labels and numeric labels `0` through `9` support forward/backward
+Named labels, GCC's quoted symbol names, and numeric labels `0` through `9` support forward/backward
 references. Numeric labels have a namespace distinct from user names.
 An undefined ordinary symbol becomes an external; undefined `.L` names,
 numeric labels and explicitly local symbols are errors. Global/weak symbols
 retain relocations where interposition or linking can change their address.
+As with GNU as without `-mshared`, same-section global `jmp`/`jcc` targets
+resolve in place. Global calls retain PLT32, and cross-section local branches
+use PC32.
 
 Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, `.section .text/.rodata/.data/.bss` |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.type` (`function/object/notype`), `.size` |
-| Constants | `.equ`, `.set` (absolute and defined before use; `.set` may reassign) |
-| Data | `.byte`, `.word`, `.long`, `.quad`, `.ascii`, `.asciz`/`.string`, `.zero` |
-| Alignment | `.balign` with power-of-two alignment, `.p2align`; optional byte fill and maximum skip (0 is none) |
+| Constants | `.equ`/`.set` (absolute and defined before use; either may reassign), `.equiv` (rejects redefinition) |
+| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.ascii`, `.asciz`/`.string`, `.zero` |
+| Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none) |
+| Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym` |
+| Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
 
-Section flags/types, when supplied, must match the canonical section. `.bss`
-accepts only zero fill. Exported absolute symbols and forward constants are
+Each section keeps its own name, properties, alignment, layout and atom, including
+`.text.*`, `.data.*`, `.rodata.*`, `.bss.*` and mergeable string sections.
+Redeclarations must preserve its properties; zero-fill sections accept only zero
+fill. Section groups, subsections, non-byte string characters and additional ELF
+section types are diagnosed. Exported absolute symbols and forward constants are
 diagnosed; the shared object writer currently lacks the former's unit ownership.
-The writer automatically emits a non-executable-stack note.
+The writer automatically emits a non-executable-stack note. Both GCC's
+`.section .note.GNU-stack,"",@progbits` and Clang's quoted section name are
+accepted; the note must remain empty and non-executable.
 Code alignment without a fill, or with `0x90`, pads with GNU as's NOPs: a
 one-byte nop first when the section's last statement was data, a jump over the
 rest past seven NOPs' worth, then the remainder's NOP and 11-byte ones. Other
@@ -145,9 +162,11 @@ are diagnosed because the shared writer has no absolute-symbol relocation;
 they are never interpreted as relative instruction displacements.
 
 Expressions use decimal, octal, hex and binary integers; parentheses, unary
-`+/-/~`, multiplication/division/remainder, bitwise `&/|/^`, and addition/
-subtraction. Precedence follows GAS: multiplicative, then bitwise, then
-additive. There is no C parser assumption. Intermediate values must stay
+`+/-/~/!`, multiplication/division/remainder, shifts, bitwise `&/|/^/!`,
+addition/subtraction, comparisons, and logical `&&/||`. Precedence follows
+[GAS](https://sourceware.org/binutils/docs/as/Infix-Ops.html): multiplication
+and shifts, then bitwise, additive, comparisons, `&&`, and `||`. Comparisons
+are signed and return -1 or 0; logical operations return 1 or 0. There is no C parser assumption. Intermediate values must stay
 within `[INT64_MIN, UINT64_MAX]`; each output field has a separate range check.
 Bitwise operations use 64-bit two's-complement values (`~0` is `-1`).
 One symbol plus an addend is relocatable. Same-section label differences can
@@ -157,9 +176,26 @@ or symbol plus addend. Constant values are captured at their use point.
 Instruction selection preserves immediate values: an imm8 sign-extending
 form can represent `-128..127`, so `add rax,200` uses a wider form. Whole-width
 fields accept signed values or unsigned bit patterns of their width.
+The assembler canonicalizes a whole-width unsigned spelling before matching:
+`andw $65535,%si` chooses the same sign-extended imm8 as `andw $-1,%si`.
 Relocations are PC32/PLT32, ABS32/ABS32S and ABS64 with explicit signed 64-bit
 addends. Symbolic byte/word data, nonrepresentable expressions and oversized
-fields fail instead of truncating. Absolute memory uses signed disp32.
+fields fail instead of truncating. Absolute memory uses signed disp32; 16/32-bit
+LEA destinations use ABS32 because those instructions truncate the address.
+
+Assembler-local `.L*`, numeric labels and `.` do not appear in the object symbol
+table unless a relocation needs the symbol itself, such as certain string-pool
+references. Ordinary named locals remain visible.
+
+CFI emits `.eh_frame` with GNU-as-compatible CIE/FDE bytes and PC32 relocations.
+Supported rules are `def_cfa`, `def_cfa_register`, `def_cfa_offset`,
+`adjust_cfa_offset`, `offset`, `rel_offset`, `val_offset`, `register`, `restore`,
+`undefined`, `same_value`, `remember_state`, `restore_state` and `escape` (each
+with the `.cfi_` prefix). Registers may be DWARF numbers or supported x86 names.
+The default x86-64 initial CFA/return-address rules can be suppressed by `simple`.
+`return_column`, `signal_frame` and `.cfi_sections .eh_frame` are supported.
+Personality/LSDA augmentation, `.debug_frame`/SFrame output and procedures that
+cross sections are diagnosed. Unsupported CFI is never silently discarded.
 
 ## Data-parallel design and scalar twin
 
@@ -169,6 +205,33 @@ and output arena must remain alive while the result is consumed. Initialize
 the caller-owned `X86MatchIndex` and encoder once. Failure restores the caller's
 arena position and clears the output link. Sources are bounded to 16 MiB,
 sections to 256 MiB, and expression stacks to 128 entries.
+
+The section adapter in `assembler_sections.c` hands `object_build` optional
+`ObjectOptions.atom_sections` indexed by AtomId and `temporary_symbols` indexed
+by SymbolId. Both counted tables cover their entire Link column, including id
+zero, and belong to the same result arena. Names are counted slices; no table
+or name requires padding. Every described atom already contains one complete
+section, so the writer need not reconstruct grouping. A zero-initialized
+`ObjectOptions` retains the compiler writer's existing grouping and symbols.
+The writer checks table counts, section types and merge entry sizes before
+emitting bytes, then compacts temporary locals only after seeing every fixup.
+
+`assembler_cfi.c` retains ordered directives as events attached to fragment IDs.
+`asm_cfi_emit` consumes final fragment positions after monotone branch relaxation,
+deduplicates identical initial CIE programs and emits FDEs in procedure order.
+Layout and emission share stable per-section fragment ranges. The single
+post-layout CFI fragment is inserted into their reserved extra slot, preserving
+all source fragment identities and each section's order. Emission visits only
+that section's range; adding function sections does not multiply full-stream
+rescans. Instruction encoding may batch across intervening declarations of
+other sections because their final bytes are contiguous in the code section.
+Empty CFI emits no atom; malformed state, capacities and representability limits
+produce diagnostics and restore the assembly arena. The native code generator's
+fixed-frame CFI producer remains separate.
+CFI byte capacity depends on its event count, procedure headers and actual escape
+payload, with separate scratch for the largest understood initial CIE program.
+Unrelated source bytes do not inflate either buffer. A sparse-CFI stress case
+compares retained arena use with a 16-byte and a 1 MiB comment prefix.
 
 The vector path is selected explicitly, without host dispatch:
 
@@ -236,7 +299,7 @@ expansion that changes flags or registers.
 
 ## Tests and measurements
 
-`test-assembler [--cross-check] [--seed N] [--fuzz N]` checks complete
+`test-assembler [--cross-check] [--keep] [--seed N] [--fuzz N]` checks complete
 scalar/vector token streams, diagnostics and byte-identical ELF output, valid
 batches of 0..65 instructions at all 64 source misalignments, malformed text
 and binary bytes, and both ends of protected pages for lengths 0..1099.
@@ -248,7 +311,7 @@ for byte when GNU as pads as binutils 2.47 does (2.42 orders its long NOPs
 differently; the test says so and keeps its known-byte padding checks).
 The cross-check compares section bytes/properties, symbols and relocations
 with GNU as using the existing object comparator, and links/runs the examples.
-Different ELF file layouts and automatic stack notes are normalized. Existing
+Different ELF file layouts, GNU as's relocation order and automatic stack notes are normalized. Existing
 independent encoder/GNU-as tests remain required.
 The `.S` fixtures compare both complete driver paths, independently preprocess
 with Clang's assembler-with-preprocessor mode, compare objects with GNU as,
@@ -278,6 +341,7 @@ standalone RIP operand to the full parser.
 ./build/compiler benchmark-assembler --workload att
 ./build/compiler benchmark-assembler --only vector
 ./build/compiler benchmark-assembler --only vector --after-scalar 100
+./build/compiler benchmark-assembler --input /path/to/compiler-output.s --external
 ```
 
 Run each separately under the 9700X lock with `taskset -c 2`. The default
@@ -286,6 +350,10 @@ external references and section changes. These are controlled synthetic
 workloads, not a compatibility corpus. `--functions 1..2048` changes size.
 There are 21 interleaved samples after a warmup; output is checked outside the
 timed interval. Phase medians and whole-run medians are reported independently.
+`--input` reads a counted source once before timing, so the same phase/object
+measurements can cover frozen compiler output. Its printed function count is
+zero (unknown), not an inferred symbol count. The CFI column is a subset of
+encode/link time, not an additional phase to add to the total.
 Initialization and index/work-arena sizes are included in the report.
 `--only` measures one path back-to-back; `--after-scalar` warms scalar assembly
 outside each sample to expose the known Zen 5 transition state.
@@ -652,5 +720,41 @@ candidates only with producer + PP printing + lex/match/layout + object costs;
 a faster matcher alone cannot justify another token representation.
 `test-assembler --cross-check` checks scalar/vector/GNU as bytes and execution;
 `benchmark-assembler` includes its documented phase/initialization/memory costs.
-#233 retains compiler-generated assembly coverage and real-tool/workload
-qualification, including exceptional syntax, tails, capacities and output order.
+The #233 compatibility corpus checks compiler-generated assembly through the
+same real producer/writer boundary, including exceptional syntax, capacities
+and output order.
+
+## Compiler-output compatibility corpus (#233)
+
+`examples/assembler/compiler-corpus.c` and its independent caller are original
+fixtures. `test-assembler --cross-check` invokes GCC and Clang at O0/O2, in
+AT&T/Intel syntax, with ordinary and separate function/data sections: 16 cases.
+It targets baseline x86-64, disables CET and PIC/PIE for this corpus, and asks
+Clang for GNU-compatible spelling with `-fno-integrated-as`. LLVM-only address
+significance annotations have separate acceptance/refusal fixtures.
+
+Every case requires byte-identical scalar/vector objects, GNU-as section
+properties/bytes/symbol/relocation comparison, and successful execution of all
+three objects linked to independently calculated results. The unwind callback
+must identify both the assembled `corpus_call` and the caller's `main` by
+`_Unwind_GetRegionStart`, as well as reach the expected frame depth. GNU
+relocation records are sorted by offset using the existing importer sorter;
+only the GNU copy's record order is normalized, never relocation meaning or
+section bytes. `--keep` retains every generated source and object; a failing
+case is retained regardless of that option.
+
+Focused independent GNU-as fixtures additionally cover all expression operator
+pairs, AT&T extension/conversion aliases, uppercase Intel operands, parenthesized
+register addresses, constant reassignment, quoted names, local symbols,
+same/cross-section branches, unsigned whole-width immediates, narrow LEA and CFI.
+CFI cases exercise common/different CIEs, simple/signal frames, saved-state
+transitions, signed/extended offsets/registers and all advance-location widths,
+including a relaxed branch and alignment before a rule. A native command check
+links and executes a 32-bit LEA against an address at `0x80000000`.
+
+Syntax and encoding rules are checked against the
+[GNU assembler manual](https://sourceware.org/binutils/docs/as/), including its
+[section](https://sourceware.org/binutils/docs/as/Section.html) and
+[CFI](https://sourceware.org/binutils/docs/as/CFI-directives.html) descriptions.
+The compiler-output corpus establishes its stated boundary; it does not imply
+support for every instruction, assembler extension or CFI augmentation.

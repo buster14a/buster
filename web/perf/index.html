@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- First-party Buster performance interface. SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore Buster performance history, compare matching evidence, and inspect native sampling profiles.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://raw.githubusercontent.com; worker-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Buster · Performance</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="./">buster<span> / performance</span></a><nav><a href="https://github.com/buster14a/buster">Source</a><a href="https://github.com/buster14a/buster-performance">Evidence archive ↗</a></nav></header>
+<div class="layout">
+  <aside><div class="eyebrow">Evidence library</div><h1>History.<br>Compare.<br>Inspect.</h1><p class="aside-note">Measured results, original sources, and the limits of what they show.</p><label for="dataset">Dataset</label><select id="dataset"></select><div id="catalog-status" class="aside-note"></div><div id="family-census"></div><footer id="generation"></footer></aside>
+  <main>
+    <div class="heading"><div><div class="eyebrow">Buster performance lab</div><h2 id="dataset-title">Loading evidence…</h2><p id="dataset-description"></p></div><span id="dataset-state" class="badge">Checking</span></div>
+    <p id="status" role="status" aria-live="polite"></p>
+    <nav class="tabs" aria-label="Workspace"><button id="history-tab" aria-selected="true">History & charts</button><button id="compare-tab" aria-selected="false">Compare</button><button id="profile-tab" aria-selected="false">Profile inspector</button><button id="evidence-tab" aria-selected="false">Evidence & provenance</button></nav>
+    <section id="history-panel">
+      <div class="controls"><label>Table<select id="table"></select></label><label>Measured column<select id="metric"></select></label><label>View<select id="view"></select></label><label>X axis<select id="x"></select></label><label>Group / second dimension<select id="group"></select></label></div>
+      <div class="controls"><label>Facet / filter column<select id="facet"></select></label><label>Value<select id="facet-value"></select></label><button id="add-filter" class="secondary">Keep this condition</button><button id="reset-filters" class="secondary">Clear filters</button><button id="export" class="secondary">Export exact selection</button></div>
+      <div id="active-filters" class="chips"></div><div id="metric-info" class="stats"></div>
+      <div id="chart" class="card"></div><div id="row-details"></div>
+      <details id="specialized"><summary>Specialized views & extension requirements</summary><div id="specialized-list"></div></details>
+      <section class="card"><div class="section-heading"><h3>Exact source values</h3><span id="row-count" class="note"></span></div><div id="table-view" class="scroll"></div><div class="pager"><button id="previous-page" class="secondary">Previous</button><span id="page-number"></span><button id="next-page" class="secondary">Next</button></div></section>
+    </section>
+    <section id="compare-panel" hidden><h3>Compare matching populations</h3><p class="note">Use the History filters to select one condition. Independent experimental units, matching identities, correctness and coverage must be declared before a regression label is eligible.</p><div class="controls"><label>Population column<select id="compare-column"></select></label><label>Baseline<select id="baseline"></select></label><label>Candidate<select id="candidate"></select></label><button id="compare">Compare selection</button></div><div id="comparison" class="card"></div></section>
+    <section id="profile-panel" hidden><div class="controls"><label>Native profile<select id="profile"></select></label><button id="load-profile">Load profile</button><a id="download-profile" class="button secondary" target="_blank" rel="noopener noreferrer">Download native trace ↗</a><label class="button secondary file-button">Open local trace<input id="local-profile" type="file" accept=".pftrace,.perfetto-trace,.trace" hidden></label></div><p id="profile-context" class="note"></p><div id="range-controls" hidden><div class="controls"><label>Start · raw ns<input id="range-start" inputmode="numeric"></label><label>End · raw ns (exclusive)<input id="range-end" inputmode="numeric"></label><label>Thread<select id="thread"></select></label><label>CPU<select id="cpu"></select></label><button id="apply-range">Apply range</button><button id="full-range" class="secondary">Full capture</button></div><p class="note">One selection drives stacks, flame/call trees, scheduling, counters and linked time rows. Dragging a timeline derives nanoseconds from screen coordinates; the inputs and shared URL retain the chosen exact bounds.</p></div><div id="profile-views"></div></section>
+    <section id="evidence-panel" hidden><div id="provenance" class="card"></div></section>
+    <footer class="main-footer">Original first-party C and browser code. No added libraries, packages, embedded upstream viewer, or query service. Evidence is loaded lazily and verified by SHA-256.</footer>
+  </main>
+</div>
+</body>
+</html>
