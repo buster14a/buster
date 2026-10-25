@@ -305,6 +305,11 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
     { "typedef int U; typedef enum E : unsigned short { A } T; typedef enum : const U { B } V, W; int n = sizeof(T) + sizeof(V) + sizeof(W);\n", "", 0 },
+    // GNU attributes among an enum's base's specifiers, which clang takes as the base type's (#428's review): before,
+    // between and after them, with a body or without, and where a typedef's declarator follows the body (K3 skips them).
+    { "enum E : int __attribute__((unused)); enum F : int __attribute__((unused)) { A };\n", "", 0 },
+    { "enum G : __attribute__((unused)) unsigned __attribute__((unused)) char __attribute__((unused)) { B };\n", "", 0 },
+    { "typedef enum H : int __attribute__((unused)) { C } T; T t = C; int n = sizeof(T);\n", "", 0 },
     { "int x = (int){1}; int a[3] = { [1 ... 2] = 0 };\n", "", 0 },
     // GNU's single array designator may omit '=', including a range, a prefix operand and a braced initializer.
     { "int a[] = { [0] 1, [3] 4, [4] -1, [5] (int)2 };\n", "", 0 },
