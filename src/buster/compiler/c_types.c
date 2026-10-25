@@ -382,6 +382,7 @@ struct TypeIndex
     uint32_t count;
 };
 
+typedef struct TypeChanges TypeChanges;
 typedef struct TypeTable TypeTable;
 struct TypeTable
 {
@@ -392,6 +393,11 @@ struct TypeTable
     TypeIndex index;
     // Why the last request that failed did, for its diagnostic.
     TypeError last_error;
+    // #113: where the table records its changes, or null; and the types a view hides, the indices from hidden_begin
+    // to hidden_end (excluded), which lookups never find, so that a request for one makes the type again.
+    TypeChanges* changes;
+    uint32_t hidden_begin;
+    uint32_t hidden_end;
 };
 
 // How many records of each table there is room for: types besides the builtin ones, and tags and members besides
@@ -427,6 +433,82 @@ struct TypeRecordAttributes
     bool packed;
     uint8_t pack_log2;
     uint8_t alignment_log2;
+};
+
+// #113's deferred bodies check each function body apart from the top level, and the top level without its bodies,
+// each with a table of its own: the top level's, and for a body a copy of it (type_copy) that hides the types the top
+// level made after the body (TypeTable.hidden_begin to hidden_end). Each table records its changes (TypeChanges), with
+// the source position its caller is at (type_changes_at) and their order there, and type_replay merges the records by
+// position into one table: the one that checking in source order makes, with the same types in the same order.
+//
+// A change is what a mutating call did: DERIVE a derived type (type_find_or_add's request, normalized already, so that
+// the replay normalizes nothing), TAG a tag (type_tag), DEFINE a record's members (type_record_define), LAYOUT a
+// record's layout and completion (type_finish_record), ENUM an enum's completion (type_enum_complete) and TRANSPARENT a
+// union made transparent. A request that fails changes nothing but last_error, of which a record keeps the last write.
+#define BUSTER_TYPE_CHANGE_DERIVE 1
+#define BUSTER_TYPE_CHANGE_TAG 2
+#define BUSTER_TYPE_CHANGE_DEFINE 3
+#define BUSTER_TYPE_CHANGE_LAYOUT 4
+#define BUSTER_TYPE_CHANGE_ENUM 5
+#define BUSTER_TYPE_CHANGE_TRANSPARENT 6
+// The largest mark of a predefined type (TypeChanges.predefined) a replay keeps apart.
+#define BUSTER_TYPE_PREDEFINED_MARKS 32
+
+typedef struct TypeChange TypeChange;
+struct TypeChange
+{
+    // The key: the caller's source position, and the change's order among the record's changes there.
+    uint32_t position;
+    uint32_t sequence;
+    uint8_t operation;
+    // DERIVE: the request's kind and flags; TAG: the tag's kind; ENUM: the aligned attribute (log2 + 1, or 0).
+    uint8_t kind;
+    uint8_t flags;
+    uint8_t alignment_log2;
+    // DERIVE: the request's base; ENUM: the underlying type.
+    TypeId base;
+    // DERIVE: the request's extent (a FUNCTION's parameter count).
+    uint64_t extent;
+    // A FUNCTION's DERIVE: its first parameter in TypeChanges.parameters. DEFINE: its first member in
+    // TypeChanges.members, and how many.
+    uint32_t first;
+    uint32_t count;
+    // The type made (DERIVE, TAG) or changed (DEFINE, LAYOUT, ENUM, TRANSPARENT), in the recording table's ids.
+    TypeId type;
+    // TAG: the tag's name, and its mark (TypeChanges.predefined), 0 for none.
+    uint32_t name;
+    uint32_t predefined;
+    // TAG, DEFINE, LAYOUT, ENUM and TRANSPARENT: the tag's index in the recording table.
+    uint32_t tag;
+    // DEFINE: the record's layout attributes.
+    TypeRecordAttributes attributes;
+};
+
+// A table's record of its changes, in arrays of the caller's with their capacities (type_changes_initialize).
+struct TypeChanges
+{
+    TypeChange* items;
+    uint32_t count;
+    uint32_t capacity;
+    TypeId* parameters;
+    uint32_t parameter_count;
+    uint32_t parameter_capacity;
+    TypeMember* members;
+    uint32_t member_count;
+    uint32_t member_capacity;
+    // The key of the next change: the caller's position (type_changes_at), and the next order there.
+    uint32_t position;
+    uint32_t sequence;
+    // The mark type_tag gives the tags it makes, which the caller sets around its predefined types' construction (0
+    // for none): a replay keeps the first tag of each mark, by key, and takes every later one's changes for its.
+    uint32_t predefined;
+    // The last write of last_error, with its key; error_written is false while there has been none.
+    bool error_written;
+    uint32_t error_position;
+    uint32_t error_sequence;
+    TypeError error;
+    // A change didn't fit: the record is incomplete, and a replay refuses it.
+    bool full;
 };
 
 typedef enum TypeTransparentUnionStatus
@@ -615,6 +697,56 @@ static __attribute__((unused)) TypeAnswer type_same_canonical(const TypeTable* t
 // Prints a type as clang's TypePrinter does, after `name` if it has one (a declarator's), into `arena`, whose pushes
 // the result's bytes take in order; `names` spell the tags. Returns the text, empty if the arena is full.
 static __attribute__((unused)) String8 type_print(const TypeTable* table, Arena* arena, TypeId type, String8 name, const TypeNames* names, uint32_t options);
+
+// #113's deferred bodies (see TypeChange). type_changes_initialize pushes a record's arrays from `arena`, with room for
+// `changes` changes, `parameters` parameters and `members` members; false if the arena can't hold them. type_changes_at
+// gives the position of the changes that follow; their order restarts at each new position.
+static __attribute__((unused)) bool type_changes_initialize(TypeChanges* changes, Arena* arena, uint32_t count, uint32_t parameters, uint32_t members);
+static __attribute__((unused)) void type_changes_at(TypeTable* table, uint32_t position);
+// Copies `source` into `table`, its columns from `arena` with room for `extra` more of each kind of record, and its index
+// from `index_arena`, large enough for them all without growing. False, with the arenas as they were, without room.
+static __attribute__((unused)) bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, Arena* index_arena, TypeCapacity extra);
+// Takes a copy back to the counts it had (`mark`, from type_view_mark), the types made since out of its index, and
+// hides nothing. An index that grew since is rebuilt at the mark's size.
+typedef struct TypeViewMark TypeViewMark;
+struct TypeViewMark
+{
+    uint32_t types;
+    uint32_t parameters;
+    uint32_t tags;
+    uint32_t members;
+    uint32_t completions;
+    uint32_t buckets;
+};
+static __attribute__((unused)) TypeViewMark type_view_mark(const TypeTable* table);
+static __attribute__((unused)) bool type_view_reset(TypeTable* table, TypeViewMark mark);
+// A tag's definition, completion and transparency withdrawn from a copy, for a body that comes before them
+// (transparency alone with `transparency_only`), and given back from the table it was copied from.
+static __attribute__((unused)) void type_tag_withdraw(TypeTable* table, uint32_t tag, bool transparency_only);
+static __attribute__((unused)) void type_tag_restore(TypeTable* table, const TypeTable* source, uint32_t tag);
+// A record's part in type_replay: its changes, and the maps from its table's type and tag indices to the replay's,
+// which the replay fills, from `base` and `tag_base` (room for all its table made). Smaller indices are `parent`'s,
+// the table its table was copied from, or with no parent the builtin types and tag 0, which every table shares.
+typedef struct TypeReplayPart TypeReplayPart;
+struct TypeReplayPart
+{
+    const TypeChanges* changes;
+    const TypeReplayPart* parent;
+    uint32_t base;
+    uint32_t tag_base;
+    uint32_t* types;
+    uint32_t* tags;
+    // Per tag from tag_base: 1 for one whose predefined type an earlier tag of the replay's is, whose changes are skipped.
+    uint8_t* merged;
+};
+// Replays the parts' changes into `table`, a table without changes of its own, merged by key: parts[0]'s (the top
+// level's) and then the others' in their order (bodies', in source order, whose positions don't overlap), parts[0]'s
+// first at a position both have. Each change is made again with its types mapped, and last_error is the last write's
+// by key. False if a change can't be made again as it was, or a record is incomplete: the parts aren't one unit's.
+static __attribute__((unused)) bool type_replay(TypeTable* table, TypeReplayPart* parts, uint32_t count, Arena* scratch);
+// The replay's index for a part's TypeId, with its qualifiers, and for a part's tag index.
+static __attribute__((unused)) TypeId type_replay_type(const TypeReplayPart* part, TypeId type);
+static __attribute__((unused)) uint32_t type_replay_tag(const TypeReplayPart* part, uint32_t tag);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The builtin types
@@ -934,6 +1066,54 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
     return fits;
 }
 
+// last_error's every write, and its key in the table's record of changes if it has one (TypeChanges.error_written).
+static void type_set_error(TypeTable* table, TypeError error)
+{
+    TypeChanges* changes = table->changes;
+    table->last_error = error;
+    if (changes != 0)
+    {
+        changes->error_written = true;
+        changes->error_position = changes->position;
+        changes->error_sequence = changes->sequence;
+        changes->error = error;
+        changes->sequence += 1;
+    }
+}
+
+// Records a change, with the next key, its parameters (a FUNCTION's) or its members (DEFINE's), in the table's record
+// if it has one; a change that doesn't fit marks the record full.
+static void type_change_record(TypeTable* table, TypeChange change, const TypeId* parameters, uint64_t parameter_count, const TypeMember* members,
+                               uint32_t member_count)
+{
+    TypeChanges* changes = table->changes;
+    if (changes != 0 && !changes->full)
+    {
+        changes->full = changes->count == changes->capacity || parameter_count > changes->parameter_capacity - changes->parameter_count ||
+                        member_count > changes->member_capacity - changes->member_count;
+        if (!changes->full)
+        {
+            change.position = changes->position;
+            change.sequence = changes->sequence;
+            changes->sequence += 1;
+            if (parameter_count != 0)
+            {
+                change.first = changes->parameter_count;
+                memcpy(changes->parameters + changes->parameter_count, parameters, parameter_count * sizeof(TypeId));
+                changes->parameter_count += (uint32_t)parameter_count;
+            }
+            if (member_count != 0)
+            {
+                change.first = changes->member_count;
+                change.count = member_count;
+                memcpy(changes->members + changes->member_count, members, (uint64_t)member_count * sizeof(TypeMember));
+                changes->member_count += member_count;
+            }
+            changes->items[changes->count++] = change;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // What a type is
 
@@ -1142,7 +1322,8 @@ static bool type_key_matches(const TypeTable* table, uint32_t index, uint32_t ke
 }
 
 // The one-at-a-time lookup, slot by slot: the index of the type with this key, or 0, with *slot the empty slot where it
-// would go. Types are never removed, so a key is absent once its probe meets an empty slot.
+// would go. Types are never removed, so a key is absent once its probe meets an empty slot. A hidden type (a view's,
+// TypeTable.hidden_begin) is passed over, and a type made again for the view comes after it in the probe.
 static uint32_t type_index_find(const TypeTable* table, uint32_t key, TypeId base, uint64_t extent, const TypeId* parameters, uint64_t hash, uint32_t* slot)
 {
     const TypeIndex* index = &table->index;
@@ -1161,7 +1342,8 @@ static uint32_t type_index_find(const TypeTable* table, uint32_t key, TypeId bas
                 *slot = position;
                 searching = false;
             }
-            else if (entry.key == key && entry.base == base && entry.extent == (uint32_t)extent && type_key_matches(table, entry.index, key, extent, parameters))
+            else if (entry.key == key && entry.base == base && entry.extent == (uint32_t)extent && (entry.index < table->hidden_begin || entry.index >= table->hidden_end) &&
+                     type_key_matches(table, entry.index, key, extent, parameters))
             {
                 result = entry.index;
                 searching = false;
@@ -1584,10 +1766,19 @@ static uint32_t type_find_or_add(TypeTable* table, uint8_t kind, uint8_t flags, 
                 .index = result,
             };
             table->index.count += 1;
+            const TypeChange change = {
+                .operation = BUSTER_TYPE_CHANGE_DERIVE,
+                .kind = kind,
+                .flags = flags,
+                .base = base,
+                .extent = extent,
+                .type = (TypeId)result << BUSTER_TYPE_INDEX_SHIFT,
+            };
+            type_change_record(table, change, parameters, kind == BUSTER_TYPE_KIND_FUNCTION ? extent : 0, 0, 0);
         }
         else
         {
-            table->last_error = error;
+            type_set_error(table, error);
         }
     }
     return result;
@@ -1625,7 +1816,7 @@ static TypeId type_derive(TypeTable* table, uint8_t kind, uint8_t flags, TypeId 
     }
     if (!valid || kind == BUSTER_TYPE_KIND_FUNCTION)
     {
-        table->last_error = TYPE_ERROR_OPERAND;
+        type_set_error(table, TYPE_ERROR_OPERAND);
     }
     else if (kind == BUSTER_TYPE_KIND_ALIGNED && extent == type_alignment_log2(table, normal) && type_is_complete(table, normal))
     {
@@ -1640,7 +1831,7 @@ static TypeId type_derive(TypeTable* table, uint8_t kind, uint8_t flags, TypeId 
         }
         else
         {
-            table->last_error = TYPE_ERROR_COMPLEX;
+            type_set_error(table, TYPE_ERROR_COMPLEX);
         }
     }
     else
@@ -1683,14 +1874,14 @@ static TypeId type_vector_size(TypeTable* table, TypeId element, uint64_t bytes)
     TypeId result = 0;
     if (!type_is_valid(table, element))
     {
-        table->last_error = TYPE_ERROR_OPERAND;
+        type_set_error(table, TYPE_ERROR_OPERAND);
     }
     else
     {
         const uint64_t element_size = type_size(table, element);
         if (bytes == 0 || element_size == 0 || bytes % element_size != 0 || bytes / element_size > UINT32_MAX)
         {
-            table->last_error = TYPE_ERROR_VECTOR;
+            type_set_error(table, TYPE_ERROR_VECTOR);
         }
         else
         {
@@ -2014,15 +2205,15 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
     }
     if (!operand)
     {
-        table->last_error = TYPE_ERROR_OPERAND;
+        type_set_error(table, TYPE_ERROR_OPERAND);
     }
     else if (count_overflow)
     {
-        table->last_error = TYPE_ERROR_TOO_LARGE;
+        type_set_error(table, TYPE_ERROR_TOO_LARGE);
     }
     else if (selected == 0)
     {
-        table->last_error = TYPE_ERROR_MODE;
+        type_set_error(table, TYPE_ERROR_MODE);
     }
     else
     {
@@ -2037,11 +2228,11 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
         const bool floating = element_kind == BUSTER_TYPE_KIND_FLOATING || complex;
         if ((vector_mode && enumeration) || (selected->integer ? !integer : selected->complex ? !complex : !floating))
         {
-            table->last_error = TYPE_ERROR_MODE_BASE;
+            type_set_error(table, TYPE_ERROR_MODE_BASE);
         }
         else if (selected->code == 0 || (selected->complex && (selected->code == BUSTER_TYPE_CODE_HALF || vector_base || vector_mode)))
         {
-            table->last_error = TYPE_ERROR_MODE_UNSUPPORTED;
+            type_set_error(table, TYPE_ERROR_MODE_UNSUPPORTED);
         }
         else
         {
@@ -2059,12 +2250,12 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
                 if (vector_count == 0)
                 {
                     result = 0;
-                    table->last_error = TYPE_ERROR_MODE_UNSUPPORTED;
+                    type_set_error(table, TYPE_ERROR_MODE_UNSUPPORTED);
                 }
                 else if (vector_count > UINT32_MAX)
                 {
                     result = 0;
-                    table->last_error = TYPE_ERROR_TOO_LARGE;
+                    type_set_error(table, TYPE_ERROR_TOO_LARGE);
                 }
                 else
                 {
@@ -2074,7 +2265,7 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
             }
             if (result != 0)
             {
-                table->last_error = TYPE_ERROR_NONE;
+                type_set_error(table, TYPE_ERROR_NONE);
             }
         }
     }
@@ -2121,15 +2312,15 @@ static TypeId type_function_abi(TypeTable* table, TypeId result_type, const Type
     }
     if (!valid)
     {
-        table->last_error = TYPE_ERROR_OPERAND;
+        type_set_error(table, TYPE_ERROR_OPERAND);
     }
     else if (normal == 0 && count != 0)
     {
-        table->last_error = TYPE_ERROR_FULL;
+        type_set_error(table, TYPE_ERROR_FULL);
     }
     else if (!type_is_valid(table, result_type))
     {
-        table->last_error = TYPE_ERROR_OPERAND;
+        type_set_error(table, TYPE_ERROR_OPERAND);
     }
     else
     {
@@ -2174,11 +2365,17 @@ static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
 // entry for it, made before its tag was completed, which is stale.
 static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, TypeId* results)
 {
+    // A view's lookups pass its hidden types over, which the vector lookup doesn't: its requests go one at a time.
+    const uint32_t vector_count = table->hidden_end != 0 ? 0 : count;
+    for (uint32_t i = vector_count; i < count; i += 1)
+    {
+        results[i] = type_derive(table, keys.kinds[i], keys.flags[i], keys.bases[i], keys.extents[i]);
+    }
     const __m512i one = _mm512_set1_epi64(1);
     const __m512i multiplier = _mm512_set1_epi64((long long)BUSTER_TYPE_HASH_MULTIPLIER);
-    for (uint32_t first = 0; first < count; first += BUSTER_TYPE_BATCH)
+    for (uint32_t first = 0; first < vector_count; first += BUSTER_TYPE_BATCH)
     {
-        const uint32_t batch = count - first < BUSTER_TYPE_BATCH ? count - first : BUSTER_TYPE_BATCH;
+        const uint32_t batch = vector_count - first < BUSTER_TYPE_BATCH ? vector_count - first : BUSTER_TYPE_BATCH;
         const __mmask8 lanes = (__mmask8)_bzhi_u32(0xff, batch);
         const __m512i kinds = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, keys.kinds + first));
         const __m512i flags = _mm512_and_si512(_mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, keys.flags + first)), _mm512_set1_epi64(BUSTER_TYPE_FLAG_KEY));
@@ -2252,11 +2449,11 @@ static TypeId type_tag(TypeTable* table, uint8_t kind, uint32_t name)
     TypeId result = 0;
     if (kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION && kind != BUSTER_TYPE_KIND_ENUM)
     {
-        table->last_error = TYPE_ERROR_OPERAND;
+        type_set_error(table, TYPE_ERROR_OPERAND);
     }
     else if (types->count == types->capacity || tags->count == tags->capacity)
     {
-        table->last_error = TYPE_ERROR_FULL;
+        type_set_error(table, TYPE_ERROR_FULL);
     }
     else
     {
@@ -2282,6 +2479,15 @@ static TypeId type_tag(TypeTable* table, uint8_t kind, uint32_t name)
         tags->pack_log2[tag] = 0;
         tags->alignment_log2[tag] = 0;
         tags->count += 1;
+        const TypeChange change = {
+            .operation = BUSTER_TYPE_CHANGE_TAG,
+            .kind = kind,
+            .type = result,
+            .name = name,
+            .predefined = table->changes != 0 ? table->changes->predefined : 0,
+            .tag = tag,
+        };
+        type_change_record(table, change, 0, 0, 0, 0);
     }
     return result;
 }
@@ -2398,10 +2604,17 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
         table->tags.pack_log2[tag] = attributes.pack_log2;
         table->tags.alignment_log2[tag] = attributes.alignment_log2;
         table->types.flags[type_index(record)] |= flags;
+        const TypeChange change = {
+            .operation = BUSTER_TYPE_CHANGE_DEFINE,
+            .type = record,
+            .attributes = attributes,
+            .tag = tag,
+        };
+        type_change_record(table, change, 0, 0, members, count);
     }
     else
     {
-        table->last_error = error;
+        type_set_error(table, error);
     }
     return error == TYPE_ERROR_NONE;
 }
@@ -2511,10 +2724,18 @@ static bool type_enum_complete(TypeTable* table, TypeId enumeration, TypeId unde
         table->tags.alignment_log2[types->index[index]] = alignment_log2;
         table->tags.completions += 1;
         table->tags.completion[types->index[index]] = table->tags.completions;
+        const TypeChange change = {
+            .operation = BUSTER_TYPE_CHANGE_ENUM,
+            .alignment_log2 = alignment_log2,
+            .base = underlying,
+            .type = enumeration,
+            .tag = types->index[index],
+        };
+        type_change_record(table, change, 0, 0, 0, 0);
     }
     else
     {
-        table->last_error = error;
+        type_set_error(table, error);
     }
     return error == TYPE_ERROR_NONE;
 }
@@ -2841,6 +3062,12 @@ static void type_finish_record(TypeTable* table, uint32_t tag, uint64_t size, ui
     types->flags[index] |= BUSTER_TYPE_FLAG_COMPLETE;
     table->tags.completions += 1;
     table->tags.completion[tag] = table->tags.completions;
+    const TypeChange change = {
+        .operation = BUSTER_TYPE_CHANGE_LAYOUT,
+        .type = table->tags.type[tag],
+        .tag = tag,
+    };
+    type_change_record(table, change, 0, 0, 0, 0);
 }
 
 // Whether a record can be laid out now: a struct or union, defined, and not complete.
@@ -2868,7 +3095,7 @@ static bool type_record_layout(TypeTable* table, TypeId record)
     }
     if (error != TYPE_ERROR_NONE)
     {
-        table->last_error = error;
+        type_set_error(table, error);
     }
     return error == TYPE_ERROR_NONE;
 }
@@ -2929,7 +3156,18 @@ static TypeTransparentUnionResult type_mark_transparent_union(TypeTable* table, 
             }
             if (result.status == TYPE_TRANSPARENT_UNION_APPLIED)
             {
+                // A change only where the flag changes: a union made transparent again records nothing.
+                const bool already = (table->types.flags[type_index(record)] & BUSTER_TYPE_FLAG_TRANSPARENT_UNION) != 0;
                 table->types.flags[type_index(record)] |= BUSTER_TYPE_FLAG_TRANSPARENT_UNION;
+                const TypeChange change = {
+                    .operation = BUSTER_TYPE_CHANGE_TRANSPARENT,
+                    .type = record,
+                    .tag = tag,
+                };
+                if (!already)
+                {
+                    type_change_record(table, change, 0, 0, 0, 0);
+                }
             }
         }
     }
@@ -3251,14 +3489,14 @@ static bool type_layout_records(TypeTable* table, const TypeId* records, uint32_
             }
             else
             {
-                table->last_error = (TypeError)errors[i];
+                type_set_error(table, (TypeError)errors[i]);
                 result = false;
             }
         }
     }
     else
     {
-        table->last_error = TYPE_ERROR_FULL;
+        type_set_error(table, TYPE_ERROR_FULL);
     }
     scratch_end(scratch);
     return result;
@@ -4553,7 +4791,7 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
     }
     if (full)
     {
-        table->last_error = TYPE_ERROR_FULL;
+        type_set_error(table, TYPE_ERROR_FULL);
     }
     return result;
 }
@@ -4699,7 +4937,7 @@ static TypeId type_composite_at(TypeTable* table, TypeId left, TypeId right, con
     }
     if (full)
     {
-        table->last_error = TYPE_ERROR_FULL;
+        type_set_error(table, TYPE_ERROR_FULL);
     }
     const TypeId result = valid ? ((TypeId*)results)[0] : 0;
     scratch_end(results_scratch);
@@ -5164,4 +5402,431 @@ static String8 type_print(const TypeTable* table, Arena* arena, TypeId type, Str
     }
     scratch_end(scratch);
     return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Deferred bodies (#113)
+
+static bool type_changes_initialize(TypeChanges* changes, Arena* arena, uint32_t count, uint32_t parameters, uint32_t members)
+{
+    const uint64_t mark = arena->length;
+    *changes = (TypeChanges){ 0 };
+    TypeChange* items = arena_push_array(arena, (uint64_t)count + 1, sizeof(TypeChange), _Alignof(TypeChange));
+    TypeId* parameter_items = items != 0 ? arena_push_array(arena, (uint64_t)parameters + 1, sizeof(TypeId), _Alignof(TypeId)) : 0;
+    TypeMember* member_items = parameter_items != 0 ? arena_push_array(arena, (uint64_t)members + 1, sizeof(TypeMember), _Alignof(TypeMember)) : 0;
+    const bool valid = member_items != 0;
+    if (valid)
+    {
+        *changes = (TypeChanges){
+            .items = items,
+            .capacity = count,
+            .parameters = parameter_items,
+            .parameter_capacity = parameters,
+            .members = member_items,
+            .member_capacity = members,
+        };
+    }
+    else
+    {
+        arena_pop_to(arena, mark);
+    }
+    return valid;
+}
+
+static void type_changes_at(TypeTable* table, uint32_t position)
+{
+    TypeChanges* changes = table->changes;
+    if (changes != 0 && changes->position != position)
+    {
+        changes->position = position;
+        changes->sequence = 0;
+    }
+}
+
+// The index made again with `buckets` buckets from the first `types` types, in the memory it has and past it. If the
+// arena can't hold it, the index stays as it was, as type_index_grow leaves it.
+static bool type_index_rebuild(TypeTable* table, uint64_t buckets, uint32_t types)
+{
+    TypeIndex* index = &table->index;
+    const uint64_t start = (uint64_t)((uint8_t*)index->slots - index->arena->base);
+    arena_pop_to(index->arena, start);
+    TypeSlot* slots = buckets <= UINT32_MAX ? arena_push_array(index->arena, buckets * BUSTER_TYPE_BUCKET_SLOTS, sizeof(TypeSlot), BUSTER_TYPE_COLUMN_ALIGNMENT) : 0;
+    const bool result = slots != 0;
+    if (result)
+    {
+        memset(slots, 0, buckets * BUSTER_TYPE_BUCKET_BYTES);
+        index->slots = slots;
+        index->bucket_count = (uint32_t)buckets;
+        index->count = 0;
+        const TypeColumns* columns = &table->types;
+        for (uint32_t i = BUSTER_TYPE_BUILTIN_COUNT; i < types; i += 1)
+        {
+            if ((BUSTER_TYPE_HASHED_KINDS >> columns->kind[i] & 1) != 0)
+            {
+                const uint8_t flags = type_key_flags(columns->kind[i], columns->flags[i]);
+                const uint64_t hash = columns->hash[i];
+                type_index_place(index, i, columns->base[i], columns->extent[i], type_slot_key(columns->kind[i], flags, columns->extent[i], hash), hash);
+            }
+        }
+    }
+    else
+    {
+        arena_pop_to(index->arena, start);
+        arena_push_array(index->arena, (uint64_t)index->bucket_count * BUSTER_TYPE_BUCKET_SLOTS, sizeof(TypeSlot), BUSTER_TYPE_COLUMN_ALIGNMENT);
+    }
+    return result;
+}
+
+static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, Arena* index_arena, TypeCapacity extra)
+{
+    const uint64_t length = arena->length;
+    const uint64_t index_length = index_arena->length;
+    const uint64_t types = (uint64_t)source->types.count - BUSTER_TYPE_BUILTIN_COUNT + extra.types;
+    const uint64_t parameters = (uint64_t)source->parameters.count + extra.parameters;
+    const uint64_t tags = (uint64_t)source->tags.count - 1 + extra.tags;
+    const uint64_t members = (uint64_t)source->members.count - 1 + extra.members;
+    const TypeCapacity capacity = {
+        .types = types < UINT32_MAX ? (uint32_t)types : UINT32_MAX,
+        .parameters = parameters < UINT32_MAX ? (uint32_t)parameters : UINT32_MAX,
+        .tags = tags < UINT32_MAX ? (uint32_t)tags : UINT32_MAX,
+        .members = members < UINT32_MAX ? (uint32_t)members : UINT32_MAX,
+    };
+    bool valid = source->hidden_end == 0 && type_initialize(table, arena, index_arena, capacity);
+    if (valid)
+    {
+        const uint64_t count = source->types.count;
+        memcpy(table->types.kind, source->types.kind, count * sizeof(*table->types.kind));
+        memcpy(table->types.code, source->types.code, count * sizeof(*table->types.code));
+        memcpy(table->types.flags, source->types.flags, count * sizeof(*table->types.flags));
+        memcpy(table->types.alignment_log2, source->types.alignment_log2, count * sizeof(*table->types.alignment_log2));
+        memcpy(table->types.base, source->types.base, count * sizeof(*table->types.base));
+        memcpy(table->types.index, source->types.index, count * sizeof(*table->types.index));
+        memcpy(table->types.extent, source->types.extent, count * sizeof(*table->types.extent));
+        memcpy(table->types.size, source->types.size, count * sizeof(*table->types.size));
+        memcpy(table->types.hash, source->types.hash, count * sizeof(*table->types.hash));
+        table->types.count = source->types.count;
+        memcpy(table->parameters.type, source->parameters.type, (uint64_t)source->parameters.count * sizeof(TypeId));
+        table->parameters.count = source->parameters.count;
+        const uint64_t tag_count = source->tags.count;
+        memcpy(table->tags.type, source->tags.type, tag_count * sizeof(*table->tags.type));
+        memcpy(table->tags.name, source->tags.name, tag_count * sizeof(*table->tags.name));
+        memcpy(table->tags.member_begin, source->tags.member_begin, tag_count * sizeof(*table->tags.member_begin));
+        memcpy(table->tags.member_count, source->tags.member_count, tag_count * sizeof(*table->tags.member_count));
+        memcpy(table->tags.completion, source->tags.completion, tag_count * sizeof(*table->tags.completion));
+        memcpy(table->tags.packed, source->tags.packed, tag_count * sizeof(*table->tags.packed));
+        memcpy(table->tags.pack_log2, source->tags.pack_log2, tag_count * sizeof(*table->tags.pack_log2));
+        memcpy(table->tags.alignment_log2, source->tags.alignment_log2, tag_count * sizeof(*table->tags.alignment_log2));
+        table->tags.count = source->tags.count;
+        table->tags.completions = source->tags.completions;
+        const uint64_t member_count = source->members.count;
+        memcpy(table->members.name, source->members.name, member_count * sizeof(*table->members.name));
+        memcpy(table->members.type, source->members.type, member_count * sizeof(*table->members.type));
+        memcpy(table->members.bit_width, source->members.bit_width, member_count * sizeof(*table->members.bit_width));
+        memcpy(table->members.alignment_log2, source->members.alignment_log2, member_count * sizeof(*table->members.alignment_log2));
+        memcpy(table->members.flags, source->members.flags, member_count * sizeof(*table->members.flags));
+        memcpy(table->members.offset, source->members.offset, member_count * sizeof(*table->members.offset));
+        table->members.count = source->members.count;
+        table->last_error = source->last_error;
+        // type_find_or_add grows the index past 3 types a bucket: room for every type the copy may hold.
+        uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
+        while (buckets * 3 < (uint64_t)table->types.capacity + 1)
+        {
+            buckets *= 2;
+        }
+        valid = type_index_rebuild(table, buckets, table->types.count);
+    }
+    if (!valid)
+    {
+        arena_pop_to(arena, length);
+        arena_pop_to(index_arena, index_length);
+        *table = (TypeTable){
+            .last_error = TYPE_ERROR_FULL,
+        };
+    }
+    return valid;
+}
+
+static TypeViewMark type_view_mark(const TypeTable* table)
+{
+    return (TypeViewMark){
+        .types = table->types.count,
+        .parameters = table->parameters.count,
+        .tags = table->tags.count,
+        .members = table->members.count,
+        .completions = table->tags.completions,
+        .buckets = table->index.bucket_count,
+    };
+}
+
+static bool type_view_reset(TypeTable* table, TypeViewMark mark)
+{
+    bool valid = mark.types >= BUSTER_TYPE_BUILTIN_COUNT && mark.types <= table->types.count && mark.parameters <= table->parameters.count &&
+                 mark.tags >= 1 && mark.tags <= table->tags.count && mark.members >= 1 && mark.members <= table->members.count;
+    if (valid && table->index.bucket_count == mark.buckets)
+    {
+        // The types made since come out latest first: a later type's probe may pass an earlier one's slot, but no
+        // earlier type's passes a later one's, which was empty when it was placed.
+        TypeIndex* index = &table->index;
+        const uint32_t wrap = index->bucket_count * BUSTER_TYPE_BUCKET_SLOTS - 1;
+        for (uint32_t i = table->types.count; valid && i > mark.types; i -= 1)
+        {
+            const uint32_t type = i - 1;
+            if ((BUSTER_TYPE_HASHED_KINDS >> table->types.kind[type] & 1) != 0)
+            {
+                uint32_t position = ((uint32_t)table->types.hash[type] & (index->bucket_count - 1)) * BUSTER_TYPE_BUCKET_SLOTS;
+                uint32_t probes = 0;
+                while (index->slots[position].index != type && probes <= wrap)
+                {
+                    position = (position + 1) & wrap;
+                    probes += 1;
+                }
+                valid = probes <= wrap;
+                if (valid)
+                {
+                    index->slots[position] = (TypeSlot){ 0 };
+                    index->count -= 1;
+                }
+            }
+        }
+    }
+    else if (valid)
+    {
+        valid = type_index_rebuild(table, mark.buckets, mark.types);
+    }
+    if (valid)
+    {
+        table->types.count = mark.types;
+        table->parameters.count = mark.parameters;
+        table->tags.count = mark.tags;
+        table->members.count = mark.members;
+        table->tags.completions = mark.completions;
+        table->hidden_begin = 0;
+        table->hidden_end = 0;
+    }
+    return valid;
+}
+
+static void type_tag_withdraw(TypeTable* table, uint32_t tag, bool transparency_only)
+{
+    TypeColumns* types = &table->types;
+    TypeTags* tags = &table->tags;
+    const uint32_t index = type_index(tags->type[tag]);
+    if (transparency_only)
+    {
+        types->flags[index] &= (uint8_t)~BUSTER_TYPE_FLAG_TRANSPARENT_UNION;
+    }
+    else
+    {
+        // As type_tag leaves a tag it has just made.
+        types->code[index] = 0;
+        types->flags[index] = 0;
+        types->alignment_log2[index] = 0;
+        types->base[index] = 0;
+        types->size[index] = 0;
+        tags->member_begin[tag] = 0;
+        tags->member_count[tag] = 0;
+        tags->completion[tag] = 0;
+        tags->packed[tag] = 0;
+        tags->pack_log2[tag] = 0;
+        tags->alignment_log2[tag] = 0;
+    }
+}
+
+static void type_tag_restore(TypeTable* table, const TypeTable* source, uint32_t tag)
+{
+    TypeColumns* types = &table->types;
+    TypeTags* tags = &table->tags;
+    const uint32_t index = type_index(source->tags.type[tag]);
+    types->code[index] = source->types.code[index];
+    types->flags[index] = source->types.flags[index];
+    types->alignment_log2[index] = source->types.alignment_log2[index];
+    types->base[index] = source->types.base[index];
+    types->size[index] = source->types.size[index];
+    tags->member_begin[tag] = source->tags.member_begin[tag];
+    tags->member_count[tag] = source->tags.member_count[tag];
+    tags->completion[tag] = source->tags.completion[tag];
+    tags->packed[tag] = source->tags.packed[tag];
+    tags->pack_log2[tag] = source->tags.pack_log2[tag];
+    tags->alignment_log2[tag] = source->tags.alignment_log2[tag];
+}
+
+static TypeId type_replay_type(const TypeReplayPart* part, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    const TypeReplayPart* owner = part;
+    while (owner != 0 && index < owner->base)
+    {
+        owner = owner->parent;
+    }
+    const uint32_t mapped = owner != 0 ? owner->types[index - owner->base] : index;
+    return (TypeId)mapped << BUSTER_TYPE_INDEX_SHIFT | type_qualifiers(type);
+}
+
+static uint32_t type_replay_tag(const TypeReplayPart* part, uint32_t tag)
+{
+    const TypeReplayPart* owner = part;
+    while (owner != 0 && tag < owner->tag_base)
+    {
+        owner = owner->parent;
+    }
+    return owner != 0 ? owner->tags[tag - owner->tag_base] : tag;
+}
+
+// Whether a tag change of `part` is for a tag the replay merged into an earlier one of its mark (TypeReplayPart.merged).
+static bool type_replay_merged(const TypeReplayPart* part, const TypeChange* change)
+{
+    return change->tag >= part->tag_base && part->merged[change->tag - part->tag_base] != 0;
+}
+
+// Makes one change again in the replay's table, with `part`'s types mapped: whether it was made as it was recorded.
+// marks and mark_tags are the replay's predefined types by mark.
+static bool type_replay_change(TypeTable* table, TypeReplayPart* part, const TypeChange* change, TypeId* parameters, TypeMember* members, TypeId* marks,
+                               uint32_t* mark_tags)
+{
+    const TypeChanges* changes = part->changes;
+    const uint32_t local = type_index(change->type);
+    bool valid = true;
+    if (change->operation == BUSTER_TYPE_CHANGE_DERIVE)
+    {
+        const uint64_t parameter_count = change->kind == BUSTER_TYPE_KIND_FUNCTION ? change->extent : 0;
+        for (uint64_t i = 0; i < parameter_count; i += 1)
+        {
+            parameters[i] = type_replay_type(part, changes->parameters[change->first + i]);
+        }
+        const uint32_t made = type_find_or_add(table, change->kind, change->flags, type_replay_type(part, change->base), change->extent, parameters);
+        valid = made != 0 && local >= part->base;
+        if (valid)
+        {
+            part->types[local - part->base] = made;
+        }
+    }
+    else if (change->operation == BUSTER_TYPE_CHANGE_TAG)
+    {
+        const uint32_t mark = change->predefined;
+        valid = mark < BUSTER_TYPE_PREDEFINED_MARKS && local >= part->base && change->tag >= part->tag_base;
+        const bool merged = valid && mark != 0 && marks[mark] != 0;
+        if (merged)
+        {
+            part->types[local - part->base] = type_index(marks[mark]);
+            part->tags[change->tag - part->tag_base] = mark_tags[mark];
+        }
+        else if (valid)
+        {
+            const TypeId made = type_tag(table, change->kind, change->name);
+            valid = made != 0;
+            if (valid)
+            {
+                part->types[local - part->base] = type_index(made);
+                part->tags[change->tag - part->tag_base] = table->tags.count - 1;
+                marks[mark] = mark != 0 ? made : 0;
+                mark_tags[mark] = mark != 0 ? table->tags.count - 1 : 0;
+            }
+        }
+        if (valid)
+        {
+            part->merged[change->tag - part->tag_base] = merged ? 1 : 0;
+        }
+    }
+    else if (change->operation == BUSTER_TYPE_CHANGE_DEFINE && !type_replay_merged(part, change))
+    {
+        for (uint32_t i = 0; i < change->count; i += 1)
+        {
+            members[i] = changes->members[change->first + i];
+            members[i].type = type_replay_type(part, members[i].type);
+        }
+        valid = type_record_define(table, type_replay_type(part, change->type), members, change->count, change->attributes);
+    }
+    else if (change->operation == BUSTER_TYPE_CHANGE_LAYOUT && !type_replay_merged(part, change))
+    {
+        valid = type_record_layout(table, type_replay_type(part, change->type));
+    }
+    else if (change->operation == BUSTER_TYPE_CHANGE_ENUM)
+    {
+        valid = type_enum_complete(table, type_replay_type(part, change->type), type_replay_type(part, change->base), change->alignment_log2);
+    }
+    else if (change->operation == BUSTER_TYPE_CHANGE_TRANSPARENT)
+    {
+        valid = type_mark_transparent_union(table, type_replay_type(part, change->type)).status == TYPE_TRANSPARENT_UNION_APPLIED;
+    }
+    return valid;
+}
+
+static bool type_replay(TypeTable* table, TypeReplayPart* parts, uint32_t count, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    bool valid = count != 0 && table->changes == 0 && table->hidden_end == 0;
+    uint64_t parameter_room = 0;
+    uint32_t member_room = 0;
+    for (uint32_t p = 0; valid && p < count; p += 1)
+    {
+        const TypeChanges* changes = parts[p].changes;
+        valid = changes != 0 && !changes->full && (p == 0 || parts[p].parent == &parts[0]);
+        for (uint32_t i = 0; valid && i < changes->count; i += 1)
+        {
+            const TypeChange* change = changes->items + i;
+            parameter_room = change->operation == BUSTER_TYPE_CHANGE_DERIVE && change->kind == BUSTER_TYPE_KIND_FUNCTION && change->extent > parameter_room ?
+                             change->extent : parameter_room;
+            member_room = change->operation == BUSTER_TYPE_CHANGE_DEFINE && change->count > member_room ? change->count : member_room;
+        }
+    }
+    TypeId* parameters = valid ? arena_push_array(scratch, parameter_room + 1, sizeof(TypeId), _Alignof(TypeId)) : 0;
+    TypeMember* members = parameters != 0 ? arena_push_array(scratch, (uint64_t)member_room + 1, sizeof(TypeMember), _Alignof(TypeMember)) : 0;
+    valid = members != 0;
+    TypeId marks[BUSTER_TYPE_PREDEFINED_MARKS] = { 0 };
+    uint32_t mark_tags[BUSTER_TYPE_PREDEFINED_MARKS] = { 0 };
+    // The top level's changes and the bodies' merged by position, the top level's first at a position both have.
+    uint32_t top = 0;
+    uint32_t body = 1;
+    uint32_t item = 0;
+    while (valid && (top < parts[0].changes->count || body < count))
+    {
+        if (body < count && item == parts[body].changes->count)
+        {
+            body += 1;
+            item = 0;
+        }
+        else
+        {
+            const TypeChange* next_top = top < parts[0].changes->count ? parts[0].changes->items + top : 0;
+            const TypeChange* next_body = body < count ? parts[body].changes->items + item : 0;
+            const bool from_top = next_body == 0 || (next_top != 0 && next_top->position <= next_body->position);
+            if (from_top)
+            {
+                valid = type_replay_change(table, &parts[0], next_top, parameters, members, marks, mark_tags);
+                top += 1;
+            }
+            else
+            {
+                valid = type_replay_change(table, &parts[body], next_body, parameters, members, marks, mark_tags);
+                item += 1;
+            }
+        }
+    }
+    // last_error's last write by key: a body's after the top level's at a position both have.
+    bool written = false;
+    uint32_t position = 0;
+    uint32_t rank = 0;
+    uint32_t sequence = 0;
+    TypeError error = TYPE_ERROR_NONE;
+    for (uint32_t p = 0; valid && p < count; p += 1)
+    {
+        const TypeChanges* changes = parts[p].changes;
+        const uint32_t part_rank = p == 0 ? 0 : 1;
+        const bool later = !written || changes->error_position > position ||
+                           (changes->error_position == position && (part_rank > rank || (part_rank == rank && changes->error_sequence > sequence)));
+        if (changes->error_written && later)
+        {
+            written = true;
+            position = changes->error_position;
+            rank = part_rank;
+            sequence = changes->error_sequence;
+            error = changes->error;
+        }
+    }
+    if (valid && written)
+    {
+        table->last_error = error;
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
 }
