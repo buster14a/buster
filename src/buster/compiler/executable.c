@@ -300,8 +300,8 @@ struct ExecutableDebug
 // without a definition its reference: address 0 for a weak one defined nowhere), plus the addend, as a debugger reads
 // it from the file (a PIE's at its base of 0: no dynamic relocation reaches a section that isn't loaded); or a
 // thread-local's offset in the TLS segment (DTPOFF32, which must fit 32 signed bits, and DTPOFF64) plus the addend. A
-// reference whose target is 0 is one to discarded code (a section that section GC dropped): it gets lld's tombstone, 0,
-// or 1 in .debug_ranges and .debug_loc, whose lists 0 would end. The references are columns, which a producer's vector paths fill a batch at a
+// reference whose target is 0 is one to discarded code (a section that section GC dropped): it gets lld's tombstone
+// (executable_debug_tombstone). The references are columns, which a producer's vector paths fill a batch at a
 // time: each one's field's offset in its section, its addend, its target, its section's kind (the field's section is
 // EXECUTABLE_SECTION_DEBUG_INFO plus it) and its kind (EXECUTABLE_DEBUG_ABS64 and the others). Each section's
 // alignment (`alignments`, 0 or 1 for none, else a power of two to 4096), its contributions' largest, places it in the
@@ -6672,6 +6672,17 @@ static bool executable_debug_sections_valid(const ExecutableOptions* options)
     return valid;
 }
 
+// lld's tombstone for a debug section's reference to discarded code or data (a field of EXECUTABLE_DEBUG_ABS64's kind or
+// another in `section`): all ones in .debug_names, whose name index would read 0 as its first unit's offset (an ABS32's
+// 32 bits, as lld truncates R_X86_64_32's), 1 in .debug_ranges and .debug_loc, whose lists 0 would end, and 0 elsewhere.
+static uint64_t executable_debug_tombstone(uint32_t section, uint8_t kind)
+{
+    const uint64_t tombstone = section == EXECUTABLE_SECTION_DEBUG_NAMES                                          ? UINT64_MAX :
+                               section == EXECUTABLE_SECTION_DEBUG_RANGES || section == EXECUTABLE_SECTION_DEBUG_LOC ? 1 :
+                                                                                                                     0;
+    return kind == EXECUTABLE_DEBUG_ABS32 ? (uint32_t)tombstone : tombstone;
+}
+
 // The value debug section reference `r` gets (see ExecutableDebugSections), or false if it can't have one: a reference
 // outside its section, of an unknown kind or to a symbol the link hasn't, an ABS32 whose value doesn't fit 32 unsigned
 // bits or a DTPOFF32 whose value doesn't fit 32 signed bits (as lld checks R_X86_64_32 and R_X86_64_DTPOFF32), or a
@@ -6693,7 +6704,7 @@ static bool executable_debug_value(const Link* link, const ExecutableLayout* lay
     uint64_t result = 0;
     if (valid && symbol == 0)
     {
-        result = section == EXECUTABLE_SECTION_DEBUG_RANGES || section == EXECUTABLE_SECTION_DEBUG_LOC ? 1 : 0;
+        result = executable_debug_tombstone(section, kind);
     }
     else if (valid && module_offset)
     {

@@ -260,8 +260,10 @@ to the writer where it does:
   or the thread-local's offset in the TLS segment after the layout;
 - a reference to a section that COMDAT selection or `--gc-sections` dropped, or
   to an excluded debug section, or to a symbol the link has none of, gets lld's
-  tombstone: 0, or 1 in `.debug_ranges` and `.debug_loc`, whose lists 0 would
-  end.
+  tombstone: all ones in `.debug_names`, whose name index would read 0 as its
+  first unit's offset (an `R_X86_64_32`'s 32 bits of it, as lld truncates it),
+  1 in `.debug_ranges` and `.debug_loc`, whose lists 0 would end, and 0
+  elsewhere.
 
 Relocation types that DWARF doesn't use are refused, naming the object, the
 section and the relocation, and so are a thread-local offset into a debug
@@ -421,7 +423,8 @@ C++ fixture's inline functions are COMDAT groups in both units, whose losing
 copies' DWARF keeps tombstones; `--gc-sections` keeps the DWARF of what it
 collects the same way; `-S` leaves the debug sections out. Assembly fixtures
 check excluded debug sections (left out, with lld's tombstones in the
-references into them), an empty section's place, and empty relocation
+references into them, `.debug_names`' all ones among them, as by section GC),
+an empty section's place, and empty relocation
 sections, also where no other section of the empty one's kind has bytes and the
 link has no debug relocation, each as lld links them. A zstd section and a
 damaged zlib stream are refused, and so is a section whose header declares no

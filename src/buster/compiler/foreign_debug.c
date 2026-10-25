@@ -11,8 +11,9 @@
 //     the symbol's value and the addend: written now;
 //   - one to code or data the link keeps (a low_pc's or a line program's R_X86_64_64, an ABS32 address, a thread-local's
 //     R_X86_64_DTPOFF32 or _64) is the writer's, by the link's symbol (ExecutableDebugSections' columns);
-//   - one to a section that COMDAT selection discarded, or to a symbol the link has none of, gets lld's tombstone: 0,
-//     or 1 in .debug_ranges and .debug_loc, whose lists 0 would end; one without a symbol is its addend.
+//   - one to a section that COMDAT selection discarded, or to a symbol the link has none of, gets lld's tombstone
+//     (executable_debug_tombstone: all ones in .debug_names, 1 in .debug_ranges and .debug_loc, 0 elsewhere); one
+//     without a symbol is its addend.
 // A debug section of a discarded group goes with its group, and an excluded one (SHF_EXCLUDE) is left out, as GNU ld and
 // lld leave it out of a final link: a reference into either gets the tombstone. An empty one keeps its place, which a
 // reference into it takes. Each output section has its contributions' largest alignment, which the writer gives it in
@@ -186,7 +187,6 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
     const Elf64_Shdr header = import_section_header(&input->elf, section->relocation_section);
     const String8 entries = import_section_bytes(&input->elf, &header);
     const uint32_t section_kind = EXECUTABLE_SECTION_DEBUG_INFO + section->kind;
-    const uint64_t tombstone = section_kind == EXECUTABLE_SECTION_DEBUG_RANGES || section_kind == EXECUTABLE_SECTION_DEBUG_LOC ? 1 : 0;
     const ImportObject* object = &section->output->objects[section->id];
     for (uint64_t i = first; result.error == FOREIGN_LINK_ERROR_NONE && i < last; i += 1)
     {
@@ -217,7 +217,7 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
             const bool module_offset = relocation_kind == EXECUTABLE_DEBUG_DTPOFF32 || relocation_kind == EXECUTABLE_DEBUG_DTPOFF64;
             const bool sectioned = index != 0 && target_section < input->elf.section_count && section->bases[target_section] != UINT64_MAX;
             const SymbolId target = index != 0 && index < object->symbol_count ? object->symbols[index] : 0;
-            uint64_t value = tombstone;
+            uint64_t value = executable_debug_tombstone(section_kind, relocation_kind);
             bool written = true;
             if (index == 0)
             {
@@ -271,7 +271,8 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
     const String8 entries = import_section_bytes(&input->elf, &header);
     const uint64_t total = entries.length / sizeof(Elf64_Rela);
     const uint32_t section_kind = EXECUTABLE_SECTION_DEBUG_INFO + section->kind;
-    const uint64_t tombstone = section_kind == EXECUTABLE_SECTION_DEBUG_RANGES || section_kind == EXECUTABLE_SECTION_DEBUG_LOC ? 1 : 0;
+    const __m512i tombstone = _mm512_set1_epi64((int64_t)executable_debug_tombstone(section_kind, EXECUTABLE_DEBUG_ABS64));
+    const __m512i tombstone32 = _mm512_set1_epi64((int64_t)executable_debug_tombstone(section_kind, EXECUTABLE_DEBUG_ABS32));
     // Lane r of each permute's result is relocation r's offset, info or addend: quadwords 3r, 3r + 1 and 3r + 2 of the
     // three loads.
     const __m512i offsets_first = _mm512_set_epi64(0, 0, 15, 12, 9, 6, 3, 0);
@@ -315,7 +316,8 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
         const __mmask8 sectioned = _mm512_mask_cmpeq_epi64_mask(named, classes, _mm512_set1_epi64(BUSTER_FOREIGN_DEBUG_SECTIONED));
         const __mmask8 recorded = _mm512_mask_cmpeq_epi64_mask(named, classes, _mm512_set1_epi64(BUSTER_FOREIGN_DEBUG_LINKED));
         take = take && _mm512_mask_cmpeq_epi64_mask(named, classes, _mm512_set1_epi64(BUSTER_FOREIGN_DEBUG_LEFT)) == 0 && (sectioned & module) == 0;
-        __m512i written = _mm512_set1_epi64((int64_t)tombstone);
+        // The tombstone's, an R_X86_64_32's its 32 bits (executable_debug_tombstone), unless the symbol is a place or none.
+        __m512i written = _mm512_mask_blend_epi64(absolute32, tombstone, tombstone32);
         written = _mm512_mask_mov_epi64(written, (uint8_t)~named, addends);
         written = _mm512_mask_add_epi64(written, sectioned, values, addends);
         const __mmask8 writes = (uint8_t)~recorded;

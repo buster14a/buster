@@ -94,7 +94,8 @@ sections resolved, and the references whose values the layout decides, as
 columns (each field's offset, addend, target symbol, section kind and kind).
 The writer patches those on its lanes after the layout: a definition's address
 (not a stub's), a thread-local's offset in the TLS segment, or lld's tombstone
-for a reference to discarded code (0, or 1 in `.debug_ranges` and `.debug_loc`).
+for a reference to discarded code (all ones in `.debug_names`, 1 in
+`.debug_ranges` and `.debug_loc`, 0 elsewhere).
 The driver's contract ("Debug information") has the rest.
 
 The consumer fixture exposed an existing loaded-segment layout issue in perf

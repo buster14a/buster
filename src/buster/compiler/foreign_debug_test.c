@@ -11,7 +11,9 @@
 // are refused, naming their object and section, and so is one that declares no bytes but whose stream gives some or
 // isn't one (foreign_debug_test_zero_streams). Excluded debug sections (SHF_EXCLUDE) are left out, as GNU ld and lld
 // leave them out, and empty ones and empty relocation sections link, also where no other section of their kind has bytes
-// and the link has no debug relocation (foreign_debug_test_sections). A thread-local offset (R_X86_64_DTPOFF32) is a
+// and the link has no debug relocation (foreign_debug_test_sections). .debug_names' references to what a link leaves out
+// get lld's tombstone there, all ones, from the excluded sections and from code section GC dropped
+// (foreign_debug_test_names). A thread-local offset (R_X86_64_DTPOFF32) is a
 // signed 32-bit field and an R_X86_64_32 an unsigned one, by the writer's and the immediate paths, each refused past its
 // range (foreign_debug_test_offsets). Overlapping debug relocation fields and a second relocation section of one section
 // are refused alike on every path, fields out of order link, and a debug section keeps its alignment, compressed or not
@@ -523,8 +525,9 @@ static void foreign_debug_test_refusals(ForeignTestTally* tally, const char* dir
 }
 
 // An assembly fixture of debug sections a link leaves out or that are empty, beside the C program: an excluded (SHF_EXCLUDE,
-// "e") .debug_str and .debug_ranges that a kept .debug_info and .debug_loc refer to, which lld gives its tombstones (0,
-// and 1 in .debug_loc); two .debug_macro sections (GNU as's `unique`), the second empty, whose place .debug_info refers
+// "e") .debug_str and .debug_ranges that a kept .debug_info, .debug_loc and .debug_names refer to, which lld gives its
+// tombstones (0, 1 in .debug_loc, and all ones in .debug_names: 16 fields, R_X86_64_32's and R_X86_64_64's, two of the
+// vector path's batches); two .debug_macro sections (GNU as's `unique`), the second empty, whose place .debug_info refers
 // to (8, after the first); and a .debug_aranges that holds a function's address. Each contribution starts with a marker.
 static const char foreign_debug_test_sections_source[] =
     "    .text\n"
@@ -554,7 +557,16 @@ static const char foreign_debug_test_sections_source[] =
     "    .quad .Lexcluded_ranges\n"
     "    .section .debug_aranges,\"\",@progbits\n"
     "    .quad 0x4444444444444444\n"
-    "    .quad dbg_sections_marker\n";
+    "    .quad dbg_sections_marker\n"
+    "    .section .debug_names,\"\",@progbits\n"
+    "    .long 0x88888888\n"
+    "    .rept 4\n"
+    "    .long .Lexcluded_string\n"
+    "    .quad .Lexcluded_ranges\n"
+    "    .long .Lexcluded_string\n"
+    "    .quad .Lexcluded_ranges\n"
+    "    .endr\n"
+    "    .long 0xaaaaaaaa\n";
 
 // The empty sections' fixture for a link with no other debug section of their kinds and no debug relocation (with a
 // main compiled without -g): an empty .debug_names, the only contribution of its kind, and a .debug_pubtypes whose
@@ -606,8 +618,9 @@ static uint64_t foreign_debug_test_symbol(String8 file, const char* name)
 
 // What an output must hold, by fixture (foreign_debug_test_sections): the sections fixture's, no excluded byte,
 // .debug_info's references into the excluded sections tombstones and the one into the empty .debug_macro its place, 8,
-// .debug_loc's tombstone 1 and .debug_aranges' address dbg_sections_marker's (0 in the copy whose relocation section was
-// emptied); the empty fixture's, no .debug_names and .debug_pubtypes' field 0 (its relocation section emptied).
+// .debug_loc's tombstone 1, .debug_names' all ones and .debug_aranges' address dbg_sections_marker's (0 in the copy
+// whose relocation section was emptied); the empty fixture's, no .debug_names and .debug_pubtypes' field 0 (its
+// relocation section emptied).
 static bool foreign_debug_test_sections_hold(String8 file, uint32_t fixture)
 {
     static const char excluded[] = "EXCLUDED_DEBUG_STRING";
@@ -619,6 +632,11 @@ static bool foreign_debug_test_sections_hold(String8 file, uint32_t fixture)
         const uint8_t* info = foreign_debug_test_marked(file, ".debug_info", 0x11111111, 4, 24);
         const uint8_t* loc = foreign_debug_test_marked(file, ".debug_loc", UINT64_C(0x3333333333333333), 8, 16);
         const uint8_t* aranges = foreign_debug_test_marked(file, ".debug_aranges", UINT64_C(0x4444444444444444), 8, 16);
+        const uint8_t* names = foreign_debug_test_marked(file, ".debug_names", 0x88888888, 4, 104);
+        uint8_t ones[96];
+        memset(ones, 0xff, sizeof(ones));
+        const uint32_t names_end = 0xaaaaaaaa;
+        const bool tombstoned = names != 0 && memcmp(names + 4, ones, sizeof(ones)) == 0 && memcmp(names + 100, &names_end, 4) == 0;
         uint32_t string = 1;
         uint64_t range = 1;
         uint32_t empty = 0;
@@ -635,7 +653,8 @@ static bool foreign_debug_test_sections_hold(String8 file, uint32_t fixture)
             memcpy(&address, aranges + 8, 8);
         }
         const uint64_t function = fixture == 1 ? 0 : foreign_debug_test_symbol(file, "dbg_sections_marker");
-        result = result && info != 0 && loc != 0 && aranges != 0 && string == 0 && range == 0 && empty == 8 && end == 0x22222222 && tombstone == 1 && address == function;
+        result = result && info != 0 && loc != 0 && aranges != 0 && string == 0 && range == 0 && empty == 8 && end == 0x22222222 && tombstone == 1 && address == function &&
+                 tombstoned;
     }
     else if (result)
     {
@@ -811,6 +830,159 @@ static void foreign_debug_test_sections(ForeignTestTally* tally, const char* dir
             foreign_test_expect(tally, linked, "ld.lld links excluded and empty debug sections", lld_errors);
             foreign_test_expect(tally, linked && foreign_debug_test_sections_hold(foreign_test_read(arena, theirs), fixture),
                                 "lld's output holds what ours does: no excluded byte, its tombstones, the empty section's place and field", theirs);
+        }
+    }
+    arena_pop_to(arena, mark);
+}
+
+// The name index's fixture for section GC (foreign_debug_test_names): two functions in sections of their own that nothing
+// calls, one global and one local, and a .debug_names whose 16 fields after a marker refer to them, R_X86_64_32's and
+// R_X86_64_64's (two of the vector path's batches, which record them for the writer), then an end marker.
+static const char foreign_debug_test_names_source[] =
+    "    .section .text.dbg_names_dropped,\"ax\",@progbits\n"
+    "    .globl dbg_names_dropped\n"
+    "    .type dbg_names_dropped, @function\n"
+    "dbg_names_dropped:\n"
+    "    ret\n"
+    "    .size dbg_names_dropped, .-dbg_names_dropped\n"
+    "    .section .text.dbg_names_local,\"ax\",@progbits\n"
+    "    .type dbg_names_local, @function\n"
+    "dbg_names_local:\n"
+    "    ret\n"
+    "    .size dbg_names_local, .-dbg_names_local\n"
+    "    .section .debug_names,\"\",@progbits\n"
+    "    .long 0xbbbbbbbb\n"
+    "    .rept 4\n"
+    "    .long dbg_names_dropped\n"
+    "    .quad dbg_names_dropped\n"
+    "    .long dbg_names_local\n"
+    "    .quad dbg_names_local\n"
+    "    .endr\n"
+    "    .long 0xcccccccc\n";
+
+// Whether an output's .debug_names holds what the name index's fixture must: with section GC, which drops both
+// functions, lld's tombstone for every field, all ones; without it, each field its function's address (an R_X86_64_32's
+// 32 bits of it), from the output's symbol table.
+static bool foreign_debug_test_names_hold(String8 file, bool gc)
+{
+    const uint8_t* names = file.pointer != 0 ? foreign_debug_test_marked(file, ".debug_names", 0xbbbbbbbb, 4, 104) : 0;
+    const uint64_t dropped = file.pointer != 0 ? foreign_debug_test_symbol(file, "dbg_names_dropped") : UINT64_MAX;
+    const uint64_t local = file.pointer != 0 ? foreign_debug_test_symbol(file, "dbg_names_local") : UINT64_MAX;
+    const uint32_t end = 0xcccccccc;
+    bool result = names != 0 && memcmp(names + 100, &end, 4) == 0 && (gc || (dropped != UINT64_MAX && local != UINT64_MAX && dropped != 0 && local != 0));
+    for (uint32_t r = 0; result && r < 4; r += 1)
+    {
+        const uint8_t* at = names + 4 + 24 * r;
+        uint32_t dropped32 = 0;
+        uint64_t dropped64 = 0;
+        uint32_t local32 = 0;
+        uint64_t local64 = 0;
+        memcpy(&dropped32, at, 4);
+        memcpy(&dropped64, at + 4, 8);
+        memcpy(&local32, at + 12, 4);
+        memcpy(&local64, at + 16, 8);
+        result = gc ? dropped32 == UINT32_MAX && dropped64 == UINT64_MAX && local32 == UINT32_MAX && local64 == UINT64_MAX :
+                      dropped32 == (uint32_t)dropped && dropped64 == dropped && local32 == (uint32_t)local && local64 == local;
+    }
+    return result;
+}
+
+// .debug_names' tombstone for code section GC dropped (#413's review): the name index's fixture beside a main compiled
+// without -g, linked with --gc-sections on 1 lane, on 8 and by the exact path into the same bytes, which run, and whose
+// fields are all ones, as lld writes .debug_names' tombstone (R_X86_64_32's 32 bits of it); and linked without
+// section GC, each field its function's address. With --cross-check, lld's outputs of the same objects hold the same.
+static void foreign_debug_test_names(ForeignTestTally* tally, const char* directory, ForeignTestSystem* system, bool cross_check, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    ForeignTestPath source;
+    ForeignTestPath object;
+    ForeignTestPath plain;
+    ForeignTestPath errors;
+    snprintf(source, sizeof(source), "%s/dbg_names.s", directory);
+    snprintf(object, sizeof(object), "%s/dbg_names.o", directory);
+    snprintf(plain, sizeof(plain), "%s/dbg_plain.o", directory);
+    snprintf(errors, sizeof(errors), "%s.err", object);
+    char* assemble[] = { (char*)"as", source, (char*)"-o", object, 0 };
+    const bool assembled = foreign_test_write(source, foreign_debug_test_names_source, sizeof(foreign_debug_test_names_source) - 1) &&
+                           object_test_run(assemble, "/dev/null", errors) == 0;
+    foreign_test_expect(tally, assembled, "assemble the name index's fixture", errors);
+    ForeignTestLine* line = assembled ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1) : 0;
+    char** arguments = line != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 16) : 0;
+    const bool lined = arguments != 0;
+    if (lined)
+    {
+        *line = (ForeignTestLine){ 0 };
+        foreign_test_pie_begin(line, system);
+        foreign_test_add(line, plain, true, true);
+        foreign_test_add(line, object, true, true);
+        foreign_test_pie_end(line, system);
+    }
+    for (uint32_t gc = 0; lined && gc < 2; gc += 1)
+    {
+        static const char* const ways[3] = { "--lanes=1", "--lanes=8", "--scalar" };
+        String8 files[3] = { 0 };
+        for (uint32_t way = 0; way < 3; way += 1)
+        {
+            ForeignTestPath output;
+            ForeignTestPath link_errors;
+            snprintf(output, sizeof(output), "%s/names%u.out%u", directory, gc, way);
+            snprintf(link_errors, sizeof(link_errors), "%s.err", output);
+            static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = gc != 0 ? (char*)"--gc-sections" : (char*)"--no-gc-sections";
+            arguments[count + 1] = (char*)ways[way];
+            arguments[count + 2] = (char*)"-o";
+            arguments[count + 3] = output;
+            count += 4;
+            for (uint32_t i = 0; i < line->our_count; i += 1)
+            {
+                arguments[count] = line->ours[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            char* run[] = { output, 0 };
+            const bool linked = object_test_run(arguments, "/dev/null", link_errors) == 0;
+            foreign_test_expect(tally, linked && object_test_run(run, "/dev/null", "/dev/null") == 0, "link-foreign links the name index's fixture, which runs", link_errors);
+            files[way] = linked ? foreign_test_read(arena, output) : (String8){ 0 };
+            foreign_test_expect(tally, foreign_debug_test_names_hold(files[way], gc != 0),
+                                gc != 0 ? ".debug_names' fields to code section GC dropped are all ones, lld's tombstone" : ".debug_names' fields hold their functions' addresses", output);
+        }
+        for (uint32_t way = 1; way < 3; way += 1)
+        {
+            foreign_test_expect(tally, files[0].pointer != 0 && files[way].pointer != 0 && files[0].length == files[way].length &&
+                                       memcmp(files[0].pointer, files[way].pointer, files[0].length) == 0,
+                                "the same bytes on 8 lanes and by the exact path as on 1", object);
+        }
+        if (cross_check)
+        {
+            ForeignTestPath theirs;
+            ForeignTestPath lld_errors;
+            snprintf(theirs, sizeof(theirs), "%s/names%u.lld", directory, gc);
+            snprintf(lld_errors, sizeof(lld_errors), "%s.err", theirs);
+            static const char* const head[] = { "ld.lld", "--hash-style=gnu", "--build-id", "--eh-frame-hdr", "-z", "now", "-z", "relro" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = gc != 0 ? (char*)"--gc-sections" : (char*)"--no-gc-sections";
+            arguments[count + 1] = (char*)"-o";
+            arguments[count + 2] = theirs;
+            count += 3;
+            for (uint32_t i = 0; i < line->their_count; i += 1)
+            {
+                arguments[count] = line->theirs[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const bool linked = object_test_run(arguments, "/dev/null", lld_errors) == 0;
+            foreign_test_expect(tally, linked && foreign_debug_test_names_hold(foreign_test_read(arena, theirs), gc != 0), "lld's output of the name index's fixture holds the same", theirs);
         }
     }
     arena_pop_to(arena, mark);
@@ -1550,6 +1722,7 @@ static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_c
     {
         foreign_debug_test_refusals(&tally, directory, system, arena);
         foreign_debug_test_sections(&tally, directory, system, cross_check, arena);
+        foreign_debug_test_names(&tally, directory, system, cross_check, arena);
         foreign_debug_test_offsets(&tally, directory, system, cross_check, arena);
         foreign_debug_test_fields(&tally, directory, system, cross_check, arena);
         foreign_debug_test_zero_streams(&tally, directory, system, arena);
