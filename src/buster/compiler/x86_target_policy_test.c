@@ -254,7 +254,11 @@ static bool x86_target_test_gas(const char* directory)
         {
             if (x86_target_requirements[form] != 0)
             {
-                const X86Instruction instruction = x86_random_instruction(&random, (uint16_t)form, true);
+                X86Instruction instruction = x86_random_instruction(&random, (uint16_t)form, true);
+                // This oracle checks canonical forms. Optional FS/GS prefixes have no separate ISA requirement,
+                // and GAS warns when one has no effect (LEA). Flagged records are covered by the raw-form tests.
+                instruction.form = (uint16_t)form;
+                passed &= x86_validate(&instruction, 1) == 1;
                 x86_print_instruction(file, &instruction, 0);
                 fputc('\n', file);
                 forms[count++] = (uint16_t)form;
