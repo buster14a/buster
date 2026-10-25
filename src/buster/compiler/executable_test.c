@@ -384,7 +384,10 @@ static uint8_t* executable_test_save(const Link* link, Arena* arena)
     for (AtomId atom = 1; result != 0 && atom < link->atoms.count; atom += 1)
     {
         const uint64_t size = link->atoms.bytes[atom] != 0 ? link->atoms.size[atom] : 0;
-        memcpy(result + at, link->atoms.bytes[atom], size);
+        if (size != 0)
+        {
+            memcpy(result + at, link->atoms.bytes[atom], size);
+        }
         at += size;
     }
     return result;
@@ -396,7 +399,10 @@ static void executable_test_restore(Link* link, const uint8_t* saved)
     for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
     {
         const uint64_t size = link->atoms.bytes[atom] != 0 ? link->atoms.size[atom] : 0;
-        memcpy(link->atoms.bytes[atom], saved + at, size);
+        if (size != 0)
+        {
+            memcpy(link->atoms.bytes[atom], saved + at, size);
+        }
         at += size;
     }
 }
@@ -1355,6 +1361,24 @@ static bool executable_test_build_id(Arena* arena, String8 file, const uint64_t*
 // The chunk hash of every length from 0 to BUSTER_EXECUTABLE_TEST_HASH_LENGTHS bytes, cut into pieces at random places,
 // against the same bytes whole; and runs of zeros of every length up to a page, whose hashes must all differ from the
 // next length's.
+// .shstrtab's room against every section's name, both layouts' (a static runtime's .iplt for .plt.got): an output with
+// every section present must fit, as the writer copies its names into the headers' fixed room.
+static bool executable_test_section_names(void)
+{
+    ExecutableTestTally tally = { .check = "section names" };
+    for (uint32_t runtime = 0; runtime < 2; runtime += 1)
+    {
+        const ExecutableLayout layout = { .runtime = runtime != 0 };
+        uint64_t bytes = 1 + sizeof(".shstrtab");
+        for (uint32_t section = 0; section < EXECUTABLE_SECTION_COUNT; section += 1)
+        {
+            bytes += strlen(executable_section_name(&layout, section)) + 1;
+        }
+        executable_test_expect(&tally, bytes <= BUSTER_EXECUTABLE_SHSTRTAB_BYTES, "every section's name fits .shstrtab's room", bytes);
+    }
+    return executable_test_report(&tally);
+}
+
 #define BUSTER_EXECUTABLE_TEST_HASH_LENGTHS 2100
 #define BUSTER_EXECUTABLE_TEST_HASH_CUTS 20
 
@@ -3880,7 +3904,8 @@ static int run_executable_tests(int argc, char** argv)
     }
     else
     {
-        bool passed = executable_test_hash(seed);
+        bool passed = executable_test_section_names();
+        passed = executable_test_hash(seed) && passed;
         passed = executable_test_programs(&directory, seed, id_order, (uint32_t)functions) && passed;
         passed = executable_test_chunks(&directory) && passed;
         passed = executable_test_files(&directory, seed) && passed;

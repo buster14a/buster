@@ -166,6 +166,7 @@ static void interpreter_test_conversions(InterpreterTestTally* tally, Arena* scr
         .values = values,
         .count = 3,
     };
+    // Every class but long double (F80), which the interpreter refuses: a conversion to it and from it is invalid.
     for (uint32_t from = BUSTER_TYPED_CLASS_I8; from < BUSTER_TYPED_CLASSES; from += 1)
     {
         classes[0] = (uint8_t)from;
@@ -174,9 +175,11 @@ static void interpreter_test_conversions(InterpreterTestTally* tally, Arena* scr
         {
             classes[1] = (uint8_t)to;
             classes[2] = (uint8_t)to;
+            const bool x87 = from == BUSTER_TYPED_CLASS_F80 || to == BUSTER_TYPED_CLASS_F80;
             const uint64_t expected = to == BUSTER_TYPED_CLASS_F32 ? 0x41300000ull : to == BUSTER_TYPED_CLASS_F64 ? 0x4026000000000000ull : 11;
             const InterpreterResult result = interpreter_test_run(&function, scratch, 0);
-            interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == expected, "every scalar conversion pair");
+            interpreter_test_expect(tally, x87 ? result.status == INTERPRETER_INVALID : result.status == INTERPRETER_OK && result.value.low == expected,
+                                    "every scalar conversion pair");
         }
     }
     classes[0] = BUSTER_TYPED_CLASS_F64;

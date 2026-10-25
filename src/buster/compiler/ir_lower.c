@@ -630,6 +630,13 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
+        else if (input->classes[i] == BUSTER_TYPED_CLASS_F80)
+        {
+            // A long double (#136), which this adapter doesn't lower yet: Tier 0 keeps its values in frame slots of its
+            // own, and the IR has no x87 type. Every one of them is an entry's value, a conversion's operand among them.
+            check.error = IR_ERROR_TYPE;
+            check.instruction = i;
+        }
     }
     IrTypedPlan plan = {0};
     uint8_t* ops = 0;

@@ -165,8 +165,9 @@ static bool pp_fuzz_text(Arena* arena, const PreprocessorFuzzCase* test_case, St
 // Preprocesses `text` with the first `kernels` sets of kernels: state->runs[0] the vectorized ones, state->runs[1] the
 // scalar twins, each from a reset intern table; state->ran[k] says whether run k had no errors. With both sets, also
 // state->runs[2] and [3], the same without expansion starts, as a compile runs them: the main loop takes some direct
-// paths only then (pp_fuzz_kernels compares them too). The runs stay until pp_fuzz_release. Returns false if a
-// preprocessor can't be set up.
+// paths only then (pp_fuzz_kernels compares them too); and run 2 defers its history (PPOptions.defer_history), as -E
+// and `parse` do, which pp_fuzz_kernels records by preprocessing the text again (pp_run_source's replay). The runs stay
+// until pp_fuzz_release. Returns false if a preprocessor can't be set up.
 static bool pp_fuzz_run(PPFuzzState* state, bool c23, bool quiet, String8 text, uint32_t kernels)
 {
     bool result = text.length <= UINT32_MAX;
@@ -175,6 +176,7 @@ static bool pp_fuzz_run(PPFuzzState* state, bool c23, bool quiet, String8 text, 
     {
         PPOptions options = pp_fuzz_options(c23, k % 2 == 1, quiet || k >= 2);
         options.expansion_starts = k < 2;
+        options.defer_history = k == 2;
         const bool table = state->tables_ready[k] ? intern_reset(&state->tables[k]) : intern_initialize(&state->tables[k]);
         state->tables_ready[k] = table;
         result = table && pp_initialize(&state->runs[k], &options, &state->tables[k]);
@@ -849,8 +851,9 @@ static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
 // The two runs of a case must agree as test-preprocessor's cases' do: the acceptance and the counts of errors and
 // warnings, the streams token for token (kind, flags, value and location), the directive tables, and the printers byte
 // for byte, with line markers and without; and the -P text must lex back into the stream's spellings, unless it can't
-// (pp_fuzz_unprintable). Returns the first check that fails (BUSTER_PPF_EQUAL if none), which is printed under `name`
-// unless pp_test_quiet.
+// (pp_fuzz_unprintable). As a compile runs them (runs 2 and 3), the acceptance, the counts, the streams and the history,
+// run 2's recorded only when it is asked for (pp_history_ensure). Returns the first check that fails (BUSTER_PPF_EQUAL if
+// none), which is printed under `name` unless pp_test_quiet.
 static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char* name)
 {
     Preprocessor* runs = state->runs;
@@ -883,9 +886,16 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
     }
     else
     {
+        // Run 2's history, deferred, recorded now by preprocessing the text again, must be the history run 3 recorded.
         char label[256];
         snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
-        result = pp_same_streams(&runs[2], &runs[3], label) ? BUSTER_PPF_EQUAL : BUSTER_PPF_KERNEL_STREAMS;
+        const bool recorded = pp_history_ensure(&runs[2]);
+        result = recorded && pp_same_streams(&runs[2], &runs[3], label) && pp_test_system_levels(&runs[2], &runs[3], label) ? BUSTER_PPF_EQUAL :
+                                                                                                                       BUSTER_PPF_KERNEL_STREAMS;
+        if (!recorded && !pp_test_quiet)
+        {
+            printf("%s: the deferred history couldn't be recorded\n", label);
+        }
     }
     for (uint32_t markers = 0; result == BUSTER_PPF_EQUAL && markers < 2; markers += 1)
     {

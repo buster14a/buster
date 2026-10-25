@@ -533,6 +533,8 @@ static uint16_t interpreter_typed_ir_type(uint32_t class)
         IR_I64,
         IR_F32,
         IR_F64,
+        // Long double (F80), which neither this interpreter nor the IR has.
+        IR_VOID,
     };
     const uint16_t result = types[class];
     return result;
@@ -753,7 +755,7 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     result = result && (function->argument_count == 0 || function->argument_classes != 0);
     for (uint32_t l = 0; result && l < function->local_count; l += 1)
     {
-        result = function->local_classes[l] > BUSTER_TYPED_CLASS_VOID && function->local_classes[l] < BUSTER_TYPED_CLASSES;
+        result = function->local_classes[l] > BUSTER_TYPED_CLASS_VOID && function->local_classes[l] < BUSTER_TYPED_CLASS_F80;
     }
     for (uint32_t c = 0; result && c < function->call_count; c += 1)
     {
@@ -761,7 +763,7 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     }
     for (uint32_t a = 0; result && a < function->argument_count; a += 1)
     {
-        result = function->argument_classes[a] > BUSTER_TYPED_CLASS_VOID && function->argument_classes[a] < BUSTER_TYPED_CLASSES;
+        result = function->argument_classes[a] > BUSTER_TYPED_CLASS_VOID && function->argument_classes[a] < BUSTER_TYPED_CLASS_F80;
         // An aggregate's bytes pass by value through its address (#137), which this interpreter doesn't model.
         result = result && (function->argument_sizes == 0 || function->argument_sizes[a] == 0);
     }
@@ -873,8 +875,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : function->classes[i];
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
-        // Validate the dispatch domain before classifying stack effects or reading operand classes.
-        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || class >= BUSTER_TYPED_CLASSES)
+        // Validate the dispatch domain before classifying effects; long double has no InterpreterValue.
+        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || class >= BUSTER_TYPED_CLASS_F80)
         {
             result->status = INTERPRETER_INVALID;
             break;

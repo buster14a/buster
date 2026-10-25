@@ -313,6 +313,15 @@ struct PPOptions
     bool clang_features;
     // Recording is on by default; the benchmark's control disables it without changing preprocessing.
     bool no_history;
+    // Record the expansion history only once something needs it (pp_history_ensure): pp_run and pp_run_source then
+    // record none, and preprocess the unit again, with history, when a diagnostic or a consumer of the history first
+    // asks for it (into a preprocessor of its own, with these options, file cache and intern table). Their own
+    // diagnostics are counted, not printed, and a unit that had any runs again at its end to print them with their
+    // notes, as it would have. A clean unit never runs again. -E, `parse` and the checker's driver defer it; the checker
+    // judges system headers' tokens from the main loop's runs (pp_system_levels), and records the history only for
+    // --scalar's twin and a unit whose runs can't say. The unit preprocesses nothing more after its run, and its options'
+    // no_history stays set.
+    bool defer_history;
     // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
     bool no_guard_skip;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
@@ -671,6 +680,19 @@ struct PPLineDirective
     // The range's next note, or BUSTER_PP_NONE.
     uint32_t next_in_range;
     uint8_t system;
+};
+
+// Where the output comes from, for the checker's system-header judgment (pp_system_levels): from output token `token`
+// on, the main loop reads range `range` (or BUSTER_PP_NONE) at system level `level` (as PPLineDirective.system), its
+// tokens there at or after `from` (a line note's location, or the range's base). A run starts at an inclusion's start
+// and end and at a line note.
+typedef struct PPSystemRun PPSystemRun;
+struct PPSystemRun
+{
+    uint32_t token;
+    uint32_t range;
+    uint32_t from;
+    uint8_t level;
 };
 
 // The output token at `token` and the ones after it come from the expansion of a macro whose name, at `location`,
@@ -1138,6 +1160,13 @@ struct Preprocessor
     uint32_t location_top;
     PPLineDirective* line_directives;
     uint32_t line_directive_count;
+    // The runs of the output by where it comes from (PPSystemRun), in the arena; and whether a run started while an
+    // invocation or an expansion read before it was open, at another level, or the runs' room ran out: then only the
+    // history says where those tokens come from (pp_system_levels_history).
+    PPSystemRun* system_runs;
+    uint32_t system_run_count;
+    uint32_t system_run_capacity;
+    bool system_runs_inexact;
     // The starts of the expansions read from files into the output, by token (PPExpansionStart), and the location of the
     // name of the latest one.
     PPExpansionStart* expansion_starts;
@@ -1180,6 +1209,22 @@ struct Preprocessor
     uint32_t history_run_count;
     uint32_t history_run_capacity;
     Arena history_initial;
+    // PPOptions.defer_history's state: whether the history is still to record, the quiet flag the options asked for (a
+    // deferred run counts its diagnostics without printing them), how pp_run or pp_run_source ran the unit (its path, or
+    // its name and bytes), for the replay, and the replay, whose history the fields above point into once recorded.
+    bool history_deferred;
+    bool history_quiet;
+    const char* history_path;
+    const char* history_name;
+    const uint8_t* history_bytes;
+    uint32_t history_length;
+    // The run's outcome at its end, which the replay must have too: its result and its diagnostics' counts.
+    bool history_result;
+    bool history_fatal;
+    uint32_t history_errors;
+    uint32_t history_warnings;
+    Preprocessor* history_replay;
+    Arena history_replay_arena;
     // Only set around synchronous expansion/substitution work; never inferred from a spelling location.
     uint32_t history_current;
     uint32_t history_anchor;
@@ -1350,6 +1395,7 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
 
 static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
+static bool pp_history_ensure(Preprocessor* pp);
 
 #include "c_preprocessor_history.c"
 
@@ -5171,6 +5217,60 @@ static void pp_read_directive_comment(Preprocessor* pp, PPContext* context, uint
     }
 }
 
+// The output from here on comes from range `range` at system level `level`, its tokens there from location `from` on
+// (PPSystemRun). A run that starts at another level while an invocation is collecting, or an expansion read before it is
+// still being read, would give their tokens a level that isn't theirs, so the runs are then inexact; so are they when the
+// arena has no room for a run.
+static void pp_note_system_run(Preprocessor* pp, uint32_t range, uint32_t from, uint8_t level)
+{
+    const uint32_t count = pp->system_run_count;
+    const uint8_t previous = count != 0 ? pp->system_runs[count - 1].level : BUSTER_PP_USER_FILE;
+    const bool open = pp->invocation_count != 0 || (pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind != BUSTER_PP_CONTEXT_FILE);
+    const bool replaces = count != 0 && pp->system_runs[count - 1].token == pp->output.count;
+    if (!replaces && count == pp->system_run_capacity)
+    {
+        const uint32_t capacity = count != 0 ? count * 2 : 64;
+        PPSystemRun* grown = arena_push(&pp->arena, (uint64_t)capacity * sizeof(PPSystemRun), _Alignof(PPSystemRun));
+        if (grown != 0 && count != 0)
+        {
+            memcpy(grown, pp->system_runs, (uint64_t)count * sizeof(PPSystemRun));
+        }
+        pp->system_runs = grown != 0 ? grown : pp->system_runs;
+        pp->system_run_capacity = grown != 0 ? capacity : pp->system_run_capacity;
+    }
+    const bool room = replaces || count < pp->system_run_capacity;
+    pp->system_runs_inexact |= (open && level != previous) || !room;
+    if (room)
+    {
+        pp->system_runs[replaces ? count - 1 : count] = (PPSystemRun){
+            .token = pp->output.count,
+            .range = range,
+            .from = from,
+            .level = level,
+        };
+        pp->system_run_count = replaces ? count : count + 1;
+    }
+}
+
+// After a file context ended: the output comes from the innermost file context left, at its range's latest line note,
+// or at its start (pp_note_system_run).
+static void pp_note_file_run(Preprocessor* pp)
+{
+    uint32_t c = pp->context_count;
+    while (c != 0 && pp->contexts[c - 1].kind != BUSTER_PP_CONTEXT_FILE)
+    {
+        c -= 1;
+    }
+    if (c != 0)
+    {
+        const uint32_t range = pp->contexts[c - 1].range;
+        const uint32_t note = pp->ranges[range].last_line_directive;
+        const bool noted = note != BUSTER_PP_NONE;
+        pp_note_system_run(pp, range, noted ? pp->line_directives[note].location : pp->ranges[range].base,
+                           noted ? pp->line_directives[note].system : pp->ranges[range].system);
+    }
+}
+
 BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
@@ -5200,6 +5300,10 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
         pp->datas[pp->files[context->file].data].guarded |= context->guard_taken;
     }
     pp->context_count -= 1;
+    if (context->kind == BUSTER_PP_CONTEXT_FILE)
+    {
+        pp_note_file_run(pp);
+    }
     if (context->kind == BUSTER_PP_CONTEXT_FILE && pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind == BUSTER_PP_CONTEXT_FILE)
     {
         // Back after the #include's line.
@@ -10081,6 +10185,7 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
             context->conditional_base = pp->conditional_count;
             pp->file_change_token = pp->output.count;
             pp->file_change_location = pp->ranges[range].base;
+            pp_note_system_run(pp, range, pp->ranges[range].base, pp->ranges[range].system);
             pp->include_depth += pp->context_count > 1;
         }
     }
@@ -11142,6 +11247,7 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
             record->first_line_directive = index;
         }
         record->last_line_directive = index;
+        pp_note_system_run(pp, range, location, pp->line_directives[index].system);
     }
 }
 
@@ -15081,6 +15187,11 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
+    // A deferred history records nothing until pp_history_ensure (PPOptions.defer_history); its run prints no
+    // diagnostic (pp_run), but this setup's are printed, its fatal errors among them.
+    pp->history_deferred = options->defer_history && !options->no_history;
+    pp->history_quiet = options->quiet;
+    pp->options.no_history |= pp->history_deferred;
     const PPPrepare prepare = pp_prepare_options(options);
     pp->vectorized = prepare.vectorized;
     pp->refine_flags = prepare.refine_flags;
@@ -15129,7 +15240,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->invocations = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
     pp->argument_records = pp_array(pp, &result, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
     pp->capture_frames = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
-    if (result && !options->no_history)
+    if (result && !pp->options.no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
         // table that outgrows its slice reserves a large arena, avoiding eight mappings/advice calls on small units.
@@ -15302,7 +15413,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     return result;
 }
 
-static void pp_release(Preprocessor* pp)
+static void pp_release_unit(Preprocessor* pp)
 {
     pp_tokens_release(&pp->output);
     pp_tokens_release(&pp->arguments);
@@ -15326,6 +15437,18 @@ static void pp_release(Preprocessor* pp)
         arena_release(&pp->arrays[i]);
     }
     *pp = (Preprocessor){ 0 };
+}
+
+// Releases a unit, and the replay that recorded its deferred history (PPOptions.defer_history), which shares its file
+// cache and has no replay of its own.
+static void pp_release(Preprocessor* pp)
+{
+    if (pp->history_replay != 0)
+    {
+        pp_release_unit(pp->history_replay);
+    }
+    arena_release(&pp->history_replay_arena);
+    pp_release_unit(pp);
 }
 
 static void pp_resolve_keywords(Preprocessor* pp);
@@ -15465,8 +15588,9 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
 }
 
 // Preprocesses the main file: the prelude (pp_run_prelude), then the file. The output is pp->output, with keywords'
-// kinds. Returns false if there were errors.
-static bool pp_run(Preprocessor* pp, const char* main_path)
+// kinds. Returns false if there were errors. pp_run's work, which a deferred history's replay does again
+// (pp_history_record).
+static bool pp_preprocess_file(Preprocessor* pp, const char* main_path)
 {
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
@@ -15486,9 +15610,8 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     return result;
 }
 
-// pp_run for a main file in memory, `length` bytes at `bytes`, named `name` (which must outlive the run), as clang names
-// its standard input <stdin>: test-preprocessor's fuzz runs give it the text clang reads.
-static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
+// pp_preprocess_file for a main file in memory, `length` bytes at `bytes`, named `name`: pp_run_source's work.
+static bool pp_preprocess_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
 {
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_virtual_file(pp, name, (const char*)bytes, length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
@@ -15506,6 +15629,296 @@ static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* byt
         result = false;
     }
     return result;
+}
+
+// Whether two streams are the same, token for token.
+static bool pp_tokens_same(const PPTokens* a, const PPTokens* b)
+{
+    return a->count == b->count && memcmp(a->kinds, b->kinds, a->count) == 0 && memcmp(a->flags, b->flags, a->count) == 0 &&
+           memcmp(a->values, b->values, (uint64_t)a->count * sizeof(uint32_t)) == 0 && memcmp(a->locations, b->locations, (uint64_t)a->count * sizeof(uint32_t)) == 0;
+}
+
+// Records a deferred history (PPOptions.defer_history): preprocesses the unit again as pp_run or pp_run_source ran it,
+// with history, into a preprocessor of its own (in an arena of its own) with the same options, file cache, intern table
+// and time, which prints the diagnostics if `report` says so, and takes its history, which the replay keeps until
+// pp_release. The replay must be the run again: its result, its errors, warnings and fatal error, and its output, token
+// for token. One that isn't (it ran out of memory for its history, say, which an empty output wouldn't show), or can't
+// be made, leaves the unit without history, and a fatal error says so.
+static void pp_history_record(Preprocessor* pp, bool report)
+{
+    pp->history_deferred = false;
+    const bool ran = pp->history_path != 0 || pp->history_name != 0;
+    pp->history_replay_arena = ran ? arena_reserve(sizeof(Preprocessor) + 64) : (Arena){ 0 };
+    Preprocessor* replay = arena_push(&pp->history_replay_arena, sizeof(Preprocessor), _Alignof(Preprocessor));
+    PPOptions options = pp->options;
+    options.no_history = false;
+    options.defer_history = false;
+    options.quiet = !report;
+    options.timing = false;
+    options.files = pp->cache;
+    const bool initialized = replay != 0 && pp_initialize(replay, &options, pp->table);
+    bool same = initialized;
+    if (initialized)
+    {
+        // The unit's time, which __DATE__, __TIME__ and __TIMESTAMP__ give.
+        memcpy(replay->date, pp->date, sizeof(pp->date));
+        memcpy(replay->time, pp->time, sizeof(pp->time));
+        memcpy(replay->timestamp, pp->timestamp, sizeof(pp->timestamp));
+        replay->has_epoch = pp->has_epoch;
+        const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
+                                                    pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
+        same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
+               replay->warnings == pp->history_warnings && pp_tokens_same(&replay->output, &pp->output);
+    }
+    if (same)
+    {
+        pp->history = replay->history;
+        pp->history_count = replay->history_count;
+        pp->history_capacity = replay->history_capacity;
+        pp->substitutions = replay->substitutions;
+        pp->substitution_count = replay->substitution_count;
+        pp->substitution_capacity = replay->substitution_capacity;
+        pp->generated = replay->generated;
+        pp->generated_count = replay->generated_count;
+        pp->generated_capacity = replay->generated_capacity;
+        pp->history_sources = replay->history_sources;
+        pp->history_source_count = replay->history_source_count;
+        pp->history_source_capacity = replay->history_source_capacity;
+        pp->history_runs = replay->history_runs;
+        pp->history_run_count = replay->history_run_count;
+        pp->history_run_capacity = replay->history_run_capacity;
+        // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
+        // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
+        pp->diagnostic_include_range = replay->diagnostic_include_range;
+        pp->history_replay = replay;
+    }
+    else
+    {
+        if (replay != 0)
+        {
+            pp_release_unit(replay);
+        }
+        arena_release(&pp->history_replay_arena);
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, !ran         ? "no expansion history: the translation unit wasn't run by pp_run or pp_run_source" :
+                                              !initialized ? "can't preprocess the translation unit again for its expansion history (out of memory)" :
+                                                             "the translation unit gave another result when preprocessed again for its expansion history");
+    }
+}
+
+// The end of a run, with its result: its outcome is kept for a replay to match (pp_history_record). Then, for a deferred
+// run (PPOptions.defer_history), the diagnostics after it are printed as the options ask, and its own, which it counted
+// without printing them, are printed with their notes by recording the history, as the unit's own run would have
+// printed them.
+static void pp_history_report(Preprocessor* pp, bool result)
+{
+    pp->history_result = result;
+    pp->history_fatal = pp->fatal;
+    pp->history_errors = pp->errors;
+    pp->history_warnings = pp->warnings;
+    if (pp->history_deferred)
+    {
+        pp->options.quiet = pp->history_quiet;
+        if (!pp->history_quiet && (pp->errors != 0 || pp->warnings != 0))
+        {
+            pp_history_record(pp, true);
+        }
+    }
+}
+
+// The unit's expansion history, recorded now if PPOptions.defer_history put it off. A reader of the history
+// (pp_history_at, the history's records) given a unit whose history may be deferred calls this first, as
+// pp_diagnose_output and parse_print_diagnostics do. Returns whether there is a history: a unit with
+// PPOptions.no_history, run otherwise than by pp_run or pp_run_source, or whose replay fails has none.
+static bool pp_history_ensure(Preprocessor* pp)
+{
+    if (pp->history_deferred)
+    {
+        pp_history_record(pp, false);
+    }
+    return pp->history != 0;
+}
+
+// Preprocesses the main file (pp_preprocess_file); with PPOptions.defer_history, then prints the diagnostics the run
+// counted (pp_history_report). The output is pp->output, with keywords' kinds. Returns false if there were errors, the
+// replay's fatal error among them.
+static bool pp_run(Preprocessor* pp, const char* main_path)
+{
+    pp->history_path = main_path;
+    // A deferred run counts its diagnostics without printing them, which its end does (pp_history_report).
+    pp->options.quiet |= pp->history_deferred;
+    const bool result = pp_preprocess_file(pp, main_path);
+    pp_history_report(pp, result);
+    return result && !pp->fatal;
+}
+
+// pp_run for a main file in memory, `length` bytes at `bytes`, named `name` (which, like the bytes, must outlive the
+// run and its replay), as clang names its standard input <stdin>: test-preprocessor's fuzz runs give it the text clang
+// reads.
+static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
+{
+    pp->history_name = name;
+    pp->history_bytes = bytes;
+    pp->history_length = length;
+    pp->options.quiet |= pp->history_deferred;
+    const bool result = pp_preprocess_source(pp, name, bytes, length);
+    pp_history_report(pp, result);
+    return result && !pp->fatal;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// System headers
+
+// A place in the ranges and their line notes for locations that mostly increase: the range found last, its next line
+// note, the location the level was last set at, and that level (pp_system_level_next).
+typedef struct PPLevelCursor PPLevelCursor;
+struct PPLevelCursor
+{
+    uint32_t range;
+    uint32_t note;
+    uint32_t applied;
+    uint8_t level;
+};
+
+// The system level (BUSTER_PP_USER_FILE, BUSTER_PP_SYSTEM_FILE or BUSTER_PP_EXTERN_C_FILE) at `location`: its range's at
+// its inclusion's start, then its line notes' up to it; a place in no range (0) is a user file's. The cursor starts from
+// where it was when `location` is in its range at or after the last note it applied, and looks the range up otherwise.
+static uint8_t pp_system_level_next(const Preprocessor* pp, PPLevelCursor* cursor, uint32_t location)
+{
+    const PPRange* range = cursor->range < pp->range_count ? &pp->ranges[cursor->range] : 0;
+    const bool inside = range != 0 && location >= range->base && location - range->base < range->length;
+    if (!inside || location < cursor->applied)
+    {
+        cursor->range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+        const bool found = cursor->range < pp->range_count;
+        cursor->level = found ? pp->ranges[cursor->range].system : BUSTER_PP_USER_FILE;
+        cursor->note = found ? pp->ranges[cursor->range].first_line_directive : BUSTER_PP_NONE;
+        cursor->applied = found ? pp->ranges[cursor->range].base : 0;
+    }
+    while (cursor->note < pp->line_directive_count && pp->line_directives[cursor->note].location <= location)
+    {
+        cursor->level = pp->line_directives[cursor->note].system;
+        cursor->applied = pp->line_directives[cursor->note].location;
+        cursor->note = pp->line_directives[cursor->note].next_in_range;
+    }
+    return cursor->range < pp->range_count ? cursor->level : BUSTER_PP_USER_FILE;
+}
+
+// pp_system_level_next for one location.
+static uint8_t pp_system_level_at(const Preprocessor* pp, uint32_t location)
+{
+    PPLevelCursor cursor = {
+        .range = BUSTER_PP_NONE,
+        .note = BUSTER_PP_NONE,
+    };
+    return pp_system_level_next(pp, &cursor, location);
+}
+
+// Expansion location, including argument forwarding and generated tokens, determines where a definition was written: a
+// macro defined in a system header but invoked in ordinary source isn't in a system header. `origin` is output token
+// `token`'s (pp_history_at's): the place is the begin of the outermost expansion it came from, or the anchor of a paste
+// or stringification, or for an argument read from a file, the token's own location. Returns 0 when its history doesn't
+// lead to a location.
+static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    bool valid = token < pp->output.count && pp->output.locations != 0;
+    uint32_t location = valid ? pp->output.locations[token] : 0;
+    const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
+        {
+            valid = index < pp->substitution_count;
+            origin = valid ? pp->substitutions[index].source : 0;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED)
+        {
+            valid = index < pp->generated_count;
+            location = valid ? pp->generated[index].anchor : location;
+            origin = valid ? pp->generated[index].expansion : 0;
+        }
+        else
+        {
+            valid = kind == 0 && index < pp->history_count;
+            location = valid ? pp->history[index].begin : location;
+            origin = valid ? pp->history[index].parent : 0;
+        }
+    }
+    valid &= origin == 0;
+    return valid ? location : 0;
+}
+
+// Every output token's system level, in `levels` (room for pp->output.count), by the expansion history: its expansion
+// location's (pp_expansion_location, followed once per run of one origin), or its own location's for a token no
+// expansion made. The history must be recorded (pp_history_ensure). This is pp_system_levels' twin, and the judgment
+// where the runs can't make it (pp->system_runs_inexact).
+static __attribute__((unused)) void pp_system_levels_history(const Preprocessor* pp, uint8_t* levels)
+{
+    PPLevelCursor cursor = {
+        .range = BUSTER_PP_NONE,
+        .note = BUSTER_PP_NONE,
+    };
+    uint32_t run = 0;
+    uint32_t origin = 0;
+    uint32_t expansion = 0;
+    for (uint32_t i = 0; i < pp->output.count; i += 1)
+    {
+        while (run < pp->history_run_count && pp->history_runs[run].token <= i)
+        {
+            run += 1;
+        }
+        const uint32_t run_origin = run != 0 ? pp->history_runs[run - 1].origin : 0;
+        expansion = run_origin != 0 && run_origin != origin ? pp_expansion_location(pp, i, run_origin) : expansion;
+        origin = run_origin;
+        levels[i] = pp_system_level_next(pp, &cursor, origin != 0 ? expansion : pp->output.locations[i]);
+    }
+}
+
+// Every output token's system level, in `levels` (room for pp->output.count), from the runs the main loop kept
+// (PPSystemRun), without the history. A token a macro made (BUSTER_PP_FROM_MACRO) has its run's: where the main loop read
+// the invocation it came from, which is its expansion location. Another has its own location's, its run's when it is in
+// the run's range at or after the run's start, as the file's text is, and otherwise looked up (pp_system_level_at). 64
+// tokens at a time: one compare finds the tokens a macro made, four the locations in the run's part of its range, and
+// the run's level is stored to all of them. Only for runs the main loop could make exactly (!pp->system_runs_inexact);
+// pp_system_levels_history is the twin.
+static __attribute__((unused)) void pp_system_levels(const Preprocessor* pp, uint8_t* levels)
+{
+    const PPTokens* out = &pp->output;
+    const __m512i made = _mm512_set1_epi8(BUSTER_PP_FROM_MACRO);
+    for (uint32_t r = 0; r <= pp->system_run_count; r += 1)
+    {
+        // The tokens before the first run, then each run's.
+        const PPSystemRun* run = r != 0 ? &pp->system_runs[r - 1] : 0;
+        const uint32_t begin = run != 0 ? run->token : 0;
+        const uint32_t end = r < pp->system_run_count ? pp->system_runs[r].token : out->count;
+        const bool ranged = run != 0 && run->range < pp->range_count;
+        const uint32_t from = ranged ? run->from : 0;
+        const uint32_t span = ranged ? pp->ranges[run->range].base + pp->ranges[run->range].length - from : 0;
+        const __m512i froms = _mm512_set1_epi32((int)from);
+        const __m512i spans = _mm512_set1_epi32((int)span);
+        const __m512i level = _mm512_set1_epi8((char)(run != 0 ? run->level : BUSTER_PP_USER_FILE));
+        for (uint32_t i = begin; i < end; i += 64)
+        {
+            const __mmask64 lanes = _bzhi_u64(~0ull, end - i < 64 ? end - i : 64);
+            const __mmask64 macro = _mm512_mask_test_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, out->flags + i), made);
+            uint64_t inside = 0;
+            for (uint32_t g = 0; g < 4; g += 1)
+            {
+                const __mmask16 group = (__mmask16)(lanes >> (16 * g));
+                const __m512i offsets = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(group, out->locations + i + 16 * g), froms);
+                inside |= (uint64_t)_mm512_mask_cmplt_epu32_mask(group, offsets, spans) << (16 * g);
+            }
+            _mm512_mask_storeu_epi8(levels + i, lanes, level);
+            uint64_t others = lanes & ~macro & ~inside;
+            while (others != 0)
+            {
+                const uint32_t k = (uint32_t)_tzcnt_u64(others);
+                levels[i + k] = pp_system_level_at(pp, out->locations[i + k]);
+                others &= others - 1;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -17273,6 +17686,8 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     bool markers = true;
     const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
+    // -E reads no history but its diagnostics' notes, which record it when there are diagnostics.
+    options.defer_history = true;
     if (arena.base == 0)
     {
         fprintf(stderr, "fatal error: can't reserve memory\n");

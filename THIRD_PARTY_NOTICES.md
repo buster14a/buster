@@ -62,6 +62,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/branch_sizing.c`, `src/buster/compiler/branch_sizing_benchmark.c`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/) | Original branch-sizing integration, lengths-only SIMD implementation, scalar reference, tests, timing and scaling harnesses, and generated observations for #305; Default. Existing repository generators supply the inputs. AMD's Zen 5 guide supplies architectural guidance, not copied implementation. Clang, GNU as and Linux perf run externally; no tool implementation or external fixture corpus is imported. The measurement record identifies source revisions, compiler/CPU identities, exact commands, hashes and qualification limits. |
 | `src/buster/compiler/x86_semantics.c`, `src/buster/compiler/x86_semantics_test.c`, `src/buster/compiler/x86_semantics_benchmark.c`, `docs/x86-semantics.md` | Original form-effects tables, immediate contracts, form choice, tests, benchmark and documentation; Default. Intel and AMD manuals supply architectural facts, not copied implementation. The existing encoder catalogue and branch-sizing generator are reused; original fixtures execute on the processor, and GNU as runs externally as a byte oracle. The benchmark's measurement helpers are original to the module. No external implementation or fixture corpus is imported. |
 | `src/buster/compiler/assembler.c`, `src/buster/compiler/assembler_words.c`, `src/buster/compiler/assembler_test.c`, `src/buster/compiler/assembler_benchmark.c`, `src/buster/compiler/x86_match.c`, `docs/assembler.md` | Original assembly frontend, register classifier, matcher, tests, benchmark and documentation; Default. Encoder form facts and the project's validation and ELF interfaces are reused. GNU as and Clang run externally on original fixtures; their implementation is not imported. uops.info supplies measured instruction costs. The digit pair/quartet multiply-add reduction is implemented from the arithmetic, without copied source. |
+| `src/buster/compiler/assembler_sections.c`, `src/buster/compiler/assembler_cfi.c`, `src/buster/compiler/assembler_compat_test.c`, `src/buster/compiler/assembler_corpus_test.c`, `examples/assembler/compiler-corpus.c`, `examples/assembler/compiler-caller.c` | Original GNU assembly section/CFI adapters, differential fixtures and independent executable/unwind corpus; Default. GNU as documentation and observed output supply syntax/encoding behavior; ELF and DWARF describe format facts. GCC 16.2.1 and Clang 23.1.1 generate assembly at test time from the original C corpus, and GNU as runs externally as its object oracle. No external implementation or fixture corpus is incorporated. The recovered syntax/corpus work is this same repository's original stopped #233 attempt; its source and recovery boundaries are recorded with the qualification evidence. |
 | `src/buster/compiler/x86_zen5.c`, `src/buster/compiler/x86_zen5_measure.c`, `src/buster/compiler/x86_zen5_test.c`, `docs/x86-zen5.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-zen5-2026-10-22/) | Original partial instruction-cost model, C microbenchmark generator, tests and hardware observations; Default. Inputs are this repository's encoder forms and original operand fixtures executed on the owner's Ryzen 7 9700X. No external timing dataset or benchmark implementation is imported. Clang and Linux perf are external tools; PMCx0C1 is the architectural retired-macro-op event, not executed micro-ops. The guide records the generation procedure and evidence. |
 | `src/buster/compiler/x86_target.c`, `src/buster/compiler/x86_target_forms.c`, `src/buster/compiler/x86_target_test.c`, `docs/x86-target.md` | Original target policy, form requirement rows, tests, benchmark and documentation; Default. CPUID fields and psABI levels are architectural facts. Macro/profile and builtin-query data were checked against Clang 23.1.3; the live tests rerun Clang as an external oracle. LLVM's target parser, target macro and host-detection sources were consulted for behavior, not copied. The existing encoder's original form-family macros are reused. Sources and reproduction are recorded in `docs/x86-target.md`. |
 | `src/buster/compiler/x86_64_disassembler.c`, `src/buster/compiler/x86_64_disassembly.c`, `src/buster/compiler/x86_64_disassembler_cli.c`, `src/buster/compiler/x86_64_disassembler_test.c`, `examples/disassembler/corpus.c`, `docs/x86-64-disassembler.md` | Original decoder, bounded formatter/command, tests, C corpus and documentation; Default. Decoder indices are built from this repository's encoder catalogue, and generated test operands use its existing generator. Independent raw-byte fixtures are handwritten. GNU as/objdump and Clang run externally as oracles for locally authored inputs; no implementation or external test corpus is imported. uops.info and ISA manuals supply design measurements and instruction facts, not copied implementation. |
@@ -378,33 +379,6 @@ The original `c_builtin_intrinsic_types.c` decoder and tests use the same tag's
 references. These modules contain no copied LLVM implementation or fixtures.
 
 ## Review limits and distribution
-
-### Performance publication tools
-
-`tools/performance/bmf*.c`, `tools/performance/build.sh` and the accompanying
-format/tool documentation are original project contributions under the default
-terms. They use the existing manifest schema as their contract. Arrow IPC is
-decoded by Apache nanoarrow 0.7.0 at
-`2cfba631b40886f1418a463f3b7c4552c8ae0dc7`; its unmodified amalgamation and
-flatcc runtime remain **Apache-2.0 without the LLVM exception**. Their licenses,
-ASF NOTICE, embedded copyrights, generator procedure and source digests are
-retained under `tools/performance/vendor/nanoarrow` and its parent README.
-Unmodified yyjson 0.12.0 at `8b4a38dc994a110abaec8a400615567bd996105f` retains
-YaoYuan's MIT terms and copyright in `tools/performance/vendor/yyjson`.
-OpenSSL, PCRE2 and libcurl are external dynamic dependencies, not incorporated
-source. The retained buster-performance examples are independent validation
-inputs produced by Arrow JavaScript 21.1.0, not fixtures copied into Buster.
-
-`web/perf/data.mjs`, `web/tests/*` and `tools/performance/serve.c` are original
-reader, comparison, browser-test and localhost serving code under the default
-terms. The browser requires JavaScript/BigInt and Web Crypto; its tests use
-external Playwright 1.62.1. `web/perf/vendor/arrow/Arrow.es2015.min.js`,
-`LICENSE.txt` and `NOTICE.txt` are unchanged Apache Arrow JavaScript 21.1.0
-distribution files, from npm artifact `apache-arrow-21.1.0.tgz`, SHA-256
-`fa3fd5781698838eafc0f74f5ae35ab0bf13bb8cb227b3f57d40bf3b34055d72`.
-They retain **Apache-2.0 without the LLVM exception**, the ASF NOTICE and the
-distribution's own embedded attribution. The distributed JS file's SHA-256 is
-`d3f0ded2a2bdd1208232b942f8e4810f7a402564fac3c78b4574158cd542acb9`.
 
 The record covers the pinned tree and this adoption's changes. Unmerged PRs,
 future imports and external system libraries are not silently covered.

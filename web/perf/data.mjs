@@ -1,344 +1,238 @@
-// Browser-side Arrow reading. Exact values survive ingestion and inspection;
-// conversion to Number is confined to physical floating types and plot pixels.
+// First-party dataset validation, immutable resource loading and comparison.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-export class JsonNumber
+import {BYTE_LIMIT, CELL_LIMIT, ROW_LIMIT, JsonNumber, parseExactJSON, rational, compareRational, exactText, median, subtract, divide, sha256} from './types.mjs';
+import {readArrow, readJSONL, signature} from './arrow.mjs';
+export * from './types.mjs';
+export {readArrow, readJSONL, signature} from './arrow.mjs';
+
+const demand = (condition, reason) => { if (!condition) throw new Error(reason); };
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof JsonNumber);
+const scalarEqual = (left, right) =>
 {
-    constructor(text) { this.text = text; }
-    toString() { return this.text; }
+    const a = rational(left);
+    const b = rational(right);
+    return a && b ? compareRational(a, b) === 0 : left === right;
+};
+
+function validTimestamp(text)
+{
+    const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/u.exec(text);
+    if (!parts) return false;
+    const [year, month, day, hour, minute, second] = parts.slice(1, 7).map(Number);
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return month >= 1 && month <= 12 && day >= 1 && day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] && hour <= 23 && minute <= 59 && second <= 59 && (!parts[7] || Number(parts[8]) <= 23 && Number(parts[9]) <= 59);
 }
 
-export function parseExactJSON(text)
+export function validateManifest(manifest, canonical)
 {
-    const tokens = [];
-    let output = '';
-    let quoted = false;
-    let escaped = false;
-    for (let i = 0; i < text.length; ++i)
+    const tasks = [{schema: canonical, value: manifest, parent: -1, kind: 'all', valid: true, depth: 0, oneOf: null, matches: 0}];
+    const push = (schema, value, parent, kind = 'all') =>
     {
-        const c = text[i];
-        if (quoted)
+        demand(tasks.length < 262144 && tasks[parent].depth < 128, 'Manifest schema work budget exceeded');
+        tasks.push({schema, value, parent, kind, valid: true, depth: tasks[parent].depth + 1, oneOf: null, matches: 0});
+    };
+    for (let cursor = 0; cursor < tasks.length; ++cursor)
+    {
+        const task = tasks[cursor];
+        const s = task.schema;
+        const v = task.value;
+        if (s === false) { task.valid = false; continue; }
+        if (s === true) continue;
+        if (s.$ref)
         {
-            output += c;
-            if (escaped) escaped = false;
-            else if (c === '\\') escaped = true;
-            else if (c === '"') quoted = false;
+            demand(s.$ref.startsWith('#/$defs/') && canonical.$defs[s.$ref.slice(8)], 'Unsupported canonical schema reference');
+            push(canonical.$defs[s.$ref.slice(8)], v, cursor);
         }
-        else if (c === '"')
+        if (s.type)
         {
-            quoted = true;
-            output += c;
+            const number = rational(v);
+            task.valid &&= s.type === 'object' ? object(v) : s.type === 'array' ? Array.isArray(v) : s.type === 'string' ? typeof v === 'string' : s.type === 'boolean' ? typeof v === 'boolean' : s.type === 'null' ? v === null : s.type === 'number' ? v instanceof JsonNumber && number !== null : s.type === 'integer' ? v instanceof JsonNumber && number !== null && number.n % number.d === 0n : false;
         }
-        else if (c === '-' || (c >= '0' && c <= '9'))
+        if (Object.hasOwn(s, 'const')) task.valid &&= scalarEqual(v, s.const);
+        if (s.enum) task.valid &&= s.enum.some(option => scalarEqual(v, option));
+        if (v instanceof JsonNumber)
         {
-            const start = i;
-            while (i + 1 < text.length && !/[\s,\]}:]/u.test(text[i + 1])) ++i;
-            const number = text.slice(start, i + 1);
-            if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/u.test(number)) throw new Error('Invalid JSON number');
-            output += JSON.stringify(`\u0000buster-number:${tokens.length}`);
-            tokens.push(number);
+            const value = rational(v);
+            for (const [name, sign, exclusive] of [['minimum', -1, false], ['maximum', 1, false], ['exclusiveMinimum', -1, true], ['exclusiveMaximum', 1, true]])
+            {
+                if (Object.hasOwn(s, name))
+                {
+                    const bound = rational(s[name]);
+                    const comparison = value && bound ? compareRational(value, bound) : null;
+                    task.valid &&= comparison !== null && (sign < 0 ? exclusive ? comparison > 0 : comparison >= 0 : exclusive ? comparison < 0 : comparison <= 0);
+                }
+            }
         }
-        else output += c;
-    }
-    return JSON.parse(output, (_key, value) =>
-    {
-        if (typeof value === 'string' && value.startsWith('\u0000buster-number:'))
+        if (typeof v === 'string')
         {
-            const index = value.slice(15);
-            if (!/^(0|[1-9][0-9]*)$/u.test(index) || tokens[index] === undefined) throw new Error('Invalid numeric marker');
-            return new JsonNumber(tokens[index]);
+            let length = 0;
+            for (const _point of v) ++length;
+            task.valid &&= (s.minLength === undefined || length >= s.minLength) && (s.maxLength === undefined || length <= s.maxLength);
+            if (s.pattern)
+            {
+                const match = new RegExp(s.pattern, 'u').exec(v);
+                task.valid &&= match !== null && match.index === 0 && match[0].length === v.length;
+            }
+            if (s.format === 'date-time') task.valid &&= validTimestamp(v);
+            if (s.format === 'uri')
+            {
+                try
+                {
+                    const url = new URL(v);
+                    task.valid &&= url.protocol === 'https:' && !!url.hostname && !url.username && !url.password && !url.hash && !/[\s\\\u0000-\u001f]/u.test(v);
+                }
+                catch { task.valid = false; }
+            }
         }
-        if (typeof value === 'string' && value.includes('\u0000')) throw new Error('Embedded NUL is unsupported');
-        return value;
-    });
-}
-
-export class Decimal
-{
-    constructor(unscaled, scale)
-    {
-        this.unscaled = BigInt(unscaled);
-        this.scale = scale;
-    }
-    toString()
-    {
-        const sign = this.unscaled < 0n ? '-' : '';
-        let digits = (this.unscaled < 0n ? -this.unscaled : this.unscaled).toString();
-        if (this.scale <= 0) return sign + digits + '0'.repeat(-this.scale);
-        digits = digits.padStart(this.scale + 1, '0');
-        return `${sign}${digits.slice(0, -this.scale)}.${digits.slice(-this.scale)}`;
-    }
-    toJSON() { return this.toString(); }
-}
-
-export function decimalFromString(text, scale, precision)
-{
-    if (typeof text !== 'string' || !/^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/u.test(text)) throw new Error('Decimal must be an exact string');
-    if (Math.abs(scale) > 76 || precision > 76) throw new Error('Decimal mapping exceeds supported scale/precision');
-    const negative = text.startsWith('-');
-    const [whole, fraction = ''] = (negative ? text.slice(1) : text).split('.');
-    let digits = BigInt(whole + fraction);
-    const shift = scale - fraction.length;
-    if (shift >= 0) digits *= 10n ** BigInt(shift);
-    else
-    {
-        const divisor = 10n ** BigInt(-shift);
-        if (digits % divisor !== 0n) throw new Error('Decimal would round');
-        digits /= divisor;
-    }
-    if (digits.toString().length > precision) throw new Error('Decimal precision overflow');
-    return new Decimal(negative ? -digits : digits, scale);
-}
-
-function arrowValue(type, value)
-{
-    if (value === null) return null;
-    switch (type.typeId)
-    {
-        case 2:
-            if (type.bitWidth === 64 && typeof value !== 'bigint') throw new Error('Reader did not retain exact int64');
-            return value;
-        case 7:
+        if (Array.isArray(v))
         {
-            let integer = 0n;
-            for (let i = value.length - 1; i >= 0; --i) integer = (integer << 32n) | BigInt(value[i] >>> 0);
-            if ((value[value.length - 1] & 0x80000000) !== 0) integer -= 1n << BigInt(value.length * 32);
-            return new Decimal(integer, type.scale);
+            task.valid &&= (s.minItems === undefined || v.length >= s.minItems) && (s.maxItems === undefined || v.length <= s.maxItems);
+            if (s.items !== undefined) for (const item of v) push(s.items, item, cursor);
         }
-        case 12:
-        case 16: return Array.from(value, item => arrowValue(type.children[0].type, item));
-        case 13: return Object.fromEntries(type.children.map(field => [field.name, arrowValue(field.type, value[field.name])]));
-        default: return value;
-    }
-}
-
-export function readArrow(bytes)
-{
-    if (!globalThis.Arrow) throw new Error('The pinned Arrow reader is unavailable');
-    const native = globalThis.Arrow.tableFromIPC(bytes);
-    const fields = native.schema.fields;
-    const names = new Set();
-    for (const field of fields)
-    {
-        if (names.has(field.name)) throw new Error('Duplicate Arrow field');
-        names.add(field.name);
-    }
-    const rows = [];
-    for (let r = 0; r < native.numRows; ++r)
-    {
-        const row = Object.create(null);
-        for (const field of fields) row[field.name] = arrowValue(field.type, native.getChild(field.name).get(r));
-        rows.push(row);
-    }
-    return {fields, rows, native};
-}
-
-function jsonValue(field, value)
-{
-    const type = field.type;
-    if (value === null)
-    {
-        if (!field.nullable) throw new Error(`Null in nonnullable ${field.name}`);
-        return null;
-    }
-    switch (type.typeId)
-    {
-        case 2:
+        if (object(v))
         {
-            const wide = type.bitWidth === 64;
-            const text = wide ? value : value instanceof JsonNumber ? value.text : '';
-            if (typeof text !== 'string' || !/^-?(0|[1-9][0-9]*)$/u.test(text)) throw new Error(`Invalid integer mapping: ${field.name}`);
-            const integer = BigInt(text);
-            const limit = 1n << BigInt(type.bitWidth - (type.isSigned ? 1 : 0));
-            const minimum = type.isSigned ? -limit : 0n;
-            if (integer < minimum || integer >= limit) throw new Error('Integer overflow');
-            return wide ? integer : Number(integer);
+            for (const name of s.required ?? []) task.valid &&= Object.hasOwn(v, name);
+            for (const name of Object.keys(v))
+            {
+                if (Object.hasOwn(s.properties ?? {}, name)) push(s.properties[name], v[name], cursor);
+                else if (s.additionalProperties === false) task.valid = false;
+                else if (object(s.additionalProperties)) push(s.additionalProperties, v[name], cursor);
+            }
         }
-        case 7: return decimalFromString(value, type.scale, type.precision);
-        case 3:
+        if (s.oneOf)
         {
-            if (!(value instanceof JsonNumber)) throw new Error('Float must use JSON number');
-            const number = Number(value.text);
-            if (!Number.isFinite(number)) throw new Error('Nonfinite JSON float');
-            if (type.precision === 0) throw new Error('JSON float16 mapping is unavailable in this browser');
-            return type.precision === 1 ? Math.fround(number) : number;
+            task.oneOf = s.oneOf.length;
+            for (const alternative of s.oneOf) push(alternative, v, cursor, 'one');
         }
-        case 5:
-        case 20:
-            if (typeof value !== 'string') throw new Error('UTF-8 must use a JSON string');
-            return value;
-        case 6:
-            if (typeof value !== 'boolean') throw new Error('Boolean mapping mismatch');
-            return value;
-        case 4:
-        case 15:
-        case 19:
-            if (typeof value !== 'string') throw new Error('Binary must use base64');
-            return Uint8Array.from(atob(value), c => c.charCodeAt(0));
-        case 12:
-        case 16:
-            if (!Array.isArray(value)) throw new Error('List mapping mismatch');
-            return value.map(item => jsonValue(type.children[0], item));
-        case 13:
-            if (!value || Array.isArray(value) || Object.keys(value).length !== type.children.length) throw new Error('Struct mapping mismatch');
-            return Object.fromEntries(type.children.map(child => [child.name, jsonValue(child, value[child.name])]));
-        default: throw new Error(`Native-only Arrow type ${String(type)}`);
+        if (s.not) push(s.not, v, cursor, 'not');
     }
-}
-
-export function readJSONL(text, fields)
-{
-    const rows = [];
-    for (const line of text.split('\n'))
+    for (let i = tasks.length - 1; i >= 0; --i)
     {
-        if (!line.trim()) continue;
-        const row = parseExactJSON(line);
-        if (Array.isArray(row) || !row || Object.keys(row).length !== fields.length) throw new Error('JSONL field set differs');
-        rows.push(Object.fromEntries(fields.map(field =>
+        const task = tasks[i];
+        task.valid &&= task.oneOf === null || task.matches === 1;
+        if (task.parent >= 0)
         {
-            if (!Object.hasOwn(row, field.name)) throw new Error(`Missing exact field ${field.name}`);
-            return [field.name, jsonValue(field, row[field.name])];
-        })));
+            const parent = tasks[task.parent];
+            if (task.kind === 'one') parent.matches += task.valid;
+            else parent.valid &&= task.kind === 'not' ? !task.valid : task.valid;
+        }
     }
-    return rows;
-}
-
-export function exactText(value)
-{
-    if (value === null || value === undefined) return '∅';
-    if (value instanceof Decimal || value instanceof JsonNumber || typeof value === 'bigint') return value.toString();
-    if (ArrayBuffer.isView(value)) return btoa(String.fromCharCode(...value));
-    if (typeof value === 'object') return JSON.stringify(value, (_key, child) => typeof child === 'bigint' ? child.toString() : child);
-    return String(value);
-}
-
-export function equivalent(left, right, fields)
-{
-    return left.length === right.length && left.every((row, r) => fields.every(field => exactText(row[field.name]) === exactText(right[r][field.name])));
-}
-
-export function rational(value)
-{
-    if (value instanceof Decimal)
-    {
-        return value.scale >= 0 ? {n: value.unscaled, d: 10n ** BigInt(value.scale)} : {n: value.unscaled * 10n ** BigInt(-value.scale), d: 1n};
-    }
-    if (typeof value === 'bigint') return {n: value, d: 1n};
-    if (typeof value === 'number' && Number.isFinite(value))
-    {
-        const [mantissa, exponent = '0'] = value.toString().split('e');
-        const fraction = mantissa.split('.')[1]?.length ?? 0;
-        const shift = Number(exponent) - fraction;
-        const integer = BigInt(mantissa.replace('.', ''));
-        return shift >= 0 ? {n: integer * 10n ** BigInt(shift), d: 1n} : {n: integer, d: 10n ** BigInt(-shift)};
-    }
-    return null;
-}
-
-export const compareRational = (a, b) => a.n * b.d < b.n * a.d ? -1 : a.n * b.d > b.n * a.d ? 1 : 0;
-export const subtract = (a, b) => ({n: a.n * b.d - b.n * a.d, d: a.d * b.d});
-export const divide = (a, b) => ({n: a.n * b.d * (b.n < 0n ? -1n : 1n), d: a.d * (b.n < 0n ? -b.n : b.n)});
-
-export function coordinate(value, minimum, maximum)
-{
-    // Approximate only the exact difference/extent at the rendering boundary.
-    const extent = subtract(maximum, minimum);
-    if (extent.n === 0n) return 0.5;
-    const position = divide(subtract(value, minimum), extent);
-    return Number(position.n) / Number(position.d);
-}
-
-export function median(values)
-{
-    const ordered = [...values].sort(compareRational);
-    if (!ordered.length) return null;
-    const middle = Math.floor(ordered.length / 2);
-    if (ordered.length % 2) return ordered[middle];
-    const a = ordered[middle - 1];
-    const b = ordered[middle];
-    return {n: a.n * b.d + b.n * a.d, d: 2n * a.d * b.d};
-}
-
-export function rationalText(value, places = 6)
-{
-    if (!value) return 'unavailable';
-    const negative = value.n < 0n;
-    const numerator = negative ? -value.n : value.n;
-    const whole = numerator / value.d;
-    const fraction = ((numerator % value.d) * 10n ** BigInt(places) / value.d).toString().padStart(places, '0').replace(/0+$/u, '');
-    return `${negative ? '-' : ''}${whole}${fraction ? '.' + fraction : ''}`;
-}
-
-export async function sha256(bytes)
-{
-    const digest = await crypto.subtle.digest('SHA-256', bytes);
-    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    demand(tasks[0].valid, 'Manifest violates the canonical v1 schema');
+    return true;
 }
 
 export async function verifiedFetch(url, digest, size, signal)
 {
+    demand(typeof digest === 'string' && /^[0-9a-f]{64}$/u.test(digest), 'Invalid resource hash');
+    const expected = size === undefined ? null : BigInt(size);
+    demand(expected === null || expected >= 0n && expected <= BigInt(BYTE_LIMIT), 'Resource exceeds the reader byte budget');
     const response = await fetch(url, {signal, credentials: 'omit'});
-    if (!response.ok) throw new Error(`Resource unavailable (${response.status})`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (size !== undefined && BigInt(bytes.byteLength) !== BigInt(size)) throw new Error('Resource size mismatch');
-    if (await sha256(bytes) !== digest) throw new Error('Resource checksum mismatch');
+    demand(response.ok && response.body, `Resource unavailable (${response.status})`);
+    const chunks = [];
+    let length = 0;
+    const reader = response.body.getReader();
+    try
+    {
+        while (true)
+        {
+            const {done, value} = await reader.read();
+            if (done) break;
+            length += value.byteLength;
+            demand(length <= BYTE_LIMIT && (expected === null || BigInt(length) <= expected), 'Response exceeds its declared byte budget');
+            chunks.push(value);
+        }
+        demand(expected === null || BigInt(length) === expected, 'Resource size mismatch');
+    }
+    catch (error) { await reader.cancel().catch(() => {}); throw error; }
+    finally { reader.releaseLock(); }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    demand(await sha256(bytes) === digest, 'Resource checksum mismatch');
     return bytes;
 }
 
 export class Dataset
 {
-    constructor(manifest, url, digest)
+    constructor(manifest, url, digest, canonical)
     {
-        if (manifest.format !== 'buster-benchmark' || !(manifest.version instanceof JsonNumber) || manifest.version.text !== '1') throw new Error('Unsupported benchmark version');
+        validateManifest(manifest, canonical);
         const supported = new Set(['arrow-ipc', 'jsonl.arrow-mapping.v1', 'perfetto.protobuf']);
-        for (const capability of manifest.requires ?? []) if (!supported.has(capability)) throw new Error(`Unsupported required capability: ${capability}`);
+        for (const capability of manifest.requires ?? []) demand(supported.has(capability), `Unsupported required capability: ${capability}`);
         this.manifest = manifest;
-        this.url = new URL(url, location.href);
+        this.url = new URL(url, globalThis.location?.href ?? 'http://localhost/');
         this.digest = digest;
-        this.resources = new Map();
-        for (const resource of manifest.resources)
+        this.identities = Object.create(null);
+        for (const name of ['resources', 'tables', 'metrics', 'scopes', 'instruments', 'contexts', 'traces'])
         {
-            if (this.resources.has(resource.id)) throw new Error('Duplicate resource identity');
-            this.resources.set(resource.id, resource);
+            const entries = manifest[name] ?? [];
+            demand(entries.length <= 4096, 'Manifest identity budget exceeded');
+            this.identities[name] = new Map();
+            for (const entry of entries)
+            {
+                demand(!this.identities[name].has(entry.id), `Duplicate ${name} identity`);
+                this.identities[name].set(entry.id, entry);
+            }
+        }
+        this.resources = this.identities.resources;
+        let resourceBytes = 0n;
+        for (const resource of this.resources.values())
+        {
+            const size = BigInt(resource.bytes);
+            demand(size <= BigInt(BYTE_LIMIT) && size <= 18446744073709551615n, 'Resource byte count exceeds the reader budget');
+            resourceBytes += size;
+            if (resource.rows !== undefined) demand(BigInt(resource.rows) <= 18446744073709551615n, 'Resource row count overflows uint64');
+            this.resourceURL(resource.id);
+        }
+        demand(resourceBytes <= 256n * 1024n * 1024n, 'Dataset resource budget exceeded');
+        for (const context of manifest.contexts ?? []) for (const id of context.evidence ?? []) demand(this.resources.has(id), 'Unresolved context evidence');
+        for (const trace of manifest.traces ?? [])
+        {
+            demand(this.resources.get(trace.resource)?.format === 'perfetto-protobuf' && this.identities.contexts.get(trace.execution_id)?.kind === 'execution', 'Unresolved native trace/execution');
+            for (const id of trace.source_artifacts ?? []) demand(this.resources.has(id), 'Unresolved source artifact');
         }
         this.loaded = new Map();
+        this.materializedCells = 0;
     }
     resourceURL(id)
     {
         const resource = this.resources.get(id);
-        if (!resource) throw new Error(`Missing resource ${id}`);
+        demand(resource, `Missing resource ${String(id)}`);
         if (resource.url)
         {
             const url = new URL(resource.url);
-            if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error('Unsafe remote resource URL');
+            demand(url.protocol === 'https:' && !url.username && !url.password && !url.hash, 'Unsafe remote resource URL');
             return url;
         }
-        if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(resource.path) || resource.path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Unsafe local resource path');
+        demand(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(resource.path) && resource.path.split('/').every(part => part && part !== '.' && part !== '..'), 'Unsafe local resource path');
         const url = new URL(resource.path, this.url);
-        if (!url.href.startsWith(new URL('.', this.url).href)) throw new Error('Resource escapes dataset');
+        demand(url.href.startsWith(new URL('.', this.url).href), 'Resource escapes dataset');
         return url;
     }
     async resource(id, signal)
     {
         const resource = this.resources.get(id);
+        demand(resource, `Missing resource ${String(id)}`);
         return verifiedFetch(this.resourceURL(id), resource.sha256, resource.bytes, signal);
     }
     async table(id, signal)
     {
         if (this.loaded.has(id)) return this.loaded.get(id);
-        const definition = (this.manifest.tables ?? []).find(table => table.id === id);
-        if (!definition) throw new Error('Unknown table');
-        let fields;
+        const definition = this.identities.tables.get(id);
+        demand(definition, `Unknown table ${String(id)}`);
+        let schema;
         if (definition.schema)
         {
-            const schema = readArrow(await this.resource(definition.schema, signal));
-            if (schema.rows.length) throw new Error('Schema sidecar has observations');
-            fields = schema.fields;
+            demand(this.resources.get(definition.schema)?.format === 'arrow-ipc-stream', 'Invalid schema sidecar format');
+            schema = readArrow(await this.resource(definition.schema, signal));
+            demand(schema.rows.length === 0, 'Schema sidecar contains observations');
         }
         const rows = [];
         const seen = new Set();
+        let slots = 0;
         for (const part of definition.data)
         {
-            if (seen.has(part)) throw new Error('Repeated partition');
+            demand(!seen.has(part), 'Repeated ordered partition');
             seen.add(part);
             const resource = this.resources.get(part);
             const bytes = await this.resource(part, signal);
@@ -346,34 +240,56 @@ export class Dataset
             if (resource.format === 'arrow-ipc-stream')
             {
                 const arrow = readArrow(bytes);
-                if (fields && signature(fields) !== signature(arrow.fields)) throw new Error('Partition schema differs');
-                fields ??= arrow.fields;
+                demand(!schema || signature(schema.fields, schema.schema.metadata) === signature(arrow.fields, arrow.schema.metadata), 'Partition Arrow schema differs');
+                schema ??= arrow;
                 partition = arrow.rows;
+                slots += arrow.slots;
             }
-            else if (resource.format === 'jsonl' && definition.schema && fields) partition = readJSONL(new TextDecoder('utf-8', {fatal: true}).decode(bytes), fields);
-            else throw new Error(`Unavailable table reader: ${resource.format}`);
-            if (resource.rows !== undefined && BigInt(partition.length) !== BigInt(resource.rows)) throw new Error('Partition row count differs');
-            rows.push(...partition);
+            else
+            {
+                demand(resource.format === 'jsonl' && schema, 'JSONL requires an ordinary Arrow schema sidecar');
+                partition = readJSONL(new TextDecoder('utf-8', {fatal: true}).decode(bytes), schema.fields);
+                slots += partition.length * schema.schema.all.length;
+            }
+            demand(resource.rows === undefined || BigInt(partition.length) === BigInt(resource.rows), 'Partition row count differs');
+            demand(rows.length + partition.length <= ROW_LIMIT && slots + this.materializedCells <= CELL_LIMIT, 'Dataset materialized-row/cell budget exceeded');
+            for (const row of partition) rows.push(row);
         }
-        const result = {definition, fields, rows};
+        const fields = schema.fields;
+        const names = new Set(fields.map(field => field.name));
+        const column = name => demand(typeof name === 'string' && names.has(name), `Missing exact Arrow column: ${String(name)}`);
+        for (const name of ['dimensions', 'primary_key', 'order_by']) for (const field of definition[name] ?? []) column(field);
+        for (const [name, annotation] of Object.entries(definition.measurements ?? {}))
+        {
+            column(name);
+            for (const [collection, key] of [['metrics', 'metric_id'], ['scopes', 'scope_id'], ['instruments', 'instrument_id']]) demand(this.identities[collection].has(annotation[key]), 'Unresolved measurement identity');
+            for (const key of ['status_column', 'reason_column']) if (annotation[key]) column(annotation[key]);
+            if (annotation.sample_count?.column) column(annotation.sample_count.column);
+            for (const interval of annotation.intervals ?? []) { column(interval.low_column); column(interval.high_column); }
+            for (const name of Object.values(annotation.counter_quality_columns ?? {})) column(name);
+            for (const row of rows)
+            {
+                const status = annotation.status_column ? row[annotation.status_column] : 'ok';
+                if (row[name] === null || status !== 'ok') demand(status !== 'ok' && typeof row[annotation.reason_column] === 'string' && row[annotation.reason_column].length, 'Missing/invalid measurement has no status and reason');
+            }
+        }
+        const result = {definition, fields, rows, slots};
+        this.materializedCells += slots;
         this.loaded.set(id, result);
         return result;
     }
 }
 
-export function signature(fields)
-{
-    return JSON.stringify(fields.map(field => [field.name, String(field.type), field.nullable, field.type.children ? signature(field.type.children) : null]));
-}
-
+let schemaPromise;
 export async function loadDataset(entry, signal)
 {
-    const url = new URL(entry.manifest, location.href);
+    schemaPromise ??= fetch(new URL('./buster-manifest-v1.schema.json', import.meta.url), {credentials: 'omit'}).then(response => { demand(response.ok, 'Canonical schema unavailable'); return response.json(); });
+    const canonical = await schemaPromise;
+    const url = new URL(entry.manifest, globalThis.location?.href ?? import.meta.url);
     const bytes = await verifiedFetch(url, entry.sha256, entry.bytes, signal);
     const manifest = parseExactJSON(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
-    return new Dataset(manifest, url.href, entry.sha256);
+    return new Dataset(manifest, url.href, entry.sha256, canonical);
 }
-
 export function comparisonEligibility(dataset, table, annotation, left, right)
 {
     const reasons = [];
@@ -406,8 +322,9 @@ export function comparisonEligibility(dataset, table, annotation, left, right)
 
 export function comparePopulation(dataset, table, column, left, right)
 {
-    const annotation = table.definition.measurements[column];
-    const metric = dataset.manifest.metrics.find(item => item.id === annotation.metric_id);
+    const annotation = table.definition.measurements?.[column];
+    const metric = dataset.manifest.metrics?.find(item => item.id === annotation?.metric_id);
+    if (!annotation || !metric) return {eligible: false, classification: 'ineligible', reasons: ['No declared metric semantics'], uncertainty: 'not estimated'};
     const eligibility = comparisonEligibility(dataset, table, annotation, left, right);
     const valid = row => row[column] !== null && (!annotation.status_column || row[annotation.status_column] === 'ok') && rational(row[column]) !== null;
     const a = left.filter(valid);
@@ -416,6 +333,7 @@ export function comparePopulation(dataset, table, column, left, right)
     const candidate = median(b.map(row => rational(row[column])));
     const result = {baseline, candidate, delta: baseline && candidate ? subtract(candidate, baseline) : null, independentLeft: a.length, independentRight: b.length, excluded: left.length + right.length - a.length - b.length, ...eligibility};
     if (!eligibility.eligible || !baseline || !candidate) return {...result, classification: 'ineligible', uncertainty: 'not estimated'};
+    if (result.excluded) return {...result, eligible: false, classification: 'ineligible', reasons: ['Missing, invalid or censored observations; no complete-population inference'], uncertainty: 'not estimated'};
     const contract = eligibility.contract;
     const key = (row, columns) => JSON.stringify(columns.map(name => exactText(row[name])));
     const matchColumns = [...new Set([...contract.match_columns, ...Object.values(contract.identity_columns), ...(annotation.derivation?.denominator && table.fields.some(field => field.name === annotation.derivation.denominator) ? [annotation.derivation.denominator] : [])])];
@@ -427,6 +345,8 @@ export function comparePopulation(dataset, table, column, left, right)
     if ([...a, ...b].some(row => [...matchColumns, ...contract.independent_unit_columns, ...(contract.pair_columns ?? [])].some(name => row[name] === null || row[name] === undefined || row[name] === 'unknown'))) return {...result, eligible: false, classification: 'ineligible', reasons: ['Unknown matching or unit identity'], uncertainty: 'not estimated'};
     const matchSet = new Set(a.map(row => key(row, matchColumns)));
     if (b.some(row => !matchSet.has(key(row, matchColumns))) || a.some(row => !b.some(other => key(other, matchColumns) === key(row, matchColumns)))) return {...result, eligible: false, classification: 'ineligible', reasons: ['Unmatched populations'], uncertainty: 'not estimated'};
+    if (matchSet.size !== 1) return {...result, eligible: false, classification: 'ineligible', reasons: ['Select one matched condition or facet before estimating a population effect'], uncertainty: 'not estimated'};
+    if (contract.estimator === 'independent' && [...independentA].some(id => independentB.has(id))) return {...result, eligible: false, classification: 'ineligible', reasons: ['Overlapping experimental units cannot use an independent estimator'], uncertainty: 'not estimated'};
     let effects;
     if (contract.estimator === 'paired')
     {
@@ -448,7 +368,9 @@ export function comparePopulation(dataset, table, column, left, right)
         }
         if (seen.size !== pairs.size) return {...result, eligible: false, classification: 'ineligible', reasons: ['Incomplete pairs']};
         result.independentPairs = effects.length;
+        result.delta = median(effects);
     }
+    result.estimator = effects ? 'median of matched pair differences' : 'difference of independent population medians';
     let seed = 384;
     const random = size => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % size; };
     const estimates = [];
@@ -464,6 +386,6 @@ export function comparePopulation(dataset, table, column, left, right)
     const interval = estimates.length ? [estimates[25], estimates[974]] : null;
     const regression = interval && (metric.direction === 'lower' ? interval[0].n > 0n : metric.direction === 'higher' ? interval[1].n < 0n : false);
     const improvement = interval && (metric.direction === 'lower' ? interval[1].n < 0n : metric.direction === 'higher' ? interval[0].n > 0n : false);
-    const relative = baseline.n > 0n ? divide(subtract(candidate, baseline), baseline) : null;
+    const relative = baseline.n > 0n ? divide(result.delta, baseline) : null;
     return {...result, interval, relative, classification: regression ? 'regression' : improvement ? 'improvement' : interval ? 'uncertain' : 'insufficient independent units', uncertainty: interval ? '95% percentile bootstrap, 1,000 resamples of independent ' + (effects ? 'pairs' : 'units') : 'not estimated (fewer than two independent units)'};
 }

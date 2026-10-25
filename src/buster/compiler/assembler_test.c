@@ -99,6 +99,40 @@ static const char asm_test_function[] =
     ".section .rodata\n.balign 8\n.type bias,@object\n"
     "bias: .quad 3\n.size bias, 8\n";
 
+static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
+{
+    // GAS appends relaxed branch relocations after ones made during parsing. ELF permits that order; the shared
+    // comparator expects offset order. Normalize only the GNU copy, using the importer's already tested sorter.
+    // Instruction bytes, relocation fields/targets/addends, and Buster's own relocation order remain checked.
+    ImportElf elf;
+    bool valid = import_elf(&elf, bytes, ET_REL).error == IMPORT_ERROR_NONE;
+    for (uint32_t index = 1; valid && index < elf.section_count; index += 1)
+    {
+        const Elf64_Shdr header = import_section_header(&elf, index);
+        if (header.sh_type == SHT_RELA)
+        {
+            uint64_t count = 0;
+            valid = import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX && import_within(bytes.length, header.sh_offset, header.sh_size);
+            if (valid && count > 1)
+            {
+                const uint64_t saved = scratch->length;
+                const char* sorted = import_vector_sort_relocations(bytes.pointer + header.sh_offset, count, scratch);
+                valid = sorted != 0;
+                if (valid)
+                {
+                    memcpy(bytes.pointer + header.sh_offset, sorted, header.sh_size);
+                }
+                arena_pop_to(scratch, saved);
+            }
+        }
+    }
+    if (!valid)
+    {
+        snprintf(error, error_size, "cannot normalize GNU as relocation order");
+    }
+    return valid && object_view_open(view, (const uint8_t*)bytes.pointer, bytes.length, true, error, error_size);
+}
+
 static bool asm_test_oracle(AsmTest* test, const char* source, const char* directory, X86Architecture architecture)
 {
     const String8 text = {.pointer = (char*)source, .length = strlen(source)};
@@ -129,7 +163,7 @@ static bool asm_test_oracle(AsmTest* test, const char* source, const char* direc
         ObjectView ours;
         ObjectView theirs;
         char error[256] = {0};
-        passed = object.error == OBJECT_ERROR_NONE && object_view_open(&ours, object.bytes, object.size, false, error, sizeof(error)) && object_view_open(&theirs, (const uint8_t*)theirs_bytes.pointer, theirs_bytes.length, true, error, sizeof(error));
+        passed = object.error == OBJECT_ERROR_NONE && object_view_open(&ours, object.bytes, object.size, false, error, sizeof(error)) && asm_test_gnu_object(&theirs, theirs_bytes, &test->vector, error, sizeof(error));
         passed = passed && object_test_same_as(&ours, &theirs, error, sizeof(error));
         asm_test_check(test, passed, "GNU as sections/symbols/relocations", error);
     }
@@ -967,17 +1001,25 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
     arena_release(&files);
 }
 
+#include "assembler_compat_test.c"
+#include "assembler_corpus_test.c"
+
 static int run_assembler_tests(int count, char** arguments)
 {
     uint64_t seed = 1;
     uint32_t fuzz = 2000;
     bool cross_check = false;
+    bool keep = false;
     bool valid = true;
     for (int i = 0; i < count; i += 1)
     {
         if (strcmp(arguments[i], "--cross-check") == 0)
         {
             cross_check = true;
+        }
+        else if (strcmp(arguments[i], "--keep") == 0)
+        {
+            keep = true;
         }
         else if (strcmp(arguments[i], "--seed") == 0 && i + 1 < count)
         {
@@ -1084,7 +1126,6 @@ static int run_assembler_tests(int count, char** arguments)
                 ".data\nfirst: .byte 1\n.zero 200000000\n.byte 2\n.zero 200000000\n",
                 ".intel_syntax noprefix\nmov eax,[rax + -rsi]\n",
                 ".intel_syntax noprefix\nmov eax,[rax + - -rsi]\n",
-                ".intel_syntax noprefix\nmov eax,[rax + (rsi)]\n",
                 ".intel_syntax noprefix\n.quad rsi\n",
                 ".intel_syntax noprefix\nmov rax,offset rsi\n",
                 ".intel_syntax noprefix\nmov eax,dword ptr eax\n",
@@ -1153,7 +1194,7 @@ static int run_assembler_tests(int count, char** arguments)
         asm_test_register_diagnostics(&test);
         asm_test_numbers(&test);
         asm_test_valid_batches(&test, &random);
-        static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789.,:;[](){}%$@+-*/\\\"# \n\t";
+        static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789.,:;[](){}%$@+-*/<>=&|~!^\\\"# \n\t";
         for (uint32_t i = 0; i < fuzz; i += 1)
         {
             char source[512];
@@ -1171,6 +1212,7 @@ static int run_assembler_tests(int count, char** arguments)
         {
             asm_test_reader(&test, directory);
             asm_test_preprocessed(&test, directory);
+            asm_test_compatibility(&test, directory, cross_check);
             if (cross_check)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
@@ -1197,6 +1239,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_target_driver(&test, directory);
                 asm_test_preprocessing(&test, directory);
                 asm_test_preprocessed_spacing(&test, directory);
+                asm_test_compiler_corpus(&test, directory, keep);
             }
             const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)

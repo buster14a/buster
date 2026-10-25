@@ -3,14 +3,16 @@
 //
 // test-debug: independent line-machine decoding, scalar/vector bytes, guarded tails, input and capacity failures,
 // late-address patching, units written after others. --cross-check additionally asks readelf, gdb and perf to consume
-// an original fixed-layout three-function ELF with these five debug sections. GNU as supplies that fixture's CFI, not
-// this module: this checks debug consumption and integration with an unwinder, not a native code-generator unwind
-// producer.
+// an original fixed-layout three-function ELF with these five debug sections, as one unit and as two (its first
+// function's and the other two's, the second written at the first's sizes), linked by GNU ld and by the native writer,
+// which takes the two units in one descriptor. GNU as supplies that fixture's CFI, not this module: this checks debug
+// consumption and integration with an unwinder, not a native code-generator unwind producer.
 // benchmark-debug times validation, sizing and writing together, plus final address patching, into reused buffers.
 
 #define BUSTER_DEBUG_TEST_BYTES (1u << 20)
 
 static bool debug_test_native_write(const char* object_path, const char* executable_path, const DebugUnit* unit, const DebugOutput* output);
+static bool debug_test_native_units(const char* object_path, const char* executable_path, const DebugUnit* units, const DebugOutput* outputs, uint32_t unit_count);
 
 static uint64_t debug_test_leb(const uint8_t* bytes, uint64_t size, uint64_t* position, bool sign, bool* valid)
 {
@@ -522,7 +524,7 @@ static bool debug_test_profile(const char* output)
     return found;
 }
 
-static bool debug_test_consumers(bool keep, bool native)
+static bool debug_test_consumers(bool keep, bool native, bool split)
 {
     char directory[] = "/tmp/buster-debug-XXXXXX";
     bool valid = mkdtemp(directory) != 0;
@@ -573,9 +575,45 @@ static bool debug_test_consumers(bool keep, bool native)
     };
     DebugOutput output = debug_test_output(bytes, address_offsets, 3);
     valid &= bytes != 0;
-    if (valid)
+    // Split, the same functions and rows as two units: _start's, and debug_outer's and debug_leaf's, its rows from 0.
+    const DebugFunction second[] = {
+        functions[1],
+        functions[2],
+    };
+    DebugFunction rebased[2];
+    memcpy(rebased, second, sizeof(rebased));
+    rebased[0].first_row = 0;
+    rebased[1].first_row = 4;
+    const DebugUnit parts[2] = {
+        { .directory = unit.directory, .files = files, .file_count = 1, .functions = functions, .function_count = 1, .offsets = offsets, .lines = lines, .row_count = 4 },
+        { .directory = unit.directory, .files = files, .file_count = 2, .functions = rebased, .function_count = 2, .offsets = offsets + 4, .lines = lines + 4,
+          .row_count = 8 },
+    };
+    DebugOutput outputs[2] = { 0 };
+    if (valid && !split)
     {
         valid &= debug_write(&unit, &output, false) == DEBUG_OK && debug_finalize(&unit, &output, addresses) == DEBUG_OK;
+    }
+    else if (valid)
+    {
+        outputs[0] = output;
+        outputs[0].address_capacity = 1;
+        valid &= debug_write(&parts[0], &outputs[0], false) == DEBUG_OK && debug_finalize(&parts[0], &outputs[0], addresses) == DEBUG_OK;
+        outputs[1] = output;
+        outputs[1].line_addresses = address_offsets + 1;
+        outputs[1].address_capacity = 2;
+        for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            outputs[1].sections[section].bytes += outputs[0].sections[section].size;
+            outputs[1].sections[section].capacity -= outputs[0].sections[section].size;
+            outputs[1].bases[section] = outputs[0].sections[section].size;
+        }
+        valid &= debug_write(&parts[1], &outputs[1], false) == DEBUG_OK && debug_finalize(&parts[1], &outputs[1], addresses + 1) == DEBUG_OK;
+        // The two units' contributions, one after the other, for the fixture's sections.
+        for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            output.sections[section].size = outputs[0].sections[section].size + outputs[1].sections[section].size;
+        }
     }
     char assembly[512];
     char object[512];
@@ -623,7 +661,9 @@ static bool debug_test_consumers(bool keep, bool native)
     if (valid)
     {
         valid &= object_test_run(assemble, out, err) == 0;
-        valid &= native ? debug_test_native_write(object, executable, &unit, &output) : object_test_run(link, out, err) == 0;
+        valid &= native && split ? debug_test_native_units(object, executable, parts, outputs, 2) :
+                 native          ? debug_test_native_write(object, executable, &unit, &output) :
+                                   object_test_run(link, out, err) == 0;
         valid &= object_test_run(read, out, err) == 0;
         String8 readout = object_test_read_file(&arena, out);
         valid &= readout.pointer != 0 && strstr(readout.pointer, "debug_leaf") != 0 && strstr(readout.pointer, "leaf.c") != 0;
@@ -632,7 +672,8 @@ static bool debug_test_consumers(bool keep, bool native)
         const bool gdb_ok = debug_test_frame(backtrace.pointer, "#0 ", "debug_leaf", "leaf.c:5") &&
                             debug_test_frame(backtrace.pointer, "#1 ", "debug_outer", "start.c:11") && debug_test_frame(backtrace.pointer, "#2 ", "_start", "start.c:1");
         valid &= gdb_ok;
-        printf("debug gdb (%s output): source breakpoint and three-frame backtrace: %s\n", native ? "Buster" : "GNU ld", gdb_ok ? "pass" : "FAIL");
+        printf("debug gdb (%s output, %s): source breakpoint and three-frame backtrace: %s\n", native ? "Buster" : "GNU ld", split ? "two units" : "one unit",
+               gdb_ok ? "pass" : "FAIL");
         if (!gdb_ok && backtrace.pointer != 0)
         {
             printf("%s\n", backtrace.pointer);
@@ -642,7 +683,8 @@ static bool debug_test_consumers(bool keep, bool native)
         String8 profile = object_test_read_file(&arena, out);
         const bool perf_ok = scripted && debug_test_profile(profile.pointer);
         valid &= perf_ok;
-        printf("debug perf (%s output): sampled DWARF call chains and source lines: %s\n", native ? "Buster" : "GNU ld", perf_ok ? "pass" : "FAIL");
+        printf("debug perf (%s output, %s): sampled DWARF call chains and source lines: %s\n", native ? "Buster" : "GNU ld", split ? "two units" : "one unit",
+               perf_ok ? "pass" : "FAIL");
     }
     arena_release(&arena);
     free(bytes);
@@ -691,8 +733,10 @@ static int run_debug_tests(int argc, char** argv)
         valid &= !debug_test_frame("#2 _start () at start.c:11\n", "#2 ", "_start", "start.c:1");
         if (cross_check)
         {
-            valid &= debug_test_consumers(keep, false);
-            valid &= debug_test_consumers(keep, true);
+            valid &= debug_test_consumers(keep, false, false);
+            valid &= debug_test_consumers(keep, true, false);
+            valid &= debug_test_consumers(keep, false, true);
+            valid &= debug_test_consumers(keep, true, true);
         }
     }
     else

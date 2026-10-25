@@ -2744,7 +2744,9 @@ static void tier0_test_access(Tier0TestTally* tally)
                           "access", "tier0_validate: a symbol past the column %d at %u, an access past the last %d at %u, the last %d", short_column.error,
                           short_column.node, past.error, past.node, last.error);
     }
-    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class < BUSTER_TYPED_CLASSES; class += 1)
+    // Every class a global holds as a value (a long double's is read and written through its address, which the x87 check
+    // covers).
+    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_F64; class += 1)
     {
         for (uint32_t shape = 0; shape < 5; shape += 1)
         {
@@ -4346,6 +4348,8 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
     free(program);
 }
 
+#include "buster/compiler/tier0_x87_test.c"
+
 static int run_tier0_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -4531,6 +4535,17 @@ static int run_tier0_tests(int argc, char** argv)
                 }
                 tier0_test_report(s < 4 ? names[s] : "programs: records by value", tally);
                 printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred\n", entries, instructions, deferred);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                // After the programs: it adds a struct of a long double to the tables, and classifies them again.
+                Tier0TestTally tally = { 0, 0 };
+                uint32_t too_deep = 0;
+                uint64_t entries = 0;
+                tier0_test_x87(&tally, &tables, seed, count, &too_deep, &entries);
+                tier0_test_report("x87", tally);
+                printf("    %" PRIu64 " entries, %u programs past the depths\n", entries, too_deep);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
