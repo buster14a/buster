@@ -150,7 +150,11 @@ static void files_benchmark_lane(void* argument)
     }
     lane_sync();
     const uint64_t start = __rdtsc();
-    benchmark->start = lane_index() == 0 ? start : benchmark->start;
+    // Lane 0's alone: another lane's store of the start it read could follow lane 0's, and leave the run before's.
+    if (lane_index() == 0)
+    {
+        benchmark->start = start;
+    }
     files_run_ahead(&benchmark->run);
     lane_sync();
     if (lane_index() == 0)
