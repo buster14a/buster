@@ -93,7 +93,7 @@ jobs:
               [parser_bindings]='c_parser|c_parser_binding_trace|c_parser_bindings[a-z_]*|c_bindings[a-z_]*'
               [environments]='c_environment[a-z_]*'
               [ir]='ir|ir_validate|ir_benchmark'
-              [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_benchmark'
+              [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_emit|ir_lower_benchmark'
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
               [checker]='c_check[a-z_]*'
               [files]='c_files[a-z_]*'

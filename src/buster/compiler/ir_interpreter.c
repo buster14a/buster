@@ -48,6 +48,7 @@ struct IrInterpreterFrame
     uint32_t destination;
     uint32_t function_index;
     uint32_t value_charge;
+    InterpreterStack dynamic;
 };
 
 static unsigned __int128 ir_interpreter_integer(InterpreterValue value)
@@ -731,6 +732,15 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 }
                 case IR_STACK_ADDR:
                     value.low = frame->slots[a];
+                    break;
+                case IR_ALLOCA:
+                    result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
+                    break;
+                case IR_STACK_SAVE:
+                    result.status = interpreter_stack_save(&frame->dynamic, &runtime, arena, &value.low);
+                    break;
+                case IR_STACK_RESTORE:
+                    result.status = interpreter_stack_restore(&frame->dynamic, av.low, &runtime, arena);
                     break;
                 case IR_SYMBOL_ADDR:
                     if (!ir_interpreter_symbol_address(program, a, &value))
