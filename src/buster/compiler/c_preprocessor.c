@@ -845,23 +845,37 @@ struct PPItem
 #define BUSTER_PP_MAX_TEMPLATES (1u << 20)
 
 // A BUSTER_PP_MACRO_SIMPLE macro's replacement list of at most BUSTER_PP_TEMPLATE_TOKENS tokens as its expansions
-// write it (pp_emit_template), made with its items (pp_compile_macro): each body token as pp_store_file_tokens stores
+// write it (pp_template_write), made with its items (pp_compile_macro): each body token as pp_store_file_tokens stores
 // it from the macro (its kind, BUSTER_PP_FROM_MACRO and its leading space, and its value and location in the location
 // space), each parameter's index, and the items' BUSTER_PP_ITEM_SPACE. An item is a body token, so position j is token
-// body_begin + j.
+// body_begin + j. Its names of macros as pp_emit_simple_names last found them are kept (pp_template_names), with the
+// macros' table they were found in (Preprocessor.macro_epoch).
 typedef struct PPTemplate PPTemplate;
 struct PPTemplate
 {
     uint32_t values[BUSTER_PP_TEMPLATE_TOKENS];
     uint32_t locations[BUSTER_PP_TEMPLATE_TOKENS];
+    // The object-like macro whose body goes straight in for a position whose bit is set in `expanding`.
+    PPMacroId nested[BUSTER_PP_TEMPLATE_TOKENS];
     uint8_t kinds[BUSTER_PP_TEMPLATE_TOKENS];
     uint8_t flags[BUSTER_PP_TEMPLATE_TOKENS];
     // A parameter's index (below the macro's BUSTER_PP_TEMPLATE_TOKENS parameters), for a position whose bit is set in
     // `parameter_mask`.
     uint8_t parameters[BUSTER_PP_TEMPLATE_TOKENS];
+    // The tokens the bodies of the names in `expanding` add to the expansion, past the names themselves.
+    uint32_t extra;
+    // The macros' table the names were found in plus 1 (0 when they weren't, or were found with a name painted because
+    // its macro was disabled, which is a state of the expansions under way).
+    uint32_t epoch;
     uint16_t parameter_mask;
     uint16_t spaces; // Bit j: item j's BUSTER_PP_ITEM_SPACE.
+    uint16_t names; // The body's identifiers (the positions pp_emit_simple_names looks at).
+    uint16_t painted; // Of those, the names of macros that don't expand.
+    uint16_t expanding; // And those whose bodies go straight in (pp_direct_object).
     uint8_t count;
+    // Whether every name of a macro is painted or goes straight in (pp_emit_simple_names' result, without its conditions
+    // on the run).
+    bool direct;
 };
 
 // The kinds of context.
@@ -1284,6 +1298,8 @@ struct Preprocessor
     uint32_t parameter_count;
     PPTemplate* templates;
     uint32_t template_count;
+    // Changed by every change of a name's macro (pp_set_macro): the macros' table a template's names were found in.
+    uint32_t macro_epoch;
     // #pragma push_macro: a name and the macro it had, in order.
     IdentId* pushed_names;
     PPMacroId* pushed_macros;
@@ -4061,6 +4077,7 @@ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
         pp->macros[id].builtin = (uint8_t)PP_BUILTIN_POISONED;
     }
     pp->macro_of[name] = id;
+    pp->macro_epoch += 1;
     if (id != 0)
     {
         pp->is_macro[name / 64] |= 1ull << (name % 64);
@@ -5107,6 +5124,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             template->parameters[i] = items[i].kind == PP_ITEM_PARAMETER ? (uint8_t)items[i].parameter : 0;
             template->parameter_mask |= (uint16_t)(items[i].kind == PP_ITEM_PARAMETER ? 1u << i : 0);
             template->spaces |= (uint16_t)((items[i].flags & BUSTER_PP_ITEM_SPACE) ? 1u << i : 0);
+            template->names |= (uint16_t)(items[i].kind == PP_ITEM_TOKEN && kind == C_TOKEN_RAW_IDENTIFIER ? 1u << i : 0);
         }
         pp->template_count += 1;
     }
@@ -8228,15 +8246,16 @@ static void pp_emit_simple_write(Preprocessor* pp, const PPInvocation* invocatio
 
 // A simple invocation's expansion written straight into the output (pp_emit_simple_plan, pp_emit_simple_write), its
 // arguments in pp->arguments. Returns false, having changed nothing but its history's room, when it can't be.
-// An argument's tokens [begin, end), at most BUSTER_PP_TEMPLATE_TOKENS, as pp_emit_argument_run gives them from
-// pp->arguments or pp_emit_file_argument_run from a file context's text (`file`, read in the range at `file_base`): a
-// line's start a leading space and BUSTER_PP_LINE_SPACE, BUSTER_PP_FROM_MACRO, and a name of a macro painted (the
-// argument names no enabled one). In lanes 0 to end - begin - 1 of each column.
-BUSTER_INLINE void pp_template_argument(const Preprocessor* pp, const PPFileData* file, uint32_t file_base, uint32_t begin, uint32_t end, __m128i* kinds,
-                                        __m128i* flags, __m512i* values, __m512i* locations)
+// An argument's tokens [begin, end), at most BUSTER_PP_TEMPLATE_TOKENS, as pp_append_tokens gives them from
+// pp->arguments, or pp_emit_file_argument_run from a file context's text (`file`, read in the range at `file_base`): a
+// line's start a leading space and BUSTER_PP_LINE_SPACE, and BUSTER_PP_FROM_MACRO; with `paint`, a name of a macro
+// painted too, as pp_emit_argument_run and pp_emit_file_argument_run paint it (the argument names no enabled one). In
+// lanes 0 to end - begin - 1 of each column.
+BUSTER_INLINE void pp_template_argument(const Preprocessor* pp, const PPFileData* file, uint32_t file_base, uint32_t begin, uint32_t end, bool paint,
+                                        __m128i* kinds, __m128i* flags, __m512i* values, __m512i* locations)
 {
     const __mmask16 valid = (__mmask16)_bzhi_u32(0xFFFF, end - begin);
-    uint32_t paint = 0;
+    uint32_t painted = 0;
     if (file != 0)
     {
         const __m128i raw = _mm_maskz_loadu_epi8(valid, file->kinds + begin);
@@ -8250,10 +8269,10 @@ BUSTER_INLINE void pp_template_argument(const Preprocessor* pp, const PPFileData
         {
             space |= file->space[begin / 64 + 1] << (64 - shift);
         }
-        for (uint32_t bits = identifiers; bits != 0; bits &= bits - 1)
+        for (uint32_t bits = paint ? identifiers : 0; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(bits);
-            paint |= (uint32_t)pp_is_macro_vector(pp, file->values[begin + lane]) << lane;
+            painted |= (uint32_t)pp_is_macro_vector(pp, file->values[begin + lane]) << lane;
         }
         __m128i made = _mm_maskz_mov_epi8((__mmask16)space | lines, _mm_set1_epi8(BUSTER_PP_SPACE));
         made = _mm_or_si128(made, _mm_maskz_mov_epi8(lines, _mm_set1_epi8(BUSTER_PP_LINE_SPACE)));
@@ -8271,17 +8290,17 @@ BUSTER_INLINE void pp_template_argument(const Preprocessor* pp, const PPFileData
         const __mmask16 lines = _mm_test_epi8_mask(read, _mm_set1_epi8(BUSTER_PP_START_OF_LINE));
         const __mmask16 named = _mm_mask_cmpeq_epi8_mask(_mm_mask_testn_epi8_mask(valid, read, _mm_set1_epi8(BUSTER_PP_NO_EXPAND)), *kinds,
                                                          _mm_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
-        for (uint32_t bits = named; bits != 0; bits &= bits - 1)
+        for (uint32_t bits = paint ? named : 0; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(bits);
-            paint |= (uint32_t)pp_is_macro_vector(pp, tokens->values[begin + lane]) << lane;
+            painted |= (uint32_t)pp_is_macro_vector(pp, tokens->values[begin + lane]) << lane;
         }
         __m128i moved = _mm_or_si128(_mm_andnot_si128(_mm_set1_epi8(BUSTER_PP_START_OF_LINE), read), _mm_set1_epi8(BUSTER_PP_FROM_MACRO));
         *flags = _mm_mask_mov_epi8(moved, lines, _mm_or_si128(moved, _mm_set1_epi8(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE)));
         *values = _mm512_maskz_loadu_epi32(valid, tokens->values + begin);
         *locations = _mm512_maskz_loadu_epi32(valid, tokens->locations + begin);
     }
-    *flags = _mm_mask_mov_epi8(*flags, (__mmask16)paint, _mm_or_si128(*flags, _mm_set1_epi8(BUSTER_PP_NO_EXPAND)));
+    *flags = _mm_mask_mov_epi8(*flags, (__mmask16)painted, _mm_or_si128(*flags, _mm_set1_epi8(BUSTER_PP_NO_EXPAND)));
 }
 
 // The body of an object-like macro whose expansion goes straight into the target (pp_direct_object), of at most
@@ -8307,175 +8326,285 @@ BUSTER_INLINE void pp_template_body(const Preprocessor* pp, const PPMacro* macro
     *locations = _mm512_add_epi32(_mm512_maskz_loadu_epi32(valid, data->starts + begin), bases);
 }
 
-// pp_emit_simple_write for an expansion of at most BUSTER_PP_TEMPLATE_TOKENS tokens that records no history, whose
-// macro has a template (PPTemplate): the same tokens, built in registers a column at a time and stored at once. Its
-// segments go in order, each moved to its place in the expansion with a masked permute: a run of the template's body
-// tokens (the names of macros in it painted), an argument's tokens (pp_template_argument), or the body of a name that
-// expands straight in (pp_template_body), which ends the run around it. Then each run's first token gets the space
-// before it in place of its own and each argument's first its space alone, the expansion's first its name's flags,
-// and each body written for a name the flags pp_emit_simple_write gives it. Returns false, having written nothing,
-// otherwise.
-static bool pp_emit_template(Preprocessor* pp, const PPInvocation* invocation, const PPEmitPlan* plan, const PPFileData* file, uint32_t file_base, uint8_t* trailing)
+// The template of a macro, when an expansion of it records no history (a deferred unit's: the history's runs take
+// pp_emit_simple_write and pp_substitute_simple), or null.
+BUSTER_INLINE PPTemplate* pp_template_of(Preprocessor* pp, const PPMacro* macro)
+{
+    return macro->template_index != 0 && pp->options.no_history ? &pp->templates[macro->template_index - 1] : 0;
+}
+
+// pp_template_names' search: the template's names of macros as pp_emit_simple_names finds them, kept in the template.
+static void pp_template_find_names(Preprocessor* pp, PPMacroId id, PPTemplate* template)
+{
+    uint32_t painted = 0;
+    uint32_t expanding = 0;
+    uint32_t extra = 0;
+    bool direct = true;
+    bool disabled = false;
+    for (uint32_t bits = template->names; bits != 0; bits &= bits - 1)
+    {
+        const uint32_t j = (uint32_t)__builtin_ctz(bits);
+        const IdentId value = template->values[j];
+        if (pp_is_macro_vector(pp, value))
+        {
+            const PPMacroId nested_id = pp->macro_of[value];
+            const PPMacro* nested = &pp->macros[nested_id];
+            const bool expands = nested_id != id && nested->disabled == 0;
+            disabled |= nested_id != id && nested->disabled != 0;
+            direct = direct && (!expands || pp_direct_object(pp, nested));
+            painted |= expands ? 0 : 1u << j;
+            expanding |= expands ? 1u << j : 0;
+            template->nested[j] = expands ? nested_id : 0;
+            extra += expands ? nested->body_end - nested->body_begin - 1 : 0;
+        }
+    }
+    template->painted = (uint16_t)painted;
+    template->expanding = (uint16_t)expanding;
+    template->extra = extra;
+    template->direct = direct;
+    // A name painted because its macro is disabled is painted only while that expansion is under way.
+    template->epoch = disabled ? 0 : pp->macro_epoch + 1;
+}
+
+// pp_emit_simple_names for a macro with a template, which keeps what it found (painted names, names whose bodies go
+// straight in, and the tokens those add) while the macros' table is the one it was found in and those bodies are still
+// enabled; found again otherwise (pp_template_find_names). Returns whether every name of a macro is painted or goes
+// straight in, with no capture open and no -E markers' starts, as pp_emit_simple_names does.
+BUSTER_INLINE bool pp_template_names(Preprocessor* pp, PPMacroId id, PPTemplate* template)
+{
+    bool kept = template->epoch == pp->macro_epoch + 1;
+    for (uint32_t bits = kept ? template->expanding : 0; bits != 0; bits &= bits - 1)
+    {
+        kept = kept && pp->macros[template->nested[__builtin_ctz(bits)]].disabled == 0;
+    }
+    if (!kept)
+    {
+        pp_template_find_names(pp, id, template);
+    }
+    return template->direct && pp->capture_count == 0 && !pp->options.expansion_starts;
+}
+
+// The tokens a simple invocation's expansion has from its macro's template: its body's tokens but the parameters, each
+// parameter's argument (the records at `arguments`), and with `direct` (an expansion written straight in, after
+// pp_template_names) the tokens the bodies of names that go straight in add. Saturates past UINT32_MAX / 2.
+BUSTER_INLINE uint32_t pp_template_size(const Preprocessor* pp, const PPTemplate* template, uint32_t arguments, bool direct)
+{
+    uint64_t size = (uint64_t)template->count - (uint32_t)__builtin_popcount(template->parameter_mask) + (direct ? template->extra : 0);
+    for (uint32_t bits = template->parameter_mask; bits != 0; bits &= bits - 1)
+    {
+        const PPArgument* argument = &pp->argument_records[arguments + template->parameters[__builtin_ctz(bits)]];
+        size += argument->raw_end - argument->raw_begin;
+    }
+    return size < UINT32_MAX / 2 ? (uint32_t)size : UINT32_MAX / 2;
+}
+
+// A simple invocation's expansion of at most BUSTER_PP_TEMPLATE_TOKENS tokens from its macro's template, built in
+// registers a column at a time and stored at once at the end of `out`, which has room for BUSTER_PP_TEMPLATE_TOKENS
+// more tokens. Its segments go in order, each moved to its place in the expansion with a masked permute: a run of the
+// template's tokens, an argument's tokens (pp_template_argument), or the body of a name that goes straight in
+// (pp_template_body), which ends the run around it. Then each run's first token gets the space before it in place of
+// its own and each argument's first its space alone.
+//
+// With `emit`, it is what pp_emit_simple_write writes into the output: the names `painted` painted, the bodies of the
+// names `expanding` written in their places (with the flags pp_emit_simple_write gives their first tokens),
+// arguments' names of macros painted, the expansion's first token given its name's flags, and the statistics. Without
+// it, it is what pp_substitute_simple writes into the expansions for the main loop to read again: names left alone
+// (`painted` and `expanding` 0), and the first token's flags left to the caller. Leaves the space after the last token
+// in `*trailing`, and the history's anchors as the item it read last left them.
+BUSTER_INLINE void pp_template_write(Preprocessor* pp, const PPInvocation* invocation, const PPTemplate* template, const PPFileData* file, uint32_t file_base,
+                                     PPTokens* out, uint32_t painted, uint32_t expanding, bool emit, uint8_t* trailing)
 {
     const PPMacro* macro = &pp->macros[invocation->macro];
-    const bool result = macro->template_index != 0 && pp->options.no_history && plan->size <= BUSTER_PP_TEMPLATE_TOKENS;
-    if (result)
+    const __m128i lanes8 = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __m512i lanes32 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __m128i template_kinds = _mm_loadu_si128((const __m128i*)template->kinds);
+    const __m128i template_flags = _mm_loadu_si128((const __m128i*)template->flags);
+    const __m128i template_painted = _mm_mask_mov_epi8(template_flags, (__mmask16)painted, _mm_or_si128(template_flags, _mm_set1_epi8(BUSTER_PP_NO_EXPAND)));
+    const __m512i template_values = _mm512_loadu_si512(template->values);
+    const __m512i template_locations = _mm512_loadu_si512(template->locations);
+    const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
+    const uint8_t name_clear = BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE;
+    __m128i kinds = _mm_setzero_si128();
+    __m128i flags = _mm_setzero_si128();
+    __m512i values = _mm512_setzero_si512();
+    __m512i locations = _mm512_setzero_si512();
+    // Where a run of the template's tokens stops: each parameter, each name that goes straight in, and the end.
+    const uint32_t stops = template->parameter_mask | expanding | (1u << template->count);
+    uint32_t at = 0;
+    uint32_t runs = 0; // The expansion's lanes that start a run of body tokens,
+    uint32_t starts = 0; // that start an argument's tokens,
+    uint32_t spaced = 0; // and of those, the ones given a space;
+    uint32_t named = 0; // those of a name's body's first tokens,
+    uint32_t named_spaced = 0; // and of those, the ones whose name had a space.
+    bool after_direct = false;
+    bool next_space = false;
+    bool run_first = true; // Whether a body token starts a run: the first one, and one after a parameter.
+    for (uint32_t j = 0; j < template->count;)
     {
-        // The plan's size counts each argument it uses and each body written for a name, so none has more tokens than
-        // the expansion.
-        const PPTemplate* template = &pp->templates[macro->template_index - 1];
-        uint32_t paint = 0;
-        uint32_t expanding = 0;
-        PPMacroId nested[BUSTER_PP_TEMPLATE_TOKENS];
-        for (uint32_t k = 0; k < plan->name_count; k += 1)
+        const bool parameter = ((template->parameter_mask >> j) & 1) != 0;
+        // An item is read when it starts a run or is a parameter (the others are the run's).
+        next_space |= (run_first || parameter) && ((template->spaces >> j) & 1) != 0;
+        const uint32_t first = at;
+        uint32_t taken = 1;
+        __mmask16 lanes = 0;
+        __m128i segment_kinds;
+        __m128i segment_flags;
+        __m512i segment_values;
+        __m512i segment_locations;
+        int32_t from = 0; // The segment's first token's lane in its source.
+        if (parameter)
         {
-            const uint32_t position = plan->names[k].token - macro->body_begin;
-            paint |= plan->names[k].expands == 0 ? 1u << position : 0;
-            expanding |= plan->names[k].expands != 0 ? 1u << position : 0;
-            nested[position] = plan->names[k].expands;
-        }
-        const __m128i lanes8 = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        const __m512i lanes32 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        const __m128i template_kinds = _mm_loadu_si128((const __m128i*)template->kinds);
-        const __m128i template_flags = _mm_loadu_si128((const __m128i*)template->flags);
-        const __m128i painted = _mm_mask_mov_epi8(template_flags, (__mmask16)paint, _mm_or_si128(template_flags, _mm_set1_epi8(BUSTER_PP_NO_EXPAND)));
-        const __m512i template_values = _mm512_loadu_si512(template->values);
-        const __m512i template_locations = _mm512_loadu_si512(template->locations);
-        const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
-        const uint8_t name_clear = BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE;
-        __m128i kinds = _mm_setzero_si128();
-        __m128i flags = _mm_setzero_si128();
-        __m512i values = _mm512_setzero_si512();
-        __m512i locations = _mm512_setzero_si512();
-        // Where a run of the template's tokens stops: each parameter, each name that expands, and the end.
-        const uint32_t stops = template->parameter_mask | expanding | (1u << template->count);
-        uint32_t at = 0;
-        uint32_t runs = 0; // The output's lanes that start a run of body tokens,
-        uint32_t starts = 0; // that start an argument's tokens,
-        uint32_t spaced = 0; // and of those, the ones given a space;
-        uint32_t named = 0; // those of a name's body's first tokens,
-        __m128i named_flags = _mm_setzero_si128(); // with their flags.
-        uint32_t directs = 0;
-        uint32_t direct_tokens = 0;
-        bool after_direct = false;
-        bool next_space = false;
-        bool run_first = true; // Whether a body token starts a run: the first one, and one after a parameter.
-        uint32_t last = 0;
-        for (uint32_t j = 0; j < template->count;)
-        {
-            const bool parameter = ((template->parameter_mask >> j) & 1) != 0;
-            // An item is read when it starts a run or is a parameter (the others are the run's).
-            next_space |= (run_first || parameter) && ((template->spaces >> j) & 1) != 0;
-            last = run_first || parameter ? j : last;
-            const uint32_t first = at;
-            uint32_t taken = 1;
-            __mmask16 lanes = 0;
-            __m128i segment_kinds;
-            __m128i segment_flags;
-            __m512i segment_values;
-            __m512i segment_locations;
-            int32_t from = 0; // The segment's first token's lane in its source.
-            if (parameter)
+            const PPArgument* argument = &pp->argument_records[invocation->arguments + template->parameters[j]];
+            const uint32_t count = argument->raw_end - argument->raw_begin;
+            if (count != 0)
             {
-                const PPArgument* argument = &pp->argument_records[invocation->arguments + template->parameters[j]];
-                const uint32_t count = argument->raw_end - argument->raw_begin;
-                if (count != 0)
-                {
-                    pp_template_argument(pp, file, file_base, argument->raw_begin, argument->raw_end, &segment_kinds, &segment_flags, &segment_values, &segment_locations);
-                    lanes = (__mmask16)(_bzhi_u32(0xFFFF, at + count) & ~_bzhi_u32(0xFFFF, at));
-                    starts |= 1u << at;
-                    spaced |= next_space ? 1u << at : 0;
-                    next_space = false;
-                    after_direct = false;
-                    at += count;
-                }
-                run_first = true;
-            }
-            else if ((expanding >> j) & 1)
-            {
-                // A name whose body goes straight in: its first token takes the name's flags.
-                const PPMacro* body = &pp->macros[nested[j]];
-                const uint32_t count = body->body_end - body->body_begin;
-                pp_template_body(pp, body, &segment_kinds, &segment_flags, &segment_values, &segment_locations);
-                uint8_t name_token = (uint8_t)(BUSTER_PP_FROM_MACRO | (template->flags[j] & BUSTER_PP_SPACE));
-                name_token = run_first ? (uint8_t)((name_token & ~BUSTER_PP_SPACE) | (next_space ? BUSTER_PP_SPACE : 0)) : name_token;
-                name_token = at == 0 ? (uint8_t)((name_token & ~name_clear) | name_flags | BUSTER_PP_NAME_SPACE) : name_token;
-                named |= 1u << at;
-                named_flags = _mm_mask_mov_epi8(named_flags, (__mmask16)(1u << at), _mm_set1_epi8((char)(BUSTER_PP_FROM_MACRO | BUSTER_PP_NAME_SPACE | (name_token & name_clear))));
+                pp_template_argument(pp, file, file_base, argument->raw_begin, argument->raw_end, emit, &segment_kinds, &segment_flags, &segment_values,
+                                     &segment_locations);
                 lanes = (__mmask16)(_bzhi_u32(0xFFFF, at + count) & ~_bzhi_u32(0xFFFF, at));
-                next_space = run_first ? false : next_space;
-                run_first = false;
-                directs += 1;
-                direct_tokens += count;
-                after_direct = true;
+                starts |= 1u << at;
+                spaced |= next_space ? 1u << at : 0;
+                next_space = false;
+                after_direct = false;
                 at += count;
             }
-            else
-            {
-                // A run of the template's tokens [j, j + taken).
-                taken = (uint32_t)__builtin_ctz(stops >> j);
-                segment_kinds = template_kinds;
-                segment_flags = painted;
-                segment_values = template_values;
-                segment_locations = template_locations;
-                from = (int32_t)j;
-                lanes = (__mmask16)(_bzhi_u32(0xFFFF, at + taken) & ~_bzhi_u32(0xFFFF, at));
-                runs |= run_first ? 1u << at : 0;
-                spaced |= run_first && next_space ? 1u << at : 0;
-                next_space = run_first ? false : next_space;
-                run_first = false;
-                after_direct = false;
-                at += taken;
-            }
-            if (lanes != 0)
-            {
-                // The segment's tokens moved from lane `from` of their source to lane `first`.
-                const __m128i index8 = _mm_add_epi8(lanes8, _mm_set1_epi8((char)(from - (int32_t)first)));
-                const __m512i index32 = _mm512_add_epi32(lanes32, _mm512_set1_epi32(from - (int32_t)first));
-                kinds = _mm_mask_permutexvar_epi8(kinds, lanes, index8, segment_kinds);
-                flags = _mm_mask_permutexvar_epi8(flags, lanes, index8, segment_flags);
-                values = _mm512_mask_permutexvar_epi32(values, lanes, index32, segment_values);
-                locations = _mm512_mask_permutexvar_epi32(locations, lanes, index32, segment_locations);
-            }
-            j += taken;
+            run_first = true;
         }
-        flags = _mm_mask_mov_epi8(flags, (__mmask16)runs, _mm_andnot_si128(_mm_set1_epi8(BUSTER_PP_SPACE), flags));
-        flags = _mm_mask_mov_epi8(flags, (__mmask16)starts,
-                                  _mm_andnot_si128(_mm_set1_epi8(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE), flags));
-        flags = _mm_mask_mov_epi8(flags, (__mmask16)spaced, _mm_or_si128(flags, _mm_set1_epi8(BUSTER_PP_SPACE)));
-        flags = _mm_mask_mov_epi8(flags, 1, _mm_or_si128(_mm_andnot_si128(_mm_set1_epi8((char)name_clear), flags), _mm_set1_epi8((char)(name_flags | BUSTER_PP_NAME_SPACE))));
-        flags = _mm_mask_mov_epi8(flags, (__mmask16)named, named_flags);
-        // pp_emit_simple_size made room for the expansion and BUSTER_PP_TOKEN_SLACK more.
-        PPTokens* out = &pp->output;
-        _mm_storeu_si128((__m128i*)(out->kinds + out->count), kinds);
-        _mm_storeu_si128((__m128i*)(out->flags + out->count), flags);
-        _mm512_storeu_si512(out->values + out->count, values);
-        _mm512_storeu_si512(out->locations + out->count, locations);
-        out->count += at;
-        *trailing = next_space ? BUSTER_PP_SPACE : 0;
-        // pp_emit_simple_write's history state: the anchors of the last item it read.
-        pp->history_anchor = macro->base + pp->datas[macro->data].starts[macro->body_begin + last];
-        pp->history_spelling = pp->history_anchor;
-        if (pp->options.timing)
+        else if ((expanding >> j) & 1)
         {
-            const uint32_t run_tokens = at - direct_tokens;
-            pp->statistics.buffer_runs += directs + !after_direct;
-            pp->statistics.buffer_run_tokens += run_tokens;
-            pp->statistics.final_buffer_run_tokens += run_tokens;
-            pp->statistics.direct_expansions += directs;
-            pp->statistics.final_direct_object_tokens += direct_tokens;
+            // A name whose body goes straight in: its first token takes the name's space (the space before it, if it
+            // starts a run), and the expansion's first its name's flags.
+            const PPMacro* body = &pp->macros[template->nested[j]];
+            const uint32_t count = body->body_end - body->body_begin;
+            pp_template_body(pp, body, &segment_kinds, &segment_flags, &segment_values, &segment_locations);
+            const bool name_space = run_first ? next_space : (template->flags[j] & BUSTER_PP_SPACE) != 0;
+            named |= 1u << at;
+            named_spaced |= name_space ? 1u << at : 0;
+            lanes = (__mmask16)(_bzhi_u32(0xFFFF, at + count) & ~_bzhi_u32(0xFFFF, at));
+            next_space = run_first ? false : next_space;
+            run_first = false;
+            after_direct = true;
+            at += count;
         }
+        else
+        {
+            // A run of the template's tokens [j, j + taken).
+            taken = (uint32_t)__builtin_ctz(stops >> j);
+            segment_kinds = template_kinds;
+            segment_flags = template_painted;
+            segment_values = template_values;
+            segment_locations = template_locations;
+            from = (int32_t)j;
+            lanes = (__mmask16)(_bzhi_u32(0xFFFF, at + taken) & ~_bzhi_u32(0xFFFF, at));
+            runs |= run_first ? 1u << at : 0;
+            spaced |= run_first && next_space ? 1u << at : 0;
+            next_space = run_first ? false : next_space;
+            run_first = false;
+            after_direct = false;
+            at += taken;
+        }
+        if (lanes != 0)
+        {
+            // The segment's tokens moved from lane `from` of their source to lane `first`.
+            const __m128i index8 = _mm_add_epi8(lanes8, _mm_set1_epi8((char)(from - (int32_t)first)));
+            const __m512i index32 = _mm512_add_epi32(lanes32, _mm512_set1_epi32(from - (int32_t)first));
+            kinds = _mm_mask_permutexvar_epi8(kinds, lanes, index8, segment_kinds);
+            flags = _mm_mask_permutexvar_epi8(flags, lanes, index8, segment_flags);
+            values = _mm512_mask_permutexvar_epi32(values, lanes, index32, segment_values);
+            locations = _mm512_mask_permutexvar_epi32(locations, lanes, index32, segment_locations);
+        }
+        j += taken;
+    }
+    flags = _mm_mask_mov_epi8(flags, (__mmask16)runs, _mm_andnot_si128(_mm_set1_epi8(BUSTER_PP_SPACE), flags));
+    flags = _mm_mask_mov_epi8(flags, (__mmask16)starts, _mm_andnot_si128(_mm_set1_epi8(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE), flags));
+    flags = _mm_mask_mov_epi8(flags, (__mmask16)spaced, _mm_or_si128(flags, _mm_set1_epi8(BUSTER_PP_SPACE)));
+    // A name's body's first token: its name's space and BUSTER_PP_NAME_SPACE (pp_emit_simple_write's), which the
+    // expansion's first token, next, gives up for its name's flags as any other first token does.
+    flags = _mm_mask_mov_epi8(flags, (__mmask16)named, _mm_set1_epi8(BUSTER_PP_FROM_MACRO | BUSTER_PP_NAME_SPACE));
+    flags = _mm_mask_mov_epi8(flags, (__mmask16)named_spaced, _mm_set1_epi8(BUSTER_PP_FROM_MACRO | BUSTER_PP_NAME_SPACE | BUSTER_PP_SPACE));
+    flags = _mm_mask_mov_epi8(flags, emit ? 1 : 0, _mm_or_si128(_mm_andnot_si128(_mm_set1_epi8((char)name_clear), flags), _mm_set1_epi8((char)(name_flags | BUSTER_PP_NAME_SPACE))));
+    _mm_storeu_si128((__m128i*)(out->kinds + out->count), kinds);
+    _mm_storeu_si128((__m128i*)(out->flags + out->count), flags);
+    _mm512_storeu_si512(out->values + out->count, values);
+    _mm512_storeu_si512(out->locations + out->count, locations);
+    out->count += at;
+    *trailing = next_space ? BUSTER_PP_SPACE : 0;
+    // pp_emit_simple_write's and pp_substitute_simple's history state: the anchors of the last item they read, a
+    // parameter or a run's first token (the first token, or one after a parameter).
+    const uint32_t read = template->parameter_mask | ((uint32_t)template->parameter_mask << 1) | 1u;
+    const uint32_t last = 31u - (uint32_t)__builtin_clz(read & _bzhi_u32(~0u, template->count));
+    pp->history_anchor = macro->base + pp->datas[macro->data].starts[macro->body_begin + last];
+    pp->history_spelling = pp->history_anchor;
+    if (emit && pp->options.timing)
+    {
+        // Each name that went straight in wrote its body: its token and the tokens the template's `extra` counts.
+        const uint32_t directs = (uint32_t)__builtin_popcount(expanding);
+        const uint32_t direct_tokens = directs + (directs != 0 ? template->extra : 0);
+        const uint32_t run_tokens = at - direct_tokens;
+        pp->statistics.buffer_runs += directs + !after_direct;
+        pp->statistics.buffer_run_tokens += run_tokens;
+        pp->statistics.final_buffer_run_tokens += run_tokens;
+        pp->statistics.direct_expansions += directs;
+        pp->statistics.final_direct_object_tokens += direct_tokens;
+    }
+}
+
+// pp_emit_simple_write of an expansion of `size` tokens (pp_template_size), when its macro has a template whose names
+// pp_template_names found (painted, or going straight in) and it has at most BUSTER_PP_TEMPLATE_TOKENS tokens, for which
+// pp_emit_simple_size's room is made: written by pp_template_write. Returns false, having written nothing, otherwise.
+static bool pp_emit_template(Preprocessor* pp, const PPInvocation* invocation, const PPTemplate* template, uint32_t size, const PPFileData* file,
+                             uint32_t file_base, uint8_t* trailing)
+{
+    const bool result = template != 0 && size <= BUSTER_PP_TEMPLATE_TOKENS;
+    if (result)
+    {
+        pp_template_write(pp, invocation, template, file, file_base, &pp->output, template->painted, template->expanding, true, trailing);
     }
     return result;
 }
 
 static bool pp_emit_simple(Preprocessor* pp, const PPInvocation* invocation, uint8_t* trailing)
 {
+    PPTemplate* template = pp_template_of(pp, &pp->macros[invocation->macro]);
     PPEmitPlan plan;
-    const bool result = pp_emit_simple_plan(pp, invocation, &plan);
-    if (result && !pp_emit_template(pp, invocation, &plan, 0, 0, trailing))
+    bool result;
+    if (template != 0)
     {
-        pp_emit_simple_write(pp, invocation, &plan, 0, 0, trailing);
+        // pp_emit_simple_plan's names and size, from the template (its expansion records no history).
+        result = pp_template_names(pp, invocation->macro, template);
+        const uint32_t size = result ? pp_template_size(pp, template, invocation->arguments, true) : 0;
+        result = result && size != 0 && (uint64_t)pp->output.count + size + BUSTER_PP_TOKEN_SLACK <= pp->output.capacity;
+        if (result && !pp_emit_template(pp, invocation, template, size, 0, 0, trailing))
+        {
+            pp_emit_simple_names(pp, invocation->macro, &plan);
+            pp_emit_simple_size(pp, invocation, &plan);
+            pp_emit_simple_write(pp, invocation, &plan, 0, 0, trailing);
+        }
+    }
+    else
+    {
+        result = pp_emit_simple_plan(pp, invocation, &plan);
+        if (result)
+        {
+            pp_emit_simple_write(pp, invocation, &plan, 0, 0, trailing);
+        }
+    }
+    return result;
+}
+
+// pp_substitute_simple of an invocation whose macro has a template, when its expansion has 1 to
+// BUSTER_PP_TEMPLATE_TOKENS tokens and the expansions have room for them: written by pp_template_write, its names left for
+// the main loop to read again. Returns false, having written nothing, otherwise (pp_substitute_simple takes an empty
+// one in a few instructions).
+static bool pp_substitute_template(Preprocessor* pp, const PPInvocation* invocation, uint32_t* begin, uint8_t* trailing)
+{
+    const PPTemplate* template = pp_template_of(pp, &pp->macros[invocation->macro]);
+    const uint32_t size = template != 0 ? pp_template_size(pp, template, invocation->arguments, false) : 0;
+    PPTokens* out = &pp->expansions;
+    const bool result = size != 0 && size <= BUSTER_PP_TEMPLATE_TOKENS && (uint64_t)out->count + size <= out->capacity;
+    if (result)
+    {
+        *begin = out->count;
+        pp_template_write(pp, invocation, template, 0, 0, out, 0, 0, false, trailing);
     }
     return result;
 }
@@ -8524,11 +8653,11 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
         uint32_t end = 0;
         uint8_t trailing;
         const bool emitted = pp_emit_simple(pp, invocation, &trailing);
-        if (!emitted)
+        if (!emitted && !pp_substitute_template(pp, invocation, &begin, &trailing))
         {
             pp_substitute_simple(pp, invocation, &begin, &trailing);
-            end = pp->expansions.count;
         }
+        end = emitted ? 0 : pp->expansions.count;
         const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
         if (begin < end)
         {
@@ -8583,7 +8712,8 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
         pp_compile_macro(pp, id);
     }
     PPEmitPlan plan;
-    simple = simple && (macro->flags & BUSTER_PP_MACRO_SIMPLE) && pp_emit_simple_names(pp, id, &plan);
+    PPTemplate* template = simple ? pp_template_of(pp, macro) : 0;
+    simple = simple && (macro->flags & BUSTER_PP_MACRO_SIMPLE) && (template != 0 ? pp_template_names(pp, id, template) : pp_emit_simple_names(pp, id, &plan));
     if (simple)
     {
         const uint32_t open = position + 1;
@@ -8624,11 +8754,13 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
             }
         }
         // An empty expansion (pp_finish_simple's): every item a parameter given an empty argument. Its trailing space is
-        // the items' that no token took (pp_substitute_simple's).
-        bool empty = simple;
-        uint8_t empty_trailing = 0;
+        // the items' that no token took (pp_substitute_simple's). A template has the expansion's size, which only an
+        // empty one doesn't have tokens, and its items' spaces.
+        const uint32_t size = simple && template != 0 ? pp_template_size(pp, template, records_begin, true) : 0;
+        bool empty = simple && (template == 0 || size == 0);
+        uint8_t empty_trailing = template != 0 && template->spaces != 0 ? BUSTER_PP_SPACE : 0;
         const PPItem* items = pp->items + macro->items_begin;
-        for (uint32_t i = 0; empty && i < macro->item_count; i += 1)
+        for (uint32_t i = 0; template == 0 && empty && i < macro->item_count; i += 1)
         {
             empty = items[i].kind == PP_ITEM_PARAMETER && records[items[i].parameter].raw_begin == records[items[i].parameter].raw_end;
             empty_trailing |= (items[i].flags & BUSTER_PP_ITEM_SPACE) ? BUSTER_PP_SPACE : 0;
@@ -8638,7 +8770,9 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
             .arguments = records_begin,
             .argument_count = count + omitted,
         };
-        const bool emitted = simple && !empty && pp_emit_simple_size(pp, &invocation, &plan);
+        // pp_emit_simple_size's room, which a template's size needs alone (its expansion records no history).
+        const bool emitted = simple && !empty &&
+                             (template != 0 ? (uint64_t)pp->output.count + size + BUSTER_PP_TOKEN_SLACK <= pp->output.capacity : pp_emit_simple_size(pp, &invocation, &plan));
         if (emitted || empty)
         {
             // pp_invoke's record of the expansion, its ')' as pp_collect_arguments records it.
@@ -8670,8 +8804,14 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
             const uint32_t saved_origin = pp->diagnostic_origin;
             pp->diagnostic_origin = 0;
             uint8_t trailing;
-            if (!pp_emit_template(pp, &invocation, &plan, data, base, &trailing))
+            if (!pp_emit_template(pp, &invocation, template, size, data, base, &trailing))
             {
+                // Past a template's size, pp_emit_simple_write, with the plan the template's names and size stood for.
+                if (template != 0)
+                {
+                    pp_emit_simple_names(pp, id, &plan);
+                    pp_emit_simple_size(pp, &invocation, &plan);
+                }
                 pp_emit_simple_write(pp, &invocation, &plan, data, base, &trailing);
             }
             pp->diagnostic_origin = saved_origin;

@@ -1194,6 +1194,10 @@ static const PPTestCase pp_test_cases[] = {
     { "stringize across a splice and a comment", "#define S(x) #x\nS(a\\\n+b)\nS(a/**/+b)\n", 0, "c17", "\"a+b\"\n\"a +b\"\n", false },
     { "redefinition with other spacing", "#define X(x) x+1\n#define X(x) x + 1\nX(2)\n", 0, "c17", "2 + 1\n", false, 1 },
     { "a disabled macro's last token", "#define foo(x) bar x\nfoo(foo) (2)\n", 0, "c17", "bar foo (2)\n", false },
+    // M's template finds N painted while N's expansion is under way, which it mustn't keep (pp_template_names) for the
+    // M(2) after it, whose N expands.
+    { "a name painted while its macro is disabled, then expanded", "#define N M(1)\n#define M(a) N a\nN\nM(2)\nint x = M(3);\n", 0, "c17",
+      "N 1\nM(1) 2\nint x = M(1) 3;\n", false },
     { "an alias's invocation", "#define F(x) x\n#define ALIAS F\nALIAS (7)\n", 0, "c17", "7\n", false },
     { "adjacent tokens don't paste", "#define PLUS +\n+PLUS\n", 0, "c17", "+ +\n", false },
     { "an unused argument isn't expanded", "#define BAD(x,y) x\n#define DROP(x) 0\nDROP(BAD(1))\n", 0, "c17", "0\n", false },
