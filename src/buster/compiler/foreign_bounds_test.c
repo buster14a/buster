@@ -218,7 +218,7 @@ static void foreign_bounds_test_case(ForeignTestTally* tally, const char* direct
             foreign_run(&foreign, &command, path == 0 ? FOREIGN_PATH_EXACT : FOREIGN_PATH_VECTOR, foreign_test_lanes[l], 0);
             Arena names = arena_reserve(1ull << 28);
             ForeignLink converted = { 0 };
-            const ForeignLinkResult built = shared ? foreign_link_build_kind(&converted, &foreign, arena, &names, RUNTIME_KIND_SHARED, (String8){ 0 }, (ForeignLinkStartup){ .entry = foreign_string("_start") }) :
+            const ForeignLinkResult built = shared ? foreign_link_build_kind(&converted, &foreign, arena, &names, RUNTIME_KIND_SHARED, (String8){ 0 }, (ForeignLinkOptions){ .entry = foreign_string("_start") }) :
                                                      foreign_link_build_dynamic(&converted, &foreign, arena, &names, interpreter);
             char detail[192];
             snprintf(detail, sizeof(detail), "case %u %s %u lanes: resolve %u convert %u name %u", (unsigned)test, path == 0 ? "exact" : "vector",
@@ -348,7 +348,7 @@ static void foreign_bounds_test_gc(ForeignTestTally* tally, const char* director
             Arena names = arena_reserve(1ull << 28);
             ForeignLink input = { 0 };
             ForeignLink output = { 0 };
-            const ForeignLinkResult built = foreign.failure.error == FOREIGN_ERROR_NONE ? foreign_link_build_for_gc(&input, &foreign, arena, &names, RUNTIME_KIND_STATIC, (String8){ 0 }, (ForeignLinkStartup){ .entry = foreign_string("_start") }) :
+            const ForeignLinkResult built = foreign.failure.error == FOREIGN_ERROR_NONE ? foreign_link_build_for_gc(&input, &foreign, arena, &names, RUNTIME_KIND_STATIC, (String8){ 0 }, (ForeignLinkOptions){ .entry = foreign_string("_start") }) :
                                                                                       (ForeignLinkResult){ .error = FOREIGN_LINK_ERROR_INPUT };
             const ForeignGcRoots roots = {
                 .entry = built.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_test_symbol(&foreign, &input, "_start") : 0,

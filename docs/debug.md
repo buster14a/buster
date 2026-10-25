@@ -63,7 +63,14 @@ written at bases with the same unit alone, byte for byte but the four offsets.
 
 `ExecutableOptions.debug` accepts an `ExecutableDebug` descriptor containing
 the five section byte slices, a function `SymbolId` column in their address-table
-order, and the line-address-offset column. It currently attaches one contribution.
+order, and the line-address-offset column. It attaches one unit or several
+(#395): `unit_functions` and `unit_count` give each unit's function count, each
+section's slice holds the units' contributions one after another (each unit
+written at its `DebugOutput.bases`), the line addresses are offsets in the whole
+`.debug_line` slice, and the writer finalizes each unit at its functions'
+addresses, unit k's `.debug_addr` contribution after the earlier units'
+8 + 8n bytes. A descriptor whose counts don't add up to the functions, or don't
+match the units' `.debug_addr` headers, is refused before anything is written.
 The producer must keep that function order and its emitted sizes consistent
 with the corresponding definitions in `Link`.
 The descriptor and bytes stay caller-owned and unchanged. The writer validates
@@ -83,6 +90,17 @@ regular table independently of DWARF, or override its function-only selection;
 the debug address slots still follow the debug descriptor. With neither
 attachment, none of these seven sections is emitted. See
 [the regular-symbol contract](executable-symbols.md).
+
+A producer that builds whole debug sections, as `link-foreign` does from other
+compilers' objects (`foreign_debug.c`), passes `ExecutableOptions.debug_sections`
+instead: each DWARF section's bytes by kind, every reference between debug
+sections resolved, and the references whose values the layout decides, as
+columns (each field's offset, addend, target symbol, section kind and kind).
+The writer patches those on its lanes after the layout: a definition's address
+(not a stub's), a thread-local's offset in the TLS segment, or lld's tombstone
+for a reference to discarded code (all ones in `.debug_names`, 1 in
+`.debug_ranges` and `.debug_loc`, 0 elsewhere).
+The driver's contract ("Debug information") has the rest.
 
 The consumer fixture exposed an existing loaded-segment layout issue in perf
 7.2.9 with libdw: compact file offsets made its mapping-base calculation differ
@@ -209,9 +227,12 @@ capacity failures, invalid row/file/string inputs, empty units and sequences,
 address overflow before any patch, and repeated finalization.
 
 `test-debug --cross-check [--keep]` also produces an original three-function
-ELF fixture. GNU as supplies its machine code and CFI; both GNU ld and Buster's
-`executable_write` attach the debug sections, the latter with its own final
-layout and address patches. The native fixture also checks scalar/vector and
+ELF fixture, as one unit and as two (its first function's, and the other two's
+written at the first's sizes). GNU as supplies its machine code and CFI; both GNU
+ld and Buster's `executable_write` attach the debug sections, the latter with
+its own final layout and address patches, the two units in one descriptor.
+Descriptors whose unit counts don't add up, or move or don't match a unit's
+`.debug_addr` header, are refused. The native fixture also checks scalar/vector and
 lane-count identity, poisoned prior output, malformed descriptors and unchanged
 caller bytes. `readelf` reads the sections,
 GDB sets a breakpoint by source file and line and checks all three stack
@@ -238,13 +259,13 @@ It passed the emitter and protected-tail checks, all 103 native attachment
 checks, and the GDB/perf checks for both GNU ld and Buster output. This is
 standalone-head consumer evidence, separate from the hosted merge result.
 
-## Remaining integration for #88
+## Remaining integration
 
-`Link` has no debug-section atom classes and the importer still drops
-nonallocated sections: the new native attachment takes explicit caller bytes,
-one unit. Preserving arbitrary foreign DWARF and attaching several units through
-`executable_write` remain follow-ups. This module does not modify the
-assembler-owned CFI/section adapter in #233.
+[#395](https://github.com/buster14a/buster/issues/395) attaches several units
+through `executable_write` (above) and keeps other compilers' DWARF through
+`link-foreign` (the driver's contract, "Debug information"); `Link` still has no
+debug-section atom classes, since those sections are built whole beside it.
+This module does not modify the assembler-owned CFI/section adapter in #233.
 
 The merged [Tier 0 PR #303](https://github.com/buster14a/buster/pull/303),
 rechecked on main at `9857e71781447f697da87809f3262b15a82145f6`, contains real
@@ -271,4 +292,7 @@ their addresses, written after the units before it. `test-streaming
 --cross-check` has `llvm-dwarfdump --verify` check the units together, gdb
 give every frame its function's line and perf's samples lines; the linker
 design's "Streaming the output" has the comparison against writing at the
-end. Its programs are generated typed streams, without source tokens, so its rows stay a line per function.
+end. Its programs are generated typed streams, without source tokens, so its
+rows stay a line per function. The direct path's executable of the same code
+takes the same units through `executable_write`, which finalizes each at its
+functions' places.

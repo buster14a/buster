@@ -317,6 +317,39 @@ jobs:
           test "$status" -eq 0
           printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
 
+      - name: Check out reviewed first-party performance fixtures and acceptance harnesses
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster-performance
+          ref: 980ae7e87dfc709bda50d7d493ea3800d1411bcc # Reviewed source/evidence from buster-performance PR #7.
+          path: build/performance-reader-evidence
+          sparse-checkout: |
+            docs/measurements/performance-format-2026-10-24
+            docs/measurements/performance-first-party-2026-10-25
+            docs/measurements/foreign-strings-2026-10-23/raw
+          persist-credentials: false
+
+      - name: Qualify first-party performance readers and frozen import on the 9700X
+        # The runner's job hook already holds the shared host lock. Use the
+        # existing Clang/C runtime only; no dependency setup or downloader.
+        run: |
+          set -euo pipefail
+          reader_root=build/performance-reader-evidence
+          reader_fixture="$reader_root/docs/measurements/performance-format-2026-10-24"
+          reader_harness="$reader_root/docs/measurements/performance-first-party-2026-10-25"
+          bash tools/performance/build.sh
+          build/performance/bmf --self-test
+          clang -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
+            -I tools/performance "$reader_harness/validate.c" -o build/performance/test-first-party
+          build/performance/test-first-party "$reader_fixture" "$reader_root" \
+            docs/performance/buster-manifest-v1.schema.json
+          clang -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
+            -I tools/performance "$reader_harness/import-tests.c" -o build/performance/test-import-first-party
+          build/performance/test-import-first-party
+          build/performance/bmf validate "$reader_harness/history/census/manifest.bmf.json"
+          build/performance/bmf validate "$reader_harness/history/foreign-strings/manifest.bmf.json" \
+            --evidence-root "$reader_root"
+
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
         # flags such as -funsigned-char.
@@ -535,6 +568,8 @@ jobs:
           == Test DWARF source lines and late address finalization
           # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
           ./build/compiler test-debug --cross-check
+          == Test zlib decompression of debug sections against gzip's streams
+          ./build/compiler test-inflate
           == Test selective lowering against its independent oracle and Clang symbols
           ./build/compiler test-lowering --clang
           == Check the frozen SQLite source against Clang

@@ -17,6 +17,7 @@
 //     entry of a section in the wide addends too, so each object's range of them is its entries' count: the side
 //     table has gaps, which nothing reads (a wide fixup holds its addend's index), where the exact path's is dense.
 //   - link_check_lanes, link.c's.
+//   - The debug sections' bytes and relocations (foreign_debug.c), after lane 0's plan, each lane taking items.
 // A view's counts must end where they were placed to end; one that doesn't fails the conversion (which no input the
 // exact path takes can make) rather than leave a gap among the fixups. Each lane's first failure is the smallest name or
 // object of its range, and the lanes' smallest is the one reported, as the exact path reports its first.
@@ -52,6 +53,9 @@ struct ForeignLinkLanes
     uint64_t* entries;
     // For each symbol, the least id of the objects whose references give it a type while it is undefined.
     uint32_t* first_typed;
+    // The debug sections' plan, when the output keeps them (foreign_debug.c).
+    ForeignDebugPlan debug_plan;
+    bool debug;
 };
 
 // Whether every lane goes on: lane 0 decides from the conversion's result and every lane gets its answer. Only lane 0
@@ -388,6 +392,41 @@ static void foreign_link_lane(void* argument)
         build->ends[FOREIGN_LINK_PHASE_CHECK] = foreign_now();
         foreign_link_build_finish(build);
         build->ends[FOREIGN_LINK_PHASE_EXPORTS] = foreign_now();
+        // The debug sections' plan, and their passes on every lane (foreign_debug.c), unless the output leaves them out.
+        state->debug = build->result.error == FOREIGN_LINK_ERROR_NONE && !build->options.strip_debug;
+        if (state->debug)
+        {
+            build->output->debug = (ExecutableDebugSections){ 0 };
+            build->result = foreign_debug_plan(&state->debug_plan, build->output, build->foreign, build->order, build->arena);
+        }
+    }
+    if (foreign_link_lanes_proceed(state) && state->debug)
+    {
+        foreign_debug_contribute_lanes(&state->debug_plan, build->foreign);
+    }
+    // Every lane's items done before lane 0 reads their results.
+    lane_sync();
+    if (lane == 0 && state->debug && build->result.error == FOREIGN_LINK_ERROR_NONE)
+    {
+        build->result = foreign_debug_first_failure(state->debug_plan.contribution_results, state->debug_plan.contribution_count);
+    }
+    if (foreign_link_lanes_proceed(state) && state->debug)
+    {
+        foreign_debug_relocate_lanes(&state->debug_plan, build->output, build->foreign);
+    }
+    lane_sync();
+    if (lane == 0)
+    {
+        if (state->debug && build->result.error == FOREIGN_LINK_ERROR_NONE)
+        {
+            build->result = foreign_debug_first_failure(state->debug_plan.relocation_results, state->debug_plan.relocation_count);
+        }
+        if (state->debug && build->result.error == FOREIGN_LINK_ERROR_NONE)
+        {
+            foreign_debug_finish(&state->debug_plan, build->output);
+        }
+        scratch_end(build->scratch);
+        build->ends[FOREIGN_LINK_PHASE_DEBUG] = foreign_now();
     }
 }
 

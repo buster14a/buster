@@ -547,14 +547,17 @@ designs and the compilers already built this way.
   version definitions are refused in the existing symbol pass before output.
 - `src/buster/compiler/debug.c` emits bounded DWARF 5 function names, ranges
   and source lines with scalar/vector twins and explicit late address slots.
-  `ExecutableOptions.debug` attaches one contribution at final TEXT addresses,
-  with nonallocated debug sections and a regular function symbol table.
-  `test-debug --cross-check` checks original fixtures with readelf, GDB and
-  perf; `benchmark-debug` measures validation through address finalization.
-  [The debug guide](docs/debug.md) records the contract, units written after
-  others (`DebugOutput.bases`), whose four offsets point at their own
-  contributions, and a function's body's row (`DebugFunction.prologue_end`);
-  `streaming.c` makes a unit per 256 functions as they compile.
+  `ExecutableOptions.debug` attaches one unit or several (#395), each written
+  after the others at its bases (`DebugOutput.bases`) and finalized at its
+  functions' TEXT addresses, with nonallocated debug sections and a regular
+  function symbol table; `ExecutableOptions.debug_sections` takes sections a
+  producer built whole instead (`link-foreign`'s), with the references the
+  layout decides as columns the writer patches on its lanes.
+  `test-debug --cross-check` checks original fixtures, as one unit and as two,
+  with readelf, GDB and perf; `benchmark-debug` measures validation through
+  address finalization. [The debug guide](docs/debug.md) records the contract
+  and a function's body's row (`DebugFunction.prologue_end`); `streaming.c`
+  makes a unit per 256 functions as they compile.
 - `src/buster/compiler/c_check_debug.c` is the C driver's `-g` (#395): each
   typed entry's code start after branch sizing (`Tier0Code.entry_records`) and
   the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`) make
@@ -569,6 +572,19 @@ designs and the compilers already built this way.
   programs, that lowering with the tokens changes no typed function, and with
   `--cross-check` the executable through `llvm-dwarfdump --verify` and gdb.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
+- `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
+  selected objects' debug sections (#395): concatenated by name in input order
+  (strings not merged), references between debug sections resolved, those to
+  code and data left to the writer, lld's tombstones for discarded code. Its
+  relocation passes take 8 relocations at a time with the exact pass as their
+  twin; `inflate.c` decompresses zlib-compressed sections (RFCs 1950 and 1951;
+  serial within a stream, the streams spread over lanes, the Adler-32 64 bytes
+  at a time). `test-inflate` checks the decompressor against gzip's streams,
+  hand-made errors and every cut and changed byte at `PROT_NONE` pages;
+  `test-foreign --cross-check` (`foreign_debug_test.c`) links gcc's and clang's
+  `-g` fixtures by both paths and on lanes, against lld with
+  `llvm-dwarfdump --verify` and gdb, and checks the relocation kernels' twins.
+  The driver's contract ("Debug information") has the details.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
@@ -699,7 +715,8 @@ designs and the compilers already built this way.
   IFUNC a fixup reaches unless its entry is glibc's startup, recognized by its
   files (the system's `crt1.o` or `rcrt1.o`, by identity, then `libc.a`'s
   `__libc_start_main`), which applies their `IRELATIVE` relocations, or
-  `--startup-applies-irelative` says the program's own does. GC, literal
+  `--startup-applies-irelative` says the program's own does. It keeps the
+  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
   pooling and CIE pooling are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
@@ -972,6 +989,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-bind --cross-check
 ./build/compiler benchmark-bind
 ./build/compiler test-executable
+./build/compiler test-inflate
 ./build/compiler test-dynamic --cross-check
 ./build/compiler test-static --cross-check
 ./build/compiler benchmark-executable
