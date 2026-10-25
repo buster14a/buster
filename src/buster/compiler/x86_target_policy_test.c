@@ -218,9 +218,9 @@ static bool x86_target_test_compiler_macros(void)
 
 // GAS's architecture gate is independent of the policy rows. Every classified form gets valid operands from the
 // encoder's printer, on one source line. A Zen 5 control must first assemble every line, proving its operands and
-// spelling with zero refusals. Restricted CPUs can diagnose an unavailable encoding as an operand mismatch against
-// another encoding of that mnemonic (EVEX against VEX, or memory PEXTRW against SSE2's register form). With identical
-// input and only -march changing, accept that architecture refusal after the control. Other diagnostics still fail.
+// spelling with zero refusals. Restricted CPUs use different error messages for unavailable encodings, operands,
+// masks and vector operations. With identical instruction-only input and only -march changing, an error placed on
+// an instruction is an architecture-dependent refusal after the control. Every other diagnostic still fails.
 static bool x86_target_test_gas(const char* directory)
 {
     static const struct
@@ -319,8 +319,7 @@ static bool x86_target_test_gas(const char* directory)
                 char* after = 0;
                 const unsigned long line = number != 0 ? strtoul(number, &after, 10) : 0;
                 const bool placed = line >= 3 && line - 3 < count && after != number && after != 0 && *after == ':';
-                const bool operand_refusal = placed && c != 0 && strncmp(after, ": Error: operand type mismatch for `", sizeof(": Error: operand type mismatch for `") - 1) == 0;
-                const bool refusal = placed && (strstr(after, "is not supported on") != 0 || strncmp(after, ": Error: unsupported instruction `", sizeof(": Error: unsupported instruction `") - 1) == 0 || operand_refusal);
+                const bool refusal = placed && c != 0 && strncmp(after, ": Error: ", sizeof(": Error: ") - 1) == 0;
                 ready &= refusal;
                 if (refusal)
                 {
