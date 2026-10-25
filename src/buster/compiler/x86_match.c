@@ -360,7 +360,7 @@ static bool x86_match_supported(const X86FormDescription* form)
     {
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sse); i += 1)
         {
-            allowed |= strcmp(name + 1, sse[i]) == 0;
+            allowed |= name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
         }
         allowed |= strcmp(name, "vzeroupper") == 0;
     }
@@ -369,7 +369,7 @@ static bool x86_match_supported(const X86FormDescription* form)
         // 512-bit floating arithmetic/moves and dword integer arithmetic are AVX-512F. No implicit VL/BW/DQ.
         for (uint32_t i = 0; i < 14; i += 1)
         {
-            allowed |= i != 4 && i != 5 && strcmp(name + 1, sse[i]) == 0;
+            allowed |= i != 4 && i != 5 && name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
         }
         allowed |= strcmp(name, "vpaddd") == 0 || strcmp(name, "vpsubd") == 0 || strcmp(name, "vpxord") == 0;
         allowed |= strcmp(name, "vmovdqa32") == 0 || strcmp(name, "vmovdqu32") == 0;
