@@ -4118,10 +4118,9 @@ and the program runs: each side checks every argument, result, hidden pointer,
 (#137), against clang and against GCC at 16 bytes, put this compiler on our
 side: a world of what its C passes (integers to 64 bits, enums, pointers,
 `float`, `double`, `long double` and the records, arrays and aligned typedefs of
-them, aligned to 16 at most, with C23's enums of a fixed underlying type and
-structs whose only named member is a flexible array member), without what its
-front end doesn't take yet (an attribute after a bit-field's width, which goes
-before its type instead), and
+them, aligned to 16 at most, with C23's enums of a fixed underlying type,
+structs whose only named member is a flexible array member and bit-fields'
+attributes after their widths), and
 signatures within Tier 0's depths (13 integer arguments, long doubles among them,
 and 15 floating ones); our
 caller and callee per signature as C, which this executable (or `--buster

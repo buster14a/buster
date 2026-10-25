@@ -2418,6 +2418,22 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            // GNU attributes after a bit-field's width, the member's, as clang lays them out: aligned, packed (a compound
+            // width, which the checker reads as raw tokens), two groups, an unnamed field's and an empty one.
+            "attributes after a bit-field's width",
+            "enum { N = 5 };\n"
+            "struct S { int a : 3 __attribute__((aligned(4))), b : 2; char c; };\n"
+            "struct T { char x; unsigned long y : 1 + 2 __attribute__((packed)); char z; };\n"
+            "struct U { char x; int y : N __attribute__((aligned(16))) __attribute__((unused)); char z : (N - 1) __attribute__(()); };\n"
+            "struct V { char x; long : 0 __attribute__((aligned(8))); char y; };\n"
+            "_Static_assert(sizeof(struct S) == 4 && _Alignof(struct S) == 4, \"S\");\n"
+            "_Static_assert(sizeof(struct T) == 3 && _Alignof(struct T) == 1, \"T\");\n"
+            "_Static_assert(sizeof(struct U) == 32 && _Alignof(struct U) == 16, \"U\");\n"
+            "_Static_assert(sizeof(struct V) == 9 && _Alignof(struct V) == 1, \"V\");\n",
+            false,
+            false
+        },
+        {
             // Its alignment applied after its body, which the enum's completion at its base came before: refused.
             "fixed enum: aligned after its body",
             "enum F : char { B } __attribute__((aligned(8)));\n",

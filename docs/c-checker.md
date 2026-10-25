@@ -94,9 +94,12 @@ plain-char semantics.
 The source adapter handles nested pointer, array and function declarators;
 prototype scopes and parameter adjustments; typedefs and local scopes;
 arithmetic, pointers, calls and casts; records/unions, anonymous members,
-bit-fields and flexible arrays (a struct whose only named member is one too, a
-GNU extension clang takes, with clang's layout); enumerations, C23's with a
-fixed underlying type among them, and source-point completion.
+bit-fields (with GNU attributes after a width, whose tokens the checker reads
+as a raw expression, apart from the parser's tree, which hangs the attributes
+on the width's last operand) and flexible arrays (a struct whose only named
+member is one too, a GNU extension clang takes, with clang's layout);
+enumerations, C23's with a fixed underlying type among them, and source-point
+completion.
 It retains initializer lists, designators and ranges, strings and predefined
 function-name arrays, compound literals, GNU statement expressions, generic
 selection, `typeof`, and runtime array bounds. Increment/decrement and compound

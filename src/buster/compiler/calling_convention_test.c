@@ -5932,7 +5932,6 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
     {
         world.gcc = gcc;
         world.compiled = compiled;
-        world.types.compiled = compiled;
         abi_test_world_build(&world, seed, 600);
         // GCC's worlds have neither nullptr_t nor packing, and compiled ones neither nullptr_t nor the directed records.
         TypeId directed[BUSTER_ABI_TEST_DIRECTED];

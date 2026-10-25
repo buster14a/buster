@@ -2030,7 +2030,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     {
                         const uint32_t colon = i++;
                         const uint32_t begin = i;
-                        while (i < frame->close && parser->tokens.kinds[i] != PARSE_KIND_COMMA && parser->tokens.kinds[i] != PARSE_KIND_SEMI)
+                        while (i < frame->close && parser->tokens.kinds[i] != PARSE_KIND_COMMA && parser->tokens.kinds[i] != PARSE_KIND_SEMI &&
+                               parser->tokens.kinds[i] != PARSE_KIND_ATTRIBUTE)
                         {
                             if (parser->tokens.kinds[i] == PARSE_KIND_L_PAREN)
                             {
@@ -2038,9 +2039,13 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             }
                             i += 1;
                         }
+                        // GNU attributes after the width, the member's (check_input_width reads the width itself).
+                        const bool attributed = i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_ATTRIBUTE;
                         int64_t bits = 0;
-                        valid &= check_input_constant(reader, begin, i, &bits) && bits >= 0 && bits <= UINT32_MAX;
+                        valid &= (attributed ? check_input_width(reader, begin, i, &bits) : check_input_constant(reader, begin, i, &bits)) && bits >= 0 &&
+                                 bits <= UINT32_MAX;
                         width = (uint32_t)bits;
+                        valid = valid && (!attributed || check_input_read_attributes(reader, &i, frame->close, &attributes));
                         for (uint32_t ignored = colon; ignored < i; ignored += 1)
                         {
                             reader->ignored[ignored] = true;

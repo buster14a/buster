@@ -1106,6 +1106,9 @@ typedef enum ParseMode
     PARSE_MODE_DECLARATOR,
     // After a declarator's name: its suffixes, then what ends it.
     PARSE_MODE_AFTER_DECLARATOR,
+    // After a bit-field's width and the GNU attributes after it (`int x : 3 __attribute__((packed))`, the member's): more
+    // of them, then what ends the member's declarator.
+    PARSE_MODE_AFTER_WIDTH,
     // After `=` in a declaration or in an initializer list: `{` or an expression.
     PARSE_MODE_INITIALIZER,
     PARSE_MODE_OPERAND,
@@ -3905,6 +3908,15 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         // `[[` after an operand is an attribute list, which clang takes nowhere in an expression.
         parse_scalar_error(parser, i, PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
     }
+    else if (kind == PARSE_KIND_ATTRIBUTE && conditional && group == PARSE_ROLE_OPEN_STRUCT)
+    {
+        // GNU attributes after a bit-field's width end it, as clang takes them: the member's, a postfix group of the
+        // width's last operand, as an attribute after a declarator is of its name.
+        step->role = PARSE_ROLE_LEAF_RIGHT;
+        frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
+        frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE;
+        frame->attribute_continuation = PARSE_MODE_AFTER_WIDTH;
+    }
     else if (kind == PARSE_KIND_L_SQUARE)
     {
         frame->statement = array_designator ? PARSE_ITEM_DESIGNATOR : frame->statement;
@@ -3995,6 +4007,21 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     else if (parse_kind_is_closer(kind))
     {
         parse_scalar_close_item(parser, i, frame, step);
+    }
+    else
+    {
+        parse_scalar_unexpected(parser, i, frame);
+    }
+}
+
+// After a bit-field's width and its attributes: another attribute, or what ends the width (a comma, a semicolon, the
+// body's closer), as after the width's operand; anything else ends the member's declaration where clang expects a `;`.
+static void parse_scalar_after_width(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
+{
+    const uint8_t kind = parser->kinds[i];
+    if (kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || parse_kind_is_closer(kind))
+    {
+        parse_scalar_operator(parser, i, frame, step);
     }
     else
     {
@@ -4252,6 +4279,7 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                 case PARSE_MODE_ENUM_BASE: parse_scalar_enum_base(parser, i, frame, &step); break;
                 case PARSE_MODE_DECLARATOR: parse_scalar_declarator(parser, i, frame, &step); break;
                 case PARSE_MODE_AFTER_DECLARATOR: parse_scalar_after_declarator(parser, i, frame, &step); break;
+                case PARSE_MODE_AFTER_WIDTH: parse_scalar_after_width(parser, i, frame, &step); break;
                 case PARSE_MODE_KR_PARAMETERS: parse_scalar_kr_parameters(parser, i, frame, &step); break;
                 case PARSE_MODE_INITIALIZER:
                     if (kind == PARSE_KIND_L_BRACE)
