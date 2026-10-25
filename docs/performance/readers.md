@@ -97,6 +97,11 @@ differences; independent populations use a difference of medians. Bootstrap
 resampling uses independent units or pairs and exposes the estimator and
 exclusions.
 
+JSONL partitions share the aggregate cell budget, including nested values. The
+interactive bootstrap caps a selected comparison at 512 independent
+observations; larger populations retain descriptive values and an explicit
+unavailable-inference reason, rather than an automatic regression label.
+
 `web/tests/reader.html` runs browser-native interoperability and rejection probes
 without a package or test framework. `build/performance/serve DIRECTORY PORT`
 serves a prepared static tree on localhost for those checks. Production Pages

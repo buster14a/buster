@@ -398,11 +398,11 @@ function jsonPrimitive(field, value)
     return undefined;
 }
 
-export function readJSONL(text, fields)
+export function readJSONL(text, fields, budget = {cells: 0})
 {
     require(text.length <= BYTE_LIMIT, 'JSONL byte budget exceeded');
+    require(Number.isSafeInteger(budget.cells) && budget.cells >= 0 && budget.cells <= CELL_LIMIT, 'Invalid aggregate JSONL cell budget');
     const rows = [];
-    let cells = 0;
     for (const line of text.split('\n'))
     {
         if (!line.trim()) continue;
@@ -415,7 +415,7 @@ export function readJSONL(text, fields)
         {
             const frame = frames[frames.length - 1];
             if (frame.cursor === frame.end) { frames.pop(); continue; }
-            require(++cells <= CELL_LIMIT, 'JSONL materialized-cell budget exceeded');
+            require(++budget.cells <= CELL_LIMIT, 'JSONL materialized-cell budget exceeded');
             const index = frame.cursor++;
             const field = frame.structure ? frame.fields[index] : frame.field;
             const key = frame.structure ? field.name : index;

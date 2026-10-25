@@ -248,8 +248,9 @@ export class Dataset
             else
             {
                 demand(resource.format === 'jsonl' && schema, 'JSONL requires an ordinary Arrow schema sidecar');
-                partition = readJSONL(new TextDecoder('utf-8', {fatal: true}).decode(bytes), schema.fields);
-                slots += partition.length * schema.schema.all.length;
+                const budget = {cells: this.materializedCells + slots};
+                partition = readJSONL(new TextDecoder('utf-8', {fatal: true}).decode(bytes), schema.fields, budget);
+                slots = budget.cells - this.materializedCells;
             }
             demand(resource.rows === undefined || BigInt(partition.length) === BigInt(resource.rows), 'Partition row count differs');
             demand(rows.length + partition.length <= ROW_LIMIT && slots + this.materializedCells <= CELL_LIMIT, 'Dataset materialized-row/cell budget exceeded');
@@ -331,7 +332,7 @@ export function comparePopulation(dataset, table, column, left, right)
     const b = right.filter(valid);
     const baseline = median(a.map(row => rational(row[column])));
     const candidate = median(b.map(row => rational(row[column])));
-    const result = {baseline, candidate, delta: baseline && candidate ? subtract(candidate, baseline) : null, independentLeft: a.length, independentRight: b.length, excluded: left.length + right.length - a.length - b.length, ...eligibility};
+    const result = {baseline, candidate, delta: baseline && candidate ? subtract(candidate, baseline) : null, observationsLeft: a.length, observationsRight: b.length, independentLeft: null, independentRight: null, excluded: left.length + right.length - a.length - b.length, ...eligibility};
     if (!eligibility.eligible || !baseline || !candidate) return {...result, classification: 'ineligible', uncertainty: 'not estimated'};
     if (result.excluded) return {...result, eligible: false, classification: 'ineligible', reasons: ['Missing, invalid or censored observations; no complete-population inference'], uncertainty: 'not estimated'};
     const contract = eligibility.contract;
@@ -344,7 +345,8 @@ export function comparePopulation(dataset, table, column, left, right)
     if (independentA.size !== a.length || independentB.size !== b.length) return {...result, eligible: false, classification: 'ineligible', reasons: ['Repeated independent unit; select one observation per unit'], uncertainty: 'not estimated'};
     if ([...a, ...b].some(row => [...matchColumns, ...contract.independent_unit_columns, ...(contract.pair_columns ?? [])].some(name => row[name] === null || row[name] === undefined || row[name] === 'unknown'))) return {...result, eligible: false, classification: 'ineligible', reasons: ['Unknown matching or unit identity'], uncertainty: 'not estimated'};
     const matchSet = new Set(a.map(row => key(row, matchColumns)));
-    if (b.some(row => !matchSet.has(key(row, matchColumns))) || a.some(row => !b.some(other => key(other, matchColumns) === key(row, matchColumns)))) return {...result, eligible: false, classification: 'ineligible', reasons: ['Unmatched populations'], uncertainty: 'not estimated'};
+    const candidateMatches = new Set(b.map(row => key(row, matchColumns)));
+    if (matchSet.size !== candidateMatches.size || [...candidateMatches].some(value => !matchSet.has(value))) return {...result, eligible: false, classification: 'ineligible', reasons: ['Unmatched populations'], uncertainty: 'not estimated'};
     if (matchSet.size !== 1) return {...result, eligible: false, classification: 'ineligible', reasons: ['Select one matched condition or facet before estimating a population effect'], uncertainty: 'not estimated'};
     if (contract.estimator === 'independent' && [...independentA].some(id => independentB.has(id))) return {...result, eligible: false, classification: 'ineligible', reasons: ['Overlapping experimental units cannot use an independent estimator'], uncertainty: 'not estimated'};
     let effects;
@@ -371,6 +373,7 @@ export function comparePopulation(dataset, table, column, left, right)
         result.delta = median(effects);
     }
     result.estimator = effects ? 'median of matched pair differences' : 'difference of independent population medians';
+    if (a.length + b.length > 512) return {...result, classification: 'inference budget exceeded', uncertainty: 'not estimated (more than 512 selected independent observations); refine the population', relative: null};
     let seed = 384;
     const random = size => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % size; };
     const estimates = [];
