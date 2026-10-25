@@ -488,13 +488,16 @@ What the lowering covers past scalars (#145's programs):
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
   where `abi_assign` puts them; a struct or union result lands in a frame object
   of the call site's own (`call_result_objects`), whose address is the call's
-  value.
+  value. That object is aligned to the result's canonical type at least, an
+  aligned typedef's smaller alignment left out: a callee takes a hidden result
+  pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
   of its size and alignment, which Tier 0's prologue fills. A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
-  the bytes there and returns it. Those aligned past 16 bytes or larger than
-  64 KB are refused, and so are results in x87 registers (`long double`).
+  the bytes there and returns it, and one returned in x87 registers (a struct
+  of a `long double`, in st0) returns its bytes' address too. Those aligned past
+  16 bytes or larger than 64 KB are refused.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
@@ -504,6 +507,21 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area.
+- **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
+  in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
+  parameter of it is a frame object of 16 bytes aligned to 16, and every object
+  of it, a global's too, is read with `LOAD` from its address and written with
+  `STORE` or `SET` through it, the address evaluated first. `x op= v`, `++` and
+  `--` on one go through its address as on memory, a postfix one keeping the old
+  value in a frame object of its own. Its constants are each function's table
+  (`x87_constants`), +0.0 at place 0, which truth tests and conversions to
+  `_Bool` compare with. A function with an entry of the class or a long double
+  result says so (`Tier0Function.x87`), which the lowering notes as it writes
+  each entry. What would hold one of its values in a temporary (a
+  statement expression's value or the operands live around it, `?:` without its
+  middle operand, a builtin's operand) and the floating classification builtins
+  on it are refused by name.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -542,8 +560,8 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `long double`, `_Complex`,
-thread-locals, inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: `_Complex`, `__int128`,
+inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
@@ -615,7 +633,12 @@ comparison of distinct pointers or of a pointer with an integer, and a
 conditional of either. The warnings clang makes errors by default
 (`-Wint-conversion`, `-Wincompatible-pointer-types` and its function-pointer
 group, `-Wreturn-mismatch`) are errors, but in a system header, where clang
-suppresses them and converts as it would have.
+suppresses them and converts as it would have. A token is in a system header
+when its expansion location is (`check_input_system_tokens`): the preprocessor
+judges every output token from runs its main loop keeps (`pp_system_levels`),
+or with `--scalar` and for a unit whose runs can't say, by the expansion
+history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
+levels" has both.
 Floating results are compared field by field, never by `long double` padding.
 
 ## Corpus comparison and semantic mutations

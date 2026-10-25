@@ -86,19 +86,15 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
 ```
 
-`tests/c-testsuite/subset.txt` declares the 219 that must pass. The other one
-is refused by name, waiting on work of its own:
-
-| Test | Refused as | Waits on |
-| --- | --- | --- |
-| 00204 | `long double` (its values, and structs of them returned in x87 registers) | [#136](https://github.com/buster14a/buster/issues/136)'s item 8 |
+`tests/c-testsuite/subset.txt` declares all 220: every test must pass.
 
 00140 joined the subset with [#137](https://github.com/buster14a/buster/issues/137)'s
-structs and unions by value and variadic function definitions, which 00204 needs
-too, besides `long double`.
+structs and unions by value and variadic function definitions, and 00204 with
+`long double` ([#136](https://github.com/buster14a/buster/issues/136)'s item 8:
+its values on the x87, passed on the stack and returned in st0, structs of them
+returned in x87 registers, and `va_arg` of them), which it needs besides those.
 
-With `--cross-check`, `-c` refuses it as the direct path does. A test moves into
-the subset in the change that makes it pass.
+A test moves into the subset in the change that makes it pass.
 
 The reference runners (`runners/single-exec`) pass no `-lm`: gcc and clang at
 `-O2` fold 00174's `sin(2)`, and Tier 0 folds no library call, so the harness

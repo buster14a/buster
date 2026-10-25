@@ -97,33 +97,7 @@ static bool check_lazy_mask_valid(const Parser* parser, const uint8_t* mask)
 // `origin` is the output token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
 static uint32_t check_lazy_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
 {
-    bool valid = token < pp->output.count && pp->output.locations != 0;
-    uint32_t location = valid ? pp->output.locations[token] : 0;
-    const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
-    for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
-    {
-        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
-        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
-        if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
-        {
-            valid = index < pp->substitution_count;
-            origin = valid ? pp->substitutions[index].source : 0;
-        }
-        else if (kind == BUSTER_PP_ORIGIN_GENERATED)
-        {
-            valid = index < pp->generated_count;
-            location = valid ? pp->generated[index].anchor : location;
-            origin = valid ? pp->generated[index].expansion : 0;
-        }
-        else
-        {
-            valid = kind == 0 && index < pp->history_count;
-            location = valid ? pp->history[index].begin : location;
-            origin = valid ? pp->history[index].parent : 0;
-        }
-    }
-    valid &= origin == 0;
-    return valid ? location : 0;
+    return pp_expansion_location(pp, token, origin);
 }
 
 static bool check_lazy_system(const Preprocessor* pp, uint32_t token)

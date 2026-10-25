@@ -23,6 +23,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer.
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
+- **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
+  structs returned in x87 registers ("Long double", below).
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -31,9 +33,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
-- **c-testsuite (#145):** 219 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+- **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
-  ([the c-testsuite guide](c-testsuite.md)). The other one, 00204, waits on item 8 of #136's plan (`long double`).
+  ([the c-testsuite guide](c-testsuite.md)).
 
 **Waits for #133, #145 and #146:**
 
@@ -257,6 +259,53 @@ The producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)) give
 result an object of its own, a function with a hidden result pointer its parameter 0, and an aggregate parameter's
 object its alignment, to 16; `docs/calling-convention.md` has the cross-check of C that this compiler compiles against
 clang's and GCC's.
+
+## Long double (#136's item 8)
+
+A `long double` is the x87's 80-bit extended value in 16 bytes, which the System V convention passes in memory (on the
+stack) and returns in st0; a struct of one returns in st0, and a struct of a `_Complex long double` in st0 and st1
+(#137's X87 results). Its class is F80 (`BUSTER_TYPED_CLASS_F80`), whose values Tier 0 keeps in memory:
+
+- **A value** takes an integer depth, as an address does, and lives in that depth's 16-byte slot of the frame
+  (`Tier0Frame.x87_area`: a slot per integer depth after the fixed slots, in a function with long double values). An entry
+  loads its operands from their slots onto the x87 stack, computes, and stores its result into its slot, leaving the x87
+  stack empty, so that nothing lives there across entries, calls or joins. Every F80 entry is deferred: emitted by
+  `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a time, as calls are.
+- **Its locals and parameters are objects** of 16 bytes aligned to 16, and its globals are reached through their
+  addresses: there is no `LOCAL`, `STORE_LOCAL`, `SET_LOCAL`, `GLOBAL`, `STORE_GLOBAL` or `SET_GLOBAL` of F80, and a
+  front end reads one with `LOAD` and writes it with `STORE` or `SET`, the address first. A parameter's home is its
+  incoming stack slot, whose place is a multiple of 16.
+- **Its constants** are an optional column of the function's (`x87_constants`, `x87_constant_count` values of two words:
+  the significand, then the sign and exponent), which `CONST F80` indexes. A constant is three immediate stores into its
+  slot.
+- **A function says whether it has long double values** (`Tier0Function.x87`: an entry of class F80, or a long double
+  result), which its producer knows as it writes them. Only such a function has the slots, and only its compile looks
+  for long double's entries: selection, measuring and the deferred entries' emitter are each written once with the flag
+  a constant (`tier0_select_entries`, `tier0_select_vector_entries`, `tier0_measure_vector_entries` and
+  `tier0_emit_deferred_entry`), the instance without long doubles inline where the code was before and the one with them
+  out of line. A function without long doubles then compiles with the code Tier 0 had before them, but for a test of the
+  flag at each of those uses (#423's measurements, below). A struct result in x87 registers, which goes to its object,
+  takes no slot: any function's calls handle one.
+- **The kinds:** `CONST`, `DUP`, `NEG` (`fchs`), `LOAD`, `STORE`, `SET`, `ADD`, `SUB`, `MUL` and `DIV` (`faddp` and the
+  others on st(1) and st(0)), the compares (`fucomip`, the operands swapped for `<` and `<=`, with clang's results for
+  unordered operands: true for `!=` alone), `CONVERT` to and from every class, `CALL`, `DISCARD`, `JUMP_VALUE` and
+  `RETURN`.
+- **Conversions:** from an integer by `fild` of it widened to 64 bits, an unsigned 64-bit one past 2^63 corrected by
+  adding 2^64; to an integer by `fistp` with the rounding control set to truncation and restored (`fnstcw`, `fldcw`), an
+  unsigned 64-bit one past 2^63 by subtracting 2^63 first and setting the top bit after, as clang's code does; and to and
+  from float and double through the red zone.
+- **Calls:** an F80 argument is copied from its slot to its place in the outgoing area (`fld`, `fstp`); a call's F80
+  result is stored from st0 into the slot of its depth, and a struct result in x87 registers into its object, part k at
+  16 · k. A function's F80 result is the value at depth 0 its `RETURN` leaves, which the epilogue loads into st0; a
+  function returning a struct in x87 registers loads its parts from the address its `RETURN` gives.
+
+Each truncation restores the control word it changed, which the convention has callee-saved, and MXCSR is untouched.
+`tier0_validate` refuses a local of the class that isn't an object, a global read or stored as an F80 value, a constant
+past the column, an integer operation of the class or a branch on it, an F80 argument anywhere but its 16 bytes of the
+outgoing area at a multiple of 16, a `RETURN` of F80 from a function whose result isn't one long double in st0 and of
+another class from one whose is, a function returning a `_Complex long double` (st0 and st1, which no class holds),
+a call whose x87 result neither an F80 class nor a result object takes, and an F80 entry or a long double result in a
+function without `x87`.
 
 ## Symbols outside the image
 
@@ -580,6 +629,26 @@ Before the programs, checks of their own:
     the position restored. Without its restores it would take 64 MB of stack. Both paths must compile it alike, with
     `push rbp` in its prologue, and it must run in a child on eight inputs with the interpreter's result and the
     expected one.
+- **x87** (#136's item 8, `tier0_x87_test.c`), long double compiled by both paths into the same records, encoded by
+  both encoders into the same bytes and run natively in a child, called from C through function pointers, so that the
+  file's C (clang's code) is the oracle of the convention for its arguments, parameters and results, and its x87
+  arithmetic the oracle of their values:
+  - **rules:** each break of the class's rules (above) refused at its entry by `tier0_validate`, and the streams beside
+    them taken;
+  - **functions** of long double parameters and results called from C: two on the stack around an integer in a
+    register, a struct of one returned in st0, a call of a C function whose such struct comes back into its object, long
+    doubles passed to a variadic C function, and one kept in its slot across a call;
+  - **boundaries:** each conversion with a sequence of its own on named cases: to `unsigned long` at 0 and 1, below 2^63
+    by 1 and by a half, at it, past it by 1 and at 10^19, and at its largest value; to `long` and `int` at their limits
+    and on fractions of either sign; and back from `unsigned long` (2^63 ± 1 and the largest two values among them) and
+    `long`. Each must give C's conversion of the value, every case in range, and each call, made under rounding upward,
+    must truncate and leave the control word as it was;
+  - **programs:** 300 random functions (`--count`) of statements that each write a value into 16 bytes of an output (a
+    long double; an integer, a float or a double converted from one; a compare's result), from inputs of every class,
+    through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions both ways (unsigned 64-bit ones past
+    2^63 too) and calls of C functions through their addresses, against the check's own stack machine over the stream.
+    The programs must reach every kind and conversion of the class. A program past the depth tables is counted, not
+    compiled.
 - **access:** `tier0_validate` must refuse a global entry whose symbol is past the access column, and an access past
   the last, and take the last. Then GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant,
   and GLOBAL_ADDRESS, of every class, by each access. Both paths must compile each alike to valid records with one
@@ -807,6 +876,18 @@ path's 11.1.
   (#411), the job measured 169.31 and 574.35, the cycles (80.27 and 232.97, against 80.11 and 229.83) within the runs'
   spread. Under Intel SDE, no variant of the passes tried brought the vector path back to the 0.5 instructions per entry
   fewer that `ac4ccbd`'s inlining happened to give.
+- **Long double (#136's item 8)** at no cost to code without it (#423's review). On these programs, which have no long
+  double, the 9700X measured `6c33fae`, whose x87 checks were inline in both selections' loops, in the call's emitter and
+  count and in the deferred entries' dispatch, against main's `7c428ce` in four rounds in alternating order: the vector
+  path at 171.56 instructions per entry (81.0 to 81.9 cycles) against 169.31 (79.2 to 79.6), and alone 79.5 cycles
+  against 77.8 and 78.0; the scalar path at 580.49 instructions against 574.35, its cycles (231.4 to 231.8 against 232.5
+  to 232.8) within the runs' spread. The checks themselves cost little: on the 7940HS, removing the four groups took the
+  vector path from 170.66 to 168.62 instructions per entry against main's 168.46, and each alone part of the way, as
+  their code changed clang's for the passes around them. With the flag (`Tier0Function.x87`) and the long doubles' code
+  out of line ("Long double" above), the 7940HS measures 169.01 and 575.97 instructions per entry against main's 168.46
+  and 574.25: a test of the flag at each use, and clang's code for the shared passes, which moves by about that much with
+  any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
+  are the same bytes as main's.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
@@ -840,7 +921,7 @@ path's 11.1.
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
     whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
-  - `va_arg` of `long double` and `_Complex` (the scalar classes and structs and unions have recipes);
+  - `_Complex` values, and `va_arg` of them (the scalar classes, long double, and structs and unions have recipes);
   - inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table).
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
@@ -861,7 +942,8 @@ path's 11.1.
   tcc. c-testsuite (#145) runs.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
-  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp.
+  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It also refuses a
+  function with long double code, whose x87 forms `x86_semantics.c` has no rows for yet.
 
 ## Boundary audit #298
 

@@ -710,6 +710,16 @@ static ForeignLinkResult foreign_gc_link_external(ForeignLink* output, const For
         output->runtime = input->runtime;
         output->runtime.tls_get_addr = state->symbols[input->runtime.tls_get_addr];
         output->library_versions = input->library_versions;
+        // The debug sections' bytes and their references' other columns are shared; their targets move to the live
+        // symbols, and one to a symbol that went gets the writer's tombstone (target 0).
+        output->debug = input->debug;
+        SymbolId* targets = input->debug.relocation_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, input->debug.relocation_count) : 0;
+        result.error = input->debug.relocation_count != 0 && targets == 0 ? FOREIGN_LINK_ERROR_MEMORY : result.error;
+        for (uint64_t r = 0; targets != 0 && r < input->debug.relocation_count; r += 1)
+        {
+            targets[r] = state->symbols[input->debug.targets[r]];
+        }
+        output->debug.targets = targets;
     }
     for (uint32_t id = 0; result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
     {

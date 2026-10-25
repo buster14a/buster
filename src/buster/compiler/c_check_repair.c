@@ -47,6 +47,9 @@ struct CheckRepair
 
 static Preprocessor* check_repair_preprocessor(Preprocessor* original, Arena* output)
 {
+    // The view shares the original's expansion history, which its diagnostics read: recorded first, if the unit put it
+    // off (PPOptions.defer_history), so that the view never records one of its own.
+    pp_history_ensure(original);
     Preprocessor* view = BUSTER_ARENA_PUSH_ARRAY(output, Preprocessor, 1);
     if (view != 0)
     {
