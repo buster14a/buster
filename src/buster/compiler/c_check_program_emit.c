@@ -75,6 +75,14 @@ static bool check_program_emit_taken(const Link* link, const CheckProgramNames* 
     return taken;
 }
 
+// Whether the compiler makes the name of `declaration`'s symbol (`renamed`: its asm label, if it has one): a file-scope
+// compound literal's, and a block-scope static's without a label of its own.
+static bool check_program_emit_makes_name(const CheckInput* input, uint32_t declaration, String8 renamed)
+{
+    return input->compound_objects[declaration] ||
+           (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+}
+
 // Adds `spelling`, the name the source gives a symbol, to the link's names and to the names a made one must not be: its
 // NameId, or 0 when the link has no room.
 static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length)
@@ -328,27 +336,33 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     // A block-scope static's declaration is in a body (declaration_bodies) and has no linkage; a block-scope extern or
     // function declaration has linkage, and its symbol is the file-scope entity's.
     const CheckInput* input = program->input;
+    // Only a unit that makes a name, which most don't, needs the table of the names a made one must not be, and the
+    // source's names in it first; the others add their names as they come.
+    bool makes = false;
+    for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
+    {
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+        makes |= declaration != BUSTER_CHECK_NONE && check_program_emit_makes_name(input, declaration, symbol_names[s + 1]);
+    }
     uint32_t slots = 2;
-    while (slots <= (uint64_t)program->symbol_count * 2 && slots < (UINT32_C(1) << 31))
+    while (makes && slots <= (uint64_t)program->symbol_count * 2 && slots < (UINT32_C(1) << 31))
     {
         slots *= 2;
     }
     CheckProgramNames names = { .mask = slots - 1 };
-    names.taken = valid && program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, slots) : 0;
-    NameId* given = valid && program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, program->symbol_count) : 0;
-    valid = valid && (program->symbol_count == 0 || (names.taken != 0 && given != 0));
+    names.taken = valid && makes ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, slots) : 0;
+    NameId* given = valid && makes ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, program->symbol_count) : 0;
+    valid = valid && (!makes || (names.taken != 0 && given != 0));
     if (names.taken != 0)
     {
         memset(names.taken, 0, (uint64_t)slots * sizeof(NameId));
     }
     // The names the source gives come first, so that no made name is one of them.
-    for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
+    for (uint32_t s = 0; valid && makes && s < program->symbol_count; s += 1)
     {
         const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
         const String8 renamed = symbol_names[s + 1];
-        const bool made = declaration != BUSTER_CHECK_NONE &&
-                          (input->compound_objects[declaration] ||
-                           (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0));
+        const bool made = declaration != BUSTER_CHECK_NONE && check_program_emit_makes_name(input, declaration, renamed);
         given[s] = 0;
         if (declaration != BUSTER_CHECK_NONE && !made)
         {
@@ -396,9 +410,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                     name = check_program_emit_made_name(&result->link, &names, base, (uint32_t)base_length, scratch);
                 }
             }
-            else
+            else if (given != 0)
             {
                 name = given[s];
+            }
+            else
+            {
+                name = renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
+                                             link_add_name(&result->link, intern_bytes(identifiers, identifier), intern_length(identifiers, identifier));
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
