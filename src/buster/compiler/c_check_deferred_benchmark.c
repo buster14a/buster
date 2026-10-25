@@ -14,8 +14,9 @@
 // (summed over the lanes) and their position checks (each body's heads from the history and its table's view, set and
 // taken back), the lanes' span, the merge and the rest (the reader's phases after the merge, as after source order's
 // walk); the position checks per body too, and how many lanes copied the reader (those that took a part, no more than
-// the bodies). A unit the deferred reader leaves to source order is said so. This measures the reader (check_input)
-// alone, not the graph's checking after it.
+// the bodies). Then what a lane costs, in nanoseconds: its copy of the reader, and the first lane's wait at the
+// partition for every lane to start. A unit the deferred reader leaves to source order is said so. This measures the
+// reader (check_input) alone, not the graph's checking after it.
 //
 // With --cpus (a comma-separated list of at least --lanes CPUs), the command pins itself to the first, where the parse,
 // source order and the top level run, and its lanes to the list in order, in a team of its own that every run reuses.
@@ -34,6 +35,8 @@ struct CheckDeferredSample
     uint64_t merge[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t rest[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t copies[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint64_t copy[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint64_t wake[BUSTER_CHECK_SOURCE_MAX_PASSES];
 };
 
 // One check of the parsed unit: source order's (lanes 0) or the deferred reader's, into `arenas` (types, its index,
@@ -99,6 +102,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     static CheckDeferredSample samples[2];
     static CheckDeferred deferred;
     uint64_t bodies = 0;
+    uint64_t body_tokens = 0;
     uint64_t history_reads = 0;
     bool merged = true;
     const char* reason = 0;
@@ -133,9 +137,12 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                 const uint64_t phases = deferred.top_ns + deferred.environment_ns + deferred.lanes_ns + deferred.merge_ns;
                 sample->rest[pass] = time > phases ? time - phases : 0;
                 sample->copies[pass] = deferred.copies;
+                sample->copy[pass] = deferred.copies != 0 ? deferred.copy_ns / deferred.copies : 0;
+                sample->wake[pass] = deferred.wake_ns;
                 merged &= !deferred.unsupported;
                 reason = deferred.unsupported ? deferred.reason : reason;
                 bodies = deferred.bodies;
+                body_tokens = deferred.body_tokens;
                 history_reads = deferred.history_reads;
                 check_deferred_release(&deferred);
             }
@@ -147,19 +154,21 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
         const uint32_t count = (uint32_t)passes;
         const double tokens = pp.output.count != 0 ? (double)pp.output.count : 1.0;
         const double per_body = bodies != 0 ? (double)bodies : 1.0;
-        printf("checker-deferred: file=%s tokens=%u bodies=%" PRIu64 " history_reads=%" PRIu64 " merged=%s%s%s%s parse=%.2f source_order=%.2f ns/token\n", file,
-               pp.output.count, bodies, history_reads, merged ? "yes" : "no", merged ? "" : " (", merged ? "" : (reason != 0 ? reason : "unknown"), merged ? "" : ")",
-               (double)check_source_median(parses, count) / tokens, (double)check_source_median(sequential, count) / tokens);
+        printf("checker-deferred: file=%s tokens=%u bodies=%" PRIu64 " body_tokens=%" PRIu64 " history_reads=%" PRIu64 " merged=%s%s%s%s parse=%.2f"
+               " source_order=%.2f ns/token\n", file, pp.output.count, bodies, body_tokens, history_reads, merged ? "yes" : "no", merged ? "" : " (",
+               merged ? "" : (reason != 0 ? reason : "unknown"), merged ? "" : ")", (double)check_source_median(parses, count) / tokens,
+               (double)check_source_median(sequential, count) / tokens);
         for (uint32_t way = 0; way < 2; way += 1)
         {
             const CheckDeferredSample* sample = samples + way;
             printf("checker-deferred:   lanes=%u copies=%" PRIu64 " whole=%.2f top=%.2f environment=%.3f walks=%.2f positions=%.3f lanes_span=%.2f merge=%.2f"
-                   " rest=%.2f ns/token, positions=%.1f ns/body\n", way == 0 ? 1 : lanes, check_source_median(sample->copies, count),
-                   (double)check_source_median(sample->whole, count) / tokens,
+                   " rest=%.2f ns/token, positions=%.1f ns/body, copy=%" PRIu64 " ns/lane, wake=%" PRIu64 " ns\n", way == 0 ? 1 : lanes,
+                   check_source_median(sample->copies, count), (double)check_source_median(sample->whole, count) / tokens,
                    (double)check_source_median(sample->top, count) / tokens, (double)check_source_median(sample->environment, count) / tokens,
                    (double)check_source_median(sample->walks, count) / tokens, (double)check_source_median(sample->positions, count) / tokens,
                    (double)check_source_median(sample->lanes, count) / tokens, (double)check_source_median(sample->merge, count) / tokens,
-                   (double)check_source_median(sample->rest, count) / tokens, (double)check_source_median(sample->positions, count) / per_body);
+                   (double)check_source_median(sample->rest, count) / tokens, (double)check_source_median(sample->positions, count) / per_body,
+                   check_source_median(sample->copy, count), check_source_median(sample->wake, count));
         }
     }
     else

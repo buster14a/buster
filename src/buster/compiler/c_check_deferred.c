@@ -135,6 +135,7 @@ struct CheckDeferredLane
     uint64_t withdrawn;
     uint64_t position_ns;
     uint64_t walk_ns;
+    uint64_t copy_ns;
 };
 
 struct CheckDeferred
@@ -179,7 +180,9 @@ struct CheckDeferred
     uint64_t copies;
     // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
-    // their position checks: setting each body's heads from the history and its table's view, and taking them back.
+    // their position checks: setting each body's heads from the history and its table's view, and taking them back. And
+    // what a lane costs: its copy of the reader, summed over the lanes that copied it, and the first lane's wait at the
+    // partition for every lane to start, a wake-up's.
     bool timing;
     // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
     const uint32_t* cpus;
@@ -198,6 +201,8 @@ struct CheckDeferred
     uint64_t merge_ns;
     uint64_t walk_ns;
     uint64_t position_ns;
+    uint64_t copy_ns;
+    uint64_t wake_ns;
 };
 
 // CLOCK_MONOTONIC's nanoseconds, for `timing`'s spans.
@@ -689,7 +694,13 @@ static void check_deferred_lane(void* argument)
     CheckDeferred* deferred = run->deferred;
     const uint32_t index = lane_index();
     CheckDeferredLane* lane = deferred->lane_states + index;
+    const uint64_t entered = deferred->timing && index == 0 ? check_deferred_now() : 0;
     const uint64_t parts = lane_parts_by_cost(deferred->costs, deferred->body_count, deferred->boundaries, deferred->orders[index]);
+    // The partition's sync is the first that every lane reaches: the first lane waits there for the others to wake.
+    if (entered != 0)
+    {
+        deferred->wake_ns = check_deferred_now() - entered;
+    }
     while (deferred->hold_lanes && index != 0 && __atomic_load_n(&deferred->held, __ATOMIC_ACQUIRE) == 0)
     {
         // A test's wait, which yields: the tests may run more lanes than CPUs.
@@ -698,7 +709,9 @@ static void check_deferred_lane(void* argument)
     for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
     {
         // The copy of the reader, made for the lane's first part: a lane that takes none spends nothing on one.
+        const uint64_t copy_begin = deferred->timing && !lane->copied ? check_deferred_now() : 0;
         lane->ready = lane->copied ? lane->ready : check_deferred_lane_prepare(deferred, lane);
+        lane->copy_ns += copy_begin != 0 ? check_deferred_now() - copy_begin : 0;
         lane->copied = true;
         const uint32_t part = deferred->orders[index][taken];
         for (uint64_t body = deferred->boundaries[part]; body < deferred->boundaries[part + 1]; body += 1)
@@ -1258,6 +1271,7 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->copies += state->copied;
         deferred->position_ns += state->position_ns;
         deferred->walk_ns += state->walk_ns;
+        deferred->copy_ns += state->copy_ns;
     }
     for (uint32_t b = 0; valid && b < deferred->body_count; b += 1)
     {
