@@ -218,8 +218,9 @@ static bool x86_target_test_compiler_macros(void)
 
 // GAS's architecture gate is independent of the policy rows. Every classified form gets valid operands from the
 // encoder's printer, on one source line. A Zen 5 control must first assemble every line, proving its operands and
-// spelling. Restricted CPUs can diagnose SSE4.1's memory PEXTRW as an operand mismatch against SSE2's register-only
-// instruction; accept that specific refusal only after the control passed. Other syntax/tool failures fail the run.
+// spelling with zero refusals. Restricted CPUs can diagnose an unavailable encoding as an operand mismatch against
+// another encoding of that mnemonic (EVEX against VEX, or memory PEXTRW against SSE2's register form). With identical
+// input and only -march changing, accept that architecture refusal after the control. Other diagnostics still fail.
 static bool x86_target_test_gas(const char* directory)
 {
     static const struct
@@ -230,9 +231,10 @@ static bool x86_target_test_gas(const char* directory)
     } configurations[] = {
         { "znver5", "znver5", 0 }, // Syntax/operand control, before any negative architecture case.
         { "x86-64", "generic64", 0 },
-        { "x86-64-v2", "generic64+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf", 0 },
-        { "x86-64-v3", "generic64+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf+avx+avx2+bmi+bmi2+f16c+fma+lzcnt+movbe+xsave", 0 },
-        { "x86-64-v4", "generic64+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf+avx+avx2+bmi+bmi2+f16c+fma+lzcnt+movbe+xsave+avx512f+avx512bw+avx512cd+avx512dq+avx512vl", 0 },
+        // GAS tracks FISTTP separately from SSE3, without an extension option. Nocona supplies both; remove MONITOR.
+        { "x86-64-v2", "nocona+nomonitor+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf", 0 },
+        { "x86-64-v3", "nocona+nomonitor+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf+avx+avx2+bmi+bmi2+f16c+fma+lzcnt+movbe+xsave", 0 },
+        { "x86-64-v4", "nocona+nomonitor+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf+avx+avx2+bmi+bmi2+f16c+fma+lzcnt+movbe+xsave+avx512f+avx512bw+avx512cd+avx512dq+avx512vl", 0 },
         { "znver5", "znver5+nofma", BUSTER_X86_FEATURE(FMA) },
         { "znver5", "znver5+noavx512vl", BUSTER_X86_FEATURE(AVX512VL) },
         { "znver5", "znver5+noavx512bw", BUSTER_X86_FEATURE(AVX512BW) },
@@ -317,7 +319,7 @@ static bool x86_target_test_gas(const char* directory)
                 char* after = 0;
                 const unsigned long line = number != 0 ? strtoul(number, &after, 10) : 0;
                 const bool placed = line >= 3 && line - 3 < count && after != number && after != 0 && *after == ':';
-                const bool operand_refusal = placed && c != 0 && forms[line - 3] == X86_FORM_PEXTRW_M16_X_IMM8 && strstr(after, "operand type mismatch for") != 0;
+                const bool operand_refusal = placed && c != 0 && strncmp(after, ": Error: operand type mismatch for `", sizeof(": Error: operand type mismatch for `") - 1) == 0;
                 const bool refusal = placed && (strstr(after, "is not supported on") != 0 || strncmp(after, ": Error: unsupported instruction `", sizeof(": Error: unsupported instruction `") - 1) == 0 || operand_refusal);
                 ready &= refusal;
                 if (refusal)
@@ -343,6 +345,7 @@ static bool x86_target_test_gas(const char* directory)
             cursor = end != 0 ? end + 1 : 0;
         }
         ready &= WEXITSTATUS(status) == (refusals != 0 ? 1 : 0);
+        ready &= c != 0 || refusals == 0;
         X86Target target = {0};
         ready &= x86_target_parse(configurations[c].profile, strlen(configurations[c].profile), &target);
         target.features &= ~configurations[c].disabled;
