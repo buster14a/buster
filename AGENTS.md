@@ -871,9 +871,16 @@ designs and the compilers already built this way.
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
+  With `PPOptions.defer_history` a unit records none while it runs: its
+  diagnostics, and `pp_history_ensure` for a later reader, record it by
+  preprocessing the unit again (`docs/c-preprocessor.md`, "Deferred history").
+  `-E` and `parse` defer it; the checker's driver records it, since
+  `check_input_system_tokens` reads it. A reader of a unit whose history may
+  be deferred calls `pp_history_ensure` first.
   `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
   Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
-  compares recording on/off and reports retained and temporary history bytes.
+  compares recording it with deferring it and reports retained and temporary
+  history bytes.
 - `src/buster/compiler/c_files.c` is #150's per-file jobs: files prepared on a
   group of lanes into a `FileCache`, each lane interning into a table of its
   own that a merge (rule 4's exchange) gives the shared table's ids in the

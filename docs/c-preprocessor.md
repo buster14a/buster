@@ -1567,7 +1567,9 @@ batched lookups, generated-input lifetimes, growth of all eight initial slices,
 and recording-on/off token equality.
 
 `benchmark-preprocessor --history-cost [options] file...` interleaves the same
-vectorized preprocessor with recording enabled and disabled, reversing order
+vectorized preprocessor with recording enabled and with the history deferred
+(`PPOptions.defer_history`, which records none for a unit without diagnostics;
+until 2026-10-25 the control was `PPOptions.no_history`), reversing order
 each pass. It checks an output digest including spelling locations outside the
 timed interval. It reports retained record bytes per unit (mean and maximum)
 and temporary-origin high-water bytes separately. These are used bytes, not
@@ -1651,6 +1653,51 @@ EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
     -I "$corpus/libc/musl/src/internal" -I "$corpus/musl-generated/obj/include" \
     -I "$corpus/libc/musl/include" "${history_inputs[@]}"
 ```
+
+### Deferred history
+
+A unit whose history only its diagnostics read records none while it runs.
+With `PPOptions.defer_history`, `pp_run` and `pp_run_source` run with recording
+off and their own diagnostics counted but not printed. A unit without
+diagnostics never needs its history. A unit with any is preprocessed again at
+its end, with history, into a preprocessor of its own (in an arena of its own)
+that shares the unit's options, file cache, intern table and time (`__DATE__`,
+`__TIME__`, `__TIMESTAMP__`). That replay prints the diagnostics, notes and
+all, as the unit's own run would have, and the unit takes its history, which
+lives until `pp_release`. `pp_history_ensure` records it the same way, quietly,
+when a reader asks for it later: `pp_diagnose_output` and the parser's
+diagnostics (`parse_print_diagnostics`) call it. The replay must give the
+unit's output again, token for token; one that doesn't, or can't be made (out
+of memory), leaves the unit without history, and a fatal error says so. It
+takes the files the run read from the cache the run filled, as a later unit
+with that cache does. The unit preprocesses nothing more after its run.
+
+`-E` and `parse` defer the history. The checker's driver records it as the
+unit runs: `check_input_system_tokens` reads the history of every unit with a
+system header, since clang judges whether a token is in a system header by
+where its expansion is, which only the history says. Deferring it there too
+needs that classification from something the main loop keeps cheaply ("The
+main loop against #117's budget").
+
+`test-preprocessor` runs every case and file once more as the drivers run it,
+with the vectorized kernels, no expansion starts and the history deferred
+(`pp_test_deferred_history`). The stream, the counts of errors and warnings and
+the printed diagnostics must be the recording run's, byte for byte; once
+`pp_history_ensure` records the history, it must be the recording run's too,
+with nothing more printed. In the fuzz batch, the vectorized run as a compile
+runs it defers its history, which `pp_fuzz_kernels` records through
+`pp_run_source`'s replay and compares with the scalar twins' history.
+
+Measured on the 9700X ([record](https://github.com/buster14a/buster-performance/blob/09c8fc3597bc310da2bea0fbc5ed1d6bde0ac63c/docs/measurements/preprocessor-history-replay-117-2026-10-25/README.md)), main at `7c428ce` against the
+replay's `a964539`. `benchmark-preprocessor --history-cost` on `sqlite3.c` gives
+5.761-5.797 ms of main loop and setup recording the history and 4.983-5.015 ms
+deferring it, 0.78 ms less, with 118.21 against 109.70 instructions per input
+token; on `main.c`, 25.548-25.690 against 21.144-21.207 ms. As whole processes
+(`time-runs` under `ab`), `-E` of `sqlite3.c` takes 19.653-19.707 ms where
+main's took 20.717-20.877, with 797 minor faults where main's had 1,012-1,014,
+and `parse -fsyntax-only` 18.671-18.965 ms where main's took 19.631-20.123.
+Recording the history costs what it did: both builds record the same history,
+and their times agree within two builds' placement noise.
 
 ### Vectorized kernels and their scalar twins
 
@@ -2318,6 +2365,16 @@ With all of them, about 3.2 ms. The rest needs preprocessing on more cores
 (#149), or another budget. On 2026-10-25 the owner chose to go on, history
 replay first.
 
+History replay is in ("Deferred history"). `-E` and `parse` record no history
+for a unit without diagnostics, which takes `sqlite3.c`'s directive tables and
+main loop from 6.09-6.12 ms to 5.27-5.31 ms as they run it. The checker's
+driver still records it: `check_input_system_tokens` reads every unit's history
+when it has a system header, to judge each token by where its expansion is, as
+clang does. Deferring it there too needs that judgment from something the main
+loop keeps cheaply, such as the file and line notes each output run comes from,
+with the history as its twin and the fallback where a directive or a file's end
+falls inside an invocation.
+
 ## Assembly output spacing
 
 In `-x assembler-with-cpp` mode, the lexer splits `$` from names and
@@ -2405,13 +2462,12 @@ spellings alone would miss this change (#272).
 ## Next steps
 
 - **The main loop**, against #117's 2 ms: "The main loop against #117's budget"
-  above has where the time goes and the plan. Next is history replay: the main
-  loop records no history, and `pp_history_ensure` preprocesses the unit again,
-  with history, when a diagnostic or a consumer first needs it. Then the
-  parser's input for file runs from the file cache (to agree with #126's and
-  #335's owners), and a leaner expansion engine. #110's object-macro
-  eligibility cache was measured and rejected (see "Object-macro eligibility
-  cache experiment" above).
+  above has where the time goes and the plan. History replay is in for `-E`
+  and `parse`; next, the checker's system-header judgment without the history,
+  so that a compile defers it too. Then the parser's input for file runs from
+  the file cache (to agree with #126's and #335's owners), and a leaner
+  expansion engine. #110's object-macro eligibility cache was measured and
+  rejected (see "Object-macro eligibility cache experiment" above).
 - **Clearing pages.** In a single run, prefaulting the arenas on another core
   while the first files are lexed would hide most of the 13%. Across many
   translation units, the arenas are reused (#152).
