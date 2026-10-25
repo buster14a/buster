@@ -382,6 +382,10 @@ static __attribute__((unused)) void pp_release(Preprocessor* pp);
 // The bytes of the windows pp_prepare_windows lexes and refines a file of at least two of them in: a window's source and
 // columns, about 280 KB, fit the 9700X's 1 MB L2 cache beside the intern table's lines that refinement reads.
 #define BUSTER_PP_WINDOW_BYTES (128u << 10)
+// The pages of a file prepared a window at a time whose line ends it counts while each window is in the caches
+// (PPFileData.line_pages): __LINE__ and diagnostics count lines from the page's start at most, whose bytes left the
+// caches long before, rather than from the last place asked about.
+#define BUSTER_PP_LINE_PAGE_BYTES 4096u
 // The bytes of scratch spellings per location range, and the most the scratch arena holds.
 #define BUSTER_PP_SCRATCH_CHUNK_BYTES (64u << 10)
 #define BUSTER_PP_SCRATCH_BYTES (1ull << 32)
@@ -493,6 +497,10 @@ struct PPFileData
     // as it goes (__LINE__, diagnostics), so each file's lines are counted about once.
     uint32_t line_cursor;
     uint32_t line_cursor_line;
+    // For a file prepared a window at a time (pp_prepare_windows), the line ends before each page of its bytes
+    // (BUSTER_PP_LINE_PAGE_BYTES): entry p counts those in bytes [0, p * BUSTER_PP_LINE_PAGE_BYTES), a "\r\n" at its '\n'.
+    // pp_line_of counts from a page's start with it, from the cursor only on the same page. Null for the others.
+    uint32_t* line_pages;
     // Built on the first diagnostic in this file, then shared by all of its inclusions.
     uint32_t* diagnostic_lines;
     uint32_t diagnostic_line_count;
@@ -2729,6 +2737,41 @@ static bool pp_window_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t e
     return result;
 }
 
+// Adds the line ends in bytes [begin, end) of a file to `*lines`, as pp_count_lines counts them but for a '\r' before
+// `end`, which a '\n' at `end` makes no line end of its own, and stores the count before each page boundary it reaches
+// (BUSTER_PP_LINE_PAGE_BYTES) in `pages` (PPFileData.line_pages), 64 bytes at a time. Each window's kept bytes in turn,
+// from the file's start, while they are in the caches (pp_prepare_windows); a 64-byte chunk two windows share is taken
+// in two parts.
+static void pp_count_page_lines(const PPFileData* data, uint64_t begin, uint64_t end, uint32_t* pages, uint32_t* lines)
+{
+    uint32_t count = *lines;
+    for (uint64_t base = begin & ~63ull; base < end; base += 64)
+    {
+        const uint64_t available = data->length - base;
+        const __mmask64 file = _bzhi_u64(~0ull, available < 64 ? (uint32_t)available : 64);
+        const __m512i bytes = _mm512_maskz_loadu_epi8(file, data->bytes + base);
+        const uint64_t newlines = _mm512_mask_cmpeq_epi8_mask(file, bytes, _mm512_set1_epi8('\n'));
+        const uint64_t returns = _mm512_mask_cmpeq_epi8_mask(file, bytes, _mm512_set1_epi8('\r'));
+        // The chunk's bytes in [begin, end).
+        const uint32_t low = base < begin ? (uint32_t)(begin - base) : 0;
+        const uint32_t high = end - base < 64 ? (uint32_t)(end - base) : 64;
+        const uint64_t taken = _bzhi_u64(~0ull, high) & ~_bzhi_u64(~0ull, low);
+        uint64_t ends = newlines;
+        if (BUSTER_UNLIKELY(returns != 0))
+        {
+            // A '\r' ends a line unless a '\n' follows it, in the chunk or first in the next one.
+            const uint64_t next_newline = available > 64 && data->bytes[base + 64] == '\n';
+            ends |= returns & ~((newlines >> 1) | (next_newline << 63));
+        }
+        count += (uint32_t)__builtin_popcountll(ends & taken);
+        if ((base + 64) % BUSTER_PP_LINE_PAGE_BYTES == 0 && base + 64 <= end)
+        {
+            pages[(base + 64) / BUSTER_PP_LINE_PAGE_BYTES] = count;
+        }
+    }
+    *lines = count;
+}
+
 // pp_prepare_into for a file of at least two windows (`window` bytes) that the vectorized kernels lex: lexed a window at
 // a time (c_tokenize_lines), each window's tokens kept up to the last one that starts a logical line (that line is lexed
 // again with the next window, and a line that takes a whole window doubles it, unlexed when only splices continue it:
@@ -2736,7 +2779,9 @@ static bool pp_window_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t e
 // BUSTER_REFINE_BLOCK_TOKENS refined at once (refine_tokens_blocks), while the lexer's columns and the source are still
 // in the caches: a whole file lexed before its refinement had refinement read them from memory again
 // (docs/c-refinement.md). The records are pp_prepare_whole's, byte for byte. The leading-space words, whose place after
-// the kinds waits for the count, are refined into scratch memory and copied there.
+// the kinds waits for the count, are refined into scratch memory and copied there. Each window's kept bytes have their
+// line ends counted by page (pp_count_page_lines, PPFileData.line_pages) with the directive table's scan, also while they
+// are in the caches; a file whose pages get no memory has none, and pp_line_of counts its lines from the cursor.
 static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t window,
                                           uint64_t* ticks)
 {
@@ -2758,6 +2803,14 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     uint64_t* directive_words = arena_push_array(scratch.arena, 2 * word_room, sizeof(uint64_t), 64);
     RefineProgress progress;
     refine_progress_begin(&progress, backslash_chunks);
+    // The line ends before each page; those before `lined` are counted (`lines`).
+    uint32_t* pages = arena_push_array(arena, length / BUSTER_PP_LINE_PAGE_BYTES + 1, sizeof(uint32_t), 64);
+    uint64_t lined = 0;
+    uint32_t lines = 0;
+    if (pages != 0)
+    {
+        pages[0] = 0;
+    }
     const bool pushed = data->kinds != 0 && data->starts != 0 && data->values != 0;
     PPPrepareStatus result = !pushed                                                           ? PP_PREPARE_NO_COLUMNS
                              : backslash_chunks == 0 || space == 0 || directive_words == 0 ? PP_PREPARE_NO_MEMORY
@@ -2833,8 +2886,14 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
             ticks[PP_PHASE_REFINE] += now - tick;
             tick = now;
         }
-        // The directive table's scan of the blocks just refined, while their kinds are in the caches.
+        // The directive table's scan of the blocks just refined, while their kinds are in the caches, and the line ends of
+        // the window's kept bytes, while they are.
         directives += result == PP_PREPARE_DONE ? pp_scan_directives_window(data->kinds, (uint32_t)begin, (uint32_t)refined, directive_words, directive_words + word_room) : 0;
+        if (result == PP_PREPARE_DONE && pages != 0 && at > lined)
+        {
+            pp_count_page_lines(data, lined, at, pages, &lines);
+            lined = at;
+        }
         if (ticks != 0)
         {
             const uint64_t now = __rdtsc();
@@ -2871,6 +2930,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     {
         data->prepared = pp_directive_table_windowed(arena, data, directive_words, directive_words + word_room, directives);
         result = data->prepared ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+        data->line_pages = pages;
     }
     scratch_end(scratch);
     if (ticks != 0)
@@ -2957,8 +3017,17 @@ static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range)
     }
 }
 
+// The line of byte `offset` of a file with line pages (PPFileData.line_pages): its page's count, then the line ends from
+// the page's start, which are in the caches no more than the cursor's place is.
+static uint32_t pp_page_line(const PPFileData* data, uint32_t offset)
+{
+    const uint32_t page = offset / BUSTER_PP_LINE_PAGE_BYTES;
+    return data->line_pages[page] + 1 + pp_count_lines(data, page * BUSTER_PP_LINE_PAGE_BYTES, offset);
+}
+
 // The physical line and column of `location` in its range's file: lines counted from the file's cursor (or from its
-// start, for a place before the cursor), and the column from the line's start before it, unless `column` is null.
+// start, for a place before the cursor; or for a file with line pages, from the place's page's start unless the cursor
+// is on that page before it), and the column from the line's start before it, unless `column` is null.
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column)
 {
     uint32_t result = 1;
@@ -2989,12 +3058,14 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
         }
         else
         {
-            if (data->line_cursor_line == 0 || offset < data->line_cursor)
+            const uint32_t page_start = offset / BUSTER_PP_LINE_PAGE_BYTES * BUSTER_PP_LINE_PAGE_BYTES;
+            const bool cursor = data->line_cursor_line != 0 && offset >= data->line_cursor && (data->line_pages == 0 || data->line_cursor >= page_start);
+            if (!cursor && data->line_pages == 0)
             {
                 data->line_cursor = 0;
                 data->line_cursor_line = 1;
             }
-            result = data->line_cursor_line + pp_count_lines(data, data->line_cursor, offset);
+            result = cursor || data->line_pages == 0 ? data->line_cursor_line + pp_count_lines(data, data->line_cursor, offset) : pp_page_line(data, offset);
             data->line_cursor = offset;
             data->line_cursor_line = result;
             uint32_t line_start = offset;

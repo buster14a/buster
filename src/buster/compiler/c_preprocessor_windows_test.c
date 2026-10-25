@@ -351,6 +351,44 @@ static bool pp_window_test_same(PPPrepareStatus a_status, const PPFileData* a, P
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The line pages
+
+// A window-prepared file's line pages (PPFileData.line_pages) against the line ends counted a byte at a time: each
+// page's entry, and the line pp_page_line gives every token's start and the end, against the count from the file's
+// start. A "\r\n" ends its line at the '\n', and a '\r' alone at itself.
+static bool pp_window_test_line_pages(const PPFileData* data, uint64_t source, uint32_t window)
+{
+    bool result = data->line_pages != 0;
+    uint32_t lines = 0;
+    uint32_t page = 0;
+    uint32_t token = 0;
+    uint32_t failed = UINT32_MAX;
+    for (uint32_t at = 0; result && at <= data->length; at += 1)
+    {
+        if (at % BUSTER_PP_LINE_PAGE_BYTES == 0)
+        {
+            result = data->line_pages[page] == lines;
+            page += 1;
+        }
+        while (result && token < data->token_count && data->starts[token] == at)
+        {
+            result = pp_page_line(data, at) == lines + 1;
+            token += 1;
+        }
+        result = result && (at != data->length || pp_page_line(data, at) == lines + 1);
+        failed = result ? failed : at;
+        const uint8_t byte = at < data->length ? data->bytes[at] : 0;
+        lines += byte == '\n' || (byte == '\r' && (at + 1 == data->length || data->bytes[at + 1] != '\n'));
+    }
+    if (!result && !pp_test_quiet)
+    {
+        printf("windows: source %lu, window %u: the line pages differ from a count a byte at a time at byte %u%s\n", (unsigned long)source, window, failed,
+               data->line_pages == 0 ? " (no pages)" : "");
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The line ends' scan
 
 // pp_window_has_line_end a byte at a time.
@@ -418,7 +456,7 @@ static uint64_t pp_window_test_line_ends(uint64_t* random, uint64_t* checks)
 
 // BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
 // without, digit separators or not, without "//" comments and digraphs, and with literal prefixes to split), prepared
-// whole by both kernels and in windows of several sizes.
+// whole by both kernels and in windows of several sizes, each window's line pages against a count a byte at a time.
 static bool pp_test_windows(uint64_t seed)
 {
     static const uint32_t windows[] = { 1, 7, 64, 100, 333, 1024, 4096, 8192 };
@@ -466,6 +504,7 @@ static bool pp_test_windows(uint64_t seed)
                 PPFileData data;
                 const PPPrepareStatus status = pp_window_test_prepare(&runs[2], &prepare, &text, windows[w], &data);
                 same &= pp_window_test_same(whole_status, &whole, status, &data, "windows", s, windows[w]);
+                same &= status != PP_PREPARE_DONE || pp_window_test_line_pages(&data, s, windows[w]);
                 windowed += 1;
             }
         }
