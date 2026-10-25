@@ -81,8 +81,10 @@
 // The typed stream
 
 // An entry's machine class: what a value is to the code generator. Integers by width and signedness (a pointer is U64),
-// and the two floating types. A value of a class narrower than its register holds its value in the register's low
-// bits; the rest are unspecified, so a consumer reads only the class's width (a 32-bit operation, a movsx).
+// the two SSE floating types, and long double's x87 extended type (F80). A value of a class narrower than its register
+// holds its value in the register's low bits; the rest are unspecified, so a consumer reads only the class's width (a
+// 32-bit operation, a movsx). An F80 value takes an integer depth, as an integer would, and lives in that depth's 16-byte
+// frame slot (Tier0Frame.x87_area), not in its register: calls and the arms of ?: then need nothing of their own for it.
 #define BUSTER_TYPED_CLASS_VOID 0
 #define BUSTER_TYPED_CLASS_I8 1
 #define BUSTER_TYPED_CLASS_U8 2
@@ -94,7 +96,8 @@
 #define BUSTER_TYPED_CLASS_U64 8
 #define BUSTER_TYPED_CLASS_F32 9
 #define BUSTER_TYPED_CLASS_F64 10
-#define BUSTER_TYPED_CLASSES 11
+#define BUSTER_TYPED_CLASS_F80 11
+#define BUSTER_TYPED_CLASSES 12
 // Every class below 16, so that a kind and a class make a byte table's index.
 #define BUSTER_TYPED_CLASS_LIMIT 16
 
@@ -143,6 +146,12 @@
 //     has reserved since (`class` U64; `value` 0): the end of a variable-length array's scope.
 // A function with any of the last three has a frame pointer, rbp, which then neither a depth nor a home takes: its
 // integer stack has one depth fewer.
+// Long double (F80) takes CONST (`value` an index into Tier0Function.x87_constants), DUP, NEG, CONVERT (to and from every
+// class; to an integer by truncation, as C converts), LOAD, STORE and SET (its 10 bytes at the address), ADD, SUB, MUL and
+// DIV, the compares (IEEE's, as the floating types'), CALL (arguments on the stack, a result in st0), DISCARD, JUMP_VALUE
+// and RETURN (in st0). Its locals and parameters are objects and its globals are reached through their addresses: no
+// LOCAL, STORE_LOCAL, SET_LOCAL, GLOBAL, STORE_GLOBAL or SET_GLOBAL of F80. Its arithmetic is the x87's at the control word
+// the convention keeps (64-bit significands, rounding to nearest).
 // A target `value` is an entry's index, or the entry count for the function's end. Every target is the start of a
 // statement or of an arm, and the stacks there must hold the same values whichever way control arrives (as in a
 // WebAssembly validator): tier0_validate checks it.
@@ -285,6 +294,12 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 // function of a unit, and a front end that knows which symbols its unit defines fills it: a thread-local by one of the
 // two TLS accesses, any other symbol directly or through the GOT. Calls are unaffected: a call of a function outside the
 // image goes through the linker's stub.
+//
+// Long double's constants are an optional column too, 0 for a function without them: x87_constants holds
+// x87_constant_count 80-bit values, two words each (the significand, then the sign and exponent in the low 16 bits), and
+// a CONST of class F80 is the one its value indexes. `x87` says whether the function has long double values at all: an
+// entry of class F80, or a long double result. A function with any has it, and only such a function has long double's
+// slots in its frame and its compile looks for long double's entries: one without them compiles as if Tier 0 had none.
 typedef struct Tier0Function Tier0Function;
 struct Tier0Function
 {
@@ -318,6 +333,9 @@ struct Tier0Function
     uint32_t result_size;
     const uint8_t* symbol_access;
     uint32_t symbol_count;
+    const uint64_t* x87_constants;
+    uint32_t x87_constant_count;
+    bool x87;
 };
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
@@ -571,10 +589,16 @@ static bool tier0_class_signed(uint32_t class)
     return class == BUSTER_TYPED_CLASS_I8 || class == BUSTER_TYPED_CLASS_I16 || class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_I64;
 }
 
-// A class's width in bytes (0 for VOID).
+// Whether a class is long double's: its values take integer depths and live in their frame slots (BUSTER_TYPED_CLASS_F80).
+static bool tier0_class_x87(uint32_t class)
+{
+    return class == BUSTER_TYPED_CLASS_F80;
+}
+
+// A class's width in bytes (0 for VOID), a long double's its slot's.
 static uint32_t tier0_class_bytes(uint32_t class)
 {
-    static const uint8_t bytes[BUSTER_TYPED_CLASS_LIMIT] = { 0, 1, 1, 2, 2, 4, 4, 8, 8, 4, 8 };
+    static const uint8_t bytes[BUSTER_TYPED_CLASS_LIMIT] = { 0, 1, 1, 2, 2, 4, 4, 8, 8, 4, 8, 16 };
     return bytes[class & (BUSTER_TYPED_CLASS_LIMIT - 1)];
 }
 
@@ -730,23 +754,44 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     return valid;
 }
 
-// Whether `result` returns an aggregate of `size` bytes (16 at most) in registers as eightbytes: in two result registers
-// at most (none x87's), 8-byte parts or a 16-byte one in an XMM register.
+// How many x87 registers a result comes back in: st0, or st0 and st1 (a COMPLEX_X87 one), each part 16 bytes after the
+// one before; 0 for any other result.
+static uint32_t tier0_x87_parts(AbiReturn result)
+{
+    const bool x87 = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[0] == BUSTER_ABI_REGISTER_X87;
+    return x87 ? (result.registers[1] == (BUSTER_ABI_REGISTER_X87 | 1) ? 2u : 1u) : 0u;
+}
+
+// Whether a result in x87 registers is one the emitters follow: st0, or st0 and st1, 16 bytes apart, for an aggregate
+// of up to 16 bytes a part (`size`), or a long double's value (0).
+static bool tier0_x87_result_valid(AbiReturn result, uint32_t size)
+{
+    const uint32_t parts = tier0_x87_parts(result);
+    const bool second = result.registers[1] == BUSTER_ABI_REGISTER_NONE || parts == 2;
+    return parts != 0 && second && result.part_bytes == 16 && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && result.registers[2] == BUSTER_ABI_REGISTER_NONE &&
+           result.registers[3] == BUSTER_ABI_REGISTER_NONE && size <= 16 * parts;
+}
+
+// Whether `result` returns an aggregate of `size` bytes in registers: as eightbytes (16 bytes at most), in two result
+// registers at most, 8-byte parts or a 16-byte one in an XMM register; or in x87 registers (tier0_x87_result_valid), a
+// struct of a long double's in st0.
 static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool vector = result.part_bytes == 16 && result.registers[1] == BUSTER_ABI_REGISTER_NONE && (result.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 &&
                         !high && size == 16;
-    return result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || vector) && result.registers[2] == BUSTER_ABI_REGISTER_NONE &&
-           result.registers[3] == BUSTER_ABI_REGISTER_NONE && tier0_parts_valid(result.registers, high, false, size, BUSTER_TIER0_RESULT_REGISTERS);
+    const bool eightbytes = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || vector) && result.registers[2] == BUSTER_ABI_REGISTER_NONE &&
+                            result.registers[3] == BUSTER_ABI_REGISTER_NONE && tier0_parts_valid(result.registers, high, false, size, BUSTER_TIER0_RESULT_REGISTERS);
+    return eightbytes || (size != 0 && tier0_x87_result_valid(result, size));
 }
 
 // The bytes a call's aggregate result in registers stores into its object (tier0_emit_call): each part's register whole,
-// 8 bytes from its eightbyte's offset, or 16 for a vector's.
+// 8 bytes from its eightbyte's offset, or 16 for a vector's or an x87 register's (whose fstp writes 10 of them).
 static uint32_t tier0_result_extent(AbiReturn result)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-    return result.part_bytes == 16 || high || result.registers[1] != BUSTER_ABI_REGISTER_NONE ? 16 : 8;
+    const uint32_t x87 = tier0_x87_parts(result);
+    return x87 != 0 ? 16 * x87 : result.part_bytes == 16 || high || result.registers[1] != BUSTER_ABI_REGISTER_NONE ? 16 : 8;
 }
 
 // Whether a call's argument or a parameter at `location`, an aggregate of `size` bytes (0 for a value), is one the
@@ -1019,7 +1064,7 @@ struct Tier0Template
 // templates follow for its homes (A and B each a register or memory: the index plus A's bit plus twice B's), or
 // DEFERRED (tier0_emit_deferred's), or UNSUPPORTED.
 #define BUSTER_TIER0_TEMPLATE_CAPACITY 2048
-#define BUSTER_TIER0_SLOT_CAPACITY (400 * BUSTER_TIER0_VARIANTS)
+#define BUSTER_TIER0_SLOT_CAPACITY (512 * BUSTER_TIER0_VARIANTS)
 #define BUSTER_TIER0_SLOT_UNSUPPORTED 0xffff
 #define BUSTER_TIER0_SLOT_DEFERRED 0xfffe
 #define BUSTER_TIER0_SLOT_HOME_DEPENDENT 0x8000
@@ -1871,8 +1916,8 @@ static bool tier0_convert_records(uint32_t to, uint32_t from, uint8_t to_registe
 static void tier0_define_templates(void)
 {
     const uint8_t no = BUSTER_TIER0_NO_OFFSET;
-    // Leaves and their copies, by class.
-    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class < BUSTER_TYPED_CLASSES; class += 1)
+    // Leaves and their copies, by class (long double's are at the end).
+    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_F64; class += 1)
     {
         const bool floating = tier0_class_floating(class);
         const uint8_t top = floating ? BUSTER_TIER0_SOURCE_X0 : BUSTER_TIER0_SOURCE_R0;
@@ -2113,8 +2158,8 @@ static void tier0_define_templates(void)
             }
             tier0_end(BUSTER_TYPED_RETURN, class, last_entry != 0 ? BUSTER_TIER0_VARIANT_LAST : BUSTER_TIER0_VARIANT_PLAIN, 0);
         }
-        // Conversions to this class from every class.
-        for (uint32_t from = BUSTER_TYPED_CLASS_I8; from < BUSTER_TYPED_CLASSES; from += 1)
+        // Conversions to this class from every class but long double.
+        for (uint32_t from = BUSTER_TYPED_CLASS_I8; from <= BUSTER_TYPED_CLASS_F64; from += 1)
         {
             for (uint32_t home = 0; home < 2; home += 1)
             {
@@ -2458,6 +2503,37 @@ static void tier0_define_templates(void)
         tier0_add(tier0_rr(X86_FORM_XORPS_X_XM128, BUSTER_TIER0_SOURCE_X1, BUSTER_TIER0_SOURCE_X0));
         tier0_end(BUSTER_TYPED_NEG, class, BUSTER_TIER0_VARIANT_PLAIN, 0);
     }
+    // Long double: every entry tier0_emit_x87's, its values in their depths' slots, but those that make no records of
+    // their own: DISCARD (nothing), JUMP_VALUE (the value stays in its slot, which the target's depth names too) and
+    // RETURN (the epilogue loads st0 from slot 0). Each is its key's plain variant alone, so that no entry fuses into
+    // one and the vector fusion's property rows stay as they are.
+    static const uint8_t x87_kinds[] = {
+        BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_NEG, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET, BUSTER_TYPED_ADD,
+        BUSTER_TYPED_SUB,   BUSTER_TYPED_MUL, BUSTER_TYPED_DIV, BUSTER_TYPED_EQ,   BUSTER_TYPED_NE,    BUSTER_TYPED_LT,  BUSTER_TYPED_LE,
+        BUSTER_TYPED_GT,    BUSTER_TYPED_GE,  BUSTER_TYPED_CALL,
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(x87_kinds); k += 1)
+    {
+        tier0_defer(x87_kinds[k], BUSTER_TYPED_CLASS_F80, BUSTER_TIER0_VARIANT_PLAIN);
+    }
+    for (uint32_t other = BUSTER_TYPED_CLASS_I8; other <= BUSTER_TYPED_CLASS_F80; other += 1)
+    {
+        tier0_defer(BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F80, other);
+        if (other != BUSTER_TYPED_CLASS_F80)
+        {
+            tier0_defer(BUSTER_TYPED_CONVERT, other, BUSTER_TYPED_CLASS_F80);
+        }
+    }
+    tier0_begin();
+    tier0_end(BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F80, BUSTER_TIER0_VARIANT_PLAIN, 0);
+    tier0_begin();
+    tier0_add(tier0_branch(X86_FORM_JMP_REL8, BUSTER_TIER0_RECORD_BRANCH));
+    tier0_end(BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_F80, BUSTER_TIER0_VARIANT_PLAIN, 0);
+    tier0_begin();
+    tier0_add(tier0_branch(X86_FORM_JMP_REL8, BUSTER_TIER0_RECORD_END));
+    tier0_end(BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_F80, BUSTER_TIER0_VARIANT_PLAIN, 0);
+    tier0_begin();
+    tier0_end(BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_F80, BUSTER_TIER0_VARIANT_LAST, 0);
 }
 
 static bool tier0_initialize(void)
@@ -2981,7 +3057,8 @@ struct Tier0Home
 _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 
 // The frame below the saved registers, from rsp up: the outgoing stack arguments, the call save area (the depths below
-// a call's arguments, saved around it), two slots for the deferred division and shifts, the optional incoming
+// a call's arguments, saved around it), two slots for the deferred division and shifts, long double's slots (`x87`: 16
+// bytes per integer depth from `x87_area`, an F80 value at depth d in slot d), the optional incoming
 // variadic register-save area, the locals' slots, then the objects. Incoming saves never share outgoing
 // call-preservation storage. `size` is what the prologue subtracts from rsp (with the pushes and the return address, a
 // multiple of 16 when the function calls or has an object aligned to 16); `saved` has a bit per tier0_callee_saved
@@ -3004,6 +3081,7 @@ struct Tier0Frame
     uint32_t save_slots;
     uint32_t fixed_area;
     uint32_t fixed_slots;
+    uint32_t x87_area;
     uint32_t variadic_area;
     uint32_t overflow_area;
     uint32_t outgoing;
@@ -3017,7 +3095,13 @@ struct Tier0Frame
     // Whether a parameter is an object (an aggregate's, tier0_object_parameters), without which the passes over the
     // parameters leave out what only objects need.
     bool object_parameters;
+    // Whether the function has long double's slots (Tier0Function.x87), and whether it returns one, in st0 from slot 0.
+    bool x87;
+    bool x87_result;
 };
+
+// A long double's slot: 16 bytes for each integer depth, of which an x87 value takes 10.
+#define BUSTER_TIER0_X87_SLOT_BYTES 16
 
 // The registers each depth table's prefix covers, as a register set.
 static uint32_t tier0_depth_registers(int32_t integer_top, int32_t floating_top)
@@ -3321,12 +3405,12 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
-// save area, the fixed slots, the optional incoming variadic saves, each memory local (8 bytes, or exactly 24 for an
-// address-only VA_LIST), and the objects, each at a multiple of its alignment and taking its size rounded up to 8, in
-// the locals' order. Anchor descriptors alias their frame/incoming addresses without owning another slot. A parameter
-// that arrives on the stack keeps its incoming slot, above the return address, and an aggregate's its incoming slots,
-// which the callee owns (its stack bytes are a copy). Check every displacement in 64 bits
-// before narrowing; an unrepresentable frame is refused before any records or output are published.
+// save area, the fixed slots, long double's slots, the optional incoming variadic saves, each memory local (8 bytes,
+// or exactly 24 for an address-only VA_LIST), and the objects, each at a multiple of its alignment and taking its
+// size rounded up to 8, in the locals' order. Anchor descriptors alias their frame/incoming addresses without owning
+// another slot. A parameter that arrives on the stack keeps its incoming slot, above the return address, and an
+// aggregate's its incoming slots, which the callee owns (its stack bytes are a copy). Check every displacement in 64
+// bits before narrowing; an unrepresentable frame is refused before any records or output are published.
 // tier0_layout_frame's slots for the vector path, 16 locals at a time: the mask of those that need one (not in a
 // register, referenced or address-taken, not a parameter on the stack, not an anchor, not an object) from the homes,
 // the references, the flags and the sizes, then a slot for each set bit, in order. Returns the offset past them, and
@@ -3424,6 +3508,12 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     valid = valid && offset <= INT32_MAX;
     frame->fixed_area = valid ? (uint32_t)offset : 0;
     offset += 8 * frame->fixed_slots;
+    if (frame->x87)
+    {
+        valid = valid && offset <= INT32_MAX;
+        frame->x87_area = valid ? (uint32_t)offset : 0;
+        offset += BUSTER_TIER0_X87_SLOT_BYTES * BUSTER_TIER0_INTEGER_DEPTHS;
+    }
     if (function->incoming_variadic != 0)
     {
         valid = valid && offset <= INT32_MAX;
@@ -4102,6 +4192,48 @@ static __attribute__((noinline)) uint32_t tier0_aggregate_moves(const Tier0Funct
     return moves;
 }
 
+// Whether entry i is long double's, tier0_emit_x87's (a call of class F80 is tier0_emit_call's): of class F80 by its key
+// (its own class, or a compare's operands'), or a conversion from F80 (whose variant is its operand's class).
+static bool tier0_x87_entry(const Tier0Entries* entries, uint32_t i)
+{
+    return tier0_class_x87(entries->key_classes[i]) || (entries->key_kinds[i] == BUSTER_TYPED_CONVERT && tier0_class_x87(entries->variants[i]));
+}
+
+// What a long double entry (tier0_x87_entry's, not a call) writes besides its slots, both selections': a compare's result
+// and its scratch (the registers at depth − 2 and − 1), a conversion's integer result (− 1, and for a U64 the register at
+// its depth too) and a conversion's floating result (the floating stack's depth), as the stacks' tops.
+static void tier0_x87_tops(const Tier0Entries* entries, uint32_t i, int32_t* integer_top, int32_t* floating_top)
+{
+    const int32_t depth = entries->depths[i];
+    const uint32_t kind = entries->key_kinds[i];
+    const uint32_t class = entries->key_classes[i];
+    const bool from_x87 = kind == BUSTER_TYPED_CONVERT && !tier0_class_x87(class);
+    int32_t integer = kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE ? depth - 1 : -1;
+    integer = from_x87 && tier0_class_integer(class) ? (class == BUSTER_TYPED_CLASS_U64 ? depth : depth - 1) : integer;
+    const int32_t floating = from_x87 && tier0_class_floating(class) ? (int32_t)entries->floating_depths[i] : -1;
+    *integer_top = integer > *integer_top ? integer : *integer_top;
+    *floating_top = floating > *floating_top ? floating : *floating_top;
+}
+
+// Long double's slot of integer depth `depth`, from rsp (or rbp with a frame pointer), as a memory operand of `form`.
+static X86Instruction tier0_x87_slot(uint32_t form, const Tier0Frame* frame, uint32_t depth, int32_t offset)
+{
+    const int64_t displacement = (int64_t)frame->x87_area + BUSTER_TIER0_X87_SLOT_BYTES * (int64_t)depth + offset + frame->bias;
+    return tier0_instruction(form, 0, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)displacement, 0);
+}
+
+// A red zone temporary below rsp as a memory operand of `form` (tier0_temporary's place), with `reg`.
+static X86Instruction tier0_x87_temporary(uint32_t form, uint8_t reg, uint32_t t)
+{
+    return tier0_instruction(form, reg, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, tier0_temporary(t), 0);
+}
+
+// An x87 instruction on st(i).
+static X86Instruction tier0_x87_register(uint32_t form, uint32_t i)
+{
+    return tier0_instruction(form, 0, (uint8_t)i, BUSTER_X86_REGISTER_DIRECT, 0, 0);
+}
+
 // A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
 // ones moved into place, with an indirect call's callee into r11 (no argument's register, nor al's), al for a variadic
 // call, the call, the result moved to its depth, and the saved depths restored.
@@ -4118,10 +4250,13 @@ static __attribute__((noinline)) uint32_t tier0_aggregate_moves(const Tier0Funct
 // go to its red zone temporary with the copies (tier0_place_aggregates). The copies' scratch registers are each stack's
 // first free one (tier0_select_scratch). A result object (call_result_objects) has its address in rdi for a hidden
 // pointer, or gets the result's registers stored in it after the call. `sized` says whether the function has
-// argument_sizes: a constant at each of tier0_emit_deferred's two uses, so that a function without aggregate arguments
-// has its calls' loops over the values without a look at their sizes.
+// argument_sizes and `x87` whether it has long double values (Tier0Frame.x87): constants in the code for functions
+// without long doubles (tier0_emit_deferred_entry's), so that a function without aggregate arguments has its calls'
+// loops over the values without a look at their sizes, and one without long doubles without a look for theirs; the
+// long doubles' code, out of line, takes `sized` from its function. A struct result in x87 registers, which stores into
+// its object, is any function's.
 static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
-                                                                  const Tier0Home* homes, uint32_t i, bool sized, Tier0Writer* writer)
+                                                                  const Tier0Home* homes, uint32_t i, bool sized, bool x87, Tier0Writer* writer)
 {
     const uint32_t call = (uint32_t)function->values[i];
     const uint32_t first = function->call_first[call];
@@ -4160,13 +4295,20 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         const AbiLocation location = function->argument_locations[first + a];
         const bool value = !sized || function->argument_sizes[first + a] == 0;
         const bool is_floating = tier0_class_floating(class);
-        const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[arguments_base + integer];
+        const uint32_t depth = arguments_base + integer;
+        const uint32_t source = is_floating ? BUSTER_TIER0_XMM(floating_below + floating) : tier0_integer_depths[depth];
         integer += is_floating ? 0 : 1;
         floating += is_floating ? 1 : 0;
         if (value)
         {
             tier0_extend(writer, class, source);
-            if (location.kind == BUSTER_ABI_LOCATION_STACK)
+            if (x87 && location.kind == BUSTER_ABI_LOCATION_STACK && tier0_class_x87(class))
+            {
+                // A long double from its slot into its 16 bytes of the stack, of which it takes 10.
+                tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth, 0));
+                tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)location.stack_offset, 0));
+            }
+            else if (location.kind == BUSTER_ABI_LOCATION_STACK)
             {
                 const uint32_t form = is_floating ? (class == BUSTER_TYPED_CLASS_F32 ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X) : X86_FORM_MOV_RM64_R64;
                 tier0_put(writer, tier0_instruction(form, (uint8_t)(source & 15), X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)location.stack_offset, 0));
@@ -4239,7 +4381,13 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     {
         const Tier0Home home = homes[object - 1];
         const bool high = (returned.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-        for (uint32_t k = 0; k < 2; k += 1)
+        const uint32_t parts = tier0_x87_parts(returned);
+        // An x87 result's parts popped in order, st0's at 0 and st1's 16 bytes on.
+        for (uint32_t k = 0; k < parts; k += 1)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, home.reg, home.mode, home.displacement + 16 * (int32_t)k, 0));
+        }
+        for (uint32_t k = 0; k < 2 && parts == 0; k += 1)
         {
             if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
             {
@@ -4247,6 +4395,11 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
                 tier0_store_part(writer, tier0_abi_register(returned.registers[k]), returned.part_bytes == 16 ? 16 : 8, home, offset);
             }
         }
+    }
+    else if (x87 && tier0_class_x87(function->classes[i]))
+    {
+        // A long double result from st0 into its depth's slot.
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, below, 0));
     }
     else if (result == 1 && below != 0)
     {
@@ -4417,18 +4570,260 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
     }
 }
 
-// The records of a deferred entry (into `writer`, which counts them when it has no records).
-static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
-                                Tier0Writer* writer)
+// The x87 control word's rounding toward zero around a store to an integer, which C's conversions need and the x87's
+// default rounding to nearest doesn't give (fisttp, which would, is SSE3's, past the baseline): before, the control word
+// saved in red zone temporary 0 and loaded with RC 11 through `scratch` and temporary 1; after, temporary 0 loaded back.
+// A function must keep the control word as it found it, and keeps it but for these records.
+#define BUSTER_TIER0_X87_TRUNCATE_RECORDS 5
+static void tier0_x87_truncate(Tier0Writer* writer, uint8_t scratch)
+{
+    tier0_put(writer, tier0_x87_temporary(X86_FORM_FNSTCW_M16, 0, 0));
+    tier0_put(writer, tier0_x87_temporary(X86_FORM_MOVZX_R32_RM16, scratch, 0));
+    tier0_put(writer, tier0_instruction(X86_FORM_OR_RM32_IMM32, 0, scratch, BUSTER_X86_REGISTER_DIRECT, 0, 0x0c00));
+    tier0_put(writer, tier0_x87_temporary(X86_FORM_MOV_RM16_R16, scratch, 1));
+    tier0_put(writer, tier0_x87_temporary(X86_FORM_FLDCW_M16, 0, 1));
+}
+
+// A long double entry's records (tier0_x87_entry's): its operands loaded onto the x87 stack from their slots (an F80
+// operand at integer depth d in slot d), the x87 operation, and its result stored into its own slot (or its register, for
+// an integer or a floating class), leaving the x87 stack empty. With d the entry's integer depth:
+//   - CONST: its constant's 10 bytes stored into slot d as immediates;
+//   - LOAD, STORE, SET: the value through the address in the register at d − 1 (or d − 2, a store's), STORE's kept in
+//     slot d − 2 too; DUP: slot d − 1 copied into slot d; NEG: fchs;
+//   - ADD, SUB, MUL, DIV: slots d − 2 and d − 1 into st1 and st0, then faddp (fsubp, fmulp, fdivp) st(1), st(0), whose
+//     st(1) − st(0) is the first operand less the last, into slot d − 2;
+//   - the compares: fucomip of the operands in the order that makes each condition one that unordered operands fail
+//     (a, b as st0, st1 for >, >=; b, a for <, <=, which are b > a and b >= a), as SSE's ucomisd has them, into the
+//     register at d − 2 (EQ and NE with the parity flag, through the register at d − 1);
+//   - CONVERT to F80: a floating value through red zone temporary 0 (fld), an integer one too (fild), widened first: a
+//     narrow one to 32 bits, a U32 to 64, and a U64 read as an I64 and 2^64 added when its top bit is set (from a float
+//     constant the top bit makes, which is exact in a 64-bit significand); into slot d for a floating operand (the value
+//     moves to the integer stack, at its depth), d − 1 for an integer one;
+//   - CONVERT from F80: to float or double, through temporary 0 into the floating stack's free register; to an integer,
+//     fistp into temporary 2 under the control word's truncation (tier0_x87_truncate), and for a U64 a value of 2^63 or
+//     more less 2^63 first, its top bit set after (fcmovbe chooses what to take away, setbe and shl the bit, both from one
+//     fucomi with 2^63, through temporary 3 and the register at d).
+static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
-    if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
+    const uint32_t class = entries->key_classes[i];
+    const uint32_t depth = entries->depths[i];
+    const uint32_t floating = entries->floating_depths[i];
+    if (kind == BUSTER_TYPED_CONST)
     {
-        tier0_emit_call(function, entries, frame, homes, i, true, writer);
+        const uint64_t constant = function->values[i];
+        const uint64_t significand = function->x87_constants[2 * constant];
+        const uint64_t top = function->x87_constants[2 * constant + 1];
+        X86Instruction low = tier0_x87_slot(X86_FORM_MOV_RM32_IMM32, frame, depth, 0);
+        X86Instruction high = tier0_x87_slot(X86_FORM_MOV_RM32_IMM32, frame, depth, 4);
+        X86Instruction exponent = tier0_x87_slot(X86_FORM_MOV_RM16_IMM16, frame, depth, 8);
+        low.immediate = (int32_t)(uint32_t)significand;
+        high.immediate = (int32_t)(uint32_t)(significand >> 32);
+        exponent.immediate = (int32_t)(uint16_t)top;
+        tier0_put(writer, low);
+        tier0_put(writer, high);
+        tier0_put(writer, exponent);
+    }
+    else if (kind == BUSTER_TYPED_LOAD)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_FLD_M80, 0, tier0_integer_depths[depth - 1], BUSTER_X86_MEMORY_BASE, 0, 0));
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, depth - 1, 0));
+    }
+    else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
+    {
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
+        if (kind == BUSTER_TYPED_STORE)
+        {
+            tier0_put(writer, tier0_x87_register(X86_FORM_FLD_ST, 0));
+        }
+        tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, tier0_integer_depths[depth - 2], BUSTER_X86_MEMORY_BASE, 0, 0));
+        if (kind == BUSTER_TYPED_STORE)
+        {
+            tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, depth - 2, 0));
+        }
+    }
+    else if (kind == BUSTER_TYPED_DUP)
+    {
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, depth, 0));
+    }
+    else if (kind == BUSTER_TYPED_NEG)
+    {
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_FCHS, 0, 0, 0, 0, 0));
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, depth - 1, 0));
+    }
+    else if (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_DIV)
+    {
+        static const uint16_t operations[4] = { X86_FORM_FADDP_ST_ST0, X86_FORM_FSUBP_ST_ST0, X86_FORM_FMULP_ST_ST0, X86_FORM_FDIVP_ST_ST0 };
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth - 2, 0));
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
+        tier0_put(writer, tier0_x87_register(operations[kind - BUSTER_TYPED_ADD], 1));
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, depth - 2, 0));
+    }
+    else if (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE)
+    {
+        // st0 the first operand (a, at d − 2) for EQ, NE, GT and GE, the last (b) for LT and LE.
+        const bool swapped = kind == BUSTER_TYPED_LT || kind == BUSTER_TYPED_LE;
+        const uint8_t result = tier0_integer_depths[depth - 2];
+        const uint8_t scratch = tier0_integer_depths[depth - 1];
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, swapped ? depth - 2 : depth - 1, 0));
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, swapped ? depth - 1 : depth - 2, 0));
+        tier0_put(writer, tier0_x87_register(X86_FORM_FUCOMIP_ST0_ST, 1));
+        tier0_put(writer, tier0_x87_register(X86_FORM_FSTP_ST, 0));
+        if (kind == BUSTER_TYPED_EQ || kind == BUSTER_TYPED_NE)
+        {
+            const bool equal = kind == BUSTER_TYPED_EQ;
+            tier0_put(writer, tier0_instruction(equal ? X86_FORM_SETE_RM8 : X86_FORM_SETNE_RM8, 0, result, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+            tier0_put(writer, tier0_instruction(equal ? X86_FORM_SETNP_RM8 : X86_FORM_SETP_RM8, 0, scratch, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+            tier0_put(writer, tier0_instruction(equal ? X86_FORM_AND_RM8_R8 : X86_FORM_OR_RM8_R8, scratch, result, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
+        else
+        {
+            const bool strict = kind == BUSTER_TYPED_GT || kind == BUSTER_TYPED_LT;
+            tier0_put(writer, tier0_instruction(strict ? X86_FORM_SETA_RM8 : X86_FORM_SETAE_RM8, 0, result, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
+        tier0_put(writer, tier0_instruction(X86_FORM_MOVZX_R32_RM8, result, result, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else if (tier0_class_x87(class))
+    {
+        // CONVERT to F80 from the operand's class (the variant).
+        const uint32_t from = entries->variants[i];
+        const uint8_t operand = tier0_integer_depths[depth != 0 ? depth - 1 : 0];
+        if (from == BUSTER_TYPED_CLASS_F32 || from == BUSTER_TYPED_CLASS_F64)
+        {
+            const bool single = from == BUSTER_TYPED_CLASS_F32;
+            tier0_put(writer, tier0_x87_temporary(single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, (uint8_t)(floating - 1), 0));
+            tier0_put(writer, tier0_x87_temporary(single ? X86_FORM_FLD_M32 : X86_FORM_FLD_M64, 0, 0));
+            tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, depth, 0));
+        }
+        else if (!tier0_class_x87(from))
+        {
+            const bool wide = from == BUSTER_TYPED_CLASS_U32 || tier0_class_bytes(from) == 8;
+            if (tier0_class_bytes(from) < 4)
+            {
+                tier0_put(writer, tier0_instruction(tier0_load_form(from), operand, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+            }
+            else if (from == BUSTER_TYPED_CLASS_U32)
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_RM32, operand, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+            }
+            tier0_put(writer, tier0_x87_temporary(wide ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32, operand, 0));
+            tier0_put(writer, tier0_x87_temporary(wide ? X86_FORM_FILD_M64 : X86_FORM_FILD_M32, 0, 0));
+            if (from == BUSTER_TYPED_CLASS_U64)
+            {
+                // 2^64 as a float (0x5f800000) where the top bit is set, else 0: sar makes the bit a mask.
+                tier0_put(writer, tier0_instruction(X86_FORM_SAR_RM64_IMM8, 0, operand, BUSTER_X86_REGISTER_DIRECT, 0, 63));
+                tier0_put(writer, tier0_instruction(X86_FORM_AND_RM32_IMM32, 0, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0x5f800000));
+                tier0_put(writer, tier0_x87_temporary(X86_FORM_MOV_RM32_R32, operand, 1));
+                tier0_put(writer, tier0_x87_temporary(X86_FORM_FADD_M32, 0, 1));
+            }
+            tier0_put(writer, tier0_x87_slot(X86_FORM_FSTP_M80, frame, depth - 1, 0));
+        }
+    }
+    else if (tier0_class_floating(class))
+    {
+        // CONVERT from F80 to float or double.
+        const bool single = class == BUSTER_TYPED_CLASS_F32;
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
+        tier0_put(writer, tier0_x87_temporary(single ? X86_FORM_FSTP_M32 : X86_FORM_FSTP_M64, 0, 0));
+        tier0_put(writer, tier0_x87_temporary(single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, (uint8_t)floating, 0));
+    }
+    else
+    {
+        // CONVERT from F80 to an integer class, truncating.
+        const uint8_t result = tier0_integer_depths[depth - 1];
+        tier0_x87_truncate(writer, result);
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
+        if (class == BUSTER_TYPED_CLASS_U64)
+        {
+            const uint8_t high = tier0_integer_depths[depth];
+            X86Instruction limit = tier0_x87_temporary(X86_FORM_MOV_RM32_IMM32, 0, 3);
+            limit.immediate = 0x5f000000;
+            tier0_put(writer, limit);
+            tier0_put(writer, tier0_x87_temporary(X86_FORM_FLD_M32, 0, 3));
+            tier0_put(writer, tier0_x87_register(X86_FORM_FUCOMI_ST0_ST, 1));
+            tier0_put(writer, tier0_instruction(X86_FORM_SETBE_RM8, 0, high, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+            tier0_put(writer, tier0_instruction(X86_FORM_FLDZ, 0, 0, 0, 0, 0));
+            tier0_put(writer, tier0_x87_register(X86_FORM_FCMOVBE_ST0_ST, 1));
+            tier0_put(writer, tier0_x87_register(X86_FORM_FSTP_ST, 1));
+            tier0_put(writer, tier0_x87_register(X86_FORM_FSUBP_ST_ST0, 1));
+            tier0_put(writer, tier0_x87_temporary(X86_FORM_FISTP_M64, 0, 2));
+            tier0_put(writer, tier0_x87_temporary(X86_FORM_FLDCW_M16, 0, 0));
+            tier0_put(writer, tier0_instruction(X86_FORM_MOVZX_R32_RM8, high, high, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+            tier0_put(writer, tier0_instruction(X86_FORM_SHL_RM64_IMM8, 0, high, BUSTER_X86_REGISTER_DIRECT, 0, 63));
+            tier0_put(writer, tier0_x87_temporary(X86_FORM_XOR_R64_RM64, high, 2));
+            tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, result, high, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
+        else
+        {
+            tier0_put(writer, tier0_x87_temporary(X86_FORM_FISTP_M64, 0, 2));
+            tier0_put(writer, tier0_x87_temporary(X86_FORM_FLDCW_M16, 0, 0));
+            tier0_put(writer, tier0_x87_temporary(X86_FORM_MOV_R64_RM64, result, 2));
+        }
+    }
+}
+
+// How many records tier0_emit_x87 writes for entry i, without writing them (tier0_count_deferred's).
+static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    const uint32_t class = entries->key_classes[i];
+    uint32_t count = 0;
+    if (kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_NEG)
+    {
+        count = 3;
+    }
+    else if (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_DUP)
+    {
+        count = 2;
+    }
+    else if (kind == BUSTER_TYPED_STORE || (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_DIV))
+    {
+        count = 4;
+    }
+    else if (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE)
+    {
+        count = kind == BUSTER_TYPED_EQ || kind == BUSTER_TYPED_NE ? 8 : 6;
+    }
+    else if (tier0_class_x87(class))
+    {
+        const uint32_t from = entries->variants[i];
+        count = tier0_class_x87(from) ? 0 : tier0_class_floating(from) ? 3 : from == BUSTER_TYPED_CLASS_U64 ? 7 : tier0_class_bytes(from) < 4 || from == BUSTER_TYPED_CLASS_U32 ? 4 : 3;
+    }
+    else if (tier0_class_floating(class))
+    {
+        count = 3;
+    }
+    else
+    {
+        count = BUSTER_TIER0_X87_TRUNCATE_RECORDS + 1 + (class == BUSTER_TYPED_CLASS_U64 ? 14 : 3);
+    }
+    return count;
+}
+
+// The records of a deferred entry (into `writer`, which counts them when it has no records). `x87` is Tier0Frame.x87: a
+// constant at each of tier0_emit_deferred's two uses, so that a function without long double values has its deferred
+// entries' code without a look for theirs, and one with them has its own, out of line (#423's measurements).
+static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                                            const Tier0Home* homes, uint32_t i, bool x87, Tier0Writer* writer)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    if (kind == BUSTER_TYPED_CALL && x87)
+    {
+        tier0_emit_call(function, entries, frame, homes, i, function->argument_sizes != 0, true, writer);
+    }
+    else if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
+    {
+        tier0_emit_call(function, entries, frame, homes, i, true, false, writer);
     }
     else if (kind == BUSTER_TYPED_CALL)
     {
-        tier0_emit_call(function, entries, frame, homes, i, false, writer);
+        tier0_emit_call(function, entries, frame, homes, i, false, false, writer);
+    }
+    else if (x87 && tier0_x87_entry(entries, i))
+    {
+        tier0_emit_x87(function, entries, frame, i, writer);
     }
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
@@ -4448,10 +4843,28 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
     }
 }
 
-// How many records a call takes, and its reference (tier0_count_deferred's). `sized` says whether the function has
-// argument_sizes, as tier0_emit_call's does: a constant at each of tier0_count_deferred's two uses.
+static __attribute__((noinline)) void tier0_emit_deferred_x87(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                              const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+{
+    tier0_emit_deferred_entry(function, entries, frame, homes, i, true, writer);
+}
+
+static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                                Tier0Writer* writer)
+{
+    if (frame->x87)
+    {
+        tier0_emit_deferred_x87(function, entries, frame, homes, i, writer);
+    }
+    else
+    {
+        tier0_emit_deferred_entry(function, entries, frame, homes, i, false, writer);
+    }
+}
+
+// How many records a call takes, and its reference (tier0_count_deferred's). `sized` and `x87` are tier0_emit_call's.
 static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, bool sized,
-                                                                       uint32_t* references)
+                                                                       bool x87, uint32_t* references)
 {
     uint32_t count = 0;
     const uint32_t call = (uint32_t)function->values[i];
@@ -4490,7 +4903,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
             to[moves] = destination;
             from[moves] = (uint8_t)source;
             moves += location.kind == BUSTER_ABI_LOCATION_REGISTERS && destination != source ? 1 : 0;
-            count += location.kind == BUSTER_ABI_LOCATION_STACK ? 1 : 0;
+            count += location.kind == BUSTER_ABI_LOCATION_STACK ? (x87 && tier0_class_x87(class) ? 2u : 1u) : 0u;
         }
         else
         {
@@ -4553,8 +4966,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
     const bool stored = object != 0 && function->calls[call].result.kind == BUSTER_ABI_RESULT_REGISTERS;
     count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
+    // A long double's result is stored into its slot at every depth.
     const uint32_t result = tier0_stack(function->classes[i]);
-    count += !stored && ((result == 1 && below != 0) || (result == 2 && floating_below != 0)) ? 1 : 0;
+    count += !stored && ((result == 1 && (below != 0 || (x87 && tier0_class_x87(function->classes[i])))) || (result == 2 && floating_below != 0)) ? 1 : 0;
     *references += indirect ? 0 : 1;
     return count;
 }
@@ -4564,18 +4978,28 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
 // argument extensions, stack stores, its register moves (one per move but the last of each cycle, which the xchg
 // before it resolves), al, the call and the result's move; division's saves, moves, extension and divide; a shift's
 // swaps or its saved rcx; the entries that move rsp, their fixed counts. The scalar path counts by running the
-// emitter, so that the twins check the count.
-static uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, uint32_t* references)
+// emitter, so that the twins check the count. `x87` is tier0_emit_deferred_entry's: a constant at each of
+// tier0_measure_vector's two instances.
+static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, bool x87,
+                                                                           uint32_t* references)
 {
     const uint32_t kind = entries->key_kinds[i];
     uint32_t count = 0;
-    if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
+    if (kind == BUSTER_TYPED_CALL && x87)
     {
-        count = tier0_count_call(function, entries, i, true, references);
+        count = tier0_count_call(function, entries, i, function->argument_sizes != 0, true, references);
+    }
+    else if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
+    {
+        count = tier0_count_call(function, entries, i, true, false, references);
     }
     else if (kind == BUSTER_TYPED_CALL)
     {
-        count = tier0_count_call(function, entries, i, false, references);
+        count = tier0_count_call(function, entries, i, false, false, references);
+    }
+    else if (x87 && tier0_x87_entry(entries, i))
+    {
+        count = tier0_count_x87(entries, i);
     }
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
@@ -4756,7 +5180,13 @@ static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0F
 static __attribute__((noinline)) void tier0_load_result(const Tier0Function* function, Tier0Writer* writer)
 {
     Tier0Part parts[2];
-    const uint32_t count = tier0_result_parts(function->result, function->result_size, parts);
+    // An x87 result's parts (a struct of a long double's) loaded from the last, so that st0 holds the first.
+    const uint32_t x87 = tier0_x87_parts(function->result);
+    for (uint32_t k = x87; k > 0; k -= 1)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_FLD_M80, 0, X86_REGISTER_RAX, BUSTER_X86_MEMORY_BASE, 16 * (int32_t)(k - 1), 0));
+    }
+    const uint32_t count = x87 == 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
     for (uint32_t k = 0; k < count; k += 1)
     {
         if (parts[k].load == BUSTER_TIER0_PART_TEMPORARY)
@@ -4780,8 +5210,9 @@ static __attribute__((noinline)) void tier0_load_result(const Tier0Function* fun
 static __attribute__((noinline)) uint32_t tier0_result_records(const Tier0Function* function)
 {
     Tier0Part parts[2];
-    const uint32_t count = tier0_result_parts(function->result, function->result_size, parts);
-    uint32_t records = 0;
+    const uint32_t x87 = tier0_x87_parts(function->result);
+    const uint32_t count = x87 == 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
+    uint32_t records = x87;
     for (uint32_t k = 0; k < count; k += 1)
     {
         records += tier0_part_records(parts[k]) + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(parts[k].bytes) : 0);
@@ -4789,14 +5220,24 @@ static __attribute__((noinline)) uint32_t tier0_result_records(const Tier0Functi
     return records;
 }
 
-// The epilogue: an aggregate result's registers loaded (tier0_load_result) while the frame they may be in (and what the
-// body allocated) is still there; then the frame released (with a frame pointer, rsp back from rbp, past what the body
-// allocated), the saved registers popped (and rbp last), ret.
+// Whether a function returns a long double's value, in st0 from slot 0, where every RETURN leaves it.
+static bool tier0_x87_returns(const Tier0Function* function)
+{
+    return function->result_size == 0 && tier0_x87_parts(function->result) != 0;
+}
+
+// The epilogue: an aggregate result's registers loaded (tier0_load_result), or a long double's st0 from slot 0, while the
+// frame they may be in (and what the body allocated) is still there; then the frame released (with a frame pointer, rsp
+// back from rbp, past what the body allocated), the saved registers popped (and rbp last), ret.
 static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame* frame, Tier0Writer* writer)
 {
     if (function->result_size != 0)
     {
         tier0_load_result(function, writer);
+    }
+    else if (frame->x87_result)
+    {
+        tier0_put(writer, tier0_x87_slot(X86_FORM_FLD_M80, frame, 0, 0));
     }
     if (frame->pointer)
     {
@@ -4828,7 +5269,7 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
 static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0Frame* frame)
 {
     const uint32_t records = (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes + 1;
-    return records + (function->result_size != 0 ? tier0_result_records(function) : 0);
+    return records + (function->result_size != 0 ? tier0_result_records(function) : frame->x87_result ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -4844,8 +5285,11 @@ static bool tier0_is_deferred(uint16_t entry)
 // or a template whose fixed registers need another depth; with HOME_DEPENDENT until the homes are known), and what the
 // body touches, into the frame: the depth registers it reaches, the templates' fixed registers, and for a call
 // everything caller-saved, with the call save area's and the fixed slots' sizes. Returns the first entry without a
-// template (the count if none), and sets *error to TIER0_ERROR_DEPTH for depths past the tables.
-static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
+// template (the count if none), and sets *error to TIER0_ERROR_DEPTH for depths past the tables. `x87` is
+// Tier0Function.x87: a constant at each of tier0_select's two uses, so that a function without long double values has
+// the loop without a look for their entries (#423's measurements).
+static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame,
+                                                                           Tier0Error* error, bool x87)
 {
     uint32_t unsupported = function->count;
     int32_t integer_top = -1;
@@ -4922,6 +5366,10 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
                     integer_top = function->kinds[i] == BUSTER_TYPED_STACK_SAVE && depth > integer_top ? depth : integer_top;
                     pointer = true;
                 }
+                else if (x87 && tier0_x87_entry(entries, i))
+                {
+                    tier0_x87_tops(entries, i, &integer_top, &floating_top);
+                }
                 else
                 {
                     // Division and shifts by a register: rax, rdx and rcx, saved around them in the fixed slots.
@@ -4948,6 +5396,17 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
     frame->calls = calls;
     frame->pointer = pointer;
     return unsupported;
+}
+
+// The selection of a function with long double values, out of line.
+static __attribute__((noinline)) uint32_t tier0_select_x87(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
+{
+    return tier0_select_entries(function, entries, frame, error, true);
+}
+
+static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
+{
+    return function->x87 ? tier0_select_x87(function, entries, frame, error) : tier0_select_entries(function, entries, frame, error, false);
 }
 
 // The counts the output's columns need, after the homes: each entry's final template (a home-dependent slot's case
@@ -5158,7 +5617,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
 }
 
 static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error);
-static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue);
+static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue, bool x87);
 static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
                               Tier0Code* code, Tier0Choices* choices);
 
@@ -5213,6 +5672,9 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     memset(&frame, 0, sizeof(frame));
     Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
     const uint32_t unsupported = error == TIER0_OK ? (vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
+    // Long double's slots, a function with long double values' (whose result, if one, leaves st0 from slot 0).
+    frame.x87 = function->x87;
+    frame.x87_result = function->x87 && tier0_x87_returns(function);
     if (unsupported != function->count)
     {
         error = TIER0_ERROR_UNSUPPORTED;
@@ -5248,7 +5710,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         uint32_t epilogue = 0;
         if (vector)
         {
-            counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references));
+            counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references), frame.x87);
             epilogue = tier0_count_epilogue(function, &frame);
         }
         else
@@ -5490,6 +5952,25 @@ static Tier0Check tier0_validate(const Tier0Function* function)
             {
                 tier0_reject(&validator, 0, "a local without a class");
             }
+            else if (tier0_class_x87(function->local_classes[l]))
+            {
+                tier0_reject(&validator, 0, "a long double local that isn't an object");
+            }
+        }
+        if (function->x87_constant_count != 0 && function->x87_constants == 0)
+        {
+            tier0_reject(&validator, 0, "long double's constants' count without the constants");
+        }
+        // A long double result in st0, which the epilogue loads from slot 0; a complex one (st0 and st1) isn't Tier 0's.
+        if (function->result_size == 0 && tier0_x87_parts(function->result) != 0 && (tier0_x87_parts(function->result) != 1 || !tier0_x87_result_valid(function->result, 0)))
+        {
+            tier0_reject(&validator, 0, "a function's x87 result that isn't one long double in st0");
+        }
+        // Long double's values have their slots only in a function that says it has them (Tier0Function.x87): its result,
+        // from slot 0, and below each entry of class F80.
+        if (tier0_x87_returns(function) && !function->x87)
+        {
+            tier0_reject(&validator, 0, "a long double result in a function without x87");
         }
         if (object_bytes > BUSTER_TIER0_MAX_OBJECT_BYTES)
         {
@@ -5521,7 +6002,11 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 const AbiLocation location = function->argument_locations[argument];
                 const bool aggregate = function->argument_sizes != 0 && function->argument_sizes[argument] != 0;
                 const bool vector = (location.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0;
-                if (aggregate ? class != BUSTER_TYPED_CLASS_U64 : location.kind == BUSTER_ABI_LOCATION_REGISTERS && tier0_class_floating(class) != vector)
+                // A long double on the stack alone, in 16 bytes at a multiple of 16 inside its call's area.
+                const bool x87 = tier0_class_x87(class) &&
+                                 (aggregate || location.kind != BUSTER_ABI_LOCATION_STACK || location.stack_offset % 16 != 0 ||
+                                  (uint64_t)location.stack_offset + 16 > function->calls[c].stack_bytes);
+                if (x87 || (aggregate ? class != BUSTER_TYPED_CLASS_U64 : location.kind == BUSTER_ABI_LOCATION_REGISTERS && tier0_class_floating(class) != vector))
                 {
                     tier0_reject(&validator, 0, "a call's argument whose class doesn't fit its location, or an aggregate's that isn't U64");
                 }
@@ -5562,6 +6047,11 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 tier0_reject(&validator, i, "an unknown kind or class");
                 break;
             }
+            if (tier0_class_x87(class) && !function->x87)
+            {
+                tier0_reject(&validator, i, "a long double entry in a function without x87");
+                break;
+            }
             if (tier0_global_kind(kind) && function->symbol_access != 0 && (value >= function->symbol_count || function->symbol_access[value] >= BUSTER_TIER0_ACCESSES))
             {
                 tier0_reject(&validator, i, "a symbol past the access column, or an access that doesn't exist");
@@ -5583,6 +6073,10 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 if (class == BUSTER_TYPED_CLASS_VOID || (kind == BUSTER_TYPED_GLOBAL && (value == 0 || value > UINT32_MAX)))
                 {
                     tier0_reject(&validator, i, "a leaf without a class, or a global without a symbol");
+                }
+                if (tier0_class_x87(class) && (kind == BUSTER_TYPED_GLOBAL || value >= function->x87_constant_count))
+                {
+                    tier0_reject(&validator, i, "a long double global read as a value (its address's LOAD reads it), or a constant past x87_constants");
                 }
                 tier0_push(&validator, class);
                 break;
@@ -5667,7 +6161,7 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
                 const bool bad_target = local ? value >= function->local_count || function->local_classes[value] != class || tier0_is_object(function, value) ||
                                                     (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0
-                                              : value == 0 || value > UINT32_MAX;
+                                              : value == 0 || value > UINT32_MAX || tier0_class_x87(class);
                 if (tier0_pop(&validator, i) != class || bad_target)
                 {
                     tier0_reject(&validator, i, "a store to a local or a global that doesn't match");
@@ -5698,9 +6192,18 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 {
                     tier0_reject(&validator, i, "an indirect call's callee that isn't U64");
                 }
-                if (function->call_result_objects != 0 && function->call_result_objects[value] != 0 && class != BUSTER_TYPED_CLASS_VOID)
+                const bool object = function->call_result_objects != 0 && function->call_result_objects[value] != 0;
+                if (object && class != BUSTER_TYPED_CLASS_VOID)
                 {
                     tier0_reject(&validator, i, "a call whose result goes to its object, with a class");
+                }
+                // A result in x87 registers leaves them only as a long double's value (st0, the call's class F80) or
+                // into its object (tier0_call_valid checks its registers), which the call pops.
+                const AbiReturn returned = function->calls[value].result;
+                const bool x87_value = tier0_x87_parts(returned) == 1 && tier0_x87_result_valid(returned, 0);
+                if ((tier0_x87_parts(returned) != 0 && !object && !tier0_class_x87(class)) || (tier0_class_x87(class) && (!x87_value || object)))
+                {
+                    tier0_reject(&validator, i, "a call whose x87 result neither a long double's class nor an object takes");
                 }
                 if (class != BUSTER_TYPED_CLASS_VOID)
                 {
@@ -5742,6 +6245,10 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 if (aggregate_result && class != BUSTER_TYPED_CLASS_U64)
                 {
                     tier0_reject(&validator, i, "a return of an aggregate that isn't an address (U64): its bytes', or the hidden pointer");
+                }
+                if (tier0_x87_returns(function) != tier0_class_x87(class))
+                {
+                    tier0_reject(&validator, i, "a return of a long double from a function whose result isn't one in st0, or of another class from one whose is");
                 }
                 if (validator.depth != 0 || (return_class != BUSTER_TIER0_ANY_DEPTH && return_class != class))
                 {
@@ -6579,8 +7086,9 @@ static __m512i tier0_value_back(__m512i previous, __m512i current, __m512i offse
 // Selection for the vector path, 8 entries at a time: each entry's word gathered from its slot's (an absorbed entry's
 // ABSORBED), the depth checks (a template whose fixed registers need another depth is deferred), the depths each stack
 // reaches and the fixed clobbers, as masks and lane maxima; the deferred entries' touches an entry at a time, as
-// tier0_select's.
-static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
+// tier0_select's, and `x87` as tier0_select_entries's.
+static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entries(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame,
+                                                                                  Tier0Error* error, bool x87)
 {
     const uint32_t count = function->count;
     const uint8_t* key_kinds = entries->key_kinds;
@@ -6675,6 +7183,10 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
                 deferred_integer_top = save && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
                 pointer = true;
             }
+            else if (x87 && tier0_x87_entry(entries, i))
+            {
+                tier0_x87_tops(entries, i, &deferred_integer_top, &deferred_floating_top);
+            }
             else
             {
                 clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
@@ -6710,6 +7222,17 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
     return unsupported;
 }
 
+// The vector selection of a function with long double values, out of line.
+static __attribute__((noinline)) uint32_t tier0_select_vector_x87(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
+{
+    return tier0_select_vector_entries(function, entries, frame, error, true);
+}
+
+static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
+{
+    return function->x87 ? tier0_select_vector_x87(function, entries, frame, error) : tier0_select_vector_entries(function, entries, frame, error, false);
+}
+
 // Measuring for the vector path, 8 words at a time, from the prologue's length on:
 // - a home-dependent entry's word is resolved to its homes' case: for a uniform slot, the case added to the template;
 //   otherwise, the case's word gathered;
@@ -6718,8 +7241,10 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
 // - the positions are the lengths' prefix sums, in registers;
 // - the branch records', references' and choice requests' counts come from popcounts.
 // The last block's words and positions are stored whole, past the entries: emission expands every lane of a block, and a
-// lane past the entries has template 0 and the end's position, which the epilogue overwrites.
-static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue)
+// lane past the entries has template 0 and the end's position, which the epilogue overwrites. `x87` is Tier0Frame.x87: a
+// constant at each of tier0_measure_vector's two uses, as tier0_select_entries's.
+static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes,
+                                                                                      uint32_t prologue, bool x87)
 {
     const uint32_t count = function->count;
     const uint64_t* values = function->values;
@@ -6790,7 +7315,7 @@ static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entr
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(rest);
             rest &= rest - 1;
-            const uint32_t records = tier0_count_deferred(function, entries, first + lane, &counts.references);
+            const uint32_t records = tier0_count_deferred(function, entries, first + lane, x87, &counts.references);
             length = _mm512_mask_set1_epi64(length, (__mmask8)(1u << lane), (int64_t)records);
         }
         counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
@@ -6805,6 +7330,17 @@ static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entr
     }
     positions[count] = (uint32_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
     return counts;
+}
+
+// The vector measuring of a function with long double values, out of line.
+static __attribute__((noinline)) Tier0Counts tier0_measure_vector_x87(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue)
+{
+    return tier0_measure_vector_entries(function, entries, homes, prologue, true);
+}
+
+static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue, bool x87)
+{
+    return x87 ? tier0_measure_vector_x87(function, entries, homes, prologue) : tier0_measure_vector_entries(function, entries, homes, prologue, false);
 }
 
 // One lane of emission: entry i's template expanded from `pair` (its hole block in the low 256 bits, or in the high ones
