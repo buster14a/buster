@@ -13,6 +13,7 @@
 #define BUSTER_ASM_EXPR_DEPTH 128
 #define BUSTER_ASM_WORD 256
 #define BUSTER_ASM_STRING 257
+#define BUSTER_ASM_MAX_SECTIONS 65536
 
 typedef struct AsmToken AsmToken;
 struct AsmToken
@@ -29,6 +30,23 @@ struct AsmExpr
     __int128 value;
     uint32_t plus;
     uint32_t minus;
+    // Intel addresses keep register terms through parentheses. These fields occupy the record's former padding.
+    uint8_t registers[2]; // Architectural GPR number plus one; 17 is RIP.
+    uint8_t scales[2];
+    uint8_t register_count;
+    uint8_t indexed; // Multiplication explicitly chooses an index, including a scale of one.
+};
+
+enum
+{
+    ASM_EXPR_SHL = 300,
+    ASM_EXPR_SHR,
+    ASM_EXPR_EQ,
+    ASM_EXPR_NE,
+    ASM_EXPR_LE,
+    ASM_EXPR_GE,
+    ASM_EXPR_AND,
+    ASM_EXPR_OR,
 };
 
 typedef struct AsmSymbol AsmSymbol;
@@ -79,7 +97,7 @@ struct AsmFragment
     uint32_t alignment;
     uint32_t maximum;
     uint8_t kind;
-    uint8_t section;
+    uint32_t section;
     uint8_t fill;
     uint8_t padding;
 };
@@ -107,6 +125,8 @@ typedef struct AsmResult AsmResult;
 struct AsmResult
 {
     Link link;
+    String8 source_name;
+    ObjectOptions object_options;
     const char* error;
     uint32_t location;
     uint32_t rounds;
@@ -116,9 +136,53 @@ struct AsmResult
     uint64_t match_ns;
     uint64_t layout_ns;
     uint64_t emit_ns;
+    uint64_t cfi_ns;
+};
+
+typedef struct AsmSection AsmSection;
+struct AsmSection
+{
+    ObjectAtomSection object;
+    uint32_t size;
+    AtomId atom;
+    uint8_t class;
+    uint8_t alignment;
+    bool data;
+    bool declared;
 };
 
 typedef struct AsmParser AsmParser;
+typedef struct AsmCfiEvent AsmCfiEvent;
+struct AsmCfiEvent
+{
+    uint32_t fragment;
+    uint32_t opcode;
+    int64_t first;
+    int64_t second;
+    uint8_t* bytes;
+    uint32_t size;
+};
+
+typedef struct AsmCfiProcedure AsmCfiProcedure;
+struct AsmCfiProcedure
+{
+    uint32_t symbol;
+    uint32_t end;
+    uint32_t first;
+    uint32_t count;
+    uint32_t return_column;
+    uint32_t relocation;
+    bool simple;
+    bool signal;
+};
+
+typedef struct AsmCfiState AsmCfiState;
+struct AsmCfiState
+{
+    int64_t offset;
+    uint32_t reg;
+};
+
 struct AsmParser
 {
     String8 source;
@@ -140,11 +204,20 @@ struct AsmParser
     uint32_t fragment_count;
     uint32_t instruction_count;
     uint32_t numeric[10];
-    uint32_t section_size[BUSTER_LINK_CLASS_COUNT];
-    uint8_t section_alignment[BUSTER_LINK_CLASS_COUNT];
-    // Whether each section's last data or instruction statement was data, which code padding starts after with a nop.
-    bool section_data[BUSTER_LINK_CLASS_COUNT];
-    uint8_t section;
+    AsmSection* sections;
+    uint32_t* section_slots;
+    uint32_t section_mask;
+    uint32_t section_count;
+    uint32_t section_capacity;
+    uint32_t section;
+    AsmCfiEvent* cfi;
+    AsmCfiProcedure* procedures;
+    AsmCfiState* cfi_stack;
+    AsmCfiState cfa;
+    uint32_t cfi_count;
+    uint32_t procedure_count;
+    uint32_t cfi_depth;
+    bool cfi_active;
     bool prefix;
 };
 
@@ -473,6 +546,65 @@ static bool asm_is(const AsmParser* parser, uint32_t token, const char* name)
     return x86_match_name(asm_token_text(parser, token), name);
 }
 
+static bool asm_is_case(const AsmParser* parser, uint32_t token, const char* name)
+{
+    const String8 text = asm_token_text(parser, token);
+    bool equal = text.length == strlen(name);
+    for (uint32_t i = 0; equal && i < text.length; i += 1)
+    {
+        const uint8_t byte = text.pointer[i];
+        const uint8_t lower = byte >= 'A' && byte <= 'Z' ? byte + ('a' - 'A') : byte;
+        equal = lower == (uint8_t)name[i];
+    }
+    return equal;
+}
+
+static bool asm_name_token(const AsmParser* parser, uint32_t token)
+{
+    return parser->tokens[token].kind == BUSTER_ASM_WORD || parser->tokens[token].kind == BUSTER_ASM_STRING;
+}
+
+static String8 asm_name_text(AsmParser* parser, uint32_t token)
+{
+    String8 name = asm_token_text(parser, token);
+    if (parser->tokens[token].kind == BUSTER_ASM_STRING)
+    {
+        name.pointer += 1;
+        name.length -= 2;
+        // GCC's ordinary quoted identifiers need no copy. Decode escapes only when the spelling contains one.
+        if (memchr(name.pointer, '\\', name.length) != 0)
+        {
+            char* bytes = arena_push(parser->arena, name.length, 1);
+            if (bytes == 0)
+            {
+                asm_fail(parser, parser->tokens[token].start, "arena exhausted decoding a symbol");
+            }
+            else
+            {
+                uint32_t count = 0;
+                for (uint32_t i = 0; i < name.length; i += 1)
+                {
+                    if (name.pointer[i] == '\\' && i + 1 < name.length)
+                    {
+                        i += 1;
+                        if (name.pointer[i] != '\\' && name.pointer[i] != '"')
+                        {
+                            asm_fail(parser, parser->tokens[token].start, "quoted names support only quote and backslash escapes");
+                        }
+                    }
+                    bytes[count++] = name.pointer[i];
+                }
+                name = (String8){.pointer = bytes, .length = count};
+            }
+        }
+        if (memchr(name.pointer, 0, name.length) != 0)
+        {
+            asm_fail(parser, parser->tokens[token].start, "a name cannot contain NUL");
+        }
+    }
+    return name;
+}
+
 static bool asm_take(AsmParser* parser, uint16_t kind)
 {
     const bool result = parser->tokens[parser->at].kind == kind;
@@ -491,7 +623,11 @@ static void asm_expect(AsmParser* parser, uint16_t kind, const char* message)
 static uint32_t asm_fragment(AsmParser* parser, uint8_t kind, uint32_t location)
 {
     uint32_t result = 0;
-    if (parser->fragment_count >= parser->capacity)
+    if (parser->section == BUSTER_LINK_CLASS_NONE)
+    {
+        asm_fail(parser, location, ".note.GNU-stack must be empty");
+    }
+    else if (parser->fragment_count >= parser->capacity)
     {
         asm_fail(parser, location, "fragment capacity exhausted");
     }
@@ -503,15 +639,15 @@ static uint32_t asm_fragment(AsmParser* parser, uint8_t kind, uint32_t location)
     return result;
 }
 
-static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
+static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t location, bool internal)
 {
     if (name.length == 0 || (name.pointer[0] >= '0' && name.pointer[0] <= '9') || (name.length == 1 && name.pointer[0] == '.'))
     {
         asm_fail(parser, location, "invalid symbol name");
     }
-    uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->symbol_mask;
+    uint32_t slot = (link_hash((const uint8_t*)name.pointer, name.length) ^ (internal ? 0x9e3779b9u : 0)) & parser->symbol_mask;
     uint32_t result = parser->symbol_slots[slot];
-    while (result != 0 && (parser->symbols[result].name.length != name.length || memcmp(parser->symbols[result].name.pointer, name.pointer, name.length) != 0))
+    while (result != 0 && (parser->symbols[result].internal != internal || parser->symbols[result].name.length != name.length || memcmp(parser->symbols[result].name.pointer, name.pointer, name.length) != 0))
     {
         slot = (slot + 1) & parser->symbol_mask;
         result = parser->symbol_slots[slot];
@@ -525,11 +661,16 @@ static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
         else
         {
             result = parser->symbol_count++;
-            parser->symbols[result] = (AsmSymbol){.name = name, .location = location};
+            parser->symbols[result] = (AsmSymbol){.name = name, .location = location, .internal = internal};
             parser->symbol_slots[slot] = result;
         }
     }
     return result;
+}
+
+static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
+{
+    return asm_symbol_scoped(parser, name, location, false);
 }
 
 static uint32_t asm_numeric(AsmParser* parser, uint32_t digit, bool forward, bool definition, uint32_t location)
@@ -540,7 +681,7 @@ static uint32_t asm_numeric(AsmParser* parser, uint32_t digit, bool forward, boo
     }
     const uint32_t serial = parser->numeric[digit] + forward;
     char name[48];
-    // ':' cannot occur in a source symbol spelling, so numeric labels cannot collide with user-written names.
+    // The internal namespace is distinct even from a quoted source name with exactly this spelling.
     const int length = snprintf(name, sizeof(name), ":numeric.%u.%u", digit, serial);
     char* copy = arena_push(parser->arena, length, 1);
     uint32_t result = 0;
@@ -551,8 +692,7 @@ static uint32_t asm_numeric(AsmParser* parser, uint32_t digit, bool forward, boo
     else
     {
         memcpy(copy, name, length);
-        result = asm_symbol(parser, (String8){.pointer = copy, .length = length}, location);
-        parser->symbols[result].internal = true;
+        result = asm_symbol_scoped(parser, (String8){.pointer = copy, .length = length}, location, true);
     }
     return result;
 }
@@ -613,6 +753,25 @@ static AsmExpr asm_combine(AsmParser* parser, AsmExpr left, AsmExpr right, uint1
     const bool symbolic = left.plus || left.minus || right.plus || right.minus;
     if (op == '+' || op == '-')
     {
+        if ((op == '-' && right.register_count != 0) || left.register_count + right.register_count > 2)
+        {
+            asm_fail(parser, location, "invalid address register expression");
+        }
+        else
+        {
+            for (uint32_t i = 0; i < left.register_count; i += 1)
+            {
+                result.registers[result.register_count] = left.registers[i];
+                result.indexed |= ((left.indexed >> i) & 1u) << result.register_count;
+                result.scales[result.register_count++] = left.scales[i];
+            }
+            for (uint32_t i = 0; i < right.register_count; i += 1)
+            {
+                result.registers[result.register_count] = right.registers[i];
+                result.indexed |= ((right.indexed >> i) & 1u) << result.register_count;
+                result.scales[result.register_count++] = right.scales[i];
+            }
+        }
         result.value = left.value + (op == '+' ? right.value : -right.value);
         const uint32_t plus[2] = {left.plus, op == '+' ? right.plus : right.minus};
         const uint32_t minus[2] = {left.minus, op == '+' ? right.minus : right.plus};
@@ -639,6 +798,30 @@ static AsmExpr asm_combine(AsmParser* parser, AsmExpr left, AsmExpr right, uint1
     else if (symbolic)
     {
         asm_fail(parser, location, "operator requires absolute operands");
+    }
+    else if (left.register_count != 0 || right.register_count != 0)
+    {
+        const AsmExpr registers = left.register_count != 0 ? left : right;
+        const AsmExpr factor = left.register_count != 0 ? right : left;
+        if (op != '*' || factor.register_count != 0 || factor.value < 1 || factor.value > 8)
+        {
+            asm_fail(parser, location, "invalid address register expression");
+        }
+        else
+        {
+            result = registers;
+            result.value *= factor.value;
+            result.indexed = (1u << result.register_count) - 1;
+            for (uint32_t i = 0; i < result.register_count; i += 1)
+            {
+                const uint32_t scale = result.scales[i] * (uint32_t)factor.value;
+                if (scale != 1 && scale != 2 && scale != 4 && scale != 8)
+                {
+                    asm_fail(parser, location, "address scale must be 1, 2, 4 or 8");
+                }
+                result.scales[i] = scale;
+            }
+        }
     }
     else
     {
@@ -674,6 +857,39 @@ static AsmExpr asm_combine(AsmParser* parser, AsmExpr left, AsmExpr right, uint1
         case '^':
             result.value = (int64_t)((uint64_t)left.value ^ (uint64_t)right.value);
             break;
+        case '!':
+            result.value = (int64_t)((uint64_t)left.value | ~(uint64_t)right.value);
+            break;
+        case ASM_EXPR_SHL:
+            result.value = right.value >= 0 && right.value < 64 ? (int64_t)((uint64_t)left.value << (uint32_t)right.value) : 0;
+            break;
+        case ASM_EXPR_SHR:
+            result.value = right.value >= 0 && right.value < 64 ? (int64_t)((uint64_t)left.value >> (uint32_t)right.value) : 0;
+            break;
+        case ASM_EXPR_EQ:
+            result.value = -((uint64_t)left.value == (uint64_t)right.value);
+            break;
+        case ASM_EXPR_NE:
+            result.value = -((uint64_t)left.value != (uint64_t)right.value);
+            break;
+        case '<':
+            result.value = -((int64_t)left.value < (int64_t)right.value);
+            break;
+        case '>':
+            result.value = -((int64_t)left.value > (int64_t)right.value);
+            break;
+        case ASM_EXPR_LE:
+            result.value = -((int64_t)left.value <= (int64_t)right.value);
+            break;
+        case ASM_EXPR_GE:
+            result.value = -((int64_t)left.value >= (int64_t)right.value);
+            break;
+        case ASM_EXPR_AND:
+            result.value = left.value != 0 && right.value != 0;
+            break;
+        case ASM_EXPR_OR:
+            result.value = left.value != 0 || right.value != 0;
+            break;
         default:
             asm_fail(parser, location, "unsupported expression operator");
             break;
@@ -688,15 +904,51 @@ static AsmExpr asm_combine(AsmParser* parser, AsmExpr left, AsmExpr right, uint1
 
 static uint32_t asm_precedence(uint16_t op)
 {
-    // GAS precedence: multiplicative, bitwise, then additive. No C precedence assumptions.
-    return op == '*' || op == '/' || op == '%' ? 3 : op == '&' || op == '|' || op == '^' ? 2
-                                                 : op == '+' || op == '-'                ? 1
-                                                                                         : 0;
+    // GAS shifts share multiplication's precedence; its bitwise operators bind more tightly than addition.
+    return op == '*' || op == '/' || op == '%' || op == ASM_EXPR_SHL || op == ASM_EXPR_SHR ? 6 :
+        op == '&' || op == '|' || op == '^' || op == '!' ? 5 :
+        op == '+' || op == '-' ? 4 :
+        op == '<' || op == '>' || op == ASM_EXPR_EQ || op == ASM_EXPR_NE || op == ASM_EXPR_LE || op == ASM_EXPR_GE ? 3 :
+        op == ASM_EXPR_AND ? 2 : op == ASM_EXPR_OR ? 1 : 0;
+}
+
+static uint16_t asm_expression_operator(const AsmParser* parser, uint32_t end, uint32_t* width)
+{
+    const AsmToken* token = &parser->tokens[parser->at];
+    uint16_t op = token->kind;
+    *width = 1;
+    if (parser->at + 1 < end && token->end == token[1].start)
+    {
+        const uint32_t pair = op | token[1].kind << 8;
+        op = pair == ('<' | '<' << 8) ? ASM_EXPR_SHL : pair == ('>' | '>' << 8) ? ASM_EXPR_SHR :
+            pair == ('=' | '=' << 8) ? ASM_EXPR_EQ : pair == ('!' | '=' << 8) || pair == ('<' | '>' << 8) ? ASM_EXPR_NE :
+            pair == ('<' | '=' << 8) ? ASM_EXPR_LE : pair == ('>' | '=' << 8) ? ASM_EXPR_GE :
+            pair == ('&' | '&' << 8) ? ASM_EXPR_AND : pair == ('|' | '|' << 8) ? ASM_EXPR_OR : op;
+        *width = op >= ASM_EXPR_SHL && op <= ASM_EXPR_OR ? 2 : 1;
+    }
+    return op;
+}
+
+static AsmExpr asm_unary(AsmParser* parser, AsmExpr value, uint16_t op, uint32_t location)
+{
+    if (op == '-')
+    {
+        value = asm_combine(parser, (AsmExpr){0}, value, '-', location);
+    }
+    else if (op == '~' || op == '!')
+    {
+        if (value.plus || value.minus || value.register_count)
+        {
+            asm_fail(parser, location, "not requires an absolute operand");
+        }
+        value.value = op == '~' ? (int64_t)~(uint64_t)value.value : value.value == 0;
+    }
+    return value;
 }
 
 static bool asm_token_register(const AsmParser* parser, uint32_t at, X86Operand* operand);
 
-static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
+static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address)
 {
     AsmExpr values[BUSTER_ASM_EXPR_DEPTH];
     uint16_t operators[BUSTER_ASM_EXPR_DEPTH];
@@ -714,7 +966,7 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
         }
         if (need_value)
         {
-            if (token.kind == '+' || token.kind == '-' || token.kind == '~')
+            if (token.kind == '+' || token.kind == '-' || token.kind == '~' || token.kind == '!')
             {
                 operators[operator_count++] = token.kind | 0x8000;
                 parser->at += 1;
@@ -724,15 +976,18 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
                 operators[operator_count++] = '(';
                 parser->at += 1;
             }
-            else if (token.kind == BUSTER_ASM_WORD)
+            else if (asm_name_token(parser, parser->at) || (address && parser->prefix && token.kind == '%' && parser->at + 1 < end && parser->tokens[parser->at + 1].kind == BUSTER_ASM_WORD))
             {
-                const String8 text = asm_token_text(parser, parser->at++);
+                const bool prefixed = token.kind == '%';
+                parser->at += prefixed;
+                const uint32_t name_at = parser->at++;
+                const String8 text = asm_name_text(parser, name_at);
                 AsmExpr value = {0};
-                if (text.length == 2 && text.pointer[0] >= '0' && text.pointer[0] <= '9' && (text.pointer[1] == 'b' || text.pointer[1] == 'f'))
+                if (token.kind == BUSTER_ASM_WORD && text.length == 2 && text.pointer[0] >= '0' && text.pointer[0] <= '9' && (text.pointer[1] == 'b' || text.pointer[1] == 'f'))
                 {
                     value.plus = asm_numeric(parser, text.pointer[0] - '0', text.pointer[1] == 'f', false, token.start);
                 }
-                else if (text.pointer[0] >= '0' && text.pointer[0] <= '9')
+                else if (token.kind == BUSTER_ASM_WORD && text.pointer[0] >= '0' && text.pointer[0] <= '9')
                 {
                     if (!asm_number(text, &value.value))
                     {
@@ -745,18 +1000,32 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
                     // (`.quad rsi`, `dword ptr eax`, `[rax + -rsi]`) rather than reading it as an external. Register
                     // names are at most five bytes, which keeps the check off the longer symbol names.
                     X86Operand reg;
-                    if (parser->options.intel && !parser->prefix && text.length <= 5 && asm_token_register(parser, parser->at - 1, &reg))
+                    const bool is_register = parser->options.intel && prefixed == parser->prefix && token.kind != BUSTER_ASM_STRING && text.length <= 5 && asm_token_register(parser, name_at, &reg);
+                    if (is_register)
                     {
-                        asm_fail(parser, token.start, "invalid use of register");
-                    }
-                    const uint32_t symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
-                    if (parser->symbols[symbol].absolute)
-                    {
-                        value.value = parser->symbols[symbol].constant;
+                        if (!address || (reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != 255))
+                        {
+                            asm_fail(parser, token.start, "invalid use of register");
+                        }
+                        value.register_count = 1;
+                        value.registers[0] = reg.class == 255 ? 17 : reg.reg + 1;
+                        value.scales[0] = 1;
                     }
                     else
                     {
-                        value.plus = symbol;
+                        if (prefixed)
+                        {
+                            asm_fail(parser, token.start, "expected address register");
+                        }
+                        const uint32_t symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
+                        if (parser->symbols[symbol].absolute)
+                        {
+                            value.value = parser->symbols[symbol].constant;
+                        }
+                        else
+                        {
+                            value.plus = symbol;
+                        }
                     }
                 }
                 values[value_count++] = value;
@@ -770,7 +1039,9 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
         else
         {
             const bool close = token.kind == ')';
-            const uint32_t precedence = asm_precedence(token.kind);
+            uint32_t operator_width;
+            const uint16_t binary = asm_expression_operator(parser, end, &operator_width);
+            const uint32_t precedence = asm_precedence(binary);
             if (!close && precedence == 0)
             {
                 break;
@@ -780,18 +1051,7 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
                 const uint16_t op = operators[--operator_count];
                 if (op & 0x8000)
                 {
-                    if ((op & 0x7fff) == '-')
-                    {
-                        values[value_count - 1] = asm_combine(parser, (AsmExpr){0}, values[value_count - 1], '-', location);
-                    }
-                    else if ((op & 0x7fff) == '~')
-                    {
-                        if (values[value_count - 1].plus || values[value_count - 1].minus)
-                        {
-                            asm_fail(parser, location, "bitwise not requires an absolute operand");
-                        }
-                        values[value_count - 1].value = (int64_t)~(uint64_t)values[value_count - 1].value;
-                    }
+                    values[value_count - 1] = asm_unary(parser, values[value_count - 1], op & 0x7fff, location);
                 }
                 else if (value_count >= 2)
                 {
@@ -810,8 +1070,8 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
             }
             else
             {
-                operators[operator_count++] = token.kind;
-                parser->at += 1;
+                operators[operator_count++] = binary;
+                parser->at += operator_width;
                 need_value = true;
             }
         }
@@ -829,18 +1089,7 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
         }
         else if (op & 0x8000)
         {
-            if ((op & 0x7fff) == '-')
-            {
-                values[value_count - 1] = asm_combine(parser, (AsmExpr){0}, values[value_count - 1], '-', location);
-            }
-            else if ((op & 0x7fff) == '~')
-            {
-                if (values[value_count - 1].plus || values[value_count - 1].minus)
-                {
-                    asm_fail(parser, location, "bitwise not requires an absolute operand");
-                }
-                values[value_count - 1].value = (int64_t)~(uint64_t)values[value_count - 1].value;
-            }
+            values[value_count - 1] = asm_unary(parser, values[value_count - 1], op & 0x7fff, location);
         }
         else if (value_count >= 2)
         {
@@ -853,6 +1102,11 @@ static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
         }
     }
     return value_count != 0 ? values[0] : (AsmExpr){0};
+}
+
+static AsmExpr asm_expression(AsmParser* parser, uint32_t end)
+{
+    return asm_expression_mode(parser, end, false);
 }
 
 static __int128 asm_absolute(AsmParser* parser, uint32_t end)
@@ -1035,104 +1289,39 @@ static uint32_t asm_scale(AsmParser* parser, uint32_t end)
 
 static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* operand, AsmExpr* expression)
 {
+    const uint32_t location = parser->tokens[parser->at].start;
     operand->kind = X86_OPERAND_MEMORY;
     operand->mode = BUSTER_X86_MEMORY_ABSOLUTE;
     asm_expect(parser, '[', "expected '['");
-    bool any = false;
-    while (parser->at < end && parser->tokens[parser->at].kind != ']' && parser->result.error == 0)
+    *expression = asm_expression_mode(parser, end, true);
+    // Prefer RSP as the unscaled base: unlike the other GPRs, it cannot be an index. Otherwise retain source order.
+    if (expression->register_count == 2 && expression->registers[1] == 5 && !(expression->indexed & 2))
     {
-        const uint32_t location = parser->tokens[parser->at].start;
-        bool negative = asm_take(parser, '-');
-        if (!negative)
-        {
-            if (any)
-            {
-                asm_expect(parser, '+', "expected '+' or '-' in address");
-            }
-            else
-            {
-                asm_take(parser, '+');
-            }
-        }
-        uint32_t term_end = parser->at;
-        uint32_t depth = 0;
-        while (term_end < end)
-        {
-            const uint16_t kind = parser->tokens[term_end].kind;
-            // A '+' or '-' after an operand separates terms; at a term's start or after an operator, it is a sign.
-            const bool after_operand = term_end != parser->at && (parser->tokens[term_end - 1].kind == BUSTER_ASM_WORD || parser->tokens[term_end - 1].kind == ')');
-            if (depth == 0 && (kind == ']' || ((kind == '+' || kind == '-') && after_operand)))
-            {
-                break;
-            }
-            depth += kind == '(';
-            if (kind == ')' && depth != 0)
-            {
-                depth -= 1;
-            }
-            term_end += 1;
-        }
-        X86Operand reg;
-        // A scaled index is written either way round: `rsi*4`, or `4*rsi` as LLVM's Intel printer writes it.
-        const uint32_t term = parser->at;
-        const uint32_t named = term_end - (parser->prefix ? 2 : 1);
-        bool scale_first = false;
-        if (term_end >= term + (parser->prefix ? 4 : 3) && parser->tokens[named - 1].kind == '*')
-        {
-            parser->at = named;
-            scale_first = asm_read_register(parser, term_end, &reg);
-        }
-        // As in GNU as, a register term may carry unary pluses (`[rax + +rsi]`). Any other sign leaves the register to
-        // the expression below, which refuses its name.
-        parser->at = term;
-        while (!scale_first && parser->at < term_end && parser->tokens[parser->at].kind == '+')
-        {
-            parser->at += 1;
-        }
-        const bool register_first = !scale_first && asm_read_register(parser, term_end, &reg);
-        if (!register_first)
-        {
-            parser->at = term;
-        }
-        if (scale_first)
-        {
-            const uint32_t scale = asm_scale(parser, named - 1);
-            if (parser->at != named - 1)
-            {
-                asm_fail(parser, location, "unsupported address term");
-            }
-            if (negative)
-            {
-                asm_fail(parser, location, "address register cannot be subtracted");
-            }
-            parser->at = term_end;
-            asm_address_register(parser, operand, reg, scale, true, location);
-        }
-        else if (register_first)
-        {
-            const bool index = asm_take(parser, '*');
-            const uint32_t scale = index ? asm_scale(parser, term_end) : 0;
-            if (negative)
-            {
-                asm_fail(parser, location, "address register cannot be subtracted");
-            }
-            asm_address_register(parser, operand, reg, scale, index, location);
-        }
-        else
-        {
-            const AsmExpr value = asm_expression(parser, term_end);
-            *expression = asm_combine(parser, *expression, value, negative ? '-' : '+', location);
-        }
-        if (parser->at != term_end)
-        {
-            asm_fail(parser, location, "unsupported address term");
-        }
-        any = true;
+        const uint8_t reg = expression->registers[0];
+        const uint8_t scale = expression->scales[0];
+        expression->registers[0] = expression->registers[1];
+        expression->scales[0] = expression->scales[1];
+        expression->registers[1] = reg;
+        expression->scales[1] = scale;
+        expression->indexed = (expression->indexed >> 1) | ((expression->indexed & 1) << 1);
     }
-    if (!any)
+    for (uint32_t i = 0; i < expression->register_count && parser->result.error == 0; i += 1)
     {
-        asm_fail(parser, parser->tokens[parser->at].start, "empty address");
+        const uint32_t factor = expression->scales[i];
+        const uint32_t scale = factor == 2 ? 1 : factor == 4 ? 2 : factor == 8 ? 3 : 0;
+        const X86Operand reg =
+        {
+            .kind = X86_OPERAND_REGISTER,
+            .class = expression->registers[i] == 17 ? 255 : BUSTER_X86_CLASS_GPR64,
+            .width = 8,
+            .reg = expression->registers[i] - 1,
+        };
+        asm_address_register(parser, operand, reg, scale, (expression->indexed >> i) & 1, location);
     }
+    expression->register_count = 0;
+    expression->indexed = 0;
+    memset(expression->registers, 0, sizeof(expression->registers));
+    memset(expression->scales, 0, sizeof(expression->scales));
     asm_expect(parser, ']', "unclosed address");
 }
 
@@ -1146,11 +1335,11 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
         indirect = asm_take(parser, '*');
         immediate = asm_take(parser, '$');
     }
-    else if (asm_is(parser, parser->at, "offset"))
+    else if (asm_is_case(parser, parser->at, "offset"))
     {
         parser->at += 1;
         immediate = true;
-        if (asm_is(parser, parser->at, "flat") && parser->at + 1 < end)
+        if (asm_is_case(parser, parser->at, "flat") && parser->at + 1 < end)
         {
             parser->at += 1;
             asm_expect(parser, ':', "expected ':' after flat");
@@ -1161,11 +1350,11 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
         static const char* const names[] = {"byte", "word", "dword", "qword", "xmmword", "ymmword", "zmmword"};
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
         {
-            if (asm_is(parser, parser->at, names[i]))
+            if (asm_is_case(parser, parser->at, names[i]))
             {
                 operand->width = 1u << i;
                 parser->at += 1;
-                if (!asm_is(parser, parser->at, "ptr"))
+                if (!asm_is_case(parser, parser->at, "ptr"))
                 {
                     asm_fail(parser, location, "expected 'ptr' after memory width");
                 }
@@ -1179,9 +1368,9 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
     }
     uint32_t segment_at = parser->at;
     segment_at += segment_at < end && parser->tokens[segment_at].kind == '%';
-    if (!immediate && segment_at + 1 < end && parser->tokens[segment_at + 1].kind == ':' && (asm_is(parser, segment_at, "fs") || asm_is(parser, segment_at, "gs")))
+    if (!immediate && segment_at + 1 < end && parser->tokens[segment_at + 1].kind == ':' && (asm_is_case(parser, segment_at, "fs") || asm_is_case(parser, segment_at, "gs")))
     {
-        operand->segment = asm_is(parser, segment_at, "fs") ? 1 : 2;
+        operand->segment = asm_is_case(parser, segment_at, "fs") ? 1 : 2;
         parser->at = segment_at + 2;
     }
     const uint16_t width = operand->width;
@@ -1242,6 +1431,13 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
         {
             operand->kind = X86_OPERAND_MEMORY;
             operand->mode = BUSTER_X86_MEMORY_ABSOLUTE;
+        }
+        if (parser->options.intel && !immediate && parser->at < end && parser->tokens[parser->at].kind == '[')
+        {
+            // GCC writes symbol[rip] as well as [rip+symbol]. Keep the prefix's displacement and symbol.
+            AsmExpr address = {0};
+            asm_intel_address(parser, end, operand, &address);
+            *expression = asm_combine(parser, *expression, address, '+', location);
         }
     }
     if (segment != 0 && operand->kind != X86_OPERAND_MEMORY)
@@ -1313,6 +1509,12 @@ static bool asm_alias(String8* name)
             {"jpe", "jp"},
             {"jpo", "jnp"},
             {"sal", "shl"},
+            {"cbtw", "cbw"},
+            {"cwtl", "cwde"},
+            {"cltq", "cdqe"},
+            {"cwtd", "cwd"},
+            {"cltd", "cdq"},
+            {"cqto", "cqo"},
     };
     bool found = false;
     for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
@@ -1326,10 +1528,46 @@ static bool asm_alias(String8* name)
     return found;
 }
 
+static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_width)
+{
+    static const struct
+    {
+        const char* name;
+        const char* canonical;
+        uint8_t source;
+        uint8_t destination;
+    } aliases[] =
+    {
+        {"movzbw", "movzx", 1, 2},
+        {"movzbl", "movzx", 1, 4},
+        {"movzbq", "movzx", 1, 8},
+        {"movzwl", "movzx", 2, 4},
+        {"movzwq", "movzx", 2, 8},
+        {"movsbw", "movsx", 1, 2},
+        {"movsbl", "movsx", 1, 4},
+        {"movsbq", "movsx", 1, 8},
+        {"movswl", "movsx", 2, 4},
+        {"movswq", "movsx", 2, 8},
+        {"movslq", "movsxd", 4, 8},
+    };
+    bool found = false;
+    for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
+    {
+        found = x86_match_name(*name, aliases[i].name);
+        if (found)
+        {
+            *name = (String8){.pointer = (char*)aliases[i].canonical, .length = strlen(aliases[i].canonical)};
+            *width = aliases[i].destination;
+            *source_width = aliases[i].source;
+        }
+    }
+    return found;
+}
+
 static void asm_instruction(AsmParser* parser, uint32_t end)
 {
     const uint32_t location = parser->tokens[parser->at].start;
-    if (parser->instruction_count >= parser->instruction_capacity || parser->section == BUSTER_LINK_CLASS_BSS)
+    if (parser->instruction_count >= parser->instruction_capacity || object_class_is_zero_fill(parser->sections[parser->section].class))
     {
         asm_fail(parser, location, "instruction capacity exhausted or instruction in .bss");
     }
@@ -1340,8 +1578,9 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         instruction->request.mnemonic = asm_token_text(parser, parser->at++);
         String8* name = &instruction->request.mnemonic;
         uint32_t width = 0;
+        uint32_t source_width = 0;
         // A complete alias keeps its last letter: jnb, jnl and sal end in suffix letters.
-        bool known = asm_alias(name);
+        bool known = asm_alias(name) || (!parser->options.intel && asm_att_extension(name, &width, &source_width));
         if (!parser->options.intel && !known && name->length > 1)
         {
             // Strip integer suffixes only when the full mnemonic has no catalogue candidate.
@@ -1360,7 +1599,8 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         }
         // LEA's memory operand is an address, not a load: its suffix sizes the destination register alone.
         const bool address = x86_match_name(*name, "lea");
-        instruction->request.width = address ? 0 : width;
+        // Extension forms describe their source memory width; the destination is fixed by its register class.
+        instruction->request.width = address ? 0 : source_width != 0 ? source_width : width;
         instruction->branch = name->pointer[0] == 'j' || x86_match_name(*name, "call") || (name->length >= 4 && memcmp(name->pointer, "loop", 4) == 0);
         uint32_t begins[4];
         uint32_t ends[4];
@@ -1410,11 +1650,12 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
             const bool count_register = !parser->options.intel && i == 0 && shift && operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_GPR8 && operand->reg == 1;
             if (width != 0 && operand->kind != X86_OPERAND_IMMEDIATE && !count_register && !(address && operand->kind == X86_OPERAND_MEMORY))
             {
-                if (operand->width != 0 && operand->width != width)
+                const uint32_t expected_width = i == 0 && source_width != 0 ? source_width : width;
+                if (operand->width != 0 && operand->width != expected_width)
                 {
                     asm_fail(parser, location, "mnemonic suffix and register width disagree");
                 }
-                operand->width = width;
+                operand->width = expected_width;
             }
             if (parser->at != ends[i])
             {
@@ -1436,7 +1677,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         }
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
-        parser->section_data[parser->section] = false;
+        parser->sections[parser->section].data = false;
         parser->at = end;
     }
 }
@@ -1515,6 +1756,17 @@ static void asm_string(AsmParser* parser, uint32_t end, bool terminated)
     } while (parser->result.error == 0 && asm_take(parser, ','));
 }
 
+static uint32_t asm_note_section(const AsmParser* parser, uint32_t end)
+{
+    const uint32_t at = parser->at;
+    // '-' is an expression token. A section spelling joins it only when the three tokens are adjacent.
+    const bool unquoted = at + 2 < end && asm_is(parser, at, ".note.GNU") && parser->tokens[at + 1].kind == '-' && asm_is(parser, at + 2, "stack") && parser->tokens[at].end == parser->tokens[at + 1].start && parser->tokens[at + 1].end == parser->tokens[at + 2].start;
+    return unquoted ? 3 : at < end && asm_is(parser, at, "\".note.GNU-stack\"") ? 1 : 0;
+}
+
+#include "assembler_sections.c"
+#include "assembler_cfi.c"
+
 static void asm_directive(AsmParser* parser, uint32_t end)
 {
     const uint32_t token = parser->at++;
@@ -1532,54 +1784,64 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             parser->prefix = !asm_is(parser, parser->at++, "noprefix");
         }
     }
-    else if (asm_is(parser, token, ".text") || asm_is(parser, token, ".data") || asm_is(parser, token, ".bss") || asm_is(parser, token, ".section"))
+    else if (asm_section_prefix(asm_token_text(parser, token), ".cfi_"))
     {
-        const bool section = asm_is(parser, token, ".section");
-        const uint32_t name = section ? parser->at++ : token;
-        uint8_t class = 0;
-        if (asm_is(parser, name, ".text"))
+        asm_cfi_directive(parser, token, end);
+    }
+    else if (asm_is(parser, token, ".file") || asm_is(parser, token, ".ident"))
+    {
+        if (parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_STRING)
         {
-            class = BUSTER_LINK_CLASS_TEXT;
-        }
-        else if (asm_is(parser, name, ".rodata"))
-        {
-            class = BUSTER_LINK_CLASS_RODATA;
-        }
-        else if (asm_is(parser, name, ".data"))
-        {
-            class = BUSTER_LINK_CLASS_DATA;
-        }
-        else if (asm_is(parser, name, ".bss"))
-        {
-            class = BUSTER_LINK_CLASS_BSS;
-        }
-        if (class == 0)
-        {
-            asm_fail(parser, location, "unsupported section (supported: .text, .rodata, .data, .bss)");
+            asm_fail(parser, location, "expected a quoted metadata string");
         }
         else
         {
-            parser->section = class;
-            // Even an empty declared section has an atom.
-            asm_fragment(parser, ASM_LABEL, location);
-            if (section && asm_take(parser, ','))
+            const String8 text = asm_name_text(parser, parser->at++);
+            if (asm_is(parser, token, ".file"))
             {
-                const char* flags = class == BUSTER_LINK_CLASS_TEXT ? "\"ax\"" : class == BUSTER_LINK_CLASS_RODATA ? "\"a\""
-                                                                                                                   : "\"aw\"";
-                if (!asm_is(parser, parser->at++, flags))
+                parser->result.source_name = text;
+            }
+        }
+    }
+    else if (asm_is(parser, token, ".addrsig") || asm_is(parser, token, ".addrsig_sym"))
+    {
+        // Omitting LLVM's optional address-significance table conservatively marks every address significant.
+        if (asm_is(parser, token, ".addrsig_sym"))
+        {
+            if (parser->at >= end || !asm_name_token(parser, parser->at))
+            {
+                asm_fail(parser, location, "expected an address-significant symbol name");
+            }
+            else
+            {
+                parser->at += 1;
+            }
+        }
+    }
+    else if (asm_is(parser, token, ".section") && asm_note_section(parser, end))
+    {
+        // The shared writer already supplies the empty non-executable-stack marker.
+        parser->section = BUSTER_LINK_CLASS_NONE;
+        parser->at += asm_note_section(parser, end);
+        if (asm_take(parser, ','))
+        {
+            if (!asm_is(parser, parser->at++, "\"\""))
+            {
+                asm_fail(parser, location, "only a non-executable GNU-stack note is supported");
+            }
+            if (asm_take(parser, ','))
+            {
+                asm_expect(parser, '@', "expected section type");
+                if (!asm_is(parser, parser->at++, "progbits"))
                 {
-                    asm_fail(parser, location, "section flags disagree with the supported section");
-                }
-                if (asm_take(parser, ','))
-                {
-                    asm_expect(parser, '@', "expected section type");
-                    if (!asm_is(parser, parser->at++, class == BUSTER_LINK_CLASS_BSS ? "nobits" : "progbits"))
-                    {
-                        asm_fail(parser, location, "section type disagrees with the supported section");
-                    }
+                    asm_fail(parser, location, "GNU-stack note requires @progbits");
                 }
             }
         }
+    }
+    else if (asm_is(parser, token, ".text") || asm_is(parser, token, ".data") || asm_is(parser, token, ".bss") || asm_is(parser, token, ".section"))
+    {
+        asm_section_directive(parser, token, end);
     }
     else if (asm_is(parser, token, ".globl") || asm_is(parser, token, ".global") || asm_is(parser, token, ".local") || asm_is(parser, token, ".weak"))
     {
@@ -1587,25 +1849,25 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                                                                                                                             : BUSTER_LINK_SYMBOL_GLOBAL;
         do
         {
-            if (parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_WORD)
+            if (parser->at >= end || !asm_name_token(parser, parser->at))
             {
                 asm_fail(parser, location, "binding directive requires a symbol name");
                 break;
             }
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_token_text(parser, parser->at++), location)];
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
             symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | binding;
             symbol->explicit_binding = true;
         } while (asm_take(parser, ','));
     }
-    else if (asm_is(parser, token, ".type") || asm_is(parser, token, ".size") || asm_is(parser, token, ".equ") || asm_is(parser, token, ".set"))
+    else if (asm_is(parser, token, ".type") || asm_is(parser, token, ".size") || asm_is(parser, token, ".equ") || asm_is(parser, token, ".equiv") || asm_is(parser, token, ".set"))
     {
-        if (parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_WORD)
+        if (parser->at >= end || !asm_name_token(parser, parser->at))
         {
             asm_fail(parser, location, "directive requires a symbol name");
         }
         else
         {
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_token_text(parser, parser->at++), location)];
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
             asm_expect(parser, ',', "expected ',' after symbol");
             if (asm_is(parser, token, ".type"))
             {
@@ -1634,7 +1896,7 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             else
             {
                 const __int128 value = asm_absolute(parser, end);
-                if (symbol->defined && (!symbol->absolute || asm_is(parser, token, ".equ")))
+                if (symbol->defined && (!symbol->absolute || asm_is(parser, token, ".equiv")))
                 {
                     asm_fail(parser, location, "duplicate symbol definition");
                 }
@@ -1644,11 +1906,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             }
         }
     }
-    else if (asm_is(parser, token, ".byte") || asm_is(parser, token, ".word") || asm_is(parser, token, ".long") || asm_is(parser, token, ".quad"))
+    else if (asm_is(parser, token, ".byte") || asm_is(parser, token, ".word") || asm_is(parser, token, ".short") || asm_is(parser, token, ".value") || asm_is(parser, token, ".long") || asm_is(parser, token, ".int") || asm_is(parser, token, ".quad"))
     {
-        const uint32_t width = asm_is(parser, token, ".byte") ? 1 : asm_is(parser, token, ".word") ? 2
-                                                                : asm_is(parser, token, ".long")   ? 4
-                                                                                                   : 8;
+        const uint32_t width = asm_is(parser, token, ".byte") ? 1 : asm_is(parser, token, ".quad") ? 8 : asm_is(parser, token, ".long") || asm_is(parser, token, ".int") ? 4 : 2;
         do
         {
             // `.` is the address of this datum, so it is bound before the datum takes its place.
@@ -1657,14 +1917,14 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             parser->fragments[fragment].expression = expression;
             parser->fragments[fragment].size = width;
         } while (parser->result.error == 0 && asm_take(parser, ','));
-        parser->section_data[parser->section] = true;
+        parser->sections[parser->section].data = true;
     }
     else if (asm_is(parser, token, ".ascii") || asm_is(parser, token, ".asciz") || asm_is(parser, token, ".string"))
     {
         asm_string(parser, end, !asm_is(parser, token, ".ascii"));
-        parser->section_data[parser->section] = true;
+        parser->sections[parser->section].data = true;
     }
-    else if (asm_is(parser, token, ".zero") || asm_is(parser, token, ".balign") || asm_is(parser, token, ".p2align"))
+    else if (asm_is(parser, token, ".zero") || asm_is(parser, token, ".align") || asm_is(parser, token, ".balign") || asm_is(parser, token, ".p2align"))
     {
         const bool align = !asm_is(parser, token, ".zero");
         __int128 value = asm_absolute(parser, end);
@@ -1687,7 +1947,7 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         output->alignment = align ? (uint32_t)value : 0;
         output->maximum = BUSTER_ASM_MAX_SECTION;
         output->fill = 0;
-        output->padding = !align || parser->section != BUSTER_LINK_CLASS_TEXT ? ASM_PADDING_FILL : parser->section_data[parser->section] ? ASM_PADDING_NOPS_AFTER_DATA : ASM_PADDING_NOPS;
+        output->padding = !align || (parser->sections[parser->section].object.flags & SHF_EXECINSTR) == 0 ? ASM_PADDING_FILL : parser->sections[parser->section].data ? ASM_PADDING_NOPS_AFTER_DATA : ASM_PADDING_NOPS;
         if (asm_take(parser, ','))
         {
             if (parser->tokens[parser->at].kind != ',')
@@ -1712,13 +1972,13 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 output->maximum = maximum == 0 ? BUSTER_ASM_MAX_SECTION : (uint32_t)maximum;
             }
         }
-        parser->section_data[parser->section] |= !align;
+        parser->sections[parser->section].data |= !align;
         if (align && value > 0)
         {
             const uint32_t log = __builtin_ctzll((uint64_t)value);
-            if (log > parser->section_alignment[parser->section])
+            if (log > parser->sections[parser->section].alignment)
             {
-                parser->section_alignment[parser->section] = log;
+                parser->sections[parser->section].alignment = log;
             }
         }
     }
@@ -1849,7 +2109,7 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         const uint32_t bucket = x86_match_bucket(parser->index, mnemonic);
         const bool named = parser->index->names[bucket].pointer != 0;
         supported &= named && !x86_match_name(mnemonic, "sal");
-        if (!supported || parser->instruction_count >= parser->instruction_capacity || parser->section == BUSTER_LINK_CLASS_BSS)
+        if (!supported || parser->instruction_count >= parser->instruction_capacity || object_class_is_zero_fill(parser->sections[parser->section].class))
         {
             break;
         }
@@ -1875,7 +2135,7 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         }
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
-        parser->section_data[parser->section] = false;
+        parser->sections[parser->section].data = false;
         parser->at = row_end[row];
         parser->at += parser->at < parser->token_count;
         done += 1;
@@ -1895,12 +2155,12 @@ static void asm_parse(AsmParser* parser)
         {
             continue;
         }
-        while (parser->at + 1 < parser->token_count && parser->tokens[parser->at].kind == BUSTER_ASM_WORD && parser->tokens[parser->at + 1].kind == ':')
+        while (parser->at + 1 < parser->token_count && asm_name_token(parser, parser->at) && parser->tokens[parser->at + 1].kind == ':')
         {
             const uint32_t location = parser->tokens[parser->at].start;
-            const String8 name = asm_token_text(parser, parser->at);
+            const String8 name = asm_name_text(parser, parser->at);
             uint32_t id;
-            if (name.length == 1 && name.pointer[0] >= '0' && name.pointer[0] <= '9')
+            if (parser->tokens[parser->at].kind == BUSTER_ASM_WORD && name.length == 1 && name.pointer[0] >= '0' && name.pointer[0] <= '9')
             {
                 id = asm_numeric(parser, name.pointer[0] - '0', false, true, location);
             }
@@ -1942,6 +2202,10 @@ static void asm_parse(AsmParser* parser)
         }
         parser->at = end;
     }
+    if (parser->cfi_active)
+    {
+        asm_fail(parser, parser->source.length, "missing .cfi_endproc");
+    }
 }
 
 static AsmExpr asm_resolve(AsmParser* parser, AsmExpr expression, uint32_t location)
@@ -1972,10 +2236,12 @@ static AsmExpr asm_resolve(AsmParser* parser, AsmExpr expression, uint32_t locat
     return expression;
 }
 
-static bool asm_local_target(const AsmParser* parser, AsmExpr expression, uint8_t section)
+static bool asm_local_target(const AsmParser* parser, AsmExpr expression, uint32_t section, bool global_jump)
 {
     const AsmSymbol* symbol = &parser->symbols[expression.plus];
-    return expression.plus != 0 && expression.minus == 0 && symbol->defined && !symbol->absolute && (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL && parser->fragments[symbol->fragment].section == section;
+    const uint8_t binding = symbol->flags & BUSTER_LINK_SYMBOL_BINDING;
+    const bool fixed = binding == BUSTER_LINK_SYMBOL_LOCAL || (global_jump && binding == BUSTER_LINK_SYMBOL_GLOBAL);
+    return expression.plus != 0 && expression.minus == 0 && symbol->defined && !symbol->absolute && fixed && parser->fragments[symbol->fragment].section == section;
 }
 
 static void asm_match_instructions(AsmParser* parser)
@@ -1984,8 +2250,28 @@ static void asm_match_instructions(AsmParser* parser)
     {
         AsmInstruction* instruction = &parser->instructions[i];
         AsmFragment* fragment = &parser->fragments[instruction->fragment];
+        uint32_t width = instruction->request.width;
         for (uint32_t j = 0; j < instruction->request.count; j += 1)
         {
+            const X86Operand* operand = &instruction->request.operands[j];
+            if (operand->kind == X86_OPERAND_REGISTER || operand->kind == X86_OPERAND_MEMORY)
+            {
+                width = operand->width > width ? operand->width : width;
+            }
+        }
+        for (uint32_t j = 0; j < instruction->request.count; j += 1)
+        {
+            X86Operand* operand = &instruction->request.operands[j];
+            if (operand->kind == X86_OPERAND_IMMEDIATE && !operand->symbolic && width != 0 && width <= 8)
+            {
+                // GNU integer operands are bit patterns of their destination width. Canonicalize only values in
+                // that width's unsigned range; oversized constants still fail the matcher's exact range check.
+                const __int128 modulus = (__int128)1 << (width * 8);
+                if (operand->value >= modulus / 2 && operand->value < modulus)
+                {
+                    operand->value -= modulus;
+                }
+            }
             if (instruction->expressions[j].plus != 0 && parser->symbols[instruction->expressions[j].plus].absolute)
             {
                 asm_fail(parser, instruction->location, "constant used before its definition is unsupported");
@@ -2012,7 +2298,8 @@ static void asm_match_instructions(AsmParser* parser)
                 // The Link contract has no absolute-symbol target; require a label instead of changing its meaning.
                 asm_fail(parser, instruction->location, "direct branch requires a label or symbol target; absolute destinations are unsupported");
             }
-            instruction->local_branch = instruction->branch && asm_local_target(parser, instruction->expressions[0], fragment->section);
+            // GNU as resolves same-section global jumps without -mshared; global calls remain interposable.
+            instruction->local_branch = instruction->branch && asm_local_target(parser, instruction->expressions[0], fragment->section, strcmp(form->mnemonic, "call") != 0);
             if (instruction->branch && !instruction->local_branch && form->relative_bytes == 1)
             {
                 const uint32_t row = instruction->record.form;
@@ -2037,7 +2324,7 @@ static void asm_match_instructions(AsmParser* parser)
 static bool asm_layout_records(AsmParser* parser)
 {
     bool eligible = parser->fragment_count != 0;
-    const uint8_t section = parser->fragments[0].section;
+    const uint32_t section = parser->fragments[0].section;
     for (uint32_t i = 0; eligible && i < parser->fragment_count; i += 1)
     {
         const AsmFragment* fragment = &parser->fragments[i];
@@ -2098,7 +2385,7 @@ static bool asm_layout_records(AsmParser* parser)
                 else
                 {
                     offsets[parser->instruction_count] = layout.length;
-                    parser->section_size[section] = layout.length;
+                    parser->sections[section].size = layout.length;
                     parser->result.rounds = layout.rounds;
                     for (uint32_t i = 0; i < parser->instruction_count; i += 1)
                     {
@@ -2131,7 +2418,7 @@ static __m512i asm_prefix16(__m512i values)
 // scans unrelated sections in each relaxation round. Scalar column loads/stores avoid Zen 5's costly gather/scatter.
 static void asm_fragment_offsets(AsmParser* parser, const uint32_t* order, const uint32_t* begin)
 {
-    for (uint32_t section = 1; section < BUSTER_LINK_CLASS_COUNT; section += 1)
+    for (uint32_t section = 1; section < parser->section_count; section += 1)
     {
         uint32_t offset = 0;
         uint32_t at = begin[section];
@@ -2189,7 +2476,7 @@ static void asm_fragment_offsets(AsmParser* parser, const uint32_t* order, const
                 asm_fail(parser, fragment->location, "section exceeds the 256 MiB layout limit");
             }
         }
-        parser->section_size[section] = offset;
+        parser->sections[section].size = offset;
     }
 }
 
@@ -2198,23 +2485,24 @@ static void asm_layout(AsmParser* parser)
     bool changed = !asm_layout_records(parser);
     const uint64_t saved = parser->arena->length;
     uint32_t* order = changed ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->fragment_count + 1) : 0;
-    uint32_t begin[BUSTER_LINK_CLASS_COUNT + 1] = {0};
-    if (changed && order == 0)
+    uint32_t* begin = changed ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->section_count + 1) : 0;
+    uint32_t* cursors = changed ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->section_count) : 0;
+    if (changed && (order == 0 || begin == 0 || cursors == 0))
     {
         asm_fail(parser, 0, "arena exhausted partitioning layout fragments");
     }
-    if (changed && order != 0)
+    if (changed && parser->result.error == 0)
     {
+        memset(begin, 0, (parser->section_count + 1) * sizeof(uint32_t));
         for (uint32_t i = 0; i < parser->fragment_count; i += 1)
         {
             begin[parser->fragments[i].section + 1] += 1;
         }
-        for (uint32_t s = 0; s < BUSTER_LINK_CLASS_COUNT; s += 1)
+        for (uint32_t s = 0; s < parser->section_count; s += 1)
         {
             begin[s + 1] += begin[s];
         }
-        uint32_t cursors[BUSTER_LINK_CLASS_COUNT];
-        memcpy(cursors, begin, sizeof(cursors));
+        memcpy(cursors, begin, parser->section_count * sizeof(uint32_t));
         for (uint32_t i = 0; i < parser->fragment_count; i += 1)
         {
             order[cursors[parser->fragments[i].section]++] = i;
@@ -2327,7 +2615,7 @@ static void asm_instruction_fixups(AsmParser* parser, AtomId atom, AsmInstructio
             uint8_t* bytes = parser->result.link.atoms.bytes[atom] + offset;
             const bool pc_relative = instruction->branch || (operand->mode & BUSTER_X86_MODE_RIP);
             const uint32_t width = displacement ? 4 : form->immediate_bytes;
-            if (pc_relative && !instruction->branch && asm_local_target(parser, expression, fragment->section))
+            if (pc_relative && !instruction->branch && asm_local_target(parser, expression, fragment->section, false))
             {
                 const __int128 value = (__int128)parser->fragments[parser->symbols[expression.plus].fragment].offset + expression.value - fragment->offset - fragment->size;
                 if (value < INT32_MIN || value > INT32_MAX)
@@ -2350,8 +2638,10 @@ static void asm_instruction_fixups(AsmParser* parser, AtomId atom, AsmInstructio
                 else
                 {
                     // A disp32 and an immediate the form sign-extends (REX.W's, and PUSH's) take 32S, other imm32s 32.
-                    const bool signed_field = displacement || x86_match_sign_extends(form);
-                    const uint8_t kind = instruction->branch ? BUSTER_LINK_FIXUP_CALL : pc_relative ? BUSTER_LINK_FIXUP_PC32
+                    const bool truncated_lea = strcmp(form->mnemonic, "lea") == 0 && !form->w;
+                    const bool signed_field = (displacement && !truncated_lea) || x86_match_sign_extends(form);
+                    const bool interposable = (parser->symbols[expression.plus].flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+                    const uint8_t kind = instruction->branch && interposable ? BUSTER_LINK_FIXUP_CALL : pc_relative ? BUSTER_LINK_FIXUP_PC32
                                                                                     : width == 8    ? BUSTER_LINK_FIXUP_ABS64
                                                                                     : signed_field  ? BUSTER_LINK_FIXUP_ABS32S
                                                                                                     : BUSTER_LINK_FIXUP_ABS32;
@@ -2423,7 +2713,7 @@ static void asm_emit(AsmParser* parser)
     const LinkCapacity capacity =
         {
             .names = parser->symbol_count,
-            .atoms = BUSTER_LINK_CLASS_COUNT,
+            .atoms = parser->section_count,
             .symbols = parser->symbol_count,
             .fixups = parser->fragment_count + parser->instruction_count * 2,
             .wide_addends = parser->fragment_count + parser->instruction_count * 2,
@@ -2432,17 +2722,18 @@ static void asm_emit(AsmParser* parser)
     {
         asm_fail(parser, 0, "arena exhausted building link tables");
     }
-    AtomId atoms[BUSTER_LINK_CLASS_COUNT] = {0};
     for (uint32_t f = 0; f < parser->fragment_count && parser->result.error == 0; f += 1)
     {
-        const uint8_t section = parser->fragments[f].section;
-        if (atoms[section] == 0)
+        const uint32_t section = parser->fragments[f].section;
+        AsmSection* descriptor = &parser->sections[section];
+        if (descriptor->atom == 0)
         {
-            const uint32_t size = parser->section_size[section];
+            const uint32_t size = descriptor->size;
             // The trusted encoder requires worst-case capacity plus its documented store slack even when the
             // chosen encodings are shorter. Keep that padding outside the logical atom size, including the tail.
-            uint8_t* bytes = section == BUSTER_LINK_CLASS_BSS ? 0 : arena_push(parser->arena, (uint64_t)size + BUSTER_X86_ENCODER_CAPACITY(256), 64);
-            if (bytes == 0 && section != BUSTER_LINK_CLASS_BSS)
+            const bool zero = object_class_is_zero_fill(descriptor->class);
+            uint8_t* bytes = zero ? 0 : arena_push(parser->arena, (uint64_t)size + BUSTER_X86_ENCODER_CAPACITY(256), 64);
+            if (bytes == 0 && !zero)
             {
                 asm_fail(parser, parser->fragments[f].location, "arena exhausted allocating section");
             }
@@ -2452,7 +2743,7 @@ static void asm_emit(AsmParser* parser)
                 {
                     memset(bytes, 0, size);
                 }
-                atoms[section] = link_add_atom(link, section, parser->section_alignment[section], size, bytes, 0);
+                descriptor->atom = link_add_atom(link, descriptor->class, descriptor->alignment, size, bytes, 0);
             }
         }
     }
@@ -2483,11 +2774,11 @@ static void asm_emit(AsmParser* parser)
             asm_fail(parser, symbol->location, "symbol size must resolve to a nonnegative absolute value");
         }
         const NameId name = !symbol->internal && symbol->name.length != 0 ? link_add_name(link, (const uint8_t*)symbol->name.pointer, symbol->name.length) : 0;
-        symbol->link = link_add_symbol(link, name, symbol->defined ? atoms[definition->section] : 0, symbol->defined ? definition->offset : 0, size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
+        symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, symbol->defined ? definition->offset : 0, size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
     }
-    for (uint32_t section = 1; section < BUSTER_LINK_CLASS_COUNT && parser->result.error == 0; section += 1)
+    for (uint32_t section = 1; section < parser->section_count && parser->result.error == 0; section += 1)
     {
-        const AtomId atom = atoms[section];
+        const AtomId atom = parser->sections[section].atom;
         if (atom == 0)
         {
             continue;
@@ -2575,6 +2866,12 @@ static void asm_emit(AsmParser* parser)
             }
         }
     }
+    for (uint32_t i = 0; i < parser->procedure_count && parser->result.error == 0; i += 1)
+    {
+        const AsmCfiProcedure* procedure = &parser->procedures[i];
+        link_add_fixup(link, parser->sections[BUSTER_LINK_CLASS_EH_FRAME].atom, procedure->relocation, BUSTER_LINK_FIXUP_PC32, parser->symbols[procedure->symbol].link, 0);
+    }
+    asm_object_options(parser);
     if (parser->result.error == 0 && link_check(link) != LINK_ERROR_NONE)
     {
         asm_fail(parser, 0, "invalid link representation (symbol size, capacity or relocation)");
@@ -2635,7 +2932,10 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
         parser.symbols = BUSTER_ARENA_PUSH_ARRAY(arena, AsmSymbol, parser.capacity);
         parser.fragments = BUSTER_ARENA_PUSH_ARRAY(arena, AsmFragment, parser.capacity);
         parser.instructions = BUSTER_ARENA_PUSH_ARRAY(arena, AsmInstruction, parser.instruction_capacity);
-        if (parser.symbol_slots == 0 || parser.symbols == 0 || parser.fragments == 0 || parser.instructions == 0)
+        parser.section_capacity = parser.instruction_capacity + BUSTER_LINK_CLASS_COUNT;
+        parser.section_capacity = parser.section_capacity < BUSTER_ASM_MAX_SECTIONS ? parser.section_capacity : BUSTER_ASM_MAX_SECTIONS;
+        parser.sections = BUSTER_ARENA_PUSH_ARRAY(arena, AsmSection, parser.section_capacity);
+        if (parser.symbol_slots == 0 || parser.symbols == 0 || parser.fragments == 0 || parser.instructions == 0 || parser.sections == 0)
         {
             asm_fail(&parser, 0, "arena exhausted allocating parser tables");
         }
@@ -2643,6 +2943,7 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
         {
             memset(parser.symbol_slots, 0, slots * sizeof(uint32_t));
             parser.symbols[0] = (AsmSymbol){0};
+            asm_sections_initialize(&parser);
             asm_fragment(&parser, ASM_LABEL, 0);
             asm_parse(&parser);
         }
@@ -2660,6 +2961,11 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     const uint64_t laid_out = asm_clock();
     if (parser.result.error == 0)
     {
+        asm_cfi_emit(&parser);
+    }
+    const uint64_t cfi_emitted = asm_clock();
+    if (parser.result.error == 0)
+    {
         asm_emit(&parser);
     }
     const uint64_t emitted = asm_clock();
@@ -2668,11 +2974,13 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     parser.result.match_ns = matched - parsed;
     parser.result.layout_ns = laid_out - matched;
     parser.result.emit_ns = emitted - laid_out;
+    parser.result.cfi_ns = cfi_emitted - laid_out;
     parser.result.instructions = parser.instruction_count;
     if (parser.result.error != 0)
     {
         arena->length = saved;
         parser.result.link = (Link){0};
+        parser.result.object_options = (ObjectOptions){0};
     }
     return parser.result;
 }
