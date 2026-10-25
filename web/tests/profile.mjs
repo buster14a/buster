@@ -26,6 +26,9 @@ try
     check(all.functions.find(item => item.name === 'parse').self === 4, 'All leaf parse samples = four');
     check(all.functions.find(item => item.name === 'main').count === 6, 'Inclusive main samples = six');
     check(all.functions.find(item => item.name === 'worker').count === 2, 'Inclusive worker samples = two');
+    const sourceFrame = all.samples[0].stack[0];
+    const identities = {...trace, samples: [{...all.samples[0], stack: [{...sourceFrame, mapping: 'a:b', name: 'c'}]}, {...all.samples[0], stack: [{...sourceFrame, mapping: 'a', name: 'b:c'}]}]};
+    check(queryProfile(identities).functions.length === 2, 'Function identities remain distinct when mapping paths and symbol names contain separators');
     check(queryProfile(trace, 1002000000n, 1007000000n).sampleCount === 5, 'Independent SQL reference half-open selection = five');
     check(queryProfile(trace, 1003000000n, 1007000000n).sampleCount === 4, 'Separate half-open selection excludes exact right boundary');
     check(queryProfile(trace, 1003000000n, 1007000000n, {tid: '101'}).sampleCount === 2, 'Native thread identity filters retained samples');

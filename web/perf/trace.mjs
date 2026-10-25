@@ -416,7 +416,7 @@ export function queryProfile(trace, start = trace.start, end = trace.end, filter
         for (let i = 0; i < sample.stack.length; ++i)
         {
             const frame = sample.stack[i];
-            const key = `${frame.build ?? ''}:${frame.mapping}:${frame.name}`;
+            const key = JSON.stringify([frame.build, frame.mapping, frame.name]);
             const item = functions.get(key) ?? {...frame, count: 0, self: 0, weight: 0n, selfWeight: 0n};
             if (!seen.has(key)) { ++item.count; item.weight += sample.weight ?? 0n; seen.add(key); }
             if (i === sample.stack.length - 1) { ++item.self; item.selfWeight += sample.weight ?? 0n; }
