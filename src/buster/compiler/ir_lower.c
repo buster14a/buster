@@ -67,7 +67,7 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// after STACK_RESTORE must be lowered (or refused, as the stack's kinds after COPY are) here before tier0_validate
+// after STACK_RESTORE must be lowered (or refused) here before tier0_validate
 // accepts it.
 _Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_STACK_RESTORE + 1, "ir_lower.c lowers or refuses every typed kind");
 
@@ -156,6 +156,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_GLOBAL:
                 case BUSTER_TYPED_GLOBAL_ADDRESS:
                 case BUSTER_TYPED_DUP:
+                case BUSTER_TYPED_STACK_SAVE:
                     stack[depth] = class;
                     depth += 1;
                     break;
@@ -163,6 +164,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_NOT:
                 case BUSTER_TYPED_CONVERT:
                 case BUSTER_TYPED_LOAD:
+                case BUSTER_TYPED_ALLOCA:
                     stack[depth - 1] = class;
                     break;
                 case BUSTER_TYPED_STORE_LOCAL:
@@ -172,6 +174,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_SET_LOCAL:
                 case BUSTER_TYPED_SET_GLOBAL:
                 case BUSTER_TYPED_DISCARD:
+                case BUSTER_TYPED_STACK_RESTORE:
                     depth -= 1;
                     break;
                 case BUSTER_TYPED_STORE:
@@ -688,6 +691,22 @@ static IrSizes ir_typed_emit_function(const Tier0Function* input, IrType result_
             case BUSTER_TYPED_DISCARD:
                 depth -= 1;
                 break;
+            case BUSTER_TYPED_ALLOCA:
+            {
+                const uint32_t address = ir_typed_emit(&sink, IR_ALLOCA, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                stack[depth - 1] = ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                classes[depth - 1] = BUSTER_TYPED_CLASS_U64;
+                break;
+            }
+            case BUSTER_TYPED_STACK_SAVE:
+                stack[depth] = ir_typed_emit(&sink, IR_STACK_SAVE, IR_I64, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                classes[depth] = BUSTER_TYPED_CLASS_U64;
+                depth += 1;
+                break;
+            case BUSTER_TYPED_STACK_RESTORE:
+                depth -= 1;
+                ir_typed_emit(&sink, IR_STACK_RESTORE, IR_VOID, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                break;
             case BUSTER_TYPED_COPY:
                 ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value);
                 depth -= 2;
@@ -858,13 +877,6 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
         else if (kind == BUSTER_TYPED_CALL && (input->call_targets[value] == 0 || input->call_targets[value] >= symbol_count))
         {
             check.error = IR_ERROR_OPERAND;
-            check.instruction = i;
-        }
-        else if (kind == BUSTER_TYPED_ALLOCA || kind == BUSTER_TYPED_STACK_SAVE || kind == BUSTER_TYPED_STACK_RESTORE)
-        {
-            // A variable-length array's allocation and the stack's positions (#136), which this adapter doesn't
-            // lower yet and the plan and the emitter would take for a binary operation.
-            check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
     }

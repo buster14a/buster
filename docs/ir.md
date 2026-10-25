@@ -229,12 +229,81 @@ before storing it reads the source's bytes either way; a partial overlap would
 need every load first. The pieces' alignment is unknown (`alignment_log2` 0),
 as a typed `LOAD`'s is.
 
-#136's variable-length arrays aren't lowered yet: `ALLOCA`, `STACK_SAVE` and
-`STACK_RESTORE` are refused with `IR_ERROR_OPCODE` at their first entry, after
-validation and before anything is allocated. `BUSTER_TYPED_STACK_RESTORE` is
-the last typed kind; a static assertion makes a later kind fail to build until
-this adapter lowers or refuses it, since the plan and the emitter would take an
-unnamed kind for a binary operation.
+#136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
+operations below. `BUSTER_TYPED_STACK_RESTORE` is the last typed kind; a static
+assertion makes a later kind fail to build until this adapter lowers or refuses
+it. Typed validation still requires class U64 and `value == 0` for each, and a
+U64 operand for allocation/restoration. The stack-shape plan treats allocation
+as replacing its top value, save as pushing one value, and restore as popping
+one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
+produce i64. The existing local and expression-edge slots carry these bits
+through branches and loops without moving their effects. This adds no planning
+arrays, instruction columns or input traversals for ordinary functions.
+
+### Dynamic stack contract
+
+| Operation | Result | Operand a | Meaning |
+| --- | --- | --- | --- |
+| `alloca` | ptr | i64 unsigned byte count | Reserve `(size + 15) & ~15` bytes, returning a 16-byte-aligned address. |
+| `stack_save` | i64 | absent | Capture this invocation's current dynamic-stack position as opaque bits. |
+| `stack_restore` | void | i64 saved position | Release allocations after that position in this invocation. |
+
+All other operands are `BUSTER_IR_NONE`; flags and alignment columns are zero.
+Alignment is exactly the typed contract's fixed 16 bytes, not a configurable
+alignment or the type's size. No sparse metadata is needed: the usual 16 bytes
+per instruction suffice. The operand/rule tables drive both verifiers, use lists,
+SSA rewrites, printer and parser. Counts other than i64, wrong result types,
+extraneous fields and memory modifiers are rejected deterministically.
+
+Allocation, save and restore are ordered effects on per-invocation state. They
+cannot be eliminated merely because their results are unused, commoned, hoisted,
+speculated or duplicated. Allocations start undefined, including padding. A
+zero count reserves nothing and need not have a unique address; dereferencing
+it is invalid. Rounding must not wrap: counts above `UINT64_MAX - 15` fail with
+an arithmetic diagnostic in the execution oracle; an unavailable representable
+extent fails with a resource diagnostic. Such inputs are outside successful
+native execution, not permission to silently allocate a small wrapped extent.
+
+Saved bits may travel through copies, phis, selects and ordinary i64 local
+storage, but must not be fabricated, changed or dereferenced. A restore must
+name a position captured in this invocation that has not been discarded by a
+restore to an earlier position. Repeated restores to the same retained position
+are valid. Equal-position captures are interchangeable. Static `IrSlot` storage,
+local homes and expression-edge slots survive restoration; storage created by a
+callee is released on its return. The producer owns source scope exits, including
+break/continue/goto and backedges: the adapter preserves the supplied CFG and
+does not invent VLA scope information. Return releases the invocation's storage.
+
+Structural verification checks types, operands, CFG and ordinary dominance; it
+does not claim a path-sensitive lifetime/provenance proof for handles transported
+through mutable memory. Checked execution diagnoses forged, foreign-frame or
+discarded handles and accesses to released or undefined bytes. The reference
+interpreters lazily place dynamic records/bytes/definedness in the existing
+arena and register live extents with the existing memory registry. Restoration
+unregisters later dynamic extents and rewinds their storage together. No dynamic
+records are allocated by ordinary functions. A restored address reused by a new
+allocation cannot distinguish an old pointer's provenance: as with native
+address reuse, callers must respect lifetimes.
+
+SCCP treats the values as unknown; DCE roots all three operations. GVN and LICM's
+positive purity tables exclude them. SROA still splits only fixed slots. The
+inliner refuses bodies with these operations because it has no callee-lifetime
+boundary repair. Native Tier 1 selection returns
+`TIER1_SELECT_ERROR_UNSUPPORTED` transactionally at the dynamic operation. Its
+current fixed rsp-relative frame/spill/call implementation cannot safely move
+rsp. Native support requires a stable frame base, separately placed outgoing
+arguments, aligned checked dynamic subtraction, epilogue recovery, and effects
+through scheduling before that refusal can be removed. Tier 0 is unchanged.
+
+`test-ir-lowering` exercises the real interpreters, scalar/vector lowering,
+SSA/optimizer consumers, canonical text and the native refusal independently.
+Generated VLA programs also compare shared-IR execution with the separate Tier 0
+typed reference and Tier 0 native execution. This proves neither native Tier 1
+VLA execution nor full source-corpus acceptance. `benchmark-ir-lowering` reports
+ordinary shapes separately from dynamic programs, retained IR bytes and minimum
+temporary scratch capacity for each path. Its ns/stack-operation number charges
+the entire mixed lowering; it is not marginal operation latency or a native
+runtime measurement.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then
