@@ -2630,6 +2630,37 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        {
+            // goto *'s operand is the whole expression after the `*` (#431's review), not the `*`'s operand: a conditional
+            // of an int's condition, one of a void *'s sum, a comma and an assignment, all of them pointers.
+            "labels as values: a computed goto's whole expression",
+            "int f(int n, void *p, int k) {\n"
+            "    void *t[2] = { &&even, &&odd };\n"
+            "    goto *(n & 1) ? t[1] : t[0];\n"
+            "even:\n"
+            "    goto *k ? p + 0 : &&odd;\n"
+            "odd:\n"
+            "    goto *n++, &&done;\n"
+            "done:\n"
+            "    goto *p = &&end;\n"
+            "end:\n"
+            "    return n;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // And a conditional of integers is an integer, clang's error.
+            "labels as values: a computed goto of a conditional's integer",
+            "void f(void *p) {\n"
+            "    void *q = &&here;\n"
+            "    goto *p ? 1 : 0;\n"
+            "here:\n"
+            "    (void)q;\n"
+            "}\n",
+            true,
+            false
+        },
     };
     enum
     {

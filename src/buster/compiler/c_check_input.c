@@ -3368,10 +3368,10 @@ static void check_input_expressions(CheckInputReader* reader)
                 };
             }
         }
-        else if (role == PARSE_ROLE_PREFIX && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
+        else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
                  check_input_indirect_goto(parser, parser->tree.parents[token]))
         {
-            // goto *expression: the operand converted to const void * as if by assignment (clang's), not dereferenced.
+            // goto *expression: the whole expression after the `*` converted to const void * as if by assignment (clang's).
             supported = count == 1;
             op = CHECK_OP_CONVERT;
             reader->query_types[token] = check_input_type_result(reader, type_pointer(reader->types, type_qualify(reader->types, BUSTER_TYPE_VOID, BUSTER_TYPE_CONST)));

@@ -870,6 +870,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "for(int i=0;i<3;i++){int v[(n&3)+1];v[0]=i;r+=v[0];if(i==1)goto*out;}r=-1;"
         "done:return r;}",
         "labels-as-values-dispatch", clang);
+    // A computed goto's operand is the whole expression after its `*` (#431's review): through ?: of an int's condition,
+    // a void *'s sum, a comma and an assignment, each where `*` taken as the operand's prefix would read another value.
+    check_test_program_source(test,
+        "int tested(int n){void*t[2]={&&even,&&odd};void*p=t[n&1];int r=0,k=0;goto*p+0;"
+        "even:r+=2;k+=1;goto*k<3?t[0]:&&odd;"
+        "odd:r+=3;k+=1;goto*k<5?t[1]+0:&&last;"
+        "last:if(r>12)goto*r++,&&done;goto*p=&&done;"
+        "done:return r*100+k*10+(p==&&done);}",
+        "labels-as-values-whole-operand", clang);
     {
         char source[4096];
         uint32_t length = 0;

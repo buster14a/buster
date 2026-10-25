@@ -3805,10 +3805,12 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   takes; and the oracle itself: clang given an option it doesn't know must
   count as no answer, and an error in a header a file includes must reject the
   file;
-- fixtures: four trees checked by hand, parent by parent, among them #127's
+- fixtures: five trees checked by hand, parent by parent, among them #127's
   comma case (`f(a ? b, c : d, e)` has two arguments), its cast case (`(T) * p`
-  is a cast where `T` names a type and a product where it doesn't) and a
-  declarator's spine (`(*a[3])(double)`: array, pointer, function);
+  is a cast where `T` names a type and a product where it doesn't), a
+  declarator's spine (`(*a[3])(double)`: array, pointer, function) and computed
+  gotos (`goto *p ? p : p`: the `*` the goto's child and the whole expression
+  its own), which the vector path must build without its fallback;
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
   `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep

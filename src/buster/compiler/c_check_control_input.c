@@ -94,13 +94,14 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     }
 }
 
-// GNU C's labels as values: whether a goto is a computed one, goto *expression (its operand the `*` prefix after it), and
-// whether a token is an address of a label, &&name (a `&&` prefix, of the name after it).
+// GNU C's labels as values: whether a goto is a computed one, goto *expression (the `*` after it its child, whose child is
+// the whole expression: the parser's PARSE_MODE_GOTO), and whether a token is an address of a label, &&name (a `&&`
+// prefix, of the name after it).
 static bool check_input_indirect_goto(const Parser* parser, uint32_t token)
 {
     const uint32_t star = token + 1;
     return parser->tokens.kinds[token] == PARSE_KIND_GOTO && star < parser->tokens.count && parser->tree.parents[star] == token &&
-           parser->tree.roles[star] == PARSE_ROLE_PREFIX && parser->tokens.kinds[star] == PARSE_KIND_STAR;
+           parser->tree.roles[star] == PARSE_ROLE_RETURN && parser->tokens.kinds[star] == PARSE_KIND_STAR;
 }
 
 static bool check_input_label_address(const Parser* parser, uint32_t token)

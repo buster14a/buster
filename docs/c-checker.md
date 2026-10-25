@@ -570,8 +570,11 @@ What the lowering covers past scalars (#145's programs):
   `&&label` is a `void *` address constant of the label's own object (its
   token plus one, which no declaration has); a label its function doesn't
   have, or `&&` outside a function's body, is an undeclared name at the
-  label's, where clang puts its errors. `goto *expression` converts its
-  operand to `const void *` as an assignment would, as clang does. Clang's
+  label's, where clang puts its errors. In `goto *expression` the `*` is
+  the goto's delimiter (the parser's child of the goto, with the whole
+  expression after it as its own child, a comma's or an assignment's too:
+  `goto *p ? &&a : &&b` goes to the conditional's value, as clang's does), and
+  the expression converts to `const void *` as an assignment would. Clang's
   jump-scope rules for it: a function with a computed goto and no address of a
   label refuses its first one, and every computed goto must be inside each
   variable-length array's scope and each statement expression that holds a

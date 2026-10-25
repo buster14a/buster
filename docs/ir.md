@@ -229,12 +229,13 @@ before storing it reads the source's bytes either way; a partial overlap would
 need every load first. The pieces' alignment is unknown (`alignment_log2` 0),
 as a typed `LOAD`'s is.
 
-#136's variable-length arrays aren't lowered yet: `ALLOCA`, `STACK_SAVE` and
-`STACK_RESTORE` are refused with `IR_ERROR_OPCODE` at their first entry, after
-validation and before anything is allocated. `BUSTER_TYPED_STACK_RESTORE` is
-the last typed kind; a static assertion makes a later kind fail to build until
-this adapter lowers or refuses it, since the plan and the emitter would take an
-unnamed kind for a binary operation.
+#136's variable-length arrays and #133's computed gotos aren't lowered yet:
+`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE` and `JUMP_INDIRECT` are refused with
+`IR_ERROR_OPCODE` at their first entry, after validation and before anything is
+allocated. `BUSTER_TYPED_JUMP_INDIRECT` is the last typed kind; a static
+assertion makes a later kind fail to build until this adapter lowers or refuses
+it, since the plan and the emitter would take an unnamed kind for a binary
+operation.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then
