@@ -1134,16 +1134,17 @@ each function that a unit's `main_command` calls or names, it walks every
 function and variable the command may reach: through calls, into other units
 as they resolve, and through the functions and variables that function bodies
 and variable initializers name (a function passed as a lane group's entry, a
-table of pointers), but not through quoted strings (inline assembly templates,
-section names). A variable that is a unit's own (`internal` or `private`) and
-`global` rather than `constant`, reached in two units' copies by the same name,
-is reported once, at the first command that splits it: `split state:
-unit.ll:command reaches a.ll:name from a.ll:function, and b.ll:name from
-b.ll:function`, and fails the check. A variable that units share (defined in
-one and declared in the others, as `lane.c`'s thread context) is never split.
-A home's function that splits one is one to compile in every unit again, or
-whose module's state its units must share. The summary line counts the split
-variables.
+table of pointers), and through aliases to the variables they lead to, each
+target in its alias's own module, but not through quoted strings (inline
+assembly templates, section names). A variable that is a unit's own
+(`internal` or `private`) and `global` rather than `constant`, reached in two
+units' copies by the same name, is reported once, at the first command that
+splits it: `split state: unit.ll:command reaches a.ll:name from a.ll:function,
+and b.ll:name from b.ll:function`, and fails the check. A variable that units
+share (defined in one and declared in the others, as `lane.c`'s thread
+context) is never split. A home's function that splits one is one to compile
+in every unit again, or whose module's state its units must share. The summary
+line counts the split variables.
 
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
 on IR of the call forms clang writes and of what must be left out, a
@@ -1163,8 +1164,11 @@ unit's own state (not), two commands each with its own unit's copy (not),
 copies reached through a function passed as an argument and through a constant
 table of pointers (split, each reported at its own command), a constant and a
 shared variable of one name in both units, and a variable that only an inline
-assembly template, a section's name and a quoted name spell (not), and a static
-function's thread-local static compiled in both units (split).
+assembly template, a section's name and a quoted name spell (not), the driver's
+copy reached through an alias of it and through a chain of two whose middle
+one's name another unit's external variable has, beside two aliases of each
+other (split), and a static function's thread-local static compiled in both
+units (split).
 
 ## Lexer tests
 

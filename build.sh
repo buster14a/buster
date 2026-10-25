@@ -39,15 +39,18 @@ order=(main_unit_checker.c main_unit_backend.c main_unit_frontend.c main_unit_ex
     calling_convention_benchmark.c tier1_schedule_benchmark.c x86_semantics_benchmark.c tier1_model_measure.c
     c_types_benchmark.c dominators_benchmark.c tier1_frame_benchmark.c tier1_allocate_benchmark.c lane_benchmark.c
     floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c)
-# The sources' indices in `order`'s order, into `indices`. Fails, naming it, for a file that `order` names twice or that
-# isn't a source, and for a source that it doesn't name.
+# The sources' indices in `order`'s order, into `indices`. Fails, naming it, for two sources of one file name, which
+# `order` couldn't tell apart, for a file that `order` names twice or that isn't a source, and for a source that it
+# doesn't name.
 compile_order()
 {
     local -A index=()
     local name
     indices=()
     for i in "${!sources[@]}"; do
-        index["$(basename "${sources[$i]}")"]="$i"
+        name="$(basename "${sources[$i]}")"
+        [ -z "${index[$name]-}" ] || { echo "build.sh: two sources are named $name, which order names by file name" >&2; return 1; }
+        index["$name"]="$i"
     done
     for name in "${order[@]}"; do
         [ -n "${index[$name]-}" ] || { echo "build.sh: order names $name, which isn't a source or is named twice" >&2; return 1; }

@@ -620,6 +620,59 @@ static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t u
     return result;
 }
 
+// The variable that `name`, seen from translation unit `unit`, leads to through a chain of aliases, as an index into
+// `variables` plus one, or 0 (`static int mirror __attribute__((alias("cache")));` makes `@mirror = internal alias
+// i32, ptr @cache`). The name is the unit's own symbol if it has one, else the external symbol, whose alias of the
+// unit's own comes first, as call_graph_resolve takes them. An alias's target is its own module's: a variable of the
+// module's own, else the module's own function or alias of the name (a function leads to no variable, an alias on
+// through the chain), else an external variable, which LLVM has the module define: an alias can't lead to a
+// declaration. Round a loop of aliases leads to none: each alias is followed once per lookup, which `stamp` tells apart
+// from every other one's.
+static uint32_t call_graph_alias_variable(CallGraphSymbols* symbols, const CallGraphTable* variables, uint32_t unit, String8 name, uint64_t stamp)
+{
+    uint32_t result = 0;
+    uint32_t work_unit = unit;
+    String8 work_name = name;
+    bool target = false;
+    bool following = true;
+    while (following)
+    {
+        uint32_t symbol = symbols->table.slots[call_graph_find(&symbols->table, work_unit, work_name)];
+        if (symbol == 0)
+        {
+            symbol = symbols->table.slots[call_graph_find(&symbols->table, BUSTER_CALL_GRAPH_EXTERNAL, work_name)];
+        }
+        // A target counts only its module's own definitions of the name, as call_graph_resolve's do.
+        bool defined = false;
+        uint32_t alias = BUSTER_CALL_GRAPH_NONE;
+        for (uint32_t definition = symbol != 0 ? symbols->first[symbol - 1] : BUSTER_CALL_GRAPH_NONE; definition != BUSTER_CALL_GRAPH_NONE;
+             definition = symbols->next[definition])
+        {
+            const bool own = symbols->units[definition] == work_unit;
+            defined = defined || own || !target;
+            if (symbols->kinds[definition] == CALL_GRAPH_KIND_ALIAS && (own || (!target && alias == BUSTER_CALL_GRAPH_NONE)))
+            {
+                alias = symbols->indices[definition];
+            }
+        }
+        if (target && !defined)
+        {
+            result = variables->slots[call_graph_find(variables, BUSTER_CALL_GRAPH_EXTERNAL, work_name)];
+        }
+        following = alias != BUSTER_CALL_GRAPH_NONE && symbols->alias_stamps[alias] != stamp;
+        if (following)
+        {
+            symbols->alias_stamps[alias] = stamp;
+            work_unit = symbols->alias_units[alias];
+            work_name = symbols->alias_targets[alias];
+            target = true;
+            result = variables->slots[call_graph_find(variables, work_unit, work_name)];
+            following = result == 0;
+        }
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The report's text, pushed byte by byte onto the end of the arena: nothing else is pushed while it is written, so it
 // stays contiguous.
@@ -1350,6 +1403,12 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                 if (variable == 0)
                 {
                     count = call_graph_resolve(&symbols, reference_units[r], reference_names[r], 2 * ((uint64_t)call_line_total + r) + pass, written).count;
+                }
+                if (variable == 0 && count == 0)
+                {
+                    // An alias of a variable (one of a function is among the functions above), with a stamp of its own.
+                    variable = call_graph_alias_variable(&symbols, &variable_table, reference_units[r], reference_names[r],
+                                                         2 * ((uint64_t)call_line_total + reference_count + r) + pass);
                 }
                 if (variable == 0 && count == 0)
                 {

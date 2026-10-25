@@ -36,8 +36,10 @@
 //     (split); each unit's own state (not); two commands each with its own unit's copy, as the driver's test and a
 //     benchmark's unit (not); copies reached through a function passed as an argument and through a constant table of
 //     pointers (split, each at its own command); a constant and a shared variable of one name in both units, and a
-//     variable that only an inline assembly template, a section's name and a quoted name spell (not); and a static
-//     function's thread-local static, with the function compiled in both units (split);
+//     variable that only an inline assembly template, a section's name and a quoted name spell (not); the driver's copy
+//     reached through an alias of it, and through a chain of two whose middle one's name another unit's external
+//     variable has, beside two aliases of each other (split); and a static function's thread-local static, with the
+//     function compiled in both units (split);
 //   - depth: a chain of BUSTER_CALL_GRAPH_TEST_CHAIN functions that ends in a self-call, and a ring of
 //     BUSTER_CALL_GRAPH_TEST_RING functions, which would overflow a recursive walk's stack.
 //
@@ -1086,6 +1088,66 @@ static const CallGraphInput call_graph_test_shared[] = {
     },
 };
 
+// The driver's copy reached through an alias of it, as clang writes `static int mirror __attribute__((alias("cache")));`.
+static const CallGraphInput call_graph_test_split_alias[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "@mirror = internal alias i32, ptr @cache\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  store i32 2, ptr @mirror, align 4\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @cache, align 4\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
+// The same through a chain of two aliases, whose middle one another unit's external variable of the same name mustn't
+// stand for, beside a reference to two aliases of each other, which lead nowhere.
+static const CallGraphInput call_graph_test_split_alias_chain[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "@first = internal alias i32, ptr @cache\n"
+                               "@second = internal alias i32, ptr @first\n"
+                               "@x = internal alias i32, ptr @y\n"
+                               "@y = internal alias i32, ptr @x\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  store i32 2, ptr @second, align 4\n"
+                               "  store i32 3, ptr @x, align 4\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "@first = dso_local global i32 0, align 4\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @cache, align 4\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
 // A static function compiled in both units, with a thread-local static of its own, which the command reaches in the
 // driver's copy directly and in the home's through the home's function.
 static const CallGraphInput call_graph_test_local_static[] = {
@@ -1395,6 +1457,22 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_shared),
         .expected = BUSTER_S8_INIT("call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 0 split variables\n"),
         .success = true,
+    },
+    {
+        .name = "split through an alias",
+        .inputs = call_graph_test_split_alias,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_split_alias),
+        .expected = BUSTER_S8_INIT("split state: driver.ll:run_test reaches driver.ll:cache from driver.ll:run_test, and home.ll:cache from home.ll:shared_lookup\n"
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 1 split variable\n"),
+        .success = false,
+    },
+    {
+        .name = "split through an alias chain",
+        .inputs = call_graph_test_split_alias_chain,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_split_alias_chain),
+        .expected = BUSTER_S8_INIT("split state: driver.ll:run_test reaches driver.ll:cache from driver.ll:run_test, and home.ll:cache from home.ll:shared_lookup\n"
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 1 split variable\n"),
+        .success = false,
     },
     {
         .name = "split local static",
