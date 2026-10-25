@@ -56,12 +56,16 @@ typedef enum LoweringSourceStage
 
 // An injected failure, with the status a real one there would have: a refusal by name (CHECK_PROGRAM_UNSUPPORTED or
 // CHECK_DATA_UNSUPPORTED) when `unsupported`, a resource's failure otherwise (always, in the checker). The benchmark
-// classifies it as it would the real one.
+// classifies it as it would the real one. In a warm-up (EMIT, PUBLISH) it fails the `ways` whose bits it has, the
+// referenced definitions' (1) and all of them (2), and it fails the run's file whose index + 1 is `file`, or every
+// file for 0.
 typedef struct LoweringSourceFault LoweringSourceFault;
 struct LoweringSourceFault
 {
     LoweringSourceStage stage;
     bool unsupported;
+    uint32_t ways;
+    uint32_t file;
 };
 
 // Selects, lowers, publishes and builds the object of a checked file's program `full` with `mode`: whether it could,
@@ -203,7 +207,7 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
     for (uint32_t way = 0; prepared && way < 2; way += 1)
     {
         // The warm-up, which also says whether this way lowers the file at all.
-        const bool injected = way == 0 && (fault.stage == LOWERING_SOURCE_STAGE_EMIT || fault.stage == LOWERING_SOURCE_STAGE_PUBLISH);
+        const bool injected = (fault.ways & (1u << way)) != 0 && (fault.stage == LOWERING_SOURCE_STAGE_EMIT || fault.stage == LOWERING_SOURCE_STAGE_PUBLISH);
         lowered[way] = lowering_source_run(ways + way, &program, &data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, &parser, &pp, &path.types, input,
                                            &path.output_arena, &path.scratch, &code_output, &bytes, injected ? fault : (LoweringSourceFault){ 0 });
     }
@@ -294,15 +298,15 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
     return valid;
 }
 
-// Measures each of `files` read with `options`, then prints the totals, with `fault` injected in every file: whether
-// the options could be read, with the files measured and failed on in `totals`.
+// Measures each of `files` read with `options`, then prints the totals, with `fault` injected in the file it names:
+// whether the options could be read, with the files measured and failed on in `totals`.
 static bool lowering_source_files(LoweringSourceTotals* totals, char** files, uint32_t file_count, char** options, uint32_t option_count, uint64_t passes,
                                   LoweringSourceFault fault)
 {
     bool valid = true;
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
-        valid = lowering_source_file(files[i], options, option_count, passes, fault, totals);
+        valid = lowering_source_file(files[i], options, option_count, passes, fault.file == 0 || fault.file == i + 1 ? fault : (LoweringSourceFault){ 0 }, totals);
         fflush(stdout);
     }
     if (valid && totals->files == 0)

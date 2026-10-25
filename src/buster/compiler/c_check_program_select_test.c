@@ -4,7 +4,9 @@
 // Original end-to-end demand fixtures. Default/lazy checking and scalar/vector schedules must emit byte-identical
 // ELF objects after semantic selection. The fixture counts are stated independently of the reachability solver.
 // Every object emitted is also compared with clang -O0 -c's of the same source (#129): the same functions, objects
-// and string literals (c_lowering_symbols.c), which no fixture defeats with a constant condition's dead arm.
+// and string literals (c_lowering_symbols.c), which no fixture defeats with a constant condition's dead arm. The
+// constant ifs' fixtures (check_test_program_folded_ifs) select their dead arms' callees, as Tier 0 lowers them, and
+// their objects are compared under the model of clang's code instead (CheckProgramOptions.folded_ifs).
 
 // Whether clang -O0 -c's object of `source` defines what `bytes` does (lowering_symbols_compare and _strings, with the
 // source's `names`); if not, the differences are printed under `name`. Then each pair of `patches` (a list of strings
@@ -74,8 +76,11 @@ static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, cons
     return valid && differences == 0 && string_differences == 0 && caught;
 }
 
+// A fixture's selection, emitted, with `functions` and `objects` selected, by every path; with `folded`, of clang's model
+// (CheckProgramOptions.unselected_operands and folded_ifs).
 static void check_test_program_selection_run(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
-                                             CheckProgramStatus emission_status, const char* clang, const char* symbols_clang, const char* const* patches)
+                                             CheckProgramStatus emission_status, const char* clang, const char* symbols_clang, const char* const* patches,
+                                             bool folded)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -119,7 +124,8 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                     check_asms_run(&asms, &input, &stream, &types.table, &retained, &scratch) &&
                     check_data_prepare(&data, &input, &stream, &initializers, &types.table, &retained, &scratch);
             const CheckProgramOptions options = { .initializers = &initializers, .asms = &asms, .identifiers = &identifiers,
-                                                 .initializer_references = data.references, .initializer_reference_count = data.reference_count, .scalar = path == 0 };
+                                                 .initializer_references = data.references, .initializer_reference_count = data.reference_count, .scalar = path == 0,
+                                                 .unselected_operands = folded, .folded_ifs = folded };
             ready = ready && check_program(&full, &parser, &input, &stream, &types.table, options, &retained, &scratch) &&
                     check_program_select(&selection, &full, &data, path == 0, &retained, &scratch);
             snprintf(description, sizeof(description), "%s: checked semantic dependency/root selection succeeds", name);
@@ -259,7 +265,54 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
 static void check_test_program_selection_case(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
                                               const char* clang, bool execute)
 {
-    check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, execute ? clang : 0, clang, 0);
+    check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, execute ? clang : 0, clang, 0, false);
+}
+
+// #418's CI: a constant if's dead arm. Each fixture's selection selects the dead arms' callees, as Tier 0 lowers them,
+// and clang's model selects what clang -O0 -c's object defines, which its emitted object must define too (and run as
+// clang's build runs). An arm that a label or an outer case enters is kept, an arm whose cases are its own switch's
+// is not, and conditions of a floating or pointer type or with a side effect keep both arms, as clang keeps them.
+static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
+{
+    typedef struct CheckFoldedIf CheckFoldedIf;
+    struct CheckFoldedIf
+    {
+        const char* name;
+        const char* source;
+        uint32_t functions;
+        uint32_t kept;
+        uint32_t objects;
+    };
+    static const CheckFoldedIf fixtures[] = {
+        { "folded-if-sizeof-chain",
+          "static inline int narrow(int n){return n+1;}static inline int wide(int n){return n+2;}static inline int widest(int n){return n+3;}"
+          "int tested(int n){long x=n;int r;if(sizeof(x)==sizeof(int))r=narrow(n);else if(sizeof(x)==sizeof(long))r=wide(n);else r=widest(n);"
+          "return r+(int)x-n;}", 4, 2, 0 },
+        { "folded-if-dead-arm-with-a-label",
+          "static int entered(int n){return n+1;}int tested(int n){if(0){again:n=entered(n);}if(n<3)goto again;return n;}", 2, 2, 0 },
+        { "folded-if-dead-arm-with-an-outer-case",
+          "static int entered(int n){return n+1;}int tested(int n){switch(n){case 0:if(0){case 1:n=entered(n);}break;}return n;}", 2, 2, 0 },
+        { "folded-if-dead-arm-with-its-own-switch",
+          "static int inner(int n){return n+1;}int tested(int n){if(0){switch(n){case 1:n=inner(n);}}return n;}", 2, 1, 0 },
+        { "folded-if-true-with-an-else",
+          "static int then_arm(int n){return n+1;}static int else_arm(int n){return n+2;}int tested(int n){if(1)n=then_arm(n);else n=else_arm(n);return n;}",
+          3, 2, 0 },
+        { "folded-if-floating-and-pointer-conditions",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}static int x;"
+          "int tested(int n){if(0.0)n=a(n);else n=b(n);if(&x)n=c(n);else n=d(n);return n+x;}", 5, 5, 1 },
+        { "folded-if-condition-with-a-side-effect",
+          "static int a(int n){return n+1;}int tested(int n){if((n++,0))n=a(n);return n;}", 2, 2, 0 },
+        { "folded-if-false-else-if-chain",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}int tested(int n){if(0){n=a(n);}else if(0){n=b(n);}return n;}", 3, 1, 0 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        const CheckFoldedIf* fixture = fixtures + i;
+        char name[160];
+        check_test_program_selection_run(test, fixture->source, fixture->name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang, 0, 0, false);
+        snprintf(name, sizeof(name), "%s-in-clangs-model", fixture->name);
+        check_test_program_selection_run(test, fixture->source, name, fixture->kept, fixture->objects, CHECK_PROGRAM_OK, clang, clang, 0, true);
+    }
 }
 
 static void check_test_program_selection(CheckTest* test, const char* clang)
@@ -281,13 +334,13 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_run(test,
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));double take(double(*)(double));"
         "int tested(int n){return (int)take(pick)+n;}",
-        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_case(test,
         "static int dead(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
         "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang, true);
     check_test_program_selection_run(test,
         "int pick(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
-        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int leaf(int n){return n+3;}static int middle(int n){return leaf(n);}"
@@ -341,22 +394,22 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "default-visibility-and-nocommon-publication", 1, 1, clang, true);
     check_test_program_selection_run(test,
         "extern int other(int) __attribute__((weak));int tested(int n){return other?other(n):7;}",
-        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "extern int other __attribute__((weak));int tested(int n){return &other?n:7;}",
-        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "static int kept __attribute__((retain))=3;int tested(int n){return n;}",
-        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int tested(int n) __attribute__((visibility(\"hidden\")));int tested(int n){return n;}",
-        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int kept __attribute__((common));int tested(int n){return n;}",
-        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",
-        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
+        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     // #129's kinds of definition, each emitted exactly where clang -O0 -c emits it.
     check_test_program_selection_case(test,
         "static int used(int n){return n+1;}static int unused(int n){return n+2;}static int only_from_dead(int n){return n+3;}"
@@ -404,5 +457,6 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_run(test,
         "static int tagged __asm__(\"tag.1\") __attribute__((used))=1;static int spelled __asm__(\"tested.x.1\") __attribute__((used))=2;"
         "int tested(int n){{static int x=3;n+=x;}{static int x=4;n+=x;}return n+tagged+spelled;}",
-        "numeric-suffix-asm-labels-beside-made-names", 1, 4, CHECK_PROGRAM_OK, clang, clang, label_patches);
+        "numeric-suffix-asm-labels-beside-made-names", 1, 4, CHECK_PROGRAM_OK, clang, clang, label_patches, false);
+    check_test_program_folded_ifs(test, clang);
 }

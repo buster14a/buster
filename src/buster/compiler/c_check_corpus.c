@@ -806,7 +806,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 // it. Any other emission failure, a clang failure or an object that can't be read or written fails the run. The
 // command sets check_corpus_symbols around its files alone: the semantic and random campaigns compare no objects.
 //
-// clang -O0 decides two things in its code that this compiler's selection decides otherwise, and a difference either
+// clang -O0 decides three things in its code that this compiler's selection decides otherwise, and a difference one
 // gives is counted under its reason, each found from the checked program, never from the names alone; any other
 // difference fails the run:
 // - folded: an object only ours defines, a const and not volatile scalar with an initializer that a selected body
@@ -816,14 +816,19 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 //   that a constant condition never evaluates count too (CheckProgramOptions.unselected_operands). clang -O0 leaves a
 //   constant condition's dead arm in a branch's condition (CodeGenFunction::EmitBranchOnBoolExpr); the selection
 //   counts only what may run.
+// - dropped: a definition only ours has, which the selection of clang's model doesn't reach: the program with
+//   unselected operands counted and a constant if's dead arm left out (CheckProgramOptions.folded_ifs). clang -O0
+//   doesn't emit the arm an integer constant condition never runs (CodeGenFunction::EmitIfStmt), and so leaves out
+//   what only it calls, as of musl's FORCE_EVAL; Tier 0 lowers it, and the selection counts it.
 typedef enum CheckCorpusSymbolReason
 {
     CHECK_CORPUS_SYMBOL_FOLDED,
     CHECK_CORPUS_SYMBOL_UNSELECTED,
+    CHECK_CORPUS_SYMBOL_DROPPED,
     CHECK_CORPUS_SYMBOL_REASONS,
 } CheckCorpusSymbolReason;
 
-static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected" };
+static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "dropped" };
 
 typedef struct CheckCorpusSymbols CheckCorpusSymbols;
 struct CheckCorpusSymbols
@@ -932,11 +937,13 @@ static bool check_corpus_symbol_named(const CheckInput* input, const Parser* par
 }
 
 // The reason a difference of an accepted file's comparison has, or CHECK_CORPUS_SYMBOL_REASONS for none: `selected`
-// and `code` are what -c emitted, `reached` what the selection reaches with unselected operands counted, and `names`
-// the source's names, with which the comparison read both objects.
+// and `code` are what -c emitted, `reached` what the selection reaches with unselected operands counted, `kept` what
+// it reaches in clang's model, with them and folded ifs, and `names` the source's names, with which the comparison
+// read both objects.
 static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifference* difference, const CheckCorpusPath* path, const Parser* parser,
                                                           const InternTable* identifiers, const CheckProgramSelection* selected,
-                                                          const CheckProgramCode* code, const CheckProgramSelection* reached, const LoweringNames* names)
+                                                          const CheckProgramCode* code, const CheckProgramSelection* reached,
+                                                          const CheckProgramSelection* kept, const LoweringNames* names)
 {
     CheckCorpusSymbolReason reason = CHECK_CORPUS_SYMBOL_REASONS;
     const CheckInput* input = &path->input;
@@ -994,6 +1001,28 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
         reason = !ours && declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name) ?
                  CHECK_CORPUS_SYMBOL_UNSELECTED : reason;
     }
+    for (uint32_t body = 0; difference->first && reason == CHECK_CORPUS_SYMBOL_REASONS && body < selected->program.body_count; body += 1)
+    {
+        const CheckProgramBody* definition = selected->program.bodies + body;
+        bool theirs = false;
+        for (uint32_t i = 0; i < kept->program.body_count; i += 1)
+        {
+            theirs |= kept->program.bodies[i].object == definition->object;
+        }
+        reason = !theirs && check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name) ? CHECK_CORPUS_SYMBOL_DROPPED : reason;
+    }
+    for (uint32_t i = 0; difference->first && reason == CHECK_CORPUS_SYMBOL_REASONS && i < selected->data.count; i += 1)
+    {
+        const uint32_t object = selected->data.objects[i].object;
+        const uint32_t declaration = selected->program.object_declarations[object];
+        bool theirs = false;
+        for (uint32_t j = 0; j < kept->data.count; j += 1)
+        {
+            theirs |= kept->data.objects[j].object == object;
+        }
+        reason = !theirs && declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name) ?
+                 CHECK_CORPUS_SYMBOL_DROPPED : reason;
+    }
     return reason;
 }
 
@@ -1007,8 +1036,10 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
     CheckProgram unselected = { 0 };
+    CheckProgram model = { 0 };
     CheckProgramSelection selected = { 0 };
     CheckProgramSelection reached = { 0 };
+    CheckProgramSelection kept = { 0 };
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
@@ -1025,6 +1056,9 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     options.unselected_operands = true;
     valid = valid && check_program(&unselected, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&reached, &unselected, &data, false, &path->output_arena, &path->scratch);
+    options.folded_ifs = true;
+    valid = valid && check_program(&model, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
+            check_program_select(&kept, &model, &data, false, &path->output_arena, &path->scratch);
     const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, &output, &bytes,
                                                      &path->scratch, NULL, true);
     const bool published = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
@@ -1071,7 +1105,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         }
         for (uint32_t i = 0; compared && i < count; i += 1)
         {
-            const CheckCorpusSymbolReason reason = check_corpus_symbol_reason(differences + i, path, parser, pp->table, &selected, &code, &reached, &names);
+            const CheckCorpusSymbolReason reason = check_corpus_symbol_reason(differences + i, path, parser, pp->table, &selected, &code, &reached, &kept, &names);
             if (reason == CHECK_CORPUS_SYMBOL_REASONS)
             {
                 unexplained += 1;
@@ -2636,10 +2670,10 @@ static int run_checker_corpus(int count, char** arguments)
     if (symbols_requested)
     {
         printf("checker-corpus: symbols compared=%" PRIu64 " minimum=%" PRIu64 " different=%" PRIu64 " unexplained=%" PRIu64 " documented_%s=%" PRIu64
-               " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum, symbols.different, symbols.unexplained,
-               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_FOLDED], symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED],
-               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.unsupported,
-               symbols.failures);
+               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
+               symbols.different, symbols.unexplained, check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_FOLDED], symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED],
+               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED],
+               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_DROPPED], symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED], symbols.unsupported, symbols.failures);
         for (uint32_t i = 0; i < symbols.feature_count; i += 1)
         {
             printf("checker-corpus: symbols unsupported=%" PRIu64 " feature=%s\n", symbols.feature_counts[i], symbols.features[i]);
