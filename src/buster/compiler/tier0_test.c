@@ -673,11 +673,13 @@ struct Tier0TestCode
     uint64_t deferred;
 };
 
-// Whether two compilations of a function made the same code: records, branch columns and references.
+// Whether two compilations of a function made the same code: records, branch columns, references and the entries'
+// first records.
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 {
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
-                a->deferred == b->deferred;
+                a->deferred == b->deferred && a->entry_count == b->entry_count;
+    same = same && (a->error != TIER0_OK || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
     same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;
     same = same && memcmp(a->targets, b->targets, a->branch_count * sizeof(uint32_t)) == 0;
@@ -717,6 +719,16 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             const uint64_t valid = x86_validate(scalar.records, scalar.count);
             result = tier0_test_expect(tally, valid == scalar.count, "records", "seed %" PRIu64 " function %u: record %" PRIu64 " of %u is invalid", seed, f, valid,
                                        scalar.count);
+        }
+        if (result)
+        {
+            // The entries' first records: one per entry and the epilogue's, ascending, within the records.
+            bool ascending = scalar.entry_count == function->count && scalar.entry_records[scalar.entry_count] <= scalar.count;
+            for (uint32_t e = 0; ascending && e < scalar.entry_count; e += 1)
+            {
+                ascending = scalar.entry_records[e] <= scalar.entry_records[e + 1];
+            }
+            result = tier0_test_expect(tally, ascending, "entries", "seed %" PRIu64 " function %u: the entries' first records aren't ascending within the records", seed, f);
         }
         if (result)
         {

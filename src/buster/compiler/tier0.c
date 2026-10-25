@@ -378,8 +378,11 @@ typedef enum Tier0Error
 
 // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
 // every branch a rel8 with displacement 0, indices ascending, a target the record its label marks or the count for the
-// end), and a LinkReference per symbolic field, its instruction a record index. `deferred` counts the entries the
-// vector path left to tier0_emit_deferred (the scalar path counts the same ones).
+// end), and a LinkReference per symbolic field, its instruction a record index. `entry_records` is each of the
+// function's `entry_count` typed entries' first record, and one more, the epilogue's: ascending, an entry that emits
+// no record (a leaf fused into its consumer) at the next entry's; with branch sizing's offsets, where each entry's code
+// starts in bytes, which source rows give a debugger (debug.c, #395). `deferred` counts the entries the vector path left
+// to tier0_emit_deferred (the scalar path counts the same ones).
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -390,6 +393,8 @@ struct Tier0Code
     uint32_t branch_count;
     LinkReference* references;
     uint32_t reference_count;
+    uint32_t* entry_records;
+    uint32_t entry_count;
     uint32_t deferred;
     Tier0Error error;
     uint32_t node;
@@ -5013,14 +5018,22 @@ static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* 
 }
 
 // The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store.
-static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts)
+static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
 {
     code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)records + BUSTER_TIER0_TEMPLATE_RECORDS);
     code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
     code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
     code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
+    // The entries' positions are final once measured: emission writes each entry's records from its position.
+    code->entry_records = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1);
     code->count = records;
-    return code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0;
+    code->entry_count = entries;
+    const bool room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && code->entry_records != 0;
+    if (room)
+    {
+        memcpy(code->entry_records, positions, ((uint64_t)entries + 1) * sizeof(uint32_t));
+    }
+    return room;
 }
 
 // A CHOICE record's context: whether its rm is a register (and rax), inc and dec allowed, and the flags live after it.
@@ -5268,7 +5281,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
-        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts))
+        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts, entries->positions, function->count))
         {
             error = TIER0_ERROR_MEMORY;
         }
