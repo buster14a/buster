@@ -656,6 +656,14 @@ Before the programs, checks of their own:
   with `FENV_ACCESS`), and every conversion to U64 runs again with invalid unmasked, where a spurious one would raise
   SIGFPE. The generator's programs have these conversions too (`Tier0ProgramOptions.unsigned_floating`, in the shapes
   with floating values; to U64 only where C defines it, in the clang cross-check's).
+- **deep** (`tier0_deep_test.c`, #136's item 6): seven functions of one U64 parameter whose stacks fill their tables, then
+  cross the line with an entry of each kind the generated programs reach rarely or never: a value pushed past it and
+  dropped back to it (a `DISCARD`, which uses no register), `?:` whose condition, branch and arms' values cross it, a
+  compare fused into its branch that drops two values across it, 17 floating values (through U64 conversions, one of
+  them dropped across the floating line), division by a local (whose dividend only rax reads) and by a value, `%`, and
+  shifts by a register past it, a frame pointer's 14 values and two past them, and both stacks crossing at one
+  conversion. Each must compile by both paths into the same records with deep entries, a frame pointer exactly in its
+  case, be encoded alike by both encoders, and give this file's model of it natively on six inputs.
 - **copies:**
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
@@ -900,6 +908,19 @@ larger shape's are.
     And on the producer's control stream (`c_check_program.c`), checked by `test-checker`'s programs: no restore at
     a block's end, none before a jump out of a block, or none before a `goto` back above an array's declaration. In
     each case the programs whose arrays would then take 80 MB of stack fail, on both paths.
+  - and on deep values (#136's item 6), each a change to `tier0.c` with the backend's unit built at -O1:
+    - one register fewer stored into its slot on entry: 347; one fewer loaded back on exit: 346;
+    - every value of a window loaded from one slot: the deep shape's runs crash and differ;
+    - integer results not stored into their slots: 185;
+    - the branch before the loads back: 24;
+    - a deep call's arguments one slot off: 41; its result one slot off: 112; floating values not stored around it: 57;
+    - the vector path's count one record more past 9: 227 (the paths differ);
+    - no choice of immediate forms in deep entries: 8;
+    - a template for one depth's window without its fixed registers: the test crashes;
+    - crossing the line not counted as deep: 11, the deep check's dropped values on both stacks (no generated program
+      drops one there);
+    - a window that only fixed registers read not counted as using the stack: 3, the deep check's division by a local,
+      which found that bug in the first version.
 - **Every stream source against the operands' rule:** a scratch build validated every function each compile path
   took, besides the validations the sources make, and printed every refusal. The sources were:
   - the generator's programs, with and without the cross-check;

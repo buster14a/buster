@@ -4231,7 +4231,12 @@ each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
 pointer, run natively: a probe must see `al` 3, `r11` its own address and the
 call's arguments, after moves that are cycles and that run through `r11`, with
-values saved around the call; and the operands: `tier0_validate` refusing each
+values saved around the call; and deep values (`tier0_deep_test.c`): seven
+functions that fill the depth tables and cross their line with an entry of each
+kind (a dropped value, `?:`, a fused compare and branch, floating values,
+division by a local and by a value and shifts by a register, a frame pointer's
+14, both stacks at once), run natively against the file's model; and the
+operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for

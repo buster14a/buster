@@ -6034,11 +6034,13 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 const uint16_t slot = tier0_slot(entries->key_kinds[i], entries->key_classes[i], entries->variants[i]);
                 if (slot != BUSTER_TIER0_SLOT_DEFERRED && slot != BUSTER_TIER0_SLOT_UNSUPPORTED)
                 {
+                    // Its registers, or the values its window reads through its fixed registers alone (division's
+                    // dividend in rax, with its divisor a local's home).
                     const Tier0TemplateInfo* info = &tier0_template_infos[slot & BUSTER_TIER0_SLOT_TEMPLATE];
-                    uses[0] = info->integer_reach != 0;
-                    uses[1] = info->floating_reach != 0;
                     window[0] = info->window & 3;
                     window[1] = info->window >> 2 & 3;
+                    uses[0] = info->integer_reach != 0 || window[0] != 0;
+                    uses[1] = info->floating_reach != 0 || window[1] != 0;
                     touch[0] = (int32_t)before[0] + info->integer_reach - 3;
                     touch[1] = (int32_t)before[1] + info->floating_reach - 3;
                 }

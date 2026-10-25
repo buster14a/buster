@@ -1,0 +1,337 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Values past Tier 0's depth tables (#136's item 6, tier0_select_deep), on the cases the generated programs reach
+// rarely or never: functions of one U64 parameter (x, in rdi) whose stacks fill their tables and then cross the line
+// with an entry of each kind, compiled by both paths into the same records, encoded by both encoders and run natively on
+// six inputs against this file's model of each. tier0_test.c includes it after tier0_x87_test.c, for its "deep" check.
+
+#define BUSTER_TIER0_TEST_DEEP_ENTRIES 256
+#define BUSTER_TIER0_TEST_DEEP_INPUTS 6
+#define BUSTER_TIER0_TEST_DEEP_CASES 7
+// The pages of each case's code.
+#define BUSTER_TIER0_TEST_DEEP_PAGES 16
+
+typedef struct Tier0TestDeep Tier0TestDeep;
+struct Tier0TestDeep
+{
+    uint8_t kinds[BUSTER_TIER0_TEST_DEEP_ENTRIES];
+    uint8_t classes[BUSTER_TIER0_TEST_DEEP_ENTRIES];
+    uint64_t values[BUSTER_TIER0_TEST_DEEP_ENTRIES];
+    uint32_t count;
+};
+
+static uint32_t tier0_test_deep_add(Tier0TestDeep* deep, uint8_t kind, uint8_t class, uint64_t value)
+{
+    const uint32_t index = deep->count;
+    deep->kinds[index] = kind;
+    deep->classes[index] = class;
+    deep->values[index] = value;
+    deep->count += 1;
+    return index;
+}
+
+// x op k, an integer value: the parameter, the constant and the operation.
+static void tier0_test_deep_operation(Tier0TestDeep* deep, uint8_t kind, uint64_t k)
+{
+    tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, k);
+    tier0_test_deep_add(deep, kind, BUSTER_TYPED_CLASS_U64, 0);
+}
+
+// (double)((x & 0xffff) + k), a floating value: through a conversion from U64, tier0_emit_u64_convert's.
+static void tier0_test_deep_floating(Tier0TestDeep* deep, uint64_t k)
+{
+    tier0_test_deep_operation(deep, BUSTER_TYPED_AND, 0xffff);
+    tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, k);
+    tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+    tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F64, 0);
+}
+
+// `count` additions of a class: the stack's values folded into one, the top first.
+static void tier0_test_deep_fold(Tier0TestDeep* deep, uint8_t class, uint32_t count)
+{
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, class, 0);
+    }
+}
+
+// Case c's stream, and its name. Each starts with x + k for k from 0 on the integer stack, 15 of them (14 with a frame
+// pointer), which fill its table, and returns a U64.
+static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
+{
+    static const char* const names[BUSTER_TIER0_TEST_DEEP_CASES] = {
+        "a value dropped at the line",
+        "?: at the line",
+        "a compare and its branch at the line",
+        "floating values at the line",
+        "division and shifts at the line",
+        "a frame pointer's 14",
+        "both stacks at once",
+    };
+    deep->count = 0;
+    if (c == 5)
+    {
+        // The stack's position, which gives the function its frame pointer, kept in local 1.
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+    }
+    else if (c == 4)
+    {
+        // A divisor in local 1: (x & 7) + 1.
+        tier0_test_deep_operation(deep, BUSTER_TYPED_AND, 7);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+    }
+    const uint32_t held = c == 5 ? 14 : 15;
+    for (uint32_t k = 0; k < held; k += 1)
+    {
+        tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, k);
+    }
+    uint32_t folds = held - 1;
+    if (c == 0)
+    {
+        // -x pushed past the line, dropped back to it (a DISCARD, which uses no register), then ~x past it.
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_NOT, BUSTER_TYPED_CLASS_U64, 0);
+        folds += 1;
+    }
+    else if (c == 1 || c == 2)
+    {
+        // (x & 1 ? x * 7 : x - 5), or ((x + 1 < x * 3) ? x ^ 13 : 11): a condition past the line, its branch back to it,
+        // and each arm's value past it.
+        uint32_t branch = 0;
+        if (c == 1)
+        {
+            tier0_test_deep_operation(deep, BUSTER_TYPED_AND, 1);
+            branch = tier0_test_deep_add(deep, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_test_deep_operation(deep, BUSTER_TYPED_MUL, 7);
+        }
+        else
+        {
+            tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 1);
+            tier0_test_deep_operation(deep, BUSTER_TYPED_MUL, 3);
+            tier0_test_deep_add(deep, BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0);
+            branch = tier0_test_deep_add(deep, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 11);
+        }
+        const uint32_t jump = tier0_test_deep_add(deep, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_U64, 0);
+        deep->values[branch] = deep->count;
+        tier0_test_deep_operation(deep, c == 1 ? BUSTER_TYPED_SUB : BUSTER_TYPED_XOR, c == 1 ? 5 : 13);
+        deep->values[jump] = deep->count;
+        folds += 1;
+    }
+    else if (c == 3)
+    {
+        // 16 floating values, which fill the floating table; one more past the line, dropped, and another; their sum.
+        for (uint32_t k = 0; k < 16; k += 1)
+        {
+            tier0_test_deep_floating(deep, k);
+        }
+        tier0_test_deep_floating(deep, 100);
+        tier0_test_deep_add(deep, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F64, 0);
+        tier0_test_deep_floating(deep, 16);
+        tier0_test_deep_fold(deep, BUSTER_TYPED_CLASS_F64, 16);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        folds += 1;
+    }
+    else if (c == 4)
+    {
+        // (x + 1000003) / d with d a local, x % d, x << (x & 7), x / (d + 0) and x >> d with d on the stack.
+        tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 1000003);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_DIV, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_MOD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_AND, 7);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_DIV, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        folds += 1;
+    }
+    else if (c == 5)
+    {
+        // Past the frame pointer's line, two more.
+        tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 14);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 15);
+        folds += 2;
+    }
+    else
+    {
+        // 16 floating values; x & 0xffff past the integer line, converted past the floating one (its operand dropped back
+        // to the integer line); the floating values' sum converted back past the integer line.
+        for (uint32_t k = 0; k < 16; k += 1)
+        {
+            tier0_test_deep_floating(deep, k);
+        }
+        tier0_test_deep_floating(deep, 16);
+        tier0_test_deep_fold(deep, BUSTER_TYPED_CLASS_F64, 16);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        folds += 1;
+    }
+    tier0_test_deep_fold(deep, BUSTER_TYPED_CLASS_U64, folds);
+    if (c == 5)
+    {
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    tier0_test_deep_add(deep, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+    return names[c];
+}
+
+// The floating values' sum of cases 3 and 6: (double)((x & 0xffff) + k) for k from 0 to 16, added from the top.
+static uint64_t tier0_test_deep_floating_sum(uint64_t x)
+{
+    double sum = (double)((x & 0xffff) + 16);
+    for (uint32_t k = 16; k-- > 0;)
+    {
+        sum = (double)((x & 0xffff) + k) + sum;
+    }
+    return (uint64_t)sum;
+}
+
+// What case c returns for x.
+static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
+{
+    const uint32_t held = c == 5 ? 14 : 15;
+    uint64_t sum = 0;
+    for (uint32_t k = 0; k < held; k += 1)
+    {
+        sum += x + k;
+    }
+    const uint64_t d = (x & 7) + 1;
+    const uint64_t cases[BUSTER_TIER0_TEST_DEEP_CASES] = {
+        ~x,
+        (x & 1) != 0 ? x * 7 : x - 5,
+        x + 1 < x * 3 ? x ^ 13 : 11,
+        tier0_test_deep_floating_sum(x),
+        (x + 1000003) / d + x % d + (x << (x & 7)) + x / d + (x >> d),
+        (x + 14) + (x + 15),
+        tier0_test_deep_floating_sum(x),
+    };
+    return sum + cases[c];
+}
+
+static void tier0_test_deep(Tier0TestTally* tally)
+{
+    static const uint64_t inputs[BUSTER_TIER0_TEST_DEEP_INPUTS] = { 0, 1, 5, 1000, (1ull << 40) + 3, UINT64_MAX - 7 };
+    static const uint8_t local_classes[2] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t local_flags[2] = { 0, 0 };
+    const AbiLocation parameter = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+    const AbiReturn result = { .kind = BUSTER_ABI_RESULT_REGISTERS,
+                               .part_bytes = 8,
+                               .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE } };
+    // Each case's code, in pages of its own, and what each run returned, the child's.
+    uint64_t* shared = mmap(0, sizeof(uint64_t) * BUSTER_TIER0_TEST_DEEP_CASES * BUSTER_TIER0_TEST_DEEP_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t* region = mmap(0, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* scratch = malloc(BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE);
+    Tier0TestDeep* deep = malloc(sizeof(Tier0TestDeep));
+    Arena arena = arena_reserve(1u << 24);
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && scratch != 0 && deep != 0 && arena.base != 0, "deep", "no memory");
+    for (uint32_t c = 0; c < BUSTER_TIER0_TEST_DEEP_CASES && ready; c += 1)
+    {
+        const char* name = tier0_test_deep_case(c, deep);
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = deep->kinds;
+        function.classes = deep->classes;
+        function.values = deep->values;
+        function.count = deep->count;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = 2;
+        function.parameter_count = 1;
+        function.parameters = &parameter;
+        function.result = result;
+        const uint64_t mark = arena.length;
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "deep",
+                                  "%s: rule \"%s\" at %u, error %d at %u, or the paths differ", name, check.rule != 0 ? check.rule : "", check.node, scalar.error,
+                                  scalar.node);
+        // Every case has deep entries, and only the frame pointer's has push rbp; mov rbp, rsp first.
+        const bool pointer = ready && scalar.count >= 2 && scalar.records[0].form == X86_FORM_PUSH_R64 && scalar.records[0].rm == X86_REGISTER_RBP &&
+                             scalar.records[1].form == X86_FORM_MOV_RM64_R64 && scalar.records[1].rm == X86_REGISTER_RBP;
+        ready = ready && tier0_test_expect(tally, scalar.deep != 0 && pointer == (c == 5), "deep", "%s: %u deep entries, %s frame pointer", name, scalar.deep,
+                                           pointer ? "a" : "no");
+        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
+                                                      branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
+                                                          BRANCH_SIZING_OK,
+                                           "deep", "%s: an invalid record, a reference or an invalid branch column", name);
+        uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
+        const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets)
+                                                 : (BranchSizing){ 0 };
+        ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "deep", "%s: the branches can't be sized", name);
+        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
+        uint8_t* page = region + BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * c;
+        const int64_t vector_length = ready && room <= BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, page, room, 0, 0) : -1;
+        const int64_t scalar_length = ready && room <= BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE ? x86_encode_scalar(scalar.records, scalar.count, scratch, room, 0, 0) : -1;
+        ready = ready && tier0_test_expect(tally, vector_length > 0 && vector_length == scalar_length && memcmp(page, scratch, (size_t)vector_length) == 0, "deep",
+                                           "%s: the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", name, vector_length, scalar_length);
+        arena_pop_to(&arena, mark);
+    }
+    ready = ready && tier0_test_expect(tally, mprotect(region, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES, PROT_READ | PROT_EXEC) == 0, "deep",
+                                       "the code can't be loaded");
+    const pid_t child = ready ? fork() : -1;
+    tier0_test_expect(tally, !ready || child >= 0, "deep", "fork failed");
+    if (child == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        for (uint32_t c = 0; c < BUSTER_TIER0_TEST_DEEP_CASES; c += 1)
+        {
+            void* address = region + BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * c;
+            uint64_t (*run)(uint64_t) = 0;
+            memcpy(&run, &address, sizeof(run));
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_DEEP_INPUTS; v += 1)
+            {
+                shared[c * BUSTER_TIER0_TEST_DEEP_INPUTS + v] = run(inputs[v]);
+            }
+        }
+        _exit(0);
+    }
+    if (child > 0)
+    {
+        int status = 0;
+        waitpid(child, &status, 0);
+        const bool ran = tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "deep", "the child's status %d", status);
+        for (uint32_t c = 0; c < BUSTER_TIER0_TEST_DEEP_CASES && ran; c += 1)
+        {
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_DEEP_INPUTS; v += 1)
+            {
+                const uint64_t expected = tier0_test_deep_model(c, inputs[v]);
+                const uint64_t got = shared[c * BUSTER_TIER0_TEST_DEEP_INPUTS + v];
+                tier0_test_expect(tally, got == expected, "deep", "%s: x = %" PRIu64 ": %016" PRIx64 ", %016" PRIx64 " expected", tier0_test_deep_case(c, deep),
+                                  inputs[v], got, expected);
+            }
+        }
+    }
+    arena_release(&arena);
+    free(deep);
+    free(scratch);
+    if (region != MAP_FAILED)
+    {
+        munmap(region, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(uint64_t) * BUSTER_TIER0_TEST_DEEP_CASES * BUSTER_TIER0_TEST_DEEP_INPUTS);
+    }
+}

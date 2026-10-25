@@ -4612,6 +4612,7 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 }
 
 #include "buster/compiler/tier0_x87_test.c"
+#include "buster/compiler/tier0_deep_test.c"
 
 static int run_tier0_tests(int argc, char** argv)
 {
@@ -4748,6 +4749,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_unsigned_floating(&tally);
                 tier0_test_report("unsigned floating", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_deep(&tally);
+                tier0_test_report("deep", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
