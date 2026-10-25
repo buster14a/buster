@@ -24,8 +24,9 @@
 // failures; these exclude directory enumeration's libc-internal calls and the benchmark harness's I/O, not process-wide
 // syscall totals. With --clang it also times `clang -E -P` with the same options (but --predefines and
 // --location-limit, which are ours; --buster-headers becomes ours' search) writing to /dev/null, a process per file, the median of as many runs, for scale.
-// --history-cost and --guard-cost replace the scalar twins with the vectorized kernels without recording macro
-// expansion history, or without skipping the inclusions of guarded files (#120), whose output must be the same. --only
+// --history-cost and --guard-cost replace the scalar twins with the vectorized kernels with their macro expansion
+// history deferred (PPOptions.defer_history, as -E and `parse` run them: a unit without diagnostics records none), or
+// without skipping the inclusions of guarded files (#120), whose output must be the same. --only
 // runs one implementation (for profiles). --read-limit takes a list of the largest files a run reads into an arena
 // rather than maps (its cache's read limit: BUSTER_FILE_CACHE_READ_LIMIT unless given; 0 maps every file), and each
 // pass runs each implementation with each of them in turn, which must all give the same output. It also reports the
@@ -959,12 +960,12 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     continue;
                 }
                 // The second implementation: the scalar twins, or with --history-cost and --guard-cost the vectorized
-                // kernels without recording history or without skipping guarded files.
+                // kernels with their history deferred or without skipping guarded files.
                 PPBenchmarkSample sample;
                 PPOptions run = options;
                 const bool control = history_cost || guard_cost;
                 run.scalar = !control && implementation == 1;
-                run.no_history = history_cost && implementation == 1;
+                run.defer_history = history_cost && implementation == 1;
                 run.no_guard_skip = guard_cost && implementation == 1;
                 ran = pp_benchmark_pass(&run, read_limits[limit], files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
                 const uint32_t compared = history_cost ? 0 : implementation;
@@ -975,7 +976,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 }
                 else if (sample.digest != expected_digest[compared])
                 {
-                    fprintf(stderr, history_cost ? "recording changed the output token digest\n" : "the read limit changed the output token digest\n");
+                    fprintf(stderr, history_cost ? "deferring the history changed the output token digest\n" : "the read limit changed the output token digest\n");
                     ran = false;
                 }
                 if (guard_cost && !have_token_digest)
@@ -1052,7 +1053,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 pp_benchmark_sort(embed_ticks, BUSTER_PP_BENCHMARK_PASSES);
                 const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
                 const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
-                const char* name = history_cost ? (implementation == 0 ? "history" : "no-history")
+                const char* name = history_cost ? (implementation == 0 ? "history" : "deferred")
                                    : guard_cost ? (implementation == 0 ? "guards" : "no-guards")
                                                 : names[implementation];
                 if (read_limits_given)
