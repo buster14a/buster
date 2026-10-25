@@ -8,7 +8,7 @@
 
 #define BUSTER_TIER0_TEST_DEEP_ENTRIES 256
 #define BUSTER_TIER0_TEST_DEEP_INPUTS 6
-#define BUSTER_TIER0_TEST_DEEP_CASES 7
+#define BUSTER_TIER0_TEST_DEEP_CASES 8
 // The pages of each case's code.
 #define BUSTER_TIER0_TEST_DEEP_PAGES 16
 
@@ -57,8 +57,8 @@ static void tier0_test_deep_fold(Tier0TestDeep* deep, uint8_t class, uint32_t co
     }
 }
 
-// Case c's stream, and its name. Each starts with x + k for k from 0 on the integer stack, 15 of them (14 with a frame
-// pointer), which fill its table, and returns a U64.
+// Case c's stream, and its name. Each starts with x + k for k from 0 on the integer stack, 15 of them, which fill its
+// table (case 5's 14, a frame pointer's table; case 7's 15 are past it), and returns a U64.
 static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
 {
     static const char* const names[BUSTER_TIER0_TEST_DEEP_CASES] = {
@@ -69,6 +69,7 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         "division and shifts at the line",
         "a frame pointer's 14",
         "both stacks at once",
+        "rsp moved past the line",
     };
     deep->count = 0;
     if (c == 5)
@@ -173,6 +174,41 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 15);
         folds += 2;
     }
+    else if (c == 7)
+    {
+        // Past a frame pointer's line (#434's review): rsp saved in local 1; (x & 0xff) * 8 + 24 bytes allocated, their
+        // address in local 2, and 4096 more in local 3; x + 1000 stored in the first and x ^ 0x5555 in the second, and
+        // both loaded back; rsp restored; then x * 77. Every entry is a deep one, with the values below it in their slots,
+        // which rbp addresses while rsp moves, and so are the locals' homes.
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_AND, 0xff);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 8);
+        tier0_test_deep_add(deep, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 24);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 1000);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4096);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_XOR, 0x5555);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_MUL, 77);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        folds += 1;
+    }
     else
     {
         // 16 floating values; x & 0xffff past the integer line, converted past the floating one (its operand dropped back
@@ -225,6 +261,7 @@ static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
         (x + 1000003) / d + x % d + (x << (x & 7)) + x / d + (x >> d),
         (x + 14) + (x + 15),
         tier0_test_deep_floating_sum(x),
+        (x + 1000) + (x ^ 0x5555) + x * 77,
     };
     return sum + cases[c];
 }
@@ -232,8 +269,9 @@ static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
 static void tier0_test_deep(Tier0TestTally* tally)
 {
     static const uint64_t inputs[BUSTER_TIER0_TEST_DEEP_INPUTS] = { 0, 1, 5, 1000, (1ull << 40) + 3, UINT64_MAX - 7 };
-    static const uint8_t local_classes[2] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
-    static const uint8_t local_flags[2] = { 0, 0 };
+    // x, then case 7's (and case 4's and 5's local 1): the saved rsp and the allocations' addresses.
+    static const uint8_t local_classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t local_flags[4] = { 0, 0, 0, 0 };
     const AbiLocation parameter = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
     const AbiReturn result = { .kind = BUSTER_ABI_RESULT_REGISTERS,
                                .part_bytes = 8,
@@ -256,7 +294,7 @@ static void tier0_test_deep(Tier0TestTally* tally)
         function.count = deep->count;
         function.local_classes = local_classes;
         function.local_flags = local_flags;
-        function.local_count = 2;
+        function.local_count = c == 7 ? 4 : 2;
         function.parameter_count = 1;
         function.parameters = &parameter;
         function.result = result;
@@ -267,10 +305,10 @@ static void tier0_test_deep(Tier0TestTally* tally)
         ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "deep",
                                   "%s: rule \"%s\" at %u, error %d at %u, or the paths differ", name, check.rule != 0 ? check.rule : "", check.node, scalar.error,
                                   scalar.node);
-        // Every case has deep entries, and only the frame pointer's has push rbp; mov rbp, rsp first.
+        // Every case has deep entries, and only the frame pointer's two have push rbp; mov rbp, rsp first.
         const bool pointer = ready && scalar.count >= 2 && scalar.records[0].form == X86_FORM_PUSH_R64 && scalar.records[0].rm == X86_REGISTER_RBP &&
                              scalar.records[1].form == X86_FORM_MOV_RM64_R64 && scalar.records[1].rm == X86_REGISTER_RBP;
-        ready = ready && tier0_test_expect(tally, scalar.deep != 0 && pointer == (c == 5), "deep", "%s: %u deep entries, %s frame pointer", name, scalar.deep,
+        ready = ready && tier0_test_expect(tally, scalar.deep != 0 && pointer == (c == 5 || c == 7), "deep", "%s: %u deep entries, %s frame pointer", name, scalar.deep,
                                            pointer ? "a" : "no");
         ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
                                                       branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
