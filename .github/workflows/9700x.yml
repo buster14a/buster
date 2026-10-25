@@ -1012,7 +1012,34 @@ jobs:
       - name: Benchmark the per-file jobs on the repository's translation units
         # Without taskset: it pins each lane to an allowed CPU of its own.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
-        run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+        run: |
+          # EXPERIMENT (#262, not for merging): main's merge, the new one, partial takes and the lanes' bytes, in turns.
+          ./build/compiler benchmark-files --rounds --variant old-merge --variant lane-bytes=4194304 --variant partial-take \
+            --variant lane-bytes=3145728,partial-take --variant lane-bytes=2097152,partial-take --variant lane-bytes=1048576,partial-take \
+            -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: EXPERIMENT (#262) Test and benchmark the per-file jobs on musl, sqlite3.c and the C library corpus
+        # Without taskset: it pins each lane to an allowed CPU of its own. The frozen corpora of the preprocessor's oracle
+        # (docs/preprocessor-oracle.md).
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          musl="$corpus/libc/musl"
+          musl_options=(-std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal"
+            -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include")
+          musl_units=("$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c)
+          status=0
+          echo "musl: ${#musl_units[@]} units"
+          ./build/compiler test-files "${musl_options[@]}" "${musl_units[@]}" || status=1
+          ./build/compiler test-files "$corpus/sqlite/sqlite3.c" || status=1
+          ./build/compiler test-files --flat "$corpus/libc" || status=1
+          ./build/compiler benchmark-files --rounds --variant old-merge --variant lane-bytes=4194304 --variant lane-bytes=1048576,partial-take \
+            --variant lane-bytes=524288,partial-take "${musl_options[@]}" "${musl_units[@]}" || status=1
+          ./build/compiler benchmark-files --rounds --variant old-merge --variant lane-bytes=4194304 --variant lane-bytes=2097152,partial-take \
+            --variant lane-bytes=1048576,partial-take "$corpus/sqlite/sqlite3.c" || status=1
+          ./build/compiler benchmark-files --flat --variant old-merge --variant lane-bytes=4194304 "$corpus/libc" || status=1
+          exit "$status"
 
       - name: Benchmark the parser on main.c
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser,')

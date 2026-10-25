@@ -81,8 +81,10 @@
 // BUSTER_FILES_MIN_BUCKETS), about what the C library's files need, so that it rarely grows.
 #define BUSTER_FILES_BYTES_PER_BUCKET 320
 #define BUSTER_FILES_MIN_BUCKETS 1024
-// Shared-table slots a lane prefetches before it takes them (files_add_first).
+// Shared-table slots a lane prefetches before it takes them (files_add_first), and spellings whose buckets it prefetches
+// before it looks them up (files_find_new).
 #define BUSTER_FILES_PLACE_BATCH 32
+#define BUSTER_FILES_FIND_BATCH 16
 // How lanes get files' bytes (FileCacheBytes, file_cache_probe), and the largest file every lane count reads into its
 // arena rather than maps: each mapping holds the process's memory map lock, on which lanes that map at once queue (14%
 // of the samples of 8 lanes preparing the C library corpus), and its pages fault in as the lexer reads them, while a
@@ -114,6 +116,29 @@ typedef enum FilesPhase
     FILES_PHASE_WAIT,
     FILES_PHASE_COUNT,
 } FilesPhase;
+
+// The rounds a trace keeps apart (the last of them counts every later round too), and the lanes it keeps.
+#define BUSTER_FILES_TRACE_ROUNDS 16
+#define BUSTER_FILES_TRACE_LANES 8
+
+// Where a run's time went, round by round, for benchmark-files --rounds (FilesRun.trace, null otherwise). Each traced lane
+// reads its TSC and its phases' ticks at the walk's start, at the top of each round (before the round is prepared and its
+// includes are searched for) and at the end; and lane 0 reads the waves and probes so far then, and each round's files,
+// bytes and working lanes. So the first interval is the roots' search, and each later one a round: its preparation, then
+// the searches for the files of the next.
+typedef struct FilesTrace FilesTrace;
+struct FilesTrace
+{
+    // The rounds traced (at most BUSTER_FILES_TRACE_ROUNDS), and the snapshots taken: one more, and the end.
+    uint32_t rounds;
+    uint32_t files[BUSTER_FILES_TRACE_ROUNDS];
+    uint64_t bytes[BUSTER_FILES_TRACE_ROUNDS];
+    uint32_t working[BUSTER_FILES_TRACE_ROUNDS];
+    uint64_t waves[BUSTER_FILES_TRACE_ROUNDS + 2];
+    uint64_t probes[BUSTER_FILES_TRACE_ROUNDS + 2];
+    uint64_t clock[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
+    uint64_t ticks[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES][FILES_PHASE_COUNT];
+};
 
 // What a lane knows of a spelling of its table, by its lane-local id: its hash, the round's file it first occurred in
 // (with BUSTER_FILES_FIRST once the merge took this lane's occurrence as the spelling's first), and its candidate in the
@@ -277,6 +302,11 @@ struct FilesRun
     // read into a lane's arena rather than mapped, whatever the lane count: BUSTER_FILES_READ_LIMIT.
     FileCacheBytes bytes;
     uint32_t read_limit;
+    // EXPERIMENT (#262, not for merging): main's merge (no prefetched lookups, the rewrite a token at a time), and parts
+    // taken from the run's counter (`taken`) by the working lanes of a round that not every lane works on.
+    bool old_merge;
+    bool partial_take;
+    uint64_t taken;
     // The lanes' state, by lane index.
     FilesLane* lanes;
     uint32_t lane_count;
@@ -326,10 +356,13 @@ struct FilesRun
     uint32_t probe_count;
     uint32_t* probe_slots;
     uint32_t probe_slot_mask;
-    // What the run did, and lane 0's TSC when round 0 (the roots') was prepared (for the benchmark).
+    // What the run did, and lane 0's TSC when round 0 (the roots') was prepared (for the benchmark), and where its time
+    // went round by round, if the benchmark asks (null otherwise).
     uint64_t roots_prepared;
     uint32_t rounds;
     uint32_t waves;
+    uint64_t probes_made;
+    FilesTrace* trace;
     uint64_t requests_read;
     uint64_t searches_made;
     uint64_t absent;
@@ -385,8 +418,37 @@ static void files_touch(void* begin, uint64_t bytes)
 }
 
 // Step 1: this lane's new spellings of the round (ids from round_begin on) are looked up in the shared table: the ones
-// it has get its ids, and the others are candidates, counted by partition.
+// it has get its ids, and the others are candidates, counted by partition. BUSTER_FILES_FIND_BATCH spellings at a time
+// are hashed and their buckets prefetched before any is looked up, so that the batch's misses in the shared table
+// overlap rather than each lookup waiting for its own.
 static void files_find_new(FilesRun* run, FilesLane* mine, uint32_t lane)
+{
+    const InternTable* shared = run->cache->table;
+    uint32_t* counts = run->counts + (uint64_t)lane * run->partition_count;
+    uint64_t found = 0;
+    memset(counts, 0, run->partition_count * sizeof(uint32_t));
+    for (IdentId batch = mine->round_begin; batch < mine->table.count; batch += BUSTER_FILES_FIND_BATCH)
+    {
+        const IdentId end = mine->table.count - batch < BUSTER_FILES_FIND_BATCH ? mine->table.count : batch + BUSTER_FILES_FIND_BATCH;
+        for (IdentId id = batch; id < end; id += 1)
+        {
+            FilesSpelling* spelling = &mine->spellings[id];
+            spelling->hash = intern_hash_bytes(intern_bytes(&mine->table, id), intern_length(&mine->table, id));
+            _mm_prefetch((const char*)(shared->buckets + (spelling->hash & shared->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_T0);
+        }
+        for (IdentId id = batch; id < end; id += 1)
+        {
+            const FilesSpelling* spelling = &mine->spellings[id];
+            mine->shared[id] = intern_find_hashed(shared, intern_bytes(&mine->table, id), intern_length(&mine->table, id), spelling->hash);
+            counts[files_partition(spelling->hash, run->partition_count)] += mine->shared[id] == 0;
+            found += mine->shared[id] != 0;
+        }
+    }
+    __atomic_add_fetch(&run->shared_found, found, __ATOMIC_RELAXED);
+}
+
+// EXPERIMENT (#262, not for merging): main's step 1.
+static void files_find_new_v1(FilesRun* run, FilesLane* mine, uint32_t lane)
 {
     const InternTable* shared = run->cache->table;
     uint32_t* counts = run->counts + (uint64_t)lane * run->partition_count;
@@ -636,8 +698,29 @@ static void files_take_ids(FilesRun* run, FilesLane* mine)
 
 // Step 6: a prepared file's identifiers (and its guard) from the lane's ids to the shared table's, 64 tokens at a time:
 // one compare finds the identifiers, and those that aren't predefined names (whose ids every table shares) take their
-// shared ids.
+// shared ids, 16 at a time by a gather. files_remap_scalar is its twin, a token at a time.
 static void files_remap(PPFileData* data, const IdentId* shared)
+{
+    for (uint32_t i = 0; i < data->token_count; i += 64)
+    {
+        const __mmask64 valid = _bzhi_u64(~0ull, data->token_count - i < 64 ? data->token_count - i : 64);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, data->kinds + i);
+        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_and_si512(kinds, _mm512_set1_epi8(0x7F)), _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+        for (uint32_t quarter = 0; quarter < 4; quarter += 1)
+        {
+            // The quarter's identifiers, which `valid` keeps within the file's tokens.
+            const __mmask16 named = (__mmask16)(identifiers >> (16 * quarter));
+            uint32_t* values = data->values + i + 16 * quarter;
+            const __m512i ids = _mm512_maskz_loadu_epi32(named, values);
+            const __mmask16 local = _mm512_mask_cmpge_epu32_mask(named, ids, _mm512_set1_epi32(C_NAME_COUNT));
+            _mm512_mask_storeu_epi32(values, local, _mm512_mask_i32gather_epi32(ids, local, ids, shared, sizeof(IdentId)));
+        }
+    }
+    data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
+}
+
+// EXPERIMENT (#262, not for merging): main's step 6.
+static void files_remap_v1(PPFileData* data, const IdentId* shared)
 {
     for (uint32_t i = 0; i < data->token_count; i += 64)
     {
@@ -650,6 +733,16 @@ static void files_remap(PPFileData* data, const IdentId* shared)
             const IdentId id = data->values[t];
             data->values[t] = id >= C_NAME_COUNT ? shared[id] : id;
         }
+    }
+    data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
+}
+
+static void files_remap_scalar(PPFileData* data, const IdentId* shared)
+{
+    for (uint32_t t = 0; t < data->token_count; t += 1)
+    {
+        const IdentId id = data->values[t];
+        data->values[t] = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && id >= C_NAME_COUNT ? shared[id] : id;
     }
     data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
 }
@@ -682,6 +775,16 @@ static uint64_t files_broadcast(FilesLane* mine, FilesPhase phase, uint64_t valu
     return result;
 }
 
+// The lanes that work on the round: one per run->lane_bytes of its bytes, up to all of them, but never more than its
+// files, and at least one.
+static uint32_t files_working_lanes(const FilesRun* run)
+{
+    const uint64_t bytes = run->record_count != 0 ? run->costs[run->record_count - 1] : 0;
+    const uint64_t wanted = run->lane_bytes != 0 ? bytes / run->lane_bytes : run->lane_count;
+    const uint32_t working = (uint32_t)(wanted < 1 ? 1 : wanted < run->lane_count ? wanted : run->lane_count);
+    return working < run->record_count ? working : run->record_count;
+}
+
 // Prepares the round's records (run->records, none prepared yet, in order) on every lane of the group, which all call it.
 // The lanes that work on it are one per run->lane_bytes of its bytes, up to all of them, but never more than its files:
 // one works alone on lane 0, one file after another straight into the shared table; several take rule 1's parts of the
@@ -693,9 +796,7 @@ static void files_prepare(FilesRun* run)
     FilesLane* mine = &run->lanes[lane];
     FileCache* cache = run->cache;
     const uint64_t bytes = run->record_count != 0 ? run->costs[run->record_count - 1] : 0;
-    const uint64_t wanted = run->lane_bytes != 0 ? bytes / run->lane_bytes : run->lane_count;
-    const uint32_t working = (uint32_t)(wanted < 1 ? 1 : wanted < run->lane_count ? wanted : run->lane_count);
-    const uint32_t lanes = working < run->record_count ? working : run->record_count;
+    const uint32_t lanes = files_working_lanes(run);
     if (lanes <= 1)
     {
         FileCacheArenas* arenas = file_cache_arenas(cache, lane);
@@ -728,7 +829,8 @@ static void files_prepare(FilesRun* run)
         FileCacheArenas* arenas = file_cache_arenas(cache, lane);
         // Rule 1: parts by cost taken in order, or with fewer than every lane or few bytes per lane, one range for each
         // working lane (and none for the others).
-        const bool split = lanes < run->lane_count || bytes / lanes < run->split_bytes;
+        const bool all = lanes == run->lane_count;
+        const bool split = (!all && !run->partial_take) || bytes / lanes < run->split_bytes;
         const Range64 range = !split ? (Range64){ 0 } : lane < lanes ? range_part_by_cost(run->costs, run->record_count, lane, lanes) : (Range64){ 0 };
         uint64_t parts = 1;
         if (!split)
@@ -738,7 +840,10 @@ static void files_prepare(FilesRun* run)
             files_tick(mine, FILES_PHASE_WAIT);
         }
         // Every lane takes until it runs out (lane_take's counter needs it), and after a failure prepares nothing more.
-        for (uint64_t part = split ? 0 : lane_take(parts); part < parts; part = split ? parts : lane_take(parts))
+        // EXPERIMENT (#262): with fewer working lanes than the group's, the working ones take from the run's counter.
+        const uint64_t none = parts;
+        for (uint64_t part = split ? 0 : all ? lane_take(parts) : lane < lanes ? __atomic_fetch_add(&run->taken, 1, __ATOMIC_RELAXED) : none; part < parts;
+             part = split ? parts : all ? lane_take(parts) : __atomic_fetch_add(&run->taken, 1, __ATOMIC_RELAXED))
         {
             const bool failed = __atomic_load_n(&run->failed, __ATOMIC_RELAXED);
             const uint64_t first_file = split ? range.begin : run->boundaries[part];
@@ -770,7 +875,14 @@ static void files_prepare(FilesRun* run)
             }
         }
         files_sync(mine, FILES_PHASE_PREPARE);
-        files_find_new(run, mine, lane);
+        if (run->old_merge)
+        {
+            files_find_new_v1(run, mine, lane);
+        }
+        else
+        {
+            files_find_new(run, mine, lane);
+        }
         files_sync(mine, FILES_PHASE_LOOKUP);
         if (lane == 0)
         {
@@ -851,7 +963,18 @@ static void files_prepare(FilesRun* run)
             PPFileData* data = &cache->records[run->records[file]];
             if (run->file_status[file] == PP_PREPARE_DONE && room)
             {
-                files_remap(data, mine->shared);
+                if (run->old_merge)
+                {
+                    files_remap_v1(data, mine->shared);
+                }
+                else if (cache->prepare.vectorized)
+                {
+                    files_remap(data, mine->shared);
+                }
+                else
+                {
+                    files_remap_scalar(data, mine->shared);
+                }
                 mine->prepared += 1;
                 mine->tokens += data->token_count;
             }
@@ -1215,6 +1338,7 @@ static void files_search(FilesRun* run)
         {
             files_collect_probes(run);
             run->waves += 1;
+            run->probes_made += run->probe_count;
             files_tick(mine, FILES_PHASE_ALONE);
         }
         probes = (uint32_t)files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed ? run->probe_count : 0);
@@ -1379,6 +1503,7 @@ static void files_next_round(FilesRun* run)
         run->costs[f] = cost;
     }
     run->rounds += count != 0;
+    run->taken = 0;
     arena_pop_to(&run->round, 0);
 }
 
@@ -1429,6 +1554,38 @@ static bool files_lane_begin(FilesRun* run, FilesLane* mine)
     return result && mine->files != 0 && mine->offsets != 0 && mine->names.base != 0 && mine->request_list.base != 0 && mine->path_list.base != 0;
 }
 
+// A trace's snapshot `at` (FilesTrace): this lane's TSC at its last phase boundary and its phases' ticks, and on lane 0
+// the waves and probes so far and, at the top of a round (`round`), the round's files, bytes and working lanes, those of
+// the rounds past the last traced one added to its own.
+static void files_trace(FilesRun* run, const FilesLane* mine, uint32_t lane, uint32_t at, bool round)
+{
+    FilesTrace* trace = run->trace;
+    if (trace != 0 && lane < BUSTER_FILES_TRACE_LANES)
+    {
+        const uint32_t slot = at < BUSTER_FILES_TRACE_ROUNDS + 1 ? at : BUSTER_FILES_TRACE_ROUNDS;
+        // A round past the last traced one has no snapshot of its own: the last traced round's goes on to its end.
+        if (!round || at <= BUSTER_FILES_TRACE_ROUNDS)
+        {
+            trace->clock[slot][lane] = mine->tick;
+            memcpy(trace->ticks[slot][lane], mine->ticks, sizeof(mine->ticks));
+        }
+        if (lane == 0 && (!round || at <= BUSTER_FILES_TRACE_ROUNDS))
+        {
+            trace->waves[slot] = run->waves;
+            trace->probes[slot] = run->probes_made;
+        }
+        if (lane == 0 && round)
+        {
+            const uint32_t r = slot - 1;
+            const uint32_t working = files_working_lanes(run);
+            trace->rounds = slot;
+            trace->files[r] += run->record_count;
+            trace->bytes[r] += run->record_count != 0 ? run->costs[run->record_count - 1] : 0;
+            trace->working[r] = working > trace->working[r] ? working : trace->working[r];
+        }
+    }
+}
+
 // Runs ahead on every lane of the group, which all call it: the roots are looked up, then prepared in round 0, and while
 // the run follows includes, each round's new files' literal includes are searched for and the files found prepared in
 // the next round, until a round finds none. Nothing it does reports a diagnostic. run->failed says if memory ran out, in
@@ -1438,6 +1595,7 @@ static void files_run_ahead(FilesRun* run)
     const uint32_t lane = lane_index();
     FilesLane* mine = &run->lanes[lane];
     mine->tick = __rdtsc();
+    files_trace(run, mine, lane, 0, false);
     files_fail(run, !files_lane_begin(run, mine));
     files_sync(mine, FILES_PHASE_ALONE);
     // Lane 0's word, the same on every lane: a lane that read run->failed itself could read lane 0's failure in
@@ -1460,8 +1618,11 @@ static void files_run_ahead(FilesRun* run)
         files_tick(mine, FILES_PHASE_ALONE);
     }
     bool more = files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && ready && !run->failed && run->item_count > run->round_items) != 0;
+    uint32_t round = 0;
     while (more)
     {
+        round += 1;
+        files_trace(run, mine, lane, round, true);
         if (run->record_count != 0)
         {
             files_prepare(run);
@@ -1487,6 +1648,7 @@ static void files_run_ahead(FilesRun* run)
         }
         more = files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed && run->item_count > run->round_items) != 0;
     }
+    files_trace(run, mine, lane, (round < BUSTER_FILES_TRACE_ROUNDS ? round : BUSTER_FILES_TRACE_ROUNDS) + 1, false);
 }
 
 // The entry point lane_run runs on each lane.
