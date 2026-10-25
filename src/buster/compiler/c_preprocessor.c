@@ -15106,11 +15106,11 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
-    // A deferred history records nothing and prints no diagnostic until pp_history_ensure (PPOptions.defer_history).
+    // A deferred history records nothing until pp_history_ensure (PPOptions.defer_history); its run prints no
+    // diagnostic (pp_run), but this setup's are printed, its fatal errors among them.
     pp->history_deferred = options->defer_history && !options->no_history;
     pp->history_quiet = options->quiet;
     pp->options.no_history |= pp->history_deferred;
-    pp->options.quiet |= pp->history_deferred;
     const PPPrepare prepare = pp_prepare_options(options);
     pp->vectorized = prepare.vectorized;
     pp->refine_flags = prepare.refine_flags;
@@ -15663,6 +15663,8 @@ static bool pp_history_ensure(Preprocessor* pp)
 static bool pp_run(Preprocessor* pp, const char* main_path)
 {
     pp->history_path = main_path;
+    // A deferred run counts its diagnostics without printing them, which its end does (pp_history_report).
+    pp->options.quiet |= pp->history_deferred;
     const bool result = pp_preprocess_file(pp, main_path);
     pp_history_report(pp, result);
     return result && !pp->fatal;
@@ -15676,6 +15678,7 @@ static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* byt
     pp->history_name = name;
     pp->history_bytes = bytes;
     pp->history_length = length;
+    pp->options.quiet |= pp->history_deferred;
     const bool result = pp_preprocess_source(pp, name, bytes, length);
     pp_history_report(pp, result);
     return result && !pp->fatal;

@@ -12210,7 +12210,11 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
         options.defer_history = true;
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table) || !parse_initialize(&parser, &parse_options, options.language))
         {
-            fprintf(stderr, "fatal error: can't reserve memory\n");
+            // The preprocessor's setup says why it failed, when it can (an invalid SOURCE_DATE_EPOCH, say).
+            if (!pp.fatal)
+            {
+                fprintf(stderr, "fatal error: can't reserve memory\n");
+            }
         }
         else
         {

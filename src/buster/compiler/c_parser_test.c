@@ -3073,6 +3073,34 @@ static uint32_t parse_test_driver(const char* directory)
         }
     }
     printf("driver: %u cases, %u runs: the expected statuses and messages, nothing left behind\n", (unsigned)CASES, runs);
+    // An invalid SOURCE_DATE_EPOCH: the preprocessor's setup fails with a fatal error, which `parse` and -E must print
+    // alone, though they defer the history's diagnostics (#412's review).
+    char epoch[256] = { 0 };
+    const char* had = getenv("SOURCE_DATE_EPOCH");
+    if (had != 0)
+    {
+        snprintf(epoch, sizeof(epoch), "%s", had);
+    }
+    for (uint32_t preprocess = 0; failures == 0 && preprocess < 2; preprocess += 1)
+    {
+        char* arguments[] = { (char*)"-E", (char*)"-o", (char*)"/dev/null", paths[0] };
+        char text[1024];
+        setenv("SOURCE_DATE_EPOCH", "invalid", 1);
+        const int status = parse_test_drive(preprocess != 0 ? arguments : arguments + 3, preprocess != 0 ? 4 : 1, capture, text, sizeof(text), preprocess != 0);
+        if (had != 0)
+        {
+            setenv("SOURCE_DATE_EPOCH", epoch, 1);
+        }
+        else
+        {
+            unsetenv("SOURCE_DATE_EPOCH");
+        }
+        if (status != 1 || strcmp(text, "fatal error: invalid SOURCE_DATE_EPOCH: expected a nonnegative decimal integer in range\n") != 0)
+        {
+            parse_test_report("driver: %s with an invalid SOURCE_DATE_EPOCH: status %d, printed \"%s\"\n", preprocess != 0 ? "-E" : "parse", status, text);
+            failures += 1;
+        }
+    }
     if (failures == 0)
     {
         char* valid[] = { paths[0] };

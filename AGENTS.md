@@ -3828,7 +3828,9 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   expansion history places and the driver records only for its diagnostics,
   and a warning with code after it and alone, which the driver prints by
   preprocessing the unit again), 16 runs of each, after which the address
-  space and the descriptors must be as they were;
+  space and the descriptors must be as they were; an invalid
+  `SOURCE_DATE_EPOCH` for `parse` and for `-E`, which must print the
+  preprocessor's setup's fatal error alone;
   then every reservation and mapping of a run on a valid and on an invalid file
   and on the two warnings' files (whose replays' reservations among them)
   failed in turn, in children whose address space may grow a page less than a
