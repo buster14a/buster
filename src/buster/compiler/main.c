@@ -307,6 +307,8 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_initializer.c"
 #include "buster/compiler/c_check_data.c"
 #include "buster/compiler/c_check_input.c"
+// #113's deferred bodies: check_input with every function body read apart, out of order and on lanes.
+#include "buster/compiler/c_check_deferred.c"
 #include "buster/compiler/c_check_diagnostic.c"
 #include "buster/compiler/c_check_initializer_input.c"
 #include "buster/compiler/c_check_data_input.c"

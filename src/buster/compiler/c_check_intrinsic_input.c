@@ -85,8 +85,9 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
     for (uint32_t token = 0; valid && token <= parser->tokens.count; token += 1)
     {
         if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
-            parser->tree.roles[token] == PARSE_ROLE_OPERAND && (output->deferred_tokens == 0 || !output->deferred_tokens[token]))
+            parser->tree.roles[token] == PARSE_ROLE_OPERAND && (output->deferred_tokens == 0 || reader->deferred != 0 || !output->deferred_tokens[token]))
         {
+            // #113's deferred bodies are read after this pass, which sizes the tables for them too, as source order does.
             const uint32_t name = parser->tokens.names[token];
             const InternSpan span = table->spans[name];
             names[lanes] = (BuiltinIntrinsicName){ (const char*)table->records + span.offset, span.length };
@@ -197,6 +198,8 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
         {
             info = output->intrinsic_declarations[cached - 1].info;
         }
+        // #113's deferred reader merges no intrinsic declarations yet: a body that uses one is read in source order.
+        reader->lane_unsupported |= reader->lane && info != 0;
         if (info != 0)
         {
             status = CHECK_INPUT_INTRINSIC_FAILED;
