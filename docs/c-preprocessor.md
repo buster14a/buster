@@ -2456,7 +2456,7 @@ What 2 ms would take, each estimated from the numbers above:
 | --- | ---: | --- |
 | No history in the main loop; a replay records it when a diagnostic or a consumer first needs it | 0.78 ms | A change to #108's contract |
 | The parser's input read from the file cache for file runs, rather than from the output | 0.5-0.8 ms | A change to the output's contract with the parser (#126, #335) |
-| A leaner expansion engine: compiled bodies, one pass over a macro's items rather than three, no origins per token | about 1.2 ms | Large; inside the preprocessor |
+| A leaner expansion engine: compiled bodies, one pass over a macro's items rather than three, no origins per token | about 1.2 ms | Large; inside the preprocessor. Its first step, templates for simple invocations, measured 0.1-0.2 ms (#444) |
 | Line counts by page while each window is in the caches | 0.5 ms, measured | Done (#439) |
 | Output columns that don't end in a mostly empty huge page | about 0.1 ms | |
 
@@ -2481,6 +2481,20 @@ went from 6.19-6.22 ms to 5.73-5.77 ms. As whole processes, `-E` of `sqlite3.c`
 took 19.86-19.94 ms and takes 19.38-19.47 ms, and `parse` 18.86-18.98 ms against
 18.10-18.38 ms. The instructions barely changed (118.16 and 118.02 per input
 token): what the old count cost was reading the file from memory again.
+
+The leaner engine's first step is in: templates for simple invocations
+("Templates" in "The main loop", #444, [the
+record](https://github.com/buster14a/buster-performance/blob/fd00c89eb172c310a42f0ad63b2dc2e0576125a3/docs/measurements/preprocessor-templates-117-2026-10-25/README.md)).
+With the history deferred, as compiles run it, `sqlite3.c`'s main loop took
+4.551-4.685 ms on main and takes 4.422-4.476 ms, and its directive tables and
+main loop together 4.889-5.025 ms against 4.761-4.817 ms. Its instructions per
+input token went from 109.51 to 106.38. `main.c`'s main loop took
+21.344-22.172 ms and takes 21.035-21.289 ms. With the history recorded, which
+takes the old paths, the times overlap. As whole processes, `parse` of
+`sqlite3.c` took 18.30-18.34 ms and takes 18.00-18.15 ms, and `-E` didn't
+change measurably. The first measurement found no gain in time:
+`sqlite3.c`'s 254 templates had crossed into a huge page, which the kernel
+cleared whole, 2 MB per run. They take base pages now.
 
 ## Assembly output spacing
 
