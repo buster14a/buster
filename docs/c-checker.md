@@ -101,7 +101,12 @@ plain-char semantics.
 The source adapter handles nested pointer, array and function declarators;
 prototype scopes and parameter adjustments; typedefs and local scopes;
 arithmetic, pointers, calls and casts; records/unions, anonymous members,
-bit-fields and flexible arrays; enumerations and source-point completion.
+bit-fields (with GNU attributes after a width, the member's, which the parser
+hangs on the member's end, outside the width's tree, so that the width is
+evaluated as any constant expression is) and flexible arrays (a struct whose only named
+member is one too, a GNU extension clang takes, with clang's layout);
+enumerations, C23's with a fixed underlying type among them, and source-point
+completion.
 It retains initializer lists, designators and ranges, strings and predefined
 function-name arrays, compound literals, GNU statement expressions, generic
 selection, `typeof`, and runtime array bounds. Increment/decrement and compound
@@ -109,6 +114,26 @@ assignments retain one destination evaluation and an explicit store conversion.
 `if`, loops, `switch`/cases, labels/goto, break/continue, returns and static
 assertions receive semantic checks. Assembly operands/constraints and source
 attribute applicability have separate bounded consumers.
+
+An enum with a fixed underlying type (`enum E : T`, C23's, which clang takes in
+every mode) is complete at its base, so that its own list may take `sizeof` of
+it. Its enumerators have the base's type in its list, and after it the enum's
+in C23 but still the base's before it, as clang 23 types them (two such enums'
+enumerators of one base are of one type before C23, and of two after it). Each
+value is representable in the base as clang's `isRepresentableIntegerValue` has
+it (a negative one by its significant bits, any other by its active bits, less a
+signed base's sign bit) and converted to it; the base drops `const` and `volatile` (`restrict`, which
+needs a pointer, is refused), and an integer type of any width but `_BitInt`
+takes it. GNU attributes among the base's specifiers are the base type's, as
+clang has them: ignored, but one that would make it a vector's (`vector_size`,
+`ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
+declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
+none. A declaration of it with a declarator (`enum E : int x;`) is refused at
+the `:`, and an enum without a base can't be given one, nor the other way round,
+each where clang reports it. An `aligned` attribute after its body, which clang
+applies after the base completed it, is refused as unsupported. (Attributes
+after a tag's name, before a `;`, make any tag's declaration a reference to the
+visible tag, as clang has it, not a declaration of it alone.)
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader

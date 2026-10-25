@@ -303,6 +303,13 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) { a: int x; }\n", "", 0 },
     { "[[deprecated]] int x; int y [[maybe_unused]];\n", "", 0 },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
+    // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
+    { "typedef int U; typedef enum E : unsigned short { A } T; typedef enum : const U { B } V, W; int n = sizeof(T) + sizeof(V) + sizeof(W);\n", "", 0 },
+    // GNU attributes among an enum's base's specifiers, which clang takes as the base type's (#428's review): before,
+    // between and after them, with a body or without, and where a typedef's declarator follows the body (K3 skips them).
+    { "enum E : int __attribute__((unused)); enum F : int __attribute__((unused)) { A };\n", "", 0 },
+    { "enum G : __attribute__((unused)) unsigned __attribute__((unused)) char __attribute__((unused)) { B };\n", "", 0 },
+    { "typedef enum H : int __attribute__((unused)) { C } T; T t = C; int n = sizeof(T);\n", "", 0 },
     { "int x = (int){1}; int a[3] = { [1 ... 2] = 0 };\n", "", 0 },
     // GNU's single array designator may omit '=', including a range, a prefix operand and a braced initializer.
     { "int a[] = { [0] 1, [3] 4, [4] -1, [5] (int)2 };\n", "", 0 },
@@ -350,6 +357,13 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "struct T { int member = 1; };\n", "1:22: expected ';' at end of declaration list", 0 },
     { "union U { int (*callback)(void) = 0; };\n", "1:32: expected ';' at end of declaration list", 0 },
     { "struct V { int x:3 = 1; };\n", "1:19: expected ';' at end of declaration list", 0 },
+    // GNU attributes after a bit-field's width end it: the member's, more of them, then `,` or `;`, or the body's `}` after
+    // the last member (clang's warning). Anything else is a missing `;`, at the token for a `:` (clang's typo for one).
+    { "enum { N = 3 }; struct S { int a : 3 __attribute__((aligned(4))), b : N __attribute__((packed)) __attribute__(()); long : 0 __attribute__((aligned(8)));"
+      " char c : (1 + 2) __attribute__((unused)) };\n", "", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) + 1; };\n", "1:45: expected ';' at end of declaration list", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) : 4; };\n", "1:46: expected ';' at end of declaration list", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) [4]; };\n", "1:45: expected ';' at end of declaration list", 0 },
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },
     { "int f(void) { return 1 }\n", "1:23: expected ';' after return statement", 0 },

@@ -30,6 +30,12 @@ struct CheckCorpusPath
     CheckInput* original_pragmas;
     TypeTable types;
     CheckInput input;
+    // #113's deferred reader (--deferred): with deferred_lanes, the input is check_input_deferred's on that many lanes,
+    // whose state, in deferred_arena, lives as long as the input.
+    uint32_t deferred_lanes;
+    CheckInputBindingMode deferred_bindings;
+    Arena deferred_arena;
+    CheckDeferred* deferred;
     CheckStream stream;
     CheckInitializers initializers;
     CheckAsms asms;
@@ -58,6 +64,11 @@ struct CheckCorpusPath
     char spelling[96];
 };
 
+#define BUSTER_CHECK_CORPUS_DEFERRED_REASONS 16
+
+// --deferred's reason for a unit that doesn't parse, which the reader never reads: tallied, not reported per file.
+static const char* const check_corpus_unparsed = "the unit doesn't parse";
+
 typedef struct CheckCorpusTally CheckCorpusTally;
 struct CheckCorpusTally
 {
@@ -80,8 +91,35 @@ struct CheckCorpusTally
     uint64_t vector_nodes;
     uint64_t binding_uses;
     uint64_t binding_fallback_uses;
+    // --deferred: the units the deferred reader merged, those it left to source order, their bodies, and the files whose
+    // deferred result wasn't the vector path's (counted in path_differences too).
+    uint64_t deferred_units;
+    uint64_t deferred_source_order;
+    uint64_t deferred_bodies;
+    uint64_t deferred_differences;
+    // The units left to source order by why (the reader's reasons are fixed strings), in the order first met.
+    const char* deferred_reasons[BUSTER_CHECK_CORPUS_DEFERRED_REASONS];
+    uint64_t deferred_reason_units[BUSTER_CHECK_CORPUS_DEFERRED_REASONS];
+    uint32_t deferred_reason_count;
     uint64_t reports;
 };
+
+// Adds `units` to the tally of `reason`, past the table's room to its last entry's.
+static void check_corpus_tally_reason(CheckCorpusTally* tally, const char* reason, uint64_t units)
+{
+    uint32_t found = tally->deferred_reason_count;
+    for (uint32_t i = 0; i < tally->deferred_reason_count; i += 1)
+    {
+        found = found == tally->deferred_reason_count && strcmp(tally->deferred_reasons[i], reason) == 0 ? i : found;
+    }
+    if (found == tally->deferred_reason_count && found < BUSTER_CHECK_CORPUS_DEFERRED_REASONS)
+    {
+        tally->deferred_reasons[found] = reason;
+        tally->deferred_reason_count += 1;
+    }
+    found = found < BUSTER_CHECK_CORPUS_DEFERRED_REASONS ? found : BUSTER_CHECK_CORPUS_DEFERRED_REASONS - 1;
+    tally->deferred_reason_units[found] += units;
+}
 
 typedef struct CheckCorpusOracle CheckCorpusOracle;
 struct CheckCorpusOracle
@@ -311,6 +349,11 @@ static void check_corpus_location(CheckCorpusPath* path, const Parser* parser, P
 
 static void check_corpus_release(CheckCorpusPath* path)
 {
+    if (path->deferred != NULL)
+    {
+        check_deferred_release(path->deferred);
+    }
+    arena_release(&path->deferred_arena);
     arena_release(&path->scratch);
     arena_release(&path->output_arena);
     arena_release(&path->input_arena);
@@ -579,6 +622,16 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
     path->resource |= !ready;
 }
 
+// --deferred's lanes (0 for none) and binding resolution: the third path of check_corpus_measure. For
+// test-checker-deferred: with check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay;
+// with check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; and
+// with check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes).
+static uint32_t check_corpus_deferred_lanes;
+static CheckInputBindingMode check_corpus_deferred_bindings;
+static bool check_corpus_deferred_fail_merge;
+static bool check_corpus_deferred_fail_state;
+static bool check_corpus_deferred_hold_lanes;
+
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
     path->suppress_warnings = suppress_warnings;
@@ -636,9 +689,26 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                 type_initialize(&path->types, &path->types_arena, &path->index_arena, capacity);
         if (ready)
         {
-            path->adapted = path->parsed ? check_input(&path->input, view, pp, &path->types, &path->input_arena, &path->scratch) :
-                                          check_input_prefix(&path->input, view, pp, &path->types, &path->input_arena, &path->scratch);
-            path->resource = path->input.resource;
+            if (path->parsed && path->deferred_lanes != 0)
+            {
+                path->deferred_arena = arena_reserve(UINT64_C(1) << 24);
+                path->deferred = check_corpus_deferred_fail_state ? NULL : BUSTER_ARENA_PUSH_ARRAY(&path->deferred_arena, CheckDeferred, 1);
+                if (path->deferred != NULL)
+                {
+                    path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
+                    path->deferred->hold_lanes = check_corpus_deferred_hold_lanes;
+                }
+                path->adapted = path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
+                                                                                &path->scratch, path->deferred_lanes, path->deferred_bindings);
+                path->resource |= path->deferred == NULL;
+            }
+            else
+            {
+                path->adapted = path->parsed ? check_input(&path->input, view, pp, &path->types, &path->input_arena, &path->scratch) :
+                                              check_input_prefix(&path->input, view, pp, &path->types, &path->input_arena, &path->scratch);
+            }
+            // Or'd: until the input, only the deferred reader's state, if it couldn't be allocated, sets it.
+            path->resource |= path->input.resource;
             for (uint32_t report = 0; report < path->input.report_count; report += 1)
             {
                 if (path->input.reports[report].token < path->token)
@@ -1689,6 +1759,10 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     return equal;
 }
 
+
+
+
+
 static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* b, const Parser* x, const Parser* y)
 {
     bool equal = check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&
@@ -1716,6 +1790,212 @@ static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* 
     return equal;
 }
 
+// The first difference between two inputs' other token columns and graph nodes, in `text`: whether there is one.
+static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput* y, char* text, uint64_t capacity)
+{
+    const char* column = 0;
+    uint32_t index = 0;
+    for (uint32_t token = 0; column == 0 && token < x->token_count; token += 1)
+    {
+        column = x->function_flags[token] != y->function_flags[token] ? "function_flags" : x->static_objects[token] != y->static_objects[token] ? "static_objects" :
+                 x->registers[token] != y->registers[token] ? "registers" : x->thread_local[token] != y->thread_local[token] ? "thread_local" :
+                 x->compound_objects[token] != y->compound_objects[token] ? "compound_objects" :
+                 !check_corpus_attributes_equal(x->attributes[token], y->attributes[token]) ? "attributes" : x->tentative[token] != y->tentative[token] ? "tentative" :
+                 x->initializer_nodes[token] != y->initializer_nodes[token] ? "initializer_nodes" :
+                 x->initializer_begins[token] != y->initializer_begins[token] ? "initializer_begins" : x->initializer_ends[token] != y->initializer_ends[token] ? "initializer_ends" :
+                 x->body_declarations[token] != y->body_declarations[token] ? "body_declarations" : x->parameters[token] != y->parameters[token] ? "parameters" :
+                 x->parameter_next[token] != y->parameter_next[token] ? "parameter_next" : x->control_owners[token] != y->control_owners[token] ? "control_owners" :
+                 x->label_targets[token] != y->label_targets[token] ? "label_targets" : x->case_ranges[token] != y->case_ranges[token] ? "case_ranges" :
+                 x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : x->asm_ids[token] != y->asm_ids[token] ? "asm_ids" :
+                 x->constant_warnings[token] != y->constant_warnings[token] ? "constant_warnings" :
+                 x->constant_warning_ignored[token] != y->constant_warning_ignored[token] ? "constant_warning_ignored" : 0;
+        index = token;
+    }
+    const CheckGraph* g = &x->graph;
+    const CheckGraph* h = &y->graph;
+    for (uint32_t node = 0; column == 0 && node < g->count && node < h->count; node += 1)
+    {
+        column = g->ops[node] != h->ops[node] ? "graph ops" : g->tokens[node] != h->tokens[node] ? "graph tokens" : g->operand0[node] != h->operand0[node] ? "graph operand0" :
+                 g->operand1[node] != h->operand1[node] ? "graph operand1" : g->operand2[node] != h->operand2[node] ? "graph operand2" :
+                 g->types[node] != h->types[node] ? "graph types" : g->members[node] != h->members[node] ? "graph members" :
+                 g->contexts[node] != h->contexts[node] ? "graph contexts" : g->argument_offsets[node] != h->argument_offsets[node] ? "graph argument_offsets" :
+                 g->argument_counts[node] != h->argument_counts[node] ? "graph argument_counts" :
+                 g->ops[node] == CHECK_OP_VALUE && !check_test_value_equal(g->leaves + node, h->leaves + node) ? "graph leaves" : 0;
+        index = node;
+    }
+    if (column == 0 && (g->argument_count != h->argument_count || g->varargs_count != h->varargs_count || g->builtin_count != h->builtin_count ||
+                        g->vector_member_count != h->vector_member_count || g->x86_count != h->x86_count || g->region_proof_count != h->region_proof_count ||
+                        g->region_step_count != h->region_step_count || g->tag_completion_count != h->tag_completion_count))
+    {
+        column = "graph side tables' counts";
+    }
+    for (uint32_t tag = 0; column == 0 && tag < g->tag_completion_count; tag += 1)
+    {
+        column = g->tag_completions[tag] != h->tag_completions[tag] ? "graph tag_completions" : 0;
+        index = tag;
+    }
+    for (uint32_t i = 0; column == 0 && i < x->region_count; i += 1)
+    {
+        column = memcmp(x->regions + i, y->regions + i, sizeof(CheckInputRegion)) != 0 ? "regions" : 0;
+        index = i;
+    }
+    for (uint32_t i = 0; column == 0 && i < x->vla_count; i += 1)
+    {
+        column = memcmp(x->vlas + i, y->vlas + i, sizeof(CheckInputVla)) != 0 ? "vlas" : 0;
+        index = i;
+    }
+    for (uint32_t i = 0; column == 0 && i < x->string_count; i += 1)
+    {
+        column = x->strings[i].token != y->strings[i].token || x->strings[i].type != y->strings[i].type ? "strings" : 0;
+        index = i;
+    }
+    if (column != 0)
+    {
+        snprintf(text, capacity, "%s at %u", column, index);
+    }
+    return column != 0;
+}
+
+// Where the deferred path (b) first differs from the vector path (a), for --deferred's report: the table, the bindings'
+// stream, the environment, the appended tables, a token's column, the graph or the later stages. A path that made no
+// input of the other's tokens (its state or tables not allocated) has no columns to compare: its stages say why.
+static void check_corpus_deferred_difference(const CheckCorpusPath* a, const CheckCorpusPath* b, char* text, uint64_t capacity)
+{
+    const CheckInput* x = &a->input;
+    const CheckInput* y = &b->input;
+    const TypeTable* s = &a->types;
+    const TypeTable* t = &b->types;
+    const bool comparable = x->token_count == y->token_count && x->declarations != NULL && y->declarations != NULL;
+    snprintf(text, capacity, "nothing found (the paths' outcomes or another column)");
+    fprintf(stderr, "  stages: adapted %u %u, checked %u %u, initialized %u %u, programmed %u %u, resource %u %u, reports %u %u (first %u %u), token %u %u\n",
+            a->adapted, b->adapted, a->checked, b->checked, a->initialized, b->initialized, a->programmed, b->programmed, a->resource, b->resource,
+            x->report_count, y->report_count, x->report_count != 0 ? x->reports[0].token : 0, y->report_count != 0 ? y->reports[0].token : 0, a->token, b->token);
+    uint32_t type = 0;
+    while (type < s->types.count && type < t->types.count && s->types.kind[type] == t->types.kind[type] && s->types.base[type] == t->types.base[type] &&
+           s->types.extent[type] == t->types.extent[type] && s->types.flags[type] == t->types.flags[type] && s->types.size[type] == t->types.size[type] &&
+           s->types.index[type] == t->types.index[type])
+    {
+        type += 1;
+    }
+    uint32_t token = 0;
+    while (comparable && token < x->token_count && x->declarations[token] == y->declarations[token] && x->declared_types[token] == y->declared_types[token] &&
+           x->objects[token] == y->objects[token] && x->declaration_bodies[token] == y->declaration_bodies[token] && x->token_nodes[token] == y->token_nodes[token] &&
+           x->declaration_kinds[token] == y->declaration_kinds[token] && x->linkage[token] == y->linkage[token] && x->defined[token] == y->defined[token])
+    {
+        token += 1;
+    }
+    if (!comparable)
+    {
+        snprintf(text, capacity, "the deferred path made no input of %u tokens to compare (%u tokens; its stages above)", x->token_count, y->token_count);
+    }
+    else if (type < s->types.count || s->types.count != t->types.count)
+    {
+        snprintf(text, capacity, "types: %u against %u, the first difference at index %u (kind %u against %u, base %#x against %#x)", s->types.count, t->types.count,
+                 type, type < s->types.count ? s->types.kind[type] : 0, type < t->types.count ? t->types.kind[type] : 0, type < s->types.count ? s->types.base[type] : 0,
+                 type < t->types.count ? t->types.base[type] : 0);
+        for (uint32_t i = type > 8 ? type - 8 : 0; i < s->types.count || i < t->types.count; i += 1)
+        {
+            fprintf(stderr, "  type %u: %u/%#x/%llu against %u/%#x/%llu\n", i, i < s->types.count ? s->types.kind[i] : 0, i < s->types.count ? s->types.base[i] : 0,
+                    (unsigned long long)(i < s->types.count ? s->types.extent[i] : 0), i < t->types.count ? t->types.kind[i] : 0,
+                    i < t->types.count ? t->types.base[i] : 0, (unsigned long long)(i < t->types.count ? t->types.extent[i] : 0));
+        }
+    }
+    else if (!check_corpus_types_equal(s, t))
+    {
+        snprintf(text, capacity, "types: tags, members, parameters or last_error (tags %u against %u, completions %u against %u, last_error %u against %u)",
+                 s->tags.count, t->tags.count, s->tags.completions, t->tags.completions, s->last_error, t->last_error);
+    }
+    else if (x->binding_event_count != y->binding_event_count || x->string_count != y->string_count || x->vla_count != y->vla_count || x->asm_count != y->asm_count ||
+             x->region_count != y->region_count || x->report_count != y->report_count || x->diagnostic_graph != y->diagnostic_graph ||
+             x->parser_binding_event_count != y->parser_binding_event_count || x->intrinsic_declaration_count != y->intrinsic_declaration_count ||
+             x->intrinsic_call_count != y->intrinsic_call_count || (x->intrinsic_ids == NULL) != (y->intrinsic_ids == NULL) ||
+             (x->deferred_tokens == NULL) != (y->deferred_tokens == NULL) || (x->overload_heads == NULL) != (y->overload_heads == NULL) ||
+             (x->explicit_abis == NULL) != (y->explicit_abis == NULL))
+    {
+        snprintf(text, capacity, "counts: events %u against %u, strings %u against %u, regions %u against %u, VLAs %u against %u, asm %u against %u, reports %u "
+                 "against %u, intrinsics %u/%u against %u/%u, tables %u%u%u%u against %u%u%u%u", x->binding_event_count, y->binding_event_count, x->string_count,
+                 y->string_count, x->region_count, y->region_count, x->vla_count, y->vla_count, x->asm_count, y->asm_count, x->report_count, y->report_count,
+                 x->intrinsic_declaration_count, x->intrinsic_call_count, y->intrinsic_declaration_count, y->intrinsic_call_count, x->intrinsic_ids != NULL,
+                 x->deferred_tokens != NULL, x->overload_heads != NULL, x->explicit_abis != NULL, y->intrinsic_ids != NULL, y->deferred_tokens != NULL,
+                 y->overload_heads != NULL, y->explicit_abis != NULL);
+    }
+    else if (token < x->token_count)
+    {
+        snprintf(text, capacity, "token %u: declaration %u against %u, type %#x against %#x, object %u against %u, body %u against %u, node %u against %u",
+                 token, x->declarations[token], y->declarations[token], x->declared_types[token], y->declared_types[token], x->objects[token], y->objects[token],
+                 x->declaration_bodies[token], y->declaration_bodies[token], x->token_nodes[token], y->token_nodes[token]);
+    }
+    else if (!check_corpus_environments_equal(&x->environment, &y->environment))
+    {
+        const CBindings* e = x->environment.bindings;
+        const CBindings* f = y->environment.bindings;
+        uint32_t event = 0;
+        while (e != 0 && f != 0 && event < e->count && event < f->count && e->operation[event] == f->operation[event] &&
+               e->declaration[event] == f->declaration[event] && e->point[event] == f->point[event] &&
+               (e->operation[event] == C_BINDING_RESTORE || (e->key[event] == f->key[event] && e->end[event] == f->end[event] &&
+                                                             e->depth[event] == f->depth[event] && e->kind[event] == f->kind[event])))
+        {
+            event += 1;
+        }
+        const bool listed = e != 0 && f != 0 && event < e->count && event < f->count;
+        uint32_t key = 0;
+        while (key <= x->environment.file.keys && key <= y->environment.file.keys && x->environment.file.offsets[key] == y->environment.file.offsets[key])
+        {
+            key += 1;
+        }
+        uint32_t entry = 0;
+        while (entry < x->environment.file.count && entry < y->environment.file.count && x->environment.file.points[entry] == y->environment.file.points[entry] &&
+               x->environment.file.handles[entry] == y->environment.file.handles[entry])
+        {
+            entry += 1;
+        }
+        uint32_t tag = 0;
+        while (tag < x->environment.tag_count && tag < y->environment.tag_count && x->environment.tag_completions[tag] == y->environment.tag_completions[tag])
+        {
+            tag += 1;
+        }
+        uint32_t declaration = 0;
+        while (declaration < x->environment.token_count && declaration < y->environment.token_count &&
+               x->environment.declaration_types[declaration] == y->environment.declaration_types[declaration])
+        {
+            declaration += 1;
+        }
+        fprintf(stderr, "environment: valid %u %u, bodies %u %u, file keys %u %u (first offset difference %u), file count %u %u (first entry difference %u: "
+                "point %u %u handle %u %u), first tag difference %u (%u against %u), first declaration type difference %u of %u\n",
+                x->environment.valid, y->environment.valid, x->environment.body_count, y->environment.body_count, x->environment.file.keys, y->environment.file.keys,
+                key, x->environment.file.count, y->environment.file.count, entry,
+                entry < x->environment.file.count ? x->environment.file.points[entry] : 0, entry < y->environment.file.count ? y->environment.file.points[entry] : 0,
+                entry < x->environment.file.count ? x->environment.file.handles[entry] : 0, entry < y->environment.file.count ? y->environment.file.handles[entry] : 0,
+                tag, tag < x->environment.tag_count ? x->environment.tag_completions[tag] : 0, tag < y->environment.tag_count ? y->environment.tag_completions[tag] : 0,
+                declaration, x->environment.token_count);
+        snprintf(text, capacity, "the environment: %u events against %u, event %u: operation %u against %u, declaration %u against %u, point %u against %u, "
+                 "key %u against %u, end %u against %u, depth %u against %u, tags %u against %u", e != 0 ? e->count : 0, f != 0 ? f->count : 0, event,
+                 listed ? e->operation[event] : 0, listed ? f->operation[event] : 0, listed ? e->declaration[event] : 0, listed ? f->declaration[event] : 0,
+                 listed ? e->point[event] : 0, listed ? f->point[event] : 0, listed ? e->key[event] : 0, listed ? f->key[event] : 0,
+                 listed ? e->end[event] : 0, listed ? f->end[event] : 0, listed ? e->depth[event] : 0, listed ? f->depth[event] : 0,
+                 x->environment.tag_count, y->environment.tag_count);
+    }
+    else if (x->graph.count != y->graph.count)
+    {
+        snprintf(text, capacity, "the graph: %u nodes against %u", x->graph.count, y->graph.count);
+    }
+    else if (check_corpus_deferred_columns(x, y, text, capacity))
+    {
+    }
+    else if (a->stream.count != b->stream.count || a->stream.status != b->stream.status)
+    {
+        snprintf(text, capacity, "the stream: %u entries against %u", a->stream.count, b->stream.count);
+    }
+    else if (!check_corpus_initializers_equal(&a->initializers, &b->initializers))
+    {
+        snprintf(text, capacity, "the initializers");
+    }
+    else if (!check_corpus_programs_equal(&a->program, &b->program))
+    {
+        snprintf(text, capacity, "the program");
+    }
+}
+
 // What one unit's check gave, kept after its arenas are released: path 0 is the scalar path, path 1 the vector one, and
 // the first error's place and message are the scalar path's.
 typedef struct CheckCorpusOutcome CheckCorpusOutcome;
@@ -1736,6 +2016,15 @@ struct CheckCorpusOutcome
     uint64_t vector_nodes;
     uint64_t binding_uses;
     uint64_t binding_fallback_uses;
+    // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, the lanes they ran
+    // on and those that copied its reader, and whether it gave the vector path's result exactly.
+    bool deferred;
+    bool deferred_equal;
+    uint64_t deferred_bodies;
+    uint32_t deferred_active;
+    uint64_t deferred_copies;
+    // Why a parsed unit was left to source order, for the report.
+    const char* deferred_reason;
     const char* phase;
     char file[512];
     char message[256];
@@ -1743,21 +2032,27 @@ struct CheckCorpusOutcome
 };
 
 // Preprocesses `file` and checks it on the scalar path and, when `both`, on the vector path too, which must give the
-// same results exactly (`equal`; true when the vector path doesn't run).
+// same results exactly (`equal`; true when the vector path doesn't run). With --deferred, a third path, the vector
+// path's with every body read apart (#113, check_input_deferred), must give the vector path's results exactly too.
 static void check_corpus_measure(const char* file, const PPOptions* options, bool suppress_warnings, bool both, CheckCorpusOutcome* outcome)
 {
     static InternTable identifiers;
     static Preprocessor pp;
-    static Parser parsers[2];
-    CheckCorpusPath paths[2] = { 0 };
+    static Parser parsers[3];
+    CheckCorpusPath paths[3] = { 0 };
     *outcome = (CheckCorpusOutcome){ 0 };
-    const uint32_t count = both ? 2 : 1;
+    const uint32_t count = both ? (check_corpus_deferred_lanes != 0 ? 3 : 2) : 1;
+    paths[2].deferred_lanes = check_corpus_deferred_lanes;
+    paths[2].deferred_bindings = check_corpus_deferred_bindings;
     bool prepared = intern_initialize(&identifiers) && pp_initialize(&pp, options, &identifiers);
     prepared = prepared && pp_run(&pp, file);
+    bool accepted[3] = { false, false, false };
     for (uint32_t path = 0; prepared && path < count; path += 1)
     {
-        outcome->accepted[path] = check_corpus_check_policy(paths + path, parsers + path, &pp, path == 0, suppress_warnings);
+        accepted[path] = check_corpus_check_policy(paths + path, parsers + path, &pp, path == 0, suppress_warnings);
     }
+    outcome->accepted[0] = accepted[0];
+    outcome->accepted[1] = accepted[1];
     outcome->prepared = prepared;
     outcome->parsed = paths[0].parsed;
     outcome->equal = prepared && (!both || check_corpus_equal(paths, paths + 1, parsers, parsers + 1));
@@ -1765,7 +2060,26 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     {
         check_corpus_symbols_file(check_corpus_symbols, file, paths + 1, parsers + 1, &pp);
     }
-    outcome->resource = paths[0].resource || paths[1].resource;
+    // The deferred path running out of room (its state's allocation among it) is a resource failure, not a result that
+    // differs from the vector path's.
+    const bool deferred_resource = count == 3 && paths[2].resource;
+    outcome->deferred_equal = count < 3 || deferred_resource || (accepted[2] == accepted[1] && check_corpus_equal(paths + 1, paths + 2, parsers + 1, parsers + 2));
+    if (!outcome->deferred_equal)
+    {
+        char difference[512];
+        check_corpus_deferred_difference(paths + 1, paths + 2, difference, sizeof(difference));
+        fprintf(stderr, "%s: the deferred reader's result differs: %s\n", file, difference);
+    }
+    outcome->deferred = count == 3 && paths[2].deferred != NULL && !paths[2].deferred->unsupported;
+    // A unit that doesn't parse has nothing to read apart; it counts as source order's too.
+    outcome->deferred_reason = count < 3 || !prepared || outcome->deferred ? NULL : !paths[2].parsed ? check_corpus_unparsed :
+                               paths[2].deferred == NULL ? "the deferred path's state or tables couldn't be allocated" :
+                               paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown";
+    outcome->deferred_bodies = outcome->deferred ? paths[2].deferred->bodies : 0;
+    outcome->deferred_active = outcome->deferred ? paths[2].deferred->active : 0;
+    outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
+    outcome->equal &= outcome->deferred_equal;
+    outcome->resource = paths[0].resource || paths[1].resource || deferred_resource;
     outcome->accepted[1] = both ? outcome->accepted[1] : outcome->accepted[0];
     outcome->lines[0] = paths[0].line;
     outcome->lines[1] = both ? paths[1].line : paths[0].line;
@@ -1781,7 +2095,7 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     memcpy(outcome->file, paths[0].file, sizeof(outcome->file));
     memcpy(outcome->message, paths[0].message, sizeof(outcome->message));
     memcpy(outcome->spelling, paths[0].spelling, sizeof(outcome->spelling));
-    for (uint32_t path = 0; path < 2; path += 1)
+    for (uint32_t path = 0; path < 3; path += 1)
     {
         check_corpus_close(paths + path);
         parse_release(parsers + path);
@@ -1812,6 +2126,14 @@ static void check_corpus_tally_add(CheckCorpusTally* to, const CheckCorpusTally*
     to->vector_nodes += from->vector_nodes;
     to->binding_uses += from->binding_uses;
     to->binding_fallback_uses += from->binding_fallback_uses;
+    to->deferred_units += from->deferred_units;
+    to->deferred_source_order += from->deferred_source_order;
+    to->deferred_bodies += from->deferred_bodies;
+    to->deferred_differences += from->deferred_differences;
+    for (uint32_t i = 0; i < from->deferred_reason_count; i += 1)
+    {
+        check_corpus_tally_reason(to, from->deferred_reasons[i], from->deferred_reason_units[i]);
+    }
     to->reports += from->reports;
 }
 
@@ -1843,6 +2165,14 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
     tally->vector_nodes += outcome.vector_nodes;
     tally->binding_uses += outcome.binding_uses;
     tally->binding_fallback_uses += outcome.binding_fallback_uses;
+    tally->deferred_units += outcome.deferred;
+    tally->deferred_source_order += prepared && check_corpus_deferred_lanes != 0 && !outcome.deferred;
+    tally->deferred_bodies += outcome.deferred_bodies;
+    tally->deferred_differences += prepared && !outcome.deferred_equal;
+    if (outcome.deferred_reason != NULL)
+    {
+        check_corpus_tally_reason(tally, outcome.deferred_reason, 1);
+    }
     const bool different = !acceptance || !line || !diagnostic_path || !equal || resource;
     if (report != 0)
     {
@@ -1862,11 +2192,16 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
         fprintf(report, "\t%u", diagnostic_path);
         fputc('\n', report);
     }
+    if (outcome.deferred_reason != NULL && outcome.deferred_reason != check_corpus_unparsed && tally->reports < report_limit)
+    {
+        fprintf(stderr, "%s: deferred reading left to source order: %s\n", label, outcome.deferred_reason);
+        tally->reports += 1;
+    }
     if (different && tally->reports < report_limit)
     {
-        fprintf(stderr, "%s: clang=%s:%u checker=%s:%u paths=%s phase=%s token=%u spelling=\"%s\" at %s:%u:%u: %s\n", label,
+        fprintf(stderr, "%s: clang=%s:%u checker=%s:%u paths=%s%s phase=%s token=%u spelling=\"%s\" at %s:%u:%u: %s\n", label,
                 oracle->rejected ? "reject" : "accept", oracle->line, outcome.accepted[0] ? "accept" : "reject", outcome.lines[0],
-                equal ? "equal" : "DIFFERENT", outcome.phase, outcome.token, outcome.spelling,
+                equal ? "equal" : "DIFFERENT", outcome.deferred_equal ? "" : " (deferred)", outcome.phase, outcome.token, outcome.spelling,
                 outcome.file, outcome.lines[0], outcome.column, outcome.message);
         tally->reports += 1;
     }
@@ -2349,6 +2684,8 @@ static int run_checker_corpus(int count, char** arguments)
     uint64_t minimize = 4;
     uint64_t seed = 133;
     bool keep = false;
+    uint64_t deferred_lanes = 0;
+    CheckInputBindingMode deferred_bindings = CHECK_INPUT_BINDINGS_DEFAULT;
     bool minimize_mutants = false;
     bool rejections = false;
     bool symbols_requested = false;
@@ -2381,7 +2718,8 @@ static int run_checker_corpus(int count, char** arguments)
                            strcmp(argument, "--select-accepted") == 0 || strcmp(argument, "--semantic-rejections") == 0 ||
                            strcmp(argument, "--root") == 0 || strcmp(argument, "--reports") == 0 || strcmp(argument, "--limit") == 0 ||
                            strcmp(argument, "--random") == 0 || strcmp(argument, "--mutations") == 0 || strcmp(argument, "--semantic-mutations") == 0 ||
-                           strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0 || strcmp(argument, "--symbols-minimum") == 0;
+                           strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0 || strcmp(argument, "--deferred") == 0 ||
+                           strcmp(argument, "--deferred-bindings") == 0 || strcmp(argument, "--symbols-minimum") == 0;
         if (value)
         {
             valid = i + 1 < count;
@@ -2410,11 +2748,18 @@ static int run_checker_corpus(int count, char** arguments)
                 {
                     root = text;
                 }
+                else if (strcmp(argument, "--deferred-bindings") == 0)
+                {
+                    deferred_bindings = strcmp(text, "stacks") == 0 ? CHECK_INPUT_BINDINGS_STACKS : strcmp(text, "batch") == 0 ? CHECK_INPUT_BINDINGS_BATCH :
+                                        strcmp(text, "direct") == 0 ? CHECK_INPUT_BINDINGS_DIRECT : CHECK_INPUT_BINDINGS_DEFAULT;
+                    valid = deferred_bindings != CHECK_INPUT_BINDINGS_DEFAULT;
+                }
                 else
                 {
                     uint64_t* destination = strcmp(argument, "--limit") == 0 ? &limit : strcmp(argument, "--random") == 0 ? &random_count :
                                             strcmp(argument, "--mutations") == 0 ? &mutation_count : strcmp(argument, "--semantic-mutations") == 0 ? &semantic_count :
                                             strcmp(argument, "--seed") == 0 ? &seed : strcmp(argument, "--minimize") == 0 ? &minimize :
+                                            strcmp(argument, "--deferred") == 0 ? &deferred_lanes :
                                             strcmp(argument, "--symbols-minimum") == 0 ? &symbols_minimum : &report_limit;
                     valid = check_corpus_number(text, destination);
                     // A floor on the files compared asks for the comparison.
@@ -2608,8 +2953,11 @@ static int run_checker_corpus(int count, char** arguments)
                " seed=%" PRIu64 " standard=%s oracle=%s selection=%s\n", file_count, selected, random_count, mutation_count, semantic_count, seed, standard + 5, clang,
                rejections ? "preprocessed-semantic-rejections" : selection != NULL ? "syntax-accepted" : "all");
         fflush(stdout);
+        check_corpus_deferred_lanes = deferred_lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES ? (uint32_t)deferred_lanes : 0;
+        check_corpus_deferred_bindings = deferred_bindings;
         check_corpus_symbols = symbols_requested ? &symbols : NULL;
-        valid = check_corpus_files(&tally, files, selected, &options, clang, clang_arguments, clang_count, report, selection, rejections, report_limit,
+        valid = deferred_lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES &&
+                check_corpus_files(&tally, files, selected, &options, clang, clang_arguments, clang_count, report, selection, rejections, report_limit,
                                    bases);
         check_corpus_symbols = NULL;
         valid = valid && check_corpus_generated(&tally, files, selected, random_count, seed, 0, directory, keep, &options, clang,
@@ -2622,7 +2970,7 @@ static int run_checker_corpus(int count, char** arguments)
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
+        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--deferred LANES [--deferred-bindings stacks|batch|direct]] [--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
                 "       test-checker-corpus [--clang PATH] --minimize-mutant FILE... [preprocessor options]\n");
     }
     if (report != 0)
@@ -2666,6 +3014,15 @@ static int run_checker_corpus(int count, char** arguments)
         printf("checker-corpus: semantic units=%" PRIu64 " base_differences=%" PRIu64 " unusable=%" PRIu64 " mutants=%" PRIu64 " differences=%" PRIu64
                " intended=%" PRIu64 " minimized=%" PRIu64 " saved=%" PRIu64 "\n", mutations.units, mutations.base_differences, mutations.unusable,
                mutations.mutants, mutations.differences, mutations.intended, mutations.minimized, mutations.saved);
+    }
+    if (deferred_lanes != 0)
+    {
+        printf("checker-corpus: deferred lanes=%" PRIu64 " units=%" PRIu64 " source_order=%" PRIu64 " bodies=%" PRIu64 " differences=%" PRIu64 "\n", deferred_lanes,
+               tally.deferred_units, tally.deferred_source_order, tally.deferred_bodies, tally.deferred_differences);
+        for (uint32_t i = 0; i < tally.deferred_reason_count; i += 1)
+        {
+            printf("checker-corpus: deferred source_order=%" PRIu64 " reason=\"%s\"\n", tally.deferred_reason_units[i], tally.deferred_reasons[i]);
+        }
     }
     if (symbols_requested)
     {

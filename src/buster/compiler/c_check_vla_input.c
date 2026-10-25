@@ -263,11 +263,20 @@ static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first
 
 static void check_input_vla_parameters(CheckInputReader* reader, uint32_t body)
 {
-    for (uint32_t i = 0; i < reader->output->vla_count; i += 1)
+    // The body's parameters are the only declarations whose body the walk has set to this one here. Reading no token
+    // outside their range keeps a body read on a lane (#113) from reading what another lane's body writes.
+    uint32_t first = BUSTER_CHECK_NONE;
+    uint32_t last = 0;
+    for (uint32_t p = reader->parameters[body]; p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
+    {
+        first = p < first ? p : first;
+        last = p > last ? p : last;
+    }
+    for (uint32_t i = 0; first != BUSTER_CHECK_NONE && i < reader->output->vla_count; i += 1)
     {
         CheckInputVla* vla = &reader->output->vlas[i];
         const uint32_t declaration = vla->declaration;
-        if (declaration < reader->parser->tokens.count && reader->output->declaration_bodies[declaration] == body)
+        if (declaration >= first && declaration <= last && reader->output->declaration_bodies[declaration] == body)
         {
             vla->body = body;
             vla->scope_begin = body;
