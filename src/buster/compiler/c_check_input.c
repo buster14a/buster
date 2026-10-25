@@ -298,7 +298,8 @@ struct CheckInputReader
     uint32_t* parameter_previous;
     uint8_t* parameter_shapes;
     // The tags a definition's parameter list declared, which its body declares again: the first at the body's
-    // opening, and each one's next at its declaration token.
+    // opening (written with output->body_declarations there, which says whether it was), and each one's next at its
+    // declaration token.
     uint32_t* parameter_tags;
     uint32_t* parameter_tag_next;
     uint32_t* member_seen;
@@ -2648,7 +2649,8 @@ static void check_input_resolve(CheckInputReader* reader)
                 reader->function_body = i;
                 // The tags the parameter list declared are in the body's scope too, as its parameters are (C11
                 // 6.2.1p4): declared again in it, with their declarations' tokens, as clang does.
-                for (uint32_t tag = reader->parameter_tags[i]; tag != BUSTER_CHECK_NONE; tag = reader->parameter_tag_next[tag])
+                const uint32_t first_tag = reader->output->body_declarations[i] != BUSTER_CHECK_NONE ? reader->parameter_tags[i] : BUSTER_CHECK_NONE;
+                for (uint32_t tag = first_tag; tag != BUSTER_CHECK_NONE; tag = reader->parameter_tag_next[tag])
                 {
                     if (c_bindings_declare(&reader->bindings, C_BINDING_TAG, parser->tokens.names[tag], C_BINDING_TAG_KIND, tag, i, reader->scope_count) == 0)
                     {
@@ -4080,7 +4082,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             reader.selected_tokens[i] = BUSTER_CHECK_NONE;
             reader.activate[i] = BUSTER_CHECK_NONE;
             reader.parameters[i] = BUSTER_CHECK_NONE;
-            reader.parameter_tags[i] = BUSTER_CHECK_NONE;
             reader.first_child[i] = BUSTER_CHECK_NONE;
             reader.next_child[i] = BUSTER_CHECK_NONE;
             reader.first_value[i] = BUSTER_CHECK_NONE;
