@@ -215,9 +215,9 @@ has the method and the logs), in nanoseconds per token:
 
 The position checks cost 3.25 ns/token on one lane, 877 to 884 ns a body: 24%
 of the parse and 3.1% of source order's reading. On eight lanes the bodies take
-6.3 ns/token of span, and the reader comes within 2% of source order: what is
-left is sequential, the top level, the merge and the phases after it, 101 of its
-108 ns/token. Before the lanes' arenas took base pages and their indexes room
+6.3 ns/token of span, and the reader comes to 2 to 3% above source order: what
+is left is sequential, the top level, the merge and the phases after it, 101 of
+its 108 ns/token. Before the lanes' arenas took base pages and their indexes room
 for the top level's types alone, eight lanes took 136 ns/token, and their walks
 64 in all: each lane's copies are columns with room for the largest body, and a
 huge page is cleared whole the first time any of it is touched.
