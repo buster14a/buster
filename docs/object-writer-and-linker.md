@@ -3921,6 +3921,21 @@ it. It writes every kind the direct path writes: static executables (with
   the loader (lld's `-z undefs`), and refuses an IFUNC that isn't preemptible
   (one the loader can't bind as a dynamic symbol), which would need an
   `IRELATIVE` relocation that the writer's shared mode doesn't write.
+- **DWARF (#395).** The selected objects' debug sections, which the importer
+  leaves out of the link, are built whole beside it (`foreign_debug.c`):
+  concatenated by name in input order, as GNU ld and lld concatenate them, but
+  without merging `.debug_str`'s strings, which lld does; each reference into a
+  debug section resolved in the conversion, each one to code or data left to
+  the writer, which patches the definitions' addresses after the layout
+  (`ExecutableOptions.debug_sections`), and lld's tombstones for discarded code.
+  zlib-compressed sections, which GNU as writes for `-g` by default, are
+  decompressed by `inflate.c`. Decompressing is most of the work: a DEFLATE
+  stream is a chain of dependent codes, so the lanes take whole streams, the
+  costliest first, while each relocation section's relocations go 8 at a time
+  with the exact pass as their twin. `-S` and `-s` skip it. SQLite's shell
+  compiled at `-g` links in 9.20 ms on one lane, 6.84 of them the DWARF's build,
+  against lld's 29.3 ms on one thread and 15.0 on eight and mold's 25.8 and
+  16.4 ([the record](https://github.com/buster14a/buster-performance/tree/cabd9313cbdf76b566c0d63ed990c15925d466cf/docs/measurements/foreign-dwarf-395-2026-10-25)).
 - **Staged chunks.** The atoms' bytes are the inputs' private mappings, so the
   writer copies each chunk into a lane's buffer and patches, hashes and writes
   the copy (`ExecutableOptions.stage`). Patched in place, each page of an input
@@ -4493,6 +4508,9 @@ Where the decisions stand:
 | Relaxing general- and local-dynamic TLS accesses | a compare and a copy per access | scalar, in the patch's path for the other kinds: the most a test program has is 47 accesses, whose five atoms' patching takes 0.89 µs of a 125 µs write |
 | Every executable's loads and calls through the GOT that relax (the count, and the patch) | which of a link's reads of slots may relax, and which targets need a slot | compares of 64 kinds and addends find the candidates, marked in a bitset of their own that the reduction ANDs with the relaxable symbols 64 at a time (those a symbols' pass finds 64 at a time from the source and type columns, or a PIE's RELATIVE bitset); each is rewritten in the patch's path for the other kinds, a byte or two (done: the count 2.01 against 2.40 ms with gathers of the bitset's words for 180,000 workers; "The static PIE" and "GOT relaxation in every executable") |
 | Ordering prioritized init and fini arrays | a few entries | scalar on lane 0, a stable radix sort: six entries take 0.24 µs of a 99.5 µs write |
+| Decompressing foreign objects' zlib debug sections (DEFLATE) | each code's table lookup, which waits for the one before: a stream is one chain | scalar within a stream, the streams over the lanes, costliest first; the fast loop keeps its state in registers, takes up to three literals per refill and leaves codes past 11 bits to a cold function (done: SQLite's shell at `-g`, the DWARF's build 6.84 against 9.68 ms on one lane; "Foreign executables, as built") |
+| Their Adler-32 | arithmetic | 64 bytes at a time, `vpsadbw` for the bytes' sums and `vpdpbusd` for the weighted ones, with the byte loop as the twin (done) |
+| Applying foreign debug relocations | each relocation's symbol, its section's place and the link's symbol | 8 at a time with one gather from a table of what each object's symbols mean, scatters for the fields and compresses for the writer's records, the exact pass for a batch with a rare relocation: four dependent gathers per batch were barely faster than the exact pass (1.30 against 1.41 ms), and plain stores in lane order lost to the scatters (done: 0.96 against 1.40 ms for SQLite's uncompressed DWARF) |
 
 So on the direct path, most of the output is produced by a vector kernel that
 already exists (the encoder), and what is left for the linker is load/store
