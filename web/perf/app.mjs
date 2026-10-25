@@ -174,10 +174,16 @@ function compare()
 async function loadTable(id, restore = false)
 {
     const generation = state.load, tableLoad = ++state.tableLoad, dataset = state.dataset;
+    state.table = null; state.rows = [];
+    for (const parent of ['chart', 'table-view', 'metric-info', 'row-details']) $(parent).replaceChildren();
+    $('row-count').textContent = 'Selected table is not yet verified';
     say('Verifying table partitions…');
-    const table = await dataset.table(id);
+    let table;
+    try { table = await dataset.table(id); }
+    catch (error) { if (generation === state.load && tableLoad === state.tableLoad) $('dataset-state').textContent = 'Selected resources unverified'; throw error; }
     if (generation !== state.load || tableLoad !== state.tableLoad) return;
     state.table = table;
+    $('dataset-state').textContent = `${dataset.manifest.kind} · ${dataset.manifest.status}`;
     const fields = table.fields.map(field => [field.name, field.name]);
     const metrics = measurements();
     if (!restore) $('view').value = metrics.length ? 'lines' : 'table';
@@ -216,9 +222,12 @@ async function loadDatasetSelection(id, restore = false)
     const entry = state.catalog.datasets.find(item => item.id === id);
     if (!entry) throw new Error('The linked dataset is not in this sealed generation');
     ++state.load; const generation = state.load;
-    state.worker?.terminate(); state.worker = null; state.profile = null; state.table = null;
+    state.worker?.terminate(); state.worker = null; state.profile = null; state.table = null; state.dataset = null;
     for (const promise of state.pending.values()) promise.reject(new Error('Dataset selection changed'));
     state.pending.clear(); $('profile-views').replaceChildren(); $('range-controls').hidden = true;
+    for (const parent of ['chart', 'table-view', 'metric-info', 'row-details', 'comparison', 'provenance']) $(parent).replaceChildren();
+    $('dataset-title').textContent = entry.name;
+    $('dataset-state').textContent = 'Unverified'; $('row-count').textContent = '';
     say('Verifying immutable manifest…');
     const dataset = await loadDataset({...entry, manifest: new URL(entry.manifest, location.href).href});
     if (generation !== state.load) return;
@@ -296,8 +305,13 @@ async function loadProfile(profile, restore = false)
 {
     const dataset = state.dataset, generation = state.load;
     const resource = dataset.resources.get(profile.resource);
+    state.worker?.terminate(); state.worker = null; state.profile = null;
+    for (const pending of state.pending.values()) pending.reject(new Error('Profile selection changed'));
+    state.pending.clear(); $('profile-views').replaceChildren(); $('range-controls').hidden = true;
     say(`Loading native trace (${Number(resource.bytes).toLocaleString()} bytes), then verifying its hash…`);
-    const bytes = await dataset.resource(profile.resource);
+    let bytes;
+    try { bytes = await dataset.resource(profile.resource); }
+    catch (error) { $('profile-views').append(element('p', {class: 'notice'}, 'Native resource verification failed. Download/local-open remains available; no profile totals are accepted.')); throw error; }
     if (dataset !== state.dataset || generation !== state.load) return;
     await startProfile(profile, bytes, resource.sha256, restore);
 }
