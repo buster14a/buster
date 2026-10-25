@@ -61,3 +61,22 @@ establishes resource/representation integrity; profile fidelity, statistical
 comparison eligibility, hardware qualification, and deployed browser behavior
 need their own evidence. It does not promote a synthetic or incomplete dataset
 to a qualified performance result.
+
+## Browser boundary
+
+The pinned Apache Arrow JavaScript 21.1.0 reader is served locally from
+`web/perf/vendor/arrow`, with its Apache-2.0 license and NOTICE. The browser
+needs BigInt, typed arrays, native JavaScript modules, TextDecoder, and Web
+Crypto in a secure context. No isolation headers or service worker is needed
+for these table readers. 64-bit values stay BigInt; decimals retain an exact
+unscaled integer and scale. JSON numeric tokens are captured lexically before
+physical small-integer/float conversion. Approximate plotting coordinates are
+computed only after subtracting exact origins; inspection and export retain
+the exact original values.
+
+`web/tests/reader.html` exercises the actual browser reader against the same
+three independent reference tables, including large values and Unicode/spaced
+field names. `web/tests/run.cjs` drives it using pinned Playwright 1.62.1.
+The performance workflow serves the test at `/buster/tests/` using the local
+C server, retaining the production subpath. Browser and native receipts belong
+in buster-performance; the source tree contains the checks themselves.

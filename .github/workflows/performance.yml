@@ -42,6 +42,23 @@ jobs:
           bash tools/performance/build.sh
           bash tools/performance/build.sh --tests
           build/performance/bmf-test build/evidence
+      - name: Install pinned browser test driver
+        run: |
+          npm install --prefix build/browser --no-save --package-lock=false playwright@1.62.1
+          node build/browser/node_modules/playwright/cli.js install --with-deps chromium --only-shell
+      - name: Exercise the actual browser Arrow reader
+        env:
+          NODE_PATH: build/browser/node_modules
+        run: |
+          set -euo pipefail
+          mkdir -p build/performance/reader-site/buster
+          cp -a web/perf web/tests build/performance/reader-site/buster/
+          cp -a build/evidence/docs/measurements/performance-format-2026-10-24 build/performance/reader-site/evidence
+          clang -std=c17 -O2 -Wall -Wextra -Werror tools/performance/serve.c -o build/performance/serve
+          build/performance/serve build/performance/reader-site 8765 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          node web/tests/run.cjs
       - name: Verify bounded validation under sanitizers
         env:
           BUSTER_PERFORMANCE_CFLAGS: -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
