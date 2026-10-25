@@ -2737,36 +2737,68 @@ static bool pp_window_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t e
     return result;
 }
 
-// Adds the line ends in bytes [begin, end) of a file to `*lines`, as pp_count_lines counts them but for a '\r' before
-// `end`, which a '\n' at `end` makes no line end of its own, and stores the count before each page boundary it reaches
-// (BUSTER_PP_LINE_PAGE_BYTES) in `pages` (PPFileData.line_pages), 64 bytes at a time. Each window's kept bytes in turn,
-// from the file's start, while they are in the caches (pp_prepare_windows); a 64-byte chunk two windows share is taken
-// in two parts.
+// The line ends in the 64-byte block at `base` of a file that lie in [begin, end), as pp_count_lines counts them but for a
+// '\r' at the block's end, which a '\n' first in the next block makes no line end of its own.
+BUSTER_INLINE uint32_t pp_count_block_lines(const PPFileData* data, uint64_t base, uint64_t begin, uint64_t end)
+{
+    const uint64_t available = data->length - base;
+    const __mmask64 file = _bzhi_u64(~0ull, available < 64 ? (uint32_t)available : 64);
+    const __m512i bytes = _mm512_maskz_loadu_epi8(file, data->bytes + base);
+    const uint64_t newlines = _mm512_mask_cmpeq_epi8_mask(file, bytes, _mm512_set1_epi8('\n'));
+    const uint64_t returns = _mm512_mask_cmpeq_epi8_mask(file, bytes, _mm512_set1_epi8('\r'));
+    // The block's bytes in [begin, end).
+    const uint32_t low = base < begin ? (uint32_t)(begin - base) : 0;
+    const uint32_t high = end - base < 64 ? (uint32_t)(end - base) : 64;
+    const uint64_t taken = _bzhi_u64(~0ull, high) & ~_bzhi_u64(~0ull, low);
+    uint64_t ends = newlines;
+    if (BUSTER_UNLIKELY(returns != 0))
+    {
+        // A '\r' ends a line unless a '\n' follows it, in the block or first in the next one.
+        const uint64_t next_newline = available > 64 && data->bytes[base + 64] == '\n';
+        ends |= returns & ~((newlines >> 1) | (next_newline << 63));
+    }
+    return (uint32_t)__builtin_popcountll(ends & taken);
+}
+
+// Adds the line ends in bytes [begin, end) of a file to `*lines`, as pp_count_block_lines counts them, and stores the
+// count before each page boundary it reaches (BUSTER_PP_LINE_PAGE_BYTES) in `pages` (PPFileData.line_pages). Each
+// window's kept bytes in turn, from the file's start, while they are in the caches (pp_prepare_windows). The whole
+// 64-byte blocks up to each page's end go by their '\n's alone, a few instructions each, and again a block at a time
+// (pp_count_block_lines) when one of them has a '\r'; so does a block two windows share, in two parts.
 static void pp_count_page_lines(const PPFileData* data, uint64_t begin, uint64_t end, uint32_t* pages, uint32_t* lines)
 {
     uint32_t count = *lines;
-    for (uint64_t base = begin & ~63ull; base < end; base += 64)
+    const uint64_t whole_end = end & ~63ull;
+    uint64_t base = begin & ~63ull;
+    while (base < end)
     {
-        const uint64_t available = data->length - base;
-        const __mmask64 file = _bzhi_u64(~0ull, available < 64 ? (uint32_t)available : 64);
-        const __m512i bytes = _mm512_maskz_loadu_epi8(file, data->bytes + base);
-        const uint64_t newlines = _mm512_mask_cmpeq_epi8_mask(file, bytes, _mm512_set1_epi8('\n'));
-        const uint64_t returns = _mm512_mask_cmpeq_epi8_mask(file, bytes, _mm512_set1_epi8('\r'));
-        // The chunk's bytes in [begin, end).
-        const uint32_t low = base < begin ? (uint32_t)(begin - base) : 0;
-        const uint32_t high = end - base < 64 ? (uint32_t)(end - base) : 64;
-        const uint64_t taken = _bzhi_u64(~0ull, high) & ~_bzhi_u64(~0ull, low);
-        uint64_t ends = newlines;
-        if (BUSTER_UNLIKELY(returns != 0))
+        const uint64_t page_end = (base / BUSTER_PP_LINE_PAGE_BYTES + 1) * BUSTER_PP_LINE_PAGE_BYTES;
+        const uint64_t stop = base >= begin && base < whole_end ? (page_end < whole_end ? page_end : whole_end) : base;
+        if (stop > base)
         {
-            // A '\r' ends a line unless a '\n' follows it, in the chunk or first in the next one.
-            const uint64_t next_newline = available > 64 && data->bytes[base + 64] == '\n';
-            ends |= returns & ~((newlines >> 1) | (next_newline << 63));
+            uint32_t newlines = 0;
+            uint64_t returns = 0;
+            for (uint64_t b = base; b < stop; b += 64)
+            {
+                const __m512i bytes = _mm512_loadu_si512(data->bytes + b);
+                newlines += (uint32_t)__builtin_popcountll(_mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n')));
+                returns |= _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r'));
+            }
+            for (uint64_t b = base; BUSTER_UNLIKELY(returns != 0) && b < stop; b += 64)
+            {
+                count += pp_count_block_lines(data, b, b, b + 64);
+            }
+            count += returns == 0 ? newlines : 0;
+            base = stop;
         }
-        count += (uint32_t)__builtin_popcountll(ends & taken);
-        if ((base + 64) % BUSTER_PP_LINE_PAGE_BYTES == 0 && base + 64 <= end)
+        else
         {
-            pages[(base + 64) / BUSTER_PP_LINE_PAGE_BYTES] = count;
+            count += pp_count_block_lines(data, base, begin, end);
+            base += 64;
+        }
+        if (base % BUSTER_PP_LINE_PAGE_BYTES == 0 && base <= end)
+        {
+            pages[base / BUSTER_PP_LINE_PAGE_BYTES] = count;
         }
     }
     *lines = count;
