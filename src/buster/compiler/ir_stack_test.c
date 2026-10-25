@@ -540,6 +540,74 @@ static void ir_stack_test_zero_alias(IrLowerTestTally* tally, Arena* output, Are
     arena_pop_to(twin, twin_mark);
 }
 
+static void ir_stack_test_class_boundary(IrLowerTestTally* tally, Arena* output, Arena* twin, Arena* scratch, Arena* execution)
+{
+    uint8_t kinds[] = {
+        BUSTER_TYPED_STACK_SAVE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ALLOCA,
+        BUSTER_TYPED_DISCARD,
+        BUSTER_TYPED_STACK_RESTORE,
+        BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_DISCARD,
+        BUSTER_TYPED_RETURN,
+    };
+    uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_F80,
+        BUSTER_TYPED_CLASS_VOID,
+    };
+    const uint64_t values[] = { 0, 16, 0, 0, 0, 0, 0, 0 };
+    const uint64_t constants[] = { UINT64_C(0x8000000000000000), 0x3fff };
+    Tier0Function source = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = 6,
+    };
+    const uint64_t output_mark = output->length;
+    const uint64_t twin_mark = twin->length;
+    const uint64_t scratch_mark = scratch->length;
+    const InterpreterOptions options = ir_stack_test_limits();
+    InterpreterResult result = interpreter_test_run(&source, execution, &options);
+    ir_lower_test_expect(tally, result.status == INTERPRETER_OK, "dynamic kinds pass the typed dispatch gate", result.status, result.entry);
+    IrFunction function = { 0 };
+    if (ir_lower_test_lower(tally, &source, IR_VOID, 1, output, twin, scratch, &function, 131, 3))
+    {
+        ir_stack_test_execute(tally, &function, 0, 0, INTERPRETER_OK, execution);
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(twin, twin_mark);
+    // This is valid Tier0 metadata, rather than a malformed F80 constant declined before the dispatch boundary.
+    kinds[5] = BUSTER_TYPED_CONST;
+    classes[5] = BUSTER_TYPED_CLASS_F80;
+    source.count = sizeof(kinds);
+    source.x87 = true;
+    source.x87_constants = constants;
+    source.x87_constant_count = 1;
+    const Tier0Check valid = tier0_validate(&source);
+    ir_lower_test_expect(tally, valid.error == TIER0_OK, "F80 boundary fixture is valid Tier0", valid.error, valid.node);
+    const uint64_t execution_mark = execution->length;
+    result = interpreter_test_run(&source, execution, &options);
+    ir_lower_test_expect(tally, result.status == INTERPRETER_INVALID && result.entry == 5 && execution->length == execution_mark, "F80 declined after dynamic effects with arena cleanup", result.status, result.entry);
+    arena_push(output, 24, 1);
+    arena_push(scratch, 40, 1);
+    for (uint32_t vector = 0; vector < 2; vector += 1)
+    {
+        IrFunction declined = { .instruction_count = 123 };
+        const IrFunction preserved = declined;
+        const IrCheck check = ir_lower_typed_path(&source, IR_VOID, 1, output, scratch, &declined, vector != 0);
+        ir_lower_test_expect(tally, check.error == IR_ERROR_TYPE && check.instruction == 5 && output->length == output_mark + 24 && scratch->length == scratch_mark + 40 && memcmp(&declined, &preserved, sizeof(declined)) == 0, "F80 lowering boundary preserves both arena marks and result", vector, check.error);
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+}
+
 static void ir_lower_test_stack(IrLowerTestTally* tally)
 {
     ir_stack_test_memory(tally);
@@ -686,6 +754,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
     ir_stack_test_joins(tally, &output, &twin, &scratch, &execution);
     ir_stack_test_faults(tally, &output, &twin, &scratch, &execution);
     ir_stack_test_zero_alias(tally, &output, &twin, &scratch, &execution);
+    ir_stack_test_class_boundary(tally, &output, &twin, &scratch, &execution);
     if (ir_stack_test_parse(tally, ir_stack_test_loop, &output, &scratch, &function))
     {
         ir_stack_test_execute(tally, &function, 0, 0, INTERPRETER_OK, &execution);

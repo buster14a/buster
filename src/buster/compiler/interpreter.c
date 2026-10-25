@@ -533,7 +533,7 @@ static uint16_t interpreter_typed_ir_type(uint32_t class)
         IR_I64,
         IR_F32,
         IR_F64,
-        // Long double (F80), which neither this interpreter nor the IR has.
+        // Typed long double has no execution model here.
         IR_VOID,
     };
     const uint16_t result = types[class];

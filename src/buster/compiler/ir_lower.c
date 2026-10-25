@@ -632,8 +632,8 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
         }
         else if (input->classes[i] == BUSTER_TYPED_CLASS_F80)
         {
-            // A long double (#136), which this adapter doesn't lower yet: Tier 0 keeps its values in frame slots of its
-            // own, and the IR has no x87 type. Every one of them is an entry's value, a conversion's operand among them.
+            // Typed long double (#136) isn't lowered by this adapter. Tier0 keeps its values in frame slots of its
+            // own; every such value has an entry of class F80, including a conversion's operand.
             check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }
