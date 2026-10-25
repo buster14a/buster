@@ -258,6 +258,12 @@ static bool x86_target_test_gas(const char* directory)
                 // This oracle checks canonical forms. Optional FS/GS prefixes have no separate ISA requirement,
                 // and GAS warns when one has no effect (LEA). Flagged records are covered by the raw-form tests.
                 instruction.form = (uint16_t)form;
+                // The printer spells absolute memory with DS even without a form override. LEA ignores that
+                // segment too; use a RIP-relative operand with the same ISA requirement for the control.
+                if ((form == X86_FORM_LEA_R16_M || form == X86_FORM_LEA_R32_M || form == X86_FORM_LEA_R64_M) && instruction.mode == BUSTER_X86_MEMORY_ABSOLUTE)
+                {
+                    instruction.mode = BUSTER_X86_MEMORY_RIP;
+                }
                 passed &= x86_validate(&instruction, 1) == 1;
                 x86_print_instruction(file, &instruction, 0);
                 fputc('\n', file);
