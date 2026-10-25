@@ -305,5 +305,21 @@ A program that skips nothing costs the same either way, so the selection's own
 work is in the noise. These are small units: the measurement that matters,
 `main.c`'s, waits on the two items above.
 
+That comparison is within one tree. Against main, on the same work, a harness of
+`benchmark-lowering-source` reduced to the driver's selection
+(`check_program_select`, which both trees have) was compiled into main at
+`5863eeda` and into this work, and timed c-testsuite's 219 programs in
+alternating rounds on the 9700X, each run under the lock and pinned to CPU 2
+([the record](https://github.com/buster14a/buster-performance/tree/34d55c24d9d74f452c51c9919bca6d48c0316220/docs/measurements/lowering-emit-418-2026-10-25)).
+The first version of this work took 4.1 to 5.1% longer than main, round by
+round: its emitter built a table of every symbol's name, and added the source's
+names in a pass of their own, in every unit, so that no name it makes is one of
+them. Most units make none, and now only a unit that makes a name builds the
+table; that took 0.8 to 1.9% longer than main (a median of 1,673,043 ns over the
+219 programs against main's 1,653,603), with the same objects as before. The
+rest is in this work's other changes on that path, which the runs don't tell
+apart: the edges from a body to its block-scope statics, and the scan for a made
+name.
+
 [The planner's qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-lowering-2026-10-23/README.md)
 retains the planner's original synthetic measurements.
