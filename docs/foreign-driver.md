@@ -242,7 +242,10 @@ before, as GNU ld and lld concatenate them. `.debug_str`'s and
 larger, and only their offsets differ from lld's. A section of a COMDAT group
 the resolution discarded goes with its group, and an excluded one
 (`SHF_EXCLUDE`) is left out, as GNU ld and lld leave it out of a final link.
-An empty one keeps its place, which a reference into it takes.
+An empty one keeps its place, which a reference into it takes. Each output
+section has its contributions' largest alignment (a compressed one's
+`ch_addralign`), in the file and in its `sh_addralign`, as GNU ld and lld
+align it.
 
 Each debug relocation is applied where the layout doesn't decide it and left
 to the writer where it does:
@@ -263,7 +266,11 @@ to the writer where it does:
 Relocation types that DWARF doesn't use are refused, naming the object, the
 section and the relocation, and so are a thread-local offset into a debug
 section and a 4-byte field's value past its range: `R_X86_64_32`'s unsigned,
-`R_X86_64_DTPOFF32`'s signed, as GNU ld and lld check them. A relocation
+`R_X86_64_DTPOFF32`'s signed, as GNU ld and lld check them. So are two fields
+of a section that overlap, which GNU ld and lld write in the relocations'
+order and compilers never emit: their bytes would otherwise depend on which of
+the writer's lanes patched last, or on a field written in the conversion being
+patched again after. Fields out of order that don't overlap are taken. A relocation
 without a symbol is its addend, as GNU ld writes an address's (lld writes its
 tombstone for any relocation without a symbol in a debug section). A compressed section (`SHF_COMPRESSED` of type `ELFCOMPRESS_ZLIB`, which
 GNU as writes for `-g` by default and GCC's and clang's `-gz` ask for)

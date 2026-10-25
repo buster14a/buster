@@ -303,9 +303,10 @@ struct ExecutableDebug
 // reference whose target is 0 is one to discarded code (a section that section GC dropped): it gets lld's tombstone, 0,
 // or 1 in .debug_ranges and .debug_loc, whose lists 0 would end. The references are columns, which a producer's vector paths fill a batch at a
 // time: each one's field's offset in its section, its addend, its target, its section's kind (the field's section is
-// EXECUTABLE_SECTION_DEBUG_INFO plus it) and its kind (EXECUTABLE_DEBUG_ABS64 and the others). The bytes are the
-// producer's, writable, and alive through executable_write with the columns; the writer takes this or ExecutableDebug,
-// not both.
+// EXECUTABLE_SECTION_DEBUG_INFO plus it) and its kind (EXECUTABLE_DEBUG_ABS64 and the others). Each section's
+// alignment (`alignments`, 0 or 1 for none, else a power of two to 4096), its contributions' largest, places it in the
+// file and is its sh_addralign, as GNU ld and lld align an output section. The bytes are the producer's, writable, and
+// alive through executable_write with the columns; the writer takes this or ExecutableDebug, not both.
 #define EXECUTABLE_DEBUG_ABS64 0
 #define EXECUTABLE_DEBUG_ABS32 1
 #define EXECUTABLE_DEBUG_DTPOFF32 2
@@ -315,6 +316,7 @@ typedef struct ExecutableDebugSections ExecutableDebugSections;
 struct ExecutableDebugSections
 {
     String8 sections[BUSTER_EXECUTABLE_DEBUG_KINDS];
+    uint64_t alignments[BUSTER_EXECUTABLE_DEBUG_KINDS];
     const uint32_t* offsets;
     const int64_t* addends;
     const SymbolId* targets;
@@ -1928,7 +1930,7 @@ struct ExecutableCounts
 // BUSTER_EXECUTABLE_MAX_TLS_BYTES. The atoms are at most BUSTER_EXECUTABLE_MAX_ATOM_BYTES each, so no sum of their
 // sizes wraps.
 static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts* counts, uint32_t lanes, uint64_t got_slots, bool dynamic, bool crt, bool runtime,
-                               const uint64_t* linker_bytes)
+                               const uint64_t* linker_bytes, const uint64_t* linker_alignments)
 {
     *layout = (ExecutableLayout){ 0 };
     layout->dynamic = dynamic;
@@ -2129,7 +2131,8 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     for (uint32_t section = EXECUTABLE_SECTION_DEBUG_INFO; section < EXECUTABLE_SECTION_COUNT; section += 1)
     {
         ExecutableSectionLayout* placed = &layout->sections[section];
-        placed->alignment = section == EXECUTABLE_SECTION_SYMTAB ? 8 : 1;
+        // A producer's debug section at its alignment (ExecutableDebugSections.alignments).
+        placed->alignment = section == EXECUTABLE_SECTION_SYMTAB ? 8 : linker_alignments[section] > 1 ? linker_alignments[section] : 1;
         placed->offset = executable_align(offset, placed->alignment);
         placed->size = section_bytes[section];
         layout->section_piece[section] = placed->size != 0 ? piece : 0;
@@ -2994,6 +2997,8 @@ struct ExecutableDynamicTotals
     bool has_init;
     bool has_fini;
     uint64_t linker_bytes[EXECUTABLE_SECTION_COUNT];
+    // A producer's debug sections' alignments (ExecutableDebugSections.alignments); 0 elsewhere.
+    uint64_t linker_alignments[EXECUTABLE_SECTION_COUNT];
 };
 
 // What the lanes share, which lane 0 allocates from its scratch arena and broadcasts. Each lane writes its own row of
@@ -6651,8 +6656,8 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
 }
 
 // Whether a producer's debug sections (ExecutableDebugSections) are ones the writer takes: none with ExecutableDebug,
-// each section's bytes there when it has a length, which DWARF32's offsets reach, and the references' columns there
-// when it has references.
+// each section's bytes there when it has a length, which DWARF32's offsets reach, its alignment a power of two to 4096
+// (or 0), and the references' columns there when it has references.
 static bool executable_debug_sections_valid(const ExecutableOptions* options)
 {
     const ExecutableDebugSections* debug = options->debug_sections;
@@ -6660,7 +6665,9 @@ static bool executable_debug_sections_valid(const ExecutableOptions* options)
     bool valid = debug == 0 || (options->debug == 0 && (debug->relocation_count == 0 || columns));
     for (uint32_t kind = 0; valid && debug != 0 && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
     {
-        valid = (debug->sections[kind].length == 0 || debug->sections[kind].pointer != 0) && debug->sections[kind].length < 0xfffffff0u;
+        const uint64_t alignment = debug->alignments[kind];
+        valid = (debug->sections[kind].length == 0 || debug->sections[kind].pointer != 0) && debug->sections[kind].length < 0xfffffff0u &&
+                (alignment & (alignment - 1)) == 0 && alignment <= 4096;
     }
     return valid;
 }
@@ -6946,6 +6953,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     for (uint32_t kind = 0; ok && options->debug_sections != 0 && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
     {
         totals.linker_bytes[EXECUTABLE_SECTION_DEBUG_INFO + kind] = options->debug_sections->sections[kind].length;
+        totals.linker_alignments[EXECUTABLE_SECTION_DEBUG_INFO + kind] = options->debug_sections->alignments[kind];
     }
     uint64_t symbol_names = 1;
     uint32_t symbol_locals = 0;
@@ -6968,7 +6976,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     }
     const bool laid_out =
         ok && executable_lay_out(layout, shared->counts, lanes, got_slots + totals.ifunc_stubs + 2 * totals.tlsgd_pairs + (totals.tlsld ? 2 : 0), dynamic,
-                                 dynamic || runtime, runtime, totals.linker_bytes);
+                                 dynamic || runtime, runtime, totals.linker_bytes, totals.linker_alignments);
     if (laid_out)
     {
         // The IFUNCs' stubs' slots, after the GOT kinds'.

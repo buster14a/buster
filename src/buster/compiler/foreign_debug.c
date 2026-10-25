@@ -15,7 +15,10 @@
 //     or 1 in .debug_ranges and .debug_loc, whose lists 0 would end; one without a symbol is its addend.
 // A debug section of a discarded group goes with its group, and an excluded one (SHF_EXCLUDE) is left out, as GNU ld and
 // lld leave it out of a final link: a reference into either gets the tombstone. An empty one keeps its place, which a
-// reference into it takes. A compressed one (SHF_COMPRESSED's ELFCOMPRESS_ZLIB, which
+// reference into it takes. Each output section has its contributions' largest alignment, which the writer gives it in
+// the file and as its sh_addralign (ExecutableDebugSections.alignments). Two fields of a section that overlap are
+// refused (foreign_debug_disjoint): GNU ld and lld write them in the relocations' order, but here the bytes would depend
+// on which of the writer's lanes patched last. A compressed one (SHF_COMPRESSED's ELFCOMPRESS_ZLIB, which
 // GNU as writes for -g by default and GCC's and clang's -gz ask for) contributes its bytes decompressed (inflate.c), at
 // the size and alignment of its compression header, which its relocations' offsets are into; one of another
 // compression (-gz=zstd's) is refused, and so are relocation types DWARF doesn't use. The writer's patch and this pass make the bytes lld writes
@@ -172,9 +175,11 @@ static ForeignLinkResult foreign_debug_failure(const ForeignDebugSection* sectio
 }
 
 // The exact path of a relocation section's relocations, `first` to `last`: each written now or recorded from record
-// *count, as the file's comment says. Returns the first failure. The vector path's twin, and its path for a batch it
-// leaves (foreign_debug_relocate_vector).
-static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* section, uint64_t first, uint64_t last, uint64_t* count)
+// *count, as the file's comment says. *end is the end of the field before them, which each field must start at or
+// after, and the last one's after them: UINT64_MAX once one starts before the end of the one before (fields out of
+// order, which may overlap: foreign_debug_disjoint then checks them). Returns the first failure. The vector path's
+// twin, and its path for a batch it leaves (foreign_debug_relocate_vector).
+static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* section, uint64_t first, uint64_t last, uint64_t* count, uint64_t* end)
 {
     ForeignLinkResult result = { 0 };
     const ForeignObject* input = section->input;
@@ -243,6 +248,7 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
             {
                 result = foreign_debug_failure(section, FOREIGN_LINK_ERROR_UNSUPPORTED, IMPORT_ERROR_UNSUPPORTED, i, type);
             }
+            *end = *end != UINT64_MAX && relocation.r_offset >= *end ? relocation.r_offset + width : UINT64_MAX;
         }
     }
     return result;
@@ -255,8 +261,9 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
 // section, its symbol in the table and not LEFT, a value that fits its field, no thread-local offset into a debug
 // section, and fields one after another without overlapping, as assemblers emit them; any other batch, and the last
 // relocations short of a batch, go to the exact path, which reports a failure where the batch has one. Either way the
-// same bytes and records come out.
-static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection* section, uint64_t* count)
+// same bytes and records come out, and the same *end (foreign_debug_relocate's), whose check of a taken batch is its
+// first field against the batch before's end.
+static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection* section, uint64_t* count, uint64_t* end)
 {
     ForeignLinkResult result = { 0 };
     const ForeignObject* input = section->input;
@@ -317,10 +324,14 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
         take = take && _mm512_mask_cmpgt_epu64_mask(writes & (uint8_t)~wide, checked, _mm512_set1_epi64(0xffffffff)) == 0;
         if (!take)
         {
-            result = foreign_debug_relocate(section, i, i + 8, count);
+            result = foreign_debug_relocate(section, i, i + 8, count, end);
         }
         else
         {
+            // The batch's fields follow each other (`ordered`); the first must follow the batch before's last.
+            const uint64_t start = (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(offsets));
+            const uint64_t stop = (uint64_t)_mm256_extract_epi64(_mm512_extracti64x4_epi64(_mm512_add_epi64(offsets, widths), 1), 3);
+            *end = *end != UINT64_MAX && start >= *end ? stop : UINT64_MAX;
             _mm512_mask_i64scatter_epi64(section->bytes, writes & wide, offsets, written, 1);
             _mm512_mask_i64scatter_epi32(section->bytes, writes & (uint8_t)~wide, offsets, _mm512_cvtepi64_epi32(written), 1);
             const uint32_t taken = (uint32_t)__builtin_popcount(recorded);
@@ -339,8 +350,70 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE && i < total)
     {
-        result = foreign_debug_relocate(section, i, total, count);
+        result = foreign_debug_relocate(section, i, total, count, end);
     }
+    return result;
+}
+
+// A relocation's field, for foreign_debug_disjoint's sort: its offset, its end and the relocation's index.
+typedef struct ForeignDebugField ForeignDebugField;
+struct ForeignDebugField
+{
+    uint64_t offset;
+    uint64_t end;
+    uint64_t index;
+};
+
+static int foreign_debug_compare_fields(const void* a, const void* b)
+{
+    const ForeignDebugField* left = a;
+    const ForeignDebugField* right = b;
+    return left->offset != right->offset ? (left->offset < right->offset ? -1 : 1) : (left->index > right->index) - (left->index < right->index);
+}
+
+// Whether a relocation section whose fields came out of order (foreign_debug_relocate's *end) has two that overlap,
+// which the link refuses: their values would depend on which the writer's lanes patch last, and a field written now on
+// one the writer patches after. GNU ld and lld write such fields in the relocations' order; compilers emit none. The
+// failure names the later relocation of the first pair, by place, that overlaps: the same whatever the lanes.
+static ForeignLinkResult foreign_debug_disjoint(const ForeignDebugSection* section)
+{
+    ForeignLinkResult result = { 0 };
+    const ForeignObject* input = section->input;
+    const Elf64_Shdr header = import_section_header(&input->elf, section->relocation_section);
+    const String8 entries = import_section_bytes(&input->elf, &header);
+    const uint64_t total = entries.length / sizeof(Elf64_Rela);
+    Scratch scratch = scratch_begin(0);
+    ForeignDebugField* fields = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ForeignDebugField, total + 1);
+    uint64_t count = 0;
+    result.error = fields != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+    for (uint64_t i = 0; fields != 0 && i < total; i += 1)
+    {
+        Elf64_Rela relocation;
+        memcpy(&relocation, entries.pointer + i * sizeof(Elf64_Rela), sizeof(relocation));
+        uint8_t kind = 0;
+        uint32_t width = 0;
+        // Every relocation is known and inside its section by now; R_X86_64_NONE writes nothing.
+        if (foreign_debug_type(ELF64_R_TYPE(relocation.r_info), &kind, &width))
+        {
+            fields[count] = (ForeignDebugField){ .offset = relocation.r_offset, .end = relocation.r_offset + width, .index = i };
+            count += 1;
+        }
+    }
+    if (fields != 0)
+    {
+        qsort(fields, count, sizeof(ForeignDebugField), foreign_debug_compare_fields);
+    }
+    for (uint64_t f = 1; fields != 0 && result.error == FOREIGN_LINK_ERROR_NONE && f < count; f += 1)
+    {
+        if (fields[f].offset < fields[f - 1].end)
+        {
+            const uint64_t later = fields[f].index > fields[f - 1].index ? fields[f].index : fields[f - 1].index;
+            Elf64_Rela relocation;
+            memcpy(&relocation, entries.pointer + later * sizeof(Elf64_Rela), sizeof(relocation));
+            result = foreign_debug_failure(section, FOREIGN_LINK_ERROR_UNSUPPORTED, IMPORT_ERROR_UNSUPPORTED, later, ELF64_R_TYPE(relocation.r_info));
+        }
+    }
+    scratch_end(scratch);
     return result;
 }
 
@@ -388,6 +461,8 @@ struct ForeignDebugPlan
     uint64_t** resolved;
     uint8_t* bytes[BUSTER_EXECUTABLE_DEBUG_KINDS];
     uint64_t sizes[BUSTER_EXECUTABLE_DEBUG_KINDS];
+    // Each output section's alignment: its contributions' largest, as GNU ld and lld align it.
+    uint64_t alignments[BUSTER_EXECUTABLE_DEBUG_KINDS];
     ForeignDebugRecords records;
     // Each item's failure, which the first in the items' order is reported of.
     ForeignLinkResult* contribution_results;
@@ -471,6 +546,7 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                     const uint64_t place = (plan->sizes[kind] + alignment - 1) & ~(alignment - 1);
                     plan->bases[id][section] = place;
                     plan->sizes[kind] = size < 0xfffffff0u ? place + size : 0xfffffff0u;
+                    plan->alignments[kind] = alignment > plan->alignments[kind] ? alignment : plan->alignments[kind];
                     contribution_capacity += size != 0 ? 1 : 0;
                 }
             }
@@ -649,8 +725,11 @@ static void foreign_debug_relocation_section(ForeignDebugPlan* plan, const Forei
     };
     const Elf64_Shdr header = import_section_header(&input->elf, relocations->section);
     uint64_t count = 0;
-    plan->relocation_results[item] = foreign->path == FOREIGN_PATH_VECTOR ? foreign_debug_relocate_vector(&section, &count) :
-                                                                            foreign_debug_relocate(&section, 0, header.sh_size / sizeof(Elf64_Rela), &count);
+    uint64_t end = 0;
+    ForeignLinkResult result = foreign->path == FOREIGN_PATH_VECTOR ? foreign_debug_relocate_vector(&section, &count, &end) :
+                                                                      foreign_debug_relocate(&section, 0, header.sh_size / sizeof(Elf64_Rela), &count, &end);
+    // Fields one after another can't overlap; others are sorted and checked.
+    plan->relocation_results[item] = result.error == FOREIGN_LINK_ERROR_NONE && end == UINT64_MAX ? foreign_debug_disjoint(&section) : result;
     relocations->count = count;
 }
 
@@ -689,6 +768,7 @@ static void foreign_debug_finish(ForeignDebugPlan* plan, ForeignLink* output)
     for (uint32_t kind = 0; kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
     {
         output->debug.sections[kind] = (String8){ .pointer = (char*)plan->bytes[kind], .length = plan->sizes[kind] };
+        output->debug.alignments[kind] = plan->alignments[kind];
     }
     output->debug.offsets = records->offsets;
     output->debug.addends = records->addends;

@@ -12,7 +12,9 @@
 // leave them out, and empty ones and empty relocation sections link, also where no other section of their kind has bytes
 // and the link has no debug relocation (foreign_debug_test_sections). A thread-local offset (R_X86_64_DTPOFF32) is a
 // signed 32-bit field and an R_X86_64_32 an unsigned one, by the writer's and the immediate paths, each refused past its
-// range (foreign_debug_test_offsets).
+// range (foreign_debug_test_offsets). Overlapping debug relocation fields and a second relocation section of one section
+// are refused alike on every path, fields out of order link, and a debug section keeps its alignment, compressed or not
+// (foreign_debug_test_fields).
 // The relocation kernels' vector path is checked against its exact twin on each debug relocation section, ending at a
 // PROT_NONE page, with each rare relocation at each of a batch's lanes (foreign_debug_test_kernels).
 // With --cross-check, ld.lld links the same objects: llvm-dwarfdump --verify finds no error in either output, their
@@ -964,6 +966,238 @@ static void foreign_debug_test_offsets(ForeignTestTally* tally, const char* dire
     arena_pop_to(arena, mark);
 }
 
+// The fields' fixtures (foreign_debug_test_fields), each assembled (`compress` with GNU as's zlib compression, else
+// none) and linked with a main compiled without -g. Two functions, f1 and f2, and a .debug_info whose relocations:
+// write two R_X86_64_64 at one place against both (refused: which the writer's lanes patched last would decide it); an
+// R_X86_64_64 against a debug section's place and one against f1 at one place (refused: the first is written in the
+// pass, the second by the writer after); an R_X86_64_64 and an R_X86_64_32 whose fields overlap by 4 bytes (refused);
+// and two fields out of order without overlapping (linked, as lld links them). Then a .debug_frame aligned to 16 behind
+// a .debug_info of 3 bytes, uncompressed and compressed (ch_addralign): the output's section 16-aligned in the file and
+// in its sh_addralign, as lld's.
+typedef struct ForeignDebugTestFields ForeignDebugTestFields;
+struct ForeignDebugTestFields
+{
+    const char* name;
+    const char* text;
+    bool compress;
+    bool refused;
+};
+
+#define BUSTER_FOREIGN_DEBUG_TEST_FUNCTIONS \
+    "    .text\n    .globl f1\n    .type f1, @function\nf1:\n    ret\n    .size f1, .-f1\n" \
+    "    .globl f2\n    .type f2, @function\nf2:\n    ret\n    .size f2, .-f2\n"
+
+static const ForeignDebugTestFields foreign_debug_test_fields_fixtures[] = {
+    {
+        "same",
+        BUSTER_FOREIGN_DEBUG_TEST_FUNCTIONS "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_64, f1\n    .reloc ., R_X86_64_64, f2\n    .quad 0\n",
+        false,
+        true,
+    },
+    {
+        "mixed",
+        BUSTER_FOREIGN_DEBUG_TEST_FUNCTIONS "    .section .debug_str,\"MS\",@progbits,1\n.Lname:\n    .asciz \"name\"\n"
+                                             "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_64, .Lname\n    .reloc ., R_X86_64_64, f1\n    .quad 0\n",
+        false,
+        true,
+    },
+    {
+        "partial",
+        BUSTER_FOREIGN_DEBUG_TEST_FUNCTIONS "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_64, f1\n    .reloc .+4, R_X86_64_32, f2\n    .quad 0\n",
+        false,
+        true,
+    },
+    {
+        "unsorted",
+        BUSTER_FOREIGN_DEBUG_TEST_FUNCTIONS "    .section .debug_info,\"\",@progbits\n    .quad 0x7777777777777777\n    .reloc .+8, R_X86_64_64, f2\n"
+                                             "    .reloc ., R_X86_64_64, f1\n    .quad 0\n    .quad 0\n",
+        false,
+        false,
+    },
+    {
+        "aligned",
+        "    .section .debug_info,\"\",@progbits\n    .byte 1, 2, 3\n    .section .debug_frame,\"\",@progbits\n    .balign 16\n    .quad 0x6565656565656565\n    .zero 4088\n",
+        false,
+        false,
+    },
+    {
+        "aligned-zlib",
+        "    .section .debug_info,\"\",@progbits\n    .byte 1, 2, 3\n    .section .debug_frame,\"\",@progbits\n    .balign 16\n    .quad 0x6565656565656565\n    .zero 4088\n",
+        true,
+        false,
+    },
+};
+
+// What a linked fixture must hold: for "unsorted", f1's and f2's addresses in its two fields after the marker; for the
+// aligned ones, .debug_frame 16-aligned in the file and in its sh_addralign, starting with its marker.
+static bool foreign_debug_test_fields_hold(String8 file, const char* name)
+{
+    bool result = file.pointer != 0;
+    if (result && strcmp(name, "unsorted") == 0)
+    {
+        const uint8_t* fields = foreign_debug_test_marked(file, ".debug_info", UINT64_C(0x7777777777777777), 8, 24);
+        uint64_t values[2] = { 0 };
+        if (fields != 0)
+        {
+            memcpy(values, fields + 8, sizeof(values));
+        }
+        result = fields != 0 && values[0] == foreign_debug_test_symbol(file, "f1") && values[1] == foreign_debug_test_symbol(file, "f2") && values[0] != values[1];
+    }
+    else if (result)
+    {
+        const DynamicTestImage image = dynamic_test_image(file);
+        const Elf64_Shdr* frame = dynamic_test_section(&image, ".debug_frame");
+        const uint64_t marker = UINT64_C(0x6565656565656565);
+        result = frame != 0 && frame->sh_addralign == 16 && frame->sh_offset % 16 == 0 && frame->sh_size >= 8 && memcmp(file.pointer + frame->sh_offset, &marker, 8) == 0;
+    }
+    return result;
+}
+
+// Debug relocation fields that overlap, out of order, and debug sections' alignment (foreign_debug_test_fields_fixtures),
+// each fixture linked on 1 lane, on 8 and by the exact path: refused alike, or linked into the same bytes, which run and
+// hold what foreign_debug_test_fields_hold checks; then a fixture whose second relocation section relocates .debug_info
+// too, which the importer refuses (as lld refuses it). With --cross-check, lld's outputs of the linked ones hold the
+// same.
+static void foreign_debug_test_fields(ForeignTestTally* tally, const char* directory, ForeignTestSystem* system, bool cross_check, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    ForeignTestPath plain;
+    snprintf(plain, sizeof(plain), "%s/dbg_plain.o", directory);
+    for (uint32_t f = 0; f <= BUSTER_ARRAY_LENGTH(foreign_debug_test_fields_fixtures); f += 1)
+    {
+        // The last: the "partial" fixture's .rela.debug_info given a second relocation section's role, by turning
+        // .rela.debug_aranges' target to .debug_info.
+        const bool twice = f == BUSTER_ARRAY_LENGTH(foreign_debug_test_fields_fixtures);
+        const ForeignDebugTestFields* fixture = twice ? 0 : &foreign_debug_test_fields_fixtures[f];
+        const char* name = twice ? "twice" : fixture->name;
+        ForeignTestPath source;
+        ForeignTestPath object;
+        ForeignTestPath errors;
+        snprintf(source, sizeof(source), "%s/dbg_fields-%s.s", directory, name);
+        snprintf(object, sizeof(object), "%s/dbg_fields-%s.o", directory, name);
+        snprintf(errors, sizeof(errors), "%s.err", object);
+        static const char twice_text[] = BUSTER_FOREIGN_DEBUG_TEST_FUNCTIONS "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_64, f1\n    .quad 0\n"
+                                         "    .section .debug_aranges,\"\",@progbits\n    .reloc ., R_X86_64_64, f2\n    .quad 0\n";
+        const char* text = twice ? twice_text : fixture->text;
+        char* assemble[] = { (char*)"as", fixture != 0 && fixture->compress ? (char*)"--compress-debug-sections=zlib" : (char*)"--compress-debug-sections=none", source,
+                             (char*)"-o", object, 0 };
+        bool assembled = foreign_test_write(source, text, strlen(text)) && object_test_run(assemble, "/dev/null", errors) == 0;
+        if (assembled && twice)
+        {
+            // .rela.debug_aranges' sh_info turned to .debug_info's index.
+            const String8 bytes = foreign_test_read(arena, object);
+            ImportElf elf = { 0 };
+            assembled = bytes.pointer != 0 && import_elf(&elf, bytes, ET_REL).error == IMPORT_ERROR_NONE;
+            uint32_t info = 0;
+            uint32_t aranges = 0;
+            for (uint32_t section = 1; assembled && section < elf.section_count; section += 1)
+            {
+                const Elf64_Shdr header = import_section_header(&elf, section);
+                const char* section_name = header.sh_name < elf.section_names.length ? elf.section_names.pointer + header.sh_name : "";
+                info = strcmp(section_name, ".debug_info") == 0 ? section : info;
+                aranges = strcmp(section_name, ".rela.debug_aranges") == 0 ? section : aranges;
+            }
+            char* copy = assembled && info != 0 && aranges != 0 ? arena_push(arena, bytes.length, 8) : 0;
+            assembled = copy != 0;
+            if (assembled)
+            {
+                memcpy(copy, bytes.pointer, bytes.length);
+                memcpy(copy + elf.section_offset + (uint64_t)aranges * sizeof(Elf64_Shdr) + offsetof(Elf64_Shdr, sh_info), &info, sizeof(info));
+                assembled = foreign_test_write(object, copy, bytes.length);
+            }
+        }
+        foreign_test_expect(tally, assembled, "assemble a debug fields' fixture", errors);
+        const bool refused = twice || fixture->refused;
+        ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
+        char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 16);
+        const bool lined = assembled && line != 0 && arguments != 0;
+        if (lined)
+        {
+            *line = (ForeignTestLine){ 0 };
+            foreign_test_pie_begin(line, system);
+            foreign_test_add(line, plain, true, true);
+            foreign_test_add(line, object, true, true);
+            foreign_test_pie_end(line, system);
+        }
+        static const char* const ways[3] = { "--lanes=1", "--lanes=8", "--scalar" };
+        String8 files[3] = { 0 };
+        String8 messages[3] = { 0 };
+        for (uint32_t way = 0; lined && way < 3; way += 1)
+        {
+            ForeignTestPath output;
+            ForeignTestPath link_errors;
+            snprintf(output, sizeof(output), "%s/fields-%s.out%u", directory, name, way);
+            snprintf(link_errors, sizeof(link_errors), "%s.err", output);
+            static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = (char*)ways[way];
+            arguments[count + 1] = (char*)"-o";
+            arguments[count + 2] = output;
+            count += 3;
+            for (uint32_t i = 0; i < line->our_count; i += 1)
+            {
+                arguments[count] = line->ours[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const int status = object_test_run(arguments, "/dev/null", link_errors);
+            messages[way] = foreign_test_read(arena, link_errors);
+            if (refused)
+            {
+                // The overlapping fields' refusal names their relocation section; the importer's of a second relocation
+                // section names the object.
+                foreign_test_expect(tally, status > 0 && messages[way].pointer != 0 && (twice || strstr(messages[way].pointer, "(section ") != 0),
+                                    "link-foreign refuses overlapping debug fields, naming their relocation section", link_errors);
+            }
+            else
+            {
+                foreign_test_expect(tally, status == 0, "link-foreign links debug fields out of order and aligned debug sections", link_errors);
+                files[way] = status == 0 ? foreign_test_read(arena, output) : (String8){ 0 };
+                char* run[] = { output, 0 };
+                foreign_test_expect(tally, status == 0 && object_test_run(run, "/dev/null", "/dev/null") == 0, "the program runs", output);
+                foreign_test_expect(tally, foreign_debug_test_fields_hold(files[way], name), "fields out of order as they are, and a debug section at its alignment", output);
+            }
+        }
+        for (uint32_t way = 1; lined && way < 3; way += 1)
+        {
+            const bool same = refused ? messages[0].pointer != 0 && messages[way].pointer != 0 && strcmp(messages[0].pointer, messages[way].pointer) == 0 :
+                                        files[0].pointer != 0 && files[way].pointer != 0 && files[0].length == files[way].length &&
+                                        memcmp(files[0].pointer, files[way].pointer, files[0].length) == 0;
+            foreign_test_expect(tally, same, "the same refusal, or the same bytes, on 8 lanes and by the exact path as on 1", object);
+        }
+        if (lined && cross_check && !refused)
+        {
+            ForeignTestPath theirs;
+            ForeignTestPath lld_errors;
+            snprintf(theirs, sizeof(theirs), "%s/fields-%s.lld", directory, name);
+            snprintf(lld_errors, sizeof(lld_errors), "%s.err", theirs);
+            static const char* const head[] = { "ld.lld", "--hash-style=gnu", "--build-id", "--eh-frame-hdr", "-z", "now", "-z", "relro", "-o" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = theirs;
+            count += 1;
+            for (uint32_t i = 0; i < line->their_count; i += 1)
+            {
+                arguments[count] = line->theirs[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const bool linked = object_test_run(arguments, "/dev/null", lld_errors) == 0;
+            foreign_test_expect(tally, linked && foreign_debug_test_fields_hold(foreign_test_read(arena, theirs), name), "lld's output holds the same fields and alignment", theirs);
+        }
+    }
+    arena_pop_to(arena, mark);
+}
+
 // One run of a relocation section's kernel for foreign_debug_test_kernels: its bytes, records, count and result.
 typedef struct ForeignDebugTestRun ForeignDebugTestRun;
 struct ForeignDebugTestRun
@@ -975,6 +1209,8 @@ struct ForeignDebugTestRun
     uint8_t section_kinds[BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS];
     uint8_t kinds[BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS];
     uint64_t count;
+    // The last field's end, or UINT64_MAX for fields out of order (foreign_debug_relocate's *end).
+    uint64_t end;
     ForeignLinkResult result;
 };
 
@@ -1040,14 +1276,16 @@ static bool foreign_debug_test_twins(const uint8_t* file, uint64_t length, uint3
                     .kinds = run->kinds,
                 },
             };
-            run->result = path == 0 ? foreign_debug_relocate_vector(&section, &run->count) : foreign_debug_relocate(&section, 0, header.sh_size / sizeof(Elf64_Rela), &run->count);
+            run->end = 0;
+            run->result = path == 0 ? foreign_debug_relocate_vector(&section, &run->count, &run->end) :
+                                      foreign_debug_relocate(&section, 0, header.sh_size / sizeof(Elf64_Rela), &run->count, &run->end);
         }
     }
     const ForeignLinkResult* a = &runs[0].result;
     const ForeignLinkResult* b = &runs[1].result;
     same = same && a->error == b->error && a->object == b->object && a->import.error == b->import.error && a->import.offset == b->import.offset &&
            a->import.section == b->import.section && a->import.relocation == b->import.relocation && a->import.type == b->import.type && runs[0].count == runs[1].count &&
-           memcmp(runs[0].bytes, runs[1].bytes, size) == 0;
+           (a->error != FOREIGN_LINK_ERROR_NONE || runs[0].end == runs[1].end) && memcmp(runs[0].bytes, runs[1].bytes, size) == 0;
     for (uint64_t r = 0; same && r < runs[0].count; r += 1)
     {
         same = runs[0].offsets[r] == runs[1].offsets[r] && runs[0].addends[r] == runs[1].addends[r] && runs[0].targets[r] == runs[1].targets[r] &&
@@ -1068,8 +1306,8 @@ static bool foreign_debug_test_twins(const uint8_t* file, uint64_t length, uint3
 // fit, a field that overlaps the one before or comes before it, a negated addend, its symbol at a place in its
 // section (a section's symbol, which compilers use, is at 0), and without a symbol (its value its addend) a thread-local
 // offset of -1, of 2^31 (past a signed 32-bit field's reach), of -2^31 (its least), and an ABS32 of -1 (past an
-// unsigned one's) and of 2^32 - 1 (its most). Each copy's runs must agree: the same failure, or the same bytes and
-// records.
+// unsigned one's) and of 2^32 - 1 (its most). Each copy's runs must agree: the same failure, or the same bytes, records
+// and last field's end (UINT64_MAX for fields out of order).
 static void foreign_debug_test_kernels(ForeignTestTally* tally, const char* directory, Arena* arena)
 {
     ForeignTestPath source;
@@ -1200,6 +1438,7 @@ static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_c
         foreign_debug_test_refusals(&tally, directory, system, arena);
         foreign_debug_test_sections(&tally, directory, system, cross_check, arena);
         foreign_debug_test_offsets(&tally, directory, system, cross_check, arena);
+        foreign_debug_test_fields(&tally, directory, system, cross_check, arena);
         foreign_debug_test_kernels(&tally, directory, arena);
     }
     return foreign_test_report(&tally);
