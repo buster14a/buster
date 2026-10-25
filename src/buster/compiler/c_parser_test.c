@@ -2822,15 +2822,16 @@ static void parse_test_read_capture(int capture, char* text, size_t capacity)
     }
 }
 
-// Runs the driver on `arguments` with its stderr in `capture` (an empty file, which it leaves empty), and what it
-// printed in `text`. Returns its exit status.
-static int parse_test_drive(char** arguments, int count, int capture, char* text, size_t capacity)
+// Runs the driver on `arguments` (or with `preprocess`, -E's, run_preprocessor_command, whose arguments start with
+// "-E") with its stderr in `capture` (an empty file, which it leaves empty), and what it printed in `text`. Returns its
+// exit status.
+static int parse_test_drive(char** arguments, int count, int capture, char* text, size_t capacity, bool preprocess)
 {
     const int saved = dup(2);
     int result = -1;
     if (saved >= 0 && dup2(capture, 2) == 2)
     {
-        result = run_parse_command(count, arguments);
+        result = preprocess ? run_preprocessor_command(count, arguments) : run_parse_command(count, arguments);
         dup2(saved, 2);
     }
     if (saved >= 0)
@@ -2880,6 +2881,17 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--bogus", 1, "unknown argument: --bogus\nusage: compiler [-fsyntax-only] ", true },
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-gnu-keywords", 0, "", false },
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
+    // Errors after a macro's expansion, placed after the invocation by its expansion history, which the driver records
+    // only for its diagnostics (PPOptions.defer_history).
+    { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#define END(a) a\nint y = END(1)\n", 0, 1, "%s:2:15: error: expected ';' after top level declarator\n", false },
+    // A warning, which the driver prints by preprocessing the unit again for its history: with code after it; and in a
+    // unit of directives alone, whose output is empty, after a #if line of 300 expansions, for which the replay's history
+    // grows while it runs (parse_test_driver_limits fails that growth too, which the empty output wouldn't show).
+    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only\n", false },
+    { PARSE_TEST_DRIVER_TEXT,
+      "#define A(x) x\n#define B A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)\n#define C B+B+B+B+B+B+B+B\n#define D C+C+C+C\n#if D\n#endif\n#warning only\n", 0, 0,
+      "%s:7:2: warning: only\n", false },
 };
 
 // Whether a run of case `c` did what it must.
@@ -2902,7 +2914,7 @@ struct ParseTestProbe
     char text[1024];
 };
 
-static ParseTestProbe parse_test_probe(char** arguments, int count, int capture, uint64_t base, uint64_t limit, ParseTestProbe* shared)
+static ParseTestProbe parse_test_probe(char** arguments, int count, int capture, uint64_t base, uint64_t limit, ParseTestProbe* shared, bool preprocess)
 {
     *shared = (ParseTestProbe){ .status = -1 };
     const pid_t child = fork();
@@ -2913,7 +2925,7 @@ static ParseTestProbe parse_test_probe(char** arguments, int count, int capture,
         space.rlim_cur = base + limit;
         limited = limited && setrlimit(RLIMIT_AS, &space) == 0 && dup2(capture, 2) == 2;
         const int before = parse_test_lowest_descriptor();
-        const int status = limited ? run_parse_command(count, arguments) : -1;
+        const int status = !limited ? -1 : preprocess ? run_preprocessor_command(count, arguments) : run_parse_command(count, arguments);
         const int after = parse_test_lowest_descriptor();
         shared->peak = parse_test_status_bytes("VmPeak:") - base;
         shared->clean = parse_test_status_bytes("VmSize:") == base && after == before;
@@ -2949,15 +2961,15 @@ static uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t lim
 // a run stops at the first that fails, so in a child whose address space may grow a page less than a run reached, the
 // last fails, and the child's peak is what the run had before it; a page less than that, the one before fails; and so
 // on, a run each, down to the first.
-static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name)
+static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name, bool preprocess)
 {
     uint32_t failures = 0;
     char text[1024];
     // A run without a limit, which also grows the stack as far as a run takes it, and one in a child, for its peak.
-    const int status = parse_test_drive(arguments, count, capture, text, sizeof(text));
+    const int status = parse_test_drive(arguments, count, capture, text, sizeof(text), preprocess);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t base = parse_test_status_bytes("VmSize:");
-    const ParseTestProbe whole = parse_test_probe(arguments, count, capture, base, 1ull << 46, shared);
+    const ParseTestProbe whole = parse_test_probe(arguments, count, capture, base, 1ull << 46, shared, preprocess);
     const bool same = whole.status == status && strcmp(whole.text, text) == 0 && whole.clean && whole.peak != 0 && base != 0;
     if (!same)
     {
@@ -2970,7 +2982,7 @@ static uint32_t parse_test_driver_limits(char** arguments, int count, int captur
     while (failures == 0 && peak != 0 && runs < 10000)
     {
         const uint64_t limit = peak - page;
-        const ParseTestProbe probe = parse_test_probe(arguments, count, capture, base, limit, shared);
+        const ParseTestProbe probe = parse_test_probe(arguments, count, capture, base, limit, shared, preprocess);
         failures += parse_test_check_probe(&probe, limit, name);
         peak = probe.peak;
         runs += 1;
@@ -2982,7 +2994,8 @@ static uint32_t parse_test_driver_limits(char** arguments, int count, int captur
 
 // The driver (run_parse_command, the compiler's default command): each case's status and text, 16 runs of each that
 // must leave the process's address space and descriptors as they were, and every reservation of a run on a valid and
-// an invalid file failed in turn (parse_test_driver_limits).
+// an invalid file, and on files with a warning, whose replay for the history fails too, failed in turn
+// (parse_test_driver_limits).
 static uint32_t parse_test_driver(const char* directory)
 {
     uint32_t failures = 0;
@@ -3039,7 +3052,7 @@ static uint32_t parse_test_driver(const char* directory)
                 count += 1;
             }
             char text[1024];
-            const int status = parse_test_drive(arguments, count, capture, text, sizeof(text));
+            const int status = parse_test_drive(arguments, count, capture, text, sizeof(text), false);
             const bool expected = parse_test_driver_expected(driver_case, paths[c], status, text);
             const uint64_t size = parse_test_status_bytes("VmSize:");
             const int descriptor = parse_test_lowest_descriptor();
@@ -3060,12 +3073,49 @@ static uint32_t parse_test_driver(const char* directory)
         }
     }
     printf("driver: %u cases, %u runs: the expected statuses and messages, nothing left behind\n", (unsigned)CASES, runs);
+    // An invalid SOURCE_DATE_EPOCH: the preprocessor's setup fails with a fatal error, which `parse` and -E must print
+    // alone, though they defer the history's diagnostics (#412's review).
+    char epoch[256] = { 0 };
+    const char* had = getenv("SOURCE_DATE_EPOCH");
+    if (had != 0)
+    {
+        snprintf(epoch, sizeof(epoch), "%s", had);
+    }
+    for (uint32_t preprocess = 0; failures == 0 && preprocess < 2; preprocess += 1)
+    {
+        char* arguments[] = { (char*)"-E", (char*)"-o", (char*)"/dev/null", paths[0] };
+        char text[1024];
+        setenv("SOURCE_DATE_EPOCH", "invalid", 1);
+        const int status = parse_test_drive(preprocess != 0 ? arguments : arguments + 3, preprocess != 0 ? 4 : 1, capture, text, sizeof(text), preprocess != 0);
+        if (had != 0)
+        {
+            setenv("SOURCE_DATE_EPOCH", epoch, 1);
+        }
+        else
+        {
+            unsetenv("SOURCE_DATE_EPOCH");
+        }
+        if (status != 1 || strcmp(text, "fatal error: invalid SOURCE_DATE_EPOCH: expected a nonnegative decimal integer in range\n") != 0)
+        {
+            parse_test_report("driver: %s with an invalid SOURCE_DATE_EPOCH: status %d, printed \"%s\"\n", preprocess != 0 ? "-E" : "parse", status, text);
+            failures += 1;
+        }
+    }
     if (failures == 0)
     {
         char* valid[] = { paths[0] };
         char* invalid[] = { paths[2] };
-        failures += parse_test_driver_limits(valid, 1, capture, shared, "a valid file");
-        failures += parse_test_driver_limits(invalid, 1, capture, shared, "an invalid file");
+        char* warned[] = { paths[CASES - 2] };
+        char* warned_empty[] = { paths[CASES - 1] };
+        failures += parse_test_driver_limits(valid, 1, capture, shared, "a valid file", false);
+        failures += parse_test_driver_limits(invalid, 1, capture, shared, "an invalid file", false);
+        failures += parse_test_driver_limits(warned, 1, capture, shared, "a file with a warning", false);
+        failures += parse_test_driver_limits(warned_empty, 1, capture, shared, "a warning and directives alone", false);
+        // -E prints the warnings the same way, its status pp_run's (to /dev/null).
+        char* preprocess_warned[] = { (char*)"-E", (char*)"-o", (char*)"/dev/null", paths[CASES - 2] };
+        char* preprocess_warned_empty[] = { (char*)"-E", (char*)"-o", (char*)"/dev/null", paths[CASES - 1] };
+        failures += parse_test_driver_limits(preprocess_warned, 4, capture, shared, "-E of a file with a warning", true);
+        failures += parse_test_driver_limits(preprocess_warned_empty, 4, capture, shared, "-E of a warning and directives alone", true);
     }
     if (shared != MAP_FAILED)
     {
