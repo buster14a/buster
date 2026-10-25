@@ -33,8 +33,9 @@
 //     (only the computed include's).
 //   - Spellings: generated files of identifiers (a shared vocabulary drawn unevenly, names of their own, long ones, line
 //     splices and UCNs) prepared without following includes, enough new spellings for the shared table to grow during a
-//     merge, and a translation unit that includes them all; and again in two runs into one cache, whose second finds most
-//     of its spellings in the shared table, against one run of all of them on one lane.
+//     merge, and a translation unit that includes them all: in parts, split once, and with two lanes working (in parts,
+//     from the run's counter, and split once) and the others idle; and again in two runs into one cache, whose second
+//     finds most of its spellings in the shared table, against one run of all of them on one lane.
 //   - Contexts: a guarded header that includes itself through ./ and sub/.., which the walk must take once, and one
 //     header in two directories (a hard link) whose own local.h differ, which it must walk in both.
 //   - Special paths: a FIFO that an include under #if 0 names (the walk's probe mustn't block) and an active one
@@ -1278,8 +1279,8 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     };
     FilesTestRun reference = { 0 };
     result = result && files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
-    // And with one range per lane, then with two lanes working (one range each) and the others idle, on every lane
-    // count, against the same reference.
+    // And with one range per lane, then with two lanes working and the others idle, taking parts from the run's
+    // counter and with one range each, on every lane count, against the same reference.
     FilesTestWork once = work;
     once.name = "spellings, split once";
     once.thresholds = true;
@@ -1290,6 +1291,9 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     two.thresholds = true;
     two.lane_bytes = written / 2;
     two.split_bytes = 0;
+    FilesTestWork two_once = two;
+    two_once.name = "spellings, two lanes working, split once";
+    two_once.split_bytes = UINT64_MAX;
     for (uint32_t l = 1; result && l < lane_count; l += 1)
     {
         FilesTestRun other;
@@ -1297,11 +1301,13 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
         files_test_release_run(&other);
         result = result && files_test_run(&two, lanes[l], directory, 0, &other) && files_test_same(&two, &reference, &other, false);
         files_test_release_run(&other);
+        result = result && files_test_run(&two_once, lanes[l], directory, 0, &other) && files_test_same(&two_once, &reference, &other, false);
+        files_test_release_run(&other);
     }
     const bool grew = result && reference.ids > 40960;
     if (result)
     {
-        printf("spellings: %u files, %u ids, %lu tokens, the same on every lane count, in parts, split once and on two lanes\n",
+        printf("spellings: %u files, %u ids, %lu tokens, the same on every lane count, in parts, split once and on two lanes (in parts and split once)\n",
                BUSTER_FILES_TEST_SPELLING_FILES, reference.ids, (unsigned long)reference.tokens);
     }
     if (result && !grew)

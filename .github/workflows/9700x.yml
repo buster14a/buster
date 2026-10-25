@@ -466,6 +466,15 @@ jobs:
           # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
           # so asking clang -fsyntax-only again (--clang) only repeats that.
           ./build/compiler test-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+          == Test the per-file jobs on the frozen musl units
+          # #262's corpora: musl's 1,355 units with its build's options, the cache filled on 1, 2, 3 and 8 lanes and with
+          # the ids in another order, as test-files does for the repository's units.
+          unset CPATH C_INCLUDE_PATH
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          musl="$corpus/libc/musl"
+          ./build/compiler test-files -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
+            -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
           == Test the runner
           ./build/compiler test-parallel
           == Test the foreign inputs
@@ -564,6 +573,9 @@ jobs:
           ./build/compiler test-debug --cross-check
           == Test selective lowering against its independent oracle and Clang symbols
           ./build/compiler test-lowering --clang
+          == Test the per-file jobs on the frozen C library corpus, flat
+          unset CPATH C_INCLUDE_PATH
+          ./build/compiler test-files --flat /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc
           == Check the frozen SQLite source against Clang
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
@@ -648,6 +660,9 @@ jobs:
           ./build/compiler test-tier1-frame-execution
           == Test the per-file jobs on the repository's sources, flat
           ./build/compiler test-files --flat src
+          == Test the per-file jobs on the frozen sqlite3.c
+          unset CPATH C_INCLUDE_PATH
+          ./build/compiler test-files /var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
           == Test deferred-body source-position environments
