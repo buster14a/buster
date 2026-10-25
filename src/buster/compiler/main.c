@@ -391,10 +391,13 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
+#include "buster/compiler/c_check_deferred_test.c"
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
+// #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.
+#include "buster/compiler/c_check_deferred_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
 
@@ -973,6 +976,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-corpus") == 0)
     {
         result = run_checker_corpus(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-deferred") == 0)
+    {
+        result = run_checker_deferred_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-deferred") == 0)
+    {
+        result = run_checker_deferred_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
     {

@@ -335,13 +335,21 @@ struct CheckInputReader
     // #113: the walk's token, where each predefined type was made (BUSTER_CHECK_NONE while it isn't), and the
     // deferred reader's state. A lane reads one body (c_check_deferred.c): from its opening, whose activations the top
     // level made, to the token after its closing, where only its scopes end. lane_unsupported says it did what only
-    // source order can merge, and the unit is read in source order instead.
+    // source order can merge, and the unit is read in source order instead; lane_reason says what, first.
     uint32_t position;
     uint32_t predefined_positions[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
     CheckDeferred* deferred;
+    const char* lane_reason;
     bool lane;
     bool lane_unsupported;
 };
+
+// A body read on a lane that does what only source order can merge (`refused`), the first time with `reason`.
+static void check_input_lane_refuse(CheckInputReader* reader, bool refused, const char* reason)
+{
+    reader->lane_reason = refused && !reader->lane_unsupported ? reason : reader->lane_reason;
+    reader->lane_unsupported |= refused;
+}
 
 static void check_input_report(CheckInputReader* reader, uint32_t token, CheckInputMessage message)
 {
@@ -1119,7 +1127,7 @@ static void check_input_transparent_union(CheckInputReader* reader, TypeId type,
             const TypeTransparentUnionResult marked = type_mark_transparent_union(reader->types, type);
             attribute->ignored = marked.status != TYPE_TRANSPARENT_UNION_APPLIED;
             // A block's typedef may make a file-scope union transparent for what follows: source order's.
-            reader->lane_unsupported |= reader->lane && !attribute->ignored;
+            check_input_lane_refuse(reader, reader->lane && !attribute->ignored, "a body makes a union transparent");
             if (!attribute->ignored)
             {
                 const uint32_t tag = reader->types->types.index[type_index(type_strip_aligned(reader->types, type))];
@@ -2382,7 +2390,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         }
     }
     // A body's declaration with linkage is the file-scope entity's, which later declarations see: source order's.
-    reader->lane_unsupported |= reader->lane && reader->linkage[token] != 0;
+    check_input_lane_refuse(reader, reader->lane && reader->linkage[token] != 0, "a body declares something with linkage");
     if (!overload && reader->linkage[token] != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and

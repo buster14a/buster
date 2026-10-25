@@ -30,6 +30,7 @@
 // c_environment.c.
 
 #include <stddef.h>
+#include <time.h>
 
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
 
@@ -109,11 +110,16 @@ struct CheckDeferredLane
     Arena scratch;
     Arena results;
     bool ready;
+    // The top level's withdrawals (CheckDeferred.withdrawals) from which on the lane's table has them withdrawn: its
+    // bodies come in runs in source order, so each moves the cursor rather than withdrawing everything again.
+    uint32_t withdrawn_from;
     // What the lane did (CheckDeferred's counts), summed after the lanes.
     uint64_t bodies;
     uint64_t body_tokens;
     uint64_t history_reads;
     uint64_t withdrawn;
+    uint64_t position_ns;
+    uint64_t walk_ns;
 };
 
 struct CheckDeferred
@@ -125,9 +131,12 @@ struct CheckDeferred
     TypeChanges top_changes;
     Arena top_arena;
     Arena top_index_arena;
-    // The top level's completions and transparency, by position: the changes a body before them withdraws.
+    // The top level's completions and transparency, by position: the changes a body before them withdraws. A tag has
+    // one completion at most and one transparency at most, after it; `transparencies` has each tag's place in the list,
+    // BUSTER_CHECK_NONE for none.
     uint32_t* withdrawals;
     uint32_t withdrawal_count;
+    uint32_t* transparencies;
     // Every body's cut, in source order, and its result.
     CheckDeferredCut* cuts;
     CheckDeferredResult* results;
@@ -151,7 +160,25 @@ struct CheckDeferred
     uint64_t body_tokens;
     uint64_t history_reads;
     uint64_t withdrawn;
+    // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
+    // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
+    // their position checks: setting each body's heads from the history and its table's view, and taking them back.
+    bool timing;
+    uint64_t top_ns;
+    uint64_t environment_ns;
+    uint64_t lanes_ns;
+    uint64_t merge_ns;
+    uint64_t walk_ns;
+    uint64_t position_ns;
 };
+
+// CLOCK_MONOTONIC's nanoseconds, for `timing`'s spans.
+static uint64_t check_deferred_now(void)
+{
+    struct timespec time = { 0 };
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    return (uint64_t)time.tv_sec * UINT64_C(1000000000) + (uint64_t)time.tv_nsec;
+}
 
 static void check_deferred_cut(CheckInputReader* reader, uint32_t opening)
 {
@@ -270,6 +297,7 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
         reader->transparent_unions = check_deferred_copy(arena, top->transparent_unions, top->types->tags.count, tags, sizeof(uint32_t));
         valid = reader->transparent_unions != 0;
     }
+    lane->withdrawn_from = deferred->withdrawal_count;
     reader->scope_marks = valid ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
     reader->scope_ends = reader->scope_marks != 0 ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
     reader->scope_openings = reader->scope_ends != 0 ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
@@ -321,6 +349,34 @@ static void check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
     lane->history_reads += clear ? 0 : reads;
 }
 
+// Sets the lane's table to have the top level's withdrawals from `first` on withdrawn, and those before given back: the
+// completions and transparency the top level made after a body's opening, which source order's table hasn't there. A
+// tag's two withdrawals commute (a completion's clears its transparency too), so the lane moves from the withdrawals it
+// has to these by the difference alone. Giving back a completion gives back the tag's final columns, its transparency
+// among them, which comes out again where the top level made it after the opening.
+static void check_deferred_withdraw_to(CheckDeferred* deferred, CheckDeferredLane* lane, uint32_t first)
+{
+    const TypeChanges* changes = &deferred->top_changes;
+    TypeTable* types = &lane->types;
+    for (uint32_t i = first; i < lane->withdrawn_from; i += 1)
+    {
+        const TypeChange* change = changes->items + deferred->withdrawals[i];
+        type_tag_withdraw(types, change->tag, change->operation == BUSTER_TYPE_CHANGE_TRANSPARENT);
+    }
+    for (uint32_t i = lane->withdrawn_from; i < first; i += 1)
+    {
+        const uint32_t tag = changes->items[deferred->withdrawals[i]].tag;
+        const uint32_t transparency = deferred->transparencies[tag];
+        type_tag_restore(types, &deferred->top, tag);
+        if (transparency != BUSTER_CHECK_NONE && transparency >= first)
+        {
+            type_tag_withdraw(types, tag, true);
+        }
+    }
+    lane->withdrawn += first > lane->withdrawn_from ? first - lane->withdrawn_from : lane->withdrawn_from - first;
+    lane->withdrawn_from = first;
+}
+
 // Copies `count` records of `size` bytes from `source` into the arena: 0 when there are none or no room (which `valid`
 // tells apart).
 static void* check_deferred_keep(Arena* arena, const void* source, uint64_t count, uint64_t size, bool* valid)
@@ -344,6 +400,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     CheckInputReader* reader = &lane->reader;
     CheckInput* input = &lane->input;
     TypeTable* types = &lane->types;
+    const uint64_t setup_begin = deferred->timing ? check_deferred_now() : 0;
     // The walk's state at a file-scope function's opening brace, before its scope.
     reader->scope_count = 0;
     reader->function_result = 0;
@@ -366,6 +423,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->specifier_thread_local = false;
     reader->declarator_overloadable = false;
     reader->lane_unsupported = false;
+    reader->lane_reason = 0;
     reader->cached_constant_count = top->cached_constant_count;
     reader->vararg_count = top->vararg_count;
     input->report_count = 0;
@@ -388,28 +446,30 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     const TypeViewMark view = type_view_mark(types);
     types->hidden_begin = cut->types;
     types->hidden_end = deferred->top.types.count;
-    uint32_t first_withdrawal = deferred->withdrawal_count;
-    for (uint32_t i = deferred->withdrawal_count; i > 0 && deferred->top_changes.items[deferred->withdrawals[i - 1]].position > cut->opening; i -= 1)
+    // The first withdrawal after the opening, by binary search: the list is in position order.
+    uint32_t low = 0;
+    uint32_t high = deferred->withdrawal_count;
+    while (low < high)
     {
-        first_withdrawal = i - 1;
+        const uint32_t middle = low + (high - low) / 2;
+        const bool after = deferred->top_changes.items[deferred->withdrawals[middle]].position > cut->opening;
+        high = after ? middle : high;
+        low = after ? low : middle + 1;
     }
-    for (uint32_t i = first_withdrawal; i < deferred->withdrawal_count; i += 1)
-    {
-        const TypeChange* change = deferred->top_changes.items + deferred->withdrawals[i];
-        type_tag_withdraw(types, change->tag, change->operation == BUSTER_TYPE_CHANGE_TRANSPARENT);
-    }
-    lane->withdrawn += deferred->withdrawal_count - first_withdrawal;
+    check_deferred_withdraw_to(deferred, lane, low);
     const uint64_t tokens = (uint64_t)cut->closing - cut->opening + 1;
     bool valid = type_changes_initialize(&result->changes, &lane->results, (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 2 + 64));
     types->changes = valid ? &result->changes : 0;
+    const uint64_t walk_begin = deferred->timing ? check_deferred_now() : 0;
     if (valid)
     {
         check_input_resolve_range(reader, cut->opening, cut->closing + 1);
     }
+    const uint64_t walk_end = deferred->timing ? check_deferred_now() : 0;
     types->changes = 0;
     result->unsupported = !valid || reader->lane_unsupported || input->report_count != 0 || input->resource || !reader->bindings.valid || result->changes.full;
-    result->reason = !valid || input->resource || result->changes.full ? "a body ran out of room" : reader->lane_unsupported ?
-                     "a body declares something with linkage, makes a union transparent or uses an intrinsic" : input->report_count != 0 ? "a body reports an error" :
+    result->reason = !valid || input->resource || result->changes.full ? "a body ran out of room" : reader->lane_unsupported ? reader->lane_reason :
+                     input->report_count != 0 ? "a body reports an error" :
                      !reader->bindings.valid ? "a body's bindings ran out of room" : 0;
     if (!result->unsupported)
     {
@@ -476,12 +536,9 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         result->unsupported = !kept;
     }
     // The lane back to the top level's state.
+    const uint64_t undo_begin = deferred->timing ? check_deferred_now() : 0;
     check_deferred_heads(deferred, lane, cut, true);
     const bool reset = type_view_reset(types, view);
-    for (uint32_t i = first_withdrawal; i < deferred->withdrawal_count; i += 1)
-    {
-        type_tag_restore(types, &deferred->top, deferred->top_changes.items[deferred->withdrawals[i]].tag);
-    }
     for (uint32_t i = 0; i < top_input->vla_count; i += 1)
     {
         input->vlas[i] = top_input->vlas[i];
@@ -490,6 +547,10 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     lane->ready = reset;
     lane->bodies += 1;
     lane->body_tokens += tokens;
+    const uint64_t undo_end = deferred->timing ? check_deferred_now() : 0;
+    // The position checks: the setup before the walk (with its record's pushes) and the undo after it.
+    lane->position_ns += (walk_begin - setup_begin) + (undo_end - undo_begin);
+    lane->walk_ns += walk_end - walk_begin;
 }
 
 typedef struct CheckDeferredRun CheckDeferredRun;
@@ -992,14 +1053,28 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
                        !valid ? "the top level ran out of room" : 0;
     deferred->top_reader = reader;
+    const uint64_t environment_begin = deferred->timing ? check_deferred_now() : 0;
+    deferred->top_ns = deferred->timing ? environment_begin - deferred->top_ns : 0;
     valid = valid && c_environment_build(&deferred->environment, &reader->bindings, &deferred->arena, reader->scratch);
+    const uint64_t environment_end = deferred->timing ? check_deferred_now() : 0;
+    deferred->environment_ns = environment_end - environment_begin;
     // The top level's completions and transparency, in position order, which bodies before them withdraw.
     deferred->withdrawals = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->arena, uint32_t, (uint64_t)deferred->top_changes.count + 1) : 0;
-    valid = valid && deferred->withdrawals != 0;
+    deferred->transparencies = deferred->withdrawals != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->arena, uint32_t, (uint64_t)deferred->top.tags.count + 1) : 0;
+    valid = valid && deferred->transparencies != 0;
+    for (uint32_t tag = 0; valid && tag < deferred->top.tags.count; tag += 1)
+    {
+        deferred->transparencies[tag] = BUSTER_CHECK_NONE;
+    }
     for (uint32_t i = 0; valid && i < deferred->top_changes.count; i += 1)
     {
-        const uint8_t operation = deferred->top_changes.items[i].operation;
-        const bool completes = operation == BUSTER_TYPE_CHANGE_LAYOUT || operation == BUSTER_TYPE_CHANGE_ENUM || operation == BUSTER_TYPE_CHANGE_TRANSPARENT;
+        const TypeChange* change = deferred->top_changes.items + i;
+        const bool completes = change->operation == BUSTER_TYPE_CHANGE_LAYOUT || change->operation == BUSTER_TYPE_CHANGE_ENUM ||
+                               change->operation == BUSTER_TYPE_CHANGE_TRANSPARENT;
+        if (change->operation == BUSTER_TYPE_CHANGE_TRANSPARENT)
+        {
+            deferred->transparencies[change->tag] = deferred->withdrawal_count;
+        }
         deferred->withdrawals[deferred->withdrawal_count] = i;
         deferred->withdrawal_count += completes;
     }
@@ -1029,7 +1104,9 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->largest_parameters = parameters > deferred->largest_parameters ? parameters : deferred->largest_parameters;
     }
     CheckDeferredRun run = { .deferred = deferred };
+    const uint64_t lanes_begin = deferred->timing ? check_deferred_now() : 0;
     valid = valid && (deferred->body_count == 0 || lane_run(deferred->lanes, check_deferred_lane, &run, 0));
+    deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
     for (uint32_t lane = 0; lane < deferred->lanes && lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)
     {
         const CheckDeferredLane* state = deferred->lane_states + lane;
@@ -1037,13 +1114,17 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->body_tokens += state->body_tokens;
         deferred->history_reads += state->history_reads;
         deferred->withdrawn += state->withdrawn;
+        deferred->position_ns += state->position_ns;
+        deferred->walk_ns += state->walk_ns;
     }
     for (uint32_t b = 0; valid && b < deferred->body_count; b += 1)
     {
         valid = !deferred->results[b].unsupported;
         deferred->reason = !valid ? deferred->results[b].reason : deferred->reason;
     }
+    const uint64_t merge_begin = deferred->timing ? check_deferred_now() : 0;
     const bool merged = valid && check_deferred_merge(deferred, reader);
+    deferred->merge_ns = deferred->timing ? check_deferred_now() - merge_begin : 0;
     deferred->reason = valid && !merged ? "the merge ran out of room" : deferred->reason;
     valid = merged;
     // A unit that isn't merged is source order's: nothing more of this run counts.
@@ -1074,7 +1155,8 @@ static void check_deferred_release(CheckDeferred* deferred)
 static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena,
                                  Arena* scratch, uint32_t lanes, CheckInputBindingMode binding_mode)
 {
-    *deferred = (CheckDeferred){ .lanes = lanes, .table = types };
+    const bool timing = deferred->timing;
+    *deferred = (CheckDeferred){ .lanes = lanes, .table = types, .timing = timing };
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
     deferred->arena = arena_reserve(UINT64_C(1) << 36);
@@ -1116,6 +1198,8 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
                                     types->members.capacity);
     deferred->top.changes = valid ? &deferred->top_changes : 0;
     deferred->reason = !valid ? "the deferred reader's own memory" : 0;
+    // check_deferred_bodies ends the top level's span, which starts here.
+    deferred->top_ns = timing ? check_deferred_now() : 0;
     bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred);
     deferred->top.changes = 0;
     deferred->unsupported |= !valid;

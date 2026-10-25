@@ -61,6 +61,8 @@ struct CheckCorpusPath
     char spelling[96];
 };
 
+#define BUSTER_CHECK_CORPUS_DEFERRED_REASONS 16
+
 typedef struct CheckCorpusTally CheckCorpusTally;
 struct CheckCorpusTally
 {
@@ -89,8 +91,29 @@ struct CheckCorpusTally
     uint64_t deferred_source_order;
     uint64_t deferred_bodies;
     uint64_t deferred_differences;
+    // The units left to source order by why (the reader's reasons are fixed strings), in the order first met.
+    const char* deferred_reasons[BUSTER_CHECK_CORPUS_DEFERRED_REASONS];
+    uint64_t deferred_reason_units[BUSTER_CHECK_CORPUS_DEFERRED_REASONS];
+    uint32_t deferred_reason_count;
     uint64_t reports;
 };
+
+// Adds `units` to the tally of `reason`, past the table's room to its last entry's.
+static void check_corpus_tally_reason(CheckCorpusTally* tally, const char* reason, uint64_t units)
+{
+    uint32_t found = tally->deferred_reason_count;
+    for (uint32_t i = 0; i < tally->deferred_reason_count; i += 1)
+    {
+        found = found == tally->deferred_reason_count && strcmp(tally->deferred_reasons[i], reason) == 0 ? i : found;
+    }
+    if (found == tally->deferred_reason_count && found < BUSTER_CHECK_CORPUS_DEFERRED_REASONS)
+    {
+        tally->deferred_reasons[found] = reason;
+        tally->deferred_reason_count += 1;
+    }
+    found = found < BUSTER_CHECK_CORPUS_DEFERRED_REASONS ? found : BUSTER_CHECK_CORPUS_DEFERRED_REASONS - 1;
+    tally->deferred_reason_units[found] += units;
+}
 
 typedef struct CheckCorpusOracle CheckCorpusOracle;
 struct CheckCorpusOracle
@@ -1624,6 +1647,8 @@ struct CheckCorpusOutcome
     bool deferred;
     bool deferred_equal;
     uint64_t deferred_bodies;
+    // Why a parsed unit was left to source order, for the report.
+    const char* deferred_reason;
     const char* phase;
     char file[512];
     char message[256];
@@ -1667,10 +1692,8 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
         fprintf(stderr, "%s: the deferred reader's result differs: %s\n", file, difference);
     }
     outcome->deferred = count == 3 && paths[2].deferred != NULL && !paths[2].deferred->unsupported;
-    if (count == 3 && paths[2].deferred != NULL && paths[2].deferred->unsupported && paths[2].parsed)
-    {
-        fprintf(stderr, "%s: deferred reading left to source order: %s\n", file, paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown");
-    }
+    outcome->deferred_reason = count == 3 && paths[2].deferred != NULL && paths[2].deferred->unsupported && paths[2].parsed ?
+                               (paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown") : NULL;
     outcome->deferred_bodies = outcome->deferred ? paths[2].deferred->bodies : 0;
     outcome->equal &= outcome->deferred_equal;
     outcome->resource = paths[0].resource || paths[1].resource;
@@ -1724,6 +1747,10 @@ static void check_corpus_tally_add(CheckCorpusTally* to, const CheckCorpusTally*
     to->deferred_source_order += from->deferred_source_order;
     to->deferred_bodies += from->deferred_bodies;
     to->deferred_differences += from->deferred_differences;
+    for (uint32_t i = 0; i < from->deferred_reason_count; i += 1)
+    {
+        check_corpus_tally_reason(to, from->deferred_reasons[i], from->deferred_reason_units[i]);
+    }
     to->reports += from->reports;
 }
 
@@ -1759,6 +1786,10 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
     tally->deferred_source_order += prepared && check_corpus_deferred_lanes != 0 && !outcome.deferred;
     tally->deferred_bodies += outcome.deferred_bodies;
     tally->deferred_differences += prepared && !outcome.deferred_equal;
+    if (outcome.deferred_reason != NULL)
+    {
+        check_corpus_tally_reason(tally, outcome.deferred_reason, 1);
+    }
     const bool different = !acceptance || !line || !diagnostic_path || !equal || resource;
     if (report != 0)
     {
@@ -1777,6 +1808,11 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
         check_corpus_field(report, oracle->file);
         fprintf(report, "\t%u", diagnostic_path);
         fputc('\n', report);
+    }
+    if (outcome.deferred_reason != NULL && tally->reports < report_limit)
+    {
+        fprintf(stderr, "%s: deferred reading left to source order: %s\n", label, outcome.deferred_reason);
+        tally->reports += 1;
     }
     if (different && tally->reports < report_limit)
     {
@@ -2581,6 +2617,10 @@ static int run_checker_corpus(int count, char** arguments)
     {
         printf("checker-corpus: deferred lanes=%" PRIu64 " units=%" PRIu64 " source_order=%" PRIu64 " bodies=%" PRIu64 " differences=%" PRIu64 "\n", deferred_lanes,
                tally.deferred_units, tally.deferred_source_order, tally.deferred_bodies, tally.deferred_differences);
+        for (uint32_t i = 0; i < tally.deferred_reason_count; i += 1)
+        {
+            printf("checker-corpus: deferred source_order=%" PRIu64 " reason=\"%s\"\n", tally.deferred_reason_units[i], tally.deferred_reasons[i]);
+        }
     }
     printf("checker-corpus: files=%" PRIu64 " excluded_by_clang_selection=%" PRIu64 " clang_accepted=%" PRIu64 " checker_accepted=%" PRIu64 " acceptance_differences=%" PRIu64
            " first_line_differences=%" PRIu64 " diagnostic_path_differences=%" PRIu64 " path_differences=%" PRIu64 " resources=%" PRIu64 " preprocessing_failures=%" PRIu64
