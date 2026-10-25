@@ -22,6 +22,7 @@
 #include <stdarg.h>
 #include <inttypes.h>
 
+#include <signal.h>
 #include <unistd.h>
 #include <asm/prctl.h>
 #include <sys/mman.h>
@@ -2462,8 +2463,45 @@ static void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* 
 // The conversions between U64 and the floating classes (tier0_emit_u64_convert) on named values, as functions that
 // convert their parameter, compiled by both paths and run: from U64 around 2^53, 2^63 and 2^64, where the halving's
 // lowest bit decides the rounding (ties to even, and just past them), and from values below 2^63, at it and up to the
-// largest below 2^64, each against C's conversion of it.
+// largest below 2^64, each against C's conversion of it. Each call must raise the floating exceptions C's conversion
+// raises, MXCSR's invalid and inexact flags (#429's review: a truncation of a value at 2^63 or past it, which C's
+// conversion takes, is invalid as a signed one, and a needless subtraction inexact), and every conversion to U64 must run
+// with invalid unmasked, where a spurious one would raise SIGFPE.
 #define BUSTER_TIER0_TEST_UNSIGNED_VALUES 20
+#define BUSTER_TIER0_TEST_UNSIGNED_FLAGS (_MM_EXCEPT_INVALID | _MM_EXCEPT_INEXACT)
+
+// The flags C's conversion of value v raises for signature `signature` (tier0_test_unsigned_floating's order), as clang
+// compiles it: the flags' oracle, out of line, with the floating environment's accesses kept in order.
+static __attribute__((noinline)) uint32_t tier0_test_unsigned_oracle(uint32_t signature, uint64_t integer, double d, float f)
+{
+#pragma STDC FENV_ACCESS ON
+    volatile uint64_t integer_in = integer;
+    volatile double double_in = d;
+    volatile float float_in = f;
+    _mm_setcsr(_mm_getcsr() & ~(uint32_t)_MM_EXCEPT_MASK);
+    if (signature == 0)
+    {
+        volatile double out = (double)integer_in;
+        (void)out;
+    }
+    else if (signature == 1)
+    {
+        volatile float out = (float)integer_in;
+        (void)out;
+    }
+    else if (signature == 2)
+    {
+        volatile uint64_t out = (uint64_t)double_in;
+        (void)out;
+    }
+    else
+    {
+        volatile uint64_t out = (uint64_t)float_in;
+        (void)out;
+    }
+    return _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
+}
+
 static void tier0_test_unsigned_floating(Tier0TestTally* tally)
 {
     static const uint64_t integers[BUSTER_TIER0_TEST_UNSIGNED_VALUES] = {
@@ -2483,8 +2521,8 @@ static void tier0_test_unsigned_floating(Tier0TestTally* tally)
     static const char* const names[4] = { "to double", "to float", "from double", "from float" };
     static const uint8_t to[4] = { BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
     static const uint8_t from[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32 };
-    // Each signature's code by each path, a page each; the results, the child's.
-    uint64_t* shared = mmap(0, sizeof(uint64_t) * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    // Each signature's code by each path, a page each; the results and then the flags each call raised, the child's.
+    uint64_t* shared = mmap(0, sizeof(uint64_t) * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     uint8_t* region = mmap(0, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Arena arena = arena_reserve(1u << 20);
     bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && arena.base != 0, "unsigned floating", "no memory");
@@ -2530,6 +2568,7 @@ static void tier0_test_unsigned_floating(Tier0TestTally* tally)
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating", "the code can't be loaded");
     const pid_t child = ready ? fork() : -1;
+    tier0_test_expect(tally, !ready || child >= 0, "unsigned floating", "fork failed");
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
@@ -2539,6 +2578,7 @@ static void tier0_test_unsigned_floating(Tier0TestTally* tally)
             for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
             {
                 uint64_t bits = 0;
+                _mm_setcsr(_mm_getcsr() & ~(uint32_t)_MM_EXCEPT_MASK);
                 if (run < 2)
                 {
                     double (*convert)(uint64_t) = 0;
@@ -2567,6 +2607,7 @@ static void tier0_test_unsigned_floating(Tier0TestTally* tally)
                     memcpy(&convert, &address, sizeof(convert));
                     bits = convert(floats[v]);
                 }
+                shared[(8 + run) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
                 shared[run * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = bits;
             }
         }
@@ -2602,8 +2643,47 @@ static void tier0_test_unsigned_floating(Tier0TestTally* tally)
                 const uint64_t seen = shared[run * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
                 tier0_test_expect(tally, seen == expected, "unsigned floating", "%s, %s path: value %u gave 0x%016" PRIx64 ", 0x%016" PRIx64 " expected", names[signature],
                                   run % 2 == 0 ? "vector" : "scalar", v, seen, expected);
+                const uint64_t flags = shared[(8 + run) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
+                const uint32_t oracle = tier0_test_unsigned_oracle(signature, integers[v], doubles[v], floats[v]);
+                tier0_test_expect(tally, flags == oracle, "unsigned floating", "%s, %s path: value %u raised flags 0x%02" PRIx64 ", C's conversion 0x%02x",
+                                  names[signature], run % 2 == 0 ? "vector" : "scalar", v, flags, oracle);
             }
         }
+    }
+    // The conversions to U64 again, with invalid unmasked: every value is in U64's range, so none may trap.
+    const pid_t unmasked = ready ? fork() : -1;
+    tier0_test_expect(tally, !ready || unmasked >= 0, "unsigned floating", "fork failed");
+    if (unmasked == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        _mm_setcsr(_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_MASK_INVALID));
+        for (uint32_t run = 4; run < 8; run += 1)
+        {
+            void* address = region + run * BUSTER_TIER0_TEST_PAGE;
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+            {
+                if (run < 6)
+                {
+                    uint64_t (*convert)(double) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    shared[v] = convert(doubles[v]);
+                }
+                else
+                {
+                    uint64_t (*convert)(float) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    shared[v] = convert(floats[v]);
+                }
+            }
+        }
+        _exit(0);
+    }
+    if (unmasked > 0)
+    {
+        int status = 0;
+        waitpid(unmasked, &status, 0);
+        tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "unsigned floating", "to U64 with invalid unmasked: the child's status %d%s", status,
+                          WIFSIGNALED(status) && WTERMSIG(status) == SIGFPE ? " (SIGFPE)" : "");
     }
     arena_release(&arena);
     if (region != MAP_FAILED)
@@ -2612,7 +2692,7 @@ static void tier0_test_unsigned_floating(Tier0TestTally* tally)
     }
     if (shared != MAP_FAILED)
     {
-        munmap(shared, sizeof(uint64_t) * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES);
+        munmap(shared, sizeof(uint64_t) * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES);
     }
 }
 

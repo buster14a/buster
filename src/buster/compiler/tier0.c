@@ -4815,10 +4815,14 @@ static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
 //     which rounds as x does (cmovge from x's copy in temporary 0), then the result's exponent raised by x's top bit
 //     (added at the exponent's lowest bit, 52 or 23, through temporary 1): the result doubled, exactly, where it was
 //     halved, as clang's code does with a branch.
-//   - To U64 from F32 or F64, the value in the floating stack's top register, the result in the register at d: the value
-//     truncated as a signed integer where it is below 2^63, and otherwise less 2^63, truncated and its top bit flipped
-//     (xor with temporary 3), chosen by cmove from the compare with 2^63 (temporary 0), which setae keeps in temporary 2
-//     past the xor's flags. A value out of U64's range (C leaves it undefined) gives the signed truncations' result.
+//   - To U64 from F32 or F64, the value in the floating stack's top register, the result in the register at d: one signed
+//     truncation, of the value less a bias, 2^63 where the value is at least that and 0 below it (cmovae from the compare
+//     with 2^63 in temporary 0, through temporary 1), then the top bit set back from the compare's result, which setae
+//     keeps in temporary 2 (shifted into place and xored with the truncation's copy in temporary 3). The subtraction is
+//     exact (Sterbenz's lemma from 2^63, and of 0 below it) and the truncation's operand is below 2^63, so a value in U64's
+//     range raises no invalid exception, and an inexact one only where it has a fraction, as C's conversion does (#429's
+//     review): truncating both ways and choosing raised them for nothing. A value out of U64's range (C leaves it
+//     undefined) gives the signed truncation's result, its top bit flipped.
 // The operand's register is the conversion's to overwrite: it consumes the value.
 #define BUSTER_TIER0_FROM_U64_RECORDS 14
 #define BUSTER_TIER0_TO_U64_RECORDS 13
@@ -4854,24 +4858,24 @@ static void tier0_emit_u64_convert(const Tier0Entries* entries, uint32_t i, Tier
         const bool single = entries->variants[i] == BUSTER_TYPED_CLASS_F32;
         const uint8_t value = (uint8_t)(floating - 1);
         const uint8_t result = tier0_integer_depths[depth];
-        // 2^63, as a float (0x5f000000) or a double (0x43e0000000000000), and the top bit (immediate | displacement << 32).
+        // 2^63, as a float (0x5f000000) or a double (0x43e0000000000000: immediate | displacement << 32).
         const X86Instruction limit = single ? tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, result, 0, 0, 0x5f000000)
                                             : tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, result, 0, 0x43e00000, 0);
-        X86Instruction low = tier0_red_zone(X86_FORM_CMP_RM8_IMM8, 0, 2);
-        low.immediate = 0;
-        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, result, 0, INT32_MIN, 0));
-        tier0_put(writer, tier0_red_zone(X86_FORM_MOV_RM64_R64, result, 3));
         tier0_put(writer, limit);
         tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 0));
         tier0_put(writer, tier0_red_zone(single ? X86_FORM_UCOMISS_X_XM32 : X86_FORM_UCOMISD_X_XM64, value, 0));
         tier0_put(writer, tier0_red_zone(X86_FORM_SETAE_RM8, 0, 2));
+        // The bias: 0 (a mov, which keeps the flags), or 2^63 where the value is at least that.
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, result, 0, 0, 0));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_CMOVAE_R32_RM32 : X86_FORM_CMOVAE_R64_RM64, result, 0));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 1));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_SUBSS_X_XM32 : X86_FORM_SUBSD_X_XM64, value, 1));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTTSS2SI_R64_XM32 : X86_FORM_CVTTSD2SI_R64_XM64, result, value, BUSTER_X86_REGISTER_DIRECT, 0, 0));
-        tier0_put(writer, tier0_red_zone(X86_FORM_MOV_RM64_R64, result, 1));
-        tier0_put(writer, tier0_red_zone(single ? X86_FORM_SUBSS_X_XM32 : X86_FORM_SUBSD_X_XM64, value, 0));
-        tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTTSS2SI_R64_XM32 : X86_FORM_CVTTSD2SI_R64_XM64, result, value, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        // The top bit back: the compare's result shifted into place.
+        tier0_put(writer, tier0_red_zone(X86_FORM_MOV_RM64_R64, result, 3));
+        tier0_put(writer, tier0_red_zone(X86_FORM_MOVZX_R32_RM8, result, 2));
+        tier0_put(writer, tier0_instruction(X86_FORM_SHL_RM64_IMM8, 0, result, BUSTER_X86_REGISTER_DIRECT, 0, 63));
         tier0_put(writer, tier0_red_zone(X86_FORM_XOR_R64_RM64, result, 3));
-        tier0_put(writer, low);
-        tier0_put(writer, tier0_red_zone(X86_FORM_CMOVE_R64_RM64, result, 1));
     }
 }
 

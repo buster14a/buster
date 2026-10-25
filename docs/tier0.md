@@ -319,9 +319,13 @@ no branch and no register but its operand's and its result's, through red zone t
   halved with its lowest bit kept, `(x >> 1) | (x & 1)`, which rounds as the value does (`cmovge` chooses which), then
   the result's exponent raised by the value's top bit, which doubles it exactly where it was halved. 14 records, where
   clang -O0 branches between the two conversions.
-- **To U64 from F32 or F64:** the value truncated as a signed integer where it is below 2^63, and otherwise less 2^63,
-  truncated, with its top bit flipped back; `cmove` chooses, from one compare with 2^63 that `setae` keeps past the
-  `xor`'s flags. 13 records. A value out of U64's range, which C leaves undefined, gives the signed truncations' result.
+- **To U64 from F32 or F64:** one signed truncation, of the value less a bias: 2^63 where the value is at least that
+  (`cmovae` from one compare with 2^63), 0 below it. The top bit comes back from the compare's result, which `setae`
+  keeps (`shl` and `xor`). 13 records. The subtraction is exact (Sterbenz's lemma from 2^63, and of 0 below it), and the
+  truncation's operand is below 2^63. So a value in U64's range raises the invalid exception never and inexact only
+  where it has a fraction, as C's conversion does. (#429's first sequence truncated both ways and chose, which raised
+  invalid from 2^63 on, and inexact for a value like 1.0.) A value out of U64's range, which C leaves undefined, gives
+  the signed truncation's result with its top bit flipped.
 
 Each selection counts the result's register in its stack's top. Neither takes a home's variant, so no local fuses into
 one.
@@ -598,8 +602,10 @@ Before the programs, checks of their own:
   function of its parameter, compiled by both paths into the same records, encoded by both encoders and run on 20
   named values: from U64 around 2^53, 2^63 and 2^64, where the halving's kept bit decides the rounding (ties to even
   and just past them), and to U64 from values below 2^63, at it and up to the largest below 2^64, each against C's
-  conversion. The generator's programs have these conversions too (`Tier0ProgramOptions.unsigned_floating`, in the
-  shapes with floating values; to U64 only where C defines it, in the clang cross-check's).
+  conversion. Each call's MXCSR invalid and inexact flags must be those of C's conversion of the same value (compiled
+  with `FENV_ACCESS`), and every conversion to U64 runs again with invalid unmasked, where a spurious one would raise
+  SIGFPE. The generator's programs have these conversions too (`Tier0ProgramOptions.unsigned_floating`, in the shapes
+  with floating values; to U64 only where C defines it, in the clang cross-check's).
 - **copies:**
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
