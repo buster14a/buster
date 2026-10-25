@@ -277,7 +277,8 @@ GNU as writes for `-g` by default and GCC's and clang's `-gz` ask for)
 contributes its bytes decompressed by `inflate.c` (written from RFCs 1950 and
 1951), at the size and alignment its compression header gives; another
 compression (`-gz=zstd`'s) is refused, and so is a zlib stream that doesn't
-decompress to its size or whose Adler-32 differs.
+decompress to its size or whose Adler-32 differs, even where the header
+declares no bytes.
 
 The build is a plan and two passes. The plan, on the calling thread or lane 0,
 places each section in its output section and lists the contributions and the
@@ -423,7 +424,9 @@ check excluded debug sections (left out, with lld's tombstones in the
 references into them), an empty section's place, and empty relocation
 sections, also where no other section of the empty one's kind has bytes and the
 link has no debug relocation, each as lld links them. A zstd section and a
-damaged zlib stream are refused. The relocation passes' vector path is checked
+damaged zlib stream are refused, and so is a section whose header declares no
+bytes but whose stream gives some or isn't one; with an empty stream, it links.
+The relocation passes' vector path is checked
 against its exact twin on each debug relocation section of a `-g` object, which
 ends at a `PROT_NONE` page, as compiled, cut to each length short of a batch,
 and with each rare relocation at each of a batch's places. With

@@ -8,7 +8,8 @@
 // computes. The C++ fixture's inline functions are COMDAT groups in both units, whose losing copies' DWARF stays with
 // tombstones; a link with --gc-sections keeps the DWARF of what it collects the same way; -S leaves the debug sections
 // out. A section of another compression (objcopy's zstd, where binutils has it) and one whose zlib stream is damaged
-// are refused, naming their object and section. Excluded debug sections (SHF_EXCLUDE) are left out, as GNU ld and lld
+// are refused, naming their object and section, and so is one that declares no bytes but whose stream gives some or
+// isn't one (foreign_debug_test_zero_streams). Excluded debug sections (SHF_EXCLUDE) are left out, as GNU ld and lld
 // leave them out, and empty ones and empty relocation sections link, also where no other section of their kind has bytes
 // and the link has no debug relocation (foreign_debug_test_sections). A thread-local offset (R_X86_64_DTPOFF32) is a
 // signed 32-bit field and an R_X86_64_32 an unsigned one, by the writer's and the immediate paths, each refused past its
@@ -1198,6 +1199,118 @@ static void foreign_debug_test_fields(ForeignTestTally* tally, const char* direc
     arena_pop_to(arena, mark);
 }
 
+// Compressed debug sections that declare no bytes (Elf64_Chdr.ch_size 0), from a .debug_abbrev that GNU as compresses
+// (without relocations, which a section of no bytes would have past its end): with the empty zlib stream
+// (78 9c 03 00 00 00 00 01) as its contents, linked on 1 lane, on 8 and by the exact path; with its stream as GNU as
+// compressed it, which gives more than no bytes, and with bytes that aren't a stream, refused alike, naming the object
+// and the section. A stream of no bytes is checked as any other.
+static void foreign_debug_test_zero_streams(ForeignTestTally* tally, const char* directory, ForeignTestSystem* system, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    ForeignTestPath source;
+    ForeignTestPath object;
+    ForeignTestPath plain;
+    ForeignTestPath errors;
+    snprintf(source, sizeof(source), "%s/dbg_zero.s", directory);
+    snprintf(object, sizeof(object), "%s/dbg_zero.o", directory);
+    snprintf(plain, sizeof(plain), "%s/dbg_plain.o", directory);
+    snprintf(errors, sizeof(errors), "%s.err", object);
+    static const char text[] = "    .section .debug_abbrev,\"\",@progbits\n    .quad 0x1234567812345678\n    .zero 1024\n";
+    char* assemble[] = { (char*)"as", (char*)"--compress-debug-sections=zlib", source, (char*)"-o", object, 0 };
+    const bool assembled = foreign_test_write(source, text, sizeof(text) - 1) && object_test_run(assemble, "/dev/null", errors) == 0;
+    const String8 bytes = assembled ? foreign_test_read(arena, object) : (String8){ 0 };
+    ImportElf elf = { 0 };
+    bool found = bytes.pointer != 0 && import_elf(&elf, bytes, ET_REL).error == IMPORT_ERROR_NONE;
+    uint32_t abbrev = 0;
+    for (uint32_t section = 1; found && section < elf.section_count; section += 1)
+    {
+        const Elf64_Shdr header = import_section_header(&elf, section);
+        const char* name = header.sh_name < elf.section_names.length ? elf.section_names.pointer + header.sh_name : "";
+        abbrev = strcmp(name, ".debug_abbrev") == 0 && (header.sh_flags & SHF_COMPRESSED) != 0 && header.sh_size > sizeof(Elf64_Chdr) + 8 ? section : abbrev;
+    }
+    found = found && abbrev != 0;
+    foreign_test_expect(tally, found, "assemble a zlib-compressed .debug_abbrev", errors);
+    const Elf64_Shdr header = found ? import_section_header(&elf, abbrev) : (Elf64_Shdr){ 0 };
+    static const char* const names[3] = { "empty", "compressed", "garbage" };
+    for (uint32_t variant = 0; found && variant < 3; variant += 1)
+    {
+        ForeignTestPath copy_path;
+        snprintf(copy_path, sizeof(copy_path), "%s/dbg_zero-%s.o", directory, names[variant]);
+        uint8_t* copy = arena_push(arena, bytes.length, 8);
+        bool made = copy != 0;
+        if (made)
+        {
+            static const uint8_t empty_stream[8] = { 0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01 };
+            const uint64_t zero = 0;
+            memcpy(copy, bytes.pointer, bytes.length);
+            memcpy(copy + header.sh_offset + offsetof(Elf64_Chdr, ch_size), &zero, sizeof(zero));
+            if (variant == 0)
+            {
+                const uint64_t size = sizeof(Elf64_Chdr) + sizeof(empty_stream);
+                memcpy(copy + header.sh_offset + sizeof(Elf64_Chdr), empty_stream, sizeof(empty_stream));
+                memcpy(copy + elf.section_offset + (uint64_t)abbrev * sizeof(Elf64_Shdr) + offsetof(Elf64_Shdr, sh_size), &size, sizeof(size));
+            }
+            else if (variant == 2)
+            {
+                memset(copy + header.sh_offset + sizeof(Elf64_Chdr), 0xff, header.sh_size - sizeof(Elf64_Chdr));
+            }
+            made = foreign_test_write(copy_path, copy, bytes.length);
+        }
+        ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
+        char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 16);
+        const bool lined = made && line != 0 && arguments != 0;
+        foreign_test_expect(tally, lined, "a compressed section of no bytes' copy", copy_path);
+        if (lined)
+        {
+            *line = (ForeignTestLine){ 0 };
+            foreign_test_pie_begin(line, system);
+            foreign_test_add(line, plain, true, true);
+            foreign_test_add(line, copy_path, true, true);
+            foreign_test_pie_end(line, system);
+        }
+        static const char* const ways[3] = { "--lanes=1", "--lanes=8", "--scalar" };
+        for (uint32_t way = 0; lined && way < 3; way += 1)
+        {
+            ForeignTestPath output;
+            ForeignTestPath link_errors;
+            snprintf(output, sizeof(output), "%s/zero-%s.out%u", directory, names[variant], way);
+            snprintf(link_errors, sizeof(link_errors), "%s.err", output);
+            static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = (char*)ways[way];
+            arguments[count + 1] = (char*)"-o";
+            arguments[count + 2] = output;
+            count += 3;
+            for (uint32_t i = 0; i < line->our_count; i += 1)
+            {
+                arguments[count] = line->ours[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const int status = object_test_run(arguments, "/dev/null", link_errors);
+            const String8 message = foreign_test_read(arena, link_errors);
+            const char* file = strrchr(copy_path, '/');
+            if (variant == 0)
+            {
+                char* run[] = { output, 0 };
+                foreign_test_expect(tally, status == 0 && object_test_run(run, "/dev/null", "/dev/null") == 0, "a compressed section of no bytes and an empty stream links", link_errors);
+            }
+            else
+            {
+                foreign_test_expect(tally, status > 0 && message.pointer != 0 && strstr(message.pointer, "doesn't decompress to its size") != 0 && file != 0 &&
+                                               strstr(message.pointer, file + 1) != 0 && strstr(message.pointer, "(section ") != 0,
+                                    "a compressed section of no bytes whose stream isn't empty is refused, naming its object and section", link_errors);
+            }
+        }
+    }
+    arena_pop_to(arena, mark);
+}
+
 // One run of a relocation section's kernel for foreign_debug_test_kernels: its bytes, records, count and result.
 typedef struct ForeignDebugTestRun ForeignDebugTestRun;
 struct ForeignDebugTestRun
@@ -1439,6 +1552,7 @@ static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_c
         foreign_debug_test_sections(&tally, directory, system, cross_check, arena);
         foreign_debug_test_offsets(&tally, directory, system, cross_check, arena);
         foreign_debug_test_fields(&tally, directory, system, cross_check, arena);
+        foreign_debug_test_zero_streams(&tally, directory, system, arena);
         foreign_debug_test_kernels(&tally, directory, arena);
     }
     return foreign_test_report(&tally);

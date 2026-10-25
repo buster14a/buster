@@ -547,7 +547,7 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                     plan->bases[id][section] = place;
                     plan->sizes[kind] = size < 0xfffffff0u ? place + size : 0xfffffff0u;
                     plan->alignments[kind] = alignment > plan->alignments[kind] ? alignment : plan->alignments[kind];
-                    contribution_capacity += size != 0 ? 1 : 0;
+                    contribution_capacity += size != 0 || (header.sh_flags & SHF_COMPRESSED) != 0 ? 1 : 0;
                 }
             }
         }
@@ -603,8 +603,9 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     const bool allocated = plan->contributions != 0 && plan->relocations != 0 && plan->contribution_order != 0 && plan->relocation_order != 0 && costs != 0 &&
                            plan->contribution_results != 0 && plan->relocation_results != 0 && recorded;
     result.error = result.error == FOREIGN_LINK_ERROR_NONE && !allocated ? FOREIGN_LINK_ERROR_MEMORY : result.error;
-    // The items, in the objects' order: the contributions with bytes (an empty section keeps its place, which references
-    // into it take) and the relocation sections with relocations.
+    // The items, in the objects' order: the contributions with bytes, and the compressed ones of none, whose streams are
+    // checked all the same (an empty section keeps its place, which references into it take); and the relocation
+    // sections with relocations.
     uint64_t first = 0;
     for (uint32_t at = 0; result.error == FOREIGN_LINK_ERROR_NONE && at < foreign->object_count; at += 1)
     {
@@ -621,7 +622,7 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                 String8 stream = { 0 };
                 foreign_debug_extent(input, &header, &size, &alignment, &stream);
                 const uint32_t item = plan->contribution_count;
-                if (size != 0)
+                if (size != 0 || (header.sh_flags & SHF_COMPRESSED) != 0)
                 {
                     plan->contributions[item] = (ForeignDebugContribution){ .object = id, .section = section, .kind = kind, .base = plan->bases[id][section], .size = size };
                     // Decompressing costs about four times copying.
@@ -679,7 +680,10 @@ static void foreign_debug_contribute(ForeignDebugPlan* plan, const Foreign* fore
     uint64_t alignment = 0;
     String8 stream = { 0 };
     foreign_debug_extent(input, &header, &size, &alignment, &stream);
-    uint8_t* place = plan->bytes[contribution->kind] + contribution->base;
+    // A compressed section of no bytes decompresses into nothing, where its kind may have no bytes at all: its stream
+    // must still be one of no bytes.
+    uint8_t nothing = 0;
+    uint8_t* place = size != 0 ? plan->bytes[contribution->kind] + contribution->base : &nothing;
     if ((header.sh_flags & SHF_COMPRESSED) == 0)
     {
         const String8 contents = import_section_bytes(&input->elf, &header);
