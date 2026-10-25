@@ -104,7 +104,7 @@ struct CheckLowerWriter
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* values;
-    // Each entry's source token (CheckProgramLowered.entry_tokens).
+    // Each entry's source token (CheckProgramLowered.entry_tokens), when `sources` asks for them.
     uint32_t* tokens;
     uint32_t* labels;
     uint32_t* label_heads;
@@ -178,6 +178,7 @@ struct CheckLowerWriter
     uint32_t varargs_count;
     bool scalar;
     bool track;
+    bool sources;
 };
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
@@ -463,6 +464,15 @@ static void check_lower_place(CheckLowerWriter* writer, uint32_t label)
     }
 }
 
+// Entry `index`'s source token, when the lowering keeps them (`sources`).
+static void check_lower_token(CheckLowerWriter* writer, uint32_t index)
+{
+    if (writer->sources)
+    {
+        writer->tokens[index] = writer->source;
+    }
+}
+
 static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
     if (class >= BUSTER_TYPED_CLASSES)
@@ -492,11 +502,11 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             {
                 writer->kinds[writer->count] = BUSTER_TYPED_CONST;
                 writer->classes[writer->count] = top;
-                writer->tokens[writer->count] = writer->source;
+                check_lower_token(writer, writer->count);
                 writer->values[writer->count++] = 0;
                 writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
                 writer->classes[writer->count] = top;
-                writer->tokens[writer->count] = writer->source;
+                check_lower_token(writer, writer->count);
                 writer->values[writer->count++] = 0;
             }
         }
@@ -509,7 +519,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             writer->kinds[writer->count] = kind;
             writer->classes[writer->count] = class;
             writer->values[writer->count] = value;
-            writer->tokens[writer->count] = writer->source;
+            check_lower_token(writer, writer->count);
             writer->count += 1;
         }
     }
@@ -1814,7 +1824,7 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
             {
                 check_lower_track(writer, writer->kinds[i], writer->classes[i], writer->values[i]);
             }
-            writer->tokens[i] = writer->source;
+            check_lower_token(writer, i);
             writer->count += 1;
         }
         if (labels[result.count] != BUSTER_CHECK_NONE)
@@ -3337,13 +3347,14 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_ABI(first, uint32_t, abi_capacity);
     BUSTER_CHECK_LOWER_ABI(variadic, uint8_t, abi_capacity);
 #undef BUSTER_CHECK_LOWER_ABI
-    CheckLowerWriter writer = { .program = program, .output = lowered, .abi = &abi, .capacity = capacity, .local_capacity = local_capacity, .scalar = scalar };
+    CheckLowerWriter writer = { .program = program, .output = lowered, .abi = &abi, .capacity = capacity, .local_capacity = local_capacity, .scalar = scalar,
+                                .sources = sources };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer.field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer.field != 0
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTask, capacity);
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);
-    BUSTER_CHECK_LOWER_COLUMN(tokens, uint32_t, capacity);
+    BUSTER_CHECK_LOWER_COLUMN(tokens, uint32_t, sources ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(labels, uint32_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(label_heads, uint32_t, track ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(stack_parents, uint32_t, track ? capacity : 1);

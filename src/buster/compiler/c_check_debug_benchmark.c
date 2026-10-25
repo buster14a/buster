@@ -2,9 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // benchmark-check-debug [--functions N] [--seed N] [--runs N] [--only rows|lines|keep|build|emit] [--path vector|scalar]
-// [--after-scalar MS] [--print PATH]: the C driver's source rows (#395, c_check_debug.c), each pass by its vector path
-// and its exact twin. --print writes the generated program to PATH and measures nothing, for timing whole compiles of
-// it with -g and without. Include after c_check_debug_test.c, whose generator and pipeline it takes, and c_check_source_benchmark.c, whose
+// [--after-scalar MS] [--directives] [--print PATH]: the C driver's source rows (#395, c_check_debug.c), each pass by its
+// vector path and its exact twin. --directives gives the generated program the test's #lines (an eighth of the
+// functions under a #line of a name of its own, and some inside bodies), as generated C has them. --print writes the
+// generated program to PATH and measures nothing, for timing whole compiles of it with -g and without. Include after c_check_debug_test.c, whose generator and pipeline it takes, and c_check_source_benchmark.c, whose
 // clock and median it shares.
 //
 // - rows: the raw rows of synthetic functions shaped like Tier 0's (entries of 0 to 3 records, about a third fused into
@@ -246,6 +247,7 @@ static int run_check_debug_benchmark(int argc, char** argv)
     int32_t only = -1;
     int32_t alone = -1;
     const char* print = 0;
+    bool directives = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -274,6 +276,10 @@ static int run_check_debug_benchmark(int argc, char** argv)
             }
             options = only >= 0;
         }
+        else if (strcmp(argv[i], "--directives") == 0)
+        {
+            directives = true;
+        }
         else if (strcmp(argv[i], "--print") == 0 && i + 1 < argc)
         {
             print = argv[++i];
@@ -293,14 +299,14 @@ static int run_check_debug_benchmark(int argc, char** argv)
     if (!options)
     {
         fprintf(stderr, "usage: compiler benchmark-check-debug [--functions N] [--seed N] [--runs N] [--only rows|lines|keep|build|emit] [--path vector|scalar] "
-                        "[--after-scalar MS] [--print PATH]\n");
+                        "[--after-scalar MS] [--directives] [--print PATH]\n");
     }
     CheckDebugTestTally tally = { .random = (seed | 1) * 0x9e3779b97f4a7c15ull };
     if (options && print != 0)
     {
         const uint64_t capacity = (uint64_t)functions * 1024 + 4096;
         char* text = malloc(capacity);
-        const uint64_t length = text != 0 ? check_debug_test_generate(&tally, text, capacity, functions, false) : capacity;
+        const uint64_t length = text != 0 ? check_debug_test_generate(&tally, text, capacity, functions, directives) : capacity;
         const bool written = length < capacity && foreign_test_write(print, text, length);
         free(text);
         if (!written)
@@ -325,8 +331,8 @@ static int run_check_debug_benchmark(int argc, char** argv)
     snprintf(path, sizeof(path), "%s/program.c", directory);
     const uint64_t capacity = (uint64_t)functions * 1024 + 4096;
     char* text = ready ? malloc(capacity) : 0;
-    // A C program as most are: macros, some across lines, and no #line.
-    const uint64_t length = text != 0 ? check_debug_test_generate(&tally, text, capacity, functions, false) : capacity;
+    // A C program as most are: macros, some across lines, and no #line (unless --directives).
+    const uint64_t length = text != 0 ? check_debug_test_generate(&tally, text, capacity, functions, directives) : capacity;
     ready = ready && length < capacity && foreign_test_write(path, text, length);
     free(text);
     if (ready)

@@ -12,7 +12,8 @@
 //   lines in runs, some past INT32_MAX, the body's start at one of them or none), of every count to 130 and larger,
 //   ending at PROT_NONE pages.
 // - Lines: fixtures (a header's function, macros, a multi-line call, macros nested past the vector path's walk, an
-//   #include and a #line inside a body, a #line before a function) and --programs generated programs of macros across
+//   #include and a #line inside a body, a #line before a function, two #lines naming one file around a function's
+//   statements) and --programs generated programs of macros across
 //   lines and #lines, compiled through the pipeline with source rows by each path: every row's file and line by the
 //   vector path and the exact path alike, the exact path's as pp_presumed gives them, each function's rows within its
 //   lines where nothing moves them, both paths' units and sections the same bytes, and the fixtures' functions with
@@ -297,7 +298,14 @@ static const CheckDebugTestFile check_debug_test_files[] = {
         "int renamed(int v)\n"                      // dbg_renamed.c:1
         "{\n"                                       // 2
         "    return v + 1;\n"                       // 3
-        "}\n",                                      // 4
+        "}\n"                                       // 4
+        "#line 10 \"dbg_same.c\"\n"
+        "int same_named(int v)\n"                   // dbg_same.c:10
+        "{\n"                                       // 11
+        "    int x = v * 3;\n"                      // 12
+        "#line 100 \"dbg_same.c\"\n"
+        "    return x + 1;\n"                       // 100: a second #line of the same name, the same file
+        "}\n",                                      // 101
     },
 };
 
@@ -322,6 +330,7 @@ static const CheckDebugTestExpected check_debug_test_expected[] = {
     { "moved", "dbg_rows.c", 32, { 34, 500, 501 }, { 35, 36 } },
     { "main", "dbg_rows.c", 39, { 42, 43, 45, 47, 49, 50, 51, 52, 53 }, { 40, 46 } },
     { "renamed", "dbg_renamed.c", 1, { 3, 4 }, { 2 } },
+    { "same_named", "dbg_same.c", 10, { 12, 100, 101 }, { 11 } },
 };
 
 // One compilation through the pipeline, with source rows (the driver's steps to check_program_emit): everything the

@@ -199,6 +199,8 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         {
             result->lowered.functions[b].symbol_access = access;
             result->lowered.functions[b].symbol_count = access_count;
+            // The entries' first records only for source rows.
+            result->lowered.functions[b].entry_records = rows != NULL;
         }
     }
     uint64_t references = 0;

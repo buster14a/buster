@@ -154,9 +154,21 @@ static uint32_t check_debug_line_at(const uint32_t* lines, uint32_t count, uint3
     return low;
 }
 
-// What the lines are read from: the preprocessor and the parser, and each range's #lines in the order of their places
-// (a range's notes are in that order, linked by next_in_range): range r's are directives[first[r]] to
-// directives[first[r + 1]], which check_debug_directive searches, rather than walking a range's notes from its first.
+// A file key's name: a PPFile's path, or a #line's.
+static String8 check_debug_file_name(const Preprocessor* pp, uint32_t key)
+{
+    const PPLineDirective* named = (key & BUSTER_CHECK_DEBUG_NAMED) != 0 ? &pp->line_directives[key & ~BUSTER_CHECK_DEBUG_NAMED] : 0;
+    const String8 result = named != 0 ? (String8){ .pointer = (char*)named->name, .length = named->name_length } :
+                                        (String8){ .pointer = pp->files[key].path, .length = pp->files[key].path_length };
+    return result;
+}
+
+// What the lines are read from: the preprocessor and the parser; each range's #lines in the order of their places (a
+// range's notes are in that order, linked by next_in_range): range r's are directives[first[r]] to
+// directives[first[r + 1]], which check_debug_directive searches, rather than walking a range's notes from its first;
+// and each file's and each named #line's key, one per name: a PPFile's index, or BUSTER_CHECK_DEBUG_NAMED and a #line's
+// index, the first of a name in that order (file_keys, directive_keys). So two #lines that name one file, or a #line
+// that names a file's path, give one key, which the kept rows compare.
 typedef struct CheckDebugSource CheckDebugSource;
 struct CheckDebugSource
 {
@@ -164,7 +176,33 @@ struct CheckDebugSource
     const Parser* parser;
     uint32_t* first;
     uint32_t* directives;
+    uint32_t* file_keys;
+    uint32_t* directive_keys;
 };
+
+// The key of name `name` (check_debug_source's table of `capacity` slots, a power of two, of keys or
+// BUSTER_CHECK_DEBUG_NO_FILE): the key it has, or `key`, which it then gets.
+static uint32_t check_debug_name_key(const CheckDebugSource* source, uint32_t* table, uint32_t capacity, String8 name, uint32_t key)
+{
+    uint32_t slot = (uint32_t)link_hash((const uint8_t*)name.pointer, name.length) & (capacity - 1);
+    uint32_t result = BUSTER_CHECK_DEBUG_NO_FILE;
+    while (result == BUSTER_CHECK_DEBUG_NO_FILE)
+    {
+        const uint32_t held = table[slot];
+        const String8 other = held != BUSTER_CHECK_DEBUG_NO_FILE ? check_debug_file_name(source->pp, held) : (String8){ 0 };
+        if (held == BUSTER_CHECK_DEBUG_NO_FILE)
+        {
+            table[slot] = key;
+            result = key;
+        }
+        else if (other.length == name.length && memcmp(other.pointer, name.pointer, name.length) == 0)
+        {
+            result = held;
+        }
+        slot = (slot + 1) & (capacity - 1);
+    }
+    return result;
+}
 
 // The source of `pp` and `parser`, its index from `arena`; false when there's no room. The expansion history is recorded
 // first if PPOptions.defer_history put it off (the checker's driver records it as the unit runs); a unit without one
@@ -177,8 +215,32 @@ static bool check_debug_source(CheckDebugSource* source, Preprocessor* pp, const
         .parser = parser,
         .first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)pp->range_count + 1),
         .directives = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)pp->line_directive_count + 1),
+        .file_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)pp->file_count + 1),
+        .directive_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)pp->line_directive_count + 1),
     };
-    const bool valid = source->first != 0 && source->directives != 0;
+    // The names' table: a slot per name and as many free, at least.
+    uint32_t capacity = 16;
+    while (capacity < 2 * ((uint64_t)pp->file_count + pp->line_directive_count) + 1 && capacity < (1u << 31))
+    {
+        capacity *= 2;
+    }
+    uint32_t* table = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
+    const bool valid = source->first != 0 && source->directives != 0 && source->file_keys != 0 && source->directive_keys != 0 && table != 0;
+    if (valid)
+    {
+        memset(table, 0xff, (uint64_t)capacity * sizeof(uint32_t));
+        for (uint32_t file = 0; file < pp->file_count; file += 1)
+        {
+            source->file_keys[file] = check_debug_name_key(source, table, capacity, check_debug_file_name(pp, file), file);
+        }
+        for (uint32_t directive = 0; directive < pp->line_directive_count; directive += 1)
+        {
+            const bool named = pp->line_directives[directive].name != 0;
+            source->directive_keys[directive] = named ? check_debug_name_key(source, table, capacity, check_debug_file_name(pp, BUSTER_CHECK_DEBUG_NAMED | directive),
+                                                                           BUSTER_CHECK_DEBUG_NAMED | directive) :
+                                                        BUSTER_CHECK_DEBUG_NO_FILE;
+        }
+    }
     uint32_t count = 0;
     for (uint32_t range = 0; valid && range < pp->range_count; range += 1)
     {
@@ -237,14 +299,14 @@ static void check_debug_line_scalar(const CheckDebugSource* source, uint32_t tok
     {
         pp_diagnostic_lines(pp, range);
         uint32_t presumed = pp_line_of(pp, range, location, 0);
-        uint32_t file = pp->ranges[range].file;
+        uint32_t file = source->file_keys[pp->ranges[range].file];
         // The range's last #line at or before the place.
         const uint32_t before = check_debug_directive(source, range, location);
         const uint32_t applies = before != 0 ? source->directives[source->first[range] + before - 1] : BUSTER_PP_NONE;
         if (applies != BUSTER_PP_NONE)
         {
             presumed = (uint32_t)((int64_t)presumed + pp->line_directives[applies].delta);
-            file = pp->line_directives[applies].name != 0 ? BUSTER_CHECK_DEBUG_NAMED | applies : file;
+            file = pp->line_directives[applies].name != 0 ? source->directive_keys[applies] : file;
         }
         *key = file;
         *line = presumed;
@@ -313,7 +375,7 @@ static bool check_debug_span(const CheckDebugSource* source, uint32_t declaratio
                 .first_line = check_debug_line_at(data->diagnostic_lines, data->diagnostic_line_count, begin - record->base),
                 .end_line = check_debug_line_at(data->diagnostic_lines, data->diagnostic_line_count, end - record->base),
                 .delta = applies != BUSTER_PP_NONE ? (uint32_t)pp->line_directives[applies].delta : 0,
-                .key = named ? BUSTER_CHECK_DEBUG_NAMED | applies : record->file,
+                .key = named ? source->directive_keys[applies] : source->file_keys[record->file],
             };
         }
     }
@@ -479,39 +541,18 @@ struct CheckDebug
     uint32_t raw_rows;
 };
 
-// A file key's name: a PPFile's path, or a #line's.
-static String8 check_debug_file_name(const Preprocessor* pp, uint32_t key)
+// The unit's file of a key (check_debug_source's, one per name): the one it has, or a new one (`files`, room for the
+// program's functions and one more), which PPFile keys remember in `by_file` and #line keys in `by_directive`.
+static uint32_t check_debug_file(const Preprocessor* pp, uint32_t key, String8* files, uint32_t* file_count, uint32_t* by_file, uint32_t* by_directive)
 {
-    const PPLineDirective* named = (key & BUSTER_CHECK_DEBUG_NAMED) != 0 ? &pp->line_directives[key & ~BUSTER_CHECK_DEBUG_NAMED] : 0;
-    const String8 result = named != 0 ? (String8){ .pointer = (char*)named->name, .length = named->name_length } :
-                                        (String8){ .pointer = pp->files[key].path, .length = pp->files[key].path_length };
-    return result;
-}
-
-// The unit's file of a key: the table's file of the same name, or a new one (`files`, room for the program's functions
-// and one more). PPFile keys remember theirs (`by_file`).
-static uint32_t check_debug_file(const Preprocessor* pp, uint32_t key, String8* files, uint32_t* file_count, uint32_t* by_file)
-{
-    uint32_t result = (key & BUSTER_CHECK_DEBUG_NAMED) == 0 ? by_file[key] : BUSTER_CHECK_DEBUG_NO_FILE;
-    if (result == BUSTER_CHECK_DEBUG_NO_FILE)
+    uint32_t* known = (key & BUSTER_CHECK_DEBUG_NAMED) != 0 ? &by_directive[key & ~BUSTER_CHECK_DEBUG_NAMED] : &by_file[key];
+    if (*known == BUSTER_CHECK_DEBUG_NO_FILE)
     {
-        const String8 name = check_debug_file_name(pp, key);
-        for (uint32_t file = 0; result == BUSTER_CHECK_DEBUG_NO_FILE && file < *file_count; file += 1)
-        {
-            result = files[file].length == name.length && memcmp(files[file].pointer, name.pointer, name.length) == 0 ? file : BUSTER_CHECK_DEBUG_NO_FILE;
-        }
-        if (result == BUSTER_CHECK_DEBUG_NO_FILE)
-        {
-            result = *file_count;
-            files[result] = name;
-            *file_count += 1;
-        }
-        if ((key & BUSTER_CHECK_DEBUG_NAMED) == 0)
-        {
-            by_file[key] = result;
-        }
+        *known = *file_count;
+        files[*file_count] = check_debug_file_name(pp, key);
+        *file_count += 1;
     }
-    return result;
+    return *known;
 }
 
 // The driver's unit from check_program_emit's raw rows: each source body a function, its rows' lines (check_debug_lines),
@@ -528,6 +569,7 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
     uint32_t* keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK);
     uint32_t* lines = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK);
     uint32_t* by_file = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)pp->file_count + 1);
+    uint32_t* by_directive = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)pp->line_directive_count + 1);
     String8* files = BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)count + 1);
     DebugFunction* functions = BUSTER_ARENA_PUSH_ARRAY(arena, DebugFunction, (uint64_t)count + 1);
     SymbolId* symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, (uint64_t)count + 1);
@@ -535,15 +577,16 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
     uint32_t* kept_lines = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK);
     char* directory = BUSTER_ARENA_PUSH_ARRAY(arena, char, PATH_MAX);
     CheckDebugSource source;
-    bool valid = keys != 0 && lines != 0 && by_file != 0 && files != 0 && functions != 0 && symbols != 0 && kept_offsets != 0 && kept_lines != 0 &&
-                 directory != 0 && getcwd(directory, PATH_MAX) != 0 && pp->main_file < pp->file_count && check_debug_source(&source, pp, parser, scratch);
+    bool valid = keys != 0 && lines != 0 && by_file != 0 && by_directive != 0 && files != 0 && functions != 0 && symbols != 0 && kept_offsets != 0 &&
+                 kept_lines != 0 && directory != 0 && getcwd(directory, PATH_MAX) != 0 && pp->main_file < pp->file_count && check_debug_source(&source, pp, parser, scratch);
     uint32_t file_count = 0;
     uint32_t kept = 0;
     if (valid)
     {
         memset(by_file, 0xff, ((uint64_t)pp->file_count + 1) * sizeof(uint32_t));
+        memset(by_directive, 0xff, ((uint64_t)pp->line_directive_count + 1) * sizeof(uint32_t));
         // The translation unit's file first: debug.c names the unit by it.
-        check_debug_file(pp, pp->main_file, files, &file_count, by_file);
+        check_debug_file(pp, source.file_keys[pp->main_file], files, &file_count, by_file, by_directive);
     }
     for (uint32_t b = 0; valid && b < count; b += 1)
     {
@@ -554,7 +597,7 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
         uint32_t key = BUSTER_CHECK_DEBUG_NO_FILE;
         uint32_t line = 0;
         check_debug_line_scalar(&source, body->declaration, &key, &line);
-        const uint32_t file = key != BUSTER_CHECK_DEBUG_NO_FILE ? check_debug_file(pp, key, files, &file_count, by_file) : 0;
+        const uint32_t file = key != BUSTER_CHECK_DEBUG_NO_FILE ? check_debug_file(pp, key, files, &file_count, by_file, by_directive) : 0;
         const uint32_t start = rows->bodies[b];
         const uint32_t row_count = exact ? check_debug_keep_scalar(rows->offsets + first, keys + first, lines + first, rows->counts[b], key, start, kept_offsets + kept, kept_lines + kept) :
                                            check_debug_keep(rows->offsets + first, keys + first, lines + first, rows->counts[b], key, start, kept_offsets + kept, kept_lines + kept);
