@@ -33,7 +33,9 @@ static bool check_test_program_function(const Tier0Function* a, const Tier0Funct
                        check_test_program_column(a->call_variadic, b->call_variadic, a->call_count) &&
                        check_test_program_column(a->calls, b->calls, (uint64_t)a->call_count * sizeof(AbiCall)) &&
                        check_test_program_column(a->argument_locations, b->argument_locations, (uint64_t)a->argument_count * sizeof(AbiLocation)) &&
-                       check_test_program_column(a->argument_classes, b->argument_classes, a->argument_count);
+                       check_test_program_column(a->argument_classes, b->argument_classes, a->argument_count) &&
+                       a->x87_constant_count == b->x87_constant_count && a->x87 == b->x87 &&
+                       check_test_program_column(a->x87_constants, b->x87_constants, (uint64_t)a->x87_constant_count * 2 * sizeof(uint64_t));
     return equal;
 }
 
@@ -101,6 +103,15 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         "unsigned long fp_bits(double d){union{double d;unsigned long u;}x={d};return x.u;}\n"
         "unsigned fp_bitsf(float f){union{float f;unsigned u;}x={f};return x.u;}\n"
         "int set_math_errno(int n){errno=n;return 0;}int get_math_errno(void){return errno;}\n"
+        // A result through a hidden pointer, which clang takes as aligned to the union's 16: w is the pointer's bytes
+        // (clang -O0 returns in place), and a misaligned one shows in the first byte.
+        "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
+        "for(int i=0;i<40;i++)w.c[i]=(char)(n+i);if((unsigned long)&w%16)w.c[0]=99;return w;}\n"
+        // Structs of a complex long double, which return in st0 and st1: one returned to the program, and the program's
+        // own called through a pointer.
+        "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
+        "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
+        "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
         "int main(void) { for (int repeat=0;repeat<3;repeat++) for (int n=-3;n<=19;n++) {\n"
         "int a=tested(n), b=oracle_tested(n); if(a!=b) { fprintf(stderr,\"n=%d repeat=%d ours=%d oracle=%d\\n\",n,repeat,a,b); return 1; } }\n"
         "if(terminal_probe){int p=fork();if(p<0)return 2;if(!p){struct rlimit r={0,0};setrlimit(RLIMIT_CORE,&r);terminal_probe();_exit(91);}\n"
@@ -794,6 +805,53 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){int x=n;__typeof__(({int y=++x;y;})) t=2;return x+t;}", "statement-region-typeof-local-declarations-unevaluated", clang);
     check_test_program_source(test,
         "int tested(int n){int x=0;({int y=n;if(y)x++;});return x;}", "statement-region-void-prefix", clang);
+    // Long double (#136, #137): its locals and parameters frame objects, its values on the x87 through their slots, its
+    // constants in each function's table, compares, every conversion (to and from unsigned long past 2^63 too), calls
+    // passing it on the stack and returning it in st0 (a struct of one too), va_arg of it, and updates of it in memory.
+    check_test_program_source(test,
+        "long double scale(long double a,int i,double d){return a*i+d;}"
+        "int tested(int n){long double x=n/3.0L;long double y=scale(x,n,0.5);long double z=-y;z+=x;z*=2;z-=n;z/=7;"
+        "int c=(x<y)+2*(x<=y)+4*(x>y)+8*(x>=y)+16*(x==y)+32*(x!=y)+64*!z+128*(x&&y)+256*(z||0.0L);"
+        "long long l=(long long)(y*1000);unsigned long u=(unsigned long)(x*x*1e15L+1e19L);unsigned char b=(unsigned char)(x+100);"
+        "_Bool t=(_Bool)z;float f=(float)x;double d=(double)y;"
+        "return c+(int)(l%100000)+(int)(u%9973)+(int)z+b+t+(int)(f*64)+(int)(d*16)+(int)((long double)u/1e18L);}",
+        "long-double-arithmetic-and-conversions", clang);
+    check_test_program_source(test,
+        "long double g=2.5L;long double table[3]={1.5L,-0.25L,3.0L};struct P{long double a;int t;long double b;};struct One{long double x;};"
+        "struct One third(long double a){struct One r={a/3};return r;}"
+        "struct P make(long double a,int t){struct P p={a,t,a*t};return p;}"
+        "long double sum(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);long double s=0;"
+        "for(int i=0;i<count;i++){s=s*2+__builtin_va_arg(ap,long double);s+=__builtin_va_arg(ap,int);}__builtin_va_end(ap);return s;}"
+        "int tested(int n){long double v=n;long double old=v++;long double pre=++v;long double down=v--;--v;"
+        "table[(unsigned)n%3]+=v;g+=old;struct P p=make(pre,n);struct One o=third(p.b);"
+        "long double s=sum(3,v,n,down,2,o.x,-n);long double*q=&table[1];*q-=s/64;long double r=n&1?s:*q;"
+        "return (int)(s*16)^(int)(r*8)^(int)(g*2)^(int)(table[(unsigned)n%3]*4)^p.t^(int)(p.a*3);}",
+        "long-double-memory-and-calls", clang);
+    // A call's result object, which a hidden pointer passes, aligned to the result's canonical type (16 for a union of a
+    // long double) though an aligned typedef says 1: va_arg's 8-byte object between the calls' objects puts one of them 8
+    // bytes off a multiple of 16 if their alignment were the typedef's. (Clang passes a variable of the typedef's type as
+    // the pointer itself, at the typedef's alignment, so the variables here are of the union's.)
+    check_test_program_source(test,
+        "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
+        "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
+        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
+        "hidden-result-canonical-alignment", clang);
+    check_test_program_source(test,
+        "struct cx{_Complex long double z;};struct cx external_complex(long double a,long double b);"
+        "long double external_complex_apply(struct cx(*f)(long double,long double),long double a);"
+        "struct cx swap(long double a,long double b){struct cx c=external_complex(b,a);return c;}"
+        "int tested(int n){struct cx c=external_complex(n,n*0.5L);long double r=__real__ c.z,i=__imag__ c.z;"
+        "return (int)(r*8+i*2)+(int)external_complex_apply(swap,n+0.25L);}",
+        "long-double-complex-struct-results", clang);
+    check_test_program_source(test,
+        "long double half();long double twice(long double a){return a*2;}"
+        "long double apply(long double(*f)(long double),long double a){return f(a);}"
+        "int tested(int n){long double a[4]={n,n+0.5L,-n,0};long double*p=a;p+=2;"
+        "long double k=apply(twice,*p)+half(a[1]);a[3]=k;"
+        "return (int)(a[3]*4)+(int)(p[-1]*2)+(int)sizeof(long double)+(int)_Alignof(long double)+(int)sizeof a;}"
+        "long double half(long double a){return a/2;}",
+        "long-double-indirect-and-unprototyped-calls", clang);
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);
@@ -871,6 +929,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "aggregate-argument-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "struct B{unsigned x:3;};int tested(int n){struct B b;b.x=n;return b.x;}",
                                 "bit-field-lowering", true, true, 0, 0);
+    // Long double: lowered, with its constants' table, and what would keep one of its values in a temporary refused.
+    check_test_program_boundary(test, "long double g;int tested(int n){long double x=n+0.5L;g=x;return g>1;}", "long-double-lowering", true, true, 1, 1);
+    check_test_program_boundary(test, "long double tested(int n){return ({long double t=n;t;});}", "long-double-statement-region-value", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, false, 0, 1);
     check_test_program_boundary(test,
                                 "struct __attribute__((packed)) P{unsigned char c:4;unsigned long long x:64;};"
                                 "int tested(int n){struct P p;p.x=(unsigned long long)n;return (int)p.x;}",

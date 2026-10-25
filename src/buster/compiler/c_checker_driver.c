@@ -906,6 +906,10 @@ static int run_check_command(int count, char** arguments, bool executable)
     bool markers = false;
     const bool parsed = filtered != 0 && !missing_value && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
+    // The expansion history is recorded only when something asks for it (PPOptions.defer_history): a diagnostic, and the
+    // system-header judgment of a unit whose runs can't make it (check_input_system_tokens). --scalar judges by the
+    // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs.
+    options.defer_history = !lazy_system_headers && !scalar;
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [-fsyntax-only | -c] "
