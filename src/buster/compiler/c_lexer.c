@@ -42,6 +42,8 @@
 // starts, chunks read in place from the source, the previous chunk's bitstrings carried as their last lanes, and a
 // one-permute byte shift; then (2026-10-22) raw string literals in C (C_TOKENIZER_RAW_STRINGS), found at prefixed
 // literals' starts by bitstrings. Measurements: docs/c-lexer.md.
+// Local changes (2026-10-25): intrinsic bitstrings and shuffles instead of compiler vector extensions, with MSVC
+// spellings for alignment, inlining, bit counts and compiler barriers.
 //
 // Upstream license (Accelerated-Zig-Parser's LICENSE file, verbatim):
 //
@@ -434,7 +436,21 @@ typedef enum CTokenizerError
 // `source` needs no padding or terminator, and `kinds`, `starts` and `ends` need `BUSTER_C_TOKENIZER_CAPACITY(length)`
 // entries. The three output arrays must not overlap each other or `source` (the vectorized path writes them through
 // restrict pointers).
-static __attribute__((unused)) int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+#if defined(_MSC_VER)
+#define BUSTER_LEX_UNUSED
+#define BUSTER_LEX_NOINLINE __declspec(noinline)
+#define BUSTER_LEX_COLD_NOINLINE __declspec(noinline)
+#define BUSTER_LEX_ALIGN(n) __declspec(align(n))
+#define BUSTER_LEX_RESTRICT __restrict
+#else
+#define BUSTER_LEX_UNUSED __attribute__((unused))
+#define BUSTER_LEX_NOINLINE __attribute__((noinline))
+#define BUSTER_LEX_COLD_NOINLINE __attribute__((cold, noinline))
+#define BUSTER_LEX_ALIGN(n) __attribute__((aligned(n)))
+#define BUSTER_LEX_RESTRICT restrict
+#endif
+
+static BUSTER_LEX_UNUSED int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // c_tokenize of the bytes from `begin` to `length` alone, as if the source ended at `length`: `begin` is 0 or the start
 // of a token that starts a logical line (BUSTER_C_TOKEN_START_OF_LINE). Every token before the last one that starts a
@@ -443,24 +459,21 @@ static __attribute__((unused)) int64_t c_tokenize(const uint8_t* source, uint64_
 // (pp_prepare_into). Not for a source that takes the scalar lexer whole (c_tokenize_scalar_only of the whole source):
 // those go to c_tokenize. Returns the number of tokens, written from kinds[0], starts[0] and ends[0] on (positions are
 // the source's), or C_TOKENIZER_ERROR_FILE_TOO_BIG; the arrays need BUSTER_C_TOKENIZER_CAPACITY(length - begin) entries.
-static __attribute__((unused)) int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+static BUSTER_LEX_UNUSED int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
                                                         uint32_t flags);
 
 // c_tokenize without the scalar lexer: returns C_TOKENIZER_ERROR_NEEDS_SCALAR for the rare inputs that need it for a
 // part (see c_tokenizer.c), with the output arrays clobbered. For testing and benchmarking.
-static __attribute__((unused)) int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+static BUSTER_LEX_UNUSED int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // The same tokenization by a straightforward scalar lexer (which `c_tokenize` uses for the rare parts of a source
 // that its vectorized path doesn't handle). It writes exactly the returned number of tokens.
-static __attribute__((unused)) int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+static BUSTER_LEX_UNUSED int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // The clang name of a token kind (without the start-of-line bit), e.g. "raw_identifier" or "plusequal".
-static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
+static BUSTER_LEX_UNUSED const char* c_token_kind_name(uint8_t kind);
 
-#if !defined(__clang__)
-#error "c_lexer.c uses Clang vector extensions"
-#endif
-#if !(defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512VBMI__) && \
+#if !defined(_MSC_VER) && !(defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512VBMI__) && \
       defined(__AVX512VBMI2__) && defined(__AVX512VPOPCNTDQ__) && defined(__GFNI__) && defined(__BMI2__))
 #error "c_lexer.c needs AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ, GFNI and BMI2 (Zen 4 and later, Intel since Ice Lake)"
 #endif
@@ -469,9 +482,22 @@ static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
 #include <stdbool.h>
 #include <string.h>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define BUSTER_INLINE static __forceinline
+#define BUSTER_LIKELY(x) (!!(x))
+#define BUSTER_UNLIKELY(x) (!!(x))
+#define BUSTER_LEX_CLZ64(x) _lzcnt_u64(x)
+#define BUSTER_LEX_CTZ64(x) _tzcnt_u64(x)
+#define BUSTER_LEX_POPCOUNT64(x) __popcnt64(x)
+#else
 #define BUSTER_INLINE static inline __attribute__((always_inline))
 #define BUSTER_LIKELY(x) __builtin_expect(!!(x), 1)
 #define BUSTER_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define BUSTER_LEX_CLZ64(x) __builtin_clzll(x)
+#define BUSTER_LEX_CTZ64(x) __builtin_ctzll(x)
+#define BUSTER_LEX_POPCOUNT64(x) __builtin_popcountll(x)
+#endif
 
 // ===== c_tokenizer_tables.h =====
 // Generated by c/gen_c_tokenizer_tables.py: the lookup tables of the vectorized C tokenizer.
@@ -497,7 +523,7 @@ static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
 #define BUSTER_LEX_CHANNEL_EXPSIGN 0x80
 
 // Indexed by ASCII character. Bit i becomes property mask i (M_IDENTIFIER through M_BACKSLASH).
-static const uint8_t c_char_properties[128] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_char_properties[128] =
 {
     0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x08, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -509,7 +535,7 @@ static const uint8_t c_char_properties[128] __attribute__((aligned(64))) =
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 // Without digit separators no byte has BUSTER_LEX_CHAR_SEPARATOR_FOLLOWER (#264).
-static const uint8_t c_char_properties_no_separators[128] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_char_properties_no_separators[128] =
 {
     0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x08, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -520,7 +546,7 @@ static const uint8_t c_char_properties_no_separators[128] __attribute__((aligned
     0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
     0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
-static const uint8_t c_operator_classes[128] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_operator_classes[128] =
 {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -531,7 +557,7 @@ static const uint8_t c_operator_classes[128] __attribute__((aligned(64))) =
     0x00, 0x00, 0x00, 0x00, 0x00, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x2D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00,
 };
-static const uint8_t c_char_kinds[128] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_char_kinds[128] =
 {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -544,27 +570,27 @@ static const uint8_t c_char_kinds[128] __attribute__((aligned(64))) =
 };
 
 // Indexed by the low 4 bits of an operator class.
-static const uint8_t c_first_char_channels[16] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_first_char_channels[16] =
 {
     0x00, 0x01, 0x01, 0x03, 0x03, 0x13, 0x51, 0x25, 0x05, 0x03, 0x02, 0x12, 0x08, 0x80, 0x00, 0x00,
 };
 // c_first_char_channels without digraphs (C_TOKENIZER_NO_DIGRAPHS; written here, not generated): '%' (class 6) without
 // BUSTER_LEX_CHANNEL_GT and BUSTER_LEX_CHANNEL_HASHDIG, '<' (class 7) without BUSTER_LEX_CHANNEL_LTDIG and ':' (class 11)
 // without BUSTER_LEX_CHANNEL_GT, so that no "%>", "%:", "<:", "<%" or ":>" pairs, and so no "%:%:" either.
-static const uint8_t c_first_char_channels_no_digraphs[16] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_first_char_channels_no_digraphs[16] =
 {
     0x00, 0x01, 0x01, 0x03, 0x03, 0x13, 0x01, 0x05, 0x05, 0x03, 0x02, 0x02, 0x08, 0x80, 0x00, 0x00,
 };
-static const uint8_t c_second_char_channels[16] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_second_char_channels[16] =
 {
     0x00, 0x00, 0x00, 0x02, 0x82, 0x82, 0x20, 0x04, 0x14, 0x03, 0x02, 0x62, 0x08, 0x00, 0x00, 0x00,
 };
-static const uint8_t c_third_char_channels[16] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_third_char_channels[16] =
 {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
 };
 // In C++.
-static const uint8_t c_third_char_channels_cxx[16] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_third_char_channels_cxx[16] =
 {
     0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x04, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
 };
@@ -573,7 +599,7 @@ static const uint8_t c_third_char_channels_cxx[16] __attribute__((aligned(64))) 
 // of the 26 pairs whose channels (c_first_char_channels and c_second_char_channels) make a 2-character punctuator,
 // and for C++'s ".*"; it was found by a search over small multipliers (docs/c-lexer.md), and the boundary snippets of
 // c_lexer_test.c contain every pair.
-static const uint8_t c_pair_kinds[128] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_pair_kinds[128] =
 {
     0x00, 0x00, 0x00, 0x1B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x37, 0x00, 0x00, 0x00, 0x3E, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x0D, 0x1F, 0x00, 0x00, 0x00, 0x23, 0x0E, 0x00, 0x29, 0x00, 0x00, 0x00,
@@ -587,7 +613,7 @@ static const uint8_t c_pair_kinds[128] __attribute__((aligned(64))) =
 
 // Indexed by (5 * c0 + 4 * c1) mod 64, like c_pair_kinds, the kind of the 3- or 4-character punctuator that starts
 // with c0 c1: "...", "<<=", ">>=", C++'s "->*" and "<=>", and "%:%:", whose first two characters tell them apart.
-static const uint8_t c_long_kinds[64] __attribute__((aligned(64))) =
+BUSTER_LEX_ALIGN(64) static const uint8_t c_long_kinds[64] =
 {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x2B, 0x00, 0x14, 0x00,
@@ -1017,7 +1043,7 @@ static uint64_t escaped_newline_size(const ScalarLexer* lexer, uint64_t position
 // clang's getCharAndSize: the character at `position` after trigraph replacement and line splicing, the number of
 // bytes it takes up (`size`, including the line splices before it) and where the character itself starts. Call
 // get_char, which handles the common case inline.
-__attribute__((noinline)) static int32_t get_char_slow(const ScalarLexer* lexer, uint64_t position, uint64_t* size, uint64_t* char_start)
+BUSTER_LEX_NOINLINE static int32_t get_char_slow(const ScalarLexer* lexer, uint64_t position, uint64_t* size, uint64_t* char_start)
 {
     uint64_t p = position;
     int32_t result = BUSTER_LEX_END_OF_FILE;
@@ -1457,7 +1483,7 @@ typedef enum CRawStringError
 // look past the quote at which the lexer salvaged that token. Its prefix undergoes phases 1/2, its delimiter doesn't. The caller decides
 // whether this is active C text: opaque header names/messages and skipped groups must not diagnose these bytes.
 // This cold query leaves the tokenizer's output/API and its vector chunk loop unchanged.
-static __attribute__((unused)) CRawStringError c_raw_string_error(const uint8_t* source, uint64_t length, uint32_t flags, uint64_t* offset)
+static BUSTER_LEX_UNUSED CRawStringError c_raw_string_error(const uint8_t* source, uint64_t length, uint32_t flags, uint64_t* offset)
 {
     const ScalarLexer lexer = { .source = source, .length = length, .trigraphs = (flags & C_TOKENIZER_TRIGRAPHS) != 0 };
     char prefix[4];
@@ -2019,9 +2045,7 @@ static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t
 // All eight bits of c_char_properties are transposed together; the remaining masks are stored separately.
 #define BUSTER_LEX_PROPERTY_MASK_COUNT 8
 
-typedef uint64_t U64x8 __attribute__((ext_vector_type(BUSTER_LEX_VECTOR_COUNT)));
-typedef uint8_t U8x64 __attribute__((ext_vector_type(BUSTER_LEX_VECTOR_BYTES)));
-typedef uint8_t U8x16 __attribute__((ext_vector_type(16)));
+typedef __m512i U64x8;
 
 static const char* const c_token_kind_names[C_TOKEN_KIND_COUNT] =
 {
@@ -2036,7 +2060,7 @@ static const char* c_token_kind_name(uint8_t kind)
     return k < C_TOKEN_KIND_COUNT ? c_token_kind_names[k] : "<invalid kind>";
 }
 
-static const uint8_t iota_bytes[BUSTER_LEX_VECTOR_BYTES] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))) =
+BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) static const uint8_t iota_bytes[BUSTER_LEX_VECTOR_BYTES] =
 {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
@@ -2045,64 +2069,100 @@ static const uint8_t iota_bytes[BUSTER_LEX_VECTOR_BYTES] __attribute__((aligned(
 // ---------------------------------------------------------------------------------------------------------------------
 // 512-bit bitstrings
 
+// Use the intrinsic type and operations, including scalar lane access, without compiler-specific vector syntax.
+BUSTER_INLINE uint64_t bitstring_lane(U64x8 value, uint32_t lane)
+{
+    uint64_t lanes[BUSTER_LEX_VECTOR_COUNT];
+    _mm512_storeu_si512(lanes, value);
+    return lanes[lane];
+}
+
+BUSTER_INLINE U64x8 bitstring_with_lane(U64x8 value, uint32_t lane, uint64_t bits)
+{
+    uint64_t lanes[BUSTER_LEX_VECTOR_COUNT];
+    _mm512_storeu_si512(lanes, value);
+    lanes[lane] = bits;
+    return _mm512_loadu_si512(lanes);
+}
+
+BUSTER_INLINE U64x8 bitstring_not(U64x8 value)
+{
+    return _mm512_xor_si512(value, _mm512_set1_epi64(-1));
+}
+
+BUSTER_INLINE uint64_t bitstring_sum(U64x8 value)
+{
+    const __m256i halves = _mm256_add_epi64(_mm512_castsi512_si256(value), _mm512_extracti64x4_epi64(value, 1));
+    const __m128i quarters = _mm_add_epi64(_mm256_castsi256_si128(halves), _mm256_extracti128_si256(halves, 1));
+    return (uint64_t)_mm_cvtsi128_si64(_mm_add_epi64(quarters, _mm_srli_si128(quarters, 8)));
+}
+
 // `a << i` and `a >> i` within the chunk, for a constant 0 < i < 64.
 BUSTER_INLINE U64x8 shl(U64x8 a, int i)
 {
-    return (__builtin_shufflevector(a, (U64x8){0}, 8, 0, 1, 2, 3, 4, 5, 6) >> (64 - i)) | (a << i);
+    const __m128i shift = _mm_cvtsi32_si128(i);
+    const __m128i carry_shift = _mm_cvtsi32_si128(64 - i);
+    return _mm512_or_si512(_mm512_srl_epi64(_mm512_alignr_epi64(a, _mm512_setzero_si512(), 7), carry_shift), _mm512_sll_epi64(a, shift));
 }
 
 BUSTER_INLINE U64x8 shr(U64x8 a, int i)
 {
-    return (__builtin_shufflevector(a, (U64x8){0}, 1, 2, 3, 4, 5, 6, 7, 8) << (64 - i)) | (a >> i);
+    const __m128i shift = _mm_cvtsi32_si128(i);
+    const __m128i carry_shift = _mm_cvtsi32_si128(64 - i);
+    return _mm512_or_si512(_mm512_sll_epi64(_mm512_alignr_epi64(_mm512_setzero_si512(), a, 1), carry_shift), _mm512_srl_epi64(a, shift));
 }
 
 // `a << i`, shifting in the top `i` bits of `previous`, the last lane of the previous chunk's bitstring.
 BUSTER_INLINE U64x8 shl_carry(U64x8 a, uint64_t previous, int i)
 {
-    return (__builtin_shufflevector(a, (U64x8){previous}, 8, 0, 1, 2, 3, 4, 5, 6) >> (64 - i)) | (a << i);
+    const __m128i shift = _mm_cvtsi32_si128(i);
+    const __m128i carry_shift = _mm_cvtsi32_si128(64 - i);
+    return _mm512_or_si512(_mm512_srl_epi64(_mm512_alignr_epi64(a, _mm512_set1_epi64((int64_t)previous), 7), carry_shift), _mm512_sll_epi64(a, shift));
 }
 
 // `a >> i`, shifting in the low `i` bits of `next`, the bitstring of the next chunk's first 64 bytes.
 BUSTER_INLINE U64x8 shr_next(U64x8 a, uint64_t next, int i)
 {
-    return (__builtin_shufflevector(a, (U64x8){next}, 1, 2, 3, 4, 5, 6, 7, 8) << (64 - i)) | (a >> i);
+    const __m128i shift = _mm_cvtsi32_si128(i);
+    const __m128i carry_shift = _mm_cvtsi32_si128(64 - i);
+    return _mm512_or_si512(_mm512_sll_epi64(_mm512_alignr_epi64(_mm512_set1_epi64((int64_t)next), a, 1), carry_shift), _mm512_srl_epi64(a, shift));
 }
 
 // 512-bit subtraction: a lane borrows when the lane below it borrowed out (Kogge-Stone, propagated in a mask register).
 BUSTER_INLINE U64x8 sub(U64x8 a, U64x8 b)
 {
-    const uint8_t carries = _mm512_cmplt_epu64_mask((__m512i)a, (__m512i)b);
-    const uint8_t equal = _mm512_cmpeq_epi64_mask((__m512i)a, (__m512i)b);
+    const uint8_t carries = _mm512_cmplt_epu64_mask(a, b);
+    const uint8_t equal = _mm512_cmpeq_epi64_mask(a, b);
     const uint8_t borrows = equal ^ (uint8_t)((carries << 1) + equal);
-    const U64x8 difference = a - b;
-    return (U64x8)_mm512_mask_add_epi64((__m512i)difference, borrows, (__m512i)difference, _mm512_set1_epi64(-1));
+    const U64x8 difference = _mm512_sub_epi64(a, b);
+    return _mm512_mask_add_epi64(difference, borrows, difference, _mm512_set1_epi64(-1));
 }
 
 // 512-bit addition with a carry in and out.
 BUSTER_INLINE U64x8 add_carry(U64x8 a, U64x8 b, uint32_t carry_in, uint32_t* carry_out)
 {
-    const U64x8 sum = a + b;
-    const uint32_t generates = _mm512_cmplt_epu64_mask((__m512i)sum, (__m512i)a);
-    const uint32_t propagates = _mm512_cmpeq_epi64_mask((__m512i)sum, _mm512_set1_epi64(-1));
+    const U64x8 sum = _mm512_add_epi64(a, b);
+    const uint32_t generates = _mm512_cmplt_epu64_mask(sum, a);
+    const uint32_t propagates = _mm512_cmpeq_epi64_mask(sum, _mm512_set1_epi64(-1));
     const uint32_t carries = ((generates << 1) | carry_in) + propagates;
     *carry_out = (carries >> 8) & 1;
-    return (U64x8)_mm512_mask_sub_epi64((__m512i)sum, (uint8_t)(carries ^ propagates), (__m512i)sum, _mm512_set1_epi64(-1));
+    return _mm512_mask_sub_epi64(sum, (uint8_t)(carries ^ propagates), sum, _mm512_set1_epi64(-1));
 }
 
 BUSTER_INLINE bool is_zero(U64x8 x)
 {
-    return _mm512_test_epi64_mask((__m512i)x, (__m512i)x) == 0;
+    return _mm512_test_epi64_mask(x, x) == 0;
 }
 
 BUSTER_INLINE uint64_t bit_511(U64x8 x)
 {
-    return x[7] >> 63;
+    return bitstring_lane(x, 7) >> 63;
 }
 
 // Bit 0 if `condition` (0 or 1), without a branch.
 BUSTER_INLINE U64x8 bit_0_if(uint64_t condition)
 {
-    return (U64x8){condition, 0, 0, 0, 0, 0, 0, 0};
+    return _mm512_maskz_set1_epi64(1, (int64_t)condition);
 }
 
 // The bits below `limit` (at most 512).
@@ -2111,7 +2171,7 @@ BUSTER_INLINE U64x8 bits_below(uint32_t limit)
     // The first bit of each lane: multiples of BUSTER_LEX_VECTOR_BYTES.
     const __m512i lane_starts = _mm512_setr_epi64(0, 64, 128, 192, 256, 320, 384, 448);
     const __m512i shifts = _mm512_max_epi64(_mm512_sub_epi64(_mm512_set1_epi64(limit), lane_starts), _mm512_setzero_si512());
-    return (U64x8)_mm512_andnot_si512(_mm512_sllv_epi64(_mm512_set1_epi64(-1), shifts), _mm512_set1_epi64(-1));
+    return _mm512_andnot_si512(_mm512_sllv_epi64(_mm512_set1_epi64(-1), shifts), _mm512_set1_epi64(-1));
 }
 
 // The position of the highest set bit below `limit` (at most 512), or -1 if there is none.
@@ -2125,14 +2185,14 @@ BUSTER_INLINE int32_t highest_bit_below(U64x8 x, uint32_t limit)
         {
             continue;
         }
-        uint64_t bits = x[lane];
+        uint64_t bits = bitstring_lane(x, (uint32_t)lane);
         if (limit - lane_start < BUSTER_LEX_VECTOR_BYTES)
         {
             bits &= _bzhi_u64(~0ull, limit - lane_start);
         }
         if (bits != 0)
         {
-            result = (int32_t)lane_start + 63 - (int32_t)__builtin_clzll(bits);
+            result = (int32_t)lane_start + 63 - (int32_t)BUSTER_LEX_CLZ64(bits);
             break;
         }
     }
@@ -2161,7 +2221,7 @@ BUSTER_INLINE __m512i perm2b(const uint8_t table[128], __m512i indices)
 
 // For a permute that shifts a vector up by one byte, shifting in the last byte of another: byte i of the result is
 // byte i - 1 of the first vector (index i - 1), and byte 0 is byte 63 of the second (index 127).
-static const uint8_t shift_in_indices[BUSTER_LEX_VECTOR_BYTES] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))) =
+BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) static const uint8_t shift_in_indices[BUSTER_LEX_VECTOR_BYTES] =
 {
     127, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
     31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
@@ -2172,7 +2232,9 @@ static const uint8_t shift_in_indices[BUSTER_LEX_VECTOR_BYTES] __attribute__((al
 BUSTER_INLINE __m512i shift_in_previous(__m512i current, __m512i previous)
 {
     __m512i indices = _mm512_load_si512(shift_in_indices);
+#if !defined(_MSC_VER)
     __asm__("" : "+v"(indices));
+#endif
     return _mm512_permutex2var_epi8(current, indices, previous);
 }
 
@@ -2359,7 +2421,7 @@ struct LastLine
 
 // For a chunk that needs the scalar lexer: it takes over from `restart` (where `written` tokens have been written)
 // until `scalar_until` (the end of the chunk).
-__attribute__((cold, noinline)) static int64_t needs_scalar(const LastLine* last_line, uint64_t begin, int64_t chunk_position, uint64_t* written, uint64_t* restart,
+BUSTER_LEX_COLD_NOINLINE static int64_t needs_scalar(const LastLine* last_line, uint64_t begin, int64_t chunk_position, uint64_t* written, uint64_t* restart,
                             uint64_t* scalar_until)
 {
     *restart = begin;
@@ -2368,7 +2430,7 @@ __attribute__((cold, noinline)) static int64_t needs_scalar(const LastLine* last
     {
         const uint32_t line_start = (uint32_t)highest_bit_below(last_line->line_breaks, BUSTER_LEX_CHUNK_BYTES) + 1;
         *restart = (uint64_t)(last_line->chunk_position + line_start);
-        *written = last_line->first_token + (uint64_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64((__m512i)(last_line->token_starts & bits_below(line_start))));
+        *written = last_line->first_token + bitstring_sum(_mm512_popcnt_epi64(_mm512_and_si512(last_line->token_starts, bits_below(line_start))));
     }
     *scalar_until = (uint64_t)(chunk_position + BUSTER_LEX_CHUNK_BYTES);
     return C_TOKENIZER_ERROR_NEEDS_SCALAR;
@@ -2395,30 +2457,32 @@ BUSTER_INLINE __m512i property_masks(__m512i properties)
 // Keep this at the consumer, so Clang can retain the resulting bitstrings in registers.
 BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_LOOKAHEAD_VECTORS], uint64_t o[][BUSTER_LEX_MASK_LANES])
 {
-    const U64x8 t0_0 = __builtin_shufflevector((U64x8)rows[0], (U64x8)rows[1], 0, 8, 2, 10, 4, 12, 6, 14);
-    const U64x8 t0_1 = __builtin_shufflevector((U64x8)rows[0], (U64x8)rows[1], 1, 9, 3, 11, 5, 13, 7, 15);
-    const U64x8 t0_2 = __builtin_shufflevector((U64x8)rows[2], (U64x8)rows[3], 0, 8, 2, 10, 4, 12, 6, 14);
-    const U64x8 t0_3 = __builtin_shufflevector((U64x8)rows[2], (U64x8)rows[3], 1, 9, 3, 11, 5, 13, 7, 15);
-    const U64x8 t0_4 = __builtin_shufflevector((U64x8)rows[4], (U64x8)rows[5], 0, 8, 2, 10, 4, 12, 6, 14);
-    const U64x8 t0_5 = __builtin_shufflevector((U64x8)rows[4], (U64x8)rows[5], 1, 9, 3, 11, 5, 13, 7, 15);
-    const U64x8 t0_6 = __builtin_shufflevector((U64x8)rows[6], (U64x8)rows[7], 0, 8, 2, 10, 4, 12, 6, 14);
-    const U64x8 t0_7 = __builtin_shufflevector((U64x8)rows[6], (U64x8)rows[7], 1, 9, 3, 11, 5, 13, 7, 15);
-    const U64x8 t1_0 = __builtin_shufflevector(t0_0, t0_2, 0, 1, 8, 9, 4, 5, 12, 13);
-    const U64x8 t1_2 = __builtin_shufflevector(t0_0, t0_2, 2, 3, 10, 11, 6, 7, 14, 15);
-    const U64x8 t1_1 = __builtin_shufflevector(t0_1, t0_3, 0, 1, 8, 9, 4, 5, 12, 13);
-    const U64x8 t1_3 = __builtin_shufflevector(t0_1, t0_3, 2, 3, 10, 11, 6, 7, 14, 15);
-    const U64x8 t1_4 = __builtin_shufflevector(t0_4, t0_6, 0, 1, 8, 9, 4, 5, 12, 13);
-    const U64x8 t1_6 = __builtin_shufflevector(t0_4, t0_6, 2, 3, 10, 11, 6, 7, 14, 15);
-    const U64x8 t1_5 = __builtin_shufflevector(t0_5, t0_7, 0, 1, 8, 9, 4, 5, 12, 13);
-    const U64x8 t1_7 = __builtin_shufflevector(t0_5, t0_7, 2, 3, 10, 11, 6, 7, 14, 15);
-    const U64x8 t2_0 = __builtin_shufflevector(t1_0, t1_4, 0, 1, 2, 3, 8, 9, 10, 11);
-    const U64x8 t2_4 = __builtin_shufflevector(t1_0, t1_4, 4, 5, 6, 7, 12, 13, 14, 15);
-    const U64x8 t2_1 = __builtin_shufflevector(t1_1, t1_5, 0, 1, 2, 3, 8, 9, 10, 11);
-    const U64x8 t2_5 = __builtin_shufflevector(t1_1, t1_5, 4, 5, 6, 7, 12, 13, 14, 15);
-    const U64x8 t2_2 = __builtin_shufflevector(t1_2, t1_6, 0, 1, 2, 3, 8, 9, 10, 11);
-    const U64x8 t2_6 = __builtin_shufflevector(t1_2, t1_6, 4, 5, 6, 7, 12, 13, 14, 15);
-    const U64x8 t2_3 = __builtin_shufflevector(t1_3, t1_7, 0, 1, 2, 3, 8, 9, 10, 11);
-    const U64x8 t2_7 = __builtin_shufflevector(t1_3, t1_7, 4, 5, 6, 7, 12, 13, 14, 15);
+    const U64x8 t0_0 = _mm512_unpacklo_epi64(rows[0], rows[1]);
+    const U64x8 t0_1 = _mm512_unpackhi_epi64(rows[0], rows[1]);
+    const U64x8 t0_2 = _mm512_unpacklo_epi64(rows[2], rows[3]);
+    const U64x8 t0_3 = _mm512_unpackhi_epi64(rows[2], rows[3]);
+    const U64x8 t0_4 = _mm512_unpacklo_epi64(rows[4], rows[5]);
+    const U64x8 t0_5 = _mm512_unpackhi_epi64(rows[4], rows[5]);
+    const U64x8 t0_6 = _mm512_unpacklo_epi64(rows[6], rows[7]);
+    const U64x8 t0_7 = _mm512_unpackhi_epi64(rows[6], rows[7]);
+    const __m512i low_pairs = _mm512_setr_epi64(0, 1, 8, 9, 4, 5, 12, 13);
+    const __m512i high_pairs = _mm512_setr_epi64(2, 3, 10, 11, 6, 7, 14, 15);
+    const U64x8 t1_0 = _mm512_permutex2var_epi64(t0_0, low_pairs, t0_2);
+    const U64x8 t1_2 = _mm512_permutex2var_epi64(t0_0, high_pairs, t0_2);
+    const U64x8 t1_1 = _mm512_permutex2var_epi64(t0_1, low_pairs, t0_3);
+    const U64x8 t1_3 = _mm512_permutex2var_epi64(t0_1, high_pairs, t0_3);
+    const U64x8 t1_4 = _mm512_permutex2var_epi64(t0_4, low_pairs, t0_6);
+    const U64x8 t1_6 = _mm512_permutex2var_epi64(t0_4, high_pairs, t0_6);
+    const U64x8 t1_5 = _mm512_permutex2var_epi64(t0_5, low_pairs, t0_7);
+    const U64x8 t1_7 = _mm512_permutex2var_epi64(t0_5, high_pairs, t0_7);
+    const U64x8 t2_0 = _mm512_shuffle_i64x2(t1_0, t1_4, 0x44);
+    const U64x8 t2_4 = _mm512_shuffle_i64x2(t1_0, t1_4, 0xEE);
+    const U64x8 t2_1 = _mm512_shuffle_i64x2(t1_1, t1_5, 0x44);
+    const U64x8 t2_5 = _mm512_shuffle_i64x2(t1_1, t1_5, 0xEE);
+    const U64x8 t2_2 = _mm512_shuffle_i64x2(t1_2, t1_6, 0x44);
+    const U64x8 t2_6 = _mm512_shuffle_i64x2(t1_2, t1_6, 0xEE);
+    const U64x8 t2_3 = _mm512_shuffle_i64x2(t1_3, t1_7, 0x44);
+    const U64x8 t2_7 = _mm512_shuffle_i64x2(t1_3, t1_7, 0xEE);
     *(U64x8*)o[0] = t2_0;
     *(U64x8*)o[1] = t2_1;
     *(U64x8*)o[2] = t2_2;
@@ -2446,8 +2510,8 @@ BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], un
     // See c/gen_c_tokenizer_tables.py for the channels.
     const __m512i previous = shift_in_previous(classes, *previous_classes);
     const __m512i allowed = _mm512_mask_blend_epi8(_mm512_cmpeq_epi8_mask(previous, classes), splat8((uint8_t)~BUSTER_LEX_SAME_CHARACTER_CHANNELS), splat8(0xFF));
-    const __m512i pairs = vpshufb(c_second_char_channels, classes) & vpshufb(digraphs ? c_first_char_channels : c_first_char_channels_no_digraphs, previous) & allowed;
-    const __m512i triples = vpshufb(cplusplus ? c_third_char_channels_cxx : c_third_char_channels, classes) & shift_in_previous(pairs, *previous_pairs);
+    const __m512i pairs = _mm512_and_si512(_mm512_and_si512(vpshufb(c_second_char_channels, classes), vpshufb(digraphs ? c_first_char_channels : c_first_char_channels_no_digraphs, previous)), allowed);
+    const __m512i triples = _mm512_and_si512(vpshufb(cplusplus ? c_third_char_channels_cxx : c_third_char_channels, classes), shift_in_previous(pairs, *previous_pairs));
 
     *properties_out = property_masks(properties);
     o[M_SLASH][lane] = _mm512_cmpeq_epi8_mask(raw, splat8('/'));
@@ -2501,33 +2565,33 @@ struct Scan
 BUSTER_INLINE Scan scan_lines(U64x8 cursors, State state, U64x8 line_break, U64x8 bounds, U64x8 quote_bounds, U64x8 apostrophe_closers,
                               U64x8 apostrophe_bounds, U64x8 line_comment_marks, U64x8 block_comment_marks, U64x8 block_comment_closers)
 {
-    const U64x8 zero = {0};
-    const U64x8 bit_0 = {1, 0, 0, 0, 0, 0, 0, 0};
+    const U64x8 zero = _mm512_setzero_si512();
+    const U64x8 bit_0 = bit_0_if(1);
     Scan result = { .literal_starts = zero, .literal_closers = zero, .literal_unterminated = zero, .line_comment_starts = zero,
                     .block_region = zero, .block_ends = zero, .spans_lines = false };
     U64x8 pseudo_quote = bit_0_if(state == STATE_STRING);
     U64x8 pseudo_apostrophe = bit_0_if(state == STATE_CHAR);
-    const U64x8 every_line_start = shl(line_break, 1) | bit_0;
-    U64x8 starts = bounds & ~sub(bounds | line_break, cursors);
+    const U64x8 every_line_start = _mm512_or_si512(shl(line_break, 1), bit_0);
+    U64x8 starts = _mm512_and_si512(bounds, bitstring_not(sub(_mm512_or_si512(bounds, line_break), cursors)));
     for (;;)
     {
-        const U64x8 quote_starts = starts & quote_bounds;
-        const U64x8 apostrophe_starts = starts & apostrophe_bounds;
-        const U64x8 block_opens = starts & block_comment_marks;
-        result.line_comment_starts |= starts & line_comment_marks;
+        const U64x8 quote_starts = _mm512_and_si512(starts, quote_bounds);
+        const U64x8 apostrophe_starts = _mm512_and_si512(starts, apostrophe_bounds);
+        const U64x8 block_opens = _mm512_and_si512(starts, block_comment_marks);
+        result.line_comment_starts = _mm512_or_si512(result.line_comment_starts, _mm512_and_si512(starts, line_comment_marks));
 
         // A literal ends at its closing quote, or (unterminated) at the end of its line.
         U64x8 next_cursors = zero;
-        const U64x8 quote_lines = quote_starts | pseudo_quote;
-        const U64x8 apostrophe_lines = apostrophe_starts | pseudo_apostrophe;
-        if (!is_zero(quote_lines | apostrophe_lines))
+        const U64x8 quote_lines = _mm512_or_si512(quote_starts, pseudo_quote);
+        const U64x8 apostrophe_lines = _mm512_or_si512(apostrophe_starts, pseudo_apostrophe);
+        if (!is_zero(_mm512_or_si512(quote_lines, apostrophe_lines)))
         {
-            const U64x8 closers = line_break | (quote_bounds & sub(line_break, quote_lines)) | (apostrophe_closers & sub(line_break, apostrophe_lines));
-            const U64x8 ends = closers & ~sub(closers, shl(quote_starts | apostrophe_starts, 1) | pseudo_quote | pseudo_apostrophe);
-            result.literal_starts |= quote_starts | apostrophe_starts;
-            result.literal_closers |= ends & ~line_break;
-            result.literal_unterminated |= ends & line_break;
-            next_cursors = shl(ends & ~line_break, 1);
+            const U64x8 closers = _mm512_or_si512(_mm512_or_si512(line_break, (_mm512_and_si512(quote_bounds, sub(line_break, quote_lines)))), (_mm512_and_si512(apostrophe_closers, sub(line_break, apostrophe_lines))));
+            const U64x8 ends = _mm512_and_si512(closers, bitstring_not(sub(closers, _mm512_or_si512(_mm512_or_si512(shl(_mm512_or_si512(quote_starts, apostrophe_starts), 1), pseudo_quote), pseudo_apostrophe))));
+            result.literal_starts = _mm512_or_si512(result.literal_starts, _mm512_or_si512(quote_starts, apostrophe_starts));
+            result.literal_closers = _mm512_or_si512(result.literal_closers, _mm512_and_si512(ends, bitstring_not(line_break)));
+            result.literal_unterminated = _mm512_or_si512(result.literal_unterminated, _mm512_and_si512(ends, line_break));
+            next_cursors = shl(_mm512_and_si512(ends, bitstring_not(line_break)), 1);
         }
 
         // A block comment ends at the first "*/" whose '*' isn't its own.
@@ -2537,36 +2601,36 @@ BUSTER_INLINE Scan scan_lines(U64x8 cursors, State state, U64x8 line_break, U64x
             // comment); one that starts on it must not take part in the subtraction, or the others would skip it.
             // (The search of a "/*" in the last 3 bits starts in the next chunk.)
             const U64x8 searches = shl(block_opens, 3);
-            const U64x8 ends = (block_comment_closers & ~sub(block_comment_closers, searches & ~block_comment_closers)) | (searches & block_comment_closers);
-            const U64x8 region = sub(ends, block_opens) | block_opens | ends;
-            if (!is_zero(region & line_break))
+            const U64x8 ends = _mm512_or_si512((_mm512_and_si512(block_comment_closers, bitstring_not(sub(block_comment_closers, _mm512_and_si512(searches, bitstring_not(block_comment_closers)))))), (_mm512_and_si512(searches, block_comment_closers)));
+            const U64x8 region = _mm512_or_si512(_mm512_or_si512(sub(ends, block_opens), block_opens), ends);
+            if (!is_zero(_mm512_and_si512(region, line_break)))
             {
                 // The rest of each line a comment ends on, with the newline that ends it. (Two comments can end on
                 // the same line, so the searches that start on a newline are kept out of the subtraction, and the
                 // subtraction's holes at the other searches are filled in.)
                 const U64x8 after_ends = shl(ends, 1);
-                const U64x8 rest_of_line = (sub(line_break, after_ends & ~line_break) ^ line_break) | after_ends;
-                const U64x8 keep = ~(region | rest_of_line);
-                result.literal_starts &= keep;
-                result.literal_closers &= keep;
-                result.literal_unterminated &= keep;
-                result.line_comment_starts &= keep;
-                result.block_region &= keep;
-                next_cursors &= keep;
+                const U64x8 rest_of_line = _mm512_or_si512((_mm512_xor_si512(sub(line_break, _mm512_and_si512(after_ends, bitstring_not(line_break))), line_break)), after_ends);
+                const U64x8 keep = bitstring_not((_mm512_or_si512(region, rest_of_line)));
+                result.literal_starts = _mm512_and_si512(result.literal_starts, keep);
+                result.literal_closers = _mm512_and_si512(result.literal_closers, keep);
+                result.literal_unterminated = _mm512_and_si512(result.literal_unterminated, keep);
+                result.line_comment_starts = _mm512_and_si512(result.line_comment_starts, keep);
+                result.block_region = _mm512_and_si512(result.block_region, keep);
+                next_cursors = _mm512_and_si512(next_cursors, keep);
                 result.spans_lines = true;
             }
-            result.block_region |= region;
-            result.block_ends |= ends;
-            next_cursors |= shl(ends, 1);
+            result.block_region = _mm512_or_si512(result.block_region, region);
+            result.block_ends = _mm512_or_si512(result.block_ends, ends);
+            next_cursors = _mm512_or_si512(next_cursors, shl(ends, 1));
             // One cursor per line: a later one on the same line is redone by the first.
-            next_cursors &= ~sub(next_cursors | line_break, every_line_start);
+            next_cursors = _mm512_and_si512(next_cursors, bitstring_not(sub(_mm512_or_si512(next_cursors, line_break), every_line_start)));
         }
 
         pseudo_quote = zero;
         pseudo_apostrophe = zero;
         // Another round only if a cursor finds another delimiter on its line: one round does for 98% of chunks, and
         // the test is then well predicted (a test of the cursors alone would take a second round that finds nothing).
-        starts = bounds & ~sub(bounds | line_break, next_cursors);
+        starts = _mm512_and_si512(bounds, bitstring_not(sub(_mm512_or_si512(bounds, line_break), next_cursors)));
         if (is_zero(starts))
         {
             break;
@@ -2618,7 +2682,7 @@ static uint64_t skip_leading_comments(const uint8_t* source, uint64_t length, ui
             }
             if ((closers | backslashes) != 0)
             {
-                const uint32_t first = (uint32_t)__builtin_ctzll(closers | backslashes);
+                const uint32_t first = (uint32_t)BUSTER_LEX_CTZ64(closers | backslashes);
                 if (((backslashes >> first) & 1) == 0)
                 {
                     result = cursor + first + 1;
@@ -2644,16 +2708,16 @@ static uint64_t skip_leading_comments(const uint8_t* source, uint64_t length, ui
 typedef struct ChunkTokens ChunkTokens;
 struct ChunkTokens
 {
-    uint64_t starts[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES)));
-    uint64_t ends[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES)));
-    uint64_t start_of_line[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES)));
-    uint64_t multi[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))); // Multi-character punctuators,
-    uint64_t long_ones[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))); // and those of 3 or 4 characters.
-    uint64_t dot_numbers[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))); // pp-numbers starting with '.'.
-    uint64_t prefixes[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))); // Prefixed literals,
-    uint64_t unknowns[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))); // and unknown ones.
-    uint64_t start_counts[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES)));
-    uint64_t end_counts[BUSTER_LEX_VECTOR_COUNT] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES)));
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t starts[BUSTER_LEX_VECTOR_COUNT];
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t ends[BUSTER_LEX_VECTOR_COUNT];
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t start_of_line[BUSTER_LEX_VECTOR_COUNT];
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t multi[BUSTER_LEX_VECTOR_COUNT]; // Multi-character punctuators,
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t long_ones[BUSTER_LEX_VECTOR_COUNT]; // and those of 3 or 4 characters.
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t dot_numbers[BUSTER_LEX_VECTOR_COUNT]; // pp-numbers starting with '.'.
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t prefixes[BUSTER_LEX_VECTOR_COUNT]; // Prefixed literals,
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t unknowns[BUSTER_LEX_VECTOR_COUNT]; // and unknown ones.
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t start_counts[BUSTER_LEX_VECTOR_COUNT];
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t end_counts[BUSTER_LEX_VECTOR_COUNT];
     const __m512i* raw; // The chunk's vectors, and the next chunk's first one.
     int64_t chunk_position; // The source position of bit 0.
     uint32_t special_lanes; // Bit j: lane j has a dot-number, or a prefixed or unknown literal.
@@ -2713,8 +2777,8 @@ BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* sou
         for (uint64_t bits = special ? t->prefixes[j] | t->unknowns[j] : 0; BUSTER_UNLIKELY(bits != 0); bits &= bits - 1)
         {
             const int64_t lane_position = t->chunk_position + BUSTER_LEX_VECTOR_BYTES * j;
-            const uint32_t bit = (uint32_t)__builtin_ctzll(bits);
-            const uint64_t index = (uint64_t)__builtin_popcountll(t->starts[j] & _bzhi_u64(~0ull, bit));
+            const uint32_t bit = (uint32_t)BUSTER_LEX_CTZ64(bits);
+            const uint64_t index = (uint64_t)BUSTER_LEX_POPCOUNT64(t->starts[j] & _bzhi_u64(~0ull, bit));
             const uint8_t kind = (t->unknowns[j] >> bit) & 1 ? C_TOKEN_UNKNOWN : prefixed_literal_kind(source, begin, length, lane_position + bit);
             cur_kind[index] = kind | (cur_kind[index] & BUSTER_C_TOKEN_START_OF_LINE);
         }
@@ -2752,7 +2816,7 @@ BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* sou
 }
 
 // The write-out of a source's last chunk, out of line (the chunk loop has its own copy).
-__attribute__((noinline)) static OutputCursors write_chunk_outlined(const ChunkTokens* t, const uint8_t* source, uint64_t begin, uint64_t length, OutputCursors cursors)
+BUSTER_LEX_NOINLINE static OutputCursors write_chunk_outlined(const ChunkTokens* t, const uint8_t* source, uint64_t begin, uint64_t length, OutputCursors cursors)
 {
     return write_chunk(t, source, begin, length, cursors);
 }
@@ -2762,12 +2826,12 @@ __attribute__((noinline)) static OutputCursors write_chunk_outlined(const ChunkT
 // c_first_char_channels_no_digraphs, and every other step is as with them, so the two loops are the same code; without
 // `line_comments`, "//" marks no comment.
 BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs, const bool line_comments, const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin,
-                               uint8_t* restrict kinds_out, uint32_t* restrict starts_out, uint32_t* restrict ends_out, uint64_t* written, uint64_t* restart,
+                               uint8_t* BUSTER_LEX_RESTRICT kinds_out, uint32_t* BUSTER_LEX_RESTRICT starts_out, uint32_t* BUSTER_LEX_RESTRICT ends_out, uint64_t* written, uint64_t* restart,
                                uint64_t* scalar_until)
 {
-    const U64x8 zero = {0};
-    const U64x8 most_significant = {0, 0, 0, 0, 0, 0, 0, 1ull << 63};
-    const U64x8 odd_bits = 0xAAAAAAAAAAAAAAAAull;
+    const U64x8 zero = _mm512_setzero_si512();
+    const U64x8 most_significant = _mm512_maskz_set1_epi64(0x80, INT64_MIN);
+    const U64x8 odd_bits = _mm512_set1_epi64((int64_t)0xAAAAAAAAAAAAAAAAull);
 
     begin = skip_leading_comments(source, length, begin, line_comments);
 
@@ -2806,7 +2870,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
     // Phase I runs a chunk ahead: its scalar mask stores cannot forward to the 64-byte Phase II loads. The eight
     // property masks instead share a vector store per source lane, then transpose at the consumer. Their rows in
     // masks are the transpose destination; the other rows retain the scalar masks. Lane 8 supplies lookahead.
-    uint64_t masks[2][NUM_MASKS][BUSTER_LEX_MASK_LANES] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES)));
+    BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t masks[2][NUM_MASKS][BUSTER_LEX_MASK_LANES];
     // Three buffers of vectors: for the chunk being analyzed, the next one (classified), and the previous one (written
     // out).
     __m512i raws[3][BUSTER_LEX_LOOKAHEAD_VECTORS];
@@ -2879,13 +2943,13 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         {
             for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
             {
-                padding[j] = lane_padding(base_offset, length, chunk + BUSTER_LEX_VECTOR_BYTES * j);
+                padding = bitstring_with_lane(padding, j, lane_padding(base_offset, length, chunk + BUSTER_LEX_VECTOR_BYTES * j));
             }
             next_padding = lane_padding(base_offset, length, chunk + BUSTER_LEX_CHUNK_BYTES);
         }
 
 #define BUSTER_LEX_MASK(m) (*(const U64x8*)o[m])
-#define BUSTER_LEX_NEXT(m) ((m) < BUSTER_LEX_PROPERTY_MASK_COUNT ? ((U64x8)properties[current][BUSTER_LEX_VECTOR_COUNT])[m] : o[m][BUSTER_LEX_VECTOR_COUNT])
+#define BUSTER_LEX_NEXT(m) ((m) < BUSTER_LEX_PROPERTY_MASK_COUNT ? bitstring_lane(properties[current][BUSTER_LEX_VECTOR_COUNT], m) : o[m][BUSTER_LEX_VECTOR_COUNT])
         U64x8 newline = BUSTER_LEX_MASK(M_NEWLINE);
         U64x8 whitespace = BUSTER_LEX_MASK(M_WHITESPACE);
         U64x8 identifier = BUSTER_LEX_MASK(M_IDENTIFIER);
@@ -2912,32 +2976,32 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         {
             // Line splices: a backslash right before a newline (not the end of the source). They don't break lines and
             // read as whitespace, which is right unless the characters around one could be part of the same token.
-            splice_backslash = backslash & shr_next(newline & ~padding, BUSTER_LEX_NEXT(M_NEWLINE) & ~next_padding, 1);
+            splice_backslash = _mm512_and_si512(backslash, shr_next(_mm512_and_si512(newline, bitstring_not(padding)), BUSTER_LEX_NEXT(M_NEWLINE) & ~next_padding, 1));
             if (BUSTER_UNLIKELY(!is_zero(splice_backslash) | ((previous_splice_backslash | previous_splice_cr) != 0)))
             {
-                U64x8 cr;
+                U64x8 cr = zero;
                 for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
                 {
-                    cr[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('\r'));
+                    cr = bitstring_with_lane(cr, j, _mm512_cmpeq_epi8_mask(raw[j], splat8('\r')));
                 }
                 const uint64_t next_cr = _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('\r'));
-                const U64x8 line_feed = newline & ~padding & ~cr;
+                const U64x8 line_feed = _mm512_and_si512(_mm512_and_si512(newline, bitstring_not(padding)), bitstring_not(cr));
                 const U64x8 first_newline = shl_carry(splice_backslash, previous_splice_backslash, 1);
-                const U64x8 second_newline = shl_carry(first_newline & cr, previous_splice_cr, 1) & line_feed;
+                const U64x8 second_newline = _mm512_and_si512(shl_carry(_mm512_and_si512(first_newline, cr), previous_splice_cr, 1), line_feed);
                 // In a splice, "\n\r" is one newline.
-                if (!is_zero(first_newline & line_feed & shr_next(cr, next_cr, 1)))
+                if (!is_zero(_mm512_and_si512(_mm512_and_si512(first_newline, line_feed), shr_next(cr, next_cr, 1))))
                 {
                     return BUSTER_LEX_NEEDS_SCALAR;
                 }
-                splice = splice_backslash | first_newline | second_newline;
+                splice = _mm512_or_si512(_mm512_or_si512(splice_backslash, first_newline), second_newline);
                 // A splice after whitespace (as in most multi-line macros) can't join tokens, close a comment or need
                 // the scalar lexer: only the others are looked at one by one.
-                const U64x8 checked_splices = splice_backslash & ~shl(whitespace, 1);
+                const U64x8 checked_splices = _mm512_and_si512(splice_backslash, bitstring_not(shl(whitespace, 1)));
                 for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
                 {
-                    for (uint64_t bits = checked_splices[j]; bits != 0; bits &= bits - 1)
+                    for (uint64_t bits = bitstring_lane(checked_splices, j); bits != 0; bits &= bits - 1)
                     {
-                        const int64_t position = chunk_position + BUSTER_LEX_VECTOR_BYTES * j + __builtin_ctzll(bits);
+                        const int64_t position = chunk_position + BUSTER_LEX_VECTOR_BYTES * j + BUSTER_LEX_CTZ64(bits);
                         const uint8_t before = source_byte(source, begin, length, position - 1);
                         const bool crlf = source_byte(source, begin, length, position + 1) == '\r' && source_byte(source, begin, length, position + 2) == '\n';
                         const uint8_t after = source_byte(source, begin, length, position + (crlf ? 3 : 2));
@@ -2949,27 +3013,27 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                         }
                         if (splice_joins(source_byte(source, begin, length, position - 2), before, after, cplusplus))
                         {
-                            joining_splices[j] |= bits & -bits;
+                            joining_splices = bitstring_with_lane(joining_splices, j, bitstring_lane(joining_splices, j) | (bits & -bits));
                         }
                         if (before == '*' && (after == '/' || after == '\\'))
                         {
-                            closing_splices[j] |= bits & -bits;
+                            closing_splices = bitstring_with_lane(closing_splices, j, bitstring_lane(closing_splices, j) | (bits & -bits));
                         }
                     }
                 }
-                previous_splice_backslash = splice_backslash[BUSTER_LEX_VECTOR_COUNT - 1] & (1ull << 63);
-                previous_splice_cr = first_newline[BUSTER_LEX_VECTOR_COUNT - 1] & cr[BUSTER_LEX_VECTOR_COUNT - 1] & (1ull << 63);
+                previous_splice_backslash = bitstring_lane(splice_backslash, BUSTER_LEX_VECTOR_COUNT - 1) & (1ull << 63);
+                previous_splice_cr = bitstring_lane(first_newline, BUSTER_LEX_VECTOR_COUNT - 1) & bitstring_lane(cr, BUSTER_LEX_VECTOR_COUNT - 1) & (1ull << 63);
             }
 
             // A backslash, whitespace and a newline is a line splice too (that's rare).
-            const U64x8 backslash_whitespace = backslash & shr_next(whitespace, BUSTER_LEX_NEXT(M_WHITESPACE), 1);
+            const U64x8 backslash_whitespace = _mm512_and_si512(backslash, shr_next(whitespace, BUSTER_LEX_NEXT(M_WHITESPACE), 1));
             if (BUSTER_UNLIKELY(!is_zero(backslash_whitespace)))
             {
                 for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
                 {
-                    for (uint64_t bits = backslash_whitespace[j]; bits != 0; bits &= bits - 1)
+                    for (uint64_t bits = bitstring_lane(backslash_whitespace, j); bits != 0; bits &= bits - 1)
                     {
-                        int64_t p = chunk_position + BUSTER_LEX_VECTOR_BYTES * j + __builtin_ctzll(bits) + 1;
+                        int64_t p = chunk_position + BUSTER_LEX_VECTOR_BYTES * j + BUSTER_LEX_CTZ64(bits) + 1;
                         while (p < (int64_t)length && (source[p] == ' ' || source[p] == '\t' || source[p] == '\v' || source[p] == '\f'))
                         {
                             p += 1;
@@ -2984,36 +3048,36 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 
             // Matches the character after any odd number of backslashes (simdjson's algorithm by John Keiser).
             {
-                const U64x8 escape_backslash = backslash & ~splice_backslash;
-                const U64x8 potential_escape = escape_backslash & ~bit_0_if(next_is_escaped);
+                const U64x8 escape_backslash = _mm512_and_si512(backslash, bitstring_not(splice_backslash));
+                const U64x8 potential_escape = _mm512_and_si512(escape_backslash, bitstring_not(bit_0_if(next_is_escaped)));
                 const U64x8 maybe_escaped = shl(potential_escape, 1);
-                const U64x8 even_series_codes_and_odd_bits = sub(maybe_escaped | odd_bits, potential_escape);
-                const U64x8 escape_and_terminal_code = even_series_codes_and_odd_bits ^ odd_bits;
-                escaped = escape_and_terminal_code ^ (escape_backslash | bit_0_if(next_is_escaped));
-                next_is_escaped = bit_511(escape_and_terminal_code & escape_backslash);
+                const U64x8 even_series_codes_and_odd_bits = sub(_mm512_or_si512(maybe_escaped, odd_bits), potential_escape);
+                const U64x8 escape_and_terminal_code = _mm512_xor_si512(even_series_codes_and_odd_bits, odd_bits);
+                escaped = _mm512_xor_si512(escape_and_terminal_code, (_mm512_or_si512(escape_backslash, bit_0_if(next_is_escaped))));
+                next_is_escaped = bit_511(_mm512_and_si512(escape_and_terminal_code, escape_backslash));
             }
         }
 
-        const U64x8 line_break = newline & ~splice;
+        const U64x8 line_break = _mm512_and_si512(newline, bitstring_not(splice));
 
         // pp-numbers: a digit (or a '.' and a digit) that doesn't continue an identifier, and everything that
         // continues it: identifier characters, '.', a sign after e/E/p/P and a digit separator.
-        const U64x8 apostrophe_separator = apostrophe & shr_next(separator_follower, BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER), 1);
-        const U64x8 number_sign = exponent_sign & ~shl_carry(apostrophe, previous_apostrophe, 2); // Not "1'e+".
-        const U64x8 number_continue = identifier | dot | number_sign | apostrophe_separator;
-        const U64x8 number_head = (digit & ~shl_carry(identifier, previous_identifier, 1)) | (dot & shr_next(digit, BUSTER_LEX_NEXT(M_DIGIT), 1));
+        const U64x8 apostrophe_separator = _mm512_and_si512(apostrophe, shr_next(separator_follower, BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER), 1));
+        const U64x8 number_sign = _mm512_and_si512(exponent_sign, bitstring_not(shl_carry(apostrophe, previous_apostrophe, 2))); // Not "1'e+".
+        const U64x8 number_continue = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(identifier, dot), number_sign), apostrophe_separator);
+        const U64x8 number_head = _mm512_or_si512((_mm512_and_si512(digit, bitstring_not(shl_carry(identifier, previous_identifier, 1)))), (_mm512_and_si512(dot, shr_next(digit, BUSTER_LEX_NEXT(M_DIGIT), 1))));
         uint32_t number_carry_out;
         const U64x8 number_sum = add_carry(number_continue, number_head, number_carry, &number_carry_out);
-        const U64x8 number_region = ((number_sum ^ number_continue) | number_head) & number_continue;
+        const U64x8 number_region = _mm512_and_si512((_mm512_or_si512((_mm512_xor_si512(number_sum, number_continue)), number_head)), number_continue);
 
         // Delimiters of literals and comments. A digit separator isn't a quote. Comment delimiters are marked at
         // their '/': the first character of "//" (with line comments) and "/*", and the last of "*/".
-        const U64x8 quote_bounds = quote & ~escaped;
-        const U64x8 apostrophe_closers = apostrophe & ~escaped;
-        const U64x8 apostrophe_bounds = apostrophe_closers & ~number_region;
-        const U64x8 line_comment_marks = line_comments ? slash & shr_next(slash, BUSTER_LEX_NEXT(M_SLASH), 1) : zero;
-        const U64x8 block_comment_marks = slash & shr_next(star, BUSTER_LEX_NEXT(M_STAR), 1);
-        const U64x8 block_comment_closers = slash & shl_carry(star, previous_star, 1);
+        const U64x8 quote_bounds = _mm512_and_si512(quote, bitstring_not(escaped));
+        const U64x8 apostrophe_closers = _mm512_and_si512(apostrophe, bitstring_not(escaped));
+        const U64x8 apostrophe_bounds = _mm512_and_si512(apostrophe_closers, bitstring_not(number_region));
+        const U64x8 line_comment_marks = line_comments ? _mm512_and_si512(slash, shr_next(slash, BUSTER_LEX_NEXT(M_SLASH), 1)) : zero;
+        const U64x8 block_comment_marks = _mm512_and_si512(slash, shr_next(star, BUSTER_LEX_NEXT(M_STAR), 1));
+        const U64x8 block_comment_closers = _mm512_and_si512(slash, shl_carry(star, previous_star, 1));
         const uint64_t next_closers = BUSTER_LEX_NEXT(M_SLASH) & ((BUSTER_LEX_NEXT(M_STAR) << 1) | bit_511(star));
         if (BUSTER_UNLIKELY(!is_zero((block_comment_marks & block_comment_closers) | (block_comment_marks & shr_next(block_comment_closers, next_closers, 2)))))
         {
@@ -3023,22 +3087,21 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         // The block comment the chunk starts inside of (if it does) goes up to its first "*/" at or after bit
         // block_comment_skip, or to the end of the chunk. It's found first, so that the scan below starts after it.
         const U64x8 carried_start = bit_0_if(state == STATE_BLOCK_COMMENT);
-        const U64x8 carried_cursor = carried_start << block_comment_skip;
-        const U64x8 carried_end = (block_comment_closers & ~sub(block_comment_closers, carried_cursor & ~block_comment_closers)) |
-                                  (carried_cursor & block_comment_closers);
-        const U64x8 carried_region = sub(carried_end, carried_start) | carried_start | carried_end;
+        const U64x8 carried_cursor = _mm512_sllv_epi64(carried_start, _mm512_set1_epi64(block_comment_skip));
+        const U64x8 carried_end = _mm512_or_si512((_mm512_and_si512(block_comment_closers, bitstring_not(sub(block_comment_closers, _mm512_and_si512(carried_cursor, bitstring_not(block_comment_closers)))))), (_mm512_and_si512(carried_cursor, block_comment_closers)));
+        const U64x8 carried_region = _mm512_or_si512(_mm512_or_si512(sub(carried_end, carried_start), carried_start), carried_end);
 
         // Find the literals and comments, line by line in parallel (see `scan_lines`), after that comment. The scan
         // starts each line outside of comments; if a block comment spans lines, that can be wrong, so the chunk is
         // scanned again with each line's state from the previous scan until the two agree (which is then the
         // sequential result).
-        const U64x8 bounds = quote_bounds | apostrophe_bounds | line_comment_marks | block_comment_marks;
+        const U64x8 bounds = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(quote_bounds, apostrophe_bounds), line_comment_marks), block_comment_marks);
         const State scan_state = state == STATE_BLOCK_COMMENT ? STATE_OUTSIDE : state;
-        const U64x8 scan_cursors = ((shl(line_break, 1) | bit_0_if(state == STATE_OUTSIDE)) & ~carried_region) | shl(carried_end, 1);
+        const U64x8 scan_cursors = _mm512_or_si512((_mm512_and_si512((_mm512_or_si512(shl(line_break, 1), bit_0_if(state == STATE_OUTSIDE))), bitstring_not(carried_region))), shl(carried_end, 1));
         U64x8 line_comment_region = zero;
         U64x8 literal_region = zero;
         Scan scan = {0};
-        if (!is_zero((bounds & ~carried_region) | bit_0_if(scan_state != STATE_OUTSIDE)))
+        if (!is_zero(_mm512_or_si512((_mm512_and_si512(bounds, bitstring_not(carried_region))), bit_0_if(scan_state != STATE_OUTSIDE))))
         {
             scan = scan_lines(scan_cursors, scan_state, line_break, bounds, quote_bounds, apostrophe_closers, apostrophe_bounds, line_comment_marks,
                               block_comment_marks, block_comment_closers);
@@ -3051,12 +3114,12 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                         return BUSTER_LEX_NEEDS_SCALAR;
                     }
                     // A line that starts inside a block comment is scanned from the end of the comment, if it's on the line.
-                    const U64x8 inside = shl(line_break & scan.block_region, 1);
-                    const U64x8 seek = block_comment_closers | line_break;
-                    const U64x8 first_closers = block_comment_closers & ~sub(seek, inside);
-                    const Scan rescan = scan_lines((scan_cursors & ~inside) | shl(first_closers, 1), scan_state, line_break, bounds, quote_bounds,
+                    const U64x8 inside = shl(_mm512_and_si512(line_break, scan.block_region), 1);
+                    const U64x8 seek = _mm512_or_si512(block_comment_closers, line_break);
+                    const U64x8 first_closers = _mm512_and_si512(block_comment_closers, bitstring_not(sub(seek, inside)));
+                    const Scan rescan = scan_lines(_mm512_or_si512((_mm512_and_si512(scan_cursors, bitstring_not(inside))), shl(first_closers, 1)), scan_state, line_break, bounds, quote_bounds,
                                                    apostrophe_closers, apostrophe_bounds, line_comment_marks, block_comment_marks, block_comment_closers);
-                    const bool same = is_zero((rescan.block_region ^ scan.block_region) & line_break) &&
+                    const bool same = is_zero(_mm512_and_si512((_mm512_xor_si512(rescan.block_region, scan.block_region)), line_break)) &&
                                       (bit_511(rescan.block_region) & ~bit_511(rescan.block_ends)) == (bit_511(scan.block_region) & ~bit_511(scan.block_ends));
                     scan = rescan;
                     if (same)
@@ -3066,16 +3129,16 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                 }
             }
             const U64x8 carried_literal = bit_0_if((state == STATE_STRING) | (state == STATE_CHAR));
-            line_comment_region = sub(line_break, scan.line_comment_starts | bit_0_if(state == STATE_LINE_COMMENT)) & ~line_break;
-            literal_region = sub(scan.literal_closers | scan.literal_unterminated, scan.literal_starts | carried_literal) | scan.literal_closers;
+            line_comment_region = _mm512_and_si512(sub(line_break, _mm512_or_si512(scan.line_comment_starts, bit_0_if(state == STATE_LINE_COMMENT))), bitstring_not(line_break));
+            literal_region = _mm512_or_si512(sub(_mm512_or_si512(scan.literal_closers, scan.literal_unterminated), _mm512_or_si512(scan.literal_starts, carried_literal)), scan.literal_closers);
         }
         U64x8 literal_starts = scan.literal_starts;
         const U64x8 literal_closers = scan.literal_closers;
         U64x8 literal_unterminated = scan.literal_unterminated;
-        const U64x8 block_region = scan.block_region | carried_region;
-        const U64x8 block_ends = scan.block_ends | carried_end;
+        const U64x8 block_region = _mm512_or_si512(scan.block_region, carried_region);
+        const U64x8 block_ends = _mm512_or_si512(scan.block_ends, carried_end);
 
-        const U64x8 outside = ~(literal_region | line_comment_region | block_region);
+        const U64x8 outside = bitstring_not((_mm512_or_si512(_mm512_or_si512(literal_region, line_comment_region), block_region)));
 
         // What the next chunk starts inside of. A literal open at the end of the chunk is unterminated if the next
         // chunk starts with a newline (the end of the source counts): then it ends here.
@@ -3089,13 +3152,13 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         State next_state = block_at_end ? STATE_BLOCK_COMMENT : bit_511(line_comment_region) ? STATE_LINE_COMMENT : STATE_OUTSIDE;
         // A "*/" can't use the '*' of a "/*" that starts at bit 509, 510 or 511: the skip is the highest of those
         // 3 bits that is set (0 if none).
-        const uint32_t opener_bits = (uint32_t)((block_comment_marks[7] & block_region[7]) >> 61);
+        const uint32_t opener_bits = (uint32_t)((bitstring_lane(block_comment_marks, 7) & bitstring_lane(block_region, 7)) >> 61);
         const uint32_t next_block_comment_skip = (uint32_t)-block_at_end & ((uint32_t)(opener_bits >= 2) + (uint32_t)(opener_bits >= 4));
         bool unterminated_at_end = false;
         if (BUSTER_UNLIKELY(literal_at_end))
         {
             const int32_t last_start = highest_bit_below(literal_starts, BUSTER_LEX_CHUNK_BYTES);
-            const bool is_char = last_start >= 0 ? ((apostrophe[last_start >> 6] >> (last_start & 63)) & 1) != 0 : state == STATE_CHAR;
+            const bool is_char = last_start >= 0 ? ((bitstring_lane(apostrophe, last_start >> 6) >> (last_start & 63)) & 1) != 0 : state == STATE_CHAR;
             next_state = is_char ? STATE_CHAR : STATE_STRING;
             // (The newline that starts the next chunk is part of a splice if this chunk ends with its backslash, or
             // with its "\\\r" and the newline is the '\n' after that.)
@@ -3111,7 +3174,11 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         // From here on, the masks are loaded again rather than kept in registers since the start of the analysis: there
         // aren't enough registers, and Clang would store them to the stack to load them back. (The barrier keeps it
         // from reusing the first loads.)
+#if defined(_MSC_VER)
+        _ReadWriteBarrier();
+#else
         __asm__ volatile("" ::: "memory");
+#endif
         newline = BUSTER_LEX_MASK(M_NEWLINE);
         whitespace = BUSTER_LEX_MASK(M_WHITESPACE);
         identifier = BUSTER_LEX_MASK(M_IDENTIFIER);
@@ -3134,18 +3201,18 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         }
         // A stray backslash is a one-character unknown token, unless it starts a UCN (\\u, \\U or \\N) or comes before
         // a quote or another backslash (which the escape bitstring would have it escape).
-        const U64x8 stray_backslash = backslash & ~splice_backslash & outside;
+        const U64x8 stray_backslash = _mm512_and_si512(_mm512_and_si512(backslash, bitstring_not(splice_backslash)), outside);
         if (BUSTER_UNLIKELY(!is_zero(stray_backslash)))
         {
-            U64x8 risky;
+            U64x8 risky = zero;
             for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
             {
-                risky[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('u')) | _mm512_cmpeq_epi8_mask(raw[j], splat8('U')) |
-                           _mm512_cmpeq_epi8_mask(raw[j], splat8('N')) | quote[j] | apostrophe[j] | backslash[j];
+                risky = bitstring_with_lane(risky, j, _mm512_cmpeq_epi8_mask(raw[j], splat8('u')) | _mm512_cmpeq_epi8_mask(raw[j], splat8('U')) |
+                           _mm512_cmpeq_epi8_mask(raw[j], splat8('N')) | bitstring_lane(quote, j) | bitstring_lane(apostrophe, j) | bitstring_lane(backslash, j));
             }
             const uint64_t next_risky = _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('u')) | _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('U')) |
                                         _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('N')) | BUSTER_LEX_NEXT(M_QUOTE) | BUSTER_LEX_NEXT(M_APOSTROPHE) | BUSTER_LEX_NEXT(M_BACKSLASH);
-            if (!is_zero(stray_backslash & shr_next(risky, next_risky, 1)))
+            if (!is_zero(_mm512_and_si512(stray_backslash, shr_next(risky, next_risky, 1))))
             {
                 return BUSTER_LEX_NEEDS_SCALAR;
             }
@@ -3153,20 +3220,20 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 
         // Literals (by their opening quote) that are unknown tokens: unterminated ones, found by mapping the newline
         // that ends each one back to its quote (if it's in this chunk), and empty character constants.
-        U64x8 unknown_openers = literal_starts & apostrophe & shr_next(literal_closers, BUSTER_LEX_NEXT(M_APOSTROPHE) & 1, 1);
+        U64x8 unknown_openers = _mm512_and_si512(_mm512_and_si512(literal_starts, apostrophe), shr_next(literal_closers, BUSTER_LEX_NEXT(M_APOSTROPHE) & 1, 1));
         if (BUSTER_UNLIKELY(!is_zero(literal_unterminated) | unterminated_at_end))
         {
             bool carried_literal_unknown = false;
             for (uint32_t lane = 0; lane < BUSTER_LEX_LOOKAHEAD_VECTORS; lane += 1)
             {
-                uint64_t bits = lane < BUSTER_LEX_VECTOR_COUNT ? literal_unterminated[lane] : (uint64_t)unterminated_at_end;
+                uint64_t bits = lane < BUSTER_LEX_VECTOR_COUNT ? bitstring_lane(literal_unterminated, lane) : (uint64_t)unterminated_at_end;
                 for (; bits != 0; bits &= bits - 1)
                 {
-                    const int32_t opener = highest_bit_below(literal_starts, lane * BUSTER_LEX_VECTOR_BYTES + (uint32_t)__builtin_ctzll(bits));
+                    const int32_t opener = highest_bit_below(literal_starts, lane * BUSTER_LEX_VECTOR_BYTES + (uint32_t)BUSTER_LEX_CTZ64(bits));
                     // (The quote of a prefixed literal that starts in the previous chunk belongs to that token.)
                     if (opener >= 0 && !(opener < BUSTER_LEX_VECTOR_BYTES && ((suppressed_starts >> opener) & 1)))
                     {
-                        unknown_openers[opener >> 6] |= 1ull << (opener & 63);
+                        unknown_openers = bitstring_with_lane(unknown_openers, opener >> 6, bitstring_lane(unknown_openers, opener >> 6) | (1ull << (opener & 63)));
                     }
                     else
                     {
@@ -3181,58 +3248,58 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                 kinds_out[index] = C_TOKEN_UNKNOWN | (kinds_out[index] & BUSTER_C_TOKEN_START_OF_LINE);
             }
         }
-        const U64x8 literal_token_ends = literal_closers | shr(literal_unterminated, 1) | (unterminated_at_end ? most_significant : zero);
+        const U64x8 literal_token_ends = _mm512_or_si512(_mm512_or_si512(literal_closers, shr(literal_unterminated, 1)), (unterminated_at_end ? most_significant : zero));
 
         // Multi-character punctuators: candidates from Phase I that start outside of literals, comments and
         // pp-numbers. An ellipsis only needs its first '.' outside of a pp-number: "...5" is "..." and "5", even
         // though ".5" looks like a pp-number.
-        const U64x8 number_token_with_dots = number_region & outside;
-        const U64x8 covered_bits = {covered, 0, 0, 0, 0, 0, 0, 0};
-        const U64x8 candidate = outside & ~number_token_with_dots & ~covered_bits;
+        const U64x8 number_token_with_dots = _mm512_and_si512(number_region, outside);
+        const U64x8 covered_bits = _mm512_maskz_set1_epi64(1, (int64_t)covered);
+        const U64x8 candidate = _mm512_and_si512(_mm512_and_si512(outside, bitstring_not(number_token_with_dots)), bitstring_not(covered_bits));
         const U64x8 hash_digraphs = shr_next(hash_digraph, BUSTER_LEX_NEXT(M_HASHDIG), 1); // The '%' of each "%:".
-        U64x8 quads = hash_digraphs & shr_next(hash_digraphs, BUSTER_LEX_NEXT(M_HASHDIG) >> 1, 2) & candidate;
-        U64x8 triples = shr_next(triple_ends, BUSTER_LEX_NEXT(M_OP3), 2) & candidate & ~quads;
-        U64x8 pairs = shr_next(pair_ends, BUSTER_LEX_NEXT(M_OP2), 1) & candidate & ~triples & ~quads;
+        U64x8 quads = _mm512_and_si512(_mm512_and_si512(hash_digraphs, shr_next(hash_digraphs, BUSTER_LEX_NEXT(M_HASHDIG) >> 1, 2)), candidate);
+        U64x8 triples = _mm512_and_si512(_mm512_and_si512(shr_next(triple_ends, BUSTER_LEX_NEXT(M_OP3), 2), candidate), bitstring_not(quads));
+        U64x8 pairs = _mm512_and_si512(_mm512_and_si512(_mm512_and_si512(shr_next(pair_ends, BUSTER_LEX_NEXT(M_OP2), 1), candidate), bitstring_not(triples)), bitstring_not(quads));
         if (cplusplus)
         {
             // "<=>" and "->*": the triple candidates that start with '<' and '-' (rare, so checked one at a time).
-            const U64x8 cxx_triple_starts = shr_next(cxx_triple_ends, BUSTER_LEX_NEXT(M_OP3_CXX), 2) & candidate & ~quads;
+            const U64x8 cxx_triple_starts = _mm512_and_si512(_mm512_and_si512(shr_next(cxx_triple_ends, BUSTER_LEX_NEXT(M_OP3_CXX), 2), candidate), bitstring_not(quads));
             if (BUSTER_UNLIKELY(!is_zero(cxx_triple_starts)))
             {
                 for (uint32_t lane = 0; lane < BUSTER_LEX_VECTOR_COUNT; lane += 1)
                 {
-                    for (uint64_t bits = cxx_triple_starts[lane]; bits != 0; bits &= bits - 1)
+                    for (uint64_t bits = bitstring_lane(cxx_triple_starts, lane); bits != 0; bits &= bits - 1)
                     {
-                        const int64_t position = chunk_position + BUSTER_LEX_VECTOR_BYTES * lane + __builtin_ctzll(bits);
+                        const int64_t position = chunk_position + BUSTER_LEX_VECTOR_BYTES * lane + BUSTER_LEX_CTZ64(bits);
                         const uint8_t first = source_byte(source, begin, length, position);
                         if (first == (source_byte(source, begin, length, position + 2) == '>' ? '<' : '-'))
                         {
-                            triples[lane] |= bits & -bits;
+                            triples = bitstring_with_lane(triples, lane, bitstring_lane(triples, lane) | (bits & -bits));
                         }
                     }
                 }
-                pairs &= ~triples;
+                pairs = _mm512_and_si512(pairs, bitstring_not(triples));
             }
             // ".*"
-            pairs |= dot & shr_next(star, BUSTER_LEX_NEXT(M_STAR), 1) & candidate & ~triples & ~quads;
+            pairs = _mm512_or_si512(pairs, _mm512_and_si512(_mm512_and_si512(_mm512_and_si512(_mm512_and_si512(dot, shr_next(star, BUSTER_LEX_NEXT(M_STAR), 1)), candidate), bitstring_not(triples)), bitstring_not(quads)));
         }
-        U64x8 covers = shl(pairs, 1) | shl(triples, 1) | shl(triples, 2) | shl(quads, 1) | shl(quads, 2) | shl(quads, 3);
+        U64x8 covers = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(shl(pairs, 1), shl(triples, 1)), shl(triples, 2)), shl(quads, 1)), shl(quads, 2)), shl(quads, 3));
         if (cplusplus && BUSTER_UNLIKELY(!is_zero((pairs | triples | quads) & covers) | (bit_511(pairs) != 0)))
         {
             // "<::" is '<' and "::" unless a ':' or '>' follows: then its "<:" isn't a candidate.
-            U64x8 less;
-            U64x8 colon;
-            U64x8 colon_or_greater;
+            U64x8 less = zero;
+            U64x8 colon = zero;
+            U64x8 colon_or_greater = zero;
             for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
             {
-                less[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('<'));
-                colon[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8(':'));
-                colon_or_greater[j] = colon[j] | _mm512_cmpeq_epi8_mask(raw[j], splat8('>'));
+                less = bitstring_with_lane(less, j, _mm512_cmpeq_epi8_mask(raw[j], splat8('<')));
+                colon = bitstring_with_lane(colon, j, _mm512_cmpeq_epi8_mask(raw[j], splat8(':')));
+                colon_or_greater = bitstring_with_lane(colon_or_greater, j, bitstring_lane(colon, j) | _mm512_cmpeq_epi8_mask(raw[j], splat8('>')));
             }
             const uint64_t next_colon = _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8(':'));
             const uint64_t next_colon_or_greater = next_colon | _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('>'));
-            pairs &= ~(less & shr_next(colon, next_colon, 1) & shr_next(colon, next_colon, 2) & ~shr_next(colon_or_greater, next_colon_or_greater, 3));
-            covers = shl(pairs, 1) | shl(triples, 1) | shl(triples, 2) | shl(quads, 1) | shl(quads, 2) | shl(quads, 3);
+            pairs = _mm512_and_si512(pairs, bitstring_not((_mm512_and_si512(_mm512_and_si512(_mm512_and_si512(less, shr_next(colon, next_colon, 1)), shr_next(colon, next_colon, 2)), bitstring_not(shr_next(colon_or_greater, next_colon_or_greater, 3))))));
+            covers = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(shl(pairs, 1), shl(triples, 1)), shl(triples, 2)), shl(quads, 1)), shl(quads, 2)), shl(quads, 3));
         }
         if (BUSTER_UNLIKELY(!is_zero((pairs | triples | quads) & covers)))
         {
@@ -3245,24 +3312,22 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
             quads = zero;
             do
             {
-                const U64x8 open_covers = shl(open_pairs, 1) | shl(open_triples, 1) | shl(open_triples, 2) | shl(open_quads, 1) |
-                                          shl(open_quads, 2) | shl(open_quads, 3);
-                const U64x8 take_pairs = open_pairs & ~open_covers;
-                const U64x8 take_triples = open_triples & ~open_covers;
-                const U64x8 take_quads = open_quads & ~open_covers;
-                pairs |= take_pairs;
-                triples |= take_triples;
-                quads |= take_quads;
-                const U64x8 taken = take_pairs | take_triples | take_quads | shl(take_pairs, 1) | shl(take_triples, 1) | shl(take_triples, 2) |
-                                    shl(take_quads, 1) | shl(take_quads, 2) | shl(take_quads, 3);
-                open_pairs &= ~taken;
-                open_triples &= ~taken;
-                open_quads &= ~taken;
-            } while (!is_zero(open_pairs | open_triples | open_quads));
-            covers = shl(pairs, 1) | shl(triples, 1) | shl(triples, 2) | shl(quads, 1) | shl(quads, 2) | shl(quads, 3);
+                const U64x8 open_covers = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(shl(open_pairs, 1), shl(open_triples, 1)), shl(open_triples, 2)), shl(open_quads, 1)), shl(open_quads, 2)), shl(open_quads, 3));
+                const U64x8 take_pairs = _mm512_and_si512(open_pairs, bitstring_not(open_covers));
+                const U64x8 take_triples = _mm512_and_si512(open_triples, bitstring_not(open_covers));
+                const U64x8 take_quads = _mm512_and_si512(open_quads, bitstring_not(open_covers));
+                pairs = _mm512_or_si512(pairs, take_pairs);
+                triples = _mm512_or_si512(triples, take_triples);
+                quads = _mm512_or_si512(quads, take_quads);
+                const U64x8 taken = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(take_pairs, take_triples), take_quads), shl(take_pairs, 1)), shl(take_triples, 1)), shl(take_triples, 2)), shl(take_quads, 1)), shl(take_quads, 2)), shl(take_quads, 3));
+                open_pairs = _mm512_and_si512(open_pairs, bitstring_not(taken));
+                open_triples = _mm512_and_si512(open_triples, bitstring_not(taken));
+                open_quads = _mm512_and_si512(open_quads, bitstring_not(taken));
+            } while (!is_zero(_mm512_or_si512(_mm512_or_si512(open_pairs, open_triples), open_quads)));
+            covers = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(shl(pairs, 1), shl(triples, 1)), shl(triples, 2)), shl(quads, 1)), shl(quads, 2)), shl(quads, 3));
         }
-        const U64x8 multi_starts = pairs | triples | quads;
-        const U64x8 multi_ends = shl(pairs, 1) | shl(triples, 2) | shl(quads, 3);
+        const U64x8 multi_starts = _mm512_or_si512(_mm512_or_si512(pairs, triples), quads);
+        const U64x8 multi_ends = _mm512_or_si512(_mm512_or_si512(shl(pairs, 1), shl(triples, 2)), shl(quads, 3));
         // A punctuator that crosses into the next chunk covers its first bits.
         uint64_t next_covered = 0;
         uint64_t next_covered_end = 0;
@@ -3272,13 +3337,13 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
             {
                 overhang = 1;
             }
-            else if ((triples[7] >> 62) != 0)
+            else if ((bitstring_lane(triples, 7) >> 62) != 0)
             {
-                overhang = (uint32_t)(triples[7] >> 62) == 1 ? 1 : 2;
+                overhang = (uint32_t)(bitstring_lane(triples, 7) >> 62) == 1 ? 1 : 2;
             }
-            else if ((quads[7] >> 61) != 0)
+            else if ((bitstring_lane(quads, 7) >> 61) != 0)
             {
-                overhang = 64 - (uint32_t)__builtin_clzll(quads[7] >> 61);
+                overhang = 64 - (uint32_t)BUSTER_LEX_CLZ64(bitstring_lane(quads, 7) >> 61);
             }
             if (overhang != 0)
             {
@@ -3288,28 +3353,28 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         }
 
         // pp-numbers and identifiers (an identifier character in a pp-number is part of it).
-        const U64x8 ellipses = triples & dot;
-        const U64x8 number_token = number_token_with_dots & ~(ellipses | shl(ellipses, 1) | shl(ellipses, 2)) & ~covered_bits;
-        const U64x8 number_starts = number_token & ~shl_carry(number_token, previous_number_token, 1);
+        const U64x8 ellipses = _mm512_and_si512(triples, dot);
+        const U64x8 number_token = _mm512_and_si512(_mm512_and_si512(number_token_with_dots, bitstring_not((_mm512_or_si512(_mm512_or_si512(ellipses, shl(ellipses, 1)), shl(ellipses, 2))))), bitstring_not(covered_bits));
+        const U64x8 number_starts = _mm512_and_si512(number_token, bitstring_not(shl_carry(number_token, previous_number_token, 1)));
         if (BUSTER_UNLIKELY(!is_zero(number_starts & ~(digit | dot))))
         {
             return BUSTER_LEX_NEEDS_SCALAR; // A digit separator that is really a quote, as in 'a'b'c'.
         }
-        const uint64_t next_number_continues = (BUSTER_LEX_NEXT(M_IDENTIFIER) | BUSTER_LEX_NEXT(M_DOT) | (BUSTER_LEX_NEXT(M_EXPSIGN) & ~((apostrophe[7] >> 62) & 1)) |
+        const uint64_t next_number_continues = (BUSTER_LEX_NEXT(M_IDENTIFIER) | BUSTER_LEX_NEXT(M_DOT) | (BUSTER_LEX_NEXT(M_EXPSIGN) & ~((bitstring_lane(apostrophe, 7) >> 62) & 1)) |
                                                 (BUSTER_LEX_NEXT(M_APOSTROPHE) & (BUSTER_LEX_NEXT(M_SEPARATOR_FOLLOWER) >> 1))) & 1;
-        const U64x8 number_ends = number_token & ~shr_next(number_token, next_number_continues, 1);
-        const U64x8 identifier_token = identifier & outside & ~number_token;
-        const U64x8 identifier_starts = identifier_token & ~shl_carry(identifier_token, previous_identifier_token, 1);
-        U64x8 identifier_ends = identifier_token & ~shr_next(identifier_token, BUSTER_LEX_NEXT(M_IDENTIFIER) & 1, 1);
-        identifier_ends[0] &= ~suppressed_ends;
+        const U64x8 number_ends = _mm512_and_si512(number_token, bitstring_not(shr_next(number_token, next_number_continues, 1)));
+        const U64x8 identifier_token = _mm512_and_si512(_mm512_and_si512(identifier, outside), bitstring_not(number_token));
+        const U64x8 identifier_starts = _mm512_and_si512(identifier_token, bitstring_not(shl_carry(identifier_token, previous_identifier_token, 1)));
+        U64x8 identifier_ends = _mm512_and_si512(identifier_token, bitstring_not(shr_next(identifier_token, BUSTER_LEX_NEXT(M_IDENTIFIER) & 1, 1)));
+        identifier_ends = bitstring_with_lane(identifier_ends, 0, bitstring_lane(identifier_ends, 0) & (~suppressed_ends));
 
         // Every other character outside of literals and comments is a one-character token.
-        const U64x8 other = ~(identifier | whitespace | newline | quote | apostrophe | backslash | nonascii);
-        const U64x8 singles = (other | stray_backslash) & outside & ~number_token & ~multi_starts & ~covers & ~covered_bits;
+        const U64x8 other = bitstring_not((_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(identifier, whitespace), newline), quote), apostrophe), backslash), nonascii)));
+        const U64x8 singles = _mm512_and_si512(_mm512_and_si512(_mm512_and_si512(_mm512_and_si512(_mm512_and_si512((_mm512_or_si512(other, stray_backslash)), outside), bitstring_not(number_token)), bitstring_not(multi_starts)), bitstring_not(covers)), bitstring_not(covered_bits));
 
         // Literals with a prefix (L, u8, u or U) start at the prefix, which would otherwise be an identifier.
         U64x8 literal_starts_token = literal_starts;
-        literal_starts_token[0] &= ~suppressed_starts;
+        literal_starts_token = bitstring_with_lane(literal_starts_token, 0, bitstring_lane(literal_starts_token, 0) & (~suppressed_starts));
         U64x8 prefix_starts = zero;
         U64x8 unknown_starts = zero;
         uint64_t next_suppressed_starts = 0;
@@ -3319,16 +3384,16 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         const uint64_t next_quotes = (BUSTER_LEX_NEXT(M_QUOTE) | BUSTER_LEX_NEXT(M_APOSTROPHE)) & (raw_strings ? 7 : 3);
         if (BUSTER_UNLIKELY(!is_zero(literal_starts & shl_carry(identifier_token, previous_identifier_token, 1)) | ((bit_511(identifier_token) & (uint64_t)(next_quotes != 0)) != 0)))
         {
-            U64x8 letter;
-            U64x8 u;
-            U64x8 eight;
+            U64x8 letter = zero;
+            U64x8 u = zero;
+            U64x8 eight = zero;
             for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
             {
-                letter[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('L')) | _mm512_cmpeq_epi8_mask(raw[j], splat8('U'));
-                u[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('u'));
-                eight[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('8'));
+                letter = bitstring_with_lane(letter, j, _mm512_cmpeq_epi8_mask(raw[j], splat8('L')) | _mm512_cmpeq_epi8_mask(raw[j], splat8('U')));
+                u = bitstring_with_lane(u, j, _mm512_cmpeq_epi8_mask(raw[j], splat8('u')));
+                eight = bitstring_with_lane(eight, j, _mm512_cmpeq_epi8_mask(raw[j], splat8('8')));
             }
-            letter |= u;
+            letter = _mm512_or_si512(letter, u);
             const uint64_t next_eight = _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('8'));
             // Raw string literals need the scalar lexer. One starts at an identifier R, LR, u8R, uR or UR right before
             // a quote: an identifier token's start is outside of literals and comments, and so is the quote. (Before
@@ -3336,59 +3401,57 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
             // The scan before is right up to the first raw string literal, whose quote it takes for a string's.
             if (raw_strings)
             {
-                U64x8 r;
+                U64x8 r = zero;
                 for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
                 {
-                    r[j] = _mm512_cmpeq_epi8_mask(raw[j], splat8('R'));
+                    r = bitstring_with_lane(r, j, _mm512_cmpeq_epi8_mask(raw[j], splat8('R')));
                 }
                 const uint64_t next_r = _mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('R'));
                 const uint64_t next_quote = BUSTER_LEX_NEXT(M_QUOTE);
-                const U64x8 raw_starts = identifier_starts & ((r & shr_next(quote, next_quote, 1)) |
-                                                              (letter & shr_next(r, next_r, 1) & shr_next(quote, next_quote, 2)) |
-                                                              (u & shr_next(eight, next_eight, 1) & shr_next(r, next_r, 2) & shr_next(quote, next_quote, 3)));
+                const U64x8 raw_starts = _mm512_and_si512(identifier_starts, (_mm512_or_si512(_mm512_or_si512((_mm512_and_si512(r, shr_next(quote, next_quote, 1))), (_mm512_and_si512(_mm512_and_si512(letter, shr_next(r, next_r, 1)), shr_next(quote, next_quote, 2)))), (_mm512_and_si512(_mm512_and_si512(_mm512_and_si512(u, shr_next(eight, next_eight, 1)), shr_next(r, next_r, 2)), shr_next(quote, next_quote, 3))))));
                 if (!is_zero(raw_starts))
                 {
                     return BUSTER_LEX_NEEDS_SCALAR;
                 }
             }
-            const U64x8 one_letter = identifier_starts & letter & shr_next(literal_starts, next_quotes, 1);
-            const U64x8 u8 = identifier_starts & u & shr_next(eight, next_eight, 1) & shr_next(literal_starts, next_quotes, 2);
-            prefix_starts = one_letter | u8;
-            identifier_ends &= ~(one_letter | shl(u8, 1));
-            literal_starts_token &= ~(shl(one_letter, 1) | shl(u8, 2));
+            const U64x8 one_letter = _mm512_and_si512(_mm512_and_si512(identifier_starts, letter), shr_next(literal_starts, next_quotes, 1));
+            const U64x8 u8 = _mm512_and_si512(_mm512_and_si512(_mm512_and_si512(identifier_starts, u), shr_next(eight, next_eight, 1)), shr_next(literal_starts, next_quotes, 2));
+            prefix_starts = _mm512_or_si512(one_letter, u8);
+            identifier_ends = _mm512_and_si512(identifier_ends, bitstring_not((_mm512_or_si512(one_letter, shl(u8, 1)))));
+            literal_starts_token = _mm512_and_si512(literal_starts_token, bitstring_not((_mm512_or_si512(shl(one_letter, 1), shl(u8, 2)))));
             // A prefixed literal is unknown if its quote starts one (an empty character constant in the next chunk
             // is "''" there).
             const uint64_t next_unknown = BUSTER_LEX_NEXT(M_APOSTROPHE) & (BUSTER_LEX_NEXT(M_APOSTROPHE) >> 1);
-            unknown_starts = (one_letter & shr_next(unknown_openers, next_unknown, 1)) | (u8 & shr_next(unknown_openers, next_unknown, 2));
-            next_suppressed_starts = bit_511(one_letter) | ((u8[7] >> 62) & 1) | (bit_511(u8) << 1);
+            unknown_starts = _mm512_or_si512((_mm512_and_si512(one_letter, shr_next(unknown_openers, next_unknown, 1))), (_mm512_and_si512(u8, shr_next(unknown_openers, next_unknown, 2))));
+            next_suppressed_starts = bit_511(one_letter) | ((bitstring_lane(u8, 7) >> 62) & 1) | (bit_511(u8) << 1);
             next_suppressed_ends = bit_511(u8);
         }
-        unknown_starts |= unknown_openers & literal_starts_token;
+        unknown_starts = _mm512_or_si512(unknown_starts, _mm512_and_si512(unknown_openers, literal_starts_token));
 
-        U64x8 all_ends = number_ends | identifier_ends | multi_ends | singles | literal_token_ends;
-        all_ends[0] |= covered_end;
-        U64x8 all_starts = number_starts | identifier_starts | multi_starts | singles | literal_starts_token;
+        U64x8 all_ends = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(number_ends, identifier_ends), multi_ends), singles), literal_token_ends);
+        all_ends = bitstring_with_lane(all_ends, 0, bitstring_lane(all_ends, 0) | (covered_end));
+        U64x8 all_starts = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(_mm512_or_si512(number_starts, identifier_starts), multi_starts), singles), literal_starts_token);
         // C++'s user-defined literal suffixes: an identifier right after a literal's closing quote is part of the
         // literal if it starts with '_' or (after a string literal) is a standard library suffix.
         if (cplusplus)
         {
             const uint64_t next_identifier_start = BUSTER_LEX_NEXT(M_IDENTIFIER) & ~BUSTER_LEX_NEXT(M_DIGIT) & 1;
-            const U64x8 suffixed = literal_closers & ~shl_carry(unknown_openers, previous_unknown_openers, 1) & shr_next(identifier_starts, next_identifier_start, 1);
+            const U64x8 suffixed = _mm512_and_si512(_mm512_and_si512(literal_closers, bitstring_not(shl_carry(unknown_openers, previous_unknown_openers, 1))), shr_next(identifier_starts, next_identifier_start, 1));
             if (BUSTER_UNLIKELY(!is_zero(suffixed)))
             {
                 for (uint32_t lane = 0; lane < BUSTER_LEX_VECTOR_COUNT; lane += 1)
                 {
-                    for (uint64_t bits = suffixed[lane]; bits != 0; bits &= bits - 1)
+                    for (uint64_t bits = bitstring_lane(suffixed, lane); bits != 0; bits &= bits - 1)
                     {
-                        const int64_t position = chunk_position + BUSTER_LEX_VECTOR_BYTES * lane + __builtin_ctzll(bits);
+                        const int64_t position = chunk_position + BUSTER_LEX_VECTOR_BYTES * lane + BUSTER_LEX_CTZ64(bits);
                         if (is_literal_suffix(source, begin, length, position + 1, source_byte(source, begin, length, position) == '"'))
                         {
                             // The literal ends with the suffix, whose start (maybe in the next chunk) isn't a token's.
-                            const uint32_t suffix = lane * BUSTER_LEX_VECTOR_BYTES + (uint32_t)__builtin_ctzll(bits) + 1;
-                            all_ends[lane] &= ~(bits & -bits);
+                            const uint32_t suffix = lane * BUSTER_LEX_VECTOR_BYTES + (uint32_t)BUSTER_LEX_CTZ64(bits) + 1;
+                            all_ends = bitstring_with_lane(all_ends, lane, bitstring_lane(all_ends, lane) & (~(bits & -bits)));
                             if (suffix < BUSTER_LEX_CHUNK_BYTES)
                             {
-                                all_starts[suffix >> 6] &= ~(1ull << (suffix & 63));
+                                all_starts = bitstring_with_lane(all_starts, suffix >> 6, bitstring_lane(all_starts, suffix >> 6) & (~(1ull << (suffix & 63))));
                             }
                             else
                             {
@@ -3399,14 +3462,14 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                 }
             }
         }
-        all_starts[0] &= ~suppressed_starts;
+        all_starts = bitstring_with_lane(all_starts, 0, bitstring_lane(all_starts, 0) & (~suppressed_starts));
 
         // The first token after each newline that starts a logical line (not one in a block comment).
-        const U64x8 line_starts = line_break & ~block_region;
-        const U64x8 seek_in = all_starts | line_starts;
-        const U64x8 seek = sub(seek_in, shl(line_starts, 1) | bit_0_if(pending_start_of_line));
-        const U64x8 start_of_line = all_starts & ~seek;
-        pending_start_of_line = bit_511(line_starts) | bit_511(seek & ~seek_in);
+        const U64x8 line_starts = _mm512_and_si512(line_break, bitstring_not(block_region));
+        const U64x8 seek_in = _mm512_or_si512(all_starts, line_starts);
+        const U64x8 seek = sub(seek_in, _mm512_or_si512(shl(line_starts, 1), bit_0_if(pending_start_of_line)));
+        const U64x8 start_of_line = _mm512_and_si512(all_starts, bitstring_not(seek));
+        pending_start_of_line = bit_511(line_starts) | bit_511(_mm512_and_si512(seek, bitstring_not(seek_in)));
 
         if (!is_zero(line_starts))
         {
@@ -3415,10 +3478,10 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         }
 
         // This chunk's tokens, for the write-out (III) at the start of the next iteration.
-        const U64x8 long_ones = triples | quads;
-        const U64x8 dot_numbers = number_starts & dot;
-        const U64x8 start_counts = (U64x8)_mm512_popcnt_epi64((__m512i)all_starts);
-        const U64x8 end_counts = (U64x8)_mm512_popcnt_epi64((__m512i)all_ends);
+        const U64x8 long_ones = _mm512_or_si512(triples, quads);
+        const U64x8 dot_numbers = _mm512_and_si512(number_starts, dot);
+        const U64x8 start_counts = _mm512_popcnt_epi64(all_starts);
+        const U64x8 end_counts = _mm512_popcnt_epi64(all_ends);
         memcpy(deferred.starts, &all_starts, sizeof(deferred.starts));
         memcpy(deferred.ends, &all_ends, sizeof(deferred.ends));
         memcpy(deferred.start_of_line, &start_of_line, sizeof(deferred.start_of_line));
@@ -3431,16 +3494,16 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         memcpy(deferred.end_counts, &end_counts, sizeof(deferred.end_counts));
         deferred.raw = raw;
         deferred.chunk_position = chunk_position;
-        const U64x8 special = dot_numbers | prefix_starts | unknown_starts;
-        deferred.special_lanes = _mm512_test_epi64_mask((__m512i)special, (__m512i)special);
+        const U64x8 special = _mm512_or_si512(_mm512_or_si512(dot_numbers, prefix_starts), unknown_starts);
+        deferred.special_lanes = _mm512_test_epi64_mask(special, special);
         pending = true;
 
-        previous_identifier = identifier[BUSTER_LEX_VECTOR_COUNT - 1];
-        previous_apostrophe = apostrophe[BUSTER_LEX_VECTOR_COUNT - 1];
-        previous_star = star[BUSTER_LEX_VECTOR_COUNT - 1];
-        previous_number_token = number_token[BUSTER_LEX_VECTOR_COUNT - 1];
-        previous_identifier_token = identifier_token[BUSTER_LEX_VECTOR_COUNT - 1];
-        previous_unknown_openers = unknown_openers[BUSTER_LEX_VECTOR_COUNT - 1];
+        previous_identifier = bitstring_lane(identifier, BUSTER_LEX_VECTOR_COUNT - 1);
+        previous_apostrophe = bitstring_lane(apostrophe, BUSTER_LEX_VECTOR_COUNT - 1);
+        previous_star = bitstring_lane(star, BUSTER_LEX_VECTOR_COUNT - 1);
+        previous_number_token = bitstring_lane(number_token, BUSTER_LEX_VECTOR_COUNT - 1);
+        previous_identifier_token = bitstring_lane(identifier_token, BUSTER_LEX_VECTOR_COUNT - 1);
+        previous_unknown_openers = bitstring_lane(unknown_openers, BUSTER_LEX_VECTOR_COUNT - 1);
         number_carry = number_carry_out;
         state = next_state;
         block_comment_skip = next_block_comment_skip;
@@ -3462,56 +3525,56 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 }
 
 // The chunk loop, specialized for each language, and C's for its modes without digraphs and without "//" comments.
-__attribute__((noinline)) static int64_t tokenize_c(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_c(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(false, true, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_digraphs(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_digraphs(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                 uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(false, false, true, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                      uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(false, true, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_digraphs_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds,
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_digraphs_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds,
                                                                                  uint32_t* starts, uint32_t* ends, uint64_t* written, uint64_t* restart,
                                                                                  uint64_t* scalar_until)
 {
     return tokenize_chunks(false, false, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_cpp(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_cpp(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                       uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(true, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                   uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(false, true, true, false, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_cpp_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_cpp_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(true, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_raw(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_raw(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                         uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(false, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-__attribute__((noinline)) static int64_t tokenize_c_raw_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_raw_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                       uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
     return tokenize_chunks(false, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);

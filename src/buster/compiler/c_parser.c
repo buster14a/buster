@@ -7745,8 +7745,6 @@ static ParseKernelResult parse_twins(ParseKernels* kernels, const ParseInput* in
 // Loads past the last token read the padding (BUSTER_PARSE_TOKEN_PADDING), which holds PARSE_KIND_END and zeros, and
 // stores past it write the arrays' slack; the results there are never read.
 
-typedef uint8_t ParseU8x64 __attribute__((ext_vector_type(64)));
-
 // Index vectors for _mm512_permutex2var_epi8 and _epi16 that shift lanes up (lane i gets lane i - s of the first
 // source) or down (lane i gets lane i + s), taking the second source's lane 0 where that falls outside the vector.
 typedef struct ParseShifts ParseShifts;
