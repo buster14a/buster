@@ -33,6 +33,8 @@
 #include <time.h>
 
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
+// The bytes of each of a lane's arenas in base pages.
+#define BUSTER_CHECK_DEFERRED_SMALL_BYTES (UINT64_C(64) << 20)
 
 // The top level's counts where its walk skipped a body.
 typedef struct CheckDeferredCut CheckDeferredCut;
@@ -120,6 +122,9 @@ struct CheckDeferredLane
     uint32_t* points;
     uint32_t* handles;
     uint32_t key_count;
+    // The record of a body's type changes, made once with room for the largest body and taken back for each: a body
+    // keeps its changes packed in `results`, so that its walk touches the same pages as the last body's.
+    TypeChanges changes;
     // What the lane did (CheckDeferred's counts), summed after the lanes.
     uint64_t bodies;
     uint64_t body_tokens;
@@ -233,11 +238,13 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     const CheckInput* top_input = top->output;
     const uint32_t names = top->bindings.name_capacity;
     const uint64_t room = (uint64_t)deferred->largest_body + deferred->largest_parameters + 64;
-    lane->output = arena_reserve(UINT64_C(1) << 36);
-    lane->scratch = arena_reserve(UINT64_C(1) << 36);
-    lane->results = arena_reserve(UINT64_C(1) << 36);
-    lane->type_arena = arena_reserve(UINT64_C(1) << 34);
-    lane->type_index_arena = arena_reserve(UINT64_C(1) << 32);
+    // Base pages for what a lane usually touches: its copies are columns with room for the largest body, mostly
+    // untouched, and a huge page is cleared whole the first time any of it is (arena_reserve_small).
+    lane->output = arena_reserve_small(UINT64_C(1) << 36, BUSTER_CHECK_DEFERRED_SMALL_BYTES);
+    lane->scratch = arena_reserve_small(UINT64_C(1) << 36, BUSTER_CHECK_DEFERRED_SMALL_BYTES);
+    lane->results = arena_reserve_small(UINT64_C(1) << 36, BUSTER_CHECK_DEFERRED_SMALL_BYTES);
+    lane->type_arena = arena_reserve_small(UINT64_C(1) << 34, BUSTER_CHECK_DEFERRED_SMALL_BYTES);
+    lane->type_index_arena = arena_reserve_small(UINT64_C(1) << 32, BUSTER_CHECK_DEFERRED_SMALL_BYTES);
     const TypeCapacity extra = {
         .types = (uint32_t)(room * 8),
         .parameters = (uint32_t)(room * 8),
@@ -309,6 +316,7 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     lane->withdrawn_from = deferred->withdrawal_count;
     // Two keys for each name the body and its parameters spell, at most.
     const uint64_t keys = room * 2;
+    valid = valid && type_changes_initialize(&lane->changes, &lane->results, (uint32_t)(room * 8 + 64), (uint32_t)(room * 8 + 64), (uint32_t)(room * 2 + 64));
     lane->stamps = valid ? check_deferred_copy(arena, 0, 0, names, sizeof(uint32_t)) : 0;
     lane->keys = lane->stamps != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
     lane->points = lane->keys != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
@@ -504,8 +512,18 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     }
     check_deferred_withdraw_to(deferred, lane, low);
     const uint64_t tokens = (uint64_t)cut->closing - cut->opening + 1;
-    bool valid = history && type_changes_initialize(&result->changes, &lane->results, (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 2 + 64));
-    types->changes = valid ? &result->changes : 0;
+    // The lane's record, empty, with the room it was made with.
+    TypeChanges* changes = &lane->changes;
+    *changes = (TypeChanges){
+        .items = changes->items,
+        .capacity = changes->capacity,
+        .parameters = changes->parameters,
+        .parameter_capacity = changes->parameter_capacity,
+        .members = changes->members,
+        .member_capacity = changes->member_capacity,
+    };
+    bool valid = history && tokens * 8 + 64 <= changes->capacity;
+    types->changes = valid ? changes : 0;
     const uint64_t walk_begin = deferred->timing ? check_deferred_now() : 0;
     if (valid)
     {
@@ -513,8 +531,8 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     }
     const uint64_t walk_end = deferred->timing ? check_deferred_now() : 0;
     types->changes = 0;
-    result->unsupported = !valid || reader->lane_unsupported || input->report_count != 0 || input->resource || !reader->bindings.valid || result->changes.full;
-    result->reason = !valid || input->resource || result->changes.full ? "a body ran out of room" : reader->lane_unsupported ? reader->lane_reason :
+    result->unsupported = !valid || reader->lane_unsupported || input->report_count != 0 || input->resource || !reader->bindings.valid || changes->full;
+    result->reason = !valid || input->resource || changes->full ? "a body ran out of room" : reader->lane_unsupported ? reader->lane_reason :
                      input->report_count != 0 ? "a body reports an error" :
                      !reader->bindings.valid ? "a body's bindings ran out of room" : 0;
     if (!result->unsupported)
@@ -523,6 +541,14 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         const uint32_t base = reader->bindings.base;
         const uint32_t events = reader->bindings.count - base;
         bool kept = true;
+        // The body's changes, packed: the record's arrays are the lane's, which its next body takes back.
+        result->changes = *changes;
+        result->changes.items = check_deferred_keep(arena, changes->items, changes->count, sizeof(TypeChange), &kept);
+        result->changes.capacity = changes->count;
+        result->changes.parameters = check_deferred_keep(arena, changes->parameters, changes->parameter_count, sizeof(TypeId), &kept);
+        result->changes.parameter_capacity = changes->parameter_count;
+        result->changes.members = check_deferred_keep(arena, changes->members, changes->member_count, sizeof(TypeMember), &kept);
+        result->changes.member_capacity = changes->member_count;
         result->types = types->types.count - view.types;
         result->tags = types->tags.count - view.tags;
         result->tag_completions = check_deferred_keep(arena, reader->tag_completions + view.tags, result->tags, sizeof(uint32_t), &kept);
