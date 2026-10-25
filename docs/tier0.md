@@ -33,9 +33,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
-- **c-testsuite (#145):** 219 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+- **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
-  ([the c-testsuite guide](c-testsuite.md)). The other one, 00204, waits on item 8 of #136's plan (`long double`).
+  ([the c-testsuite guide](c-testsuite.md)).
 
 **Waits for #133, #145 and #146:**
 
@@ -895,7 +895,7 @@ path's 11.1.
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
     whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
-  - `va_arg` of `long double` and `_Complex` (the scalar classes and structs and unions have recipes);
+  - `_Complex` values, and `va_arg` of them (the scalar classes, long double, and structs and unions have recipes);
   - inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table).
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column

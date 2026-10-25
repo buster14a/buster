@@ -268,9 +268,9 @@ designs and the compilers already built this way.
   `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
   `test-builtin-varargs` distinguish semantic constraints from emitted execution.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
-  structs and unions too), `va_copy` and `va_end` through them over Tier 0's
-  incoming variadic frames (#137); full Tier 1 coverage and corpus acceptance
-  remain separate requirements.
+  structs, unions and long doubles too), `va_copy` and `va_end` through them
+  over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
+  acceptance remain separate requirements.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -307,9 +307,8 @@ designs and the compilers already built this way.
   against its expected output; `--cross-check` also links its `-c` object with
   `cc`. `--self-test` checks the harness with a stand-in compiler.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
-  `5c72756` that must pass; the 9700X job fetches that commit and runs both.
-  [The c-testsuite guide](docs/c-testsuite.md) has the details and the
-  programs still refused, each with what it waits on.
+  `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
+  and runs both. [The c-testsuite guide](docs/c-testsuite.md) has the details.
 - `src/buster/compiler/main.c` is the executable entry point: its commands, and
   for anything else the semantic driver (`run_check_command`, in
   `c_checker_driver.c`): `./build/compiler [--scalar] -fsyntax-only [-E's
@@ -4118,11 +4117,13 @@ and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Two compiled runs
 (#137), against clang and against GCC at 16 bytes, put this compiler on our
 side: a world of what its C passes (integers to 64 bits, enums, pointers,
-`float`, `double` and the records, arrays and aligned typedefs of them, aligned
-to 16 at most), without what its front end doesn't take yet (C23's enums of a
+`float`, `double`, `long double` and the records, arrays and aligned typedefs of
+them, aligned to 16 at most), without what its front end doesn't take yet (C23's enums of a
 fixed underlying type, an attribute after a bit-field's width, which goes
-before its type instead, a struct of a flexible array member alone), and
-signatures within Tier 0's depths (13 integer and 15 floating arguments); our
+before its type instead, a struct whose only named member is a flexible array
+member), and
+signatures within Tier 0's depths (13 integer arguments, long doubles among them,
+and 15 floating ones); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the
