@@ -3181,6 +3181,15 @@ static void parse_scalar_enum_base(ParseScalar* parser, uint32_t i, ParseFrame* 
     {
         step->role = PARSE_ROLE_SPECIFIER;
     }
+    else if (kind == PARSE_KIND_ATTRIBUTE)
+    {
+        // GNU attributes among the base's specifiers, before, between or after them, which clang takes as the base type's:
+        // a specifier's group, then the base again.
+        step->role = PARSE_ROLE_LEAF_RIGHT;
+        frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
+        frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+        frame->attribute_continuation = PARSE_MODE_ENUM_BASE;
+    }
     else if (kind == PARSE_KIND_L_BRACE)
     {
         ParseFrame* body = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_ENUM, PARSE_MODE_ITEM, PARSE_MODE_SPECIFIERS, false, step);
@@ -5298,15 +5307,16 @@ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const ui
                         }
                         i += kinds[i] == PARSE_KIND_IDENTIFIER;
                         // An enum's underlying type (C23's `enum E : T`), which a typedef's `:` after the tag always is: the
-                        // type's specifiers, as parse_scalar_enum_base takes them, then its body.
+                        // type's specifiers and GNU attributes among them, as parse_scalar_enum_base takes them, then its
+                        // body.
                         if (kind == PARSE_KIND_ENUM && kinds[i] == PARSE_KIND_COLON)
                         {
                             i += 1;
-                            while (kinds[i] == PARSE_KIND_TYPE || kinds[i] == PARSE_KIND_QUALIFIER ||
+                            while (kinds[i] == PARSE_KIND_TYPE || kinds[i] == PARSE_KIND_QUALIFIER || kinds[i] == PARSE_KIND_ATTRIBUTE ||
                                    (kinds[i] == PARSE_KIND_IDENTIFIER && kernels->typedef_names[names[i]] != 0) ||
                                    (kinds[i] == PARSE_KIND_ATOMIC && kinds[i + 1] != PARSE_KIND_L_PAREN))
                             {
-                                i += 1;
+                                i = kinds[i] == PARSE_KIND_ATTRIBUTE ? parse_after_group(kernels, kinds, i + 1) : i + 1;
                             }
                         }
                         i = kinds[i] == PARSE_KIND_L_BRACE ? parse_after_group(kernels, kinds, i) : i;

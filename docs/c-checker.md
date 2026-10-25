@@ -110,12 +110,18 @@ every mode) is complete at its base, so that its own list may take `sizeof` of
 it. Its enumerators have its type, each value representable in the base as
 clang's `isRepresentableIntegerValue` has it (a negative one by its significant
 bits, any other by its active bits, less a signed base's sign bit) and
-converted to it; the base drops its qualifiers, and an integer type of any
-width but `_BitInt` takes it. Its redeclarations keep the base; a declaration
-of it with a declarator (`enum E : int x;`) is refused at the `:`, and an enum
-without a base can't be given one, nor the other way round, each where clang
-reports it. An `aligned` attribute after its body, which clang applies after
-the base completed it, is refused as unsupported.
+converted to it; the base drops `const` and `volatile` (`restrict`, which
+needs a pointer, is refused), and an integer type of any width but `_BitInt`
+takes it. GNU attributes among the base's specifiers are the base type's, as
+clang has them: ignored, but one that would make it a vector's (`vector_size`,
+`ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
+declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
+none. A declaration of it with a declarator (`enum E : int x;`) is refused at
+the `:`, and an enum without a base can't be given one, nor the other way round,
+each where clang reports it. An `aligned` attribute after its body, which clang
+applies after the base completed it, is refused as unsupported. (Attributes
+after a tag's name, before a `;`, make any tag's declaration a reference to the
+visible tag, as clang has it, not a declaration of it alone.)
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader

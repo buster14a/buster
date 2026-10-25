@@ -2424,6 +2424,56 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             true
         },
+        {
+            // #428's review: GNU attributes among the base's specifiers, which clang takes as the base type's and ignores
+            // (the base's own type kept), with a body, without and before a typedef's declarator; and the enum's
+            // references (`enum E x`) and declarations alone in another scope, which need no base.
+            "fixed enum: attributes in its base, and references without it",
+            "enum A : int __attribute__((unused)); enum B : int __attribute__((aligned(8))) { B0 };\n"
+            "typedef enum C : __attribute__((unused)) unsigned __attribute__((unused)) char __attribute__((mode(DI))) { C0 } T; T t = C0;\n"
+            "_Static_assert(sizeof(enum B) == 4 && _Alignof(enum B) == 4 && sizeof(T) == 1, \"B T\");\n"
+            "enum D : short; enum D d; enum D : short; void f(void) { enum D; enum D *p = 0; (void)p; }\n",
+            false,
+            false
+        },
+        {
+            // Attributes after a tag's name are the declaration's, not the tag's: before a `;` they make it a reference to
+            // the visible tag, not a new one in a block's scope, and not a declaration of a fixed enum alone, as clang has it.
+            "attributes after a tag's name: a reference",
+            "struct S { int a; };\n"
+            "void f(void) { struct S __attribute__((unused)); struct S s; s.a = 1; }\n"
+            "enum K : int; enum K __attribute__((unused)); void g(void) { enum K __attribute__((unused)); enum K k = 0; (void)k; }\n",
+            false,
+            false
+        },
+        {
+            // A declaration of it alone without its base, in its scope, before its body or after it: clang's
+            // "enumeration previously declared with fixed underlying type", at the name.
+            "fixed enum: declared alone without it",
+            "enum E : int;\nenum E;\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: defined, then declared alone without it",
+            "enum E : int { A };\nenum E;\n",
+            true,
+            false
+        },
+        {
+            // restrict needs a pointer; const and volatile are dropped.
+            "fixed enum: restrict in its base",
+            "int a;\nenum E : restrict int { A };\n",
+            true,
+            false
+        },
+        {
+            // An attribute that makes the base a vector's: not an integer type.
+            "fixed enum: a vector in its base",
+            "int a;\nenum E : int __attribute__((vector_size(16))) { A };\n",
+            true,
+            false
+        },
     };
     enum
     {
