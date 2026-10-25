@@ -131,6 +131,8 @@ struct PerfArrowField
 {
     PerfBytes name;
     char metadata[65];
+    PerfBytes metadata_source;
+    PerfFlatVector metadata_vector;
     uint32_t next;
     uint32_t children;
     unsigned int type;
@@ -147,6 +149,8 @@ struct PerfArrowSchema
 {
     PerfArrowField *fields;
     char metadata[65];
+    PerfBytes metadata_source;
+    PerfFlatVector metadata_vector;
     size_t count;
     size_t roots;
 };
@@ -206,6 +210,8 @@ static bool perf_arrow_schema(PerfFlat *flat, uint32_t table, PerfArrowSchema *s
 {
     bool result = perf_flat_scalar(flat, table, 0, 2, 0) == 0;
     result = perf_arrow_metadata(flat, table, 2, schema->metadata) && result;
+    schema->metadata_source = flat->bytes;
+    schema->metadata_vector = perf_flat_vector(flat, table, 2, 4);
     PerfFlatVector features = perf_flat_vector(flat, table, 3, 8);
     result = result && features.count == 0;
     PerfFlatVector root = perf_flat_vector(flat, table, 1, 4);
@@ -248,6 +254,8 @@ static bool perf_arrow_schema(PerfFlat *flat, uint32_t table, PerfArrowSchema *s
         uint32_t dictionary = perf_flat_object(flat, position, 4);
         PerfFlatVector children = perf_flat_vector(flat, position, 5, 4);
         result = flat->valid && dictionary == 0 && type != 0 && field->name.data != NULL && perf_utf8(field->name) && perf_arrow_metadata(flat, position, 6, field->metadata);
+        field->metadata_source = flat->bytes;
+        field->metadata_vector = perf_flat_vector(flat, position, 6, 4);
         field->children = children.count;
         field->next = index + 1;
         switch (field->type)
@@ -309,6 +317,8 @@ static bool perf_arrow_schema(PerfFlat *flat, uint32_t table, PerfArrowSchema *s
             }
         }
     }
+    PerfBytes *names = result ? calloc(schema->count + 1, sizeof(*names)) : NULL;
+    result = result && names != NULL;
     for (uint32_t parent = 0; parent <= schema->count && result; ++parent)
     {
         uint32_t start = parent == schema->count ? 0 : parent + 1;
@@ -317,14 +327,18 @@ static bool perf_arrow_schema(PerfFlat *flat, uint32_t table, PerfArrowSchema *s
         {
             continue;
         }
+        size_t count = 0;
         for (uint32_t a = start; a < end && result; a = schema->fields[a].next)
         {
-            for (uint32_t b = schema->fields[a].next; b < end && result; b = schema->fields[b].next)
-            {
-                result = !perf_bytes_equal(schema->fields[a].name, schema->fields[b].name);
-            }
+            names[count++] = schema->fields[a].name;
+        }
+        qsort(names, count, sizeof(*names), perf_json_key_compare);
+        for (size_t i = 1; i < count && result; ++i)
+        {
+            result = !perf_bytes_equal(names[i - 1], names[i]);
         }
     }
+    free(names);
     result = result && flat->valid;
     return result;
 }

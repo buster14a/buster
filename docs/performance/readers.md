@@ -45,6 +45,12 @@ counts. `compare-jsonl ARROW JSONL SCHEMA` checks exact typed equivalence.
 `sha256 FILE` produces the content hash. These commands do not establish capture
 fidelity, comparison eligibility, publication or target-machine acceptance.
 
+`write-schema INPUT.arrow OUTPUT.schema.arrow` writes an ordinary zero-row Arrow
+IPC stream with original C code. It retains schema/field custom metadata and
+exact Unicode field names. Native producers can call `perf_arrow_schema_write`
+directly with the parsed Arrow schema. The schema writer uses forward references
+and explicit bounds; it does not add a Buster physical-schema file format.
+
 ## Supported physical formats
 
 | Format | Reader boundary |

@@ -15,6 +15,7 @@
 #include "json.c"
 #include "schema.c"
 #include "arrow.c"
+#include "arrow_writer.c"
 #include "protobuf.c"
 #include "dataset.c"
 
@@ -75,6 +76,8 @@ static bool perf_self_test(void)
         }
     }
     const char *valid[] = {
+        "\"\"",
+        "{\"\":\"\"}",
         "null",
         "true",
         "false",
@@ -199,6 +202,23 @@ int main(int argc, char **argv)
         }
         perf_dataset_free(&dataset);
     }
+    else if (argc == 4 && strcmp(argv[1], "write-schema") == 0)
+    {
+        PerfBuffer source = {0};
+        PerfBuffer output = {0};
+        PerfArrowInfo info = {0};
+        valid = perf_read_file(argv[2], &source) && perf_arrow_inspect(perf_buffer_bytes(&source), &info) && perf_arrow_schema_write(&info.schema, &output);
+        FILE *file = valid ? fopen(argv[3], "wb") : NULL;
+        valid = valid && file != NULL;
+        if (file != NULL)
+        {
+            valid = fwrite(output.data, 1, output.size, file) == output.size && valid;
+            valid = fclose(file) == 0 && valid;
+        }
+        free(info.schema.fields);
+        free(source.data);
+        free(output.data);
+    }
     else if (argc == 5 && strcmp(argv[1], "compare-jsonl") == 0)
     {
         PerfBuffer arrow = {0};
@@ -290,7 +310,7 @@ int main(int argc, char **argv)
     }
     else
     {
-        fprintf(stderr, "usage: bmf --self-test | check-json FILE | check-manifest FILE | inspect-arrow FILE | sha256 FILE | compare-jsonl ARROW JSONL SCHEMA | validate MANIFEST [--schema FILE] [--cache DIR] [--evidence-root DIR]\n");
+        fprintf(stderr, "usage: bmf --self-test | check-json FILE | check-manifest FILE | inspect-arrow FILE | write-schema ARROW OUTPUT | sha256 FILE | compare-jsonl ARROW JSONL SCHEMA | validate MANIFEST [--schema FILE] [--cache DIR] [--evidence-root DIR]\n");
     }
     return valid ? 0 : 1;
 }

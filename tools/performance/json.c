@@ -46,7 +46,7 @@ static PerfBytes perf_json_text(const PerfJson *json, uint32_t index)
         const PerfJsonNode *node = &json->nodes[index];
         if (node->kind == PERF_JSON_STRING)
         {
-            result.data = json->strings.data + node->text_offset;
+            result.data = json->strings.data == NULL ? (const unsigned char *)"" : json->strings.data + node->text_offset;
             result.size = node->text_size;
         }
         else
