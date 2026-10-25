@@ -6,6 +6,11 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 
+#include "buster/compiler/x86_target_policy_test.c"
+
+// The backend unit owns the selector fixtures, so this call does not duplicate them in the frontend unit.
+bool run_x86_target_selection_tests(void);
+
 static bool x86_target_test_cpuid(void)
 {
     X86CpuId cpu = { .xcr0 = 0xe6, .znver5 = true };
@@ -47,6 +52,8 @@ static bool x86_target_test_cpuid(void)
     passed &= !x86_target_parse("", 0, &unchanged) && unchanged.features == 123;
     passed &= !x86_target_parse("znver5-extra", 12, &unchanged) && unchanged.features == 123;
     passed &= x86_target_parse("znver5-extra", 6, &unchanged) && unchanged.architecture == X86_ARCH_ZNVER5;
+    const X86Target live = x86_target_native();
+    printf("target live native: features=%#llx, znver5=%u (CPUID with OS-enabled XCR0 state)\n", (unsigned long long)live.features, live.native_znver5);
     printf("target CPUID, XCR0 and bounded names: %s\n", passed ? "pass" : "FAIL");
     return passed;
 }
@@ -61,6 +68,24 @@ static bool x86_target_test_forms(void)
     } cases[] = {
         { X86_FORM_ADD_RM64_R64, 0 },
         { X86_FORM_ADDSD_X_XM64, 0 },
+        { X86_FORM_CMPSS_X_XM32_IMM8, 0 },
+        { X86_FORM_CMPSD_X_XM64_IMM8, 0 },
+        { X86_FORM_MOVD_X_RM32, 0 },
+        { X86_FORM_MOVQ_X_RM64, 0 },
+        { X86_FORM_XCHG_RM64_R64, 0 },
+        { X86_FORM_LOCK_XADD_M64_R64, 0 },
+        { X86_FORM_LOCK_BTC_M64_R64, 0 },
+        { X86_FORM_FLD_M80, 0 },
+        { X86_FORM_FSTP_M80, 0 },
+        { X86_FORM_FISTP_M64, 0 },
+        { X86_FORM_FUCOMIP_ST0_ST, 0 },
+        { X86_FORM_FCMOVNU_ST0_ST, 0 },
+        { X86_FORM_FISTTP_M16, 1 },
+        { X86_FORM_FISTTP_M32, 1 },
+        { X86_FORM_FISTTP_M64, 1 },
+        { X86_FORM_HADDPS_X_XM128, 1 },
+        { X86_FORM_PABSB_X_XM128, 1 },
+        { X86_FORM_PCMPISTRI_X_XM128_IMM8, 1 },
         { X86_FORM_FNSTCW_M16, 0 },
         { X86_FORM_STMXCSR_M32, 0 },
         { X86_FORM_LOCK_CMPXCHG_M8_R8, 0 },
@@ -77,6 +102,12 @@ static bool x86_target_test_forms(void)
         { X86_FORM_ANDN_R64_R64_RM64, 2 },
         { X86_FORM_SHLX_R64_RM64_R64, 2 },
         { X86_FORM_VADDSS_X_X_XM32, 2 },
+        { X86_FORM_VMOVSS_X_X_X, 2 },
+        { X86_FORM_VCVTTSD2SI_R64_XM64, 2 },
+        { X86_FORM_VFMSUB132SS_X_X_XM32, 2 },
+        { X86_FORM_VFNMSUB231PD_Y_Y_YM256, 2 },
+        { X86_FORM_VMULSS_X_X_XM32_EVEX, 3 },
+        { X86_FORM_VFMADDSUB132PS_Z_Z_ZM512, 3 },
         { X86_FORM_VPADDD_Y_Y_YM256, 2 },
         { X86_FORM_KMOVW_K_K, 3 },
         { X86_FORM_KMOVB_K_K, 3 },
@@ -86,6 +117,7 @@ static bool x86_target_test_forms(void)
         { X86_FORM_PUSHP_R64, 255 }, // APX is not implied by AVX-512.
         { X86_FORM_ANDN_R64_R64_RM64_EVEX, 255 },
         { X86_FORM_NONE, 255 },
+        { X86_FORM_FEMMS, 255 }, // Obsolete 3DNow! is not part of a supported profile.
     };
     uint8_t scalar[X86_FORM_COUNT];
     uint8_t vector[X86_FORM_COUNT];
@@ -279,11 +311,16 @@ static int run_x86_target_tests(void)
 {
     bool passed = x86_target_test_cpuid();
     passed &= x86_target_test_forms();
+    passed &= x86_target_test_matrix();
+    passed &= x86_target_test_fma_masks();
     passed &= x86_target_test_pages();
+    passed &= x86_target_test_compiler_macros();
+    passed &= run_x86_target_selection_tests();
     char directory[] = "/tmp/buster-target-XXXXXX";
     if (mkdtemp(directory) != 0)
     {
         passed &= x86_target_test_preprocessor(directory);
+        passed &= x86_target_test_gas(directory);
         char path[4096];
         snprintf(path, sizeof(path), "%s/case.c", directory);
         unlink(path);

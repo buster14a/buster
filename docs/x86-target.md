@@ -73,9 +73,13 @@ the encoder before operand validation, as for its existing validator. Use this
 at external-input boundaries and in every selector test; the trusted encoder
 and branch-sizing loops retain their existing contract.
 
-The requirement table is deliberately explicit and incomplete. It starts with
-the assembler's admitted forms, common scalar integer/control/SSE2 forms and representative v2, BMI/BMI2, AVX,
-AVX2, FMA, AVX-512 and mask-move families. A zero row means **unclassified and
+The requirement table is explicit. It covers the current Tier 0 templates and
+generated deferred/ABI/frame records, including scalar SSE compares, XMM integer
+moves and exchanges; baseline locked arithmetic/bit/atomic operations; x87
+arithmetic, conversions and state operations; SSE3/SSSE3 families and bounded
+SSE4 operations; scalar AVX moves, arithmetic and conversions; and the FMA
+families in VEX and EVEX. `FISTTP` requires SSE3 even though its encoding uses
+x87 registers. A zero row means **unclassified and
 unavailable**, including on `native`; it never means baseline. A newly added
 form therefore cannot silently become eligible. The table is not a claim that
 all of the encoder's catalogue has been classified. Extend it, with independent
@@ -96,6 +100,30 @@ Run each through `EXCLUSIVE_OWNER=... ~/buster-fast-bench/exclusive.sh` on the
 9700X. Tests cover synthetic CPUID/OS state, bounded target names, invalid
 options, all 65,536 encoded form values at six targets, random valid operands
 for every admitted form, scalar/vector table identity and protected page edges.
+They also cover every subset of each distinct requirement mask, each profile
+with each individual feature removed, and first-failure rejection for every
+form at all six profiles. These kernel checks use the requirement table as
+their scalar specification; independent named-form expectations and GNU as's
+architecture gate establish instruction legality. The assembler oracle checks
+every classified form at baseline/v2/v3/v4/Zen 5 and with individual features
+removed, including FMA and AVX512VL/BW/DQ. An unavailable tool, malformed input,
+unknown architecture or unexpected diagnostic fails the oracle.
+
+`test-x86-target` also replays the existing Tier 1 selector and native-emission
+fixtures at baseline/v3/v4, with both covers and both allocation paths. Its
+policy-owned Tier 0 consumer checks every compiled template and generated
+records from both paths, including floating values, calls, aggregate objects,
+indirect/TLS accesses and dynamic frames. The selector fixtures stay in the
+backend translation unit; the frontend calls their test entry point without
+duplicating the implementation. These are bounded selector tests, separate
+from full source/corpus acceptance.
+
+Target feature macros are compared with both Clang and GCC for all six profiles,
+including live `native`; compiler-specific macro differences are recorded
+explicitly. GCC 16.2.1 has no `__INVPCID__` or `__RDPRU__` macro, and its named
+`znver5` omits `__SHSTK__`, which its native resolver reports on the 9700X.
+Those macro differences do not remove the actual target capabilities. Full
+predefined-preamble equality remains a Clang contract.
 The benchmark checks table equality before reporting 21 interleaved medians
 for building a whole table, including the scalar source as optimized by Clang.
 `--only scalar|avx512` isolates one path. `--after-predefines MS` emits target
@@ -146,13 +174,21 @@ taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100
 
 ## Remaining acceptance for #180
 
-Tier 0 #136 and Tier 1 #141 have not yet supplied instruction selection on main.
-They must consume this target, extend the requirement table for their emitted
-families, choose legal alternative sequences and run the record check on every
-test. Full builtin availability/lowering remains #148, and per-function target
-attributes remain #147. The c-testsuite and SQLite runs at baseline/v3/v4 need
-the unfinished compiler pipeline (#145/#146). This change does not discharge
-those acceptance items or close #180.
+Tier 0 and the bounded Tier 1 selectors are on main. Tier 1 takes the shared
+eligibility table and refuses denied forms before publishing records; its native
+consumer checks frame/spill records as well. Tier 0's current templates use
+baseline instructions. Its implementation and source driver still need the
+configured target at a final validation boundary, and every Tier 0-owned test
+must adopt the check as families grow. The independent policy test audits the
+current output but does not add that production guard. This integration stays
+with #136/#133; the existing interface and handoff are recorded on
+[#136](https://github.com/buster14a/buster/issues/136#issuecomment-6395663929).
+
+Selectors must choose legal alternative sequences when they adopt optional
+instructions, and extend the explicit requirements with independent negative
+tests. Full target-sensitive builtin lowering remains #148, and per-function
+target attributes remain #147. Complete c-testsuite and SQLite acceptance at
+baseline/v3/v4 remains #145/#146. The bounded policy work does not close #180.
 
 ## Sources and reproduction
 

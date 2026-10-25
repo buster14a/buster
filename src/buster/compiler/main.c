@@ -440,6 +440,9 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit.c"
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/x86_target_selection_test.c"
+#endif
 int run_tier1_select_benchmark(int argc, char** argv);
 int run_tier1_model_measure(int argc, char** argv);
 int run_tier1_model_measure_tests(int argc, char** argv);
