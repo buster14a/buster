@@ -85,6 +85,13 @@ struct CheckProgramOptions
     const uint32_t* initializer_references;
     uint32_t initializer_reference_count;
     bool scalar;
+    // Also references in the operands of &&, || and ?: that a constant condition never evaluates, which no emission
+    // needs: test-checker-corpus --symbols' model of the references clang -O0's code has (#129).
+    bool unselected_operands;
+    // With them, of an if whose condition is an integer constant without side effects, only the arm it runs, when no
+    // label or case of an outer switch enters the other, as clang -O0's code has (CodeGenFunction::EmitIfStmt): the
+    // same model's. Tier 0 lowers both arms, which -c's program keeps.
+    bool folded_ifs;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -134,6 +141,9 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
+    // CheckProgramOptions.unselected_operands and folded_ifs.
+    bool unselected_operands;
+    bool folded_ifs;
 };
 
 typedef enum CheckControlTaskKind
@@ -597,6 +607,38 @@ static void check_control_leave(CheckControlWriter* writer, uint32_t jump, uint3
     }
 }
 
+// The first and last tokens of the statement `arm`: its first children's first and its last children's last.
+static void check_control_extent(const CheckControlWriter* writer, uint32_t arm, uint32_t* low, uint32_t* high)
+{
+    *low = arm;
+    *high = arm;
+    for (uint32_t token = arm; token != BUSTER_CHECK_NONE; token = writer->first[token])
+    {
+        *low = token < *low ? token : *low;
+    }
+    for (uint32_t token = arm; token != BUSTER_CHECK_NONE; token = writer->last[token])
+    {
+        *high = token > *high ? token : *high;
+    }
+}
+
+// Whether a jump can enter the statement `arm` (none for BUSTER_CHECK_NONE) other than at its start: it holds a label,
+// or a case of a switch outside it, as clang's CodeGenFunction::ContainsLabel finds.
+static bool check_control_enterable(const CheckControlWriter* writer, uint32_t arm)
+{
+    const uint8_t* roles = writer->parser->tree.roles;
+    const uint32_t* owners = writer->program->input->control_owners;
+    uint32_t low = 0;
+    uint32_t high = 0;
+    check_control_extent(writer, arm, &low, &high);
+    bool enterable = false;
+    for (uint32_t token = low; arm != BUSTER_CHECK_NONE && !enterable && token <= high; token += 1)
+    {
+        enterable = roles[token] == PARSE_ROLE_LABEL || (roles[token] == PARSE_ROLE_CLOSE_CASE && (owners[token] < low || owners[token] > high));
+    }
+    return enterable;
+}
+
 static void check_control_expand(CheckControlWriter* writer, CheckControlTask task)
 {
     const Parser* parser = writer->parser;
@@ -649,16 +691,53 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         }
         else if (parser->tokens.kinds[keyword] == PARSE_KIND_IF)
         {
-            const uint32_t otherwise = alternate != BUSTER_CHECK_NONE ? check_control_label(writer) : end;
-            check_control_mark(writer, end);
-            if (alternate != BUSTER_CHECK_NONE)
+            // folded_ifs' model of clang -O0's code: the arm a constant condition runs, without the condition. The
+            // condition's node is its truth (CHECK_OP_CONDITION); clang folds the expression's, of an integer type.
+            const CheckGraph* graph = &input->graph;
+            const uint32_t expression = graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
+            const CheckValue* value = writer->program->stream->values + expression;
+            uint32_t width = 0;
+            bool sign = false;
+            bool truth = false;
+            const bool folded = writer->program->folded_ifs && expression < graph->count && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                                check_action_integer_type(writer->program->types, value->type, &width, &sign) &&
+                                check_program_runtime_truth(writer->program, condition, expression, &truth) &&
+                                !check_control_enterable(writer, truth ? alternate : body);
+            const uint32_t executed = truth ? body : alternate;
+            const uint32_t skipped = truth ? alternate : body;
+            if (folded)
             {
-                check_control_statement(writer, alternate, task.stop, task.repeat);
-                check_control_mark(writer, otherwise);
-                check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, end);
+                // The arm left out takes its own switches with it, whose cases go where the if ends, since every case
+                // of a body has a place.
+                uint32_t low = 0;
+                uint32_t high = 0;
+                check_control_extent(writer, skipped, &low, &high);
+                check_control_mark(writer, end);
+                for (uint32_t case_token = low; skipped != BUSTER_CHECK_NONE && case_token <= high; case_token += 1)
+                {
+                    if (parser->tree.roles[case_token] == PARSE_ROLE_CLOSE_CASE)
+                    {
+                        check_control_mark(writer, writer->source_labels[case_token]);
+                    }
+                }
+                if (executed != BUSTER_CHECK_NONE)
+                {
+                    check_control_statement(writer, executed, task.stop, task.repeat);
+                }
             }
-            check_control_statement(writer, body, task.stop, task.repeat);
-            check_control_entry(writer, CHECK_CONTROL_BRANCH_FALSE, token, condition, otherwise);
+            else
+            {
+                const uint32_t otherwise = alternate != BUSTER_CHECK_NONE ? check_control_label(writer) : end;
+                check_control_mark(writer, end);
+                if (alternate != BUSTER_CHECK_NONE)
+                {
+                    check_control_statement(writer, alternate, task.stop, task.repeat);
+                    check_control_mark(writer, otherwise);
+                    check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, end);
+                }
+                check_control_statement(writer, body, task.stop, task.repeat);
+                check_control_entry(writer, CHECK_CONTROL_BRANCH_FALSE, token, condition, otherwise);
+            }
         }
         else if (parser->tokens.kinds[keyword] == PARSE_KIND_WHILE)
         {
@@ -1260,7 +1339,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 }
             }
             bool truth = false;
-            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
+            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) && !program->unselected_operands &&
                 check_program_runtime_truth(program, node, operands[0], &truth))
             {
                 if (op == CHECK_OP_CONDITIONAL)
@@ -1334,8 +1413,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
-                               .initializers = options.initializers, .asms = options.asms,
-                               .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
+                               .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
+                               .folded_ifs = options.folded_ifs, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;

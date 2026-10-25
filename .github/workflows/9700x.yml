@@ -127,6 +127,7 @@ jobs:
               [files]='unit:c_files_benchmark.c'
               [parser]='unit:c_parser_benchmark.c'
               [lowering]='c_lowering[a-z_]*|lane'
+              [lowering-source]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|x86_target'
               [gnu]='c_bindings|c_gnu[a-z_]*|c_intern|c_lexer[a-z_]*|c_parser|c_parser_binding_trace|c_predefines|c_preprocessor|c_refine|lane|x86_target'
               [parser-bindings]='c_bindings[a-z_]*|c_gnu|c_intern|c_lexer[a-z_]*|c_parser[a-z_]*|c_predefines|c_preprocessor|c_refine|lane|x86_target'
               [types]='unit:c_types_benchmark.c'
@@ -418,6 +419,19 @@ jobs:
           == Test the per-file jobs on the repository's translation units
           # The predefines follow the options as clang's do (c_predefines.c).
           ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+          == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
+          # #129: each source the checker accepts is written as -c writes it, and must define what clang -O0 -c's object
+          # does, but for the three documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
+          # feature it names. Its acceptance against clang -fsyntax-only is compared too, as for any corpus. These eight
+          # directories' 348 files that the backend lowers, with every explained difference of musl's (math's), must all
+          # be compared: a backend that came to refuse them would otherwise pass by comparing none.
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          musl="$corpus/libc/musl"
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 348 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+            -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
           == Check semantic mutants of the frozen SQLite and musl sources against Clang
           # #133: each mutant is one edit of a unit's -E text (a type changed, a declaration removed, operands swapped),
           # checked as a file is: acceptance and the first error's line against clang -fsyntax-only, and both paths
@@ -482,11 +496,11 @@ jobs:
           ./build.sh check-call-graph
           == Test c-testsuite's programs end to end
           # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
-          # the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links.
-          # The declared subset must pass. The self-test checks the harness's timeouts, relative paths (as given here)
-          # and cross-check rule with a stand-in compiler.
+          # the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links,
+          # whose functions and objects must be clang -O0 -c's (#129). The declared subset must pass. The self-test
+          # checks the harness's timeouts, relative paths (as given here) and cross-check rules with a stand-in compiler.
           ./build/compiler test-c-testsuite --self-test
-          ./build/compiler test-c-testsuite --cross-check --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
+          ./build/compiler test-c-testsuite --cross-check --clang /usr/bin/clang --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
           == Test the parser on the repository's translation units
           # Both paths, which must agree kernel by kernel, and accept each unit build.sh compiles, but main_unit_*.c,
           # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
@@ -593,10 +607,12 @@ jobs:
           == Test selective lowering against its independent oracle and Clang symbols
           ./build/compiler test-lowering --clang
           == Check the frozen SQLite source against Clang
+          # --symbols compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129):
+          # it refuses sqlite3.c, so this run counts the refusal's feature, and the musl run above compares objects.
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
           == Test the direct path's executables
           ./build/compiler test-executable
           == Compare a frozen preprocessor corpus subset with Clang
@@ -1164,6 +1180,14 @@ jobs:
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           taskset -c 2 ./build/compiler benchmark-checker-source "${source[@]}"
+
+      - name: Benchmark what lowering only the referenced definitions saves on c-testsuite's programs
+        # #129: after checking, each program's selection and everything -c does after it, for the referenced definitions
+        # and for all of them (--lower-all), with the functions and objects defined, lowered and skipped.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lowering-source,')
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-lowering-source build/c-testsuite/tests/single-exec/*.c
 
       - name: Benchmark typed checking on frozen SQLite bodies in isolation and after scalar work
         # Where `changes` doesn't rule it out (the checker's sources, c_check*.c).

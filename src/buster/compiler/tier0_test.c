@@ -22,6 +22,7 @@
 #include <stdarg.h>
 #include <inttypes.h>
 
+#include <signal.h>
 #include <unistd.h>
 #include <asm/prctl.h>
 #include <sys/mman.h>
@@ -228,6 +229,25 @@ static uint64_t tier0_test_convert(uint32_t to, uint32_t from, uint64_t value)
         else
         {
             result = tier0_test_bits(to, d);
+        }
+    }
+    else if (to == BUSTER_TYPED_CLASS_U64 && from_floating)
+    {
+        // Tier 0's unsigned truncation (tier0_emit_u64_convert): the signed one below 2^63 (or unordered), and from 2^63
+        // the signed one of the value less 2^63, its top bit flipped.
+        if (from == BUSTER_TYPED_CLASS_F32)
+        {
+            float f = 0.0f;
+            const uint32_t low = (uint32_t)value;
+            memcpy(&f, &low, sizeof(f));
+            const bool high = f >= 0x1p63f;
+            result = (uint64_t)_mm_cvttss_si64(_mm_set_ss(high ? f - 0x1p63f : f)) ^ (high ? 1ull << 63 : 0);
+        }
+        else
+        {
+            const double d = tier0_test_double(from, value);
+            const bool high = d >= 0x1p63;
+            result = (uint64_t)_mm_cvttsd_si64(_mm_set_sd(high ? d - 0x1p63 : d)) ^ (high ? 1ull << 63 : 0);
         }
     }
     else if (!to_floating && from_floating)
@@ -671,6 +691,7 @@ struct Tier0TestCode
     uint64_t records;
     uint64_t entries;
     uint64_t deferred;
+    uint64_t deep;
 };
 
 // Whether two compilations of a function made the same code: records, branch columns, references and the entries'
@@ -678,7 +699,7 @@ struct Tier0TestCode
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 {
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
-                a->deferred == b->deferred && a->entry_count == b->entry_count && (a->entry_records == 0) == (b->entry_records == 0);
+                a->deferred == b->deferred && a->deep == b->deep && a->entry_count == b->entry_count && (a->entry_records == 0) == (b->entry_records == 0);
     same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
     same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;
@@ -722,6 +743,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         code->records += scalar.count;
         code->entries += function->count;
         code->deferred += scalar.deferred;
+        code->deep += scalar.deep;
         if (result)
         {
             const uint64_t valid = x86_validate(scalar.records, scalar.count);
@@ -998,7 +1020,7 @@ static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* cover
 }
 
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred, uint64_t* coverage)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* coverage)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -1020,6 +1042,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             code->records = 0;
             code->entries = 0;
             code->deferred = 0;
+            code->deep = 0;
             if (ok)
             {
                 tier0_test_coverage(functions, coverage);
@@ -1034,6 +1057,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             *records += code->records;
             *entries += code->entries;
             *deferred += code->deferred;
+            *deep += code->deep;
             if (ok)
             {
                 const Tier0TestData data = tier0_test_layout(program);
@@ -1619,9 +1643,9 @@ static void tier0_test_applies(Tier0TestTally* tally)
     }
 }
 
-// The errors both paths must report alike, on streams of the test's own: the first unsupported entry (a conversion from
-// U64 to a floating class, which the first slice leaves out) wherever it falls among 64-entry blocks and after another,
-// and an expression deeper than the integer depths.
+// The errors both paths must report alike, on streams of the test's own: the first entry without a template (NOT of a
+// double, which tier0_validate refuses too: a stream the paths take covers every entry) wherever it falls among
+// 64-entry blocks and after another, and an expression deeper than the integer depths.
 static void tier0_test_errors(Tier0TestTally* tally)
 {
     enum
@@ -1634,7 +1658,7 @@ static void tier0_test_errors(Tier0TestTally* tally)
     Arena arena = arena_reserve(1ull << 28);
     for (uint32_t place = 0; place < 200; place += 1)
     {
-        // `place` constants discarded, a conversion that fails, more constants, another, the return.
+        // `place` constants discarded, an entry without a template, more constants, another, the return.
         uint32_t count = 0;
         uint32_t expected = 0;
         for (uint32_t c = 0; c < 2; c += 1)
@@ -1650,9 +1674,9 @@ static void tier0_test_errors(Tier0TestTally* tally)
                 count += 2;
             }
             kinds[count] = BUSTER_TYPED_CONST;
-            classes[count] = BUSTER_TYPED_CLASS_U64;
+            classes[count] = BUSTER_TYPED_CLASS_F64;
             values[count] = c + 1;
-            kinds[count + 1] = BUSTER_TYPED_CONVERT;
+            kinds[count + 1] = BUSTER_TYPED_NOT;
             classes[count + 1] = BUSTER_TYPED_CLASS_F64;
             values[count + 1] = 0;
             kinds[count + 2] = BUSTER_TYPED_DISCARD;
@@ -1675,14 +1699,17 @@ static void tier0_test_errors(Tier0TestTally* tally)
         const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
         tier0_test_expect(tally, scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == scalar.error && scalar.node == expected && vector.node == expected,
-                          "errors", "the conversion at entry %u: the scalar path's error %d at %u, the vector path's %d at %u", expected, scalar.error, scalar.node,
+                          "errors", "the entry at %u: the scalar path's error %d at %u, the vector path's %d at %u", expected, scalar.error, scalar.node,
                           vector.error, vector.node);
         arena_pop_to(&arena, mark);
     }
-    for (uint32_t deep = 14; deep <= 17; deep += 1)
+    static const uint32_t deeps[] = { 14, 15, 16, 17, 32, 239, 240, 241, 250 };
+    for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(deeps); d += 1)
     {
         // `deep` constants on the integer stack at once, added up and discarded. The last one is the first add's
-        // immediate, so 16 fit the 15 depths and 17 are refused.
+        // immediate, so 16 fit the 15 depths, the next ones go to the deep slots, and a stack of 240 (241 constants) is
+        // refused past BUSTER_TIER0_MAX_DEPTH.
+        const uint32_t deep = deeps[d];
         uint32_t count = 0;
         for (uint32_t k = 0; k < deep; k += 1)
         {
@@ -1714,7 +1741,7 @@ static void tier0_test_errors(Tier0TestTally* tally)
         const uint64_t mark = arena.length;
         const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        const Tier0Error expected = deep > BUSTER_TIER0_INTEGER_DEPTHS + 1 ? TIER0_ERROR_DEPTH : TIER0_OK;
+        const Tier0Error expected = deep - 1 >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
         tier0_test_expect(tally, scalar.error == expected && vector.error == expected && (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)), "errors",
                           "%u values at once: the scalar path's error %d, the vector path's %d, %d expected", deep, scalar.error, vector.error, expected);
         arena_pop_to(&arena, mark);
@@ -2045,11 +2072,12 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
 }
 
 // A copy's scratch register, its stacks' first free one (an XMM one from 16 bytes, a general one below), must be in
-// the frame's clobbers after either selection, so that no local makes it its home; past the tables, the function is
-// refused as too deep. On copies above every count of integer and floating values, of each size class, with both
-// paths' code compared. The values are then folded in postorder, each consumer's last operand the entry before it:
-// the doubles summed onto a zero pushed above them, the sum converted, and the integers summed onto that. The zero
-// takes one more floating depth, so that 16 doubles are too deep whatever the copy.
+// the frame's clobbers after either selection, so that no local makes it its home; past the tables, selection says the
+// function is too deep, and the compile takes the values to the deep slots. On copies above every count of integer and
+// floating values, of each size class, with both paths' code compared. The values are then folded in postorder, each
+// consumer's last operand the entry before it: the doubles summed onto a zero pushed above them, the sum converted, and
+// the integers summed onto that. The zero takes one more floating depth, so that 16 doubles are too deep for the
+// tables whatever the copy.
 static void tier0_test_copies(Tier0TestTally* tally)
 {
     enum
@@ -2156,10 +2184,10 @@ static void tier0_test_copies(Tier0TestTally* tally)
                 {
                     counted &= too_deep ? errors[path] == TIER0_ERROR_DEPTH : errors[path] == TIER0_OK && (frames[path].clobbers & scratch) != 0;
                 }
+                // Past the tables, the copy's values go to the deep slots (tier0_select_deep).
                 const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
                 const Tier0Code vector = tier0_compile(&function, &arena);
-                const bool compiled = too_deep ? scalar.error == TIER0_ERROR_DEPTH && vector.error == TIER0_ERROR_DEPTH
-                                               : scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
+                const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
                 tier0_test_expect(tally, counted && compiled, "copies", "a copy of %u bytes over %u integers and %u floating values: its scratch %s", sizes[s], integers,
                                   floatings, counted ? "counted, but the paths differ" : "not in a selection's clobbers");
                 arena_pop_to(&arena, mark);
@@ -2457,6 +2485,631 @@ static void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* 
     if (shared != MAP_FAILED)
     {
         munmap(shared, sizeof(Tier0TestProbe) * (BUSTER_TIER0_TEST_PROBE_RUNS + 1));
+    }
+}
+
+// The conversions between U64 and the floating classes (tier0_emit_u64_convert) on named values, as functions that
+// convert their parameter, compiled by both paths and run: from U64 around 2^53, 2^63 and 2^64, where the halving's
+// lowest bit decides the rounding (ties to even, and just past them), and from values below 2^63, at it and up to the
+// largest below 2^64, each against C's conversion of it. Each call must raise the floating exceptions C's conversion
+// raises, MXCSR's invalid and inexact flags (#429's review: a truncation of a value at 2^63 or past it, which C's
+// conversion takes, is invalid as a signed one, and a needless subtraction inexact), and every conversion to U64 must run
+// with invalid unmasked, where a spurious one would raise SIGFPE.
+#define BUSTER_TIER0_TEST_UNSIGNED_VALUES 22
+#define BUSTER_TIER0_TEST_UNSIGNED_FLAGS (_MM_EXCEPT_INVALID | _MM_EXCEPT_INEXACT)
+// MXCSR's four rounding modes: to nearest, down, up and toward zero.
+#define BUSTER_TIER0_TEST_UNSIGNED_MODES 4
+
+// C's conversion of value v for signature `signature` (tier0_test_unsigned_floating's order) under the rounding mode MXCSR
+// holds, as clang compiles it: its bits into *bits, and the flags it raised returned. The oracle, out of line, with the
+// floating environment's accesses kept in order and its rounding mode honored.
+static __attribute__((noinline)) uint32_t tier0_test_unsigned_oracle(uint32_t signature, uint64_t integer, double d, float f, uint64_t* bits)
+{
+#pragma STDC FENV_ACCESS ON
+    volatile uint64_t integer_in = integer;
+    volatile double double_in = d;
+    volatile float float_in = f;
+    _mm_setcsr(_mm_getcsr() & ~(uint32_t)_MM_EXCEPT_MASK);
+    uint64_t result = 0;
+    if (signature == 0)
+    {
+        volatile double out = (double)integer_in;
+        const double value = out;
+        memcpy(&result, &value, sizeof(value));
+    }
+    else if (signature == 1)
+    {
+        volatile float out = (float)integer_in;
+        const float value = out;
+        uint32_t low = 0;
+        memcpy(&low, &value, sizeof(value));
+        result = low;
+    }
+    else if (signature == 2)
+    {
+        volatile uint64_t out = (uint64_t)double_in;
+        result = out;
+    }
+    else
+    {
+        volatile uint64_t out = (uint64_t)float_in;
+        result = out;
+    }
+    const uint32_t flags = _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
+    *bits = result;
+    return flags;
+}
+
+// The named values, of each signature's operand class.
+static const uint64_t tier0_test_unsigned_integers[BUSTER_TIER0_TEST_UNSIGNED_VALUES] = {
+    0, 1, (1ull << 53) - 1, (1ull << 53) + 1, (1ull << 53) + 3, 1ull << 62, (1ull << 63) - 1, 1ull << 63, (1ull << 63) + 1,
+    0x8000000000000400ull, 0x8000000000000401ull, 0x8000000000000c00ull, 0x8000008000000000ull, 0x8000008000000001ull,
+    0xfffffffffffffbffull, 0xfffffffffffffc00ull, 0xffffff7fffffffffull, 0xffffff8000000000ull, UINT64_MAX, 0x0123456789abcdefull,
+    0x8000000000000c01ull, 0x10000000000003ffull,
+};
+static const double tier0_test_unsigned_doubles[BUSTER_TIER0_TEST_UNSIGNED_VALUES] = {
+    0.0, 0.5, 1.0, 1.75, 4503599627370497.0, 0x1p62, 0x1p63 - 1024.0, 0x1p63, 0x1p63 + 2048.0, 0x1p64 - 2048.0,
+    1e19, 12345.678, 0x1.fffffffffffffp62, 0x1.0000000000001p63, 0x1.8p63, 9007199254740993.0, 3.0e18, 0x1p63 - 2048.0,
+    0x1.23456789abcdep63, 0.999, -0.5, -0.0,
+};
+static const float tier0_test_unsigned_floats[BUSTER_TIER0_TEST_UNSIGNED_VALUES] = {
+    0.0f, 0.5f, 1.0f, 3.5f, 0x1p24f, 0x1.fffffep62f, 0x1p63f, 0x1.000002p63f, 0x1.fffffep63f, 1e19f, 16777217.0f, 0x1p40f,
+    0x1.8p63f, 0x1.4p63f, 12345.678f, 0x1p62f, 0x1.000002p62f, 0x1p53f, 0.999f, 0x1.234566p63f, -0.5f, -0.0f,
+};
+// The signatures: each one's name, and the classes it converts to and from.
+static const char* const tier0_test_unsigned_names[4] = { "to double", "to float", "from double", "from float" };
+static const uint8_t tier0_test_unsigned_to[4] = { BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+static const uint8_t tier0_test_unsigned_from[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32 };
+
+static void tier0_test_unsigned_floating(Tier0TestTally* tally)
+{
+    const uint64_t* integers = tier0_test_unsigned_integers;
+    const double* doubles = tier0_test_unsigned_doubles;
+    const float* floats = tier0_test_unsigned_floats;
+    const char* const* names = tier0_test_unsigned_names;
+    const uint8_t* to = tier0_test_unsigned_to;
+    const uint8_t* from = tier0_test_unsigned_from;
+    // Each signature's code by each path, a page each; per rounding mode, the results and then the flags each call raised,
+    // the child's.
+    uint64_t* shared = mmap(0, sizeof(uint64_t) * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES * BUSTER_TIER0_TEST_UNSIGNED_MODES, PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t* region = mmap(0, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Arena arena = arena_reserve(1u << 20);
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && arena.base != 0, "unsigned floating", "no memory");
+    for (uint32_t signature = 0; signature < 4 && ready; signature += 1)
+    {
+        const uint8_t kinds[3] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONVERT, BUSTER_TYPED_RETURN };
+        const uint8_t classes[3] = { from[signature], to[signature], to[signature] };
+        const uint64_t values[3] = { 0, 0, 0 };
+        const uint8_t local_classes[1] = { from[signature] };
+        const uint8_t local_flags[1] = { 0 };
+        const bool from_floating = tier0_class_floating(from[signature]);
+        const AbiLocation parameter = { .registers = { from_floating ? BUSTER_ABI_REGISTER_VECTOR : BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE },
+                                        .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 3;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = 1;
+        function.parameter_count = 1;
+        function.parameters = &parameter;
+        function.result = (AbiReturn){ .kind = BUSTER_ABI_RESULT_REGISTERS, .part_bytes = 8,
+                                       .registers = { from_floating ? BUSTER_ABI_RAX : BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
+                                                      BUSTER_ABI_REGISTER_NONE } };
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "unsigned floating",
+                                  "%s: rule \"%s\" at %u, error %d, or the paths differ", names[signature], check.rule != 0 ? check.rule : "", check.node, scalar.error);
+        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0, "unsigned floating",
+                                           "%s: an invalid record or a branch", names[signature]);
+        for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+        {
+            const Tier0Code* code = encoder == 0 ? &vector : &scalar;
+            uint8_t* page = region + (signature * 2 + encoder) * BUSTER_TIER0_TEST_PAGE;
+            const int64_t length = encoder == 0 ? x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0)
+                                                : x86_encode_scalar(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "unsigned floating", "%s: encoder %u failed", names[signature], encoder);
+        }
+    }
+    ready = ready && tier0_test_expect(tally, mprotect(region, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating", "the code can't be loaded");
+    const pid_t child = ready ? fork() : -1;
+    tier0_test_expect(tally, !ready || child >= 0, "unsigned floating", "fork failed");
+    if (child == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        for (uint32_t run = 0; run < 8 * BUSTER_TIER0_TEST_UNSIGNED_MODES; run += 1)
+        {
+            void* address = region + run % 8 * BUSTER_TIER0_TEST_PAGE;
+            uint64_t* block = shared + run / 8 * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+            {
+                uint64_t bits = 0;
+                _mm_setcsr((_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_ROUND_MASK)) | (run / 8) << 13);
+                if (run % 8 < 2)
+                {
+                    double (*convert)(uint64_t) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    const double d = convert(integers[v]);
+                    memcpy(&bits, &d, sizeof(d));
+                }
+                else if (run % 8 < 4)
+                {
+                    float (*convert)(uint64_t) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    const float f = convert(integers[v]);
+                    uint32_t low = 0;
+                    memcpy(&low, &f, sizeof(f));
+                    bits = low;
+                }
+                else if (run % 8 < 6)
+                {
+                    uint64_t (*convert)(double) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    bits = convert(doubles[v]);
+                }
+                else
+                {
+                    uint64_t (*convert)(float) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    bits = convert(floats[v]);
+                }
+                block[(8 + run % 8) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
+                block[run % 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = bits;
+            }
+        }
+        _exit(0);
+    }
+    if (child > 0)
+    {
+        int status = 0;
+        waitpid(child, &status, 0);
+        const bool ran = tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "unsigned floating", "the child's status %d", status);
+        // Each call's bits and flags against C's conversion under the same rounding mode (the oracle's, compiled with
+        // FENV_ACCESS), MXCSR put back after.
+        static const char* const modes[BUSTER_TIER0_TEST_UNSIGNED_MODES] = { "to nearest", "down", "up", "toward zero" };
+        const uint32_t csr = _mm_getcsr();
+        for (uint32_t run = 0; run < 8 * BUSTER_TIER0_TEST_UNSIGNED_MODES && ran; run += 1)
+        {
+            const uint32_t signature = run % 8 / 2;
+            const uint32_t mode = run / 8;
+            const uint64_t* block = shared + mode * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+            {
+                _mm_setcsr((csr & ~(uint32_t)_MM_ROUND_MASK) | mode << 13);
+                uint64_t expected = 0;
+                const uint32_t oracle = tier0_test_unsigned_oracle(signature, integers[v], doubles[v], floats[v], &expected);
+                _mm_setcsr(csr);
+                const uint64_t seen = block[run % 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
+                tier0_test_expect(tally, seen == expected, "unsigned floating", "%s, %s path, rounding %s: value %u gave 0x%016" PRIx64 ", 0x%016" PRIx64 " expected",
+                                  names[signature], run % 2 == 0 ? "vector" : "scalar", modes[mode], v, seen, expected);
+                const uint64_t flags = block[(8 + run % 8) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
+                tier0_test_expect(tally, flags == oracle, "unsigned floating", "%s, %s path, rounding %s: value %u raised flags 0x%02" PRIx64 ", C's conversion 0x%02x",
+                                  names[signature], run % 2 == 0 ? "vector" : "scalar", modes[mode], v, flags, oracle);
+            }
+        }
+    }
+    // The conversions to U64 again, with invalid unmasked: every value is in U64's range, so none may trap.
+    const pid_t unmasked = ready ? fork() : -1;
+    tier0_test_expect(tally, !ready || unmasked >= 0, "unsigned floating", "fork failed");
+    if (unmasked == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        _mm_setcsr(_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_MASK_INVALID));
+        for (uint32_t run = 4; run < 8; run += 1)
+        {
+            void* address = region + run * BUSTER_TIER0_TEST_PAGE;
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+            {
+                if (run < 6)
+                {
+                    uint64_t (*convert)(double) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    shared[v] = convert(doubles[v]);
+                }
+                else
+                {
+                    uint64_t (*convert)(float) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    shared[v] = convert(floats[v]);
+                }
+            }
+        }
+        _exit(0);
+    }
+    if (unmasked > 0)
+    {
+        int status = 0;
+        waitpid(unmasked, &status, 0);
+        tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "unsigned floating", "to U64 with invalid unmasked: the child's status %d%s", status,
+                          WIFSIGNALED(status) && WTERMSIG(status) == SIGFPE ? " (SIGFPE)" : "");
+    }
+    arena_release(&arena);
+    if (region != MAP_FAILED)
+    {
+        munmap(region, 8 * BUSTER_TIER0_TEST_PAGE);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(uint64_t) * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES * BUSTER_TIER0_TEST_UNSIGNED_MODES);
+    }
+}
+
+// The conversions between U64 and the floating classes at the stacks' limits (#429's review): where the register form's
+// scratch registers would be past their tables, the red zone form takes the conversion (tier0_u64_convert_registers), so
+// that every depth with room for the conversion's value compiles. Each placement puts a conversion over integers and
+// doubles held below it, with or without a frame pointer (STACK_SAVE's), at the last depth of each form or the one
+// before it, as a function of x and out that converts x, stores the integers' sum at out[0] and the doubles' at out[1],
+// and returns the conversion. Both paths must compile it alike, in the form the check's own rule gives (the red zone
+// form's records are those at negative displacements from rsp), and each call, on the named values under each rounding
+// mode, must give C's conversion, raise its flags and leave the values below as they were; and a conversion to U64 must
+// run with invalid unmasked.
+typedef struct Tier0TestLimit Tier0TestLimit;
+struct Tier0TestLimit
+{
+    // Conversions to U64 (signatures 2 and 3) or from it (0 and 1); the integers below the conversion's own (`out` first,
+    // then constants, and out + 8 last when there are doubles) and the doubles; and whether the function has a frame
+    // pointer.
+    bool to_u64;
+    uint8_t integers;
+    uint8_t doubles;
+    bool pointer;
+};
+
+#define BUSTER_TIER0_TEST_LIMITS 12
+#define BUSTER_TIER0_TEST_LIMIT_ENTRIES 96
+// Each call's results: the conversion's bits, the flags it raised, then out[0] and out[1].
+#define BUSTER_TIER0_TEST_LIMIT_RESULTS 4
+#define BUSTER_TIER0_TEST_LIMIT_UNTOUCHED 0x5a5a5a5a5a5a5a5aull
+
+// Integer k below a conversion (from 1: `out` is the first), and double j (from 0), whose sums are exact.
+static uint64_t tier0_test_limit_integer(uint32_t k)
+{
+    return 0x9e3779b97f4a7c15ull * k;
+}
+
+static double tier0_test_limit_double(uint32_t j)
+{
+    return (double)j + 1.25;
+}
+
+static void tier0_test_limit_add(uint8_t* kinds, uint8_t* classes, uint64_t* values, uint32_t* count, uint8_t kind, uint8_t class, uint64_t value)
+{
+    kinds[*count] = kind;
+    classes[*count] = class;
+    values[*count] = value;
+    *count += 1;
+}
+
+// The constants among a placement's integers: those but `out`, and out + 8 under its doubles.
+static uint32_t tier0_test_limit_constants(const Tier0TestLimit* limit)
+{
+    return limit->integers - 1u - (limit->doubles != 0 ? 1u : 0u);
+}
+
+// Placement `limit`'s function for signature `signature` into the columns, which returns its entries' count. Its locals:
+// 0 x, 1 out, 2 the conversion's result and 3 the stack's position. The stream's values are one stack in push order, so
+// the doubles' sum is stored first, at the address under them; each sum is folded onto a zero pushed above its values, so
+// that each entry's last operand is the entry before it.
+static uint32_t tier0_test_limit_stream(const Tier0TestLimit* limit, uint32_t signature, uint8_t* kinds, uint8_t* classes, uint64_t* values)
+{
+    const uint8_t to = tier0_test_unsigned_to[signature];
+    const uint8_t u64 = BUSTER_TYPED_CLASS_U64;
+    const uint8_t f64 = BUSTER_TYPED_CLASS_F64;
+    uint32_t count = 0;
+    if (limit->pointer)
+    {
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_STACK_SAVE, u64, 0);
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_SET_LOCAL, u64, 3);
+    }
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_LOCAL, u64, 1);
+    for (uint32_t k = 1; k <= tier0_test_limit_constants(limit); k += 1)
+    {
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_CONST, u64, tier0_test_limit_integer(k));
+    }
+    if (limit->doubles != 0)
+    {
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_LOCAL, u64, 1);
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_CONST, u64, 8);
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_ADD, u64, 0);
+    }
+    for (uint32_t j = 0; j < limit->doubles; j += 1)
+    {
+        const double value = tier0_test_limit_double(j);
+        uint64_t bits = 0;
+        memcpy(&bits, &value, sizeof(bits));
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_CONST, f64, bits);
+    }
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_LOCAL, tier0_test_unsigned_from[signature], 0);
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_CONVERT, to, 0);
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_SET_LOCAL, to, 2);
+    if (limit->doubles != 0)
+    {
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_CONST, f64, 0);
+        for (uint32_t j = 0; j < limit->doubles; j += 1)
+        {
+            tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_ADD, f64, 0);
+        }
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_SET, f64, 0);
+    }
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_CONST, u64, 0);
+    for (uint32_t k = 1; k <= tier0_test_limit_constants(limit); k += 1)
+    {
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_ADD, u64, 0);
+    }
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_SET, u64, 0);
+    if (limit->pointer)
+    {
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_LOCAL, u64, 3);
+        tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_STACK_RESTORE, u64, 0);
+    }
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_LOCAL, to, 2);
+    tier0_test_limit_add(kinds, classes, values, &count, BUSTER_TYPED_RETURN, to, 0);
+    return count;
+}
+
+// Whether the code has a record at a negative displacement from rsp: a red zone temporary's.
+static bool tier0_test_red_zone(const Tier0Code* code)
+{
+    bool found = false;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        const X86Instruction* record = &code->records[r];
+        found |= record->mode == BUSTER_X86_MEMORY_BASE && record->rm == X86_REGISTER_RSP && record->displacement < 0;
+    }
+    return found;
+}
+
+// Whether the code pushes general register `reg`: the prologue's save of a callee-saved one.
+static bool tier0_test_pushes(const Tier0Code* code, uint8_t reg)
+{
+    bool found = false;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        found |= code->records[r].form == X86_FORM_PUSH_R64 && code->records[r].rm == reg;
+    }
+    return found;
+}
+
+// Signature `signature`'s function at `address` called on value v, its out[0] and out[1] into out: the conversion's bits.
+static uint64_t tier0_test_limit_call(void* address, uint32_t signature, uint32_t v, uint64_t* out)
+{
+    uint64_t bits = 0;
+    if (signature == 0)
+    {
+        double (*convert)(uint64_t, uint64_t*) = 0;
+        memcpy(&convert, &address, sizeof(convert));
+        const double d = convert(tier0_test_unsigned_integers[v], out);
+        memcpy(&bits, &d, sizeof(d));
+    }
+    else if (signature == 1)
+    {
+        float (*convert)(uint64_t, uint64_t*) = 0;
+        memcpy(&convert, &address, sizeof(convert));
+        const float f = convert(tier0_test_unsigned_integers[v], out);
+        uint32_t low = 0;
+        memcpy(&low, &f, sizeof(f));
+        bits = low;
+    }
+    else if (signature == 2)
+    {
+        uint64_t (*convert)(double, uint64_t*) = 0;
+        memcpy(&convert, &address, sizeof(convert));
+        bits = convert(tier0_test_unsigned_doubles[v], out);
+    }
+    else
+    {
+        uint64_t (*convert)(float, uint64_t*) = 0;
+        memcpy(&convert, &address, sizeof(convert));
+        bits = convert(tier0_test_unsigned_floats[v], out);
+    }
+    return bits;
+}
+
+static void tier0_test_unsigned_limits(Tier0TestTally* tally)
+{
+    static const Tier0TestLimit limits[BUSTER_TIER0_TEST_LIMITS] = {
+        // From U64: x in the integer table's last register but one, then in its last (14, or 13 with a frame pointer),
+        // which leaves the register form no scratch; and that with the result in xmm15.
+        { false, 13, 0, false },
+        { false, 14, 0, false },
+        { false, 12, 0, true },
+        { false, 13, 0, true },
+        { false, 14, 15, false },
+        // To U64: the result in the integer table's last register but one, then in its last; x in xmm14, then in xmm15,
+        // which leaves the register form no floating scratch; and the result in the last register with x in xmm15.
+        { true, 13, 0, false },
+        { true, 14, 0, false },
+        { true, 12, 0, true },
+        { true, 13, 0, true },
+        { true, 2, 14, false },
+        { true, 2, 15, false },
+        { true, 14, 15, false },
+    };
+    static const char* const modes[BUSTER_TIER0_TEST_UNSIGNED_MODES] = { "to nearest", "down", "up", "toward zero" };
+    enum
+    {
+        functions = BUSTER_TIER0_TEST_LIMITS * 2,
+        pages = functions * 2,
+    };
+    const uint64_t calls = (uint64_t)pages * BUSTER_TIER0_TEST_UNSIGNED_MODES * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
+    uint64_t* shared = mmap(0, sizeof(uint64_t) * BUSTER_TIER0_TEST_LIMIT_RESULTS * calls, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t* region = mmap(0, pages * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Arena arena = arena_reserve(1u << 22);
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && arena.base != 0, "unsigned floating limits", "no memory");
+    for (uint32_t f = 0; f < functions && ready; f += 1)
+    {
+        const Tier0TestLimit* limit = &limits[f / 2];
+        const uint32_t signature = (limit->to_u64 ? 2u : 0u) + f % 2;
+        uint8_t kinds[BUSTER_TIER0_TEST_LIMIT_ENTRIES];
+        uint8_t classes[BUSTER_TIER0_TEST_LIMIT_ENTRIES];
+        uint64_t values[BUSTER_TIER0_TEST_LIMIT_ENTRIES];
+        const uint32_t count = tier0_test_limit_stream(limit, signature, kinds, classes, values);
+        const uint8_t local_classes[4] = { tier0_test_unsigned_from[signature], BUSTER_TYPED_CLASS_U64, tier0_test_unsigned_to[signature], BUSTER_TYPED_CLASS_U64 };
+        const uint8_t local_flags[4] = { 0, 0, 0, 0 };
+        const bool from_floating = tier0_class_floating(tier0_test_unsigned_from[signature]);
+        const AbiLocation parameters[2] = {
+            { .registers = { from_floating ? BUSTER_ABI_REGISTER_VECTOR : BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+            { .registers = { from_floating ? BUSTER_ABI_RDI : BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+        };
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = count;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = 4;
+        function.parameter_count = 2;
+        function.parameters = parameters;
+        function.result = (AbiReturn){ .kind = BUSTER_ABI_RESULT_REGISTERS, .part_bytes = 8,
+                                       .registers = { from_floating ? BUSTER_ABI_RAX : BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
+                                                      BUSTER_ABI_REGISTER_NONE } };
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "unsigned floating limits",
+                                  "%s over %u integers and %u doubles, %s frame pointer: rule \"%s\" at %u, error %d at %u, or the paths differ",
+                                  tier0_test_unsigned_names[signature], limit->integers, limit->doubles, limit->pointer ? "a" : "no", check.rule != 0 ? check.rule : "",
+                                  check.node, scalar.error, scalar.node);
+        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0, "unsigned floating limits",
+                                           "%s over %u integers and %u doubles: an invalid record or a branch", tier0_test_unsigned_names[signature], limit->integers,
+                                           limit->doubles);
+        // The form, by the integer stack's depth at the conversion (x's among them, from U64) and its table's depths.
+        const uint32_t depths = limit->pointer ? 14 : 15;
+        const uint32_t depth = limit->integers + (limit->to_u64 ? 0u : 1u);
+        const bool registers = limit->to_u64 ? depth + 1 < depths && limit->doubles + 1u < 16 : depth < depths;
+        ready = ready && tier0_test_expect(tally, tier0_test_red_zone(&scalar) == !registers, "unsigned floating limits",
+                                           "%s over %u integers and %u doubles, %s frame pointer: not the %s form", tier0_test_unsigned_names[signature],
+                                           limit->integers, limit->doubles, limit->pointer ? "a" : "no", registers ? "register" : "red zone");
+        // The register form's integer scratch, a callee-saved register past the caller-saved depths, which the selections'
+        // tops must count, so that the prologue saves it.
+        const uint32_t scratch = limit->to_u64 ? depth + 1 : depth;
+        const bool saved = !registers || scratch < BUSTER_TIER0_CALLER_SAVED_DEPTHS || tier0_test_pushes(&scalar, tier0_integer_depths[scratch]);
+        ready = ready && tier0_test_expect(tally, saved, "unsigned floating limits", "%s over %u integers and %u doubles, %s frame pointer: depth %u's register unsaved",
+                                           tier0_test_unsigned_names[signature], limit->integers, limit->doubles, limit->pointer ? "a" : "no", scratch);
+        for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+        {
+            const Tier0Code* code = encoder == 0 ? &vector : &scalar;
+            uint8_t* page = region + (f * 2 + encoder) * BUSTER_TIER0_TEST_PAGE;
+            const int64_t length = encoder == 0 ? x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0)
+                                                : x86_encode_scalar(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "unsigned floating limits", "%s over %u integers: encoder %u failed", tier0_test_unsigned_names[signature],
+                                      limit->integers, encoder);
+        }
+    }
+    ready = ready && tier0_test_expect(tally, mprotect(region, pages * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating limits",
+                                       "the code can't be loaded");
+    const pid_t child = ready ? fork() : -1;
+    tier0_test_expect(tally, !ready || child >= 0, "unsigned floating limits", "fork failed");
+    if (child == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        for (uint32_t page = 0; page < pages; page += 1)
+        {
+            const Tier0TestLimit* limit = &limits[page / 4];
+            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page / 2 % 2;
+            for (uint32_t mode = 0; mode < BUSTER_TIER0_TEST_UNSIGNED_MODES; mode += 1)
+            {
+                for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+                {
+                    uint64_t out[2] = { BUSTER_TIER0_TEST_LIMIT_UNTOUCHED, BUSTER_TIER0_TEST_LIMIT_UNTOUCHED };
+                    _mm_setcsr((_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_ROUND_MASK)) | mode << 13);
+                    const uint64_t bits = tier0_test_limit_call(region + page * BUSTER_TIER0_TEST_PAGE, signature, v, out);
+                    uint64_t* results = shared + BUSTER_TIER0_TEST_LIMIT_RESULTS * (((uint64_t)page * BUSTER_TIER0_TEST_UNSIGNED_MODES + mode) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v);
+                    results[1] = _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
+                    results[0] = bits;
+                    results[2] = out[0];
+                    results[3] = out[1];
+                }
+            }
+        }
+        _exit(0);
+    }
+    if (child > 0)
+    {
+        int status = 0;
+        waitpid(child, &status, 0);
+        const bool ran = tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "unsigned floating limits", "the child's status %d", status);
+        const uint32_t csr = _mm_getcsr();
+        for (uint32_t page = 0; page < pages && ran; page += 1)
+        {
+            const Tier0TestLimit* limit = &limits[page / 4];
+            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page / 2 % 2;
+            // The values below: the integers' sum (wrapping) and the doubles', or out[1] untouched without doubles.
+            uint64_t integers = 0;
+            for (uint32_t k = 1; k <= tier0_test_limit_constants(limit); k += 1)
+            {
+                integers += tier0_test_limit_integer(k);
+            }
+            double sum = 0.0;
+            for (uint32_t j = limit->doubles; j-- > 0;)
+            {
+                sum = tier0_test_limit_double(j) + sum;
+            }
+            uint64_t doubles = BUSTER_TIER0_TEST_LIMIT_UNTOUCHED;
+            if (limit->doubles != 0)
+            {
+                memcpy(&doubles, &sum, sizeof(doubles));
+            }
+            for (uint32_t mode = 0; mode < BUSTER_TIER0_TEST_UNSIGNED_MODES; mode += 1)
+            {
+                for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+                {
+                    _mm_setcsr((csr & ~(uint32_t)_MM_ROUND_MASK) | mode << 13);
+                    uint64_t expected = 0;
+                    const uint32_t oracle = tier0_test_unsigned_oracle(signature, tier0_test_unsigned_integers[v], tier0_test_unsigned_doubles[v],
+                                                                       tier0_test_unsigned_floats[v], &expected);
+                    _mm_setcsr(csr);
+                    const uint64_t* results = shared + BUSTER_TIER0_TEST_LIMIT_RESULTS * (((uint64_t)page * BUSTER_TIER0_TEST_UNSIGNED_MODES + mode) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v);
+                    tier0_test_expect(tally, results[0] == expected && results[1] == oracle && results[2] == integers && results[3] == doubles, "unsigned floating limits",
+                                      "%s over %u integers and %u doubles, %s frame pointer, %s path, rounding %s, value %u: 0x%016" PRIx64 " with flags 0x%02" PRIx64
+                                      " and out 0x%016" PRIx64 " 0x%016" PRIx64 ", C's 0x%016" PRIx64 " with 0x%02x and 0x%016" PRIx64 " 0x%016" PRIx64,
+                                      tier0_test_unsigned_names[signature], limit->integers, limit->doubles, limit->pointer ? "a" : "no", page % 2 == 0 ? "vector" : "scalar",
+                                      modes[mode], v, results[0], results[1], results[2], results[3], expected, oracle, integers, doubles);
+                }
+            }
+        }
+    }
+    // The conversions to U64 again, with invalid unmasked: every value is in U64's range, so none may trap.
+    const pid_t unmasked = ready ? fork() : -1;
+    tier0_test_expect(tally, !ready || unmasked >= 0, "unsigned floating limits", "fork failed");
+    if (unmasked == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        _mm_setcsr(_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_MASK_INVALID));
+        for (uint32_t page = 0; page < pages; page += 1)
+        {
+            const Tier0TestLimit* limit = &limits[page / 4];
+            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page / 2 % 2;
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES && limit->to_u64; v += 1)
+            {
+                uint64_t out[2] = { 0, 0 };
+                shared[v] = tier0_test_limit_call(region + page * BUSTER_TIER0_TEST_PAGE, signature, v, out);
+            }
+        }
+        _exit(0);
+    }
+    if (unmasked > 0)
+    {
+        int status = 0;
+        waitpid(unmasked, &status, 0);
+        tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "unsigned floating limits", "to U64 with invalid unmasked: the child's status %d%s",
+                          status, WIFSIGNALED(status) && WTERMSIG(status) == SIGFPE ? " (SIGFPE)" : "");
+    }
+    arena_release(&arena);
+    if (region != MAP_FAILED)
+    {
+        munmap(region, pages * BUSTER_TIER0_TEST_PAGE);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(uint64_t) * BUSTER_TIER0_TEST_LIMIT_RESULTS * calls);
     }
 }
 
@@ -4233,9 +4886,9 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
         tier0_test_expect(tally, valid ? check.error == TIER0_OK : check.error == TIER0_ERROR_INVALID && check.node == 1, "stack",
                           "stream %u: tier0_validate says %s at %u (%s)", b, check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
     }
-    // The depths: 14 integer values at once stop short of rbp's depth, and 15 reach it, which a frame pointer refuses (the
-    // stack's position saved first) where a function without one takes it. The last value is a DUP, which no add takes as
-    // its operand's home, so that every value takes its depth.
+    // The depths: 14 integer values at once stop short of rbp's depth, and 15 reach it, which a function without a frame
+    // pointer takes and one with it (the stack's position saved first) takes to its deep slots (tier0_select_deep). The
+    // last value is a DUP, which no add takes as its operand's home, so that every value takes its depth.
     Arena arena = arena_reserve(1ull << 28);
     for (uint32_t values_at_once = 14; values_at_once <= 15; values_at_once += 1)
     {
@@ -4262,11 +4915,10 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
             const uint64_t mark = arena.length;
             const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
             const Tier0Code vector = tier0_compile(&function, &arena);
-            const Tier0Error expected = pointer != 0 && values_at_once == 15 ? TIER0_ERROR_DEPTH : TIER0_OK;
-            tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == expected && vector.error == expected &&
-                                         (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)),
-                              "stack", "%u values at once %s a frame pointer: errors %d and %d, %d expected", values_at_once, pointer != 0 ? "with" : "without",
-                              scalar.error, vector.error, expected);
+            tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK &&
+                                         tier0_test_same_code(&scalar, &vector),
+                              "stack", "%u values at once %s a frame pointer: errors %d and %d, or the paths differ", values_at_once, pointer != 0 ? "with" : "without",
+                              scalar.error, vector.error);
             arena_pop_to(&arena, mark);
         }
     }
@@ -4369,6 +5021,7 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 }
 
 #include "buster/compiler/tier0_x87_test.c"
+#include "buster/compiler/tier0_deep_test.c"
 
 static int run_tier0_tests(int argc, char** argv)
 {
@@ -4434,14 +5087,17 @@ static int run_tier0_tests(int argc, char** argv)
                 { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
                   .access = true },
                 { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
-                  .access = true, .vlas = true },
+                  .access = true, .vlas = true, .unsigned_floating = true },
                 { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
-                  .access = true, .vlas = true },
+                  .access = true, .vlas = true, .unsigned_floating = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
-            // The larger shape with records passed and returned by value (#137): a program of its own seed for seed.
+            // The larger shape with records passed and returned by value (#137): a program of its own seed for seed. And
+            // past the depth tables (tier0_select_deep): calls of up to 32 arguments and deeper expressions.
             Tier0ProgramOptions records = shapes[3];
             records.records = &tables.records;
+            Tier0ProgramOptions deep = shapes[3];
+            deep.deep = true;
             {
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_moves(&tally);
@@ -4500,6 +5156,27 @@ static int run_tier0_tests(int argc, char** argv)
             }
             {
                 Tier0TestTally tally = { 0, 0 };
+                tier0_test_unsigned_floating(&tally);
+                tier0_test_report("unsigned floating", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_unsigned_limits(&tally);
+                tier0_test_report("unsigned floating limits", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_deep(&tally);
+                tier0_test_report("deep", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
                 tier0_test_access(&tally);
                 tier0_test_report("access", tally);
                 total.checks += tally.checks;
@@ -4533,14 +5210,16 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
-            for (uint32_t s = 0; s < 5; s += 1)
+            for (uint32_t s = 0; s < 6; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
                 uint64_t instructions = 0;
                 uint64_t entries = 0;
                 uint64_t deferred = 0;
+                uint64_t deep_entries = 0;
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
-                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : records, &instructions, &entries, &deferred, coverage);
+                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : deep, &instructions, &entries, &deferred,
+                                    &deep_entries, coverage);
                 if (s == 4)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -4553,8 +5232,11 @@ static int run_tier0_tests(int argc, char** argv)
                         tier0_test_expect(&tally, count < 300 || k == 1 || k == 6 || coverage[k] != 0, "records by value", "no %s", tier0_test_coverage_names[k]);
                     }
                 }
-                tier0_test_report(s < 4 ? names[s] : "programs: records by value", tally);
-                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred\n", entries, instructions, deferred);
+                // The deep shape's programs must reach the deep slots: with the default count, many of their entries do.
+                tier0_test_expect(&tally, s < 5 ? deep_entries == 0 : count < 300 || deep_entries >= entries / 100, "deep values",
+                                  "%" PRIu64 " deep entries among %" PRIu64, deep_entries, entries);
+                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : "programs: deep values", tally);
+                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep\n", entries, instructions, deferred, deep_entries);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -4584,6 +5266,13 @@ static int run_tier0_tests(int argc, char** argv)
                 tier0_test_report("cross-check: records, mixed with clang", mixed);
                 total.checks += mixed.checks;
                 total.failures += mixed.failures;
+                Tier0TestTally deep_cross = { 0, 0 };
+                Tier0ProgramOptions deep_defined = deep;
+                deep_defined.defined = true;
+                tier0_test_cross(&deep_cross, &tables, seed + 2000006ull, cross_count, deep_defined, clang, keep);
+                tier0_test_report("cross-check: deep values", deep_cross);
+                total.checks += deep_cross.checks;
+                total.failures += deep_cross.failures;
             }
             tier0_tables_close(&tables);
         }

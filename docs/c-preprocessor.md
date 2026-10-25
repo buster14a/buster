@@ -451,10 +451,21 @@ makes its own; with one, the units and lanes that share it read each file once
   the files (`PPOptions.no_guard_skip`). On the 9700X (medians of three runs
   of 21 passes, CPU 2) it saves 0.2%: `sqlite3.c` takes 13.33 ms against
   13.36 ms, with 98 skips, and `main.c` 26.45 ms against 26.50 ms, with 512.
-- **Lines.** `pp_line_of` counts newlines (64 bytes at a time, with
-  popcounts) from a per-file cursor, because the preprocessor asks about later
-  places as it goes (`__LINE__`, diagnostics, line markers). Each file's lines
-  are counted about once.
+- **Lines.** `pp_line_of` counts newlines (64 bytes at a time, with popcounts)
+  from a per-file cursor, because the preprocessor asks about later places as it
+  goes (`__LINE__`, diagnostics, line markers). Each file's lines are counted
+  about once. For a file prepared a window at a time (two windows or more), the
+  lexer read those bytes long before, so `pp_prepare_windows` counts its line
+  ends while each window is in the caches, right after the window's directive
+  scan (`pp_count_page_lines`). It keeps the count before each 4 KB page
+  (`PPFileData.line_pages`), which a unit's data copies from the file cache's
+  record. A `\r\n` counts once, at its `\n`, also where a page or a window ends
+  between the two. The whole 64-byte blocks up to a page's end go by a popcount
+  of their `\n`s, a few instructions each; when one of them has a `\r`, they are
+  counted again exactly, a block at a time (`pp_count_block_lines`), and so is a
+  block that two windows share, in two parts. `pp_line_of` then counts from the
+  cursor when the cursor is on the place's page before the place, and from the
+  page's start otherwise: at most 4 KB per question.
 - **Memory.** Each column of the files' tokens has an arena of its own: kinds,
   starts and values. A file's columns are pushed for the lexer's bound, one
   token per byte, then trimmed to the tokens it has. Before this, the columns
@@ -2412,9 +2423,10 @@ of the run on CPU 2 and a counting build's census:
 - **The output columns' page faults: about 0.45 ms.** Each column ends in a 2
   MB huge page that the kernel clears whole: 12.25 MB are cleared for 7.07 MB of
   tokens.
-- **`__LINE__`: 0.1 to 0.35 ms.** `pp_line_of` (3% of the run) counts newlines
-  in bytes that left the caches long before. Counting them per window in
-  `pp_prepare_windows` comes next, agreed with #116.
+- **`__LINE__`: about 0.5 ms, as it turned out.** `pp_line_of` (3% of the run)
+  counted newlines in bytes that left the caches long before: an `-E` run's 218
+  questions about lines read about 7 MB of `sqlite3.c` again from memory. The
+  line pages ("Lines" above) took this away, agreed with #116.
 - **The rest, about 1.5 ms:** directives, object-like expansions, buffer runs
   and the context stack. The system headers' share of the main loop is about
   22%.
@@ -2426,7 +2438,7 @@ What 2 ms would take, each estimated from the numbers above:
 | No history in the main loop; a replay records it when a diagnostic or a consumer first needs it | 0.78 ms | A change to #108's contract |
 | The parser's input read from the file cache for file runs, rather than from the output | 0.5-0.8 ms | A change to the output's contract with the parser (#126, #335) |
 | A leaner expansion engine: compiled bodies, one pass over a macro's items rather than three, no origins per token | about 1.2 ms | Large; inside the preprocessor |
-| Line counts per window | 0.1-0.3 ms | After #408, with #116 |
+| Line counts by page while each window is in the caches | 0.5 ms, measured | Done (#439) |
 | Output columns that don't end in a mostly empty huge page | about 0.1 ms | |
 
 With all of them, about 3.2 ms. The rest needs preprocessing on more cores
@@ -2440,6 +2452,16 @@ The checker judges system headers' tokens from runs the main loop keeps,
 instead of the history ("System levels"). Its whole compile of `sqlite3.c`
 (`-fsyntax-only`) took 149.6-150.3 ms on main before #412 and takes
 147.3-147.8 ms.
+
+The line pages are in too (#439, [the
+record](https://github.com/buster14a/buster-performance/blob/69c5c334c7bdbd9cb29e9014f3eacda51f7e7ea5/docs/measurements/preprocessor-line-pages-117-2026-10-25/README.md)).
+With the history recorded, as the benchmark records it, `sqlite3.c`'s main loop
+took 5.889-5.926 ms on main and takes 5.380-5.405 ms, and its directive tables,
+which now count the line ends, 0.296-0.299 ms against 0.347-0.368 ms. Their sum
+went from 6.19-6.22 ms to 5.73-5.77 ms. As whole processes, `-E` of `sqlite3.c`
+took 19.86-19.94 ms and takes 19.38-19.47 ms, and `parse` 18.86-18.98 ms against
+18.10-18.38 ms. The instructions barely changed (118.16 and 118.02 per input
+token): what the old count cost was reading the file from memory again.
 
 ## Assembly output spacing
 
