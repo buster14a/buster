@@ -3781,7 +3781,9 @@ static uint8_t tier0_register_of(uint8_t source, const Tier0Holes* holes)
 }
 
 // A record from its specification, field by field: the scalar expansion (the vector one copies the compiled bytes).
-static X86Instruction tier0_record_scalar(const Tier0RecordSpec* spec, const Tier0Holes* holes)
+// Always inlined, as it was with one caller: the scalar path's emission, whose loop it is most of; the deep entries'
+// (tier0_emit_deep) is the second.
+static inline __attribute__((always_inline)) X86Instruction tier0_record_scalar(const Tier0RecordSpec* spec, const Tier0Holes* holes)
 {
     X86Instruction record;
     memset(&record, 0, sizeof(record));
@@ -3840,9 +3842,22 @@ static X86Instruction tier0_record_scalar(const Tier0RecordSpec* spec, const Tie
 // ---------------------------------------------------------------------------------------------------------------------
 // The deferred entries
 
+// The immediates' choice requests, gathered by emission: each CHOICE record's index, row, value and context.
+typedef struct Tier0Choices Tier0Choices;
+struct Tier0Choices
+{
+    uint32_t* records;
+    uint16_t* rows;
+    int64_t* values;
+    uint16_t* contexts;
+    uint16_t* forms;
+    uint32_t count;
+};
+
 // A record sink: writes records at `records[count]` onward (when `records` isn't 0: the function's records, `count` an
-// absolute index) and counts them, and adds the calls' references and a deep entry's branch (tier0_emit_deep's: its
-// record and target in the code's branch columns, `branch_count` of them, which emission's templates add to too).
+// absolute index) and counts them, and adds the calls' references and a deep entry's branch and choice request
+// (tier0_emit_deep's: its branch's record and target in the code's branch columns, `branch_count` of them, and its
+// request in `choices`, which emission's templates add to too; counted in `choice_count` when counting).
 typedef struct Tier0Writer Tier0Writer;
 struct Tier0Writer
 {
@@ -3853,6 +3868,8 @@ struct Tier0Writer
     uint32_t* branches;
     uint32_t* targets;
     uint32_t branch_count;
+    Tier0Choices* choices;
+    uint32_t choice_count;
 };
 
 static void tier0_put(Tier0Writer* writer, X86Instruction record)
@@ -5096,7 +5113,6 @@ static void tier0_put_branch(Tier0Writer* writer, const Tier0Entries* entries, X
 }
 
 static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live);
-static void tier0_apply_choice(X86Instruction* record, uint32_t form, int64_t value);
 
 // A deep call (BUSTER_TIER0_DEEP_CALL): every value in its slot, the stacks its flags spill stored there first; each
 // argument read from its slot, a stack one through rax into its place in the outgoing area, then each register one
@@ -5239,9 +5255,9 @@ static void tier0_emit_deep_deferred(const Tier0Function* function, const Tier0E
 
 // A deep entry's records (tier0_select_deep's), in place of its template's or its deferred emitter's: those, at the
 // depths of its windows, between tier0_deep_enter's and tier0_deep_leave's; a template's branch, its last record, after
-// them, whose loads keep the flags its compare set. Its choice request is decided here (x86_choose_forms_scalar), the same
-// for both paths: a deferred entry has none in the output's columns.
-static void tier0_emit_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+// them, whose loads keep the flags its compare set; its choice request with the templates' (the writer's). Out of line:
+// the deep entries are rare, and the deferred entries' dispatch inlines what it calls.
+static __attribute__((noinline)) void tier0_emit_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t flags = entries->deep[i];
     if ((flags & BUSTER_TIER0_DEEP_CALL) != 0)
@@ -5263,15 +5279,17 @@ static void tier0_emit_deep(const Tier0Function* function, const Tier0Entries* e
             const Tier0Holes holes = tier0_holes_scalar(function, entries, homes, i, info);
             for (uint32_t r = 0; r < info->length; r += 1)
             {
-                X86Instruction record = tier0_record_scalar(&tier0_templates[index].specs[r], &holes);
-                if (r == info->choice && writer->records != 0)
+                const X86Instruction record = tier0_record_scalar(&tier0_templates[index].specs[r], &holes);
+                if (r == info->choice && writer->choices != 0)
                 {
-                    const int64_t value = info->choice_static != 0 ? (int64_t)info->choice_immediate : (int64_t)holes.k;
-                    const uint16_t context = tier0_choice_context(&record, info->choice_live);
-                    uint16_t form = X86_FORM_NONE;
-                    x86_choose_forms_scalar(&info->choice_row, &value, &context, 1, &form);
-                    tier0_apply_choice(&record, form, value);
+                    Tier0Choices* choices = writer->choices;
+                    choices->records[choices->count] = writer->count;
+                    choices->rows[choices->count] = info->choice_row;
+                    choices->values[choices->count] = info->choice_static != 0 ? (int64_t)info->choice_immediate : (int64_t)holes.k;
+                    choices->contexts[choices->count] = tier0_choice_context(&record, info->choice_live);
+                    choices->count += 1;
                 }
+                writer->choice_count += r == info->choice ? 1 : 0;
                 if (r == info->fixup)
                 {
                     if (writer->records != 0)
@@ -5363,13 +5381,25 @@ static __attribute__((noinline)) void tier0_emit_deferred_x87(const Tier0Functio
 static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
                                 Tier0Writer* writer)
 {
-    if (entries->deep != 0 && entries->deep[i] != 0)
-    {
-        tier0_emit_deep(function, entries, frame, homes, i, writer);
-    }
-    else if (frame->x87)
+    if (frame->x87)
     {
         tier0_emit_deferred_x87(function, entries, frame, homes, i, writer);
+    }
+    else
+    {
+        tier0_emit_deferred_entry(function, entries, frame, homes, i, false, writer);
+    }
+}
+
+// A deferred entry of a function with deep entries (which has no long double values: tier0_select_deep refuses them): a
+// deep entry's records (tier0_emit_deep's), or another's as in any function. Only measuring's and emission's versions for
+// such functions call it, so that the others don't test for deep entries.
+static void tier0_emit_deferred_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                                     Tier0Writer* writer)
+{
+    if (entries->deep[i] != 0)
+    {
+        tier0_emit_deep(function, entries, frame, homes, i, writer);
     }
     else
     {
@@ -6104,7 +6134,11 @@ struct Tier0Counts
     uint32_t choices;
 };
 
-static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
+// The scalar path's measuring. `deep` is whether the function has deep entries (tier0_select_deep's), a constant at each
+// of tier0_measure's two uses, so that a function without them is measured as before they existed; a deep entry's
+// template may add a branch and a choice request (tier0_emit_deep's).
+static inline __attribute__((always_inline)) Tier0Counts tier0_measure_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame,
+                                                                              const Tier0Home* homes, bool deep)
 {
     Tier0Counts counts = { 0, 0, 0 };
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -6113,11 +6147,19 @@ static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* en
         uint32_t length = 0;
         if (tier0_is_deferred(entry))
         {
-            Tier0Writer counter = { 0, 0, 0, 0, 0, 0, 0 };
-            tier0_emit_deferred(function, entries, frame, homes, i, &counter);
+            Tier0Writer counter = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            if (deep)
+            {
+                tier0_emit_deferred_deep(function, entries, frame, homes, i, &counter);
+            }
+            else
+            {
+                tier0_emit_deferred(function, entries, frame, homes, i, &counter);
+            }
             length = counter.count;
             counts.references += counter.reference_count;
-            counts.branches += counter.branch_count;
+            counts.branches += deep ? counter.branch_count : 0;
+            counts.choices += deep ? counter.choice_count : 0;
         }
         else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
         {
@@ -6135,6 +6177,17 @@ static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* en
         entries->lengths[i] = (uint16_t)length;
     }
     return counts;
+}
+
+// The scalar measuring of a function with deep entries, out of line.
+static __attribute__((noinline)) Tier0Counts tier0_measure_deep(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
+{
+    return tier0_measure_entries(function, entries, frame, homes, true);
+}
+
+static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
+{
+    return entries->deep != 0 ? tier0_measure_deep(function, entries, frame, homes) : tier0_measure_entries(function, entries, frame, homes, false);
 }
 
 // How many records tier0_emit_deep writes for entry i, with its references and branch counted into `counts`, from what
@@ -6183,6 +6236,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
             count += info->length;
             counts->references += info->fixup != 0xff ? 1 : 0;
             counts->branches += info->branch != 0xff ? 1 : 0;
+            counts->choices += info->choice != 0xff ? 1 : 0;
         }
         else
         {
@@ -6273,26 +6327,18 @@ static bool tier0_build_choice_shapes(void)
     return valid;
 }
 
-// The immediates' choice requests, gathered by emission: each CHOICE record's index, row, value and context.
-typedef struct Tier0Choices Tier0Choices;
-struct Tier0Choices
-{
-    uint32_t* records;
-    uint16_t* rows;
-    int64_t* values;
-    uint16_t* contexts;
-    uint16_t* forms;
-    uint32_t count;
-};
 
 // Emission for the scalar path, in entry order: the prologue; each entry's template expanded at its place, field by
 // field from its specifications, its choice request, branch and reference, or a deferred entry's records; then the
-// epilogue. tier0_emit_vector is its twin.
-static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
-                            Tier0Code* code, Tier0Choices* choices)
+// epilogue. tier0_emit_vector is its twin. `deep` is tier0_measure_entries': with deep entries, the branch count goes
+// to their emitter in the writer and back (a deep entry's branch comes in entry order, as a template's does).
+static inline __attribute__((always_inline)) void tier0_emit_body_entries(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                                         const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
+                                                                         bool deep)
 {
-    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0 };
+    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0 };
     tier0_emit_prologue(function, frame, homes, references, &writer);
+    uint32_t branches = 0;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         const uint16_t entry = entries->templates[i];
@@ -6300,7 +6346,16 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
         if (tier0_is_deferred(entry))
         {
             writer.count = position;
-            tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+            if (deep)
+            {
+                writer.branch_count = branches;
+                tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
+                branches = writer.branch_count;
+            }
+            else
+            {
+                tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+            }
             code->deferred += 1;
         }
         else if (entry != BUSTER_TIER0_ENTRY_ABSORBED && tier0_template_infos[entry].length != 0)
@@ -6324,9 +6379,9 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
             if (info->branch != 0xff)
             {
                 const uint32_t target = info->end != 0 ? function->count : (uint32_t)function->values[i];
-                code->branches[writer.branch_count] = position + info->branch;
-                code->targets[writer.branch_count] = entries->positions[target];
-                writer.branch_count += 1;
+                code->branches[branches] = position + info->branch;
+                code->targets[branches] = entries->positions[target];
+                branches += 1;
             }
             if (info->fixup != 0xff)
             {
@@ -6343,8 +6398,28 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
     }
     writer.count = entries->positions[function->count];
     tier0_emit_epilogue(function, frame, &writer);
-    code->branch_count = writer.branch_count;
+    code->branch_count = branches;
     code->reference_count = writer.reference_count;
+}
+
+// The scalar emission of a function with deep entries, out of line.
+static __attribute__((noinline)) void tier0_emit_body_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes,
+                                                           const uint32_t* references, Tier0Code* code, Tier0Choices* choices)
+{
+    tier0_emit_body_entries(function, entries, frame, homes, references, code, choices, true);
+}
+
+static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
+                            Tier0Code* code, Tier0Choices* choices)
+{
+    if (entries->deep != 0)
+    {
+        tier0_emit_body_deep(function, entries, frame, homes, references, code, choices);
+    }
+    else
+    {
+        tier0_emit_body_entries(function, entries, frame, homes, references, code, choices, false);
+    }
 }
 
 // The per-entry columns, from the scratch arena.
@@ -8006,10 +8081,11 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
 // - the positions are the lengths' prefix sums, in registers;
 // - the branch records', references' and choice requests' counts come from popcounts.
 // The last block's words and positions are stored whole, past the entries: emission expands every lane of a block, and a
-// lane past the entries has template 0 and the end's position, which the epilogue overwrites. `x87` is Tier0Frame.x87: a
-// constant at each of tier0_measure_vector's two uses, as tier0_select_entries's.
+// lane past the entries has template 0 and the end's position, which the epilogue overwrites. `x87` is Tier0Frame.x87 and
+// `deep` whether the function has deep entries (tier0_select_deep's, which has no long double values): constants at each
+// of tier0_measure_vector's three uses, as tier0_select_entries's are.
 static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes,
-                                                                                      uint32_t prologue, bool x87)
+                                                                                      uint32_t prologue, bool x87, bool deep)
 {
     const uint32_t count = function->count;
     const uint64_t* values = function->values;
@@ -8080,8 +8156,8 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(rest);
             rest &= rest - 1;
-            const uint32_t records = entries->deep != 0 && entries->deep[first + lane] != 0 ? tier0_count_deep(function, entries, homes, first + lane, &counts)
-                                                                                            : tier0_count_deferred(function, entries, first + lane, x87, &counts.references);
+            const uint32_t records = deep && entries->deep[first + lane] != 0 ? tier0_count_deep(function, entries, homes, first + lane, &counts)
+                                                                              : tier0_count_deferred(function, entries, first + lane, x87, &counts.references);
             length = _mm512_mask_set1_epi64(length, (__mmask8)(1u << lane), (int64_t)records);
         }
         counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
@@ -8101,12 +8177,20 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
 // The vector measuring of a function with long double values, out of line.
 static __attribute__((noinline)) Tier0Counts tier0_measure_vector_x87(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue)
 {
-    return tier0_measure_vector_entries(function, entries, homes, prologue, true);
+    return tier0_measure_vector_entries(function, entries, homes, prologue, true, false);
+}
+
+// And of a function with deep entries.
+static __attribute__((noinline)) Tier0Counts tier0_measure_vector_deep(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue)
+{
+    return tier0_measure_vector_entries(function, entries, homes, prologue, false, true);
 }
 
 static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue, bool x87)
 {
-    return x87 ? tier0_measure_vector_x87(function, entries, homes, prologue) : tier0_measure_vector_entries(function, entries, homes, prologue, false);
+    return x87                ? tier0_measure_vector_x87(function, entries, homes, prologue)
+           : entries->deep != 0 ? tier0_measure_vector_deep(function, entries, homes, prologue)
+                                : tier0_measure_vector_entries(function, entries, homes, prologue, false, false);
 }
 
 // One lane of emission: entry i's template expanded from `pair` (its hole block in the low 256 bits, or in the high ones
@@ -8132,8 +8216,12 @@ static inline __attribute__((always_inline)) __m512i tier0_expand(const uint64_t
 // - the choice requests are compressed into their columns, their contexts read from the expanded records;
 // - the branches, then the references and the deferred entries, are written an entry at a time in order, the deferred
 //   entries over what the lanes stored at their places.
-static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
-                              Tier0Code* code, Tier0Choices* choices)
+// `deep` is tier0_emit_body_entries': with deep entries, the branch and request counts go to their emitter in the writer
+// and back, and since a block's deep entries' branches come after its templates', the branch columns are sorted last
+// (tier0_sort_branches).
+static inline __attribute__((always_inline)) void tier0_emit_vector_entries(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                                           const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
+                                                                           bool deep)
 {
     const uint32_t count = function->count;
     const uint64_t* values = function->values;
@@ -8150,7 +8238,7 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     int64_t* choice_values = choices->values;
     uint16_t* contexts = choices->contexts;
     const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
-    Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0 };
+    Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0, choices, 0 };
     tier0_emit_prologue(function, frame, homes, references, &writer);
     uint32_t branches = 0;
     uint32_t requests = 0;
@@ -8250,9 +8338,18 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
             if ((deferred >> lane & 1) != 0)
             {
                 writer.count = positions[i];
-                writer.branch_count = branches;
-                tier0_emit_deferred(function, entries, frame, homes, i, &writer);
-                branches = writer.branch_count;
+                if (deep)
+                {
+                    writer.branch_count = branches;
+                    choices->count = requests;
+                    tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
+                    branches = writer.branch_count;
+                    requests = choices->count;
+                }
+                else
+                {
+                    tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+                }
                 deferred_count += 1;
             }
             else
@@ -8272,7 +8369,7 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     }
     writer.count = positions[count];
     tier0_emit_epilogue(function, frame, &writer);
-    if (entries->deep != 0)
+    if (deep)
     {
         tier0_sort_branches(branch_records, targets, branches);
     }
@@ -8280,6 +8377,26 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     code->reference_count = writer.reference_count;
     code->deferred += deferred_count;
     choices->count = requests;
+}
+
+// The vector emission of a function with deep entries, out of line.
+static __attribute__((noinline)) void tier0_emit_vector_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes,
+                                                             const uint32_t* references, Tier0Code* code, Tier0Choices* choices)
+{
+    tier0_emit_vector_entries(function, entries, frame, homes, references, code, choices, true);
+}
+
+static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
+                              Tier0Code* code, Tier0Choices* choices)
+{
+    if (entries->deep != 0)
+    {
+        tier0_emit_vector_deep(function, entries, frame, homes, references, code, choices);
+    }
+    else
+    {
+        tier0_emit_vector_entries(function, entries, frame, homes, references, code, choices, false);
+    }
 }
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
