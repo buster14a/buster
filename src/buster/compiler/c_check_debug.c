@@ -166,9 +166,12 @@ struct CheckDebugSource
     uint32_t* directives;
 };
 
-// The source of `pp` and `parser`, its index from `arena`; false when there's no room.
+// The source of `pp` and `parser`, its index from `arena`; false when there's no room. The expansion history is recorded
+// first if PPOptions.defer_history put it off (the checker's driver records it as the unit runs); a unit without one
+// places its macros' code where their definitions spell it.
 static bool check_debug_source(CheckDebugSource* source, Preprocessor* pp, const Parser* parser, Arena* arena)
 {
+    pp_history_ensure(pp);
     *source = (CheckDebugSource){
         .pp = pp,
         .parser = parser,
