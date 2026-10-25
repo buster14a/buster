@@ -240,6 +240,13 @@ produce i64. The existing local and expression-edge slots carry these bits
 through branches and loops without moving their effects. This adds no planning
 arrays, instruction columns or input traversals for ordinary functions.
 
+The ordered replay is written once in `ir_lower_emit.c` and instantiated for
+counting and filling. Counting fixes its output to null; filling receives the
+non-null local function after `ir_create` succeeds. Constructor helpers stay
+inline so count mode can erase column writes and fill mode can erase null checks
+before general inlining decisions. Both scalar/vector paths use the same two
+instantiations, and all existing allocation, validation and rollback gates remain.
+
 ### Dynamic stack contract
 
 | Operation | Result | Operand a | Meaning |
@@ -258,8 +265,9 @@ extraneous fields and memory modifiers are rejected deterministically.
 Allocation, save and restore are ordered effects on per-invocation state. They
 cannot be eliminated merely because their results are unused, commoned, hoisted,
 speculated or duplicated. Allocations start undefined, including padding. A
-zero count reserves nothing and need not have a unique address; dereferencing
-it is invalid. Rounding must not wrap: counts above `UINT64_MAX - 15` fail with
+zero count reserves nothing and need not have a unique address. It creates no
+accessible extent; an address aliasing an older live object retains that object's
+ordinary access checks. Rounding must not wrap: counts above `UINT64_MAX - 15` fail with
 an arithmetic diagnostic in the execution oracle; an unavailable representable
 extent fails with a resource diagnostic. Such inputs are outside successful
 native execution, not permission to silently allocate a small wrapped extent.
@@ -312,7 +320,9 @@ figures include validation, planning, classification, exact allocation/emission
 and verification, along with the stated operand setup. They measure lowering
 throughput per operation, not generated instruction or runtime latency. Both
 paths must agree before timing; retained bytes and minimum scratch capacity are
-reported separately for every shape.
+reported separately for every shape. Scratch-capacity searches run after the
+recorded samples. `--ordinary` selects only the three established ordinary
+shapes, including when comparing an identical harness on an older producer.
 
 The strict generated dynamic case uses integer expressions with VLA storage,
 calls and control flow, with memory and undefined-byte checking enabled.

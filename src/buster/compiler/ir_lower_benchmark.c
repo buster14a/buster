@@ -11,7 +11,7 @@
 // per-function core allocations, including alignment gaps; peak output is the largest one, not the process's peak RSS.
 // The small and larger cases are value-only programs, as before #136's frame objects; a third case, reported apart, is
 // the larger shape with the generator's objects (local arrays and structs, and COPY between them).
-// Usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS]
+// Usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS] [--ordinary]
 
 #define BUSTER_IR_LOWER_BENCHMARK_PROGRAMS 8u
 #define BUSTER_IR_LOWER_BENCHMARK_VARIANTS 2u
@@ -223,8 +223,20 @@ static bool ir_lower_benchmark_validate(IrLowerBenchmarkCorpus* corpus, Arena* o
         arena_pop_to(output, output_mark);
         arena_pop_to(twin_output, twin_mark);
         arena_pop_to(scratch, scratch_mark);
-        // Untimed minimum usable scratch capacity, including temporary verifier storage, measured separately for
-        // each path. No permanent telemetry or extra work is added to ordinary production lowering.
+    }
+    return valid;
+}
+
+// Probe after recording this shape's samples so the capacity search cannot warm them up. Identical-harness A/B
+// measurements also keep the work between shapes equal. Each path includes temporary verifier storage.
+static bool ir_lower_benchmark_scratch(IrLowerBenchmarkCorpus* corpus, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    bool valid = true;
+    for (uint32_t f = 0; valid && f < corpus->count; f += 1)
+    {
+        const IrLowerBenchmarkFunction item = corpus->functions[f];
         const uint64_t capacity = scratch->capacity;
         for (uint32_t path = 0; valid && path < 2; path += 1)
         {
@@ -249,6 +261,7 @@ static bool ir_lower_benchmark_validate(IrLowerBenchmarkCorpus* corpus, Arena* o
             }
             const uint64_t bytes = high - scratch_mark;
             corpus->scratch_bytes[path] = bytes > corpus->scratch_bytes[path] ? bytes : corpus->scratch_bytes[path];
+            valid = valid && scratch->length == scratch_mark;
         }
         scratch->capacity = capacity;
     }
@@ -372,6 +385,7 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
             }
         }
     }
+    valid = valid && ir_lower_benchmark_scratch(&corpus, &output, &scratch);
     if (valid)
     {
         printf("\n%s programs: %u functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions (%.3f/typed entry), %" PRIu64 " objects, %" PRIu64 " copies\n", name, corpus.count, corpus.entries, corpus.instructions,
@@ -414,10 +428,15 @@ static int run_ir_lower_benchmark(int argc, char** argv)
     uint32_t selected = (1u << BUSTER_IR_LOWER_BENCHMARK_VARIANTS) - 1;
     uint32_t after_scalar_ms = 0;
     uint64_t seed = 1;
+    bool ordinary = false;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
     {
-        if (strcmp(argv[i], "--passes") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--ordinary") == 0)
+        {
+            ordinary = true;
+        }
+        else if (strcmp(argv[i], "--passes") == 0 && i + 1 < argc)
         {
             i += 1;
             valid = ir_benchmark_number(argv[i], 1, BUSTER_IR_BENCHMARK_MAX_PASSES, &passes);
@@ -445,7 +464,7 @@ static int run_ir_lower_benchmark(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS]\n");
+        fprintf(stderr, "usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS] [--ordinary]\n");
         fprintf(stderr, "  passes: 1..%u; seed: decimal u64; after-scalar: 0..%u ms\n", BUSTER_IR_BENCHMARK_MAX_PASSES, BUSTER_IR_BENCHMARK_MAX_AFTER_SCALAR_MS);
     }
 #ifndef __OPTIMIZE__
@@ -479,11 +498,11 @@ static int run_ir_lower_benchmark(int argc, char** argv)
         {
             valid = ir_lower_benchmark_case(&tables, seed, true, true, false, 0, passes, selected, after_scalar_ms);
         }
-        if (valid)
+        if (valid && !ordinary)
         {
             valid = ir_lower_benchmark_case(&tables, seed, true, true, true, 0, passes, selected, after_scalar_ms);
         }
-        for (uint8_t kind = BUSTER_TYPED_ALLOCA; valid && kind <= BUSTER_TYPED_STACK_RESTORE; kind += 1)
+        for (uint8_t kind = BUSTER_TYPED_ALLOCA; valid && !ordinary && kind <= BUSTER_TYPED_STACK_RESTORE; kind += 1)
         {
             valid = ir_lower_benchmark_case(&tables, seed, false, false, true, kind, passes, selected, after_scalar_ms);
         }

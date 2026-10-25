@@ -317,16 +317,27 @@ static void ir_stack_test_invalid(IrLowerTestTally* tally, IrFunction* function,
         const uint32_t i = nodes[op];
         const uint8_t type = function->type[i];
         const uint32_t a = function->a[i];
-        for (uint32_t mutation = 0; mutation < 5; mutation += 1)
+        // Independent contract order: result type, unused fields, modifiers, then value operand validity.
+        const IrError errors[] = { IR_ERROR_TYPE, IR_ERROR_OPERAND, IR_ERROR_METADATA, IR_ERROR_METADATA, IR_ERROR_OPERAND, IR_ERROR_TYPE, IR_ERROR_OPERAND, IR_ERROR_METADATA };
+        for (uint32_t mutation = 0; mutation < 8; mutation += 1)
         {
             if (mutation == 0) { function->type[i] = IR_F64; }
             if (mutation == 1) { function->b[i] = 0; }
             if (mutation == 2) { function->flags[i] = BUSTER_IR_VOLATILE; }
             if (mutation == 3) { function->alignment_log2[i] = 4; }
             if (mutation == 4) { function->a[i] = op == 1 ? 0 : BUSTER_IR_NONE; }
+            if (mutation >= 5)
+            {
+                function->type[i] = mutation == 5 ? IR_F64 : type;
+                function->b[i] = mutation < 7 ? 0 : BUSTER_IR_NONE;
+                function->flags[i] = BUSTER_IR_VOLATILE;
+                function->alignment_log2[i] = 4;
+                function->a[i] = BUSTER_IR_NONE;
+            }
+            const uint64_t scratch_mark = scratch->length;
             const IrCheck vector = ir_verify(function, scratch, 0);
             const IrCheck scalar = ir_verify_scalar(function, scratch, 0);
-            ir_lower_test_expect(tally, vector.error != IR_OK && vector.error == scalar.error && vector.instruction == scalar.instruction && vector.instruction == i, "malformed dynamic IR refused by both verifiers", op, mutation);
+            ir_lower_test_expect(tally, vector.error == errors[mutation] && vector.error == scalar.error && vector.instruction == scalar.instruction && vector.instruction == i && vector.detail == scalar.detail && scratch->length == scratch_mark, "malformed dynamic IR preserves diagnostic priority and scratch in both verifiers", op, mutation);
             function->type[i] = type;
             function->a[i] = a;
             function->b[i] = BUSTER_IR_NONE;
@@ -572,10 +583,12 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
         arena_pop_to(&scratch, 0);
         for (uint32_t vector = 0; vector < 2; vector += 1)
         {
-            for (uint32_t mutation = 0; mutation < 3; mutation += 1)
+            for (uint32_t mutation = 0; mutation < 5; mutation += 1)
             {
                 values[mutation == 0 ? 0 : 3] = mutation < 2 ? 1 : 0;
                 classes[3] = mutation == 2 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+                classes[0] = mutation == 3 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+                classes[12] = mutation == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
                 IrFunction result = { .instruction_count = 123 };
                 const IrFunction preserved = result;
                 const uint64_t mark = twin.length;
@@ -584,6 +597,8 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
                 values[0] = 0;
                 values[3] = 0;
                 classes[3] = BUSTER_TYPED_CLASS_U64;
+                classes[0] = BUSTER_TYPED_CLASS_U64;
+                classes[12] = BUSTER_TYPED_CLASS_U64;
             }
         }
     }

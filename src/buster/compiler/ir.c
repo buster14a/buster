@@ -763,7 +763,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
             } break;
             case IR_RULE_RETURN: valid = f->result_type == IR_VOID ? a == BUSTER_IR_NONE : a < f->instruction_count && f->type[a] == f->result_type; break;
-            case IR_RULE_STACK: valid = ta == IR_I64; break;
+            // Validate the fixed-width stack rule outside the established explicit semantic cases.
+            default: valid = ir_rule_table[op] == IR_RULE_STACK && ta == IR_I64; break;
         }
         if (!valid)
         {
