@@ -543,6 +543,11 @@ static bool foreign_debug_test_twins(const uint8_t* file, uint64_t length, uint3
     }
     ImportObject object = { .symbols = map, .symbol_count = symbols.count };
     ForeignLink output = { .objects = &object };
+    static uint64_t resolved[4096];
+    if (same && symbols.count != 0)
+    {
+        foreign_debug_resolve(&input, &object, bases, resolved);
+    }
     static ForeignDebugTestRun runs[2];
     ForeignTestEdge edges[2] = { 0 };
     for (uint32_t path = 0; same && path < 2; path += 1)
@@ -563,6 +568,7 @@ static bool foreign_debug_test_twins(const uint8_t* file, uint64_t length, uint3
                 .bytes = run->bytes,
                 .size = size,
                 .bases = bases,
+                .resolved = resolved,
                 .records = {
                     .offsets = run->offsets,
                     .addends = run->addends,

@@ -102,10 +102,44 @@ struct ForeignDebugRecords
     uint8_t* kinds;
 };
 
+// What each of an object's symbols means to its debug relocations, which the vector path reads by one gather where it
+// would otherwise read the symbol, its section's place and the link's symbol: the class in the top two bits and a value
+// in the low 48 (foreign_debug_resolve).
+#define BUSTER_FOREIGN_DEBUG_TOMBSTONE 0ull
+#define BUSTER_FOREIGN_DEBUG_SECTIONED 1ull
+#define BUSTER_FOREIGN_DEBUG_LINKED 2ull
+#define BUSTER_FOREIGN_DEBUG_LEFT 3ull
+#define BUSTER_FOREIGN_DEBUG_VALUE_MASK ((1ull << 48) - 1)
+
+// Each of `input`'s symbols, as its debug relocations take it, into `resolved`: SECTIONED with its place in its output
+// section (`bases` of its section, plus its value) for a symbol in a kept debug section; LINKED with the link's symbol
+// (`object`'s map) for another; TOMBSTONE for one the link has none of; and LEFT, which leaves a relocation of it to the
+// exact path, for a symbol whose section is through SHN_XINDEX or whose place doesn't fit 48 bits. Symbol 0 is
+// TOMBSTONE, but the relocations of no symbol don't read it.
+static void foreign_debug_resolve(const ForeignObject* input, const ImportObject* object, const uint64_t* bases, uint64_t* resolved)
+{
+    resolved[0] = BUSTER_FOREIGN_DEBUG_TOMBSTONE << 62;
+    for (uint32_t index = 1; index < input->symbols.count; index += 1)
+    {
+        const Elf64_Sym symbol = import_symbol(&input->symbols, index);
+        const bool direct = symbol.st_shndx != SHN_XINDEX;
+        const bool sectioned = direct && symbol.st_shndx < input->elf.section_count && bases[symbol.st_shndx] != UINT64_MAX;
+        const uint64_t place = sectioned ? bases[symbol.st_shndx] + symbol.st_value : 0;
+        const SymbolId target = index < object->symbol_count ? object->symbols[index] : 0;
+        const uint64_t class = !direct || (sectioned && place > BUSTER_FOREIGN_DEBUG_VALUE_MASK) ? BUSTER_FOREIGN_DEBUG_LEFT :
+                               sectioned                                                       ? BUSTER_FOREIGN_DEBUG_SECTIONED :
+                               target != 0                                                     ? BUSTER_FOREIGN_DEBUG_LINKED :
+                                                                                                 BUSTER_FOREIGN_DEBUG_TOMBSTONE;
+        const uint64_t value = class == BUSTER_FOREIGN_DEBUG_SECTIONED ? place : class == BUSTER_FOREIGN_DEBUG_LINKED ? target : 0;
+        resolved[index] = class << 62 | value;
+    }
+}
+
 // A relocation section's relocations as both paths take them: object `id`'s relocation section `relocation_section`,
 // whose target's bytes are at `bytes` (`size` of them) in output kind `kind`'s section at `base`; `bases` holds each of
-// the object's sections' place in its kind's output section (UINT64_MAX for one that isn't a kept debug section), and
-// the records go to `records` from its start.
+// the object's sections' place in its kind's output section (UINT64_MAX for one that isn't a kept debug section),
+// `resolved` its symbols as foreign_debug_resolve gives them (the vector path's), and the records go to `records` from
+// its start.
 typedef struct ForeignDebugSection ForeignDebugSection;
 struct ForeignDebugSection
 {
@@ -118,6 +152,7 @@ struct ForeignDebugSection
     uint8_t* bytes;
     uint64_t size;
     const uint64_t* bases;
+    const uint64_t* resolved;
     ForeignDebugRecords records;
 };
 
@@ -210,13 +245,13 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
 }
 
 // The vector path of a relocation section's relocations (foreign_debug_relocate's), 8 at a time: the records
-// de-interleaved into offsets, infos and addends by permutes, then their symbols' st_shndx and st_value, the sections'
-// places and the link's symbols gathered (a gather only where a lane needs it), each value computed, written by
-// scatters and recorded by compresses, in order. A batch takes this path when every relocation in it is a common one:
-// a type DWARF uses (not R_X86_64_NONE), its field within the section, its symbol in the table and not through
-// SHN_XINDEX, a value that fits its field, no thread-local offset into a debug section, and fields one after another
-// without overlapping, as assemblers emit them; any other batch, and the last relocations short of a batch, go to the
-// exact path, which reports a failure where the batch has one. Either way the same bytes and records come out.
+// de-interleaved into offsets, infos and addends by permutes, each symbol's meaning gathered from the object's table
+// (foreign_debug_resolve), each value computed, written by scatters and recorded by compresses, in order. A batch takes
+// this path when every relocation in it is a common one: a type DWARF uses (not R_X86_64_NONE), its field within the
+// section, its symbol in the table and not LEFT, a value that fits its field, no thread-local offset into a debug
+// section, and fields one after another without overlapping, as assemblers emit them; any other batch, and the last
+// relocations short of a batch, go to the exact path, which reports a failure where the batch has one. Either way the
+// same bytes and records come out.
 static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection* section, uint64_t* count)
 {
     ForeignLinkResult result = { 0 };
@@ -226,8 +261,6 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
     const uint64_t total = entries.length / sizeof(Elf64_Rela);
     const uint32_t section_kind = EXECUTABLE_SECTION_DEBUG_INFO + section->kind;
     const uint64_t tombstone = section_kind == EXECUTABLE_SECTION_DEBUG_RANGES || section_kind == EXECUTABLE_SECTION_DEBUG_LOC ? 1 : 0;
-    const ImportObject* object = &section->output->objects[section->id];
-    const uint8_t* symbols = (const uint8_t*)input->symbols.entries.pointer;
     // Lane r of each permute's result is relocation r's offset, info or addend: quadwords 3r, 3r + 1 and 3r + 2 of the
     // three loads.
     const __m512i offsets_first = _mm512_set_epi64(0, 0, 15, 12, 9, 6, 3, 0);
@@ -239,9 +272,10 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
     const __m512i next_lane = _mm512_set_epi64(7, 7, 6, 5, 4, 3, 2, 1);
     const __m512i size = _mm512_set1_epi64((int64_t)section->size);
     const __m512i base = _mm512_set1_epi64((int64_t)section->base);
+    const __m512i value_mask = _mm512_set1_epi64((int64_t)BUSTER_FOREIGN_DEBUG_VALUE_MASK);
     uint64_t i = 0;
     // A section without symbols has no batch the vector path takes.
-    for (; result.error == FOREIGN_LINK_ERROR_NONE && symbols != 0 && i + 8 <= total; i += 8)
+    for (; result.error == FOREIGN_LINK_ERROR_NONE && input->symbols.count != 0 && i + 8 <= total; i += 8)
     {
         const uint8_t* at = (const uint8_t*)entries.pointer + i * sizeof(Elf64_Rela);
         const __m512i first = _mm512_loadu_si512(at);
@@ -263,25 +297,16 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
         const __mmask8 ordered = _mm512_cmple_epu64_mask(_mm512_add_epi64(offsets, widths), _mm512_permutexvar_epi64(next_lane, offsets)) | 0x80;
         const __mmask8 named = _mm512_test_epi64_mask(indices, indices);
         bool take = (uint8_t)(absolute64 | absolute32 | module64 | module32) == 0xff && inside == 0xff && symbolized == 0xff && ordered == 0xff;
-        // Each named symbol's st_info, st_other and st_shndx, and its value where its section is a debug section's.
-        const __m512i positions = _mm512_add_epi64(_mm512_slli_epi64(indices, 4), _mm512_slli_epi64(indices, 3));
-        const __m512i heads = take ? _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), named, positions, symbols, 1) : _mm512_setzero_si512();
-        const __m512i shndx = _mm512_srli_epi64(heads, 48);
-        take = take && (_mm512_mask_cmpeq_epi64_mask(named, shndx, _mm512_set1_epi64(SHN_XINDEX)) == 0);
-        const __mmask8 counted = named & _mm512_cmplt_epu64_mask(shndx, _mm512_set1_epi64(input->elf.section_count));
-        const __m512i places = take && counted != 0 ? _mm512_mask_i64gather_epi64(_mm512_set1_epi64(-1), counted, shndx, section->bases, 8) : _mm512_set1_epi64(-1);
-        const __mmask8 sectioned = counted & _mm512_cmpneq_epi64_mask(places, _mm512_set1_epi64(-1));
+        const __m512i meanings = take ? _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), named, indices, section->resolved, 8) : _mm512_setzero_si512();
+        const __m512i classes = _mm512_srli_epi64(meanings, 62);
+        const __m512i values = _mm512_and_si512(meanings, value_mask);
         const __mmask8 module = module64 | module32;
-        take = take && (sectioned & module) == 0;
-        const __mmask8 placed = sectioned & (uint8_t)~module;
-        const __m512i values = take && placed != 0 ? _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), placed, positions, symbols + 8, 1) : _mm512_setzero_si512();
-        // The link's symbols, for the references that aren't to a debug section.
-        const __mmask8 linked = named & (uint8_t)~placed & _mm512_cmplt_epu64_mask(indices, _mm512_set1_epi64(object->symbol_count));
-        const __m256i targets = take && linked != 0 ? _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), linked, indices, object->symbols, 4) : _mm256_setzero_si256();
-        const __mmask8 recorded = linked & _mm256_test_epi32_mask(targets, targets);
+        const __mmask8 sectioned = _mm512_mask_cmpeq_epi64_mask(named, classes, _mm512_set1_epi64(BUSTER_FOREIGN_DEBUG_SECTIONED));
+        const __mmask8 recorded = _mm512_mask_cmpeq_epi64_mask(named, classes, _mm512_set1_epi64(BUSTER_FOREIGN_DEBUG_LINKED));
+        take = take && _mm512_mask_cmpeq_epi64_mask(named, classes, _mm512_set1_epi64(BUSTER_FOREIGN_DEBUG_LEFT)) == 0 && (sectioned & module) == 0;
         __m512i written = _mm512_set1_epi64((int64_t)tombstone);
         written = _mm512_mask_mov_epi64(written, (uint8_t)~named, addends);
-        written = _mm512_mask_add_epi64(written, placed, _mm512_add_epi64(places, values), addends);
+        written = _mm512_mask_add_epi64(written, sectioned, values, addends);
         const __mmask8 writes = (uint8_t)~recorded;
         take = take && _mm512_mask_cmpgt_epu64_mask(writes & (uint8_t)~wide, written, _mm512_set1_epi64(0xffffffff)) == 0;
         if (!take)
@@ -300,7 +325,7 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
                                                           _mm512_set1_epi64(EXECUTABLE_DEBUG_ABS32));
             _mm256_mask_storeu_epi32(section->records.offsets + *count, room, _mm512_cvtepi64_epi32(_mm512_maskz_compress_epi64(recorded, _mm512_add_epi64(base, offsets))));
             _mm512_mask_storeu_epi64(section->records.addends + *count, room, _mm512_maskz_compress_epi64(recorded, addends));
-            _mm256_mask_storeu_epi32(section->records.targets + *count, room, _mm256_maskz_compress_epi32(recorded, targets));
+            _mm256_mask_storeu_epi32(section->records.targets + *count, room, _mm512_cvtepi64_epi32(_mm512_maskz_compress_epi64(recorded, values)));
             _mm_mask_storeu_epi8(section->records.section_kinds + *count, room, _mm_set1_epi8((char)section->kind));
             _mm_mask_storeu_epi8(section->records.kinds + *count, room, _mm512_cvtepi64_epi8(_mm512_maskz_compress_epi64(recorded, kinds)));
             *count += taken;
@@ -351,8 +376,10 @@ struct ForeignDebugPlan
     uint32_t* contribution_order;
     uint32_t* relocation_order;
     // Each object's sections' places in their kinds' output sections (UINT64_MAX for one that isn't a kept debug
-    // section), for the objects with debug sections.
+    // section), and its symbols as its debug relocations take them (foreign_debug_resolve), for the objects with debug
+    // sections.
     uint64_t** bases;
+    uint64_t** resolved;
     uint8_t* bytes[BUSTER_EXECUTABLE_DEBUG_KINDS];
     uint64_t sizes[BUSTER_EXECUTABLE_DEBUG_KINDS];
     ForeignDebugRecords records;
@@ -388,7 +415,7 @@ static void foreign_debug_order(uint32_t* order, ForeignDebugCost* costs, uint32
 
 // The plan of the selected objects' debug sections (ForeignDebugPlan), in the order of `order` (input order), from
 // `arena`: the sizing pass. Returns the first failure.
-static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreign* foreign, const uint32_t* order, Arena* arena)
+static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const ForeignLink* output, const Foreign* foreign, const uint32_t* order, Arena* arena)
 {
     ForeignLinkResult result = { 0 };
     *plan = (ForeignDebugPlan){ 0 };
@@ -396,12 +423,14 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     uint32_t contribution_capacity = 0;
     uint32_t relocation_section_capacity = 0;
     plan->bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t*, foreign->object_count);
-    result.error = plan->bases != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+    plan->resolved = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t*, foreign->object_count);
+    result.error = plan->bases != 0 && plan->resolved != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
     for (uint32_t at = 0; result.error == FOREIGN_LINK_ERROR_NONE && at < foreign->object_count; at += 1)
     {
         const uint32_t id = order[at];
         const ForeignObject* input = &foreign->objects[id];
         plan->bases[id] = 0;
+        plan->resolved[id] = 0;
         for (uint32_t section = 1; id != 0 && input->library == 0 && result.error == FOREIGN_LINK_ERROR_NONE && section < input->elf.section_count; section += 1)
         {
             uint32_t kind = 0;
@@ -446,6 +475,16 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
             const bool relocates = header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX;
             relocation_capacity += relocates ? header.sh_size / sizeof(Elf64_Rela) : 0;
             relocation_section_capacity += relocates ? 1 : 0;
+        }
+        // The vector path's table of the object's symbols; the exact path reads the symbols themselves.
+        if (plan->bases[id] != 0 && result.error == FOREIGN_LINK_ERROR_NONE && input->symbols.count != 0 && foreign->path == FOREIGN_PATH_VECTOR)
+        {
+            plan->resolved[id] = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, input->symbols.count);
+            result.error = plan->resolved[id] != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+            if (plan->resolved[id] != 0)
+            {
+                foreign_debug_resolve(input, &output->objects[id], plan->bases[id], plan->resolved[id]);
+            }
         }
     }
     for (uint32_t kind = 0; result.error == FOREIGN_LINK_ERROR_NONE && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
@@ -586,6 +625,7 @@ static void foreign_debug_relocation_section(ForeignDebugPlan* plan, const Forei
         .bytes = plan->bytes[relocations->kind] + relocations->base,
         .size = relocations->size,
         .bases = plan->bases[relocations->object],
+        .resolved = plan->resolved[relocations->object],
         .records = {
             .offsets = plan->records.offsets + first,
             .addends = plan->records.addends + first,
@@ -651,7 +691,7 @@ static ForeignLinkResult foreign_debug_build(ForeignLink* output, const Foreign*
 {
     ForeignDebugPlan plan;
     output->debug = (ExecutableDebugSections){ 0 };
-    ForeignLinkResult result = foreign_debug_plan(&plan, foreign, order, arena);
+    ForeignLinkResult result = foreign_debug_plan(&plan, output, foreign, order, arena);
     for (uint32_t item = 0; result.error == FOREIGN_LINK_ERROR_NONE && item < plan.contribution_count; item += 1)
     {
         foreign_debug_contribute(&plan, foreign, item);
