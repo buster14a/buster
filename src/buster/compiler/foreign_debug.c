@@ -13,7 +13,9 @@
 //     R_X86_64_DTPOFF32 or _64) is the writer's, by the link's symbol (ExecutableDebugSections' columns);
 //   - one to a section that COMDAT selection discarded, or to a symbol the link has none of, gets lld's tombstone: 0,
 //     or 1 in .debug_ranges and .debug_loc, whose lists 0 would end; one without a symbol is its addend.
-// A debug section of a discarded group goes with its group. A compressed one (SHF_COMPRESSED's ELFCOMPRESS_ZLIB, which
+// A debug section of a discarded group goes with its group, and an excluded one (SHF_EXCLUDE) is left out, as GNU ld and
+// lld leave it out of a final link: a reference into either gets the tombstone. An empty one keeps its place, which a
+// reference into it takes. A compressed one (SHF_COMPRESSED's ELFCOMPRESS_ZLIB, which
 // GNU as writes for -g by default and GCC's and clang's -gz ask for) contributes its bytes decompressed (inflate.c), at
 // the size and alignment of its compression header, which its relocations' offsets are into; one of another
 // compression (-gz=zstd's) is refused, and so are relocation types DWARF doesn't use. The writer's patch and this pass make the bytes lld writes
@@ -47,12 +49,13 @@ static uint32_t foreign_debug_kind(const ImportElf* elf, const Elf64_Shdr* heade
     return result;
 }
 
-// Whether section `section` of a selected object is one of its debug sections the output keeps: not allocated, of
-// contents, of a known name, and not of a discarded group; with its kind.
+// Whether section `section` of a selected object is one of its debug sections the output keeps: not allocated, not
+// excluded (SHF_EXCLUDE, which GNU ld and lld leave out of an executable or a shared library, a reference into it then
+// getting lld's tombstone), of contents, of a known name, and not of a discarded group; with its kind.
 static bool foreign_debug_section(const ForeignObject* input, uint32_t section, uint32_t* kind)
 {
     const Elf64_Shdr header = import_section_header(&input->elf, section);
-    const bool candidate = (header.sh_flags & SHF_ALLOC) == 0 && header.sh_type == SHT_PROGBITS && (input->discarded == 0 || input->discarded[section] == 0);
+    const bool candidate = (header.sh_flags & (SHF_ALLOC | SHF_EXCLUDE)) == 0 && header.sh_type == SHT_PROGBITS && (input->discarded == 0 || input->discarded[section] == 0);
     *kind = candidate ? foreign_debug_kind(&input->elf, &header) : BUSTER_EXECUTABLE_DEBUG_KINDS;
     return *kind < BUSTER_EXECUTABLE_DEBUG_KINDS;
 }
@@ -465,15 +468,16 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                     const uint64_t place = (plan->sizes[kind] + alignment - 1) & ~(alignment - 1);
                     plan->bases[id][section] = place;
                     plan->sizes[kind] = size < 0xfffffff0u ? place + size : 0xfffffff0u;
-                    contribution_capacity += 1;
+                    contribution_capacity += size != 0 ? 1 : 0;
                 }
             }
         }
         for (uint32_t r = 0; plan->bases[id] != 0 && result.error == FOREIGN_LINK_ERROR_NONE && r < input->relocation_count; r += 1)
         {
             const Elf64_Shdr header = import_section_header(&input->elf, input->relocations[r]);
-            const bool relocates = header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX;
-            relocation_capacity += relocates ? header.sh_size / sizeof(Elf64_Rela) : 0;
+            const uint64_t entries = header.sh_size / sizeof(Elf64_Rela);
+            const bool relocates = entries != 0 && header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX;
+            relocation_capacity += relocates ? entries : 0;
             relocation_section_capacity += relocates ? 1 : 0;
         }
         // The vector path's table of the object's symbols; the exact path reads the symbols themselves.
@@ -520,7 +524,8 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     const bool allocated = plan->contributions != 0 && plan->relocations != 0 && plan->contribution_order != 0 && plan->relocation_order != 0 && costs != 0 &&
                            plan->contribution_results != 0 && plan->relocation_results != 0 && recorded;
     result.error = result.error == FOREIGN_LINK_ERROR_NONE && !allocated ? FOREIGN_LINK_ERROR_MEMORY : result.error;
-    // The items, in the objects' order.
+    // The items, in the objects' order: the contributions with bytes (an empty section keeps its place, which references
+    // into it take) and the relocation sections with relocations.
     uint64_t first = 0;
     for (uint32_t at = 0; result.error == FOREIGN_LINK_ERROR_NONE && at < foreign->object_count; at += 1)
     {
@@ -537,18 +542,22 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                 String8 stream = { 0 };
                 foreign_debug_extent(input, &header, &size, &alignment, &stream);
                 const uint32_t item = plan->contribution_count;
-                plan->contributions[item] = (ForeignDebugContribution){ .object = id, .section = section, .kind = kind, .base = plan->bases[id][section], .size = size };
-                // Decompressing costs about four times copying.
-                costs[item] = (ForeignDebugCost){ .cost = (header.sh_flags & SHF_COMPRESSED) != 0 ? 4 * size : size, .item = item };
-                plan->contribution_results[item] = (ForeignLinkResult){ 0 };
-                plan->contribution_count += 1;
+                if (size != 0)
+                {
+                    plan->contributions[item] = (ForeignDebugContribution){ .object = id, .section = section, .kind = kind, .base = plan->bases[id][section], .size = size };
+                    // Decompressing costs about four times copying.
+                    costs[item] = (ForeignDebugCost){ .cost = (header.sh_flags & SHF_COMPRESSED) != 0 ? 4 * size : size, .item = item };
+                    plan->contribution_results[item] = (ForeignLinkResult){ 0 };
+                    plan->contribution_count += 1;
+                }
             }
         }
         for (uint32_t r = 0; plan->bases[id] != 0 && r < input->relocation_count; r += 1)
         {
             const Elf64_Shdr header = import_section_header(&input->elf, input->relocations[r]);
             uint32_t kind = 0;
-            if (header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX && foreign_debug_section(input, header.sh_info, &kind))
+            if (header.sh_size >= sizeof(Elf64_Rela) && header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX &&
+                foreign_debug_section(input, header.sh_info, &kind))
             {
                 const Elf64_Shdr target = import_section_header(&input->elf, header.sh_info);
                 uint64_t size = 0;
@@ -622,7 +631,8 @@ static void foreign_debug_relocation_section(ForeignDebugPlan* plan, const Forei
         .relocation_section = relocations->section,
         .kind = relocations->kind,
         .base = relocations->base,
-        .bytes = plan->bytes[relocations->kind] + relocations->base,
+        // None for a section of no bytes, whose relocations are all refused for their fields past its end.
+        .bytes = plan->bytes[relocations->kind] != 0 ? plan->bytes[relocations->kind] + relocations->base : 0,
         .size = relocations->size,
         .bases = plan->bases[relocations->object],
         .resolved = plan->resolved[relocations->object],

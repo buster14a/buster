@@ -240,7 +240,9 @@ by name in input order, each contribution at its alignment after the one
 before, as GNU ld and lld concatenate them. `.debug_str`'s and
 `.debug_line_str`'s strings aren't merged, which lld does: the sections are
 larger, and only their offsets differ from lld's. A section of a COMDAT group
-the resolution discarded goes with its group.
+the resolution discarded goes with its group, and an excluded one
+(`SHF_EXCLUDE`) is left out, as GNU ld and lld leave it out of a final link.
+An empty one keeps its place, which a reference into it takes.
 
 Each debug relocation is applied where the layout doesn't decide it and left
 to the writer where it does:
@@ -254,8 +256,9 @@ to the writer where it does:
   (`ExecutableOptions.debug_sections`), which patches the definition's address
   or the thread-local's offset in the TLS segment after the layout;
 - a reference to a section that COMDAT selection or `--gc-sections` dropped, or
-  to a symbol the link has none of, gets lld's tombstone: 0, or 1 in
-  `.debug_ranges` and `.debug_loc`, whose lists 0 would end.
+  to an excluded debug section, or to a symbol the link has none of, gets lld's
+  tombstone: 0, or 1 in `.debug_ranges` and `.debug_loc`, whose lists 0 would
+  end.
 
 Relocation types that DWARF doesn't use are refused, naming the object, the
 section and the relocation, and so is a thread-local offset into a debug
@@ -405,7 +408,11 @@ clang, which doesn't, at `-O0` and `-O2`, in DWARF 5 and 4, and with
 exact path: the same bytes, which run and print what the program computes. The
 C++ fixture's inline functions are COMDAT groups in both units, whose losing
 copies' DWARF keeps tombstones; `--gc-sections` keeps the DWARF of what it
-collects the same way; `-S` leaves the debug sections out. A zstd section and a
+collects the same way; `-S` leaves the debug sections out. Assembly fixtures
+check excluded debug sections (left out, with lld's tombstones in the
+references into them), an empty section's place, and empty relocation
+sections, also where no other section of the empty one's kind has bytes and the
+link has no debug relocation, each as lld links them. A zstd section and a
 damaged zlib stream are refused. The relocation passes' vector path is checked
 against its exact twin on each debug relocation section of a `-g` object, which
 ends at a `PROT_NONE` page, as compiled, cut to each length short of a batch,

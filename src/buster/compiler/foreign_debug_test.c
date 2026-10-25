@@ -8,7 +8,9 @@
 // computes. The C++ fixture's inline functions are COMDAT groups in both units, whose losing copies' DWARF stays with
 // tombstones; a link with --gc-sections keeps the DWARF of what it collects the same way; -S leaves the debug sections
 // out. A section of another compression (objcopy's zstd, where binutils has it) and one whose zlib stream is damaged
-// are refused, naming their object and section.
+// are refused, naming their object and section. Excluded debug sections (SHF_EXCLUDE) are left out, as GNU ld and lld
+// leave them out, and empty ones and empty relocation sections link, also where no other section of their kind has bytes
+// and the link has no debug relocation (foreign_debug_test_sections).
 // The relocation kernels' vector path is checked against its exact twin on each debug relocation section, ending at a
 // PROT_NONE page, with each rare relocation at each of a batch's lanes (foreign_debug_test_kernels).
 // With --cross-check, ld.lld links the same objects: llvm-dwarfdump --verify finds no error in either output, their
@@ -515,6 +517,300 @@ static void foreign_debug_test_refusals(ForeignTestTally* tally, const char* dir
     arena_pop_to(arena, mark);
 }
 
+// An assembly fixture of debug sections a link leaves out or that are empty, beside the C program: an excluded (SHF_EXCLUDE,
+// "e") .debug_str and .debug_ranges that a kept .debug_info and .debug_loc refer to, which lld gives its tombstones (0,
+// and 1 in .debug_loc); two .debug_macro sections (GNU as's `unique`), the second empty, whose place .debug_info refers
+// to (8, after the first); and a .debug_aranges that holds a function's address. Each contribution starts with a marker.
+static const char foreign_debug_test_sections_source[] =
+    "    .text\n"
+    "    .globl dbg_sections_marker\n"
+    "    .type dbg_sections_marker, @function\n"
+    "dbg_sections_marker:\n"
+    "    ret\n"
+    "    .size dbg_sections_marker, .-dbg_sections_marker\n"
+    "    .section .debug_str,\"MSe\",@progbits,1\n"
+    ".Lexcluded_string:\n"
+    "    .asciz \"EXCLUDED_DEBUG_STRING\"\n"
+    "    .section .debug_ranges,\"e\",@progbits\n"
+    ".Lexcluded_ranges:\n"
+    "    .quad 0x7777777777777777\n"
+    "    .section .debug_macro,\"\",@progbits,unique,1\n"
+    "    .quad 0x5555555555555555\n"
+    "    .section .debug_macro,\"\",@progbits,unique,2\n"
+    ".Lempty:\n"
+    "    .section .debug_info,\"\",@progbits\n"
+    "    .long 0x11111111\n"
+    "    .long .Lexcluded_string\n"
+    "    .quad .Lexcluded_ranges\n"
+    "    .long .Lempty\n"
+    "    .long 0x22222222\n"
+    "    .section .debug_loc,\"\",@progbits\n"
+    "    .quad 0x3333333333333333\n"
+    "    .quad .Lexcluded_ranges\n"
+    "    .section .debug_aranges,\"\",@progbits\n"
+    "    .quad 0x4444444444444444\n"
+    "    .quad dbg_sections_marker\n";
+
+// The empty sections' fixture for a link with no other debug section of their kinds and no debug relocation (with a
+// main compiled without -g): an empty .debug_names, the only contribution of its kind, and a .debug_pubtypes whose
+// relocation section the test empties.
+static const char foreign_debug_test_empty_source[] =
+    "    .text\n"
+    "    .globl dbg_empty_marker\n"
+    "    .type dbg_empty_marker, @function\n"
+    "dbg_empty_marker:\n"
+    "    ret\n"
+    "    .size dbg_empty_marker, .-dbg_empty_marker\n"
+    "    .section .debug_names,\"\",@progbits\n"
+    "    .section .debug_pubtypes,\"\",@progbits\n"
+    "    .quad 0x6666666666666666\n"
+    "    .quad dbg_empty_marker\n";
+
+// An output's bytes of section `name` from its marker on (the marker's `marker_length` bytes, little-endian), `length`
+// of them, or none.
+static const uint8_t* foreign_debug_test_marked(String8 file, const char* name, uint64_t marker, uint32_t marker_length, uint64_t length)
+{
+    const DynamicTestImage image = dynamic_test_image(file);
+    const Elf64_Shdr* section = dynamic_test_section(&image, name);
+    const uint8_t* result = 0;
+    for (uint64_t at = 0; section != 0 && section->sh_type == SHT_PROGBITS && result == 0 && at + length <= section->sh_size; at += 1)
+    {
+        const uint8_t* place = (const uint8_t*)file.pointer + section->sh_offset + at;
+        result = memcmp(place, &marker, marker_length) == 0 ? place : 0;
+    }
+    return result;
+}
+
+// The value of an output's regular symbol `name`, or UINT64_MAX.
+static uint64_t foreign_debug_test_symbol(String8 file, const char* name)
+{
+    const DynamicTestImage image = dynamic_test_image(file);
+    const Elf64_Shdr* table = dynamic_test_section(&image, ".symtab");
+    const bool linked = table != 0 && table->sh_link < image.header->e_shnum && image.section_headers[table->sh_link].sh_offset + image.section_headers[table->sh_link].sh_size <= file.length;
+    uint64_t result = UINT64_MAX;
+    for (uint64_t i = 1; linked && result == UINT64_MAX && i < table->sh_size / sizeof(Elf64_Sym); i += 1)
+    {
+        Elf64_Sym symbol;
+        memcpy(&symbol, file.pointer + table->sh_offset + i * sizeof(Elf64_Sym), sizeof(symbol));
+        const Elf64_Shdr* strings = &image.section_headers[table->sh_link];
+        const bool named = symbol.st_name < strings->sh_size && strcmp(file.pointer + strings->sh_offset + symbol.st_name, name) == 0;
+        result = named ? symbol.st_value : UINT64_MAX;
+    }
+    return result;
+}
+
+// What an output must hold, by fixture (foreign_debug_test_sections): the sections fixture's, no excluded byte,
+// .debug_info's references into the excluded sections tombstones and the one into the empty .debug_macro its place, 8,
+// .debug_loc's tombstone 1 and .debug_aranges' address dbg_sections_marker's (0 in the copy whose relocation section was
+// emptied); the empty fixture's, no .debug_names and .debug_pubtypes' field 0 (its relocation section emptied).
+static bool foreign_debug_test_sections_hold(String8 file, uint32_t fixture)
+{
+    static const char excluded[] = "EXCLUDED_DEBUG_STRING";
+    const uint64_t ranges = UINT64_C(0x7777777777777777);
+    bool result = file.pointer != 0;
+    if (result && fixture < 2)
+    {
+        result = memmem(file.pointer, file.length, excluded, sizeof(excluded) - 1) == 0 && memmem(file.pointer, file.length, &ranges, 8) == 0;
+        const uint8_t* info = foreign_debug_test_marked(file, ".debug_info", 0x11111111, 4, 24);
+        const uint8_t* loc = foreign_debug_test_marked(file, ".debug_loc", UINT64_C(0x3333333333333333), 8, 16);
+        const uint8_t* aranges = foreign_debug_test_marked(file, ".debug_aranges", UINT64_C(0x4444444444444444), 8, 16);
+        uint32_t string = 1;
+        uint64_t range = 1;
+        uint32_t empty = 0;
+        uint32_t end = 0;
+        uint64_t tombstone = 0;
+        uint64_t address = 1;
+        if (info != 0 && loc != 0 && aranges != 0)
+        {
+            memcpy(&string, info + 4, 4);
+            memcpy(&range, info + 8, 8);
+            memcpy(&empty, info + 16, 4);
+            memcpy(&end, info + 20, 4);
+            memcpy(&tombstone, loc + 8, 8);
+            memcpy(&address, aranges + 8, 8);
+        }
+        const uint64_t function = fixture == 1 ? 0 : foreign_debug_test_symbol(file, "dbg_sections_marker");
+        result = result && info != 0 && loc != 0 && aranges != 0 && string == 0 && range == 0 && empty == 8 && end == 0x22222222 && tombstone == 1 && address == function;
+    }
+    else if (result)
+    {
+        const DynamicTestImage image = dynamic_test_image(file);
+        const Elf64_Shdr* names = dynamic_test_section(&image, ".debug_names");
+        const uint8_t* pubtypes = foreign_debug_test_marked(file, ".debug_pubtypes", UINT64_C(0x6666666666666666), 8, 16);
+        uint64_t field = 1;
+        if (pubtypes != 0)
+        {
+            memcpy(&field, pubtypes + 8, 8);
+        }
+        result = image.valid && (names == 0 || names->sh_size == 0) && pubtypes != 0 && field == 0;
+    }
+    return result;
+}
+
+// An object's copy whose relocation section `relocation_name` has size 0: an empty relocation section, whose fields
+// keep their bytes (a RELA field's are 0).
+static bool foreign_debug_test_empty_relocations(const char* object, const char* copy_path, const char* relocation_name, Arena* arena)
+{
+    const String8 bytes = foreign_test_read(arena, object);
+    ImportElf elf = { 0 };
+    bool result = bytes.pointer != 0 && import_elf(&elf, bytes, ET_REL).error == IMPORT_ERROR_NONE;
+    uint32_t relocation = 0;
+    for (uint32_t section = 1; result && section < elf.section_count; section += 1)
+    {
+        const Elf64_Shdr header = import_section_header(&elf, section);
+        const char* name = header.sh_name < elf.section_names.length ? elf.section_names.pointer + header.sh_name : "";
+        relocation = strcmp(name, relocation_name) == 0 ? section : relocation;
+    }
+    char* copy = result && relocation != 0 ? arena_push(arena, bytes.length, 8) : 0;
+    result = copy != 0;
+    if (result)
+    {
+        const uint64_t size = 0;
+        memcpy(copy, bytes.pointer, bytes.length);
+        memcpy(copy + elf.section_offset + (uint64_t)relocation * sizeof(Elf64_Shdr) + offsetof(Elf64_Shdr, sh_size), &size, sizeof(size));
+        result = foreign_test_write(copy_path, copy, bytes.length);
+    }
+    return result;
+}
+
+// Debug sections a link leaves out or that are empty: the sections fixture (foreign_debug_test_sections_source) with the
+// C program's -O2 objects, its copy whose .rela.debug_aranges is empty, and the empty fixture's copy whose
+// .rela.debug_pubtypes is empty with a main compiled without -g (so that no section of .debug_names' kind has bytes and
+// the link has no debug relocation). Each is linked on 1 lane, on 8 and by the exact path: the same bytes, which run
+// (and print what the C program computes), holding what foreign_debug_test_sections_hold checks. With --cross-check, so
+// does lld's output of the same objects.
+static void foreign_debug_test_sections(ForeignTestTally* tally, const char* directory, ForeignTestSystem* system, bool cross_check, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    ForeignTestPath sources[2];
+    ForeignTestPath assembled[2];
+    ForeignTestPath objects[3];
+    ForeignTestPath plain_source;
+    ForeignTestPath plain;
+    ForeignTestPath errors;
+    snprintf(sources[0], sizeof(sources[0]), "%s/dbg_sections.s", directory);
+    snprintf(sources[1], sizeof(sources[1]), "%s/dbg_empty.s", directory);
+    snprintf(assembled[0], sizeof(assembled[0]), "%s/dbg_sections.o", directory);
+    snprintf(assembled[1], sizeof(assembled[1]), "%s/dbg_empty-full.o", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s", assembled[0]);
+    snprintf(objects[1], sizeof(objects[1]), "%s/dbg_sections-empty.o", directory);
+    snprintf(objects[2], sizeof(objects[2]), "%s/dbg_empty.o", directory);
+    snprintf(plain_source, sizeof(plain_source), "%s/dbg_plain.c", directory);
+    snprintf(plain, sizeof(plain), "%s/dbg_plain.o", directory);
+    snprintf(errors, sizeof(errors), "%s.err", assembled[0]);
+    static const char plain_text[] = "int main(void)\n{\n    return 0;\n}\n";
+    const char* texts[2] = { foreign_debug_test_sections_source, foreign_debug_test_empty_source };
+    const uint64_t lengths[2] = { sizeof(foreign_debug_test_sections_source) - 1, sizeof(foreign_debug_test_empty_source) - 1 };
+    bool ready = foreign_test_write(plain_source, plain_text, sizeof(plain_text) - 1);
+    for (uint32_t s = 0; ready && s < 2; s += 1)
+    {
+        char* assemble[] = { (char*)"as", sources[s], (char*)"-o", assembled[s], 0 };
+        ready = foreign_test_write(sources[s], texts[s], lengths[s]) && object_test_run(assemble, "/dev/null", errors) == 0;
+    }
+    char* compile[] = { (char*)"cc", (char*)"-c", (char*)"-O2", plain_source, (char*)"-o", plain, 0 };
+    ready = ready && object_test_run(compile, "/dev/null", errors) == 0;
+    foreign_test_expect(tally, ready, "assemble the excluded and empty debug sections' fixtures", errors);
+    const bool emptied = ready && foreign_debug_test_empty_relocations(assembled[0], objects[1], ".rela.debug_aranges", arena) &&
+                         foreign_debug_test_empty_relocations(assembled[1], objects[2], ".rela.debug_pubtypes", arena);
+    foreign_test_expect(tally, emptied, "empty the fixtures' relocation sections", objects[1]);
+    for (uint32_t fixture = 0; emptied && fixture < 3; fixture += 1)
+    {
+        ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
+        char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 16);
+        const bool lined = line != 0 && arguments != 0;
+        if (lined)
+        {
+            *line = (ForeignTestLine){ 0 };
+            foreign_test_pie_begin(line, system);
+            if (fixture < 2)
+            {
+                foreign_test_add(line, foreign_test_path(directory, "gcc-O2-dbg_main.c.o", arena), true, true);
+                foreign_test_add(line, foreign_test_path(directory, "gcc-O2-dbg_sum.c.o", arena), true, true);
+            }
+            else
+            {
+                foreign_test_add(line, plain, true, true);
+            }
+            foreign_test_add(line, objects[fixture], true, true);
+            foreign_test_pie_end(line, system);
+        }
+        static const char* const ways[3] = { "--lanes=1", "--lanes=8", "--scalar" };
+        String8 files[3] = { 0 };
+        for (uint32_t way = 0; lined && way < 3; way += 1)
+        {
+            ForeignTestPath output;
+            ForeignTestPath link_errors;
+            snprintf(output, sizeof(output), "%s/sections%u.out%u", directory, fixture, way);
+            snprintf(link_errors, sizeof(link_errors), "%s.err", output);
+            static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = (char*)ways[way];
+            arguments[count + 1] = (char*)"-o";
+            arguments[count + 2] = output;
+            count += 3;
+            for (uint32_t i = 0; i < line->our_count; i += 1)
+            {
+                arguments[count] = line->ours[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const bool linked = object_test_run(arguments, "/dev/null", link_errors) == 0;
+            foreign_test_expect(tally, linked, "link-foreign links excluded and empty debug sections", link_errors);
+            files[way] = linked ? foreign_test_read(arena, output) : (String8){ 0 };
+            if (linked)
+            {
+                ForeignTestPath run_output;
+                snprintf(run_output, sizeof(run_output), "%s.run", output);
+                char* run[] = { output, 0 };
+                const bool ran = object_test_run(run, run_output, "/dev/null") == 0;
+                const String8 printed = foreign_test_read(arena, run_output);
+                const char* expected = fixture < 2 ? foreign_debug_test_expected[0] : "";
+                foreign_test_expect(tally, ran && printed.pointer != 0 && strcmp(printed.pointer, expected) == 0, "the program runs and prints what it computes", output);
+                foreign_test_expect(tally, foreign_debug_test_sections_hold(files[way], fixture),
+                                    "no excluded debug byte, lld's tombstones into them, an empty section's place, and an empty relocation section's field", output);
+            }
+        }
+        for (uint32_t way = 1; lined && way < 3; way += 1)
+        {
+            foreign_test_expect(tally, files[0].pointer != 0 && files[way].pointer != 0 && files[0].length == files[way].length &&
+                                       memcmp(files[0].pointer, files[way].pointer, files[0].length) == 0,
+                                "the same bytes on 8 lanes and by the exact path as on 1", objects[fixture]);
+        }
+        if (lined && cross_check)
+        {
+            ForeignTestPath theirs;
+            ForeignTestPath lld_errors;
+            snprintf(theirs, sizeof(theirs), "%s/sections%u.lld", directory, fixture);
+            snprintf(lld_errors, sizeof(lld_errors), "%s.err", theirs);
+            static const char* const head[] = { "ld.lld", "--hash-style=gnu", "--build-id", "--eh-frame-hdr", "-z", "now", "-z", "relro", "-o" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = theirs;
+            count += 1;
+            for (uint32_t i = 0; i < line->their_count; i += 1)
+            {
+                arguments[count] = line->theirs[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const bool linked = object_test_run(arguments, "/dev/null", lld_errors) == 0;
+            foreign_test_expect(tally, linked, "ld.lld links excluded and empty debug sections", lld_errors);
+            foreign_test_expect(tally, linked && foreign_debug_test_sections_hold(foreign_test_read(arena, theirs), fixture),
+                                "lld's output holds what ours does: no excluded byte, its tombstones, the empty section's place and field", theirs);
+        }
+    }
+    arena_pop_to(arena, mark);
+}
+
 // One run of a relocation section's kernel for foreign_debug_test_kernels: its bytes, records, count and result.
 typedef struct ForeignDebugTestRun ForeignDebugTestRun;
 struct ForeignDebugTestRun
@@ -741,6 +1037,7 @@ static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_c
     if (written)
     {
         foreign_debug_test_refusals(&tally, directory, system, arena);
+        foreign_debug_test_sections(&tally, directory, system, cross_check, arena);
         foreign_debug_test_kernels(&tally, directory, arena);
     }
     return foreign_test_report(&tally);
