@@ -10,7 +10,8 @@
 // by no more (#432's review). A unit that merges is checked again with its first lane taking every part, when no other
 // lane may copy the reader; with its merge failing after the replay, which must give source order's result; and with
 // the allocation of the deferred reader's state failing, which must count as a resource failure, not as a result that
-// differs. Then benchmark-checker-deferred's --cpus parser.
+// differs. Then benchmark-checker-deferred's --cpus parser, and the difference report on a deferred path that made no
+// input, which must say so rather than read its columns.
 //
 //   ./build/compiler test-checker-deferred [--keep]
 //
@@ -133,6 +134,37 @@ static bool check_deferred_test_cpus(void)
         munmap(pages, page * 2);
     }
     return valid;
+}
+
+// The difference report on a deferred path that made no input (#432's second review): the vector path's tokens have
+// columns and the deferred path's none, which the report must say rather than read. Its stages go to standard error,
+// silenced here.
+static bool check_deferred_test_no_input(void)
+{
+    static uint32_t declarations[4];
+    static CheckCorpusPath made;
+    static CheckCorpusPath none;
+    made = (CheckCorpusPath){ 0 };
+    none = (CheckCorpusPath){ 0 };
+    made.input.token_count = BUSTER_ARRAY_LENGTH(declarations);
+    made.input.declarations = declarations;
+    char text[256] = { 0 };
+    fflush(stderr);
+    const int saved = dup(STDERR_FILENO);
+    const int null = open("/dev/null", O_WRONLY);
+    const bool quiet = saved >= 0 && null >= 0 && dup2(null, STDERR_FILENO) >= 0;
+    check_corpus_deferred_difference(&made, &none, text, sizeof(text));
+    fflush(stderr);
+    if (saved >= 0)
+    {
+        dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+    if (null >= 0)
+    {
+        close(null);
+    }
+    return quiet && strstr(text, "made no input") != NULL;
 }
 
 // Many bodies, for the lanes' parts: a unit of `count` small functions that call one another.
@@ -283,6 +315,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
     if (!cpus)
     {
         fprintf(stderr, "test-checker-deferred: benchmark-checker-deferred's --cpus parser read a list wrong\n");
+    }
+    const bool no_input = check_deferred_test_no_input();
+    checks += 1;
+    failures += !no_input;
+    if (!no_input)
+    {
+        fprintf(stderr, "test-checker-deferred: the difference report on a deferred path without an input didn't say so\n");
     }
     if (!keep && valid)
     {

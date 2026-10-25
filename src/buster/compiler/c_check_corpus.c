@@ -1508,13 +1508,15 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
 }
 
 // Where the deferred path (b) first differs from the vector path (a), for --deferred's report: the table, the bindings'
-// stream, the environment, the appended tables, a token's column, the graph or the later stages.
+// stream, the environment, the appended tables, a token's column, the graph or the later stages. A path that made no
+// input of the other's tokens (its state or tables not allocated) has no columns to compare: its stages say why.
 static void check_corpus_deferred_difference(const CheckCorpusPath* a, const CheckCorpusPath* b, char* text, uint64_t capacity)
 {
     const CheckInput* x = &a->input;
     const CheckInput* y = &b->input;
     const TypeTable* s = &a->types;
     const TypeTable* t = &b->types;
+    const bool comparable = x->token_count == y->token_count && x->declarations != NULL && y->declarations != NULL;
     snprintf(text, capacity, "nothing found (the paths' outcomes or another column)");
     fprintf(stderr, "  stages: adapted %u %u, checked %u %u, initialized %u %u, programmed %u %u, resource %u %u, reports %u %u (first %u %u), token %u %u\n",
             a->adapted, b->adapted, a->checked, b->checked, a->initialized, b->initialized, a->programmed, b->programmed, a->resource, b->resource,
@@ -1527,13 +1529,17 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
         type += 1;
     }
     uint32_t token = 0;
-    while (token < x->token_count && x->declarations[token] == y->declarations[token] && x->declared_types[token] == y->declared_types[token] &&
+    while (comparable && token < x->token_count && x->declarations[token] == y->declarations[token] && x->declared_types[token] == y->declared_types[token] &&
            x->objects[token] == y->objects[token] && x->declaration_bodies[token] == y->declaration_bodies[token] && x->token_nodes[token] == y->token_nodes[token] &&
            x->declaration_kinds[token] == y->declaration_kinds[token] && x->linkage[token] == y->linkage[token] && x->defined[token] == y->defined[token])
     {
         token += 1;
     }
-    if (type < s->types.count || s->types.count != t->types.count)
+    if (!comparable)
+    {
+        snprintf(text, capacity, "the deferred path made no input of %u tokens to compare (%u tokens; its stages above)", x->token_count, y->token_count);
+    }
+    else if (type < s->types.count || s->types.count != t->types.count)
     {
         snprintf(text, capacity, "types: %u against %u, the first difference at index %u (kind %u against %u, base %#x against %#x)", s->types.count, t->types.count,
                  type, type < s->types.count ? s->types.kind[type] : 0, type < t->types.count ? t->types.kind[type] : 0, type < s->types.count ? s->types.base[type] : 0,
