@@ -332,8 +332,9 @@ static bool tier0_aggregates_valid(const Tier0Function* function);
 // The optional frame descriptors are checked even when unused. The typed stream itself retains tier0_validate's
 // valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata: the
 // parameters' locations, where an incoming variadic area bounds them or objects may be among them
-// (tier0_parameters_valid), and the aggregates' (tier0_aggregates_valid).
-static bool tier0_frame_input_valid(const Tier0Function* function)
+// (tier0_parameters_valid), and the aggregates' (tier0_aggregates_valid). Out of line: the compile paths call it once
+// per function, and inline it changed clang's code for their shared passes (tier0_generate) whenever it changed.
+static __attribute__((noinline)) bool tier0_frame_input_valid(const Tier0Function* function)
 {
     bool valid = function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
     const AbiCall* incoming = function->incoming_variadic;

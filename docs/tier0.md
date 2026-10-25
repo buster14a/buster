@@ -235,7 +235,9 @@ as it counts every call's (`tier0_count_deferred`), from the parts, the copies' 
 and the counter's loops over the values alone: each is specialized on whether the function has `argument_sizes`
 (`tier0_emit_call` and `tier0_count_call`, always inlined, the flag a constant at each use). The aggregates' placement
 and moves (`tier0_place_aggregates`, `tier0_aggregate_moves`) and the result's loads (`tier0_load_result`) are passes
-of their own, out of line. Selection takes the copies' scratch in a pass of its own (`tier0_select_scratch`), and the
+of their own, out of line, and so are the optional parts' checks (`tier0_frame_input_valid`, once per function), whose
+code, inline, changed clang's code for the paths' shared passes. Selection takes the copies' scratch in a pass of its
+own (`tier0_select_scratch`), and the
 passes over the parameters leave out what only objects need without one among them (`Tier0Frame.object_parameters`).
 [Measurements](#measurements) has what this saves on code without aggregates.
 
