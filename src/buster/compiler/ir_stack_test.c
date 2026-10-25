@@ -391,6 +391,8 @@ static void ir_stack_test_calls(IrLowerTestTally* tally, Arena* input, Arena* ou
     const bool ready = ir_stack_test_parse(tally, caller, input, scratch, &functions[0]) && ir_stack_test_parse(tally, callee, input, scratch, &functions[1]);
     if (ready)
     {
+        functions[0].symbol_count = 3;
+        functions[1].symbol_count = 3;
         const uint32_t symbols[2] = { 1, 2 };
         const uint8_t flags[2] = { BUSTER_IR_INLINE_INTERNAL, BUSTER_IR_INLINE_INTERNAL };
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
