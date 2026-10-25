@@ -16,8 +16,9 @@ build/performance/bmf-test /path/to/buster-performance
 ```
 
 The build requires Clang, pkg-config, OpenSSL 3, PCRE2-8 and libcurl 7.85 or
-newer. The pinned vendored libraries, generator inputs, licenses and checksums
-are in [`tools/performance/vendor`](../../tools/performance/vendor/README.md).
+newer. Exact external inputs, hashes and licensing are documented in
+[`tools/performance/dependencies.md`](../../tools/performance/dependencies.md).
+Downloaded sources stay in ignored build storage; none are tracked here.
 This is separate offline publication tooling; it does not change compiler
 execution, ISA, or the compiler build. Its control flow uses bounded work lists;
 upstream libraries perform physical decoding, regex matching and hashing.
@@ -64,8 +65,8 @@ to a qualified performance result.
 
 ## Browser boundary
 
-The pinned Apache Arrow JavaScript 21.1.0 reader is served locally from
-`web/perf/vendor/arrow`, with its Apache-2.0 license and NOTICE. The browser
+The pinned Apache Arrow JavaScript 21.1.0 reader is assembled from the external
+cache into the publishing artifact, with its Apache-2.0 license and NOTICE. The browser
 needs BigInt, typed arrays, native JavaScript modules, TextDecoder, and Web
 Crypto in a secure context. No isolation headers or service worker is needed
 for these table readers. 64-bit values stay BigInt; decimals retain an exact

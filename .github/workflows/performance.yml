@@ -36,7 +36,7 @@ jobs:
           sudo apt-get install -y clang pkg-config libssl-dev libpcre2-dev libcurl4-openssl-dev
       - name: Verify dependency sources and native representation checks
         run: |
-          sha256sum -c tools/performance/vendor/SHA256SUMS
+          test -z "$(git ls-files -- tools/performance/vendor web/perf/vendor tools/performance/deps web/perf/deps)"
           clang --version
           pkg-config --modversion openssl libpcre2-8 libcurl
           bash tools/performance/build.sh
@@ -53,6 +53,8 @@ jobs:
           set -euo pipefail
           mkdir -p build/performance/reader-site/buster
           cp -a web/perf web/tests build/performance/reader-site/buster/
+          mkdir -p build/performance/reader-site/buster/perf/deps/arrow
+          cp build/performance/deps/arrow-js/Arrow.es2015.min.js build/performance/deps/arrow-js/LICENSE.txt build/performance/deps/arrow-js/NOTICE.txt build/performance/reader-site/buster/perf/deps/arrow/
           cp -a build/evidence/docs/measurements/performance-format-2026-10-24 build/performance/reader-site/evidence
           clang -std=c17 -O2 -Wall -Wextra -Werror tools/performance/serve.c -o build/performance/serve
           build/performance/serve build/performance/reader-site 8765 &
