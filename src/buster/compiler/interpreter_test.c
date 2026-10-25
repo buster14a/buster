@@ -416,6 +416,37 @@ static void interpreter_test_limits(InterpreterTestTally* tally, Arena* scratch)
     value = UINT64_MAX;
     result = interpreter_test_run(&function, scratch, 0);
     interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "invalid branch target");
+    {
+        // An indirect jump to a label (#133), which an interpreted function has no code at: a valid stream, refused.
+        const uint8_t indirect_kinds[] = {
+            BUSTER_TYPED_CONST,
+            BUSTER_TYPED_JUMP_INDIRECT,
+            BUSTER_TYPED_RETURN,
+        };
+        const uint8_t indirect_classes[] = {
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_VOID,
+        };
+        const uint64_t indirect_values[] = {
+            7,
+            0,
+            0,
+        };
+        const uint32_t indirect_labels[] = {
+            2,
+        };
+        const Tier0Function indirect = {
+            .kinds = indirect_kinds,
+            .classes = indirect_classes,
+            .values = indirect_values,
+            .count = 3,
+            .label_entries = indirect_labels,
+            .label_count = 1,
+        };
+        result = interpreter_test_run(&indirect, scratch, 0);
+        interpreter_test_expect(tally, tier0_validate(&indirect).error == TIER0_OK && result.status == INTERPRETER_INVALID, "indirect jump refused");
+    }
     function.count = 0;
     result = interpreter_test_run(&function, scratch, 0);
     interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 0, "empty void function");

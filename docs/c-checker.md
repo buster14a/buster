@@ -582,6 +582,32 @@ What the lowering covers past scalars (#145's programs):
   an `if` or a jump: `invalid or unsupported declaration`); the control stream
   already puts such a jump out of a block's first array's bounds before the
   block's `STACK_SAVE`, where it needs no restore.
+- **Labels as values** (GNU C's, which Lua's interpreter dispatches with).
+  `&&label` is a `void *` address constant of the label's own object (its
+  token plus one, which no declaration has); a label its function doesn't
+  have, or `&&` outside a function's body, is an undeclared name at the
+  label's, where clang puts its errors. In `goto *expression` the `*` is
+  the goto's delimiter (the parser's child of the goto, with the whole
+  expression after it as its own child, a comma's or an assignment's too:
+  `goto *p ? &&a : &&b` goes to the conditional's value, as clang's does), and
+  the expression converts to `const void *` as an assignment would. Clang's
+  jump-scope rules for it: a function with a computed goto and no address of a
+  label refuses its first one, and every computed goto must be inside each
+  variable-length array's scope and each statement expression that holds a
+  label whose address its function takes, since it may go to any of them.
+  Those scopes nest, so the labels' innermost ones intersect in one interval,
+  which each goto must be in: a pass over the function, not one per pair. The
+  control stream marks each such label's place (`CHECK_CONTROL_LABEL`) and a
+  computed goto is `CHECK_CONTROL_JUMP_INDIRECT`, with no `STACK_RESTORE`: as
+  in clang's code, leaving an array's block that way doesn't release its
+  storage, which the function's return does. An address of a label is a
+  reference to its function in the selection. The lowering gives Tier 0 each
+  function's labels (`Tier0Function.label_entries`), and the emission defines
+  a local symbol at each one's first record after branch sizing
+  (`.Lbuster_label_N`, of no type), which `GLOBAL_ADDRESS` reaches and a static
+  table's pointers point at. Not yet: the difference of two labels' addresses
+  as a static initializer's constant (GNU's relative jump tables), which clang
+  folds and the checker refuses as not a constant.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
@@ -732,11 +758,11 @@ after the fixes:
 
 Files compared counts each corpus's files, the mutated units' bases and the
 mutants. The scalar and vector paths gave identical columns on every one. The
-three differences left are in bases, and mutants aren't made of a unit whose
-base differs:
+differences left are in bases, and mutants aren't made of a unit whose base
+differs. Lua's `lvm.c`, GNU's labels as values (`&&L_OP_MOVE`, `goto *`), was
+one: since the checker takes them (#133), Lua's 34 files agree with clang (the
+corpus comparison, without mutants, on a laptop's clang 23). Two are left:
 
-- Lua's `lvm.c`: GNU's labels as values (`&&L_OP_MOVE`, `goto *`), which the
-  checker doesn't take yet;
 - the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
   `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
   floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s

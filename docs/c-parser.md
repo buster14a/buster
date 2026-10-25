@@ -154,7 +154,13 @@ them string literals but the operands and the names, which are names whatever
 the ordinary names mean, as `&&label`'s is, and nothing continues them
 (`asm("" + 1)` is an error); asm goto takes all four colons and a label at
 least, a top-level asm block only its template, and an asm label after a
-declarator only string literals. A C23 attribute list's items are a name,
+declarator only string literals. A computed goto's `*` (GNU's `goto
+*expression`, as clang's `ParseGotoStatement` reads it) isn't a prefix but the
+goto's delimiter, with `return`'s role: the goto's child, whose child is the
+whole expression after it, so that `goto *p ? &&a : &&b` and `goto *p + 1` go
+to the value of `p ? &&a : &&b` and of `p + 1`. The vector path's K2 gives
+every unary operator after `goto` that role, by one blend per block, and its
+checks send the others than `*` to the scalar parser's error. A C23 attribute list's items are a name,
 perhaps in a scope (`gnu::unused`) and with an argument clause, a balanced run
 of tokens, separated by commas; its items and a GNU attribute list's may be
 empty, the last one too.

@@ -694,14 +694,15 @@ struct Tier0TestCode
     uint64_t deep;
 };
 
-// Whether two compilations of a function made the same code: records, branch columns and references.
+// Whether two compilations of a function made the same code: records, branch columns, references and labels' records.
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 {
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
-                a->deferred == b->deferred && a->deep == b->deep;
+                a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep;
     same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
     same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;
     same = same && memcmp(a->targets, b->targets, a->branch_count * sizeof(uint32_t)) == 0;
+    same = same && (a->label_count == 0 || memcmp(a->label_records, b->label_records, a->label_count * sizeof(uint32_t)) == 0);
     for (uint32_t r = 0; same && r < a->reference_count; r += 1)
     {
         const LinkReference* x = &a->references[r];
@@ -5001,6 +5002,7 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 }
 
 #include "buster/compiler/tier0_x87_test.c"
+#include "buster/compiler/tier0_label_test.c"
 #include "buster/compiler/tier0_deep_test.c"
 
 static int run_tier0_tests(int argc, char** argv)
@@ -5110,6 +5112,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_stack(&tally, &tables);
                 tier0_test_report("stack", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_labels(&tally);
+                tier0_test_report("labels", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

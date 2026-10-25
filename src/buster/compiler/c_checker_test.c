@@ -2534,6 +2534,133 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        {
+            // GNU C's labels as values (#133, Lua's interpreter): a static table of addresses of labels, a computed goto
+            // through it, through a local and through ?:, the addresses compared and stored, and a computed goto out of a
+            // variable-length array's block, which leaves its scope as clang lets it.
+            "labels as values",
+            "int f(int n, const unsigned char *code) {\n"
+            "    static const void *const table[] = { &&add, &&twice, &&done };\n"
+            "    void *last = &&done;\n"
+            "    int acc = n;\n"
+            "    goto *table[*code];\n"
+            "add:\n"
+            "    acc += code[1];\n"
+            "    code += 2;\n"
+            "    goto *table[*code];\n"
+            "twice:\n"
+            "    acc += acc;\n"
+            "    last = &&twice;\n"
+            "    code += 1;\n"
+            "    goto *(acc > 100 ? table[2] : table[*code]);\n"
+            "done:\n"
+            "    return last == &&twice ? acc : -acc;\n"
+            "}\n"
+            "int g(int n) {\n"
+            "    void *out = &&end;\n"
+            "    for (int i = 0; i < 3; i++) { int v[(n & 3) + 1]; v[0] = i; if (v[0] == 2) goto *out; }\n"
+            "    n = 0;\n"
+            "end:\n"
+            "    return n;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // An address of a label no function has: clang's "use of undeclared label", at the name.
+            "labels as values: an undeclared label",
+            "void f(void) {\n"
+            "    void *p = &&here;\n"
+            "    void *q = &&nowhere;\n"
+            "    goto *p;\n"
+            "here:\n"
+            "    (void)q;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // An address of a label outside a function's body.
+            "labels as values: outside a function",
+            "void f(void) { x: ; }\n"
+            "void *p = &&x;\n",
+            true,
+            false
+        },
+        {
+            // A computed goto in a function that takes no label's address.
+            "labels as values: a computed goto without labels",
+            "void f(void *p) {\n"
+            "    goto *p;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A computed goto may go to any of its function's labels: not into a variable-length array's scope, nor into a
+            // statement expression.
+            "labels as values: into a variable-length array's scope",
+            "void f(int n) {\n"
+            "    void *p = &&inner;\n"
+            "    goto *p;\n"
+            "    { int v[n]; inner: v[0] = 1; }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "labels as values: into a statement expression",
+            "int f(void) {\n"
+            "    void *p = &&inner;\n"
+            "    goto *p;\n"
+            "    return ({ inner: 1; });\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // goto *'s operand converts to const void * as an assignment would: an integer is clang's error.
+            "labels as values: a computed goto of an integer",
+            "void f(int n) {\n"
+            "    void *p = &&here;\n"
+            "    goto *n;\n"
+            "here:\n"
+            "    (void)p;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // goto *'s operand is the whole expression after the `*` (#431's review), not the `*`'s operand: a conditional
+            // of an int's condition, one of a void *'s sum, a comma and an assignment, all of them pointers.
+            "labels as values: a computed goto's whole expression",
+            "int f(int n, void *p, int k) {\n"
+            "    void *t[2] = { &&even, &&odd };\n"
+            "    goto *(n & 1) ? t[1] : t[0];\n"
+            "even:\n"
+            "    goto *k ? p + 0 : &&odd;\n"
+            "odd:\n"
+            "    goto *n++, &&done;\n"
+            "done:\n"
+            "    goto *p = &&end;\n"
+            "end:\n"
+            "    return n;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // And a conditional of integers is an integer, clang's error.
+            "labels as values: a computed goto of a conditional's integer",
+            "void f(void *p) {\n"
+            "    void *q = &&here;\n"
+            "    goto *p ? 1 : 0;\n"
+            "here:\n"
+            "    (void)q;\n"
+            "}\n",
+            true,
+            false
+        },
         // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
         // it; a prototype's ends with the prototype (#435).
         {

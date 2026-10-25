@@ -1630,6 +1630,67 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
+// #133's indirect jump to a label, which the adapter doesn't lower yet: both paths refuse the stream at the jump, after
+// validation and before anything is allocated, leaving the caller's result and both arenas as they were.
+static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
+{
+    static const uint8_t kinds[3] =
+    {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_JUMP_INDIRECT,
+        BUSTER_TYPED_RETURN
+    };
+    static const uint8_t classes[3] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_VOID
+    };
+    static const uint64_t values[3] =
+    {
+        7,
+        0,
+        0
+    };
+    // The label the indirect jump goes to.
+    static const uint32_t labels[1] =
+    {
+        2
+    };
+    const IrFunction preserved =
+    {
+        .instruction_count = 123,
+        .block_count = 17,
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    // Nonzero marks, so that a rollback to zero would show.
+    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    ir_lower_test_expect(tally, ready, "indirect jump arenas", 0, 0);
+    const Tier0Function source =
+    {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = 3,
+        .label_entries = labels,
+        .label_count = 1,
+    };
+    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    {
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        IrFunction result = preserved;
+        const IrCheck check = ir_lower_typed_path(&source, IR_VOID, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == 1 &&
+                                        output.length == output_mark && scratch.length == scratch_mark &&
+                                        result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                             "the indirect jump refused at its entry without allocation", 0, vector);
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 // Defined after the production interpreter, optimizers and selector in ir_stack_test.c: exercise their real contracts.
 static void ir_lower_test_stack(IrLowerTestTally* tally);
 
@@ -1739,6 +1800,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);
         ir_lower_test_stack(&tally);
+        ir_lower_test_indirect_jump(&tally);
         ir_lower_test_guarded(&tally);
         const Tier0ProgramOptions values =
         {
