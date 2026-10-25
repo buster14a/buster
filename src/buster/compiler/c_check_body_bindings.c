@@ -6,10 +6,11 @@
 // c_body_bindings_resolve with private arenas and (for scalar replay) a private reusable CBindingReplay. All source
 // arrays and the file index stay immutable. A missing local binding falls back at the original use's token position.
 //
-// Body-entry parameters/labels are reactivated at OPEN_BODY. The slice includes declarations there (including the
-// function itself when its activation falls there). Original undo marks differ from private marks by preceding
-// file activations. Exit restores may occur at the closing token or afterward, or be omitted when empty. The
-// translation-unit cleanup stays outside the slice. Preserve contiguous events and borrow their other columns.
+// Body-entry parameters, the tags their list declared, and labels are reactivated at OPEN_BODY. The slice includes
+// declarations there (including the function itself when its activation falls there). Original undo marks differ
+// from private marks by preceding file activations. Exit restores may occur at the closing token or afterward, or be
+// omitted when empty. The translation-unit cleanup stays outside the slice. Preserve contiguous events and borrow
+// their other columns.
 // Two bounded SIMD passes count/classify events and translate undo/end columns; there are exact scalar twins.
 //
 // This consumes already elaborated source events and declaration TypeIds. It does not defer declaration/type

@@ -122,7 +122,12 @@ composite declaration types, canonical object identities, linkage, storage
 duration, actual and tentative definitions, and each selected initializer node.
 Linked declarations also retain translation-unit identity across closed blocks.
 An out-of-scope prototype constrains later declarations of the same entity but
-does not silently change the type visible to an unprototyped call.
+does not silently change the type visible to an unprototyped call. A
+prototype's parameters, and the tags its list declares, end at its `)`. A
+definition's are declared again at its body's opening, as clang has them, since
+the body's scope is theirs too (C11 6.2.1p4): in
+`int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
+parameter's (#435).
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
@@ -478,7 +483,11 @@ What the lowering covers past scalars (#145's programs):
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
 - **Copies.** Struct and union assignment and initialization are `COPY`s of
   at most 256 bytes each, the source's address kept in a temporary between
-  them; a statement's assignment leaves no address to discard.
+  them; a statement's assignment leaves no address to discard, and neither
+  does a discarded comma's right operand (`k = 1, a = b;`). An assignment whose
+  value is used keeps its destination's address in a temporary too, pushed
+  again after the last `COPY`: whatever reads it takes its class from the entry
+  before it, which a `COPY`, of class `VOID`, can't give (#440).
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
