@@ -8,6 +8,18 @@
 // of main_command's branches first tests its unit, so that the other units' branches fold to false, and clang, which
 // emits a static function only once emitted code refers to it, emits none of theirs. main, in the driver's unit, asks
 // each other unit for the command in turn, then its own commands, then runs the compiler itself.
+//
+// The modules that several units' commands run compile in one unit alone, their home, which the others call (#270):
+// the lexer in the driver's unit, the preprocessor and the parser in the front end's, and the linker's (the runtime's
+// import and binding, a PIE's inputs and the executable writer) in the dynamic PIEs' unit. A module's entry points
+// take its macro (BUSTER_LEXER_ENTRY and the others, below) where its other functions take static: in the home it is
+// nothing, so that they have external linkage there, and in the other units BUSTER_ELSEWHERE, which makes their
+// definitions inline ones that are never inlined, which clang doesn't emit: their calls go to the home's, and the
+// static functions that only the entry points reach aren't emitted there either. A unit without main.c, a benchmark's,
+// has them static. Each unit still reads every definition, so that its diagnostics are the whole file's. A command
+// whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
+// variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
+// checks the rest (call_graph.c).
 #define BUSTER_UNIT_DRIVER 0
 #define BUSTER_UNIT_X86 1
 #define BUSTER_UNIT_FRONTEND 2
@@ -24,6 +36,39 @@
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
 #define BUSTER_IN_UNIT(unit) (BUSTER_UNIT == (unit))
+
+// An entry point in a unit that isn't its module's home: an inline definition, which clang emits only to inline it,
+// and noinline keeps it from that, so that the unit's calls go to the home's external definition. Calling the module's
+// static functions from it is a C2y feature that clang takes in C17 as an extension (-Wstatic-in-inline): the
+// definition is only ever compiled in its home.
+#define BUSTER_ELSEWHERE inline __attribute__((noinline))
+#pragma clang diagnostic ignored "-Wstatic-in-inline"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+#define BUSTER_HOME_DRIVER
+#else
+#define BUSTER_HOME_DRIVER BUSTER_ELSEWHERE
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
+#define BUSTER_HOME_FRONTEND
+#else
+#define BUSTER_HOME_FRONTEND BUSTER_ELSEWHERE
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC)
+#define BUSTER_HOME_DYNAMIC
+#else
+#define BUSTER_HOME_DYNAMIC BUSTER_ELSEWHERE
+#endif
+// The modules' homes (at the top): the lexer's (c_lexer.c), the preprocessor's (c_preprocessor.c), the parser's
+// (c_parser.c) but for the fragments' unit, which compiles a parser of its own with the fragment sink, and the linker's
+// (link.c's).
+#define BUSTER_LEXER_ENTRY BUSTER_HOME_DRIVER
+#define BUSTER_PREPROCESSOR_ENTRY BUSTER_HOME_FRONTEND
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS)
+#define BUSTER_PARSER_ENTRY static
+#else
+#define BUSTER_PARSER_ENTRY BUSTER_HOME_FRONTEND
+#endif
+#define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
 
 #include <stdint.h>
 #include <stdbool.h>

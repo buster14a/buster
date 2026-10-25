@@ -31,6 +31,11 @@ inherit its portability layers, build system, or performance-acceptance machiner
   `struct Name { ... };`, matching the existing codebase.
 - Use plain `static` for functions private to a translation unit. Do not
   import `BUSTER_F_DECL`, `BUSTER_GLOBAL_LOCAL`, or unity-build linkage macros.
+  The one exception is a module's entry points that `main.c`'s units compile
+  in one unit, their home, and call there: they take the module's macro
+  (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
+  `BUSTER_LINKER_ENTRY`), which `main.c` defines and which is `static`
+  anywhere else.
 - Use named constants for shared sizes, limits, and invariants. For example,
   prefer `BUSTER_LEX_VECTOR_COUNT`, `BUSTER_LEX_VECTOR_BYTES`, and a derived
   `BUSTER_LEX_CHUNK_BYTES` to unrelated `VECTOR_COUNT` and `VECTOR_SIZE`

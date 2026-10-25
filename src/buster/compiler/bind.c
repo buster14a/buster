@@ -96,7 +96,8 @@
 //     twin and oracle.
 // Both look names up in the runtime's index (runtime_find_global_name), which bind_test.c checks against a scan.
 //
-// main.c includes this file after runtime.c. Layout, in this order:
+// main.c includes this file after runtime.c. bind_begin and bind_end take BUSTER_LINKER_ENTRY rather than static:
+// main.c's units compile them in one unit alone (link.c). Layout, in this order:
 //   - API: BindError, BindPath, BindOverride, Bind and the entry points' prototypes.
 //   - Matching: bind_lane_mask, bind_visibility_rank, bind_fail, bind_name_symbol, bind_take_name, bind_match_vector,
 //     bind_match_exact and bind_match.
@@ -236,11 +237,11 @@ static __attribute__((unused)) LinkCapacity bind_capacity(const Runtime* runtime
 // appends Scrt1.o, crti.o and crtbeginS.o (crt1.o, crti.o and crtbeginT.o for a static runtime), numbering the
 // runtime's units from unit_base and copying atoms' bytes into `bytes`. Bind's arrays come from `arena`. False, with
 // bind->error, if it fails.
-static __attribute__((unused)) bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena);
+BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena);
 // Binds every name of the link, appending the archives' members it needs (libc_nonshared.a's, or a static runtime's),
 // then crtendS.o (crtend.o) and crtn.o, and lists the imports and exports. False, with bind->error and bind->name, if
 // it fails; the link is then unfit to link.
-static __attribute__((unused)) bool bind_end(Bind* bind, Link* link);
+BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_end(Bind* bind, Link* link);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Matching
@@ -1764,7 +1765,7 @@ static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, 
     return result;
 }
 
-static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
+BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
 {
     const uint32_t words = (runtime->member_count + 63) / 64;
     const uint32_t signature_words = (runtime->group_signatures + 63) / 64;
@@ -1831,7 +1832,7 @@ static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath 
     return bind->error == BIND_ERROR_NONE;
 }
 
-static bool bind_end(Bind* bind, Link* link)
+BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
 {
     // The runtime's definitions that took the program's over, now that the program's atoms have joined (Bind.overrides).
     for (uint32_t i = 0; bind->error == BIND_ERROR_NONE && i < bind->override_count; i += 1)

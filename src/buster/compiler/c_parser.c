@@ -25,7 +25,8 @@
 // parser's kinds (ParseKind: keywords merged by what they mean to the grammar, literals merged), pragma lines taken
 // out as events at their position, and `::` split into two colons.
 //
-// main.c includes this file after c_preprocessor.c; every function is static. Layout, in this order:
+// main.c includes this file after c_preprocessor.c; every function is static, but for the entry points that take
+// BUSTER_PARSER_ENTRY, which main.c's units compile in one unit alone. Layout, in this order:
 //   - Token kinds: ParseKind (BUSTER_PARSE_KINDS), parse_keyword_kinds and parse_kind_table.
 //   - The input: ParseTokens and parse_tokens_from_output (with its scalar twin).
 //   - The tree: levels, roles, thresholds and rules (BUSTER_PARSE_ROLES), and parse_select.
@@ -41,6 +42,12 @@
 #include <stdio.h>
 
 #include <immintrin.h>
+
+// The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
+// unit of its own, such as a benchmark's, has them static, as every other function here.
+#ifndef BUSTER_PARSER_ENTRY
+#define BUSTER_PARSER_ENTRY static
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Token kinds
@@ -4752,7 +4759,7 @@ struct ParseScalarResult
 static ParseScalarResult parse_scalar_fragments_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                                       ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, ParseBindingTrace* trace, CFragmentSink* fragments)
 #else
-static ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
+BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                              ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, ParseBindingTrace* trace)
 #endif
 {
@@ -4855,7 +4862,7 @@ static ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_
 }
 
 #if BUSTER_PARSE_FRAGMENT_SINK
-static ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
+BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                              ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, ParseBindingTrace* trace)
 {
     return parse_scalar_fragments_traced(kinds, names, flags, count, language, meanings, tree, scratch, diagnostics, capacity, diagnostic_count, trace, 0);
@@ -4868,7 +4875,7 @@ static ParseScalarResult parse_scalar_fragments(const uint8_t* kinds, const uint
 }
 #endif
 
-static ParseScalarResult parse_scalar(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
+BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                       ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count)
 {
     return parse_scalar_traced(kinds, names, flags, count, language, meanings, tree, scratch, diagnostics, capacity, diagnostic_count, 0);
@@ -11756,7 +11763,7 @@ static void parse_tables_initialize(void)
     }
 }
 
-static bool parse_initialize(Parser* parser, const ParseOptions* options, CLanguage language)
+BUSTER_PARSER_ENTRY bool parse_initialize(Parser* parser, const ParseOptions* options, CLanguage language)
 {
     parse_tables_initialize();
     *parser = (Parser){
@@ -11817,7 +11824,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
 
 // Parses the unit the preprocessor `pp` produced (pp_run's output). Returns false if it has errors or the parser ran out
 // of memory (parser->fatal); the diagnostics are in parser->diagnostics (parse_print_diagnostics prints them).
-static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
+BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp)
 {
     const PPTokens* output = &pp->output;
     bool result = output->count <= BUSTER_PARSE_MAX_TOKENS / 2;
@@ -12147,7 +12154,7 @@ static void parse_diagnostic_message(const Parser* parser, const Preprocessor* p
 
 // Prints the parse's diagnostics, as clang does: "file:line:column: error: message", then what stopped it, if anything did.
 // Their places come from the expansion history, recorded first if it was deferred (pp_history_ensure).
-static void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
+BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
 {
     if (parser->diagnostic_count != 0)
     {
