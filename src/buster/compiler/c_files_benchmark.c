@@ -632,7 +632,7 @@ int run_files_benchmark(int argc, char** argv)
             {
                 variants[v].read_limit = (uint32_t)strtoul(p + 11, 0, 10);
             }
-            else if (length == 12 && strncmp(p, "bytes=", 6) == 0 && strncmp(p + 6, "populate", 6) == 0)
+            else if (length == 14 && strncmp(p, "bytes=populate", 14) == 0)
             {
                 variants[v].bytes = FILE_CACHE_MAP_POPULATED;
             }
