@@ -365,6 +365,9 @@ static bool files_test_same_record(const PPFileData* a, const PPFileData* b, con
         result = result && memcmp(a->directive_hash, b->directive_hash, directives * sizeof(uint32_t)) == 0 &&
                  memcmp(a->directive_end, b->directive_end, directives * sizeof(uint32_t)) == 0 && memcmp(a->directive_kind, b->directive_kind, directives) == 0 &&
                  memcmp(a->directive_next, b->directive_next, directives * sizeof(uint32_t)) == 0;
+        // The line pages of a file prepared a window at a time (an entry per page, and one for the end).
+        const uint64_t pages = (uint64_t)a->length / BUSTER_PP_LINE_PAGE_BYTES + 1;
+        result = result && (a->line_pages != 0) == (b->line_pages != 0) && (a->line_pages == 0 || memcmp(a->line_pages, b->line_pages, pages * sizeof(uint32_t)) == 0);
     }
     return result;
 }

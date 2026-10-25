@@ -3537,6 +3537,7 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
     data->unterminated_comment = record->unterminated_comment;
     data->unterminated_comment_starts_line = record->unterminated_comment_starts_line;
     data->guard_opener = record->guard_opener;
+    data->line_pages = record->line_pages;
     data->prepared = true;
 }
 

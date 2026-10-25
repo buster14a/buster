@@ -454,7 +454,14 @@ makes its own; with one, the units and lanes that share it read each file once
 - **Lines.** `pp_line_of` counts newlines (64 bytes at a time, with
   popcounts) from a per-file cursor, because the preprocessor asks about later
   places as it goes (`__LINE__`, diagnostics, line markers). Each file's lines
-  are counted about once.
+  are counted about once. For a file prepared a window at a time (two windows
+  or more), the lexer read those bytes long before, so `pp_prepare_windows`
+  counts its line ends while each window is in the caches, right after the
+  window's directive scan (`pp_count_page_lines`). It keeps the count before
+  each 4 KB page (`PPFileData.line_pages`). A `\r\n` counts once, at its `\n`,
+  also where a page or a window ends between the two. `pp_line_of` then counts
+  from the cursor when the cursor is on the place's page before the place, and
+  from the page's start otherwise: at most 4 KB per question.
 - **Memory.** Each column of the files' tokens has an arena of its own: kinds,
   starts and values. A file's columns are pushed for the lexer's bound, one
   token per byte, then trimmed to the tokens it has. Before this, the columns
