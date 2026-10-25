@@ -254,7 +254,7 @@ static bool x86_target_test_gas(const char* directory)
         {
             if (x86_target_requirements[form] != 0)
             {
-                const X86Instruction instruction = x86_random_instruction(&random, (uint16_t)form, false);
+                const X86Instruction instruction = x86_random_instruction(&random, (uint16_t)form, true);
                 x86_print_instruction(file, &instruction, 0);
                 fputc('\n', file);
                 forms[count++] = (uint16_t)form;
