@@ -215,10 +215,11 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         else
         {
             // Tier 0's own refusals are features it doesn't have yet: an entry without a template, or values past its
-            // depth tables.
+            // depth tables that its deep slots don't take (tier0_select_deep).
             result->status = codes[b].error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
                              codes[b].error == TIER0_ERROR_UNSUPPORTED || codes[b].error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
-            result->reason = codes[b].error == TIER0_ERROR_DEPTH ? "expressions with more values live at once than Tier 0 has registers for" :
+            result->reason = codes[b].error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0 has registers for, with long double values or "
+                                                                   "a call's aggregate arguments, or than its deep slots take" :
                              codes[b].error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
             result->backend_error = codes[b].error;
             result->backend_node = codes[b].node;

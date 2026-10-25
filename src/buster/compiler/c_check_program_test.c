@@ -86,7 +86,7 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         "#include <fenv.h>\n"
         "#include <errno.h>\n"
         "#include <xmmintrin.h>\n"
-        "#include <signal.h>\n#include <sys/resource.h>\n#include <sys/wait.h>\n#include <unistd.h>\n"
+        "#include <signal.h>\n#include <sys/resource.h>\n#include <sys/wait.h>\n#include <unistd.h>\n#include <stdarg.h>\n"
         "int tested(int); int oracle_tested(int);\n"
         "void terminal_probe(void) __attribute__((weak));\n"
         "int external_data=17; int external_helper(int n){return n*3;}\n"
@@ -112,6 +112,19 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
         "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
         "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
+        // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
+        // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
+        // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
+        // the five registers after n's, then on the stack; external_floats' f8 and f9 come on the stack as floats, after
+        // xmm0 to xmm7, and its unnamed longs and doubles all on the stack.
+        "static unsigned long external_fold(unsigned long h,unsigned long v){return (h^v)*1099511628211UL;}\n"
+        "unsigned long external_variadic(int n,...){va_list a;va_start(a,n);unsigned long h=(unsigned long)n;for(int i=0;i<20;i++){"
+        "long l=va_arg(a,long);double d=va_arg(a,double);unsigned long b;__builtin_memcpy(&b,&d,8);h=external_fold(external_fold(h,(unsigned long)l),b);}"
+        "va_end(a);return h;}\n"
+        "unsigned long external_floats(int n,float f0,float f1,float f2,float f3,float f4,float f5,float f6,float f7,float f8,float f9,int m,...){"
+        "const float f[10]={f0,f1,f2,f3,f4,f5,f6,f7,f8,f9};va_list a;va_start(a,m);unsigned long h=(unsigned long)n*31+(unsigned long)m;"
+        "for(int i=0;i<10;i++){unsigned b;__builtin_memcpy(&b,&f[i],4);h=external_fold(h,b);}for(int i=0;i<10;i++){long l=va_arg(a,long);"
+        "double d=va_arg(a,double);unsigned long b;__builtin_memcpy(&b,&d,8);h=external_fold(external_fold(h,(unsigned long)l),b);}va_end(a);return h;}\n"
         "int main(void) { for (int repeat=0;repeat<3;repeat++) for (int n=-3;n<=19;n++) {\n"
         "int a=tested(n), b=oracle_tested(n); if(a!=b) { fprintf(stderr,\"n=%d repeat=%d ours=%d oracle=%d\\n\",n,repeat,a,b); return 1; } }\n"
         "if(terminal_probe){int p=fork();if(p<0)return 2;if(!p){struct rlimit r={0,0};setrlimit(RLIMIT_CORE,&r);terminal_probe();_exit(91);}\n"
@@ -861,6 +874,102 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "unsigned long r=(unsigned long)(d/2)+(unsigned long)(f/4)+(unsigned long)e+(unsigned long)g+(unsigned long)f+(unsigned long)(d-4096.0);"
         "unsigned long hi=(unsigned long)(double)w;return (int)(r%9973)^(int)(hi%10007)^(int)(u%1000)^(int)(t%977);}",
         "unsigned-long-floating-conversions", clang);
+    {
+        // Values past Tier 0's depth tables (tier0_select_deep): a call of 40 unsigned long and 24 double arguments, the
+        // most a call takes (BUSTER_TIER0_MAX_CALL_ARGUMENTS), each an expression evaluated over the arguments before it,
+        // with ?:, a division, a shift and a call among the later ones; a call through a pointer of 18; and a product
+        // nested 24 deep. Run against clang's.
+        char source[8192];
+        uint32_t length = 0;
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long many(");
+        for (uint32_t i = 0; i < 40; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long a%u,", i);
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "double d%u%s", i, i + 1 < 24 ? "," : "){unsigned long s=0;double t=0;");
+        }
+        for (uint32_t i = 0; i < 40; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "s=s*31+a%u;", i);
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "t=t*1.5+d%u;", i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "return s^(unsigned long)(long)(t*16);}unsigned long eighteen(");
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long b%u%s", i, i + 1 < 18 ? "," : "){return 0");
+        }
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "+b%u*%u", i, 2 * i + 1);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, ";}int tested(int n){unsigned long x=(unsigned long)n+3;unsigned long r=many(");
+        for (uint32_t i = 0; i < 40; i += 1)
+        {
+            static const char* const shapes[4] = { "x+%u", "(x&1?x*%u:x-%u)", "x/%u+(x<<%u%%7)", "eighteen(x,%u,x,x,x,x,x,x,x,x,x,x,x,x,x,x,x,x)" };
+            char argument[96];
+            snprintf(argument, sizeof(argument), shapes[i % 4], i + 2, i + 1);
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s,", argument);
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "(double)x*%u.5-%u%s", i, i, i + 1 < 24 ? "," : ");");
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long(*f)(");
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long%s", i + 1 < 18 ? "," : ")=eighteen;unsigned long q=f(");
+        }
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "x*%u+(x>>%u)%s", i + 1, i % 3, i + 1 < 18 ? "," : ");unsigned long deep=");
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "(x+%u)*(", i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "x");
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, ")");
+        }
+        snprintf(source + length, sizeof(source) - length, ";return (int)((r^q^deep)%%100003);}");
+        check_test_program_source(test, source, "values-past-the-depth-tables", clang);
+    }
+    {
+        // Indirect variadic calls past the depth tables (#434's review), to the harness's functions, which clang compiles:
+        // after a variable-length array, which gives the function its frame pointer (an integer table of 14) and moves
+        // rsp, one of 20 unsigned long and 20 double arguments in turn, past both tables, whose al the callee's prologue
+        // reads; and one of 10 floats, the last two on the stack, an int and 10 more of each, past the floating table.
+        char source[4096];
+        uint32_t length = 0;
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length,
+                                     "unsigned long external_variadic(int n,...);unsigned long external_floats(int n,float,float,float,float,float,float,float,"
+                                     "float,float,float,int m,...);int tested(int n){unsigned long x=(unsigned long)n+3;unsigned long buffer[(x&7)+1];"
+                                     "for(unsigned long i=0;i<=(x&7);i++)buffer[i]=x*i+1;unsigned long(*v)(int,...)=external_variadic;"
+                                     "unsigned long(*f)(int,float,float,float,float,float,float,float,float,float,float,int,...)=external_floats;"
+                                     "unsigned long a=v(n");
+        for (uint32_t i = 0; i < 20; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, ",x*%u+%u,(double)x*0.5-%u", i + 1, i, i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, ");unsigned long b=f(n");
+        for (uint32_t i = 0; i < 10; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, ",(float)x*0.25f+%u", i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, ",n+7");
+        for (uint32_t i = 0; i < 10; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, ",x*3+%u,(double)x/4+%u", i, i);
+        }
+        snprintf(source + length, sizeof(source) - length, ");return (int)((a^b^buffer[x&7])%%100003);}");
+        check_test_program_source(test, source, "variadic-calls-past-the-depth-tables", clang);
+    }
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);

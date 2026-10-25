@@ -384,8 +384,8 @@ typedef enum Tier0Error
     TIER0_OK,
     // An entry no template or deferred emitter covers yet: `node` names it.
     TIER0_ERROR_UNSUPPORTED,
-    // An expression deeper than the depth tables (more than 9 integer or 16 floating values live at once): spilling
-    // the deep values is the scalar path's, and not written yet.
+    // A stack deeper than the deep slots take (BUSTER_TIER0_MAX_DEPTH), or past the depth tables where deep values don't
+    // reach (tier0_select_deep): a function with long double values, or a call with aggregate arguments.
     TIER0_ERROR_DEPTH,
     // The output arena or the scratch arena has no room.
     TIER0_ERROR_MEMORY,
@@ -396,7 +396,8 @@ typedef enum Tier0Error
 // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
 // every branch a rel8 with displacement 0, indices ascending, a target the record its label marks or the count for the
 // end), and a LinkReference per symbolic field, its instruction a record index. `deferred` counts the entries the
-// vector path left to tier0_emit_deferred (the scalar path counts the same ones).
+// vector path left to tier0_emit_deferred (the scalar path counts the same ones), and `deep` those among them whose
+// values went to the deep slots (tier0_select_deep).
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -408,6 +409,7 @@ struct Tier0Code
     LinkReference* references;
     uint32_t reference_count;
     uint32_t deferred;
+    uint32_t deep;
     Tier0Error error;
     uint32_t node;
 };
@@ -1103,7 +1105,10 @@ struct Tier0TemplateInfo
     // The symbolic record's BUSTER_LINK_FIXUP_* and X86FixupField.
     uint8_t fixup_kind;
     uint8_t fixup_field;
-    uint8_t padding;
+    // How far below the entry's depth its registers read on each stack (2 for R2, 1 for R1, 0 for neither; the floating
+    // stack's from bit 2), the most of a home-dependent slot's cases', as its reach: a deep entry's window
+    // (tier0_select_deep).
+    uint8_t window;
     int32_t choice_immediate;
     uint32_t clobbers;
     // Which bytes of the compiled records take their hole (tier0_compiled).
@@ -1374,6 +1379,30 @@ static void tier0_note_reach(Tier0Template* template, uint8_t source)
     }
 }
 
+// How far below the depth a source reads on its stack (BUSTER_TIER0_SOURCE_R2 and R1, X2 and X1), as
+// Tier0TemplateInfo.window keeps it: the integer stack's in bits 0 and 1, the floating stack's in bits 2 and 3.
+static uint32_t tier0_source_window(uint8_t source)
+{
+    uint32_t window = 0;
+    if (source == BUSTER_TIER0_SOURCE_R2 || source == BUSTER_TIER0_SOURCE_R1)
+    {
+        window = source == BUSTER_TIER0_SOURCE_R2 ? 2 : 1;
+    }
+    else if (source == BUSTER_TIER0_SOURCE_X2 || source == BUSTER_TIER0_SOURCE_X1)
+    {
+        window = (source == BUSTER_TIER0_SOURCE_X2 ? 2u : 1u) << 2;
+    }
+    return window;
+}
+
+// The deeper of two windows, stack by stack.
+static uint8_t tier0_window_max(uint32_t a, uint32_t b)
+{
+    const uint32_t integer = (a & 3) > (b & 3) ? a & 3 : b & 3;
+    const uint32_t floating = (a >> 2 & 3) > (b >> 2 & 3) ? a >> 2 & 3 : b >> 2 & 3;
+    return (uint8_t)(integer | floating << 2);
+}
+
 // Sets one byte of a compiled record: a static byte, or a hole's.
 static void tier0_compile_byte(Tier0Template* template, uint32_t record, uint32_t offset, uint32_t hole, uint8_t value)
 {
@@ -1532,6 +1561,17 @@ static void tier0_end(uint32_t kind, uint32_t class, uint32_t variant, uint32_t 
         info.required_depth = template->required_depth;
         info.integer_reach = template->integer_reach;
         info.floating_reach = template->floating_reach;
+        for (uint32_t r = 0; r < template->length; r += 1)
+        {
+            const Tier0RecordSpec* spec = &template->specs[r];
+            const bool rm = spec->rm_kind == BUSTER_TIER0_RM_REGISTER || spec->rm_kind == BUSTER_TIER0_RM_BASE || spec->rm_kind == BUSTER_TIER0_RM_BASE_K ||
+                            spec->rm_kind == BUSTER_TIER0_RM_BASE_INDEX;
+            info.window = tier0_window_max(info.window, tier0_source_window(spec->reg));
+            info.window = tier0_window_max(info.window, rm ? tier0_source_window(spec->rm) : 0);
+            info.window = tier0_window_max(info.window, spec->rm_kind == BUSTER_TIER0_RM_BASE_INDEX ? tier0_source_window(spec->index) : 0);
+        }
+        // A template for one depth reads the values below it through its fixed registers too (division's dividend in rax).
+        info.window = tier0_window_max(info.window, template->required_depth != BUSTER_TIER0_ANY_DEPTH ? template->required_depth : 0);
         info.clobbers = template->clobbers;
         info.mask = template->mask;
         info.b_own = template->b_offset == BUSTER_TIER0_NO_OFFSET &&
@@ -2568,6 +2608,7 @@ static bool tier0_initialize(void)
                     const Tier0TemplateInfo* other = &tier0_template_infos[(value & BUSTER_TIER0_SLOT_TEMPLATE) + c];
                     first->integer_reach = other->integer_reach > first->integer_reach ? other->integer_reach : first->integer_reach;
                     first->floating_reach = other->floating_reach > first->floating_reach ? other->floating_reach : first->floating_reach;
+                    first->window = tier0_window_max(first->window, other->window);
                     first->clobbers |= other->clobbers;
                 }
             }
@@ -2711,7 +2752,26 @@ struct Tier0Entries
     uint32_t* positions;
     // The vector path's per-entry words (BUSTER_TIER0_WORD_*).
     uint64_t* words;
+    // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and a
+    // deep entry's depths before it, where `depths` and `floating_depths` hold the ones its records are made at.
+    uint8_t* deep;
+    uint8_t* deep_depths;
+    uint8_t* deep_floating_depths;
 };
+
+// A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
+// into the stack's first registers (INTEGER, FLOATING), or a call that reads its arguments from their slots (CALL); the
+// stacks whose registers it stores into their slots first (SPILL_*), their values being in registers before it, and those
+// it loads back from them last (FILL_*), their values being in registers after it.
+#define BUSTER_TIER0_DEEP_INTEGER 0x01
+#define BUSTER_TIER0_DEEP_FLOATING 0x02
+#define BUSTER_TIER0_DEEP_CALL 0x04
+#define BUSTER_TIER0_DEEP_SPILL_INTEGER 0x08
+#define BUSTER_TIER0_DEEP_SPILL_FLOATING 0x10
+#define BUSTER_TIER0_DEEP_FILL_INTEGER 0x20
+#define BUSTER_TIER0_DEEP_FILL_FLOATING 0x40
+// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
+#define BUSTER_TIER0_MAX_DEPTH 240
 
 static bool tier0_label(const uint64_t* labels, uint32_t entry)
 {
@@ -3063,8 +3123,10 @@ struct Tier0Home
 _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 
 // The frame below the saved registers, from rsp up: the outgoing stack arguments, the call save area (the depths below
-// a call's arguments, saved around it), two slots for the deferred division and shifts, long double's slots (`x87`: 16
-// bytes per integer depth from `x87_area`, an F80 value at depth d in slot d), the optional incoming
+// a call's arguments, saved around it), two slots for the deferred division and shifts, the deep slots (8 bytes per
+// depth from `deep_area`, value d of the integer stack in slot d, `deep_slots` of them, then `deep_floating_slots` of
+// the floating stack's: tier0_select_deep's, none without deep entries), long double's slots (`x87`: 16 bytes per
+// integer depth from `x87_area`, an F80 value at depth d in slot d), the optional incoming
 // variadic register-save area, the locals' slots, then the objects. Incoming saves never share outgoing
 // call-preservation storage. `size` is what the prologue subtracts from rsp (with the pushes and the return address, a
 // multiple of 16 when the function calls or has an object aligned to 16); `saved` has a bit per tier0_callee_saved
@@ -3087,6 +3149,9 @@ struct Tier0Frame
     uint32_t save_slots;
     uint32_t fixed_area;
     uint32_t fixed_slots;
+    uint32_t deep_area;
+    uint32_t deep_slots;
+    uint32_t deep_floating_slots;
     uint32_t x87_area;
     uint32_t variadic_area;
     uint32_t overflow_area;
@@ -3411,9 +3476,9 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
-// save area, the fixed slots, long double's slots, the optional incoming variadic saves, each memory local (8 bytes,
-// or exactly 24 for an address-only VA_LIST), and the objects, each at a multiple of its alignment and taking its
-// size rounded up to 8, in the locals' order. Anchor descriptors alias their frame/incoming addresses without owning
+// save area, the fixed slots, the deep slots, long double's slots, the optional incoming variadic saves, each memory
+// local (8 bytes, or exactly 24 for an address-only VA_LIST), and the objects, each at a multiple of its alignment and
+// taking its size rounded up to 8, in the locals' order. Anchor descriptors alias their frame/incoming addresses without owning
 // another slot. A parameter that arrives on the stack keeps its incoming slot, above the return address, and an
 // aggregate's its incoming slots, which the callee owns (its stack bytes are a copy). Check every displacement in 64
 // bits before narrowing; an unrepresentable frame is refused before any records or output are published.
@@ -3514,6 +3579,9 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     valid = valid && offset <= INT32_MAX;
     frame->fixed_area = valid ? (uint32_t)offset : 0;
     offset += 8 * frame->fixed_slots;
+    valid = valid && offset <= INT32_MAX;
+    frame->deep_area = valid ? (uint32_t)offset : 0;
+    offset += 8 * ((uint64_t)frame->deep_slots + frame->deep_floating_slots);
     if (frame->x87)
     {
         valid = valid && offset <= INT32_MAX;
@@ -3713,7 +3781,9 @@ static uint8_t tier0_register_of(uint8_t source, const Tier0Holes* holes)
 }
 
 // A record from its specification, field by field: the scalar expansion (the vector one copies the compiled bytes).
-static X86Instruction tier0_record_scalar(const Tier0RecordSpec* spec, const Tier0Holes* holes)
+// Always inlined, as it was with one caller: the scalar path's emission, whose loop it is most of; the deep entries'
+// (tier0_emit_deep) is the second.
+static inline __attribute__((always_inline)) X86Instruction tier0_record_scalar(const Tier0RecordSpec* spec, const Tier0Holes* holes)
 {
     X86Instruction record;
     memset(&record, 0, sizeof(record));
@@ -3772,8 +3842,22 @@ static X86Instruction tier0_record_scalar(const Tier0RecordSpec* spec, const Tie
 // ---------------------------------------------------------------------------------------------------------------------
 // The deferred entries
 
+// The immediates' choice requests, gathered by emission: each CHOICE record's index, row, value and context.
+typedef struct Tier0Choices Tier0Choices;
+struct Tier0Choices
+{
+    uint32_t* records;
+    uint16_t* rows;
+    int64_t* values;
+    uint16_t* contexts;
+    uint16_t* forms;
+    uint32_t count;
+};
+
 // A record sink: writes records at `records[count]` onward (when `records` isn't 0: the function's records, `count` an
-// absolute index) and counts them, and adds the calls' references.
+// absolute index) and counts them, and adds the calls' references and a deep entry's branch and choice request
+// (tier0_emit_deep's: its branch's record and target in the code's branch columns, `branch_count` of them, and its
+// request in `choices`, which emission's templates add to too; counted in `choice_count` when counting).
 typedef struct Tier0Writer Tier0Writer;
 struct Tier0Writer
 {
@@ -3781,6 +3865,11 @@ struct Tier0Writer
     uint32_t count;
     LinkReference* references;
     uint32_t reference_count;
+    uint32_t* branches;
+    uint32_t* targets;
+    uint32_t branch_count;
+    Tier0Choices* choices;
+    uint32_t choice_count;
 };
 
 static void tier0_put(Tier0Writer* writer, X86Instruction record)
@@ -4863,14 +4952,15 @@ static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floatin
 // The operand's register is the conversion's to overwrite: it consumes the value.
 #define BUSTER_TIER0_FROM_U64_RECORDS 14
 #define BUSTER_TIER0_TO_U64_RECORDS 11
-static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, uint32_t i, Tier0Writer* writer)
+// `registers` is the form, which tier0_emit_u64_convert gives as tier0_u64_convert_registers chooses it at the entry's
+// depths, and a deep entry's emission (tier0_emit_deep_deferred) at its depths before its window's.
+static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool registers, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t class = entries->key_classes[i];
     const uint32_t depth = entries->depths[i];
     const uint32_t floating = entries->floating_depths[i];
     const uint8_t direct = BUSTER_X86_REGISTER_DIRECT;
     const bool to_u64 = !tier0_class_floating(class);
-    const bool registers = tier0_u64_convert_registers(to_u64, depth, floating, pointer);
     if (!to_u64 && registers)
     {
         const bool single = class == BUSTER_TYPED_CLASS_F32;
@@ -4959,10 +5049,372 @@ static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, ui
     }
 }
 
+static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, uint32_t i, Tier0Writer* writer)
+{
+    const bool to_u64 = !tier0_class_floating(entries->key_classes[i]);
+    tier0_emit_u64_convert_form(entries, tier0_u64_convert_registers(to_u64, entries->depths[i], entries->floating_depths[i], pointer), i, writer);
+}
+
 // How many records tier0_emit_u64_convert writes for entry i (tier0_count_deferred's).
 static uint32_t tier0_count_u64_convert(const Tier0Entries* entries, uint32_t i)
 {
     return tier0_class_floating(entries->key_classes[i]) ? BUSTER_TIER0_FROM_U64_RECORDS : BUSTER_TIER0_TO_U64_RECORDS;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Deep entries
+
+// A deep entry as its records see it (tier0_select_deep marks them), per stack, the integer stack's at 0 and the floating
+// stack's at 1: its depth before it, and at its exit (a JUMP_VALUE's at its target, which its value is on); the depth its
+// own records are made at, which the depth columns hold for a stack it is deep on (its window: the values it reads, loaded
+// into the stack's first registers); and whether it leaves a value at the exit's top.
+typedef struct Tier0DeepEntry Tier0DeepEntry;
+struct Tier0DeepEntry
+{
+    uint32_t before[2];
+    uint32_t exit[2];
+    uint32_t window[2];
+    bool result[2];
+};
+
+static Tier0DeepEntry tier0_deep_entry(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
+{
+    const uint8_t kind = function->kinds[i];
+    const uint32_t stack = tier0_stack(function->classes[i]);
+    const Tier0Shape shape = tier0_shapes[kind];
+    const bool jump_value = kind == BUSTER_TYPED_JUMP_VALUE;
+    // The stack the entry leaves a value on (1 or 2), or 0.
+    const uint32_t leaves = kind == BUSTER_TYPED_CALL || jump_value || shape.push == BUSTER_TIER0_STACK_CLASS ? stack
+                            : shape.push == BUSTER_TIER0_STACK_INTEGER                                     ? 1
+                                                                                                           : 0;
+    Tier0DeepEntry deep;
+    deep.before[0] = entries->deep_depths[i];
+    deep.before[1] = entries->deep_floating_depths[i];
+    deep.exit[0] = (uint32_t)((int32_t)deep.before[0] + entries->integer_effects[i]) + (jump_value && stack == 1 ? 1u : 0u);
+    deep.exit[1] = (uint32_t)((int32_t)deep.before[1] + entries->floating_effects[i]) + (jump_value && stack == 2 ? 1u : 0u);
+    deep.window[0] = entries->depths[i];
+    deep.window[1] = entries->floating_depths[i];
+    deep.result[0] = leaves == 1;
+    deep.result[1] = leaves == 2;
+    return deep;
+}
+
+// The register of depth d of a stack (0, the integer one, or 1).
+static uint32_t tier0_stack_register(uint32_t stack, uint32_t d)
+{
+    return stack == 0 ? tier0_integer_depths[d] : BUSTER_TIER0_XMM(d);
+}
+
+// Value `index` of a stack's deep slot, as tier0_spill takes its offset.
+static uint32_t tier0_deep_slot(const Tier0Frame* frame, uint32_t stack, uint32_t index)
+{
+    return frame->deep_area + 8 * ((stack == 0 ? 0 : frame->deep_slots) + index);
+}
+
+// A deep entry's records before its own: the registers of each stack its flags spill stored into their slots, then the
+// window of each stack it is deep on loaded from its slots into the stack's first registers.
+static void tier0_deep_enter(Tier0Writer* writer, const Tier0Frame* frame, const Tier0DeepEntry* deep, uint32_t flags)
+{
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const bool spill = (flags & (s == 0 ? BUSTER_TIER0_DEEP_SPILL_INTEGER : BUSTER_TIER0_DEEP_SPILL_FLOATING)) != 0;
+        for (uint32_t d = 0; spill && d < deep->before[s]; d += 1)
+        {
+            tier0_spill(writer, frame, tier0_stack_register(s, d), tier0_deep_slot(frame, s, d), false);
+        }
+    }
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const bool window = (flags & (s == 0 ? BUSTER_TIER0_DEEP_INTEGER : BUSTER_TIER0_DEEP_FLOATING)) != 0;
+        const uint32_t base = deep->before[s] - deep->window[s];
+        for (uint32_t d = 0; window && d < deep->window[s]; d += 1)
+        {
+            tier0_spill(writer, frame, tier0_stack_register(s, d), tier0_deep_slot(frame, s, base + d), true);
+        }
+    }
+}
+
+// A deep entry's records after its own: the value it leaves on each stack it is deep on stored from its register at the
+// window's depth into its slot, then the registers of each stack its flags fill loaded back from their slots.
+static void tier0_deep_leave(Tier0Writer* writer, const Tier0Frame* frame, const Tier0DeepEntry* deep, uint32_t flags)
+{
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const bool window = (flags & (s == 0 ? BUSTER_TIER0_DEEP_INTEGER : BUSTER_TIER0_DEEP_FLOATING)) != 0;
+        if (window && deep->result[s])
+        {
+            const uint32_t top = deep->exit[s] - 1;
+            const uint32_t base = deep->before[s] - deep->window[s];
+            tier0_spill(writer, frame, tier0_stack_register(s, top - base), tier0_deep_slot(frame, s, top), false);
+        }
+    }
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const bool fill = (flags & (s == 0 ? BUSTER_TIER0_DEEP_FILL_INTEGER : BUSTER_TIER0_DEEP_FILL_FLOATING)) != 0;
+        for (uint32_t d = 0; fill && d < deep->exit[s]; d += 1)
+        {
+            tier0_spill(writer, frame, tier0_stack_register(s, d), tier0_deep_slot(frame, s, d), true);
+        }
+    }
+}
+
+// The template of a slot for entry i's homes: a home-dependent slot's case (A and B each a register or memory: the
+// first template's index plus A's bit plus twice B's).
+static inline __attribute__((always_inline)) uint32_t tier0_home_case(const Tier0Function* function, const Tier0Home* homes, uint32_t i, uint16_t entry)
+{
+    uint32_t index = entry & BUSTER_TIER0_SLOT_TEMPLATE;
+    if ((entry & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0)
+    {
+        const Tier0TemplateInfo* first = &tier0_template_infos[index];
+        const uint8_t kind = function->kinds[i];
+        const bool own = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+        const bool a_register = first->a_offset != BUSTER_TIER0_NO_OFFSET && homes[function->values[i - first->a_offset]].is_register != 0;
+        const bool b_register = first->b_offset != BUSTER_TIER0_NO_OFFSET ? homes[function->values[i - first->b_offset]].is_register != 0
+                                                                          : own && homes[function->values[i]].is_register != 0;
+        index += (a_register ? 1u : 0u) + (b_register ? 2u : 0u);
+    }
+    return index;
+}
+
+// Whether a deep entry's slot has a template at the depth of its window (`depth`), or its records are its deferred
+// emitter's at that depth.
+static bool tier0_deep_template(uint16_t slot, uint32_t depth)
+{
+    const bool template = slot != BUSTER_TIER0_SLOT_DEFERRED && slot != BUSTER_TIER0_SLOT_UNSUPPORTED;
+    const uint32_t required = template ? tier0_template_infos[slot & BUSTER_TIER0_SLOT_TEMPLATE].required_depth : BUSTER_TIER0_ANY_DEPTH;
+    return template && (required == BUSTER_TIER0_ANY_DEPTH || required == depth);
+}
+
+// A deep branch's record, with its column's entry: its record's index and its target's first record.
+static void tier0_put_branch(Tier0Writer* writer, const Tier0Entries* entries, X86Instruction record, uint32_t target)
+{
+    if (writer->records != 0)
+    {
+        writer->branches[writer->branch_count] = writer->count;
+        writer->targets[writer->branch_count] = entries->positions[target];
+    }
+    writer->branch_count += 1;
+    tier0_put(writer, record);
+}
+
+static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live);
+
+// A deep call (BUSTER_TIER0_DEEP_CALL): every value in its slot, the stacks its flags spill stored there first; each
+// argument read from its slot, a stack one through rax into its place in the outgoing area, then each register one
+// straight into its register; an indirect call's callee into r11; then the call as tier0_emit_call makes it, its result
+// stored into its slot, and the stacks its flags fill loaded back. Nothing below the arguments is saved around it: it is
+// in the slots. Its arguments are values: tier0_select_deep leaves a call with aggregate arguments to TIER0_ERROR_DEPTH.
+static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                                 Tier0Writer* writer)
+{
+    const uint32_t flags = entries->deep[i];
+    const uint32_t call = (uint32_t)function->values[i];
+    const uint32_t first = function->call_first[call];
+    const uint32_t count = function->call_argument_counts[call];
+    const bool indirect = function->call_targets[call] == 0;
+    const Tier0DeepEntry deep = tier0_deep_entry(function, entries, i);
+    uint32_t integer_arguments = 0;
+    uint32_t floating_arguments = 0;
+    for (uint32_t a = 0; a < count; a += 1)
+    {
+        const bool floating = tier0_class_floating(function->argument_classes[first + a]);
+        integer_arguments += floating ? 0 : 1;
+        floating_arguments += floating ? 1 : 0;
+    }
+    const uint32_t below = deep.before[0] - integer_arguments - (indirect ? 1 : 0);
+    const uint32_t floating_below = deep.before[1] - floating_arguments;
+    tier0_deep_enter(writer, frame, &deep, flags & (BUSTER_TIER0_DEEP_SPILL_INTEGER | BUSTER_TIER0_DEEP_SPILL_FLOATING));
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        uint32_t integer = 0;
+        uint32_t floating = 0;
+        for (uint32_t a = 0; a < count; a += 1)
+        {
+            const uint32_t class = function->argument_classes[first + a];
+            const AbiLocation location = function->argument_locations[first + a];
+            const bool is_floating = tier0_class_floating(class);
+            const uint32_t slot = is_floating ? tier0_deep_slot(frame, 1, floating_below + floating) : tier0_deep_slot(frame, 0, below + (indirect ? 1 : 0) + integer);
+            integer += is_floating ? 0 : 1;
+            floating += is_floating ? 1 : 0;
+            if (pass == 0 && location.kind == BUSTER_ABI_LOCATION_STACK)
+            {
+                tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
+                tier0_extend(writer, class, X86_REGISTER_RAX);
+                tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)location.stack_offset, 0));
+            }
+            else if (pass == 1 && location.kind == BUSTER_ABI_LOCATION_REGISTERS)
+            {
+                const uint32_t destination = tier0_abi_register(location.registers[0]);
+                tier0_spill(writer, frame, destination, slot, true);
+                tier0_extend(writer, class, destination);
+            }
+        }
+    }
+    if (indirect)
+    {
+        tier0_spill(writer, frame, X86_REGISTER_R11, tier0_deep_slot(frame, 0, below), true);
+    }
+    const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
+    const AbiReturn returned = function->calls[call].result;
+    if (object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY)
+    {
+        const Tier0Home home = homes[object - 1];
+        tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
+    }
+    if (function->call_variadic[call])
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
+    }
+    if (indirect)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else
+    {
+        if (writer->records != 0)
+        {
+            writer->references[writer->reference_count] = (LinkReference){
+                .instruction = writer->count,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_CALL,
+                .target = function->call_targets[call],
+                .addend = 0,
+            };
+        }
+        writer->reference_count += 1;
+        tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    }
+    const uint32_t result = tier0_stack(function->classes[i]);
+    if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
+    {
+        const Tier0Home home = homes[object - 1];
+        const bool high = (returned.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+        const uint32_t parts = tier0_x87_parts(returned);
+        for (uint32_t k = 0; k < parts; k += 1)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, home.reg, home.mode, home.displacement + 16 * (int32_t)k, 0));
+        }
+        for (uint32_t k = 0; k < 2 && parts == 0; k += 1)
+        {
+            if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+            {
+                const uint32_t offset = high ? 8 : 8 * k;
+                tier0_store_part(writer, tier0_abi_register(returned.registers[k]), returned.part_bytes == 16 ? 16 : 8, home, offset);
+            }
+        }
+    }
+    else if (result != 0)
+    {
+        const uint32_t stack = result - 1;
+        tier0_spill(writer, frame, tier0_stack_register(stack, 0), tier0_deep_slot(frame, stack, stack == 0 ? below : floating_below), false);
+    }
+    tier0_deep_leave(writer, frame, &deep, flags & (BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING));
+}
+
+// A deep entry's own records where its slot has no template at its window's depth: its deferred emitter's at that depth.
+static void tier0_emit_deep_deferred(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                                     Tier0Writer* writer)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
+    {
+        tier0_emit_division(function, entries, frame, homes, i, writer);
+    }
+    else if (kind == BUSTER_TYPED_COPY)
+    {
+        tier0_emit_copy(function, entries, i, writer);
+    }
+    else if (tier0_moves_stack(kind))
+    {
+        tier0_emit_stack(entries, frame, i, writer);
+    }
+    else if (kind == BUSTER_TYPED_CONVERT)
+    {
+        // Its form at its depths before its window's, where selection counted its registers and tier0_deferred_uses
+        // found them (so a deep conversion to U64 is always the red zone's, and one from U64 deep on the floating stack
+        // alone the registers' where its integer depth has room).
+        const bool to_u64 = !tier0_class_floating(entries->key_classes[i]);
+        const bool registers = tier0_u64_convert_registers(to_u64, entries->deep_depths[i], entries->deep_floating_depths[i], frame->pointer);
+        tier0_emit_u64_convert_form(entries, registers, i, writer);
+    }
+    else
+    {
+        tier0_emit_shift(entries, frame, i, writer);
+    }
+}
+
+// A deep entry's records (tier0_select_deep's), in place of its template's or its deferred emitter's: those, at the
+// depths of its windows, between tier0_deep_enter's and tier0_deep_leave's; a template's branch, its last record, after
+// them, whose loads keep the flags its compare set; its choice request with the templates' (the writer's). Out of line:
+// the deep entries are rare, and the deferred entries' dispatch inlines what it calls.
+static __attribute__((noinline)) void tier0_emit_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t flags = entries->deep[i];
+    if ((flags & BUSTER_TIER0_DEEP_CALL) != 0)
+    {
+        tier0_emit_deep_call(function, entries, frame, homes, i, writer);
+    }
+    else
+    {
+        const Tier0DeepEntry deep = tier0_deep_entry(function, entries, i);
+        tier0_deep_enter(writer, frame, &deep, flags);
+        const uint16_t slot = tier0_slot(entries->key_kinds[i], entries->key_classes[i], entries->variants[i]);
+        X86Instruction branch;
+        memset(&branch, 0, sizeof(branch));
+        uint32_t target = UINT32_MAX;
+        if (tier0_deep_template(slot, entries->depths[i]))
+        {
+            const uint32_t index = tier0_home_case(function, homes, i, slot);
+            const Tier0TemplateInfo* info = &tier0_template_infos[index];
+            const Tier0Holes holes = tier0_holes_scalar(function, entries, homes, i, info);
+            for (uint32_t r = 0; r < info->length; r += 1)
+            {
+                const X86Instruction record = tier0_record_scalar(&tier0_templates[index].specs[r], &holes);
+                if (r == info->choice && writer->choices != 0)
+                {
+                    Tier0Choices* choices = writer->choices;
+                    choices->records[choices->count] = writer->count;
+                    choices->rows[choices->count] = info->choice_row;
+                    choices->values[choices->count] = info->choice_static != 0 ? (int64_t)info->choice_immediate : (int64_t)holes.k;
+                    choices->contexts[choices->count] = tier0_choice_context(&record, info->choice_live);
+                    choices->count += 1;
+                }
+                writer->choice_count += r == info->choice ? 1 : 0;
+                if (r == info->fixup)
+                {
+                    if (writer->records != 0)
+                    {
+                        writer->references[writer->reference_count] = (LinkReference){
+                            .instruction = writer->count,
+                            .field = info->fixup_field,
+                            .kind = info->fixup_kind,
+                            .target = (SymbolId)function->values[i],
+                            .addend = 0,
+                        };
+                    }
+                    writer->reference_count += 1;
+                }
+                if (r == info->branch)
+                {
+                    branch = record;
+                    target = info->end != 0 ? function->count : (uint32_t)function->values[i];
+                }
+                else
+                {
+                    tier0_put(writer, record);
+                }
+            }
+        }
+        else
+        {
+            tier0_emit_deep_deferred(function, entries, frame, homes, i, writer);
+        }
+        tier0_deep_leave(writer, frame, &deep, flags);
+        if (target != UINT32_MAX)
+        {
+            tier0_put_branch(writer, entries, branch, target);
+        }
+    }
 }
 
 // The records of a deferred entry (into `writer`, which counts them when it has no records). `x87` is Tier0Frame.x87: a
@@ -5022,6 +5474,22 @@ static void tier0_emit_deferred(const Tier0Function* function, const Tier0Entrie
     if (frame->x87)
     {
         tier0_emit_deferred_x87(function, entries, frame, homes, i, writer);
+    }
+    else
+    {
+        tier0_emit_deferred_entry(function, entries, frame, homes, i, false, writer);
+    }
+}
+
+// A deferred entry of a function with deep entries (which has no long double values: tier0_select_deep refuses them): a
+// deep entry's records (tier0_emit_deep's), or another's as in any function. Only measuring's and emission's versions for
+// such functions call it, so that the others don't test for deep entries.
+static void tier0_emit_deferred_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                                     Tier0Writer* writer)
+{
+    if (entries->deep[i] != 0)
+    {
+        tier0_emit_deep(function, entries, frame, homes, i, writer);
     }
     else
     {
@@ -5594,6 +6062,166 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
     return function->x87 ? tier0_select_x87(function, entries, frame, error) : tier0_select_entries(function, entries, frame, error, false);
 }
 
+// What a deferred slot's emitter (but a call's) uses of each stack (0, the integer one, or 1): whether it uses its
+// registers, how far below the depth it reads (its window) and the highest depth it writes, as tier0_select_deep reads a
+// template's from its reach and window. `pointer` is whether the function has a frame pointer. A long double's are never
+// asked for.
+static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const uint32_t* before, bool pointer, bool* uses,
+                                uint32_t* window, int32_t* touch)
+{
+    const uint32_t kind = entries->key_kinds[i];
+    if (kind == BUSTER_TYPED_COPY)
+    {
+        // Its two addresses, and its scratch at the depth (an XMM register's from 16 bytes).
+        const bool wide = function->values[i] >= 16;
+        uses[0] = true;
+        window[0] = 2;
+        touch[0] = wide ? (int32_t)before[0] - 1 : (int32_t)before[0];
+        uses[1] = wide;
+        touch[1] = (int32_t)before[1];
+    }
+    else if (kind == BUSTER_TYPED_CONVERT)
+    {
+        // A conversion between U64 and a floating class: its operand on one stack and its result on the other, and in its
+        // register form the stacks' first free registers (to U64, the integer stack's next one too), where
+        // tier0_u64_convert_registers chooses that form at these depths, as selection did and its emission does.
+        const uint32_t to = tier0_class_floating(entries->key_classes[i]) ? 1 : 0;
+        const bool registers = tier0_u64_convert_registers(to == 0, before[0], before[1], pointer);
+        uses[0] = true;
+        uses[1] = true;
+        window[1 - to] = 1;
+        touch[0] = to == 0 ? (int32_t)before[0] + (registers ? 1 : 0) : (int32_t)before[0] - (registers ? 0 : 1);
+        touch[1] = to == 0 ? (int32_t)before[1] - (registers ? 0 : 1) : (int32_t)before[1];
+    }
+    else
+    {
+        // ALLOCA, STACK_SAVE and STACK_RESTORE: an operand, a result, or both, at their depths.
+        const bool operand = kind != BUSTER_TYPED_STACK_SAVE;
+        uses[0] = true;
+        window[0] = operand ? 1 : 0;
+        touch[0] = operand ? (int32_t)before[0] - 1 : (int32_t)before[0];
+    }
+}
+
+// The deep entries of a function whose stacks go past the depth tables (selection's TIER0_ERROR_DEPTH): their values in
+// the frame's deep slots. At each entry's start a stack's values are where its depth says, all in their registers up to
+// the table's depth count (14 integer ones with a frame pointer, 15 without; 16 floating ones) and all in their slots past
+// it, so that every way into a label agrees. An entry is deep on a stack where its exit (a JUMP_VALUE's at its target)
+// and its start are on the two sides of that line, or where it uses the stack's registers past it or reaches past the
+// table. It loads the values it reads (its window, 2 at most) from their slots into the stack's first registers, after
+// storing the registers into their slots if they were there, makes its own records at that depth (the depth columns hold
+// it from here on: tier0_emit_deep), stores its result into its slot, and loads the registers back if its exit is within
+// the table. A call deep on either stack takes its arguments from their slots (tier0_emit_deep_call). Every deep entry is
+// deferred, in both paths, and counted in *deep_count. Returns TIER0_OK, or TIER0_ERROR_DEPTH where deep values don't
+// reach: a function with long double values (whose slots its depths index), a call with aggregate arguments at depths
+// whose copies' scratch registers are past the tables, or a stack deeper than BUSTER_TIER0_MAX_DEPTH, which the depth
+// columns' bytes would wrap past.
+static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, bool vector, uint32_t* deep_count)
+{
+    const uint32_t count = function->count;
+    const uint32_t limits[2] = { (uint32_t)tier0_integer_depth_count(frame->pointer), BUSTER_TIER0_FLOATING_DEPTHS };
+    const uint8_t window_flags[2] = { BUSTER_TIER0_DEEP_INTEGER, BUSTER_TIER0_DEEP_FLOATING };
+    const uint8_t spill_flags[2] = { BUSTER_TIER0_DEEP_SPILL_INTEGER, BUSTER_TIER0_DEEP_SPILL_FLOATING };
+    const uint8_t fill_flags[2] = { BUSTER_TIER0_DEEP_FILL_INTEGER, BUSTER_TIER0_DEEP_FILL_FLOATING };
+    entries->deep = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    entries->deep_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    entries->deep_floating_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    Tier0Error error = entries->deep != 0 && entries->deep_depths != 0 && entries->deep_floating_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+    error = error == TIER0_OK && function->x87 ? TIER0_ERROR_DEPTH : error;
+    uint32_t slots[2] = { 0, 0 };
+    for (uint32_t i = 0; i < count && error == TIER0_OK; i += 1)
+    {
+        // A stack's depth rises by one entry at a time at most, so one past the limit would have shown here first.
+        const uint32_t before[2] = { entries->depths[i], entries->floating_depths[i] };
+        error = before[0] >= BUSTER_TIER0_MAX_DEPTH || before[1] >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
+        uint32_t flags = 0;
+        uint32_t window[2] = { 0, 0 };
+        if (entries->absorbed[i] == 0 && error == TIER0_OK)
+        {
+            const uint8_t kind = function->kinds[i];
+            const uint32_t stack = tier0_stack(function->classes[i]);
+            const bool jump_value = kind == BUSTER_TYPED_JUMP_VALUE;
+            const uint32_t exit[2] = { (uint32_t)((int32_t)before[0] + entries->integer_effects[i]) + (jump_value && stack == 1 ? 1u : 0u),
+                                       (uint32_t)((int32_t)before[1] + entries->floating_effects[i]) + (jump_value && stack == 2 ? 1u : 0u) };
+            if (kind == BUSTER_TYPED_CALL)
+            {
+                const uint32_t call = (uint32_t)function->values[i];
+                bool aggregates = false;
+                for (uint32_t a = 0; a < function->call_argument_counts[call] && function->argument_sizes != 0; a += 1)
+                {
+                    aggregates |= function->argument_sizes[function->call_first[call] + a] != 0;
+                }
+                const bool deep = before[0] > limits[0] || exit[0] > limits[0] || before[1] > limits[1] || exit[1] > limits[1];
+                error = aggregates && (before[0] >= limits[0] || before[1] >= limits[1]) ? TIER0_ERROR_DEPTH : TIER0_OK;
+                for (uint32_t s = 0; s < 2 && deep; s += 1)
+                {
+                    flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] ? fill_flags[s] : 0);
+                    slots[s] = before[s] > slots[s] ? before[s] : slots[s];
+                    slots[s] = exit[s] > slots[s] ? exit[s] : slots[s];
+                }
+            }
+            else
+            {
+                bool uses[2] = { false, false };
+                int32_t touch[2] = { -1, -1 };
+                const uint16_t slot = tier0_slot(entries->key_kinds[i], entries->key_classes[i], entries->variants[i]);
+                if (slot != BUSTER_TIER0_SLOT_DEFERRED && slot != BUSTER_TIER0_SLOT_UNSUPPORTED)
+                {
+                    // Its registers, or the values its window reads through its fixed registers alone (division's
+                    // dividend in rax, with its divisor a local's home).
+                    const Tier0TemplateInfo* info = &tier0_template_infos[slot & BUSTER_TIER0_SLOT_TEMPLATE];
+                    window[0] = info->window & 3;
+                    window[1] = info->window >> 2 & 3;
+                    uses[0] = info->integer_reach != 0 || window[0] != 0;
+                    uses[1] = info->floating_reach != 0 || window[1] != 0;
+                    touch[0] = (int32_t)before[0] + info->integer_reach - 3;
+                    touch[1] = (int32_t)before[1] + info->floating_reach - 3;
+                }
+                else
+                {
+                    tier0_deferred_uses(function, entries, i, before, frame->pointer, uses, window, touch);
+                }
+                for (uint32_t s = 0; s < 2; s += 1)
+                {
+                    const bool crosses = (before[s] > limits[s]) != (exit[s] > limits[s]);
+                    const bool deep = crosses || (uses[s] && (before[s] > limits[s] || touch[s] >= (int32_t)limits[s]));
+                    flags |= deep ? window_flags[s] | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] ? fill_flags[s] : 0) : 0;
+                    slots[s] = deep && before[s] > slots[s] ? before[s] : slots[s];
+                    slots[s] = deep && exit[s] > slots[s] ? exit[s] : slots[s];
+                }
+            }
+        }
+        entries->deep[i] = (uint8_t)flags;
+        *deep_count += flags != 0 ? 1 : 0;
+        if (flags != 0)
+        {
+            // Its depths, and the depths its records are made at on the stacks it is deep on: its windows'.
+            entries->deep_depths[i] = (uint8_t)before[0];
+            entries->deep_floating_depths[i] = (uint8_t)before[1];
+            entries->depths[i] = (flags & BUSTER_TIER0_DEEP_INTEGER) != 0 ? (uint8_t)window[0] : entries->depths[i];
+            entries->floating_depths[i] = (flags & BUSTER_TIER0_DEEP_FLOATING) != 0 ? (uint8_t)window[1] : entries->floating_depths[i];
+            if (vector)
+            {
+                entries->words[i] |= BUSTER_TIER0_WORD_DEFERRED;
+            }
+            else
+            {
+                entries->templates[i] = BUSTER_TIER0_ENTRY_DEFERRED;
+            }
+        }
+    }
+    if (error == TIER0_OK)
+    {
+        // The depth registers within the tables, which the deep entries' records keep to (never a frame pointer's rbp).
+        frame->deep_slots = slots[0];
+        frame->deep_floating_slots = slots[1];
+        frame->integer_top = frame->integer_top < (int32_t)limits[0] ? frame->integer_top : (int32_t)limits[0] - 1;
+        frame->floating_top = frame->floating_top < (int32_t)limits[1] ? frame->floating_top : (int32_t)limits[1] - 1;
+        frame->clobbers &= frame->pointer ? ~(1u << X86_REGISTER_RBP) : ~0u;
+    }
+    return error;
+}
+
 // The counts the output's columns need, after the homes: each entry's final template (a home-dependent slot's case
 // for its homes) and length (a deferred entry's as its emitter counts it), and the branch records, references and
 // choice requests.
@@ -5605,7 +6233,11 @@ struct Tier0Counts
     uint32_t choices;
 };
 
-static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
+// The scalar path's measuring. `deep` is whether the function has deep entries (tier0_select_deep's), a constant at each
+// of tier0_measure's two uses, so that a function without them is measured as before they existed; a deep entry's
+// template may add a branch and a choice request (tier0_emit_deep's).
+static inline __attribute__((always_inline)) Tier0Counts tier0_measure_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame,
+                                                                              const Tier0Home* homes, bool deep)
 {
     Tier0Counts counts = { 0, 0, 0 };
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -5614,23 +6246,25 @@ static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* en
         uint32_t length = 0;
         if (tier0_is_deferred(entry))
         {
-            Tier0Writer counter = { 0, 0, 0, 0 };
-            tier0_emit_deferred(function, entries, frame, homes, i, &counter);
+            Tier0Writer counter = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            if (deep)
+            {
+                tier0_emit_deferred_deep(function, entries, frame, homes, i, &counter);
+            }
+            else
+            {
+                tier0_emit_deferred(function, entries, frame, homes, i, &counter);
+            }
             length = counter.count;
             counts.references += counter.reference_count;
+            counts.branches += deep ? counter.branch_count : 0;
+            counts.choices += deep ? counter.choice_count : 0;
         }
         else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
         {
-            uint32_t index = entry & BUSTER_TIER0_SLOT_TEMPLATE;
+            const uint32_t index = tier0_home_case(function, homes, i, entry);
             if ((entry & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0)
             {
-                const Tier0TemplateInfo* first = &tier0_template_infos[index];
-                const uint8_t kind = function->kinds[i];
-                const bool own = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
-                const bool a_register = first->a_offset != BUSTER_TIER0_NO_OFFSET && homes[function->values[i - first->a_offset]].is_register != 0;
-                const bool b_register = first->b_offset != BUSTER_TIER0_NO_OFFSET ? homes[function->values[i - first->b_offset]].is_register != 0
-                                                                                  : own && homes[function->values[i]].is_register != 0;
-                index += (a_register ? 1u : 0u) + (b_register ? 2u : 0u);
                 entries->templates[i] = (uint16_t)index;
             }
             const Tier0TemplateInfo* info = &tier0_template_infos[index];
@@ -5642,6 +6276,93 @@ static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* en
         entries->lengths[i] = (uint16_t)length;
     }
     return counts;
+}
+
+// The scalar measuring of a function with deep entries, out of line.
+static __attribute__((noinline)) Tier0Counts tier0_measure_deep(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
+{
+    return tier0_measure_entries(function, entries, frame, homes, true);
+}
+
+static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
+{
+    return entries->deep != 0 ? tier0_measure_deep(function, entries, frame, homes) : tier0_measure_entries(function, entries, frame, homes, false);
+}
+
+// How many records tier0_emit_deep writes for entry i, with its references and branch counted into `counts`, from what
+// the emitter decides rather than by running it (tier0_count_deferred's way): the vector path's measuring.
+static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, Tier0Counts* counts)
+{
+    const uint32_t flags = entries->deep[i];
+    const Tier0DeepEntry deep = tier0_deep_entry(function, entries, i);
+    uint32_t count = 0;
+    count += (flags & BUSTER_TIER0_DEEP_SPILL_INTEGER) != 0 ? deep.before[0] : 0;
+    count += (flags & BUSTER_TIER0_DEEP_SPILL_FLOATING) != 0 ? deep.before[1] : 0;
+    count += (flags & BUSTER_TIER0_DEEP_FILL_INTEGER) != 0 ? deep.exit[0] : 0;
+    count += (flags & BUSTER_TIER0_DEEP_FILL_FLOATING) != 0 ? deep.exit[1] : 0;
+    if ((flags & BUSTER_TIER0_DEEP_CALL) != 0)
+    {
+        // Each argument's load (and its store, on the stack) with a narrow integer's extension, r11's, the hidden
+        // pointer's lea, al, the call, and the result's store (or a result object's).
+        const uint32_t call = (uint32_t)function->values[i];
+        const uint32_t first = function->call_first[call];
+        for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+        {
+            const uint32_t class = function->argument_classes[first + a];
+            const uint32_t kind = function->argument_locations[first + a].kind;
+            const uint32_t extension = tier0_class_integer(class) && tier0_class_bytes(class) < 4 ? 1 : 0;
+            count += kind == BUSTER_ABI_LOCATION_STACK ? 2 + extension : kind == BUSTER_ABI_LOCATION_REGISTERS ? 1 + extension : 0;
+        }
+        const bool indirect = function->call_targets[call] == 0;
+        const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
+        const bool stored = object != 0 && function->calls[call].result.kind == BUSTER_ABI_RESULT_REGISTERS;
+        count += indirect ? 1 : 0;
+        count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
+        count += function->call_variadic[call] ? 1 : 0;
+        count += 1;
+        count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
+        counts->references += indirect ? 0 : 1;
+    }
+    else
+    {
+        // Each window's loads and its result's store, and its own records.
+        count += (flags & BUSTER_TIER0_DEEP_INTEGER) != 0 ? deep.window[0] + (deep.result[0] ? 1u : 0u) : 0;
+        count += (flags & BUSTER_TIER0_DEEP_FLOATING) != 0 ? deep.window[1] + (deep.result[1] ? 1u : 0u) : 0;
+        const uint16_t slot = tier0_slot(entries->key_kinds[i], entries->key_classes[i], entries->variants[i]);
+        if (tier0_deep_template(slot, entries->depths[i]))
+        {
+            const Tier0TemplateInfo* info = &tier0_template_infos[tier0_home_case(function, homes, i, slot)];
+            count += info->length;
+            counts->references += info->fixup != 0xff ? 1 : 0;
+            counts->branches += info->branch != 0xff ? 1 : 0;
+            counts->choices += info->choice != 0xff ? 1 : 0;
+        }
+        else
+        {
+            count += tier0_count_deferred(function, entries, i, false, &counts->references);
+        }
+    }
+    return count;
+}
+
+// The branch columns in record order, for the vector path, whose emission writes a block's deep entries' branches
+// (tier0_emit_deep's) after its templates': an insertion sort, which moves only those.
+static void tier0_sort_branches(uint32_t* branches, uint32_t* targets, uint32_t count)
+{
+    for (uint32_t k = 1; k < count; k += 1)
+    {
+        const uint32_t branch = branches[k];
+        const uint32_t target = targets[k];
+        uint32_t j = k;
+        while (j > 0 && branches[j - 1] > branch)
+        {
+            branches[j] = branches[j - 1];
+            targets[j] = targets[j - 1];
+            j -= 1;
+        }
+        branches[j] = branch;
+        targets[j] = target;
+    }
 }
 
 // Each entry's first record, after the prologue (the entry past the last is the epilogue's first record).
@@ -5705,25 +6426,16 @@ static bool tier0_build_choice_shapes(void)
     return valid;
 }
 
-// The immediates' choice requests, gathered by emission: each CHOICE record's index, row, value and context.
-typedef struct Tier0Choices Tier0Choices;
-struct Tier0Choices
-{
-    uint32_t* records;
-    uint16_t* rows;
-    int64_t* values;
-    uint16_t* contexts;
-    uint16_t* forms;
-    uint32_t count;
-};
 
 // Emission for the scalar path, in entry order: the prologue; each entry's template expanded at its place, field by
 // field from its specifications, its choice request, branch and reference, or a deferred entry's records; then the
-// epilogue. tier0_emit_vector is its twin.
-static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
-                            Tier0Code* code, Tier0Choices* choices)
+// epilogue. tier0_emit_vector is its twin. `deep` is tier0_measure_entries': with deep entries, the branch count goes
+// to their emitter in the writer and back (a deep entry's branch comes in entry order, as a template's does).
+static inline __attribute__((always_inline)) void tier0_emit_body_entries(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                                         const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
+                                                                         bool deep)
 {
-    Tier0Writer writer = { code->records, 0, code->references, 0 };
+    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0 };
     tier0_emit_prologue(function, frame, homes, references, &writer);
     uint32_t branches = 0;
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -5733,7 +6445,16 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
         if (tier0_is_deferred(entry))
         {
             writer.count = position;
-            tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+            if (deep)
+            {
+                writer.branch_count = branches;
+                tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
+                branches = writer.branch_count;
+            }
+            else
+            {
+                tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+            }
             code->deferred += 1;
         }
         else if (entry != BUSTER_TIER0_ENTRY_ABSORBED && tier0_template_infos[entry].length != 0)
@@ -5780,6 +6501,26 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
     code->reference_count = writer.reference_count;
 }
 
+// The scalar emission of a function with deep entries, out of line.
+static __attribute__((noinline)) void tier0_emit_body_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes,
+                                                           const uint32_t* references, Tier0Code* code, Tier0Choices* choices)
+{
+    tier0_emit_body_entries(function, entries, frame, homes, references, code, choices, true);
+}
+
+static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
+                            Tier0Code* code, Tier0Choices* choices)
+{
+    if (entries->deep != 0)
+    {
+        tier0_emit_body_deep(function, entries, frame, homes, references, code, choices);
+    }
+    else
+    {
+        tier0_emit_body_entries(function, entries, frame, homes, references, code, choices, false);
+    }
+}
+
 // The per-entry columns, from the scratch arena.
 static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t count)
 {
@@ -5796,6 +6537,9 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
     entries->positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, padded);
+    entries->deep = 0;
+    entries->deep_depths = 0;
+    entries->deep_floating_depths = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
            entries->positions != 0;
@@ -5857,6 +6601,10 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     memset(&frame, 0, sizeof(frame));
     Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
     const uint32_t unsupported = error == TIER0_OK ? (vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
+    if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
+    {
+        error = tier0_select_deep(function, entries, &frame, scratch, vector, &code->deep);
+    }
     // Long double's slots, a function with long double values' (whose result, if one, leaves st0 from slot 0).
     frame.x87 = function->x87;
     frame.x87_result = function->x87 && tier0_x87_returns(function);
@@ -7437,10 +8185,11 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
 // - the positions are the lengths' prefix sums, in registers;
 // - the branch records', references' and choice requests' counts come from popcounts.
 // The last block's words and positions are stored whole, past the entries: emission expands every lane of a block, and a
-// lane past the entries has template 0 and the end's position, which the epilogue overwrites. `x87` is Tier0Frame.x87: a
-// constant at each of tier0_measure_vector's two uses, as tier0_select_entries's.
+// lane past the entries has template 0 and the end's position, which the epilogue overwrites. `x87` is Tier0Frame.x87 and
+// `deep` whether the function has deep entries (tier0_select_deep's, which has no long double values): constants at each
+// of tier0_measure_vector's three uses, as tier0_select_entries's are.
 static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes,
-                                                                                      uint32_t prologue, bool x87)
+                                                                                      uint32_t prologue, bool x87, bool deep)
 {
     const uint32_t count = function->count;
     const uint64_t* values = function->values;
@@ -7511,7 +8260,8 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(rest);
             rest &= rest - 1;
-            const uint32_t records = tier0_count_deferred(function, entries, first + lane, x87, &counts.references);
+            const uint32_t records = deep && entries->deep[first + lane] != 0 ? tier0_count_deep(function, entries, homes, first + lane, &counts)
+                                                                              : tier0_count_deferred(function, entries, first + lane, x87, &counts.references);
             length = _mm512_mask_set1_epi64(length, (__mmask8)(1u << lane), (int64_t)records);
         }
         counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
@@ -7531,12 +8281,20 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
 // The vector measuring of a function with long double values, out of line.
 static __attribute__((noinline)) Tier0Counts tier0_measure_vector_x87(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue)
 {
-    return tier0_measure_vector_entries(function, entries, homes, prologue, true);
+    return tier0_measure_vector_entries(function, entries, homes, prologue, true, false);
+}
+
+// And of a function with deep entries.
+static __attribute__((noinline)) Tier0Counts tier0_measure_vector_deep(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue)
+{
+    return tier0_measure_vector_entries(function, entries, homes, prologue, false, true);
 }
 
 static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue, bool x87)
 {
-    return x87 ? tier0_measure_vector_x87(function, entries, homes, prologue) : tier0_measure_vector_entries(function, entries, homes, prologue, false);
+    return x87                ? tier0_measure_vector_x87(function, entries, homes, prologue)
+           : entries->deep != 0 ? tier0_measure_vector_deep(function, entries, homes, prologue)
+                                : tier0_measure_vector_entries(function, entries, homes, prologue, false, false);
 }
 
 // One lane of emission: entry i's template expanded from `pair` (its hole block in the low 256 bits, or in the high ones
@@ -7562,8 +8320,12 @@ static inline __attribute__((always_inline)) __m512i tier0_expand(const uint64_t
 // - the choice requests are compressed into their columns, their contexts read from the expanded records;
 // - the branches, then the references and the deferred entries, are written an entry at a time in order, the deferred
 //   entries over what the lanes stored at their places.
-static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
-                              Tier0Code* code, Tier0Choices* choices)
+// `deep` is tier0_emit_body_entries': with deep entries, the branch and request counts go to their emitter in the writer
+// and back, and since a block's deep entries' branches come after its templates', the branch columns are sorted last
+// (tier0_sort_branches).
+static inline __attribute__((always_inline)) void tier0_emit_vector_entries(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                                           const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
+                                                                           bool deep)
 {
     const uint32_t count = function->count;
     const uint64_t* values = function->values;
@@ -7580,7 +8342,7 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     int64_t* choice_values = choices->values;
     uint16_t* contexts = choices->contexts;
     const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
-    Tier0Writer writer = { records, 0, links, 0 };
+    Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0, choices, 0 };
     tier0_emit_prologue(function, frame, homes, references, &writer);
     uint32_t branches = 0;
     uint32_t requests = 0;
@@ -7680,7 +8442,18 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
             if ((deferred >> lane & 1) != 0)
             {
                 writer.count = positions[i];
-                tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+                if (deep)
+                {
+                    writer.branch_count = branches;
+                    choices->count = requests;
+                    tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
+                    branches = writer.branch_count;
+                    requests = choices->count;
+                }
+                else
+                {
+                    tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+                }
                 deferred_count += 1;
             }
             else
@@ -7700,10 +8473,34 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     }
     writer.count = positions[count];
     tier0_emit_epilogue(function, frame, &writer);
+    if (deep)
+    {
+        tier0_sort_branches(branch_records, targets, branches);
+    }
     code->branch_count = branches;
     code->reference_count = writer.reference_count;
     code->deferred += deferred_count;
     choices->count = requests;
+}
+
+// The vector emission of a function with deep entries, out of line.
+static __attribute__((noinline)) void tier0_emit_vector_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes,
+                                                             const uint32_t* references, Tier0Code* code, Tier0Choices* choices)
+{
+    tier0_emit_vector_entries(function, entries, frame, homes, references, code, choices, true);
+}
+
+static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
+                              Tier0Code* code, Tier0Choices* choices)
+{
+    if (entries->deep != 0)
+    {
+        tier0_emit_vector_deep(function, entries, frame, homes, references, code, choices);
+    }
+    else
+    {
+        tier0_emit_vector_entries(function, entries, frame, homes, references, code, choices, false);
+    }
 }
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)

@@ -815,7 +815,12 @@ designs and the compilers already built this way.
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
   them deferred: loaded onto the x87, computed and stored back, its locals and
-  parameters objects and its constants an optional column. The output is
+  parameters objects and its constants an optional column. Values past the
+  depth tables (15 integer, 14 with a frame pointer, and 16 floating ones)
+  live in the frame's deep slots, a slot per depth: the entries whose values
+  cross that line or that use registers past it are deferred, their operands
+  loaded from the slots into the stacks' first registers around their own
+  records (`tier0_select_deep`). The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
@@ -4223,16 +4228,19 @@ informational.
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
 [--cross-count N] [--clang PATH] [--keep]]` (about 0.8 s on the 9700X, and
 2.9 s with `--cross-check`) checks `tier0.c` on programs from
-`tier0_generate.c`, `--count` (300) of each of five shapes: one function of
+`tier0_generate.c`, `--count` (300) of each of six shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
-address-taken locals, objects); larger; and larger with structs and unions
+address-taken locals, objects); larger; larger with structs and unions
 passed and returned by value (#137), from a catalog of records whose parts
 load every way (byte arrays of 1 to 17 bytes, floats and doubles mixed with
 integers both ways round, unions, a member aligned to 16, the empty struct,
 records past 16 bytes), whose programs must reach every kind of part,
 location and result the catalog makes, and functions with a frame pointer
-(variable-length arrays) that pass, take or return records. Their calls pass up to 12
-arguments, past the argument registers, a third of them (in the shapes with
+(variable-length arrays) that pass, take or return records; and larger past
+the depth tables (calls of 13 to 32 arguments, each evaluated over the ones
+before it, and deeper expressions, whose deep entries must be at least 1% of
+the entries). Their calls pass up to 12
+arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
@@ -4248,7 +4256,8 @@ it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
 cycles of every length) run on a register file, the vector path's application
 of chosen forms against the scalar path's on random records, that both paths
-refuse unsupported entries and expressions past the depths alike, and the
+refuse unsupported entries alike and compile up to 240 values at once alike,
+refusing more, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects, values and `VA_LIST`s whose places both paths must give
 alike, aligned, inside the frame and apart; copies: their rules, and a copy of
@@ -4256,12 +4265,17 @@ each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
 pointer, run natively: a probe must see `al` 3, `r11` its own address and the
 call's arguments, after moves that are cycles and that run through `r11`, with
-values saved around the call; and the operands: `tier0_validate` refusing each
+values saved around the call; and deep values (`tier0_deep_test.c`): seven
+functions that fill the depth tables and cross their line with an entry of each
+kind (a dropped value, `?:`, a fused compare and branch, floating values,
+division by a local and by a value and shifts by a register, a frame pointer's
+14, both stacks at once), run natively against the file's model; and the
+operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for
 `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
-depths, and a function that allocates 64 KB and up a thousand times, each in a
+depths (the 15th value in its deep slot), and a function that allocates 64 KB and up a thousand times, each in a
 scope of its own, around calls with stack arguments, run natively; and the
 aggregates at locations written by hand, 13 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
@@ -4314,8 +4328,8 @@ on the same inputs and compares the results and every global (a floating
 one's NaNs alike whatever their bits, as C leaves them), then times both; then
 as many programs of the records shape linked mixed, their even functions Tier
 0's and their odd ones clang's, so that calls pass and return structs and
-unions by value between the two compilers both ways.
-It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
+unions by value between the two compilers both ways, and as many of the deep
+shape. It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
 run times. A shared library generated beside them (GNU as source, which `as`
 and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so
 that the executable's slots for them are the loader's to fill (`GLOB_DAT`, and
