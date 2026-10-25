@@ -600,7 +600,12 @@ comparison of distinct pointers or of a pointer with an integer, and a
 conditional of either. The warnings clang makes errors by default
 (`-Wint-conversion`, `-Wincompatible-pointer-types` and its function-pointer
 group, `-Wreturn-mismatch`) are errors, but in a system header, where clang
-suppresses them and converts as it would have.
+suppresses them and converts as it would have. A token is in a system header
+when its expansion location is (`check_input_system_tokens`): the preprocessor
+judges every output token from runs its main loop keeps (`pp_system_levels`),
+or with `--scalar` and for a unit whose runs can't say, by the expansion
+history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
+levels" has both.
 Floating results are compared field by field, never by `long double` padding.
 
 ## Corpus comparison and semantic mutations

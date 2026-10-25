@@ -1676,12 +1676,12 @@ own diagnostics, which may have recorded the history). It takes the files the
 run read from the cache the run filled, as a later unit with that cache does.
 The unit preprocesses nothing more after its run.
 
-`-E` and `parse` defer the history. The checker's driver records it as the
-unit runs: `check_input_system_tokens` reads the history of every unit with a
-system header, since clang judges whether a token is in a system header by
-where its expansion is, which only the history says. Deferring it there too
-needs that classification from something the main loop keeps cheaply ("The
-main loop against #117's budget").
+`-E`, `parse` and the checker's driver defer the history. The checker judges
+whether a token is in a system header by where its expansion is, as clang
+does, from runs the main loop keeps ("System levels" below); it records the
+history only for `--scalar`, whose judgment is the history's, for a unit whose
+runs can't say, and with `-flazy-system-headers`, which reads every
+declaration's history.
 
 `test-preprocessor` runs every case and file once more as the drivers run it,
 with the vectorized kernels, no expansion starts and the history deferred
@@ -1706,6 +1706,53 @@ main's took 20.717-20.877, with 797 minor faults where main's had 1,012-1,014,
 and `parse -fsyntax-only` 18.671-18.965 ms where main's took 19.631-20.123.
 Recording the history costs what it did: both builds record the same history,
 and their times agree within two builds' placement noise.
+
+### System levels
+
+clang suppresses some warnings in system headers, judging each token by its
+expansion location: the place of the outermost macro invocation it came from,
+or for a token no macro made, its own. The checker needs that judgment for
+every token of a unit with a system header (`check_input_system_tokens`). The
+expansion history gives it: the walk from a token's origin to the place
+(`pp_expansion_location`), then the level of that place's range and its line
+notes (`pp_system_level_next`). Without the history, the main loop keeps runs of
+where the output comes from (`PPSystemRun`): from an output token on, the range
+it reads, the level there, and the location the range's part starts at. A run
+starts when a file is entered, when one ends, back in the file that included
+it, and at each line note (`#line`, a line marker, `#pragma GCC
+system_header`). A unit has a few hundred.
+
+The main loop reads an invocation in the file it writes the invocation's tokens
+from, so a token a macro made (`BUSTER_PP_FROM_MACRO`) has its run's level.
+Another token has its own location's: its run's when the location is in the
+run's part of its range, as the file's text is, and otherwise looked up.
+`pp_system_levels` does it 64 tokens at a time: a compare finds the tokens a
+macro made, four the locations in the run's part, the run's level is stored to
+all, and the few others are looked up. A run that changes the level while an
+invocation is collecting its arguments, or while an expansion read before the
+run is still being read, would give those tokens the wrong level. That needs a
+line note or a file's end among a macro's arguments, or a `_Pragma("GCC
+system_header")` from an expansion. The main loop then marks the runs inexact
+(`Preprocessor.system_runs_inexact`), and the checker records the history and
+judges by it.
+
+`pp_system_levels_history` keeps the history's judgment, which the checker made
+before the runs, as the twin. `test-preprocessor` compares the two paths on
+every output token of every case and file and of the fuzz batch, after checking
+that both kernels keep the same runs. On the repository's 53 translation units,
+10,194,926 output tokens are at a system level, 3,454,990 of them made by
+macros, and no unit is inexact. `sqlite3.c` has 53,292 at a system level and
+Lua's 34 files 187,066, all judged alike. The cases have one inexact unit, a
+system header that ends while an invocation collects its arguments. Five cases
+written by hand fix the levels of each output token for both paths: a system
+header's macros, pastes and stringifications in a user file and a user macro
+in the header, line markers, an `extern "C"` header's marker, `#pragma GCC
+system_header`, and a line marker among an invocation's arguments, whose runs
+must be inexact. A copy that judges macros' tokens by their own locations, one
+that never marks the runs inexact, one without the runs at a file's end, and
+one without the runs at line notes each fail `test-preprocessor`. The
+checker's corpus comparisons judge with the history on the scalar path and
+with the runs on the vector one, which must give the same tokens.
 
 ### Vectorized kernels and their scalar twins
 
@@ -2373,15 +2420,11 @@ With all of them, about 3.2 ms. The rest needs preprocessing on more cores
 (#149), or another budget. On 2026-10-25 the owner chose to go on, history
 replay first.
 
-History replay is in ("Deferred history"). `-E` and `parse` record no history
-for a unit without diagnostics, which takes `sqlite3.c`'s directive tables and
-main loop from 6.09-6.12 ms to 5.27-5.31 ms as they run it. The checker's
-driver still records it: `check_input_system_tokens` reads every unit's history
-when it has a system header, to judge each token by where its expansion is, as
-clang does. Deferring it there too needs that judgment from something the main
-loop keeps cheaply, such as the file and line notes each output run comes from,
-with the history as its twin and the fallback where a directive or a file's end
-falls inside an invocation.
+History replay is in ("Deferred history"). `-E`, `parse` and the checker's
+driver record no history for a unit without diagnostics, which takes
+`sqlite3.c`'s directive tables and main loop from 6.09-6.12 ms to 5.27-5.31 ms.
+The checker judges system headers' tokens from runs the main loop keeps,
+instead of the history ("System levels").
 
 ## Assembly output spacing
 
@@ -2470,12 +2513,12 @@ spellings alone would miss this change (#272).
 ## Next steps
 
 - **The main loop**, against #117's 2 ms: "The main loop against #117's budget"
-  above has where the time goes and the plan. History replay is in for `-E`
-  and `parse`; next, the checker's system-header judgment without the history,
-  so that a compile defers it too. Then the parser's input for file runs from
-  the file cache (to agree with #126's and #335's owners), and a leaner
-  expansion engine. #110's object-macro eligibility cache was measured and
-  rejected (see "Object-macro eligibility cache experiment" above).
+  above has where the time goes and the plan. History replay is in, for `-E`,
+  `parse` and the checker's driver ("Deferred history", "System levels"). Next,
+  the parser's input for file runs from the file cache (to agree with #126's
+  and #335's owners), and a leaner expansion engine. #110's object-macro
+  eligibility cache was measured and rejected (see "Object-macro eligibility
+  cache experiment" above).
 - **Clearing pages.** In a single run, prefaulting the arenas on another core
   while the first files are lexed would hide most of the 13%. Across many
   translation units, the arenas are reused (#152).

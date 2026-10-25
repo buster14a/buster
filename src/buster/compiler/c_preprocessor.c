@@ -317,9 +317,10 @@ struct PPOptions
     // record none, and preprocess the unit again, with history, when a diagnostic or a consumer of the history first
     // asks for it (into a preprocessor of its own, with these options, file cache and intern table). Their own
     // diagnostics are counted, not printed, and a unit that had any runs again at its end to print them with their
-    // notes, as it would have. A clean unit never runs again. -E and `parse` defer it; the checker reads the history of
-    // every unit with a system header (check_input_system_tokens), so its driver records it as the unit runs. The unit
-    // preprocesses nothing more after its run, and its options' no_history stays set.
+    // notes, as it would have. A clean unit never runs again. -E, `parse` and the checker's driver defer it; the checker
+    // judges system headers' tokens from the main loop's runs (pp_system_levels), and records the history only for
+    // --scalar's twin and a unit whose runs can't say. The unit preprocesses nothing more after its run, and its options'
+    // no_history stays set.
     bool defer_history;
     // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
     bool no_guard_skip;
