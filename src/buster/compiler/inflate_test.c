@@ -3,7 +3,9 @@
 //
 // test-inflate [--seed N] [--directory PATH] [--keep]: inflate.c against streams of the test's own making and of
 // gzip's.
-//   - Adler-32: the known values, and random inputs against a sum taken modulo at every byte;
+//   - Adler-32: the known values, and random inputs against a sum taken modulo at every byte, by bytes and by vectors;
+//     and the vector path against the byte path at every length to 300 and around its chunks and blocks, of random
+//     bytes and of 0xff, ending at a PROT_NONE page;
 //   - streams by hand, bit by bit: the empty stream, a stored block, fixed blocks with a literal and with a match, and
 //     each error the decoder reports: the header's (another method, a window past 32 KB, a check that fails, a preset
 //     dictionary), a block of type 3, a stored block whose lengths disagree, a dynamic block whose code length code is
@@ -162,6 +164,7 @@ static void inflate_test_adler(InflateTestTally* tally, uint64_t seed)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(known); i += 1)
     {
         inflate_test_expect(tally, inflate_adler32((const uint8_t*)known[i].text, strlen(known[i].text)) == known[i].adler, "a known Adler-32", i);
+        inflate_test_expect(tally, inflate_adler32_vector((const uint8_t*)known[i].text, strlen(known[i].text)) == known[i].adler, "a known Adler-32, by vectors", i);
     }
     uint64_t state = seed;
     static uint8_t bytes[200000];
@@ -180,7 +183,33 @@ static void inflate_test_adler(InflateTestTally* tally, uint64_t seed)
             b = (b + a) % 65521;
         }
         inflate_test_expect(tally, inflate_adler32(bytes, length) == (b << 16 | a), "Adler-32 against the sum taken modulo at every byte", length);
+        inflate_test_expect(tally, inflate_adler32_vector(bytes, length) == (b << 16 | a), "Adler-32 by vectors against the sum taken modulo at every byte", length);
     }
+    // The vector path against its twin: every length to 300 and around the 64-byte chunks and the blocks of 4,096 of
+    // them, of random bytes and of 0xff (the largest sums), each ending at a PROT_NONE page, where a read past the end
+    // faults.
+    const uint64_t block = 64 * 4096;
+    const uint64_t lengths[] = {
+        511, 512, 513, 4095, 4096, 4097, 5551, 5552, 5553, 65535, 65536, 65537,
+        block - 1, block, block + 1, 2 * block - 1, 2 * block, 2 * block + 1, 3 * block - 1, 3 * block, 3 * block + 63,
+    };
+    const uint64_t largest = 3 * block + 64;
+    InflateTestGuarded guarded = inflate_test_guard(largest);
+    inflate_test_expect(tally, guarded.mapping != 0, "map an input ending at a PROT_NONE page", largest);
+    for (uint32_t fill = 0; guarded.mapping != 0 && fill < 2; fill += 1)
+    {
+        for (uint64_t length = 0; length <= 300 + BUSTER_ARRAY_LENGTH(lengths); length += 1)
+        {
+            const uint64_t size = length <= 300 ? length : lengths[length - 301];
+            uint8_t* start = guarded.start + largest - size;
+            for (uint64_t i = 0; i < size; i += 1)
+            {
+                start[i] = fill != 0 ? 0xff : (uint8_t)inflate_test_next(&state);
+            }
+            inflate_test_expect(tally, inflate_adler32_vector(start, size) == inflate_adler32(start, size), "Adler-32 by vectors as by bytes, at a page's end", size);
+        }
+    }
+    inflate_test_unguard(&guarded);
 }
 
 static void inflate_test_by_hand(InflateTestTally* tally)
