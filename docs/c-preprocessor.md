@@ -1754,6 +1754,19 @@ one without the runs at line notes each fail `test-preprocessor`. The
 checker's corpus comparisons judge with the history on the scalar path and
 with the runs on the vector one, which must give the same tokens.
 
+Measured on the 9700X ([record](https://github.com/buster14a/buster-performance/blob/7afeefe26a969c5e117044e9ccd414bb59cd55f8/docs/measurements/preprocessor-system-levels-133-2026-10-25/README.md)) on `sqlite3.c`, which the checker
+accepts without a diagnostic:
+
+- **The checker's whole compile:** `-fsyntax-only` takes 147.310-147.784 ms
+  with the runs and the history deferred. #412's head, which records the
+  history, takes 149.530-149.954 ms. The peak resident set falls by about
+  2 MB, and the minor faults from about 1,780 to 1,415.
+- **`-E` and `parse`, which keep the runs too:** within noise of #412's
+  head, at 19.674-19.801 and 18.657-18.807 ms.
+- **The main loop:** 5.786-5.852 ms with the history recorded, against
+  #412's 5.817-5.865 ms, with 118.16 instructions per input token where
+  #412 has 118.21.
+
 ### Vectorized kernels and their scalar twins
 
 `PPOptions.scalar` selects the scalar twin of each vectorized kernel:
@@ -2424,7 +2437,9 @@ History replay is in ("Deferred history"). `-E`, `parse` and the checker's
 driver record no history for a unit without diagnostics, which takes
 `sqlite3.c`'s directive tables and main loop from 6.09-6.12 ms to 5.27-5.31 ms.
 The checker judges system headers' tokens from runs the main loop keeps,
-instead of the history ("System levels").
+instead of the history ("System levels"). Its whole compile of `sqlite3.c`
+(`-fsyntax-only`) took 149.6-150.3 ms on main before #412 and takes
+147.3-147.8 ms.
 
 ## Assembly output spacing
 
