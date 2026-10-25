@@ -25,6 +25,11 @@ struct CheckProgramLowered
     const char* reason;
     uint64_t entries;
     uint64_t output_bytes;
+    // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
+    // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
+    // (Tier0Code.label_records).
+    SymbolId* label_symbols;
+    uint32_t label_symbol_count;
 };
 
 typedef enum CheckLowerTaskKind
@@ -174,6 +179,11 @@ struct CheckLowerWriter
     bool x87;
     bool scalar;
     bool track;
+    // The function's labels whose addresses the program takes (CHECK_CONTROL_LABEL with a symbol): each one's control
+    // entry, then its entry (Tier0Function.label_entries), and the room for them, one per control entry.
+    uint32_t* label_entries;
+    uint32_t label_entry_count;
+    uint32_t label_symbol_capacity;
 };
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
@@ -395,7 +405,8 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
         pop = value < writer->call_count ? writer->call_counts[value] + (writer->call_targets[value] == 0) : 0;
         push = class != BUSTER_TYPED_CLASS_VOID;
     }
-    else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_STACK_RESTORE)
+    else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_STACK_RESTORE ||
+             kind == BUSTER_TYPED_JUMP_INDIRECT)
     {
         pop = 1;
     }
@@ -442,7 +453,7 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
         }
         writer->reachable = kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE;
     }
-    else if (kind == BUSTER_TYPED_RETURN)
+    else if (kind == BUSTER_TYPED_RETURN || kind == BUSTER_TYPED_JUMP_INDIRECT)
     {
         if (writer->stack_head != 0)
         {
@@ -3172,6 +3183,25 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
     }
+    else if (control.kind == CHECK_CONTROL_LABEL)
+    {
+        // A label whose address the selected program takes has its symbol, which the emission defines at its record.
+        const SymbolId symbol = program->object_symbols[control.token + 1];
+        if (symbol != 0 && writer->output->label_symbol_count < writer->label_symbol_capacity)
+        {
+            writer->label_entries[writer->label_entry_count++] = index;
+            writer->output->label_symbols[writer->output->label_symbol_count++] = symbol;
+        }
+        else if (symbol != 0)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+    else if (control.kind == CHECK_CONTROL_JUMP_INDIRECT)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_expression(writer, control.node, false, 0);
+    }
     else if (control.kind == CHECK_CONTROL_INITIALIZE)
     {
         check_lower_initializer(writer, control);
@@ -3456,7 +3486,16 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_COLUMN(miscellaneous, CBuiltinMiscLowerCall, (uint64_t)program->stream->misc_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(floating, CBuiltinFloatLowerCall, (uint64_t)program->stream->floating_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(x87_constants, uint64_t, 2 * x87_capacity64);
+    BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
+    // The labels' symbols: of the selected program's objects, those whose token is a label's.
+    for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        writer.label_symbol_capacity += object != 0 && object - 1 < count && program->parser->tree.roles[object - 1] == PARSE_ROLE_LABEL;
+    }
+    lowered->label_symbols = valid && writer.label_symbol_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, writer.label_symbol_capacity) : 0;
+    valid &= writer.label_symbol_capacity == 0 || lowered->label_symbols != 0;
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes every signature together after.
     AbiTable table;
@@ -3523,6 +3562,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         Tier0Function* function = &lowered->functions[b];
         *function = (Tier0Function){ 0 };
         writer.count = 0;
+        writer.label_entry_count = 0;
         writer.depth = 0;
         writer.local_count = 0;
         writer.call_count = 0;
@@ -3739,6 +3779,19 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                 }
             }
         }
+        // The labels whose addresses the program takes, from their control entries to their entries, as the targets.
+        for (uint32_t k = 0; k < writer.label_entry_count && lowered->status == CHECK_PROGRAM_OK; k += 1)
+        {
+            const uint32_t label = writer.label_entries[k];
+            if (label >= writer.label_count || writer.labels[label] == BUSTER_CHECK_NONE)
+            {
+                check_lower_fail(&writer, CHECK_PROGRAM_INVALID);
+            }
+            else
+            {
+                writer.label_entries[k] = writer.labels[label];
+            }
+        }
 #define BUSTER_CHECK_LOWER_COPY(field, source, type, length) \
         if (lowered->status == CHECK_PROGRAM_OK && (length) != 0) \
         { \
@@ -3779,6 +3832,8 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             function->x87_constant_count = writer.x87_constant_count;
             function->x87 = true;
         }
+        BUSTER_CHECK_LOWER_COPY(label_entries, label_entries, uint32_t, writer.label_entry_count);
+        function->label_count = writer.label_entry_count;
 #undef BUSTER_CHECK_LOWER_COPY
         // A variadic definition that starts its list has its incoming frame (Tier0Function.incoming_variadic): its own
         // call, which abi_assign gives below.
@@ -3796,6 +3851,11 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         {
             writer.local_map[input->objects[parameter]] = BUSTER_CHECK_NONE;
         }
+    }
+    if (valid && lowered->status == CHECK_PROGRAM_OK && lowered->label_symbol_count != writer.label_symbol_capacity)
+    {
+        // A label's symbol whose function marked no place for it: its address would be undefined.
+        check_lower_fail(&writer, CHECK_PROGRAM_INVALID);
     }
     AbiLocation* locations = valid && lowered->status == CHECK_PROGRAM_OK ? BUSTER_ARENA_PUSH_ARRAY(output, AbiLocation, (uint64_t)abi.argument_count + 1) : 0;
     AbiCall* calls = valid && lowered->status == CHECK_PROGRAM_OK ? BUSTER_ARENA_PUSH_ARRAY(output, AbiCall, (uint64_t)abi.count + 1) : 0;

@@ -855,6 +855,21 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);
+    // GNU C's labels as values (#133): an interpreter's dispatch through a static table of labels' addresses, a computed goto
+    // through a local and through ?:, the addresses compared, and a computed goto out of a variable-length array's block.
+    check_test_program_source(test,
+        "static int run(const unsigned char*c,int n){static const void*const t[]={&&add,&&mul,&&jump,&&end,&&dup};"
+        "int acc=n;int pc=0;void*last=&&end;goto*t[c[pc]];"
+        "add:acc+=c[pc+1];pc+=2;goto*t[c[pc]];"
+        "mul:acc*=c[pc+1];pc+=2;goto*t[c[pc]];"
+        "jump:pc=c[pc+1];goto*(pc>8?&&end:t[c[pc]]);"
+        "dup:acc+=acc;pc+=1;last=&&dup;goto*t[c[pc]];"
+        "end:return last==&&dup?acc+1000:acc;}"
+        "int tested(int n){static const unsigned char p[]={0,3,1,5,4,2,9,0,100,3};static const unsigned char q[]={1,2,0,7,3};"
+        "void*out=&&done;int r=run(p,n)*31+run(q,n);"
+        "for(int i=0;i<3;i++){int v[(n&3)+1];v[0]=i;r+=v[0];if(i==1)goto*out;}r=-1;"
+        "done:return r;}",
+        "labels-as-values-dispatch", clang);
     {
         char source[4096];
         uint32_t length = 0;

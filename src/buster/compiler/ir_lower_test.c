@@ -1586,12 +1586,12 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
-// #136's variable-length arrays: an allocation, and a position saved and restored, which the adapter doesn't lower
-// yet. Both paths refuse each stream at its first stack entry, after validation and before anything is allocated,
-// leaving the caller's result and both arenas as they were.
+// #136's variable-length arrays: an allocation, and a position saved and restored, and #133's indirect jump to a label,
+// which the adapter doesn't lower yet. Both paths refuse each stream at its first such entry, after validation and
+// before anything is allocated, leaving the caller's result and both arenas as they were.
 static void ir_lower_test_stack(IrLowerTestTally* tally)
 {
-    static const uint8_t kinds[2][4] =
+    static const uint8_t kinds[3][4] =
     {
         {
             BUSTER_TYPED_CONST,
@@ -1605,8 +1605,14 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
             BUSTER_TYPED_RETURN,
             BUSTER_TYPED_NONE
         },
+        {
+            BUSTER_TYPED_CONST,
+            BUSTER_TYPED_JUMP_INDIRECT,
+            BUSTER_TYPED_RETURN,
+            BUSTER_TYPED_NONE
+        },
     };
-    static const uint8_t classes[2][4] =
+    static const uint8_t classes[3][4] =
     {
         {
             BUSTER_TYPED_CLASS_U64,
@@ -1620,8 +1626,14 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
             BUSTER_TYPED_CLASS_VOID,
             BUSTER_TYPED_CLASS_VOID
         },
+        {
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_VOID,
+            BUSTER_TYPED_CLASS_VOID
+        },
     };
-    static const uint64_t values[2][4] =
+    static const uint64_t values[3][4] =
     {
         {
             48,
@@ -1635,16 +1647,29 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
             0,
             0
         },
+        {
+            7,
+            0,
+            0,
+            0
+        },
     };
-    static const uint32_t counts[2] =
+    static const uint32_t counts[3] =
     {
         4,
+        3,
         3
     };
-    static const uint32_t refused[2] =
+    static const uint32_t refused[3] =
     {
         1,
-        0
+        0,
+        1
+    };
+    // The third stream's label, which its indirect jump goes to.
+    static const uint32_t labels[1] =
+    {
+        2
     };
     const IrFunction preserved =
     {
@@ -1656,7 +1681,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
     // Nonzero marks, so that a rollback to zero would show.
     const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
     ir_lower_test_expect(tally, ready, "stack arenas", 0, 0);
-    for (uint32_t s = 0; ready && s < 2; s += 1)
+    for (uint32_t s = 0; ready && s < 3; s += 1)
     {
         const Tier0Function source =
         {
@@ -1664,6 +1689,8 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
             .classes = classes[s],
             .values = values[s],
             .count = counts[s],
+            .label_entries = s == 2 ? labels : 0,
+            .label_count = s == 2 ? 1 : 0,
         };
         for (uint32_t vector = 0; vector < 2; vector += 1)
         {
@@ -1674,7 +1701,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
             ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == refused[s] &&
                                             output.length == output_mark && scratch.length == scratch_mark &&
                                             result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                 "the stack's kinds refused at their entry without allocation", s, vector);
+                                 "the stack's kinds and the indirect jump refused at their entry without allocation", s, vector);
         }
     }
     arena_release(&output);

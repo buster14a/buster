@@ -24,6 +24,10 @@ typedef enum CheckProgramStatus
 // block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (after the
 // save, to its end) by a STACK_RESTORE of the outermost block it leaves (`target`, a closing token). The function's
 // own block's end needs none: its return releases its frame.
+// GNU C's labels as values: a label whose address the program takes (&&label) marks its place with CHECK_CONTROL_LABEL
+// (`token` the label), which does nothing else, and a computed goto (goto *expression) is CHECK_CONTROL_JUMP_INDIRECT of
+// its operand (`node`, converted to const void *), which goes to one of them. It releases no variable-length array's
+// storage on its way out of their blocks, as clang's code doesn't: the function's return does.
 typedef enum CheckControlKind
 {
     CHECK_CONTROL_EVALUATE,
@@ -37,6 +41,9 @@ typedef enum CheckControlKind
     CHECK_CONTROL_STACK_SAVE,
     CHECK_CONTROL_ALLOCATE,
     CHECK_CONTROL_STACK_RESTORE,
+    CHECK_CONTROL_LABEL,
+    CHECK_CONTROL_JUMP_INDIRECT,
+    // The kinds from here on go to a label: their `target`.
     CHECK_CONTROL_BRANCH_FALSE,
     CHECK_CONTROL_BRANCH_TRUE,
     CHECK_CONTROL_JUMP,
@@ -186,6 +193,8 @@ struct CheckControlWriter
     uint32_t* repeats;
     const uint32_t* region_first;
     const uint32_t* region_next;
+    // Whether each label's address is taken (&&label), by its token: its place gets a CHECK_CONTROL_LABEL.
+    const uint8_t* addressed;
     CheckControl* entries;
     CheckControlTask* tasks;
     uint32_t* labels;
@@ -780,6 +789,18 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, stops ? task.stop : task.repeat);
                 check_control_leave(writer, jump, BUSTER_CHECK_NONE, stops ? writer->stops : writer->repeats, stops ? task.stop : task.repeat);
             }
+            else if (kind == PARSE_KIND_GOTO && check_input_indirect_goto(writer->parser, jump))
+            {
+                const uint32_t node = input->token_nodes[jump + 1];
+                if (node != BUSTER_CHECK_NONE)
+                {
+                    check_control_entry(writer, CHECK_CONTROL_JUMP_INDIRECT, jump, node, BUSTER_CHECK_NONE);
+                }
+                else
+                {
+                    check_program_fail(writer->program, CHECK_PROGRAM_INVALID, jump);
+                }
+            }
             else if (kind == PARSE_KIND_GOTO)
             {
                 const uint32_t target = input->label_targets[jump];
@@ -824,6 +845,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             {
                 check_control_statement(writer, child, task.stop, task.repeat);
             }
+        }
+        if (role == PARSE_ROLE_LABEL && writer->addressed[token] != 0)
+        {
+            check_control_entry(writer, CHECK_CONTROL_LABEL, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         }
         check_control_mark(writer, writer->source_labels[token]);
     }
@@ -1379,10 +1404,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
     uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
     uint8_t* needed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* addressed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControl, capacity) : 0;
     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControlTask, capacity) : 0;
     valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
-            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && entries != 0 && tasks != 0 && plan_first != 0 && (options.initializers == 0 || plan_next != 0) &&
+            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && addressed != 0 && entries != 0 && tasks != 0 && plan_first != 0 &&
+            (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && reference_items != 0 && reference_sort != 0 &&
             stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
             allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0;
@@ -1415,6 +1442,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
         }
         memset(needed, 0, (uint64_t)count + 1);
+        memset(addressed, 0, (uint64_t)count + 1);
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         memset(stops, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -1450,6 +1478,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 last[parent] = token;
             }
             body_count += input->body_declarations[token] != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0);
+            if (check_input_label_address(parser, token) && input->label_targets[token] < count)
+            {
+                addressed[input->label_targets[token]] = 1;
+            }
             if (input->initializer_nodes[token] < node_count)
             {
                 initializers[input->initializer_nodes[token]] = token;
@@ -1603,6 +1635,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .repeats = repeats,
         .region_first = region_first,
         .region_next = region_next,
+        .addressed = addressed,
         .entries = entries,
         .tasks = tasks,
         .labels = labels,
