@@ -4899,7 +4899,8 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         signature->variadic = variadic;
         uint32_t offset = 0;
         // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values (a long double's
-        // value on the integer one), and copies its aggregates through each stack's first free register (#136); our
+        // value on the integer one), and copies its aggregates through each stack's first free register (#136); past
+        // them it takes values to its frame's deep slots, but not a call's aggregates or a function's long doubles. Our
         // caller's `r = c_callee(...)` holds r's address under them when the result is a struct, a union or a long double.
         // So in a compiled world an argument past 13 integer or 15 floating ones becomes one of the other stack's (21 named
         // and 6 unnamed fit both).

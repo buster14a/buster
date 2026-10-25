@@ -861,6 +861,72 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "unsigned long r=(unsigned long)(d/2)+(unsigned long)(f/4)+(unsigned long)e+(unsigned long)g+(unsigned long)f+(unsigned long)(d-4096.0);"
         "unsigned long hi=(unsigned long)(double)w;return (int)(r%9973)^(int)(hi%10007)^(int)(u%1000)^(int)(t%977);}",
         "unsigned-long-floating-conversions", clang);
+    {
+        // Values past Tier 0's depth tables (tier0_select_deep): a call of 40 unsigned long and 24 double arguments, the
+        // most a call takes (BUSTER_TIER0_MAX_CALL_ARGUMENTS), each an expression evaluated over the arguments before it,
+        // with ?:, a division, a shift and a call among the later ones; a call through a pointer of 18; and a product
+        // nested 24 deep. Run against clang's.
+        char source[8192];
+        uint32_t length = 0;
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long many(");
+        for (uint32_t i = 0; i < 40; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long a%u,", i);
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "double d%u%s", i, i + 1 < 24 ? "," : "){unsigned long s=0;double t=0;");
+        }
+        for (uint32_t i = 0; i < 40; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "s=s*31+a%u;", i);
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "t=t*1.5+d%u;", i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "return s^(unsigned long)(long)(t*16);}unsigned long eighteen(");
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long b%u%s", i, i + 1 < 18 ? "," : "){return 0");
+        }
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "+b%u*%u", i, 2 * i + 1);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, ";}int tested(int n){unsigned long x=(unsigned long)n+3;unsigned long r=many(");
+        for (uint32_t i = 0; i < 40; i += 1)
+        {
+            static const char* const shapes[4] = { "x+%u", "(x&1?x*%u:x-%u)", "x/%u+(x<<%u%%7)", "eighteen(x,%u,x,x,x,x,x,x,x,x,x,x,x,x,x,x,x,x)" };
+            char argument[96];
+            snprintf(argument, sizeof(argument), shapes[i % 4], i + 2, i + 1);
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s,", argument);
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "(double)x*%u.5-%u%s", i, i, i + 1 < 24 ? "," : ");");
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long(*f)(");
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "unsigned long%s", i + 1 < 18 ? "," : ")=eighteen;unsigned long q=f(");
+        }
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "x*%u+(x>>%u)%s", i + 1, i % 3, i + 1 < 18 ? "," : ");unsigned long deep=");
+        }
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "(x+%u)*(", i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "x");
+        for (uint32_t i = 0; i < 24; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, ")");
+        }
+        snprintf(source + length, sizeof(source) - length, ";return (int)((r^q^deep)%%100003);}");
+        check_test_program_source(test, source, "values-past-the-depth-tables", clang);
+    }
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);

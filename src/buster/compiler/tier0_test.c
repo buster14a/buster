@@ -691,13 +691,14 @@ struct Tier0TestCode
     uint64_t records;
     uint64_t entries;
     uint64_t deferred;
+    uint64_t deep;
 };
 
 // Whether two compilations of a function made the same code: records, branch columns and references.
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 {
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
-                a->deferred == b->deferred;
+                a->deferred == b->deferred && a->deep == b->deep;
     same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
     same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;
     same = same && memcmp(a->targets, b->targets, a->branch_count * sizeof(uint32_t)) == 0;
@@ -732,6 +733,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         code->records += scalar.count;
         code->entries += function->count;
         code->deferred += scalar.deferred;
+        code->deep += scalar.deep;
         if (result)
         {
             const uint64_t valid = x86_validate(scalar.records, scalar.count);
@@ -998,7 +1000,7 @@ static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* cover
 }
 
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred, uint64_t* coverage)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* coverage)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -1020,6 +1022,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             code->records = 0;
             code->entries = 0;
             code->deferred = 0;
+            code->deep = 0;
             if (ok)
             {
                 tier0_test_coverage(functions, coverage);
@@ -1034,6 +1037,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             *records += code->records;
             *entries += code->entries;
             *deferred += code->deferred;
+            *deep += code->deep;
             if (ok)
             {
                 const Tier0TestData data = tier0_test_layout(program);
@@ -1679,10 +1683,13 @@ static void tier0_test_errors(Tier0TestTally* tally)
                           vector.error, vector.node);
         arena_pop_to(&arena, mark);
     }
-    for (uint32_t deep = 14; deep <= 17; deep += 1)
+    static const uint32_t deeps[] = { 14, 15, 16, 17, 32, 239, 240, 241, 250 };
+    for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(deeps); d += 1)
     {
         // `deep` constants on the integer stack at once, added up and discarded. The last one is the first add's
-        // immediate, so 16 fit the 15 depths and 17 are refused.
+        // immediate, so 16 fit the 15 depths, the next ones go to the deep slots, and a stack of 240 (241 constants) is
+        // refused past BUSTER_TIER0_MAX_DEPTH.
+        const uint32_t deep = deeps[d];
         uint32_t count = 0;
         for (uint32_t k = 0; k < deep; k += 1)
         {
@@ -1714,7 +1721,7 @@ static void tier0_test_errors(Tier0TestTally* tally)
         const uint64_t mark = arena.length;
         const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        const Tier0Error expected = deep > BUSTER_TIER0_INTEGER_DEPTHS + 1 ? TIER0_ERROR_DEPTH : TIER0_OK;
+        const Tier0Error expected = deep - 1 >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
         tier0_test_expect(tally, scalar.error == expected && vector.error == expected && (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)), "errors",
                           "%u values at once: the scalar path's error %d, the vector path's %d, %d expected", deep, scalar.error, vector.error, expected);
         arena_pop_to(&arena, mark);
@@ -2045,11 +2052,12 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
 }
 
 // A copy's scratch register, its stacks' first free one (an XMM one from 16 bytes, a general one below), must be in
-// the frame's clobbers after either selection, so that no local makes it its home; past the tables, the function is
-// refused as too deep. On copies above every count of integer and floating values, of each size class, with both
-// paths' code compared. The values are then folded in postorder, each consumer's last operand the entry before it:
-// the doubles summed onto a zero pushed above them, the sum converted, and the integers summed onto that. The zero
-// takes one more floating depth, so that 16 doubles are too deep whatever the copy.
+// the frame's clobbers after either selection, so that no local makes it its home; past the tables, selection says the
+// function is too deep, and the compile takes the values to the deep slots. On copies above every count of integer and
+// floating values, of each size class, with both paths' code compared. The values are then folded in postorder, each
+// consumer's last operand the entry before it: the doubles summed onto a zero pushed above them, the sum converted, and
+// the integers summed onto that. The zero takes one more floating depth, so that 16 doubles are too deep for the
+// tables whatever the copy.
 static void tier0_test_copies(Tier0TestTally* tally)
 {
     enum
@@ -2156,10 +2164,10 @@ static void tier0_test_copies(Tier0TestTally* tally)
                 {
                     counted &= too_deep ? errors[path] == TIER0_ERROR_DEPTH : errors[path] == TIER0_OK && (frames[path].clobbers & scratch) != 0;
                 }
+                // Past the tables, the copy's values go to the deep slots (tier0_select_deep).
                 const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
                 const Tier0Code vector = tier0_compile(&function, &arena);
-                const bool compiled = too_deep ? scalar.error == TIER0_ERROR_DEPTH && vector.error == TIER0_ERROR_DEPTH
-                                               : scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
+                const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
                 tier0_test_expect(tally, counted && compiled, "copies", "a copy of %u bytes over %u integers and %u floating values: its scratch %s", sizes[s], integers,
                                   floatings, counted ? "counted, but the paths differ" : "not in a selection's clobbers");
                 arena_pop_to(&arena, mark);
@@ -4469,9 +4477,9 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
         tier0_test_expect(tally, valid ? check.error == TIER0_OK : check.error == TIER0_ERROR_INVALID && check.node == 1, "stack",
                           "stream %u: tier0_validate says %s at %u (%s)", b, check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
     }
-    // The depths: 14 integer values at once stop short of rbp's depth, and 15 reach it, which a frame pointer refuses (the
-    // stack's position saved first) where a function without one takes it. The last value is a DUP, which no add takes as
-    // its operand's home, so that every value takes its depth.
+    // The depths: 14 integer values at once stop short of rbp's depth, and 15 reach it, which a function without a frame
+    // pointer takes and one with it (the stack's position saved first) takes to its deep slots (tier0_select_deep). The
+    // last value is a DUP, which no add takes as its operand's home, so that every value takes its depth.
     Arena arena = arena_reserve(1ull << 28);
     for (uint32_t values_at_once = 14; values_at_once <= 15; values_at_once += 1)
     {
@@ -4498,11 +4506,10 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
             const uint64_t mark = arena.length;
             const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
             const Tier0Code vector = tier0_compile(&function, &arena);
-            const Tier0Error expected = pointer != 0 && values_at_once == 15 ? TIER0_ERROR_DEPTH : TIER0_OK;
-            tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == expected && vector.error == expected &&
-                                         (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)),
-                              "stack", "%u values at once %s a frame pointer: errors %d and %d, %d expected", values_at_once, pointer != 0 ? "with" : "without",
-                              scalar.error, vector.error, expected);
+            tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK &&
+                                         tier0_test_same_code(&scalar, &vector),
+                              "stack", "%u values at once %s a frame pointer: errors %d and %d, or the paths differ", values_at_once, pointer != 0 ? "with" : "without",
+                              scalar.error, vector.error);
             arena_pop_to(&arena, mark);
         }
     }
@@ -4675,9 +4682,12 @@ static int run_tier0_tests(int argc, char** argv)
                   .access = true, .vlas = true, .unsigned_floating = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
-            // The larger shape with records passed and returned by value (#137): a program of its own seed for seed.
+            // The larger shape with records passed and returned by value (#137): a program of its own seed for seed. And
+            // past the depth tables (tier0_select_deep): calls of up to 32 arguments and deeper expressions.
             Tier0ProgramOptions records = shapes[3];
             records.records = &tables.records;
+            Tier0ProgramOptions deep = shapes[3];
+            deep.deep = true;
             {
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_moves(&tally);
@@ -4776,14 +4786,16 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
-            for (uint32_t s = 0; s < 5; s += 1)
+            for (uint32_t s = 0; s < 6; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
                 uint64_t instructions = 0;
                 uint64_t entries = 0;
                 uint64_t deferred = 0;
+                uint64_t deep_entries = 0;
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
-                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : records, &instructions, &entries, &deferred, coverage);
+                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : deep, &instructions, &entries, &deferred,
+                                    &deep_entries, coverage);
                 if (s == 4)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -4796,8 +4808,11 @@ static int run_tier0_tests(int argc, char** argv)
                         tier0_test_expect(&tally, count < 300 || k == 1 || k == 6 || coverage[k] != 0, "records by value", "no %s", tier0_test_coverage_names[k]);
                     }
                 }
-                tier0_test_report(s < 4 ? names[s] : "programs: records by value", tally);
-                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred\n", entries, instructions, deferred);
+                // The deep shape's programs must reach the deep slots: with the default count, many of their entries do.
+                tier0_test_expect(&tally, s < 5 ? deep_entries == 0 : count < 300 || deep_entries >= entries / 100, "deep values",
+                                  "%" PRIu64 " deep entries among %" PRIu64, deep_entries, entries);
+                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : "programs: deep values", tally);
+                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep\n", entries, instructions, deferred, deep_entries);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -4827,6 +4842,13 @@ static int run_tier0_tests(int argc, char** argv)
                 tier0_test_report("cross-check: records, mixed with clang", mixed);
                 total.checks += mixed.checks;
                 total.failures += mixed.failures;
+                Tier0TestTally deep_cross = { 0, 0 };
+                Tier0ProgramOptions deep_defined = deep;
+                deep_defined.defined = true;
+                tier0_test_cross(&deep_cross, &tables, seed + 2000006ull, cross_count, deep_defined, clang, keep);
+                tier0_test_report("cross-check: deep values", deep_cross);
+                total.checks += deep_cross.checks;
+                total.failures += deep_cross.failures;
             }
             tier0_tables_close(&tables);
         }
