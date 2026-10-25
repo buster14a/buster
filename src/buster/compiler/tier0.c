@@ -4952,14 +4952,15 @@ static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floatin
 // The operand's register is the conversion's to overwrite: it consumes the value.
 #define BUSTER_TIER0_FROM_U64_RECORDS 14
 #define BUSTER_TIER0_TO_U64_RECORDS 11
-static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, uint32_t i, Tier0Writer* writer)
+// `registers` is the form, which tier0_emit_u64_convert gives as tier0_u64_convert_registers chooses it at the entry's
+// depths, and a deep entry's emission (tier0_emit_deep_deferred) at its depths before its window's.
+static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool registers, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t class = entries->key_classes[i];
     const uint32_t depth = entries->depths[i];
     const uint32_t floating = entries->floating_depths[i];
     const uint8_t direct = BUSTER_X86_REGISTER_DIRECT;
     const bool to_u64 = !tier0_class_floating(class);
-    const bool registers = tier0_u64_convert_registers(to_u64, depth, floating, pointer);
     if (!to_u64 && registers)
     {
         const bool single = class == BUSTER_TYPED_CLASS_F32;
@@ -5046,6 +5047,12 @@ static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, ui
         tier0_put(writer, top);
         tier0_put(writer, tier0_red_zone(X86_FORM_XOR_R64_RM64, result, 1));
     }
+}
+
+static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, uint32_t i, Tier0Writer* writer)
+{
+    const bool to_u64 = !tier0_class_floating(entries->key_classes[i]);
+    tier0_emit_u64_convert_form(entries, tier0_u64_convert_registers(to_u64, entries->depths[i], entries->floating_depths[i], pointer), i, writer);
 }
 
 // How many records tier0_emit_u64_convert writes for entry i (tier0_count_deferred's).
@@ -5323,7 +5330,12 @@ static void tier0_emit_deep_deferred(const Tier0Function* function, const Tier0E
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
-        tier0_emit_u64_convert(entries, frame->pointer, i, writer);
+        // Its form at its depths before its window's, where selection counted its registers and tier0_deferred_uses
+        // found them (so a deep conversion to U64 is always the red zone's, and one from U64 deep on the floating stack
+        // alone the registers' where its integer depth has room).
+        const bool to_u64 = !tier0_class_floating(entries->key_classes[i]);
+        const bool registers = tier0_u64_convert_registers(to_u64, entries->deep_depths[i], entries->deep_floating_depths[i], frame->pointer);
+        tier0_emit_u64_convert_form(entries, registers, i, writer);
     }
     else
     {
@@ -6052,9 +6064,10 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
 
 // What a deferred slot's emitter (but a call's) uses of each stack (0, the integer one, or 1): whether it uses its
 // registers, how far below the depth it reads (its window) and the highest depth it writes, as tier0_select_deep reads a
-// template's from its reach and window. A long double's are never asked for.
-static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const uint32_t* before, bool* uses, uint32_t* window,
-                                int32_t* touch)
+// template's from its reach and window. `pointer` is whether the function has a frame pointer. A long double's are never
+// asked for.
+static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const uint32_t* before, bool pointer, bool* uses,
+                                uint32_t* window, int32_t* touch)
 {
     const uint32_t kind = entries->key_kinds[i];
     if (kind == BUSTER_TYPED_COPY)
@@ -6069,14 +6082,16 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
-        // A conversion between U64 and a floating class: its operand on one stack, its result on the other, and the
-        // stacks' first free registers (to U64, the integer stack's next one too).
+        // A conversion between U64 and a floating class: its operand on one stack and its result on the other, and in its
+        // register form the stacks' first free registers (to U64, the integer stack's next one too), where
+        // tier0_u64_convert_registers chooses that form at these depths, as selection did and its emission does.
         const uint32_t to = tier0_class_floating(entries->key_classes[i]) ? 1 : 0;
+        const bool registers = tier0_u64_convert_registers(to == 0, before[0], before[1], pointer);
         uses[0] = true;
         uses[1] = true;
         window[1 - to] = 1;
-        touch[0] = (int32_t)before[0] + (to == 0 ? 1 : 0);
-        touch[1] = (int32_t)before[1];
+        touch[0] = to == 0 ? (int32_t)before[0] + (registers ? 1 : 0) : (int32_t)before[0] - (registers ? 0 : 1);
+        touch[1] = to == 0 ? (int32_t)before[1] - (registers ? 0 : 1) : (int32_t)before[1];
     }
     else
     {
@@ -6164,7 +6179,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 }
                 else
                 {
-                    tier0_deferred_uses(function, entries, i, before, uses, window, touch);
+                    tier0_deferred_uses(function, entries, i, before, frame->pointer, uses, window, touch);
                 }
                 for (uint32_t s = 0; s < 2; s += 1)
                 {

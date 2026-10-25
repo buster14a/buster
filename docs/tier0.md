@@ -381,7 +381,9 @@ in both paths (`tier0_emit_deep`):
 3. its own records run at that depth, which the depth columns hold for it from here on: its template's, home case and
    choice of immediate forms included, or its deferred emitter's (division, shifts, copies, the stack's entries and the
    conversions between U64 and the floating classes), which then finds rax, rdx and rcx where a template for depth 2
-   does;
+   does. A conversion takes the form selection chose at its depths before its window's (`tier0_u64_convert_registers`),
+   so that its registers are those selection counted: a deep one to U64 is always the red zone's, and one from U64 the
+   registers' only where it is deep on the floating stack alone with room at its integer depth;
 4. its result goes from its register at that depth into its slot;
 5. if its exit is within the table, the stack's values are loaded back into their registers;
 6. a template's branch, its last record, comes after them, which keep the flags its compare set: both ways out
@@ -690,16 +692,19 @@ Before the programs, checks of their own:
   Both paths must compile each alike in the form the check's own rule gives (the red zone form's records are those at
   negative displacements from rsp), the prologue must push the register form's scratch where it is callee-saved, and
   each call, as the unsigned floating check makes them, must give C's conversion and its flags and both sums.
-- **deep** (`tier0_deep_test.c`, #136's item 6): eight functions of one U64 parameter whose stacks fill their tables,
+- **deep** (`tier0_deep_test.c`, #136's item 6): nine functions of one U64 parameter whose stacks fill their tables,
   then cross the line with an entry of each kind the generated programs reach rarely or never: a value pushed past it
   and dropped back to it (a `DISCARD`, which uses no register), `?:` whose condition, branch and arms' values cross it,
   a compare fused into its branch that drops two values across it, 17 floating values (through U64 conversions, one of
   them dropped across the floating line), division by a local (whose dividend only rax reads) and by a value, `%`, and
   shifts by a register past it, a frame pointer's 14 values and two past them, both stacks crossing at one conversion,
-  and rsp moved past a frame pointer's line (#434's review): rsp saved, two allocations stored through and loaded back,
-  rsp restored, every entry a deep one while the values below are in their slots, which rbp addresses. Each must
-  compile by both paths into the same records with deep entries, a frame pointer exactly in the cases that have one,
-  be encoded alike by both encoders, and give this file's model of it natively on six inputs.
+  rsp moved past a frame pointer's line (#434's review): rsp saved, two allocations stored through and loaded back,
+  rsp restored, every entry a deep one while the values below are in their slots, which rbp addresses; and a conversion
+  to U64 deep on the floating stack alone at integer depth 13, whose register form's scratch would be rbp, which
+  nothing else in it reaches. Each must compile by both paths into the same records with deep entries, a frame pointer
+  exactly in the cases that have one, write no callee-saved register that its prologue doesn't push (by
+  `x86_instructions_effects_scalar`), be encoded alike by both encoders, and give this file's model of it natively on
+  six inputs.
 - **copies:**
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
@@ -956,7 +961,13 @@ larger shape's are.
     - crossing the line not counted as deep: 11, the deep check's dropped values on both stacks (no generated program
       drops one there);
     - a window that only fixed registers read not counted as using the stack: 3, the deep check's division by a local,
-      which found that bug in the first version.
+      which found that bug in the first version;
+    - the deep slots addressed from rsp (#434's review): the deep check's case with rsp moved, on all six inputs, and
+      the deep shape's runs; the frame pointer's case without a move passes;
+    - a deep variadic call's al left at 0 (#434's review): test-checker's `variadic-calls-past-the-depth-tables`, on
+      both paths, whose callee clang compiles; test-tier0 passes;
+    - a deep conversion's form chosen at its window's depths: 5, the deep check's conversion past the floating line,
+      whose register form overwrote rbp, x's home there.
 - **Every stream source against the operands' rule:** a scratch build validated every function each compile path
   took, besides the validations the sources make, and printed every refusal. The sources were:
   - the generator's programs, with and without the cross-check;

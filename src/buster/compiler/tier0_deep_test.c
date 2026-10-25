@@ -8,7 +8,7 @@
 
 #define BUSTER_TIER0_TEST_DEEP_ENTRIES 256
 #define BUSTER_TIER0_TEST_DEEP_INPUTS 6
-#define BUSTER_TIER0_TEST_DEEP_CASES 8
+#define BUSTER_TIER0_TEST_DEEP_CASES 9
 // The pages of each case's code.
 #define BUSTER_TIER0_TEST_DEEP_PAGES 16
 
@@ -57,8 +57,19 @@ static void tier0_test_deep_fold(Tier0TestDeep* deep, uint8_t class, uint32_t co
     }
 }
 
+// local 1 + k, an F64 value (case 8's): the constant through the integer register at the integer stack's depth.
+static void tier0_test_deep_local_plus(Tier0TestDeep* deep, uint32_t k)
+{
+    const double constant = (double)k;
+    uint64_t bits = 0;
+    memcpy(&bits, &constant, sizeof(bits));
+    tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F64, 1);
+    tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F64, bits);
+    tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_F64, 0);
+}
+
 // Case c's stream, and its name. Each starts with x + k for k from 0 on the integer stack, 15 of them, which fill its
-// table (case 5's 14, a frame pointer's table; case 7's 15 are past it), and returns a U64.
+// table (case 5's 14, a frame pointer's table; case 7's 15 are past it; case 8 holds 13), and returns a U64.
 static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
 {
     static const char* const names[BUSTER_TIER0_TEST_DEEP_CASES] = {
@@ -70,6 +81,7 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         "a frame pointer's 14",
         "both stacks at once",
         "rsp moved past the line",
+        "a conversion past the floating line",
     };
     deep->count = 0;
     if (c == 5)
@@ -86,7 +98,19 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
         tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
     }
-    const uint32_t held = c == 5 ? 14 : 15;
+    else if (c == 8)
+    {
+        // (double)(x & 0xffff) in local 1, an F64 one, then local 1 + k for k from 0 to 15, which fill the floating table,
+        // with the integer stack empty.
+        tier0_test_deep_operation(deep, BUSTER_TYPED_AND, 0xffff);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_F64, 1);
+        for (uint32_t k = 0; k < 16; k += 1)
+        {
+            tier0_test_deep_local_plus(deep, k);
+        }
+    }
+    const uint32_t held = c == 5 ? 14 : c == 8 ? 13 : 15;
     for (uint32_t k = 0; k < held; k += 1)
     {
         tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, k);
@@ -209,6 +233,25 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
         folds += 1;
     }
+    else if (c == 8)
+    {
+        // Over the 13 integers, a 17th floating value past the floating table, local 1 + 16, its constant through r15, the
+        // integer register at depth 13; then converted to U64 past the floating line, at integer depth 13 (#429's review's
+        // limits): a deep entry on the floating stack alone, whose form selection chose at its depths before its window's,
+        // the red zone's. The register form, which its window's depths would choose, has its scratch at depth 14, rbp,
+        // which nothing here reaches: the prologue doesn't save it unless it is x's home, which the last addition reads.
+        // Then the integers folded and converted to F64, past the floating line again, and added to the 16 floating
+        // values, their sum converted to U64, and x added.
+        tier0_test_deep_local_plus(deep, 16);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_fold(deep, BUSTER_TYPED_CLASS_U64, held);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F64, 0);
+        tier0_test_deep_fold(deep, BUSTER_TYPED_CLASS_F64, 16);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        folds = 0;
+    }
     else
     {
         // 16 floating values; x & 0xffff past the integer line, converted past the floating one (its operand dropped back
@@ -246,7 +289,18 @@ static uint64_t tier0_test_deep_floating_sum(uint64_t x)
 // What case c returns for x.
 static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
 {
-    const uint32_t held = c == 5 ? 14 : 15;
+    const uint32_t held = c == 5 ? 14 : c == 8 ? 13 : 15;
+    // Case 8's: the integers and its conversion's result, as a double, added to its 16 floating values from the top.
+    uint64_t integers = (x & 0xffff) + 16;
+    for (uint32_t k = 0; k < 13; k += 1)
+    {
+        integers += x + k;
+    }
+    double floating = (double)integers;
+    for (uint32_t k = 16; k-- > 0;)
+    {
+        floating = ((double)(x & 0xffff) + (double)k) + floating;
+    }
     uint64_t sum = 0;
     for (uint32_t k = 0; k < held; k += 1)
     {
@@ -262,15 +316,42 @@ static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
         (x + 14) + (x + 15),
         tier0_test_deep_floating_sum(x),
         (x + 1000) + (x ^ 0x5555) + x * 77,
+        (uint64_t)floating + x - sum,
     };
     return sum + cases[c];
+}
+
+// Whether every callee-saved register (rbx, rbp, r12 to r15) the records write is one the prologue's first records push:
+// a register past what selection counted would show here. `writes` has room for `count`.
+static bool tier0_test_deep_saved(const X86Instruction* records, uint32_t count, uint64_t* reads, uint64_t* writes)
+{
+    const uint64_t callee_saved = BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBX) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP) |
+                                  BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R12) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R13) |
+                                  BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R14) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R15);
+    uint64_t pushed = 0;
+    uint32_t first = 0;
+    // The pushes, and a frame pointer's mov rbp, rsp after the first of them.
+    while (first < count && (records[first].form == X86_FORM_PUSH_R64 || (first == 1 && records[first].form == X86_FORM_MOV_RM64_R64 && records[first].rm == X86_REGISTER_RBP)))
+    {
+        pushed |= records[first].form == X86_FORM_PUSH_R64 ? BUSTER_X86_RESOURCE_GPR(records[first].rm) : 0;
+        first += 1;
+    }
+    x86_instructions_effects_scalar(records, count, reads, writes);
+    uint64_t written = 0;
+    for (uint32_t r = first; r < count; r += 1)
+    {
+        written |= writes[r];
+    }
+    return (written & callee_saved & ~pushed) == 0;
 }
 
 static void tier0_test_deep(Tier0TestTally* tally)
 {
     static const uint64_t inputs[BUSTER_TIER0_TEST_DEEP_INPUTS] = { 0, 1, 5, 1000, (1ull << 40) + 3, UINT64_MAX - 7 };
-    // x, then case 7's (and case 4's and 5's local 1): the saved rsp and the allocations' addresses.
+    // x, then case 7's (and case 4's and 5's local 1): the saved rsp and the allocations' addresses; case 8's local 1 is
+    // (double)(x & 0xffff).
     static const uint8_t local_classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t floating_classes[2] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64 };
     static const uint8_t local_flags[4] = { 0, 0, 0, 0 };
     const AbiLocation parameter = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
     const AbiReturn result = { .kind = BUSTER_ABI_RESULT_REGISTERS,
@@ -292,7 +373,7 @@ static void tier0_test_deep(Tier0TestTally* tally)
         function.classes = deep->classes;
         function.values = deep->values;
         function.count = deep->count;
-        function.local_classes = local_classes;
+        function.local_classes = c == 8 ? floating_classes : local_classes;
         function.local_flags = local_flags;
         function.local_count = c == 7 ? 4 : 2;
         function.parameter_count = 1;
@@ -310,6 +391,10 @@ static void tier0_test_deep(Tier0TestTally* tally)
                              scalar.records[1].form == X86_FORM_MOV_RM64_R64 && scalar.records[1].rm == X86_REGISTER_RBP;
         ready = ready && tier0_test_expect(tally, scalar.deep != 0 && pointer == (c == 5 || c == 7), "deep", "%s: %u deep entries, %s frame pointer", name, scalar.deep,
                                            pointer ? "a" : "no");
+        uint64_t* reads = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)scalar.count) : 0;
+        uint64_t* writes = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)scalar.count) : 0;
+        ready = ready && tier0_test_expect(tally, reads != 0 && writes != 0 && tier0_test_deep_saved(scalar.records, scalar.count, reads, writes), "deep",
+                                           "%s: a callee-saved register written that the prologue doesn't push", name);
         ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
                                                       branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
                                                           BRANCH_SIZING_OK,
