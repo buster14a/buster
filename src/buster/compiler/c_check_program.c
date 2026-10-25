@@ -85,6 +85,9 @@ struct CheckProgramOptions
     const uint32_t* initializer_references;
     uint32_t initializer_reference_count;
     bool scalar;
+    // Also references in the operands of &&, || and ?: that a constant condition never evaluates, which no emission
+    // needs: test-checker-corpus --symbols' model of the references clang -O0's code has (#129).
+    bool unselected_operands;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -134,6 +137,8 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
+    // CheckProgramOptions.unselected_operands.
+    bool unselected_operands;
 };
 
 typedef enum CheckControlTaskKind
@@ -1260,7 +1265,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 }
             }
             bool truth = false;
-            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
+            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) && !program->unselected_operands &&
                 check_program_runtime_truth(program, node, operands[0], &truth))
             {
                 if (op == CHECK_OP_CONDITIONAL)
@@ -1334,7 +1339,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
-                               .initializers = options.initializers, .asms = options.asms,
+                               .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;

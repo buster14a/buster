@@ -193,6 +193,9 @@ int run_object_writer_benchmark(int argc, char** argv);
 #include "buster/compiler/runtime.c"
 #include "buster/compiler/import_test.c"
 int run_import_benchmark(int argc, char** argv);
+// #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), for the
+// checker's selection tests, test-checker-corpus --symbols and test-c-testsuite --cross-check.
+#include "buster/compiler/c_lowering_symbols.c"
 
 // Binding: the C runtime joined to a program's link and each name bound, and its tests, for the test-bind command. Its
 // benchmark is another translation unit.
@@ -393,6 +396,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
+// #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
+#include "buster/compiler/c_lowering_source_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
 
@@ -975,6 +980,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
     {
         result = run_checker_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
+    {
+        result = run_lowering_source_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {

@@ -3,9 +3,52 @@
 //
 // Original end-to-end demand fixtures. Default/lazy checking and scalar/vector schedules must emit byte-identical
 // ELF objects after semantic selection. The fixture counts are stated independently of the reachability solver.
+// Every object emitted is also compared with clang -O0 -c's of the same source (#129): the same functions, objects
+// and string literals (c_lowering_symbols.c), which no fixture defeats with a constant condition's dead arm.
+
+// Whether clang -O0 -c's object of `source` defines what `bytes` does (lowering_symbols_compare and _strings); if
+// not, the differences are printed under `name`.
+static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, const char* source, const char* name, const char* clang, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    char directory[] = "/tmp/buster-check-symbols-XXXXXX";
+    const bool created = mkdtemp(directory) != 0;
+    char path[160];
+    char object[160];
+    char out[160];
+    char err[160];
+    snprintf(path, sizeof(path), "%s/fixture.c", directory);
+    snprintf(object, sizeof(object), "%s/clang.o", directory);
+    snprintf(out, sizeof(out), "%s/out", directory);
+    snprintf(err, sizeof(err), "%s/err", directory);
+    char* compile[] = { (char*)clang, "-std=gnu17", "-O0", "-c", "-w", "-o", object, path, 0 };
+    LoweringSymbols ours = { 0 };
+    LoweringSymbols theirs = { 0 };
+    bool valid = created && parse_test_write(path, source, strlen(source)) && object_test_run(compile, out, err) == 0;
+    valid = valid && lowering_symbols_read(&ours, (String8){ .pointer = (char*)bytes, .length = size }, scratch) &&
+            lowering_symbols_read_file(&theirs, object, scratch);
+    char report[2048];
+    const uint32_t differences = valid ? lowering_symbols_compare(&ours, "ours", &theirs, "clang", NULL, 0, report, sizeof(report)) : 0;
+    char strings[2048];
+    const uint32_t string_differences = valid ? lowering_symbols_compare_strings(&ours, "ours", &theirs, "clang", strings, sizeof(strings)) : 0;
+    if (!valid || differences != 0 || string_differences != 0)
+    {
+        fprintf(stderr, "%s: against clang -O0 -c (%s): %s%s", name, valid ? "compared" : "not compared", valid ? report : "", valid ? strings : "\n");
+    }
+    if (created)
+    {
+        unlink(path);
+        unlink(object);
+        unlink(out);
+        unlink(err);
+        rmdir(directory);
+    }
+    arena_pop_to(scratch, mark);
+    return valid && differences == 0 && string_differences == 0;
+}
 
 static void check_test_program_selection_run(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
-                                             CheckProgramStatus emission_status, const char* clang)
+                                             CheckProgramStatus emission_status, const char* clang, const char* symbols_clang)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -149,6 +192,12 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                     {
                         memcpy(expected, object.bytes, object.size);
                     }
+                    if (equal && symbols_clang != 0)
+                    {
+                        // The other paths' objects must be these bytes, so one comparison covers them all.
+                        snprintf(description, sizeof(description), "%s: the object defines clang -O0 -c's functions, objects and literals", name);
+                        check_test_expect(test, check_test_program_symbols(object.bytes, object.size, source, name, symbols_clang, &scratch), description);
+                    }
                 }
                 else if (equal)
                 {
@@ -176,104 +225,146 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
     intern_release(&identifiers);
 }
 
-static void check_test_program_selection_case(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects, const char* clang)
+// A fixture that must be emitted: its object compared with clang's, and with `execute`, run against clang's build.
+static void check_test_program_selection_case(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
+                                              const char* clang, bool execute)
 {
-    check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, clang);
+    check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, execute ? clang : 0, clang);
 }
 
 static void check_test_program_selection(CheckTest* test, const char* clang)
 {
-    check_test_program_selection_case(test, "", "empty-selected-unit", 0, 0, 0);
-    check_test_program_selection_case(test, "static int dead=3;int kept=9;", "selected-data-only-unit", 0, 1, 0);
+    check_test_program_selection_case(test, "", "empty-selected-unit", 0, 0, clang, false);
+    check_test_program_selection_case(test, "static int dead=3;int kept=9;", "selected-data-only-unit", 0, 1, clang, false);
     check_test_program_selection_case(test,
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));int tested(int n){return pick(n);}",
-        "selected-unmarked-overload-identity-excludes-lexical-placeholder", 2, 0, clang);
+        "selected-unmarked-overload-identity-excludes-lexical-placeholder", 2, 0, clang, true);
     check_test_program_selection_case(test,
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));int external_apply(int(*)(int),int);"
         "int tested(int n){int(*p)(int)=pick;int(*q)(int);q=&pick;return external_apply(p,n)+external_apply(q,n)+"
         "external_apply((int(*)(int))pick,n)+external_apply(pick,n)+external_apply(_Generic(0,int:pick,default:0),n);}",
-        "contextual-overload-local-initializer-assignment-cast-and-argument", 2, 0, clang);
+        "contextual-overload-local-initializer-assignment-cast-and-argument", 2, 0, clang, true);
     check_test_program_selection_case(test,
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));int external_apply(int(*)(int),int);"
         "int(*saved)(int)=pick;int(*give(void))(int){return pick;}int tested(int n){return external_apply(saved,n)+external_apply(give(),n);}",
-        "contextual-overload-static-initializer-and-return", 3, 1, clang);
+        "contextual-overload-static-initializer-and-return", 3, 1, clang, true);
     check_test_program_selection_run(test,
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));double take(double(*)(double));"
         "int tested(int n){return (int)take(pick)+n;}",
-        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
     check_test_program_selection_case(test,
         "static int dead(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
-        "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang);
+        "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang, true);
     check_test_program_selection_run(test,
         "int pick(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
-        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int leaf(int n){return n+3;}static int middle(int n){return leaf(n);}"
         "static __int128 dead(__int128 n){return n+1;}static int discarded=99;\n"
         "# 1 \"selection-user.c\" 2\n"
         "static int(*callback)(int)=middle;int tested(int n){return callback!=0?middle(n):0;}\n",
-        "source-body-address-and-initializer-chain", 3, 1, clang);
+        "source-body-address-and-initializer-chain", 3, 1, clang, true);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int a(void);static int b(void){return a();}static int a(void){return b();}"
         "static int*cycle;static int**other=&cycle;static int*cycle=(int*)&other;\n"
         "# 1 \"selection-user.c\" 2\n"
         "int tested(int n){return n+5;}\n",
-        "unreachable-code-and-data-cycles", 1, 0, clang);
+        "unreachable-code-and-data-cycles", 1, 0, clang, true);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int kept __attribute__((used))=3;static int dead=5;static int unused(void){return dead;}\n"
         "# 1 \"selection-user.c\" 2\n"
         "int tested(int n){return n+(\"abc\"[1]);}\n",
-        "retained-data-and-live-string-pool", 1, 2, clang);
+        "retained-data-and-live-string-pool", 1, 2, clang, true);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "inline int external_only(int n){return n+2;}extern inline int emitted(int n){return n+3;}"
         "static int unused(void){return 1;}\n"
         "# 1 \"selection-user.c\" 2\n"
         "int tested(int n){return emitted(n);}\n",
-        "c99-inline-only-and-external-definition", 2, 0, clang);
+        "c99-inline-only-and-external-definition", 2, 0, clang, true);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int leaf(int) __asm__(\"renamed_\" \"leaf\");"
         "static int leaf(int n){static int saved __asm__(\"renamed_data\")=3;return n+saved;}\n"
         "# 1 \"selection-user.c\" 2\n"
         "int tested(int n){return leaf(n);}\n",
-        "canonical-function-and-local-static-asm-labels", 2, 1, clang);
+        "canonical-function-and-local-static-asm-labels", 2, 1, clang, true);
     check_test_program_selection_case(test,
         "int x=1;extern int x __asm__(\"late_x\");static int leaf(int n){return n+x;}"
         "static int leaf(int) __asm__(\"late_leaf\");int tested(int n){return leaf(n);}",
-        "ignored-late-object-and-function-asm-labels", 2, 1, clang);
+        "ignored-late-object-and-function-asm-labels", 2, 1, clang, true);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\nstatic int dead(void){\n#pragma pack(push,1)\nreturn 99;}\n"
         "struct S{char c;int x;};\n#pragma pack(pop)\n# 1 \"selection-user.c\" 2\nint tested(int n){return n+sizeof(struct S);}\n",
-        "deferred-body-retains-later-packing-history", 1, 0, clang);
+        "deferred-body-retains-later-packing-history", 1, 0, clang, true);
     check_test_program_selection_case(test,
         "extern int unused(int) __attribute__((weak));int tested(int n){return n+sizeof(&unused);}",
-        "unevaluated-weak-reference-has-no-publication-obligation", 1, 0, clang);
+        "unevaluated-weak-reference-has-no-publication-obligation", 1, 0, clang, true);
     check_test_program_selection_case(test,
         "static int dropped __attribute__((section(\".dropped\")))=3;int tested(int n){return n;}",
-        "dropped-private-section-has-no-publication-obligation", 1, 0, clang);
+        "dropped-private-section-has-no-publication-obligation", 1, 0, clang, true);
     check_test_program_selection_case(test,
         "int kept __attribute__((nocommon));int tested(int n) __attribute__((visibility(\"default\")));int tested(int n){return n+kept;}",
-        "default-visibility-and-nocommon-publication", 1, 1, clang);
+        "default-visibility-and-nocommon-publication", 1, 1, clang, true);
     check_test_program_selection_run(test,
         "extern int other(int) __attribute__((weak));int tested(int n){return other?other(n):7;}",
-        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
     check_test_program_selection_run(test,
         "extern int other __attribute__((weak));int tested(int n){return &other?n:7;}",
-        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
     check_test_program_selection_run(test,
         "static int kept __attribute__((retain))=3;int tested(int n){return n;}",
-        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
     check_test_program_selection_run(test,
         "int tested(int n) __attribute__((visibility(\"hidden\")));int tested(int n){return n;}",
-        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
     check_test_program_selection_run(test,
         "int kept __attribute__((common));int tested(int n){return n;}",
-        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
     check_test_program_selection_run(test,
         "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",
-        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0);
+        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+    // #129's kinds of definition, each emitted exactly where clang -O0 -c emits it.
+    check_test_program_selection_case(test,
+        "static int used(int n){return n+1;}static int unused(int n){return n+2;}static int only_from_dead(int n){return n+3;}"
+        "static int dead(int n){return only_from_dead(n)+unused(n);}int tested(int n){return used(n);}",
+        "static-referenced-unreferenced-and-only-from-unreferenced", 2, 0, clang, true);
+    check_test_program_selection_case(test,
+        "inline int inline_only(int n){return n+1;}inline int made_external(int n){return n+2;}extern int made_external(int);"
+        "extern inline int extern_inline(int n){return n+3;}static inline int static_used(int n){return n+4;}"
+        "static inline int static_unused(int n){return n+5;}int tested(int n){return made_external(n)+extern_inline(n)+static_used(n);}",
+        "inline-static-inline-and-extern-inline", 4, 0, clang, true);
+    // The call of an inline definition goes to its external symbol, which this unit doesn't define.
+    check_test_program_selection_case(test,
+        "inline int inline_only(int n){return n+1;}int tested(int n){return inline_only(n);}",
+        "inline-definition-called-through-its-external-symbol", 1, 0, clang, false);
+    check_test_program_selection_case(test,
+        "extern inline __attribute__((gnu_inline)) int gnu_extern(int n){return n+1;}"
+        "inline __attribute__((gnu_inline)) int gnu_plain(int n){return n+2;}int tested(int n){return gnu_plain(n);}",
+        "gnu-inline-forms", 2, 0, clang, true);
+    check_test_program_selection_case(test,
+        "static int by_address(int n){return n+1;}static int by_global(int n){return n+2;}static int by_static(int n){return n+3;}"
+        "static int by_dead(int n){return n+4;}int(*exported)(int)=by_global;static int(*table[])(int)={by_static};"
+        "static int(*dead_table[])(int)={by_dead};int tested(int n){int(*p)(int)=by_address;return p(n)+table[0](n)+exported(n);}",
+        "address-taken-and-referenced-only-from-initializers", 4, 2, clang, true);
+    check_test_program_selection_case(test,
+        "static int used_static=3;static int unused_static=4;static int only_dead=5;static int dead(void){return only_dead+unused_static;}"
+        "int global_unused=6;int tentative;static int static_tentative;static int*chain=&used_static;static int**chain_head=&chain;"
+        "int tested(int n){return n+*chain+tentative+static_tentative;}",
+        "objects-referenced-unreferenced-tentative-and-chained", 1, 5, clang, true);
+    check_test_program_selection_case(test,
+        "static int dead(void){static int in_dead=1;return in_dead;}"
+        "int tested(int n){static int counter;static int unused_local=7;{static int counter=2;n+=counter;}return n+ ++counter;}",
+        "block-scope-statics-of-emitted-and-unreferenced-functions", 1, 3, clang, true);
+    check_test_program_selection_case(test,
+        "static const char*dead(void){return \"only in dead\";}static const char*text=\"in a static initializer\";"
+        "static const char*dead_text=\"in an unreferenced initializer\";int tested(int n){const char*s=\"in tested\";return n+s[1]+text[2];}",
+        "string-literals-of-emitted-and-unreferenced-definitions", 1, 3, clang, true);
+    check_test_program_selection_case(test,
+        "static int kept(int n) __attribute__((used));static int kept(int n){return n+1;}static int kept_data __attribute__((used))=3;"
+        "int tested(int n){return n;}",
+        "used-function-and-object-roots", 2, 1, clang, true);
 }
