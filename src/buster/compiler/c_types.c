@@ -704,7 +704,8 @@ static __attribute__((unused)) String8 type_print(const TypeTable* table, Arena*
 static __attribute__((unused)) bool type_changes_initialize(TypeChanges* changes, Arena* arena, uint32_t count, uint32_t parameters, uint32_t members);
 static __attribute__((unused)) void type_changes_at(TypeTable* table, uint32_t position);
 // Copies `source` into `table`, its columns from `arena` with room for `extra` more of each kind of record, and its index
-// from `index_arena`, large enough for them all without growing. False, with the arenas as they were, without room.
+// from `index_arena`, with room for the source's types and BUSTER_TYPE_COPY_INDEX_SLACK more, which grows past them as any
+// index does (type_view_reset takes it back to a mark). False, with the arenas as they were, without room.
 static __attribute__((unused)) bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, Arena* index_arena, TypeCapacity extra);
 // Takes a copy back to the counts it had (`mark`, from type_view_mark), the types made since out of its index, and
 // hides nothing. An index that grew since is rebuilt at the mark's size.
@@ -929,6 +930,8 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 #define BUSTER_TYPE_BUCKET_SLOTS 4
 #define BUSTER_TYPE_BUCKET_BYTES 64
 #define BUSTER_TYPE_INITIAL_BUCKETS 64
+// The types past a copy's own that its index has room for before it grows (type_copy).
+#define BUSTER_TYPE_COPY_INDEX_SLACK 4096
 _Static_assert(sizeof(TypeSlot) * BUSTER_TYPE_BUCKET_SLOTS == BUSTER_TYPE_BUCKET_BYTES, "a bucket is a cache line");
 
 static uint64_t type_capacity_bytes(TypeCapacity capacity)
@@ -5527,9 +5530,12 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->members.offset, source->members.offset, member_count * sizeof(*table->members.offset));
         table->members.count = source->members.count;
         table->last_error = source->last_error;
-        // type_find_or_add grows the index past 3 types a bucket: room for every type the copy may hold.
+        // type_find_or_add grows the index past 3 types a bucket. An index for every type the copy may hold would be mostly
+        // empty, and its probes would miss the caches: #113's lanes each copy a unit's table with room for eight types a
+        // token of its largest body, 232,048 for sqlite3.c's 3,256, an index of 8 MB a lane.
+        const uint64_t slack = extra.types < BUSTER_TYPE_COPY_INDEX_SLACK ? extra.types : BUSTER_TYPE_COPY_INDEX_SLACK;
         uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
-        while (buckets * 3 < (uint64_t)table->types.capacity + 1)
+        while (buckets * 3 < (uint64_t)table->types.count + slack + 1)
         {
             buckets *= 2;
         }
