@@ -801,9 +801,11 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
     return result;
 }
 
-// The default C command with -g, in the unit whose lowering keeps the typed entries' source tokens
-// (BUSTER_CHECK_SOURCE_ROWS, main.c), which run_check_command sends such a link to from every other unit.
-int run_source_debug_command(int count, char** arguments);
+// run_check_command's result, in every unit but the one of source rows (BUSTER_CHECK_SOURCE_ROWS, main.c), for a link
+// with -g: its options parsed and its arenas released, main_command runs the command again in that unit
+// (run_source_debug_command), whose lowering alone keeps the typed entries' source tokens. The two units' copies are
+// each a command of their own then, which share no state (call_graph.c's split-state check).
+#define BUSTER_CHECK_RESULT_DEBUG (-1)
 
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
@@ -931,13 +933,10 @@ static int run_check_command(int count, char** arguments, bool executable)
     }
     else if (!BUSTER_CHECK_SOURCE_ROWS && link && (options.predefines.debug || options.predefines.debug_modules))
     {
-        // -g's link, whole, in the unit whose lowering keeps the source rows (its own unit folds this branch away). This
-        // call's arenas, which hold only the parsed options, go first: that call reserves its own, and the two calls'
-        // together would take twice the address space (an RLIMIT_AS that a compile without -g fits would refuse it).
-        arena_release(&output_arena);
-        arena_release(&scratch);
-        arena_release(&arena);
-        result = run_source_debug_command(count, arguments);
+        // -g's link, whole, in the unit whose lowering keeps the source rows, which main_command calls once this call has
+        // released its arenas below (the two calls' together would take twice the address space). That unit folds this
+        // branch away.
+        result = BUSTER_CHECK_RESULT_DEBUG;
     }
     else
     {

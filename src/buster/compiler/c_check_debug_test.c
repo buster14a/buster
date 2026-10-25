@@ -961,8 +961,8 @@ static bool check_debug_test_limited(char* const* arguments, uint64_t limit)
     return child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-// -g's link takes no more address space than the link without it (#426's review): the default command sends it to this
-// unit after releasing its own arenas, whose 192 GiB the forwarded call would otherwise have reserved again. The least
+// -g's link takes no more address space than the link without it (#426's review): the checker's unit hands it back to
+// main_command, which runs it in this unit, once its own arenas, 192 GiB of reservations, are released. The least
 // RLIMIT_AS a program's link without -g fits, found by halves to 4 GiB below the hard limit (or 64 TiB), and its link
 // with -g under 64 GiB more.
 static void check_debug_test_address_space(CheckDebugTestTally* tally, const char* directory)

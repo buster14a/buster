@@ -593,14 +593,14 @@ static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool
     if (node < program->stream->count && program->stream->values[node].overload_head == 0)
     {
         // A statement's assignment of an aggregate copies the bytes and leaves no address to discard, and one into a
-        // bit-field (an update's too) leaves no value.
+        // bit-field (an update's too) leaves no value. A discarded comma discards its right operand in its place.
         const CheckOp op = program->input->graph.ops[node];
         const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
         const uint32_t destination = program->input->graph.operand0[node];
         const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) &&
                                destination < program->stream->count && (program->stream->values[destination].flags & BUSTER_CHECK_BIT_FIELD) != 0;
         const bool discard = !address && target == BUSTER_TYPE_VOID &&
-                             ((store && check_lower_aggregate(program->types, program->stream->values[node].type)) || bit_field);
+                             ((store && check_lower_aggregate(program->types, program->stream->values[node].type)) || bit_field || op == CHECK_OP_COMMA);
         if (!address && !discard)
         {
             check_lower_convert(writer, program->stream->values[node].type, target);
@@ -857,7 +857,8 @@ static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t
 
 // `size` bytes copied from the source's address on top of the stack to the destination's under it, which stays when
 // `keep` (an assignment's value): one COPY, or COPYs of up to BUSTER_TIER0_MAX_COPY_BYTES each, the source's address
-// in a temporary between them.
+// in a temporary between them. A kept destination's address goes in a temporary too, pushed again after the last COPY:
+// its consumer's class is read from the entry before it (tier0_validate), which a COPY, of class VOID, can't give.
 static void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
 {
     if (size == 0)
@@ -875,11 +876,17 @@ static void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
     else
     {
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t destination = keep ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) : BUSTER_CHECK_NONE;
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, source);
+        if (keep)
+        {
+            // The destination's address, left under the SET_LOCAL of its class, stays the first COPY's operand.
+            check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        }
         for (uint64_t offset = 0; offset < size && writer->output->status == CHECK_PROGRAM_OK; offset += BUSTER_TIER0_MAX_COPY_BYTES)
         {
             const uint64_t piece = size - offset < BUSTER_TIER0_MAX_COPY_BYTES ? size - offset : BUSTER_TIER0_MAX_COPY_BYTES;
-            if (keep || offset + piece != size)
+            if (offset + piece != size)
             {
                 check_lower_emit(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
             }
@@ -887,6 +894,10 @@ static void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
             check_lower_offset(writer, offset);
             check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, piece);
+        }
+        if (keep)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
         }
     }
 }
@@ -2382,7 +2393,11 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     else if (constant && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
              ((value.category == CHECK_RVALUE && !task.address) || ((task.address || address_value) && value.constant_kind == CHECK_CONSTANT_ADDRESS)))
     {
-        check_lower_constant(writer, &value);
+        // A discarded one (a comma's, whose operands have no effects) is nothing.
+        if (!task.discard)
+        {
+            check_lower_constant(writer, &value);
+        }
     }
     else if (op == CHECK_OP_VALUE)
     {
@@ -2621,7 +2636,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     }
     else if (op == CHECK_OP_COMMA)
     {
-        check_lower_operand(writer, node, 1, task.address, value.type);
+        check_lower_operand(writer, node, 1, task.address, task.discard ? BUSTER_TYPE_VOID : value.type);
         check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
     }
     else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)

@@ -94,7 +94,7 @@ jobs:
               [parser_bindings]='c_parser|c_parser_binding_trace|c_parser_bindings[a-z_]*|c_bindings[a-z_]*'
               [environments]='c_environment[a-z_]*'
               [ir]='ir|ir_validate|ir_benchmark'
-              [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_benchmark'
+              [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_emit|ir_lower_benchmark'
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
               [checker]='c_check[a-z_]*'
               [check_debug]='c_check_debug[a-z_]*|c_check_program_emit|c_check_program_lower|debug|tier0'
@@ -305,8 +305,8 @@ jobs:
 
       - name: Build only the compiler executable, and beside it the external Clang pragma token oracle
         # Without debug information, which nothing here reads: it took a fifth of the build's time (BUSTER_DEBUG_INFO,
-        # build.sh). The build waits for its longest unit with CPUs to spare, so the oracle builds meanwhile, outside
-        # build/, which build.sh makes anew and which must hold the compiler alone.
+        # build.sh). The build runs a compile per core, leaving the cores' other threads to spare, so the oracle builds
+        # meanwhile, outside build/, which build.sh makes anew and which must hold the compiler alone.
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
           bash tools/build-preprocessor-pragma-oracle.sh "$oracle" > "$RUNNER_TEMP/oracle.log" 2>&1 &

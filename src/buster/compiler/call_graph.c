@@ -25,11 +25,19 @@
 // what bounds the recursion's depth (the style's "trivial statically bounded recursion"); an entry that matches no
 // cycle fails the check too, so that the list shrinks when the recursion goes.
 //
+// It also checks that no command splits a static variable between translation units. main.c's units compile some
+// modules in one unit alone, their home, which the others call (main.c), so a command runs in its own unit's code and
+// in the homes', each with its own copies of the static variables: a home must share none with its callers' units. From
+// each command (each function that a unit's main_command calls or names), the walk follows the calls and the functions
+// and variables that functions' bodies and variables' initializers name (call_graph_variable, call_graph_reference); a
+// unit's own variable that code may change (internal or private, and global rather than constant), reached in two
+// units' copies by one name, is reported, and fails the check.
+//
 // main.c includes this file after lane.c (for its arenas) and call_graph_test.c after it. Layout, in this order: the
 // allowlist (call_graph_allowed), the interface (CallGraphInput, CallGraphResult, call_graph_check), reading the IR
-// (call_graph_symbol, call_graph_binding, call_graph_define, call_graph_alias, call_graph_call), the symbol table
-// (call_graph_find and call_graph_resolve), the report's text (call_graph_append and the others), call_graph_check, and run_check_call_graph,
-// the command.
+// (call_graph_symbol, call_graph_binding, call_graph_define, call_graph_alias, call_graph_call, call_graph_variable,
+// call_graph_reference), the symbol table (call_graph_find and call_graph_resolve), the report's text
+// (call_graph_append and the others), call_graph_check, and run_check_call_graph, the command.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -84,9 +92,11 @@ struct CallGraphResult
     uint64_t allowed_count;
     uint64_t unused_allowed_count;
     uint64_t problem_count;
+    // Static variables that a command reaches in two translation units' copies (call_graph_check's split-state walk).
+    uint64_t split_count;
     // The arena was too small for the graph or the report, which is then incomplete.
     bool full;
-    // No problem, no cycle outside the allowlist, every entry used, and the arena large enough.
+    // No problem, no cycle outside the allowlist, every entry used, no split variable, and the arena large enough.
     bool success;
 };
 
@@ -350,6 +360,102 @@ static CallGraphCall call_graph_call(String8 line)
     return result;
 }
 
+typedef struct CallGraphVariable CallGraphVariable;
+struct CallGraphVariable
+{
+    String8 name;
+    bool is_variable;
+    // internal or private: the name belongs to its translation unit.
+    bool local;
+    // external or extern_weak: another unit's variable, declared.
+    bool declaration;
+    // global rather than constant: a static variable whose value code may change.
+    bool changes;
+    // Where its type and initializer start, whose symbols are the functions and variables it points to.
+    uint64_t initializer;
+};
+
+// A global variable: `@name = [linkage] [preemption] [visibility] [thread_local[(model)]] [unnamed_addr] ... (global |
+// constant) <type> [<initializer>], ...`. The words before the keyword are lowercase identifiers, some with a
+// parenthesized argument; an alias's line meets `alias` or `ifunc` first.
+static CallGraphVariable call_graph_variable(String8 line)
+{
+    CallGraphVariable result = { 0 };
+    if (line.length != 0 && line.pointer[0] == '@')
+    {
+        const CallGraphSymbol symbol = call_graph_symbol(line, 0);
+        if (symbol.valid && call_graph_starts_with(line, symbol.end, BUSTER_S8(" = ")))
+        {
+            uint64_t at = symbol.end + BUSTER_COMPILE_TIME_STRING_LENGTH(" = ");
+            result.local = call_graph_binding(line, at) == CALL_GRAPH_BINDING_LOCAL;
+            result.declaration = call_graph_starts_with(line, at, BUSTER_S8("external ")) || call_graph_starts_with(line, at, BUSTER_S8("extern_weak "));
+            bool searching = true;
+            while (searching)
+            {
+                uint64_t end = at;
+                while (end < line.length && ((line.pointer[end] >= 'a' && line.pointer[end] <= 'z') || (line.pointer[end] >= '0' && line.pointer[end] <= '9') || line.pointer[end] == '_'))
+                {
+                    end += 1;
+                }
+                const String8 word = { .pointer = line.pointer + at, .length = end - at };
+                const bool global = call_graph_equal(word, BUSTER_S8("global"));
+                result.is_variable = global || call_graph_equal(word, BUSTER_S8("constant"));
+                result.changes = global;
+                if (!result.is_variable && end > at && end < line.length && line.pointer[end] == '(')
+                {
+                    while (end < line.length && line.pointer[end] != ')')
+                    {
+                        end += 1;
+                    }
+                    end += end < line.length;
+                }
+                searching = !result.is_variable && end > at && end < line.length && line.pointer[end] == ' ' && !call_graph_equal(word, BUSTER_S8("alias")) &&
+                            !call_graph_equal(word, BUSTER_S8("ifunc"));
+                at = end + 1;
+            }
+            result.name = symbol.name;
+            result.initializer = at;
+        }
+    }
+    return result;
+}
+
+// The first global symbol (its `@` and name) at or past `at` in `line` that isn't inside a quoted string, such as an
+// inline assembly template or a section's name: what a function's instruction or a variable's initializer points to.
+// The result's end is where the next search starts; it isn't valid when there is none.
+static CallGraphSymbol call_graph_reference(String8 line, uint64_t at)
+{
+    CallGraphSymbol result = { 0 };
+    bool searching = true;
+    while (searching && at < line.length)
+    {
+        // The next `@`, unless a quote comes first: a string's, or a quoted local name's (`%"..."`), skipped whole. A
+        // quoted global name's quote comes after its `@`.
+        const char* sign = memchr(line.pointer + at, '@', line.length - at);
+        const uint64_t sign_at = sign != 0 ? (uint64_t)(sign - line.pointer) : line.length;
+        const char* quote = memchr(line.pointer + at, '"', sign_at - at);
+        if (quote != 0)
+        {
+            const uint64_t open = (uint64_t)(quote - line.pointer) + 1;
+            const char* close = memchr(line.pointer + open, '"', line.length - open);
+            at = close != 0 ? (uint64_t)(close - line.pointer) + 1 : line.length;
+        }
+        else if (sign != 0)
+        {
+            const CallGraphSymbol symbol = call_graph_symbol(line, sign_at);
+            searching = !symbol.valid;
+            result = searching ? result : symbol;
+            at = symbol.end > sign_at ? symbol.end : sign_at + 1;
+        }
+        else
+        {
+            at = line.length;
+        }
+    }
+    result.end = at;
+    return result;
+}
+
 // The line that starts at `at` in `text`, without its newline.
 static String8 call_graph_line(String8 text, uint64_t at)
 {
@@ -514,6 +620,59 @@ static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t u
     return result;
 }
 
+// The variable that `name`, seen from translation unit `unit`, leads to through a chain of aliases, as an index into
+// `variables` plus one, or 0 (`static int mirror __attribute__((alias("cache")));` makes `@mirror = internal alias
+// i32, ptr @cache`). The name is the unit's own symbol if it has one, else the external symbol, whose alias of the
+// unit's own comes first, as call_graph_resolve takes them. An alias's target is its own module's: a variable of the
+// module's own, else the module's own function or alias of the name (a function leads to no variable, an alias on
+// through the chain), else an external variable, which LLVM has the module define: an alias can't lead to a
+// declaration. Round a loop of aliases leads to none: each alias is followed once per lookup, which `stamp` tells apart
+// from every other one's.
+static uint32_t call_graph_alias_variable(CallGraphSymbols* symbols, const CallGraphTable* variables, uint32_t unit, String8 name, uint64_t stamp)
+{
+    uint32_t result = 0;
+    uint32_t work_unit = unit;
+    String8 work_name = name;
+    bool target = false;
+    bool following = true;
+    while (following)
+    {
+        uint32_t symbol = symbols->table.slots[call_graph_find(&symbols->table, work_unit, work_name)];
+        if (symbol == 0)
+        {
+            symbol = symbols->table.slots[call_graph_find(&symbols->table, BUSTER_CALL_GRAPH_EXTERNAL, work_name)];
+        }
+        // A target counts only its module's own definitions of the name, as call_graph_resolve's do.
+        bool defined = false;
+        uint32_t alias = BUSTER_CALL_GRAPH_NONE;
+        for (uint32_t definition = symbol != 0 ? symbols->first[symbol - 1] : BUSTER_CALL_GRAPH_NONE; definition != BUSTER_CALL_GRAPH_NONE;
+             definition = symbols->next[definition])
+        {
+            const bool own = symbols->units[definition] == work_unit;
+            defined = defined || own || !target;
+            if (symbols->kinds[definition] == CALL_GRAPH_KIND_ALIAS && (own || (!target && alias == BUSTER_CALL_GRAPH_NONE)))
+            {
+                alias = symbols->indices[definition];
+            }
+        }
+        if (target && !defined)
+        {
+            result = variables->slots[call_graph_find(variables, BUSTER_CALL_GRAPH_EXTERNAL, work_name)];
+        }
+        following = alias != BUSTER_CALL_GRAPH_NONE && symbols->alias_stamps[alias] != stamp;
+        if (following)
+        {
+            symbols->alias_stamps[alias] = stamp;
+            work_unit = symbols->alias_units[alias];
+            work_name = symbols->alias_targets[alias];
+            target = true;
+            result = variables->slots[call_graph_find(variables, work_unit, work_name)];
+            following = result == 0;
+        }
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The report's text, pushed byte by byte onto the end of the arena: nothing else is pushed while it is written, so it
 // stays contiguous.
@@ -623,6 +782,8 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint64_t define_count = 0;
     uint64_t alias_line_count = 0;
     uint64_t call_line_count = 0;
+    uint64_t variable_line_count = 0;
+    uint64_t reference_line_count = 0;
     for (uint32_t unit = 0; unit < input_count; unit += 1)
     {
         const String8 text = inputs[unit].text;
@@ -633,21 +794,36 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
             define_count += call_graph_define(line).is_define;
             alias_line_count += call_graph_alias(line).is_alias;
             call_line_count += call_graph_call(line).callee.length != 0;
+            variable_line_count += call_graph_variable(line).is_variable;
+            // Every `@` of every line, which bounds the symbols the second pass keeps.
+            for (const char* sign = memchr(line.pointer, '@', line.length); sign != 0; sign = memchr(sign + 1, '@', (uint64_t)(line.pointer + line.length - sign - 1)))
+            {
+                reference_line_count += 1;
+            }
             at += line.length + 1;
         }
     }
 
     // The counts index 32-bit arrays.
-    const bool fits = define_count + alias_line_count < UINT32_MAX && call_line_count < UINT32_MAX;
+    const bool fits = define_count + alias_line_count + variable_line_count < UINT32_MAX && call_line_count < UINT32_MAX && reference_line_count < UINT32_MAX;
     const uint64_t function_capacity = fits ? define_count : 0;
     const uint64_t alias_capacity = fits ? alias_line_count : 0;
     const uint64_t definition_capacity = function_capacity + alias_capacity;
     const uint64_t call_capacity = fits ? call_line_count : 0;
+    const uint64_t variable_capacity = fits ? variable_line_count : 0;
+    const uint64_t reference_capacity = fits ? reference_line_count : 0;
+    // The walks' nodes: the functions, then the variables.
+    const uint64_t node_capacity = function_capacity + variable_capacity;
     // At most half the slots are full.
     uint64_t slot_count = 16;
     while (slot_count < 2 * definition_capacity)
     {
         slot_count *= 2;
+    }
+    uint64_t variable_slot_count = 16;
+    while (variable_slot_count < 2 * variable_capacity)
+    {
+        variable_slot_count *= 2;
     }
     Scratch scratch = scratch_begin(arena);
     Arena* work = scratch.arena;
@@ -695,12 +871,33 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint32_t* reached = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
     uint32_t* path = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
     bool* allowed_used = BUSTER_ARENA_PUSH_ARRAY(work, bool, allowed_count + 1);
+    // The split-state walk's (below): the variables, by scope and name (a translation unit's own, or the external ones),
+    // each one's unit, whether it is a unit's own that code may change, whether its initializer names a symbol, and the
+    // name's place among the changing ones' names; the symbols that functions' bodies and variables' initializers name,
+    // with their owners; and the walks' graph over functions and variables, by owner (reach_begin, reach_targets).
+    String8* variable_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, variable_capacity + 1);
+    uint32_t* variable_scopes = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, variable_capacity + 1);
+    uint32_t* variable_slots = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, variable_slot_count);
+    uint32_t* variable_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, variable_capacity + 1);
+    bool* variable_changes = BUSTER_ARENA_PUSH_ARRAY(work, bool, variable_capacity + 1);
+    bool* variable_named = BUSTER_ARENA_PUSH_ARRAY(work, bool, variable_capacity + 1);
+    uint32_t* variable_states = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, variable_capacity + 1);
+    String8* state_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, variable_capacity + 1);
+    uint32_t* state_scopes = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, variable_capacity + 1);
+    uint32_t* state_slots = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, variable_slot_count);
+    uint32_t* reference_owners = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, reference_capacity + 1);
+    bool* reference_from_variables = BUSTER_ARENA_PUSH_ARRAY(work, bool, reference_capacity + 1);
+    uint32_t* reference_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, reference_capacity + 1);
+    String8* reference_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, reference_capacity + 1);
+    uint32_t* reach_begin = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, node_capacity + 2);
     bool memory = fits && symbol_names != 0 && symbol_scopes != 0 && symbol_first != 0 && symbol_last != 0 && symbol_strong_count != 0 && slots != 0 &&
                   definition_kinds != 0 && definition_indices != 0 && definition_next != 0 && definition_bindings != 0 && definition_units != 0 && names != 0 && units != 0 && alias_units != 0 &&
                   alias_targets != 0 && alias_stamps != 0 && work_units != 0 && work_names != 0 && work_targets != 0 && call_callers != 0 && call_units != 0 && call_names != 0 &&
                   call_lines != 0 && callers_begin != 0 && calls_itself != 0 && visit != 0 && lowest != 0 && on_stack != 0 && component_stack != 0 &&
                   walk_functions != 0 && walk_calls != 0 && components != 0 && component_begin != 0 && members != 0 && component_first != 0 && queue != 0 &&
-                  predecessors != 0 && reached != 0 && path != 0 && allowed_used != 0;
+                  predecessors != 0 && reached != 0 && path != 0 && allowed_used != 0 && variable_names != 0 && variable_scopes != 0 && variable_slots != 0 &&
+                  variable_units != 0 && variable_changes != 0 && variable_named != 0 && variable_states != 0 && state_names != 0 && state_scopes != 0 && state_slots != 0 &&
+                  reference_owners != 0 && reference_from_variables != 0 && reference_units != 0 && reference_names != 0 && reach_begin != 0;
 
     CallGraphReport report = {
         .arena = arena,
@@ -712,6 +909,9 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint32_t call_count = 0;
     uint32_t component_count = 0;
     uint32_t* targets = 0;
+    uint32_t variable_count = 0;
+    uint32_t reference_count = 0;
+    uint32_t call_line_total = 0;
     if (memory)
     {
         memset(slots, 0, slot_count * sizeof(*slots));
@@ -745,6 +945,7 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
         uint32_t definition_count = 0;
         uint32_t alias_count = 0;
         uint32_t call_line_index = 0;
+        memset(variable_slots, 0, variable_slot_count * sizeof(*variable_slots));
         for (uint32_t unit = 0; unit < input_count; unit += 1)
         {
             const String8 text = inputs[unit].text;
@@ -843,6 +1044,47 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                     call_lines[call_line_index] = line_number;
                     call_line_index += 1;
                 }
+                // A variable, by its scope and name, the first definition of each but for another unit's declarations;
+                // then the symbols that an instruction of a function's body or a variable's initializer names, which the
+                // split-state walk follows from them.
+                const CallGraphVariable variable = call_graph_variable(line);
+                bool recorded = false;
+                if (variable.is_variable && !variable.declaration)
+                {
+                    const uint32_t scope = variable.local ? unit : BUSTER_CALL_GRAPH_EXTERNAL;
+                    const CallGraphTable variable_table = {
+                        .slots = variable_slots,
+                        .mask = variable_slot_count - 1,
+                        .names = variable_names,
+                        .scopes = variable_scopes,
+                    };
+                    const uint64_t slot = call_graph_find(&variable_table, scope, variable.name);
+                    recorded = variable_slots[slot] == 0;
+                    if (recorded)
+                    {
+                        variable_names[variable_count] = variable.name;
+                        variable_scopes[variable_count] = scope;
+                        variable_units[variable_count] = unit;
+                        variable_changes[variable_count] = variable.local && variable.changes;
+                        variable_named[variable_count] = false;
+                        variable_count += 1;
+                        variable_slots[slot] = variable_count;
+                    }
+                }
+                const bool body = current != BUSTER_CALL_GRAPH_NONE && !define.is_define;
+                for (CallGraphSymbol reference = call_graph_reference(line, recorded ? variable.initializer : 0); (body || recorded) && reference.valid;
+                     reference = call_graph_reference(line, reference.end))
+                {
+                    reference_owners[reference_count] = recorded ? variable_count - 1 : current;
+                    reference_from_variables[reference_count] = recorded;
+                    if (recorded)
+                    {
+                        variable_named[variable_count - 1] = true;
+                    }
+                    reference_units[reference_count] = unit;
+                    reference_names[reference_count] = reference.name;
+                    reference_count += 1;
+                }
                 at += line.length + 1;
                 line_number += 1;
             }
@@ -852,6 +1094,8 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                 result.problem_count += 1;
             }
         }
+
+        call_line_total = call_line_index;
 
         // Each call's callees, which call_graph_resolve finds: counted first, then written after their caller's earlier
         // calls' (callers_begin[f + 2] counts f's; its prefix sums leave callers_begin[f + 1] where f's start, which
@@ -1092,20 +1336,243 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
         }
     }
 
+    // The split-state walks: from each command, every function and variable it may reach, through calls (into other
+    // translation units too, as the calls resolve) and through the functions and variables that functions' bodies and
+    // variables' initializers name (a function passed as an argument, a table of pointers). A command's function is
+    // what main.c's dispatcher, main_command, calls or names in one of its branches: a command runs in its own unit's
+    // code and in that of the other units it calls, such as the homes of main.c's modules. A static variable (a unit's
+    // own, internal or private, and global rather than constant) that a command reaches in two units' copies, by the
+    // same name, is one whose state those copies don't share: a table that one initializes and the other reads, say.
+    // Each such name is reported once, at the first command that splits it.
+    uint32_t* reach_targets = 0;
+    uint32_t* walk_stack = 0;
+    uint32_t* walk_stamps = 0;
+    uint32_t* walk_from = 0;
+    uint32_t* state_stamps = 0;
+    uint32_t* state_nodes = 0;
+    bool* state_reported = 0;
+    bool* roots = 0;
+    if (memory)
+    {
+        const uint32_t node_count = function_count + variable_count;
+        const CallGraphTable variable_table = {
+            .slots = variable_slots,
+            .mask = variable_slot_count - 1,
+            .names = variable_names,
+            .scopes = variable_scopes,
+        };
+        CallGraphSymbols symbols = {
+            .table = {
+                .slots = slots,
+                .mask = slot_count - 1,
+                .names = symbol_names,
+                .scopes = symbol_scopes,
+            },
+            .first = symbol_first,
+            .strong_count = symbol_strong_count,
+            .kinds = definition_kinds,
+            .indices = definition_indices,
+            .next = definition_next,
+            .bindings = definition_bindings,
+            .units = definition_units,
+            .alias_units = alias_units,
+            .alias_targets = alias_targets,
+            .alias_stamps = alias_stamps,
+            .work_units = work_units,
+            .work_names = work_names,
+            .work_targets = work_targets,
+        };
+        // Each node's edges: a function's calls, then its references; a variable's references. A reference is to the
+        // unit's own variable of that name, else to the functions a call of the name would reach, else to an external
+        // variable, but for a constant that names nothing, such as a string, which the walks needn't visit. Counted
+        // first, then written as the calls are (reach_begin[n + 2] counts n's).
+        memset(reach_begin, 0, ((uint64_t)node_count + 2) * sizeof(*reach_begin));
+        for (uint32_t f = 0; f < function_count; f += 1)
+        {
+            reach_begin[f + 2] += callers_begin[f + 1] - callers_begin[f];
+        }
+        uint64_t reach_count = call_count;
+        for (uint32_t pass = 0; memory && pass < 2; pass += 1)
+        {
+            for (uint32_t r = 0; r < reference_count; r += 1)
+            {
+                const uint32_t owner = reference_from_variables[r] ? function_count + reference_owners[r] : reference_owners[r];
+                uint32_t* written = pass == 1 ? reach_targets + reach_begin[owner + 1] : 0;
+                uint32_t count = 0;
+                uint32_t variable = variable_slots[call_graph_find(&variable_table, reference_units[r], reference_names[r])];
+                if (variable == 0)
+                {
+                    count = call_graph_resolve(&symbols, reference_units[r], reference_names[r], 2 * ((uint64_t)call_line_total + r) + pass, written).count;
+                }
+                if (variable == 0 && count == 0)
+                {
+                    // An alias of a variable (one of a function is among the functions above), with a stamp of its own.
+                    variable = call_graph_alias_variable(&symbols, &variable_table, reference_units[r], reference_names[r],
+                                                         2 * ((uint64_t)call_line_total + reference_count + r) + pass);
+                }
+                if (variable == 0 && count == 0)
+                {
+                    variable = variable_slots[call_graph_find(&variable_table, BUSTER_CALL_GRAPH_EXTERNAL, reference_names[r])];
+                }
+                if (variable != 0 && (variable_changes[variable - 1] || variable_named[variable - 1]))
+                {
+                    if (written != 0)
+                    {
+                        written[0] = function_count + variable - 1;
+                    }
+                    count = 1;
+                }
+                reach_begin[owner + (pass == 0 ? 2 : 1)] += count;
+                reach_count += pass == 0 ? count : 0;
+            }
+            if (pass == 0)
+            {
+                memory = reach_count < UINT32_MAX;
+                reach_targets = memory ? BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, reach_count + 1) : 0;
+                memory = reach_targets != 0;
+                for (uint32_t n = 0; memory && n < node_count; n += 1)
+                {
+                    reach_begin[n + 2] += reach_begin[n + 1];
+                }
+                // The calls first, at the start of each function's edges.
+                for (uint32_t f = 0; memory && f < function_count; f += 1)
+                {
+                    for (uint32_t i = callers_begin[f]; i < callers_begin[f + 1]; i += 1)
+                    {
+                        reach_targets[reach_begin[f + 1]] = targets[i];
+                        reach_begin[f + 1] += 1;
+                    }
+                }
+            }
+        }
+
+        // Each changing variable's name, numbered across the units.
+        uint32_t state_count = 0;
+        memset(state_slots, 0, variable_slot_count * sizeof(*state_slots));
+        const CallGraphTable state_table = {
+            .slots = state_slots,
+            .mask = variable_slot_count - 1,
+            .names = state_names,
+            .scopes = state_scopes,
+        };
+        for (uint32_t v = 0; memory && v < variable_count; v += 1)
+        {
+            if (variable_changes[v])
+            {
+                const uint64_t slot = call_graph_find(&state_table, 0, variable_names[v]);
+                if (state_slots[slot] == 0)
+                {
+                    state_names[state_count] = variable_names[v];
+                    state_scopes[state_count] = 0;
+                    state_count += 1;
+                    state_slots[slot] = state_count;
+                }
+                variable_states[v] = state_slots[slot] - 1;
+            }
+        }
+        walk_stack = memory ? BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, (uint64_t)node_count + 1) : 0;
+        walk_stamps = memory ? BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, (uint64_t)node_count + 1) : 0;
+        walk_from = memory ? BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, (uint64_t)node_count + 1) : 0;
+        state_stamps = memory ? BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, (uint64_t)state_count + 1) : 0;
+        state_nodes = memory ? BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, (uint64_t)state_count + 1) : 0;
+        state_reported = memory ? BUSTER_ARENA_PUSH_ARRAY(work, bool, (uint64_t)state_count + 1) : 0;
+        roots = memory ? BUSTER_ARENA_PUSH_ARRAY(work, bool, (uint64_t)function_count + 1) : 0;
+        memory = memory && walk_stack != 0 && walk_stamps != 0 && walk_from != 0 && state_stamps != 0 && state_nodes != 0 && state_reported != 0 && roots != 0;
+        if (memory)
+        {
+            memset(walk_stamps, 0, ((uint64_t)node_count + 1) * sizeof(*walk_stamps));
+            memset(state_stamps, 0, ((uint64_t)state_count + 1) * sizeof(*state_stamps));
+            memset(state_reported, 0, ((uint64_t)state_count + 1) * sizeof(*state_reported));
+            memset(roots, 0, ((uint64_t)function_count + 1) * sizeof(*roots));
+            for (uint32_t f = 0; f < function_count; f += 1)
+            {
+                for (uint32_t i = call_graph_equal(names[f], BUSTER_S8("main_command")) ? reach_begin[f] : reach_begin[f + 1]; i < reach_begin[f + 1]; i += 1)
+                {
+                    if (reach_targets[i] < function_count)
+                    {
+                        roots[reach_targets[i]] = true;
+                    }
+                }
+            }
+        }
+        uint32_t stamp = 0;
+        for (uint32_t root = 0; memory && root < function_count; root += 1)
+        {
+            if (roots[root])
+            {
+                stamp += 1;
+                uint32_t depth = 1;
+                walk_stack[0] = root;
+                walk_stamps[root] = stamp;
+                walk_from[root] = root;
+                while (depth != 0)
+                {
+                    depth -= 1;
+                    const uint32_t node = walk_stack[depth];
+                    if (node >= function_count && variable_changes[node - function_count])
+                    {
+                        const uint32_t v = node - function_count;
+                        const uint32_t state = variable_states[v];
+                        if (state_stamps[state] != stamp)
+                        {
+                            state_stamps[state] = stamp;
+                            state_nodes[state] = node;
+                        }
+                        else if (variable_units[state_nodes[state] - function_count] != variable_units[v] && !state_reported[state])
+                        {
+                            state_reported[state] = true;
+                            result.split_count += 1;
+                            const uint32_t nodes[2] = { state_nodes[state], node };
+                            call_graph_append(&report, BUSTER_S8("split state: "));
+                            call_graph_append_function(&report, inputs, units, names, root);
+                            call_graph_append(&report, BUSTER_S8(" reaches "));
+                            for (uint32_t k = 0; k < 2; k += 1)
+                            {
+                                const uint32_t from = walk_from[nodes[k]];
+                                const uint32_t from_unit = from < function_count ? units[from] : variable_units[from - function_count];
+                                call_graph_append(&report, k == 0 ? BUSTER_S8("") : BUSTER_S8(", and "));
+                                call_graph_append(&report, inputs[variable_units[nodes[k] - function_count]].name);
+                                call_graph_append(&report, BUSTER_S8(":"));
+                                call_graph_append(&report, variable_names[nodes[k] - function_count]);
+                                call_graph_append(&report, BUSTER_S8(" from "));
+                                call_graph_append(&report, inputs[from_unit].name);
+                                call_graph_append(&report, BUSTER_S8(":"));
+                                call_graph_append(&report, from < function_count ? names[from] : variable_names[from - function_count]);
+                            }
+                            call_graph_append(&report, BUSTER_S8("\n"));
+                        }
+                    }
+                    for (uint32_t i = reach_begin[node]; i < reach_begin[node + 1]; i += 1)
+                    {
+                        const uint32_t next = reach_targets[i];
+                        if (walk_stamps[next] != stamp)
+                        {
+                            walk_stamps[next] = stamp;
+                            walk_from[next] = node;
+                            walk_stack[depth] = next;
+                            depth += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     call_graph_append(&report, BUSTER_S8("call graph: "));
     call_graph_append_count(&report, input_count, BUSTER_S8("translation unit, "), BUSTER_S8("translation units, "));
     call_graph_append_count(&report, function_count, BUSTER_S8("function, "), BUSTER_S8("functions, "));
     call_graph_append_count(&report, call_count, BUSTER_S8("call between them, "), BUSTER_S8("calls between them, "));
     call_graph_append_count(&report, result.cycle_count, BUSTER_S8("cycle, "), BUSTER_S8("cycles, "));
     call_graph_append_number(&report, result.allowed_count);
-    call_graph_append(&report, BUSTER_S8(" allowed\n"));
+    call_graph_append(&report, BUSTER_S8(" allowed, "));
+    call_graph_append_count(&report, result.split_count, BUSTER_S8("split variable\n"), BUSTER_S8("split variables\n"));
 
     result.report = (String8){ .pointer = report.begin, .length = report.length };
     result.function_count = function_count;
     result.call_count = call_count;
     scratch_end(scratch);
     result.full = report.full || !memory;
-    result.success = !result.full && result.problem_count == 0 && result.cycle_count == 0 && result.unused_allowed_count == 0;
+    result.success = !result.full && result.problem_count == 0 && result.cycle_count == 0 && result.unused_allowed_count == 0 && result.split_count == 0;
     return result;
 }
 

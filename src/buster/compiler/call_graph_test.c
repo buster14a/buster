@@ -32,6 +32,14 @@
 //     its entry, an allowed self-call and an entry without a cycle; then a cycle through two units' static functions of
 //     the same name, which an entry naming the other functions once each, and another, mustn't match;
 //   - malformed IR: definitions without a closing brace or a name;
+//   - split state: a command whose unit writes its copy of a table and calls a home's function that reads the home's
+//     (split); each unit's own state (not); two commands each with its own unit's copy, as the driver's test and a
+//     benchmark's unit (not); copies reached through a function passed as an argument and through a constant table of
+//     pointers (split, each at its own command); a constant and a shared variable of one name in both units, and a
+//     variable that only an inline assembly template, a section's name and a quoted name spell (not); the driver's copy
+//     reached through an alias of it, and through a chain of two whose middle one's name another unit's external
+//     variable has, beside two aliases of each other (split); and a static function's thread-local static, with the
+//     function compiled in both units (split);
 //   - depth: a chain of BUSTER_CALL_GRAPH_TEST_CHAIN functions that ends in a self-call, and a ring of
 //     BUSTER_CALL_GRAPH_TEST_RING functions, which would overflow a recursive walk's stack.
 //
@@ -908,12 +916,281 @@ static const CallGraphInput call_graph_test_malformed[] = {
     },
 };
 
+// A command whose unit initializes its own copy of a table and then calls a home's function that reads the home's.
+static const CallGraphInput call_graph_test_split[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@ready = internal global i8 0, align 1\n"
+                               "@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  call void @initialize()\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal void @initialize() {\n"
+                               "  store i8 1, ptr @ready, align 1\n"
+                               "  store i32 7, ptr @table, align 16\n"
+                               "  ret void\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @table, align 16\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
+// The same, but each unit's state is its own: the home's table has another name.
+static const CallGraphInput call_graph_test_own_state[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@ready = internal global i8 0, align 1\n"
+                               "@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  store i32 7, ptr @table, align 16\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@home_table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @home_table, align 16\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
+// Two commands of one dispatcher, each with its own unit's copy of a table: a benchmark's unit of its own, and the
+// driver's test. No command reaches both.
+static const CallGraphInput call_graph_test_commands[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  %3 = call i32 @run_benchmark(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  store i32 7, ptr @table, align 16\n"
+                               "  ret i32 0\n"
+                               "}\n"
+                               "declare i32 @run_benchmark(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("benchmark.ll"),
+        .text = BUSTER_S8_INIT("@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "define dso_local i32 @run_benchmark(i32 noundef %0) {\n"
+                               "  store i32 1, ptr @table, align 16\n"
+                               "  ret i32 0\n"
+                               "}\n"),
+    },
+};
+
+// Functions reached only as values, each of which calls the home: one passed to a declared function (a lane group's
+// entry), whose command writes the driver's table, and one kept in a constant table of pointers, whose command writes
+// the driver's cache.
+static const CallGraphInput call_graph_test_pointers[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "@cache = internal global i64 0, align 8\n"
+                               "@handlers = internal constant [1 x ptr] [ptr @handler], align 8\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  %3 = call i32 @run_table(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  store i32 7, ptr @table, align 16\n"
+                               "  %2 = call zeroext i1 @lane_start(i32 noundef 1, ptr noundef @worker, ptr noundef null)\n"
+                               "  ret i32 0\n"
+                               "}\n"
+                               "define internal void @worker(ptr noundef %0) {\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef 0)\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define internal i32 @run_table(i32 noundef %0) {\n"
+                               "  store i64 7, ptr @cache, align 8\n"
+                               "  %2 = load ptr, ptr @handlers, align 8\n"
+                               "  call void %2(ptr noundef null)\n"
+                               "  ret i32 0\n"
+                               "}\n"
+                               "define internal void @handler(ptr noundef %0) {\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef 1)\n"
+                               "  ret void\n"
+                               "}\n"
+                               "declare zeroext i1 @lane_start(i32 noundef, ptr noundef, ptr noundef)\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "@cache = internal global i64 0, align 8\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @table, align 16\n"
+                               "  %3 = load i64, ptr @cache, align 8\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
+// What doesn't split a unit's state: a constant of the same name in both units, a variable both units share (defined
+// in one, declared in the other, as main.c's units share lane.c's thread context), and the driver's table, which only an
+// inline assembly template and a section's name spell, besides a quoted name that holds it.
+static const CallGraphInput call_graph_test_shared[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@limits = internal constant [2 x i32] [i32 1, i32 2], align 4\n"
+                               "@context = thread_local global { i32, i32 } { i32 0, i32 1 }, align 4\n"
+                               "@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "@\"other table\" = internal global [4 x i32] zeroinitializer, section \"@table\", align 16\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @limits, align 4\n"
+                               "  store i32 %2, ptr @context, align 4\n"
+                               "  store i32 %2, ptr @\"other table\", align 4\n"
+                               "  call void asm sideeffect \"lea @table(%rip), %rax\", \"~{rax}\"()\n"
+                               "  %3 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %3\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@limits = internal constant [2 x i32] [i32 1, i32 2], align 4\n"
+                               "@context = external thread_local global { i32, i32 }, align 4\n"
+                               "@table = internal global [4 x i32] zeroinitializer, align 16\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @limits, align 4\n"
+                               "  store i32 %2, ptr @context, align 4\n"
+                               "  store i32 %2, ptr @table, align 4\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
+// The driver's copy reached through an alias of it, as clang writes `static int mirror __attribute__((alias("cache")));`.
+static const CallGraphInput call_graph_test_split_alias[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "@mirror = internal alias i32, ptr @cache\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  store i32 2, ptr @mirror, align 4\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @cache, align 4\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
+// The same through a chain of two aliases, whose middle one another unit's external variable of the same name mustn't
+// stand for, beside a reference to two aliases of each other, which lead nowhere.
+static const CallGraphInput call_graph_test_split_alias_chain[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "@first = internal alias i32, ptr @cache\n"
+                               "@second = internal alias i32, ptr @first\n"
+                               "@x = internal alias i32, ptr @y\n"
+                               "@y = internal alias i32, ptr @x\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  store i32 2, ptr @second, align 4\n"
+                               "  store i32 3, ptr @x, align 4\n"
+                               "  %2 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@cache = internal global i32 1, align 4\n"
+                               "@first = dso_local global i32 0, align 4\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = load i32, ptr @cache, align 4\n"
+                               "  ret i32 %2\n"
+                               "}\n"),
+    },
+};
+
+// A static function compiled in both units, with a thread-local static of its own, which the command reaches in the
+// driver's copy directly and in the home's through the home's function.
+static const CallGraphInput call_graph_test_local_static[] = {
+    {
+        .name = BUSTER_S8_INIT("driver.ll"),
+        .text = BUSTER_S8_INIT("@counter.count = internal thread_local global i32 0, align 4\n"
+                               "define internal i32 @main_command(i32 noundef %0) {\n"
+                               "  %2 = call i32 @run_test(i32 noundef %0)\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @run_test(i32 noundef %0) {\n"
+                               "  %2 = call i32 @counter()\n"
+                               "  %3 = call i32 @shared_lookup(i32 noundef %0)\n"
+                               "  ret i32 %3\n"
+                               "}\n"
+                               "define internal i32 @counter() {\n"
+                               "  %1 = load i32, ptr @counter.count, align 4\n"
+                               "  %2 = add nsw i32 %1, 1\n"
+                               "  store i32 %2, ptr @counter.count, align 4\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "declare i32 @shared_lookup(i32 noundef)\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("home.ll"),
+        .text = BUSTER_S8_INIT("@counter.count = internal thread_local(initialexec) global i32 0, align 4\n"
+                               "define dso_local i32 @shared_lookup(i32 noundef %0) {\n"
+                               "  %2 = call i32 @counter()\n"
+                               "  ret i32 %2\n"
+                               "}\n"
+                               "define internal i32 @counter() {\n"
+                               "  %1 = load i32, ptr @counter.count, align 4\n"
+                               "  ret i32 %1\n"
+                               "}\n"),
+    },
+};
+
 static const CallGraphTestCase call_graph_test_cases[] = {
     {
         .name = "shapes",
         .inputs = call_graph_test_shapes,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_shapes),
-        .expected = BUSTER_S8_INIT("call graph: 1 translation unit, 4 functions, 4 calls between them, 0 cycles, 0 allowed\n"),
+        .expected = BUSTER_S8_INIT("call graph: 1 translation unit, 4 functions, 4 calls between them, 0 cycles, 0 allowed, 0 split variables\n"),
         .success = true,
     },
     {
@@ -921,7 +1198,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_self,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_self),
         .expected = BUSTER_S8_INIT("cycle: self.ll:a -> self.ll:a\n"
-                                   "call graph: 1 translation unit, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 1 translation unit, 2 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -929,7 +1206,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_pair,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_pair),
         .expected = BUSTER_S8_INIT("cycle: pair.ll:a -> pair.ll:b -> pair.ll:a\n"
-                                   "call graph: 1 translation unit, 3 functions, 3 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 1 translation unit, 3 functions, 3 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -937,7 +1214,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_chord,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_chord),
         .expected = BUSTER_S8_INIT("cycle: chord.ll:a -> chord.ll:b -> chord.ll:a\n"
-                                   "call graph: 1 translation unit, 3 functions, 4 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 1 translation unit, 3 functions, 4 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -945,7 +1222,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_units,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_units),
         .expected = BUSTER_S8_INIT("cycle: one.ll:x -> two.ll:y -> three.ll:z -> one.ll:x\n"
-                                   "call graph: 3 translation units, 6 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 3 translation units, 6 functions, 6 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -954,7 +1231,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_alias),
         .expected = BUSTER_S8_INIT("alias.ll:34: a call of dispatched, an ifunc, whose callee is chosen at run time\n"
                                    "cycle: alias.ll:recurse -> alias.ll:recurse\n"
-                                   "call graph: 1 translation unit, 4 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 1 translation unit, 4 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -964,7 +1241,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .expected = BUSTER_S8_INIT("lost.ll:5: an alias without a target\n"
                                    "lost.ll:8: a call of loop_a, an alias that leads to no definition\n"
                                    "lost.ll:9: a call of lost, an alias that leads to no definition\n"
-                                   "call graph: 1 translation unit, 1 function, 0 calls between them, 0 cycles, 0 allowed\n"),
+                                   "call graph: 1 translation unit, 1 function, 0 calls between them, 0 cycles, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -972,7 +1249,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_strong_alias,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_strong_alias),
         .expected = BUSTER_S8_INIT("cycle: recurse.ll:recurse -> recurse.ll:recurse\n"
-                                   "call graph: 2 translation units, 2 functions, 1 call between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 2 functions, 1 call between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -980,7 +1257,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_strong_alias_reversed,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_strong_alias_reversed),
         .expected = BUSTER_S8_INIT("cycle: recurse.ll:recurse -> recurse.ll:recurse\n"
-                                   "call graph: 2 translation units, 2 functions, 1 call between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 2 functions, 1 call between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -988,7 +1265,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_weak_alias,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_weak_alias),
         .expected = BUSTER_S8_INIT("cycle: weak_alias.ll:recurse -> weak_alias.ll:recurse\n"
-                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -996,7 +1273,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_weak_alias_reversed,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_weak_alias_reversed),
         .expected = BUSTER_S8_INIT("cycle: weak_alias.ll:recurse -> weak_alias.ll:recurse\n"
-                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1005,7 +1282,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_both_strong),
         .expected = BUSTER_S8_INIT("recurse.ll:1: a second strong definition of again\n"
                                    "cycle: recurse.ll:recurse -> recurse.ll:recurse\n"
-                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1013,7 +1290,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_both_weak,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_both_weak),
         .expected = BUSTER_S8_INIT("cycle: weak_alias.ll:recurse -> weak_alias.ll:recurse\n"
-                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1021,7 +1298,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_replaced_aliasee,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_replaced_aliasee),
         .expected = BUSTER_S8_INIT("cycle: alias_a.ll:recurse -> alias_a.ll:recurse\n"
-                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1029,7 +1306,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_replaced_aliasee_reversed,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_replaced_aliasee_reversed),
         .expected = BUSTER_S8_INIT("cycle: alias_a.ll:recurse -> alias_a.ll:recurse\n"
-                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1037,7 +1314,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_inline_body,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_inline_body),
         .expected = BUSTER_S8_INIT("cycle: inline_a.ll:recurse -> inline_a.ll:again -> inline_a.ll:recurse\n"
-                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1045,7 +1322,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_inline_body_reversed,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_inline_body_reversed),
         .expected = BUSTER_S8_INIT("cycle: inline_a.ll:recurse -> inline_a.ll:again -> inline_a.ll:recurse\n"
-                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1053,7 +1330,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_forced,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_forced),
         .expected = BUSTER_S8_INIT("cycle: forced_a.ll:again -> forced_a.ll:recurse -> forced_a.ll:again\n"
-                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1061,7 +1338,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_forced_reversed,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_forced_reversed),
         .expected = BUSTER_S8_INIT("cycle: forced_a.ll:again -> forced_a.ll:recurse -> forced_a.ll:again\n"
-                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1069,7 +1346,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_flatten,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_flatten),
         .expected = BUSTER_S8_INIT("cycle: flatten_a.ll:again -> flatten_a.ll:recurse -> flatten_a.ll:again\n"
-                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1077,7 +1354,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_flatten_reversed,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_flatten_reversed),
         .expected = BUSTER_S8_INIT("cycle: flatten_a.ll:again -> flatten_a.ll:recurse -> flatten_a.ll:again\n"
-                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1085,7 +1362,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_section,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_section),
         .expected = BUSTER_S8_INIT("cycle: section_a.ll:again -> section_a.ll:recurse -> section_a.ll:again\n"
-                                   "call graph: 2 translation units, 3 functions, 5 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 3 functions, 5 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1093,7 +1370,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .inputs = call_graph_test_replaced_bodies,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_replaced_bodies),
         .expected = BUSTER_S8_INIT("cycle: bodies.ll:g -> bodies.ll:f -> bodies.ll:g\n"
-                                   "call graph: 2 translation units, 6 functions, 5 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 6 functions, 5 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1104,7 +1381,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .allowed_count = BUSTER_ARRAY_LENGTH(call_graph_test_copies_allowed),
         .expected = BUSTER_S8_INIT("allowed cycle: first.ll:a -> first.ll:b -> first.ll:a\n"
                                    "allowed cycle: second.ll:a -> second.ll:b -> second.ll:a\n"
-                                   "call graph: 2 translation units, 4 functions, 4 calls between them, 0 cycles, 2 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 4 calls between them, 0 cycles, 2 allowed, 0 split variables\n"),
         .success = true,
     },
     {
@@ -1117,7 +1394,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
                                    "allowed cycle: grown.ll:f -> grown.ll:f\n"
                                    "allowlist entry without a cycle: a b\n"
                                    "allowlist entry without a cycle: e\n"
-                                   "call graph: 1 translation unit, 4 functions, 4 calls between them, 1 cycle, 1 allowed\n"),
+                                   "call graph: 1 translation unit, 4 functions, 4 calls between them, 1 cycle, 1 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1129,7 +1406,7 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .expected = BUSTER_S8_INIT("allowed cycle: one.ll:x -> one.ll:a -> two.ll:y -> two.ll:a -> one.ll:x\n"
                                    "allowlist entry without a cycle: x a y b\n"
                                    "allowlist entry without a cycle: x a y y\n"
-                                   "call graph: 2 translation units, 4 functions, 4 calls between them, 0 cycles, 1 allowed\n"),
+                                   "call graph: 2 translation units, 4 functions, 4 calls between them, 0 cycles, 1 allowed, 0 split variables\n"),
         .success = false,
     },
     {
@@ -1140,7 +1417,69 @@ static const CallGraphTestCase call_graph_test_cases[] = {
                                    "broken.ll:3: a definition without a name\n"
                                    "broken.ll:5: a definition without its closing brace\n"
                                    "cycle: broken.ll:b -> broken.ll:b\n"
-                                   "call graph: 1 translation unit, 2 functions, 1 call between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 1 translation unit, 2 functions, 1 call between them, 1 cycle, 0 allowed, 0 split variables\n"),
+        .success = false,
+    },
+    {
+        .name = "split state",
+        .inputs = call_graph_test_split,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_split),
+        .expected = BUSTER_S8_INIT("split state: driver.ll:run_test reaches home.ll:table from home.ll:shared_lookup, and driver.ll:table from driver.ll:initialize\n"
+                                   "call graph: 2 translation units, 4 functions, 3 calls between them, 0 cycles, 0 allowed, 1 split variable\n"),
+        .success = false,
+    },
+    {
+        .name = "own state",
+        .inputs = call_graph_test_own_state,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_own_state),
+        .expected = BUSTER_S8_INIT("call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 0 split variables\n"),
+        .success = true,
+    },
+    {
+        .name = "commands apart",
+        .inputs = call_graph_test_commands,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_commands),
+        .expected = BUSTER_S8_INIT("call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 0 split variables\n"),
+        .success = true,
+    },
+    {
+        .name = "split through pointers",
+        .inputs = call_graph_test_pointers,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_pointers),
+        .expected = BUSTER_S8_INIT("split state: driver.ll:run_test reaches home.ll:table from home.ll:shared_lookup, and driver.ll:table from driver.ll:run_test\n"
+                                   "split state: driver.ll:run_table reaches home.ll:cache from home.ll:shared_lookup, and driver.ll:cache from driver.ll:run_table\n"
+                                   "call graph: 2 translation units, 6 functions, 4 calls between them, 0 cycles, 0 allowed, 2 split variables\n"),
+        .success = false,
+    },
+    {
+        .name = "shared, constant and spelled state",
+        .inputs = call_graph_test_shared,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_shared),
+        .expected = BUSTER_S8_INIT("call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 0 split variables\n"),
+        .success = true,
+    },
+    {
+        .name = "split through an alias",
+        .inputs = call_graph_test_split_alias,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_split_alias),
+        .expected = BUSTER_S8_INIT("split state: driver.ll:run_test reaches driver.ll:cache from driver.ll:run_test, and home.ll:cache from home.ll:shared_lookup\n"
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 1 split variable\n"),
+        .success = false,
+    },
+    {
+        .name = "split through an alias chain",
+        .inputs = call_graph_test_split_alias_chain,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_split_alias_chain),
+        .expected = BUSTER_S8_INIT("split state: driver.ll:run_test reaches driver.ll:cache from driver.ll:run_test, and home.ll:cache from home.ll:shared_lookup\n"
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 0 cycles, 0 allowed, 1 split variable\n"),
+        .success = false,
+    },
+    {
+        .name = "split local static",
+        .inputs = call_graph_test_local_static,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_local_static),
+        .expected = BUSTER_S8_INIT("split state: driver.ll:run_test reaches home.ll:counter.count from home.ll:counter, and driver.ll:counter.count from driver.ll:counter\n"
+                                   "call graph: 2 translation units, 5 functions, 4 calls between them, 0 cycles, 0 allowed, 1 split variable\n"),
         .success = false,
     },
 };
@@ -1231,7 +1570,7 @@ static int run_call_graph_tests(int argc, char** argv)
         }
         CallGraphTestText chain_expected = call_graph_test_text(&arena);
         call_graph_test_printf(&chain_expected, "cycle: deep.ll:f%llu -> deep.ll:f%llu\n", BUSTER_CALL_GRAPH_TEST_CHAIN - 1, BUSTER_CALL_GRAPH_TEST_CHAIN - 1);
-        call_graph_test_printf(&chain_expected, "call graph: 1 translation unit, %llu functions, %llu calls between them, 1 cycle, 0 allowed\n", BUSTER_CALL_GRAPH_TEST_CHAIN, BUSTER_CALL_GRAPH_TEST_CHAIN);
+        call_graph_test_printf(&chain_expected, "call graph: 1 translation unit, %llu functions, %llu calls between them, 1 cycle, 0 allowed, 0 split variables\n", BUSTER_CALL_GRAPH_TEST_CHAIN, BUSTER_CALL_GRAPH_TEST_CHAIN);
         const CallGraphInput chain_input = {
             .name = BUSTER_S8_INIT("deep.ll"),
             .text = { .pointer = chain.begin, .length = chain.length },
@@ -1249,7 +1588,7 @@ static int run_call_graph_tests(int argc, char** argv)
         {
             call_graph_test_printf(&ring_expected, f < BUSTER_CALL_GRAPH_TEST_RING ? "ring.ll:f%llu -> " : "ring.ll:f%llu\n", f % BUSTER_CALL_GRAPH_TEST_RING, 0);
         }
-        call_graph_test_printf(&ring_expected, "call graph: 1 translation unit, %llu functions, %llu calls between them, 1 cycle, 0 allowed\n", BUSTER_CALL_GRAPH_TEST_RING, BUSTER_CALL_GRAPH_TEST_RING);
+        call_graph_test_printf(&ring_expected, "call graph: 1 translation unit, %llu functions, %llu calls between them, 1 cycle, 0 allowed, 0 split variables\n", BUSTER_CALL_GRAPH_TEST_RING, BUSTER_CALL_GRAPH_TEST_RING);
         const CallGraphInput ring_input = {
             .name = BUSTER_S8_INIT("ring.ll"),
             .text = { .pointer = ring.begin, .length = ring.length },

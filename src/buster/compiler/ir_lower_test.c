@@ -582,6 +582,40 @@ static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* low
 // native code of the same streams (test-tier0's harness, which checks the two of them against each other too): their
 // results and global bytes; and each lowered function promoted to SSA by both paths. `options` choose the shapes;
 // `name` labels the report.
+static uint64_t ir_lower_test_dynamic_interpret(const IrFunction* functions, const Tier0Program* generated, const Tier0TestData* data, uint8_t* globals, const uint64_t* inputs, Arena* execution, bool* fault)
+{
+    IrInterpreterFunction code[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
+    InterpreterBinding bindings[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
+    for (uint32_t f = 0; f < generated->function_count; f += 1)
+    {
+        code[f] = (IrInterpreterFunction){ .symbol = generated->global_count + f + 1, .function = &functions[f] };
+    }
+    for (uint32_t g = 0; g < generated->global_count; g += 1)
+    {
+        const uint64_t size = (uint64_t)generated->global_elements[g] * tier0_class_bytes(generated->global_classes[g]);
+        bindings[g] = (InterpreterBinding){ .symbol = g + 1, .bytes = globals + data->offsets[g], .size = size, .writable = true };
+    }
+    const IrInterpreterProgram program = { .functions = code, .function_count = generated->function_count, .bindings = bindings, .binding_count = generated->global_count };
+    InterpreterValue arguments[3];
+    for (uint32_t a = 0; a < 3; a += 1)
+    {
+        arguments[a] = (InterpreterValue){ .low = inputs[a] };
+    }
+    const InterpreterResult result = ir_interpret(&program, code[generated->function_count - 1].symbol, arguments, 3, 0, execution);
+    *fault = result.status != INTERPRETER_OK;
+    if (*fault)
+    {
+        fprintf(stderr, "  shared IR status %u, function %u, instruction %u\n", result.status, result.function, result.entry);
+        if (result.function < generated->function_count && result.entry < functions[result.function].instruction_count)
+        {
+            const IrFunction* function = &functions[result.function];
+            fprintf(stderr, "  %s.%s a=%u b=%u c=%u\n", ir_op_names[function->op[result.entry]], ir_type_names[function->type[result.entry]], function->a[result.entry], function->b[result.entry], function->c[result.entry]);
+            ir_print(function, execution, stderr);
+        }
+    }
+    return result.value.low;
+}
+
 static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count, Tier0ProgramOptions options, const char* name)
 {
     Tier0Tables tables =
@@ -607,6 +641,7 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     uint64_t functions_seen = 0;
     uint64_t copies = 0;
     uint64_t objects = 0;
+    uint64_t stack_ops[3] = { 0 };
     for (uint32_t p = 0; ready && p < count; p += 1)
     {
         const uint64_t program_seed = seed + p;
@@ -631,6 +666,10 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
                 for (uint32_t i = 0; i < source->count; i += 1)
                 {
                     copies += source->kinds[i] == BUSTER_TYPED_COPY;
+                    if (tier0_moves_stack(source->kinds[i]))
+                    {
+                        stack_ops[source->kinds[i] - BUSTER_TYPED_ALLOCA] += 1;
+                    }
                 }
                 for (uint32_t l = 0; l < source->local_count; l += 1)
                 {
@@ -670,7 +709,8 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
             const uint64_t expected = tier0_test_interpret(program, sources, &data, globals, arguments[r], &source_fault);
             memcpy(expected_globals, globals, data.size);
             tier0_test_initial(program, &data, globals);
-            const uint64_t actual = ir_lower_test_interpret(functions, sources->count, sources->count - 1, program->global_count, &data, globals, arguments[r], 3, &execution, &ir_fault);
+            const uint64_t actual = options.vlas ? ir_lower_test_dynamic_interpret(functions, program, &data, globals, arguments[r], &execution, &ir_fault)
+                                               : ir_lower_test_interpret(functions, sources->count, sources->count - 1, program->global_count, &data, globals, arguments[r], 3, &execution, &ir_fault);
             ok = ir_lower_test_expect(tally, !source_fault && !ir_fault, "typed and IR execution finish", program_seed, r);
             ok = ir_lower_test_expect(tally, expected == actual && memcmp(expected_globals, globals, data.size) == 0, "typed and IR results and global bytes agree", program_seed, r) && ok;
             ok = ir_lower_test_expect(tally, outcomes[r].result == actual && outcomes[r].globals == tier0_test_hash(globals, data.size), "native and IR results and global bytes agree", program_seed, r) && ok;
@@ -683,8 +723,12 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
     }
-    printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies\n", name,
-           functions_seen, entries, instructions, objects, copies);
+    if (options.vlas)
+    {
+        ir_lower_test_expect(tally, stack_ops[0] != 0 && stack_ops[1] != 0 && stack_ops[2] != 0, "generated execution covers all three stack operations", seed, count);
+    }
+    printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies; stack ops=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n", name,
+           functions_seen, entries, instructions, objects, copies, stack_ops[0], stack_ops[1], stack_ops[2]);
     tier0_tables_close(&tables);
     arena_release(&native);
     arena_release(&promoted);
@@ -1586,100 +1630,8 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
-// #136's variable-length arrays: an allocation, and a position saved and restored, which the adapter doesn't lower
-// yet. Both paths refuse each stream at its first stack entry, after validation and before anything is allocated,
-// leaving the caller's result and both arenas as they were.
-static void ir_lower_test_stack(IrLowerTestTally* tally)
-{
-    static const uint8_t kinds[2][4] =
-    {
-        {
-            BUSTER_TYPED_CONST,
-            BUSTER_TYPED_ALLOCA,
-            BUSTER_TYPED_DISCARD,
-            BUSTER_TYPED_RETURN
-        },
-        {
-            BUSTER_TYPED_STACK_SAVE,
-            BUSTER_TYPED_STACK_RESTORE,
-            BUSTER_TYPED_RETURN,
-            BUSTER_TYPED_NONE
-        },
-    };
-    static const uint8_t classes[2][4] =
-    {
-        {
-            BUSTER_TYPED_CLASS_U64,
-            BUSTER_TYPED_CLASS_U64,
-            BUSTER_TYPED_CLASS_U64,
-            BUSTER_TYPED_CLASS_VOID
-        },
-        {
-            BUSTER_TYPED_CLASS_U64,
-            BUSTER_TYPED_CLASS_U64,
-            BUSTER_TYPED_CLASS_VOID,
-            BUSTER_TYPED_CLASS_VOID
-        },
-    };
-    static const uint64_t values[2][4] =
-    {
-        {
-            48,
-            0,
-            0,
-            0
-        },
-        {
-            0,
-            0,
-            0,
-            0
-        },
-    };
-    static const uint32_t counts[2] =
-    {
-        4,
-        3
-    };
-    static const uint32_t refused[2] =
-    {
-        1,
-        0
-    };
-    const IrFunction preserved =
-    {
-        .instruction_count = 123,
-        .block_count = 17,
-    };
-    Arena output = arena_reserve(1ull << 20);
-    Arena scratch = arena_reserve(1ull << 20);
-    // Nonzero marks, so that a rollback to zero would show.
-    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
-    ir_lower_test_expect(tally, ready, "stack arenas", 0, 0);
-    for (uint32_t s = 0; ready && s < 2; s += 1)
-    {
-        const Tier0Function source =
-        {
-            .kinds = kinds[s],
-            .classes = classes[s],
-            .values = values[s],
-            .count = counts[s],
-        };
-        for (uint32_t vector = 0; vector < 2; vector += 1)
-        {
-            const uint64_t output_mark = output.length;
-            const uint64_t scratch_mark = scratch.length;
-            IrFunction result = preserved;
-            const IrCheck check = ir_lower_typed_path(&source, IR_VOID, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == refused[s] &&
-                                            output.length == output_mark && scratch.length == scratch_mark &&
-                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                 "the stack's kinds refused at their entry without allocation", s, vector);
-        }
-    }
-    arena_release(&output);
-    arena_release(&scratch);
-}
+// Defined after the production interpreter, optimizers and selector in ir_stack_test.c: exercise their real contracts.
+static void ir_lower_test_stack(IrLowerTestTally* tally);
 
 static void ir_lower_test_guarded(IrLowerTestTally* tally)
 {
@@ -1803,6 +1755,13 @@ static int run_ir_lower_tests(int argc, char** argv)
         objects.objects = true;
         ir_lower_test_programs(&tally, seed, count, values, "values");
         ir_lower_test_programs(&tally, seed, count, objects, "objects");
+        // Strict execution keeps undefined-byte checking enabled. Full representation COPY can include uninitialized
+        // struct padding, and the older generator's FP->integer cases include the documented CVTT oracle boundary.
+        // These are independent acceptance gaps, not grounds to weaken the dynamic storage checks.
+        Tier0ProgramOptions dynamic = values;
+        dynamic.vlas = true;
+        dynamic.floating = false;
+        ir_lower_test_programs(&tally, seed, count, dynamic, "dynamic stack (strict shared IR / Tier 0 native)");
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;
     }
