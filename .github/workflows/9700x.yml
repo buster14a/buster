@@ -318,11 +318,12 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: buster14a/buster-performance
-          ref: 980ae7e87dfc709bda50d7d493ea3800d1411bcc # Reviewed source/evidence from buster-performance PR #7.
+          ref: 1c0523ac42bb2f33e212226cf94626ac942ee4d2 # Reviewed source/evidence from buster-performance PR #8.
           path: build/performance-reader-evidence
           sparse-checkout: |
             docs/measurements/performance-format-2026-10-24
             docs/measurements/performance-first-party-2026-10-25
+            docs/measurements/performance-pages-2026-10-25
             docs/measurements/foreign-strings-2026-10-23/raw
           persist-credentials: false
 
@@ -346,6 +347,25 @@ jobs:
           build/performance/bmf validate "$reader_harness/history/census/manifest.bmf.json"
           build/performance/bmf validate "$reader_harness/history/foreign-strings/manifest.bmf.json" \
             --evidence-root "$reader_root"
+          pages_harness="$reader_root/docs/measurements/performance-pages-2026-10-25"
+          clang -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
+            -I tools/performance "$pages_harness/profile-validation.c" -o build/performance/test-profile
+          build/performance/test-profile "$reader_fixture/profile-example/capture.pftrace" \
+            "$pages_harness/profile/capture.pftrace"
+          build/performance/bmf validate "$pages_harness/profile/manifest.bmf.json"
+          for manifest in "$pages_harness/history-partitioned/"*.bmf.json; do
+            build/performance/bmf validate "$manifest"
+          done
+          build/performance/capture --no-sampling build/performance/qualification-launch 2 1000000 \
+            -- /usr/bin/true
+          pages_source=$(git rev-parse HEAD)
+          pages_evidence=1c0523ac42bb2f33e212226cf94626ac942ee4d2
+          pages_index=docs/measurements/performance-pages-2026-10-25/site-index.json
+          build/performance/publish . "$pages_source" "$reader_root" "$pages_evidence" \
+            "$pages_index" build/performance/pages-check-1 2026-10-25T13:19:28Z
+          build/performance/publish . "$pages_source" "$reader_root" "$pages_evidence" \
+            "$pages_index" build/performance/pages-check-2 2026-10-25T13:19:28Z
+          diff -rq build/performance/pages-check-1 build/performance/pages-check-2
 
       - name: Write clang's predefines for the compiler's flags
         # For the steps that preprocess the compiler's own translation units: --predefines supplies the macro effects of
