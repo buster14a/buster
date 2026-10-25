@@ -906,28 +906,20 @@ static bool intern_add_names(InternTable* table)
 }
 
 // Reserves the table's memory, with `buckets` buckets (a power of two) to start with, and adds the predefined names.
-// Returns false if the memory can't be reserved. c_files.c starts each lane's table at the size of the lane's share of
-// the files, so that it grows little or not at all.
-static __attribute__((unused)) bool intern_initialize_small(InternTable* table, uint64_t buckets, uint64_t small);
-static __attribute__((unused)) bool intern_initialize_with(InternTable* table, uint64_t buckets)
-{
-    return intern_initialize_small(table, buckets, BUSTER_ARENA_SMALL_BYTES);
-}
-
-// intern_initialize_with with the first `small` bytes of the record arena (its first buckets, spans and records) in
-// base pages (arena_reserve_small).
+// Returns false if the memory can't be reserved.
 static __attribute__((unused)) bool intern_initialize_in(InternTable* table, uint64_t buckets);
-static __attribute__((unused)) bool intern_initialize_small(InternTable* table, uint64_t buckets, uint64_t small)
+static __attribute__((unused)) bool intern_initialize_with(InternTable* table, uint64_t buckets)
 {
     uint32_t capacity;
     *table = (InternTable){ 0 };
-    table->record_arena = arena_reserve_small(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX, small);
+    table->record_arena = arena_reserve(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
     return intern_initialize_in(table, buckets);
 }
 
-// EXPERIMENT (#262): intern_initialize_with in the record arena the caller reserved (table->record_arena, with nothing
-// pushed yet and room for intern_layout_bytes(buckets) and BUSTER_INTERN_RECORD_BYTES_MAX), which a lane reserves before
-// its first round of several lanes.
+// intern_initialize_with in the record arena its caller reserved (table->record_arena, with nothing pushed yet and room
+// for intern_layout_bytes(buckets) and BUSTER_INTERN_RECORD_BYTES_MAX), and the rest of the table zero. c_files.c
+// reserves each lane's as the lane starts, and starts the table at its first round of several lanes, at the size of the
+// lane's share of that round's files, so that it grows little or not at all.
 static __attribute__((unused)) bool intern_initialize_in(InternTable* table, uint64_t buckets)
 {
     const Arena arena = table->record_arena;
@@ -1102,21 +1094,6 @@ static __attribute__((unused)) void intern_bulk_replace(InternTable* table, cons
     }
 }
 
-// EXPERIMENT (#262, not for merging): main's intern_bulk_replace.
-static __attribute__((unused)) void intern_bulk_replace_v1(InternTable* table, const InternBulk* bulk, uint32_t begin, uint32_t end)
-{
-    for (uint32_t id = begin; bulk->grew && id < end && id < bulk->first; id += 1)
-    {
-        const InternSpan span = bulk->old_spans[id];
-        table->spans[id] = span;
-        if (id != 0)
-        {
-            const uint8_t* bytes = table->records + span.offset;
-            intern_place_shared(table, intern_slot(intern_first_bytes(bytes, span.length), id), intern_hash_bytes(bytes, span.length));
-        }
-    }
-}
-
 // Adds spelling `id` (one of intern_bulk_begin's new ids) with its record at offset `offset` and `hash`
 // (intern_hash_bytes's). Every lane, each for the spellings it adds.
 static __attribute__((unused)) void intern_bulk_add(InternTable* table, IdentId id, const uint8_t* bytes, uint32_t length, uint32_t offset, uint64_t hash)
@@ -1137,75 +1114,4 @@ static __attribute__((unused)) void intern_bulk_end(InternTable* table, InternBu
         arena_release(&bulk->old_arena);
     }
     *bulk = (InternBulk){ 0 };
-}
-
-// EXPERIMENT (#262): makes `table` a copy of `from`, the same spellings with the same ids and records, in at least
-// `buckets` buckets (a power of two), so that a lane refining into it finds `from`'s spellings with their ids and gives
-// new ones ids from from->count on. With as many buckets as `from`, the buckets are copied; with more, `from`'s spellings
-// are placed again. The table's memory is reused where it fits: its records' room always, and its buckets and spans
-// when it has as many buckets as the copy needs; else they are laid out anew in a mapping of their own, as intern_grow
-// lays them out. Reading `from` while no lane writes it, any number of lanes copy it at once. Returns false if the
-// memory can't be reserved.
-static __attribute__((unused)) bool intern_copy(InternTable* table, const InternTable* from, uint64_t buckets)
-{
-    const uint64_t wanted = buckets > from->bucket_mask + 1 ? buckets : from->bucket_mask + 1;
-    uint32_t capacity;
-    bool result = true;
-    if (table->record_arena.base == 0)
-    {
-        // The first layout goes at the start of the record arena, before the records, as intern_initialize_with's.
-        *table = (InternTable){ 0 };
-        table->record_arena = arena_reserve(intern_layout_bytes(wanted, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
-        result = intern_lay_out(table, &table->record_arena, wanted);
-        table->records = result ? table->record_arena.base + table->record_arena.length : 0;
-    }
-    else if (table->bucket_mask + 1 != wanted)
-    {
-        InternTable laid = *table;
-        laid.arena = arena_reserve(intern_layout_bytes(wanted, &capacity));
-        result = intern_lay_out(&laid, &laid.arena, wanted);
-        if (result)
-        {
-            arena_release(&table->arena);
-            *table = laid;
-        }
-        else
-        {
-            arena_release(&laid.arena);
-        }
-    }
-    else
-    {
-        // The same layout again: every bucket is written below, or cleared first if `from`'s spellings are placed.
-        result = true;
-    }
-    const uint64_t record_bytes = from->record_arena.length - (uint64_t)(from->records - from->record_arena.base);
-    table->record_arena.length = result ? (uint64_t)(table->records - table->record_arena.base) : table->record_arena.length;
-    uint8_t* records = result ? arena_push(&table->record_arena, record_bytes, 1) : 0;
-    result = records != 0;
-    if (result)
-    {
-        memcpy(records, from->records, record_bytes);
-        memcpy(table->spans, from->spans, (uint64_t)from->count * sizeof(InternSpan));
-        table->count = from->count;
-        if (wanted == from->bucket_mask + 1)
-        {
-            memcpy(table->buckets, from->buckets, wanted * BUSTER_INTERN_BUCKET_BYTES);
-        }
-        else
-        {
-            memset(table->buckets, 0, wanted * BUSTER_INTERN_BUCKET_BYTES);
-            for (IdentId id = 1; id < from->count; id += 1)
-            {
-                const uint8_t* bytes = table->records + table->spans[id].offset;
-                const uint32_t length = table->spans[id].length;
-                intern_place(table, intern_slot(intern_first_bytes(bytes, length), id), intern_hash_bytes(bytes, length));
-            }
-        }
-    }
-    else
-    {
-        table->count = 0;
-    }
-    return result;
 }

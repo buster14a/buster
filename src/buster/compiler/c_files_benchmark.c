@@ -4,8 +4,9 @@
 // The per-file jobs' benchmark (c_files.c): a file cache filled on one lane to eight, as a process that compiles from
 // nothing fills it, and how the time scales.
 //
-// Usage: build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--bytes map|read|populate]
-//                                       [--lane-bytes N] [--read-limit N] [options] path...
+// Usage: build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--rounds]
+//                                       [--bytes map|read|populate] [--shared-bytes N] [--lane-bytes N] [--read-limit N]
+//                                       [options] path...
 //
 // The paths (files, or the .c and .h files under directories) are the walk's roots, with -E's options (-I, -isystem,
 // -D, --predefines, -std=, ...); with --flat they are only prepared, without following their includes (a corpus such as
@@ -20,15 +21,18 @@
 // additions and rewrite, reading the include lines, the searches with their probes, the work one lane does while the
 // others wait, and waiting at syncs); and how busy the least and the most busy lane were (all but waiting), as a share
 // of the run. Then what a run did: its rounds and waves, files, bytes, tokens, shared ids, the merge's candidates, and
-// the opens, mappings and reads of its probes. Without --flat, it then preprocesses each root as a translation unit with
+// the opens, mappings and reads of its probes. With --rounds, then where each lane count's time went round by round
+// (files_benchmark_rounds), from a trace the walk keeps only when asked (FilesRun.trace). --shared-bytes, --lane-bytes,
+// --read-limit and --bytes set FilesRun's shared_bytes, lane_bytes, read_limit and bytes (which lanes prepare a round,
+// and how they get files' bytes). Without --flat, it then preprocesses each root as a translation unit with
 // the cache of a run on one lane, and counts the files the walk prepared that no unit entered, with their tokens and
 // bytes, and the largest of them. Run it under the 9700X's lock without taskset: it pins its lanes itself. The exit
 // status is 1 if the arguments are invalid or a run fails.
 // The command starts one fixed lane team before its warm-ups and reuses it for every run, including the final
 // single-lane cache. As before, the reported run starts inside the entry after its warm-up sync, excluding startup.
 //
-// Layout: the clock, a run (files_benchmark_lane, files_benchmark_run), the unused files (files_benchmark_unused), and
-// run_files_benchmark.
+// Layout: the clock, a run (files_benchmark_lane, files_benchmark_run), the rounds (files_benchmark_rounds), the unused
+// files (files_benchmark_unused), and run_files_benchmark.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -97,28 +101,6 @@ static uint64_t files_benchmark_median(uint64_t* values, uint32_t count)
 // ---------------------------------------------------------------------------------------------------------------------
 // A run
 
-// EXPERIMENT (#262, not for merging): a way to run the walk, which --variant options list and the runs take in turn.
-#define BUSTER_FILES_BENCHMARK_MAX_VARIANTS 8
-typedef struct FilesBenchmarkVariant FilesBenchmarkVariant;
-struct FilesBenchmarkVariant
-{
-    FileCacheBytes bytes;
-    uint32_t read_limit;
-    uint64_t lane_bytes;
-    bool old_merge;
-    bool partial_take;
-    bool probe_take;
-    uint32_t probe_lanes;
-    bool clone_tables;
-    uint64_t lane_array_small;
-    uint64_t lane_small_bytes;
-    uint32_t small_from;
-    uint32_t small_above;
-    bool prepare_populate;
-    bool reserve_tables;
-    const char* label;
-};
-
 // What the lanes of a run share: the run, how long each lane spins first, and the run's ticks (lane 0's, from the sync
 // that starts the time to the sync after the run).
 typedef struct FilesBenchmark FilesBenchmark;
@@ -177,74 +159,41 @@ static void files_benchmark_lane(void* argument)
     }
 }
 
-// EXPERIMENT (#262): the system's huge page faults, their fallbacks and direct compaction stalls so far (/proc/vmstat), or
-// zeros.
-static void files_benchmark_vmstat(uint64_t* values)
+// How a run prepares its rounds and gets its files' bytes: FilesRun's shared_bytes, lane_bytes, bytes and read_limit.
+typedef struct FilesBenchmarkSettings FilesBenchmarkSettings;
+struct FilesBenchmarkSettings
 {
-    static const char* const names[] = { "\nthp_fault_alloc ", "\nthp_fault_fallback ", "\ncompact_stall " };
-    static char buffer[32768];
-    values[0] = values[1] = values[2] = 0;
-    const int fd = open("/proc/vmstat", O_RDONLY | O_CLOEXEC);
-    if (fd >= 0)
-    {
-        const ssize_t length = read(fd, buffer, sizeof(buffer) - 1);
-        close(fd);
-        buffer[length > 0 ? length : 0] = 0;
-        for (uint32_t i = 0; i < 3; i += 1)
-        {
-            const char* at = strstr(buffer, names[i]);
-            values[i] = at != 0 ? strtoull(at + strlen(names[i]), 0, 10) : 0;
-        }
-    }
-}
+    uint64_t shared_bytes;
+    uint64_t lane_bytes;
+    FileCacheBytes bytes;
+    uint32_t read_limit;
+};
 
 // One run from nothing on `lanes` lanes (pinned to `cpus`): its times in `sample`, what it did in `counts` and, unless
 // `trace` is null, where its time went round by round. Leaves the cache and its table filled when `keep` (for
 // files_benchmark_unused), else releases them.
-static bool files_benchmark_run(const PPOptions* options, const char* const* roots, uint32_t root_count, bool follow, const FilesBenchmarkVariant* variant,
-                                uint32_t lanes, const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts, FilesTrace* trace,
-                                InternTable* table, FileCache* cache, bool keep)
+static bool files_benchmark_run(const PPOptions* options, const char* const* roots, uint32_t root_count, bool follow, const FilesBenchmarkSettings* settings, uint32_t lanes,
+                                const uint32_t* cpus, uint64_t spin_ticks, FilesBenchmarkSample* sample, FilesBenchmarkCounts* counts, FilesTrace* trace, InternTable* table,
+                                FileCache* cache, bool keep)
 {
     static Preprocessor search;
     static FilesBenchmark benchmark;
     PPOptions with = *options;
     bool result = intern_initialize(table) && file_cache_initialize(cache, table, pp_prepare_options(&with));
-    cache->lane_small_bytes = variant->lane_small_bytes;
-    cache->lane_small_from = lanes > variant->small_above ? variant->small_from : UINT32_MAX;
     with.files = cache;
     result = result && pp_initialize(&search, &with, table) && files_run_initialize(&benchmark.run, cache, &search, roots, root_count, follow, lanes);
-    benchmark.run.bytes = variant->bytes;
-    benchmark.run.read_limit = variant->read_limit;
-    benchmark.run.lane_bytes = variant->lane_bytes;
-    benchmark.run.old_merge = variant->old_merge;
-    benchmark.run.partial_take = variant->partial_take;
-    benchmark.run.probe_take = variant->probe_take;
-    benchmark.run.probe_lanes = variant->probe_lanes;
-    benchmark.run.clone_tables = variant->clone_tables;
-    benchmark.run.lane_array_small = variant->lane_array_small;
-    benchmark.run.prepare_populate = variant->prepare_populate;
-    benchmark.run.small_from = variant->small_from;
-    benchmark.run.small_above = variant->small_above;
-    benchmark.run.reserve_tables = variant->reserve_tables;
+    benchmark.run.shared_bytes = settings->shared_bytes;
+    benchmark.run.lane_bytes = settings->lane_bytes;
+    benchmark.run.bytes = settings->bytes;
+    benchmark.run.read_limit = settings->read_limit;
+    benchmark.run.trace = trace;
     benchmark.spin_ticks = spin_ticks;
     benchmark.ticks = 0;
     if (trace != 0)
     {
         *trace = (FilesTrace){ 0 };
-        benchmark.run.trace = trace;
     }
-    uint64_t before[3];
-    files_benchmark_vmstat(before);
     result = result && lane_run(lanes, files_benchmark_lane, &benchmark, cpus) && !benchmark.run.failed;
-    if (trace != 0)
-    {
-        uint64_t after[3];
-        files_benchmark_vmstat(after);
-        for (uint32_t i = 0; i < 3; i += 1)
-        {
-            trace->vmstat[i] = after[i] - before[i];
-        }
-    }
     *sample = (FilesBenchmarkSample){
         .ticks = benchmark.ticks,
         .roots = benchmark.run.roots_prepared > benchmark.start ? benchmark.run.roots_prepared - benchmark.start : 0,
@@ -303,25 +252,15 @@ static uint64_t files_benchmark_interval(const FilesTrace* trace, uint32_t at, u
 }
 
 // Prints where the runs' time went round by round (--rounds), as medians of `runs` traces of `lanes` lanes: per interval
-// (the roots' search, then each round: its preparation and the searches for the next round's files), what it did, its
-// wall time on lane 0, lane 0's phases, and the other traced lanes' most preparing and searching and least and most
-// waiting.
+// (the roots' search, then each round: its preparation and the searches for the next round's files), what it did (its
+// files, bytes, working lanes, waves and probes), its wall time on lane 0, lane 0's phases (preparing, the merge's
+// steps, the include lines, the searches, the work alone and the waits), and the other traced lanes' most preparing and
+// searching and least and most waiting.
 static void files_benchmark_rounds(const FilesTrace* traces, uint32_t runs, uint32_t lanes, double milliseconds)
 {
     static uint64_t values[BUSTER_FILES_BENCHMARK_MAX_RUNS];
     const uint32_t traced = lanes < BUSTER_FILES_TRACE_LANES ? lanes : BUSTER_FILES_TRACE_LANES;
     printf("rounds on %u lanes (medians of %u runs, ms; lane 0, then the other lanes' most and least):\n", lanes, runs);
-    // EXPERIMENT (#262): the system's huge page faults, fallbacks and compaction stalls per run.
-    double vmstat[3];
-    for (uint32_t i = 0; i < 3; i += 1)
-    {
-        for (uint32_t r = 0; r < runs; r += 1)
-        {
-            values[r] = traces[r].vmstat[i];
-        }
-        vmstat[i] = (double)files_benchmark_median(values, runs);
-    }
-    printf("  per run (medians, the whole system's): %.0f huge page faults, %.0f fallbacks, %.0f compaction stalls\n", vmstat[0], vmstat[1], vmstat[2]);
     printf("  round  files      bytes  lanes  waves  probes     wall  prepare   merge  requests  search  alone    wait |  prepare  search    waits\n");
     for (uint32_t at = 0; at <= traces[0].rounds; at += 1)
     {
@@ -370,58 +309,6 @@ static void files_benchmark_rounds(const FilesTrace* traces, uint32_t runs, uint
         printf("%s %6lu %7lu %8.3f %8.3f %7.3f %9.3f %7.3f %6.3f %7.3f | %8.3f %7.3f %.3f-%.3f\n", what, (unsigned long)(first->waves[at + 1] - first->waves[at]),
                (unsigned long)(first->probes[at + 1] - first->probes[at]), medians[0], medians[1], medians[2], medians[3], medians[4], medians[5], medians[6], medians[7],
                medians[8], medians[9], medians[10]);
-        // EXPERIMENT (#262): lane 0's and the busiest other lane's lexing, refining, directive tables and own table (ms),
-        // tables' growths and page faults; and lane 0's merge steps (lookup, exchange, add, rewrite).
-        double detail[2][6];
-        for (uint32_t side = 0; side < 2; side += 1)
-        {
-            for (uint32_t value = 0; value < 6; value += 1)
-            {
-                for (uint32_t r = 0; r < runs; r += 1)
-                {
-                    const FilesTrace* trace = &traces[r];
-                    uint64_t result = 0;
-                    for (uint32_t l = side == 0 ? 0 : 1; l < (side == 0 ? 1 : traced); l += 1)
-                    {
-                        uint64_t spent = 0;
-                        if (value < 3)
-                        {
-                            const uint32_t phase = value == 0 ? PP_PHASE_LEX : value == 1 ? PP_PHASE_REFINE : PP_PHASE_DIRECTIVES;
-                            spent = trace->prepare_ticks[at + 1][l][phase] - trace->prepare_ticks[at][l][phase];
-                        }
-                        else if (value == 3)
-                        {
-                            spent = trace->table_ticks[at + 1][l] - trace->table_ticks[at][l];
-                        }
-                        else if (value == 4)
-                        {
-                            spent = trace->table_grows[at + 1][l] - trace->table_grows[at][l];
-                        }
-                        else
-                        {
-                            spent = trace->faults[at + 1][l] - trace->faults[at][l];
-                        }
-                        result = spent > result ? spent : result;
-                    }
-                    values[r] = result;
-                }
-                const double median = (double)files_benchmark_median(values, runs);
-                detail[side][value] = value < 4 ? median * milliseconds : median;
-            }
-        }
-        double steps[4];
-        for (uint32_t step = 0; step < 4; step += 1)
-        {
-            for (uint32_t r = 0; r < runs; r += 1)
-            {
-                values[r] = files_benchmark_interval(&traces[r], at, 0, FILES_PHASE_LOOKUP + step);
-            }
-            steps[step] = (double)files_benchmark_median(values, runs) * milliseconds;
-        }
-        printf("         lane 0: lex %.3f refine %.3f tables %.3f own table %.3f, %.0f growths, %.0f faults; merge %.3f %.3f %.3f %.3f | others: lex %.3f refine %.3f tables %.3f "
-               "own table %.3f, %.0f growths, %.0f faults\n",
-               detail[0][0], detail[0][1], detail[0][2], detail[0][3], detail[0][4], detail[0][5], steps[0], steps[1], steps[2], steps[3], detail[1][0], detail[1][1],
-               detail[1][2], detail[1][3], detail[1][4], detail[1][5]);
     }
 }
 
@@ -566,11 +453,12 @@ int run_files_benchmark(int argc, char** argv)
     uint32_t spin = 2;
     bool flat = false;
     bool rounds = false;
-    const char* variant_specs[BUSTER_FILES_BENCHMARK_MAX_VARIANTS];
-    uint32_t variant_count = 0;
-    FileCacheBytes bytes = BUSTER_FILES_BYTES;
-    uint64_t lane_bytes = BUSTER_FILES_LANE_BYTES;
-    uint32_t read_limit = BUSTER_FILES_READ_LIMIT;
+    FilesBenchmarkSettings settings = {
+        .shared_bytes = BUSTER_FILES_SHARED_BYTES,
+        .lane_bytes = BUSTER_FILES_LANE_BYTES,
+        .bytes = BUSTER_FILES_BYTES,
+        .read_limit = BUSTER_FILES_READ_LIMIT,
+    };
     char** passed = calloc((size_t)argc + 2, sizeof(char*));
     int passed_count = 0;
     FilesSources sources = { 0 };
@@ -613,28 +501,24 @@ int run_files_benchmark(int argc, char** argv)
         {
             rounds = true;
         }
-        else if (strcmp(argument, "--variant") == 0 && next != 0 && variant_count < BUSTER_FILES_BENCHMARK_MAX_VARIANTS)
+        else if (strcmp(argument, "--shared-bytes") == 0 && next != 0)
         {
-            // EXPERIMENT (#262): a comma-separated list of lane-bytes=N, read-limit=N, bytes=map|read|populate, old-merge,
-            // partial-take, probe-take, probe-lanes=N, clone-tables, small-arrays=N, small-columns=N,
-            // small-from=N, small-above=N, prepare-populate and reserve-tables, each over the command line's settings.
-            variant_specs[variant_count] = next;
-            variant_count += 1;
+            settings.shared_bytes = strtoull(next, 0, 10);
             i += 1;
         }
         else if (strcmp(argument, "--lane-bytes") == 0 && next != 0)
         {
-            lane_bytes = strtoull(next, 0, 10);
+            settings.lane_bytes = strtoull(next, 0, 10);
             i += 1;
         }
         else if (strcmp(argument, "--read-limit") == 0 && next != 0)
         {
-            read_limit = (uint32_t)strtoul(next, 0, 10);
+            settings.read_limit = (uint32_t)strtoul(next, 0, 10);
             i += 1;
         }
         else if (strcmp(argument, "--bytes") == 0 && next != 0)
         {
-            bytes = strcmp(next, "populate") == 0 ? FILE_CACHE_MAP_POPULATED : strcmp(next, "read") == 0 ? FILE_CACHE_READ : FILE_CACHE_MAP;
+            settings.bytes = strcmp(next, "populate") == 0 ? FILE_CACHE_MAP_POPULATED : strcmp(next, "read") == 0 ? FILE_CACHE_READ : FILE_CACHE_MAP;
             valid = strcmp(next, "populate") == 0 || strcmp(next, "read") == 0 || strcmp(next, "map") == 0;
             i += 1;
         }
@@ -671,88 +555,6 @@ int run_files_benchmark(int argc, char** argv)
     lane_count = kept;
     valid = valid && lane_count != 0;
     valid = valid && sources.count != 0;
-    static FilesBenchmarkVariant variants[BUSTER_FILES_BENCHMARK_MAX_VARIANTS];
-    const uint32_t variant_total = variant_count != 0 ? variant_count : 1;
-    for (uint32_t v = 0; valid && v < variant_total; v += 1)
-    {
-        variants[v] = (FilesBenchmarkVariant){ .bytes = bytes, .read_limit = read_limit, .lane_bytes = lane_bytes, .label = variant_count != 0 ? variant_specs[v] : "" };
-        const char* p = variant_count != 0 ? variant_specs[v] : "";
-        while (valid && *p != 0)
-        {
-            const char* end = strchr(p, ',');
-            const size_t length = end != 0 ? (size_t)(end - p) : strlen(p);
-            if (length > 11 && strncmp(p, "lane-bytes=", 11) == 0)
-            {
-                variants[v].lane_bytes = strtoull(p + 11, 0, 10);
-            }
-            else if (length > 11 && strncmp(p, "read-limit=", 11) == 0)
-            {
-                variants[v].read_limit = (uint32_t)strtoul(p + 11, 0, 10);
-            }
-            else if (length == 14 && strncmp(p, "bytes=populate", 14) == 0)
-            {
-                variants[v].bytes = FILE_CACHE_MAP_POPULATED;
-            }
-            else if (length == 10 && strncmp(p, "bytes=read", 10) == 0)
-            {
-                variants[v].bytes = FILE_CACHE_READ;
-            }
-            else if (length == 9 && strncmp(p, "bytes=map", 9) == 0)
-            {
-                variants[v].bytes = FILE_CACHE_MAP;
-            }
-            else if (length == 9 && strncmp(p, "old-merge", 9) == 0)
-            {
-                variants[v].old_merge = true;
-            }
-            else if (length == 12 && strncmp(p, "partial-take", 12) == 0)
-            {
-                variants[v].partial_take = true;
-            }
-            else if (length == 10 && strncmp(p, "probe-take", 10) == 0)
-            {
-                variants[v].probe_take = true;
-            }
-            else if (length == 12 && strncmp(p, "clone-tables", 12) == 0)
-            {
-                variants[v].clone_tables = true;
-            }
-            else if (length > 13 && strncmp(p, "small-arrays=", 13) == 0)
-            {
-                variants[v].lane_array_small = strtoull(p + 13, 0, 10);
-            }
-            else if (length > 14 && strncmp(p, "small-columns=", 14) == 0)
-            {
-                variants[v].lane_small_bytes = strtoull(p + 14, 0, 10);
-            }
-            else if (length == 16 && strncmp(p, "prepare-populate", 16) == 0)
-            {
-                variants[v].prepare_populate = true;
-            }
-            else if (length == 14 && strncmp(p, "reserve-tables", 14) == 0)
-            {
-                variants[v].reserve_tables = true;
-            }
-            else if (length > 11 && strncmp(p, "small-from=", 11) == 0)
-            {
-                variants[v].small_from = (uint32_t)strtoul(p + 11, 0, 10);
-            }
-            else if (length > 12 && strncmp(p, "small-above=", 12) == 0)
-            {
-                variants[v].small_above = (uint32_t)strtoul(p + 12, 0, 10);
-            }
-            else if (length > 12 && strncmp(p, "probe-lanes=", 12) == 0)
-            {
-                variants[v].probe_lanes = (uint32_t)strtoul(p + 12, 0, 10);
-            }
-            else
-            {
-                fprintf(stderr, "benchmark-files: an unknown variant setting in %s\n", variant_specs[v]);
-                valid = false;
-            }
-            p += length + (end != 0);
-        }
-    }
     Arena arena = arena_reserve(1ull << 30);
     PPOptions options;
     const char* input;
@@ -767,7 +569,7 @@ int run_files_benchmark(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr,
-                "usage: %s [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--rounds] [--variant SPEC]... [--bytes map|read|populate] [--lane-bytes N] "
+                "usage: %s [--lanes LIST] [--cpus LIST] [--runs N] [--spin MS] [--flat] [--rounds] [--bytes map|read|populate] [--shared-bytes N] [--lane-bytes N] "
                 "[--read-limit N] [options] path...\n",
                 argv[0]);
     }
@@ -776,10 +578,10 @@ int run_files_benchmark(int argc, char** argv)
     const double milliseconds = 1e-6 / ticks_per_nanosecond;
     static InternTable table;
     static FileCache cache;
-    static FilesBenchmarkSample samples[BUSTER_FILES_BENCHMARK_MAX_VARIANTS][BUSTER_FILES_BENCHMARK_MAX_RUNS];
+    static FilesBenchmarkSample samples[BUSTER_FILES_BENCHMARK_MAX_RUNS];
     static uint64_t values[BUSTER_FILES_BENCHMARK_MAX_RUNS];
-    // With --rounds, every run's trace, by variant and lane count, for the tables after the runs'.
-    FilesTrace* traces = valid && rounds ? calloc((size_t)runs * lane_count * variant_total, sizeof(FilesTrace)) : 0;
+    // With --rounds, every run's trace, by lane count, for the tables after the runs'.
+    FilesTrace* traces = valid && rounds ? calloc((size_t)runs * lane_count, sizeof(FilesTrace)) : 0;
     bool result = valid && (!rounds || traces != 0);
     uint32_t capacity = 1;
     for (uint32_t l = 0; valid && l < lane_count; l += 1)
@@ -806,38 +608,28 @@ int run_files_benchmark(int argc, char** argv)
         printf("one command team, reused across runs; run times exclude thread startup and shutdown\n");
         printf("lanes  run ms  speedup  roots ms  Mtokens/s  prepare  lookup  exchange  add  rewrite  requests  search  alone   wait  (ms, most of a lane)  busy\n");
     }
-    double first_runs[BUSTER_FILES_BENCHMARK_MAX_VARIANTS] = { 0 };
+    double first_run = 0.0;
     FilesBenchmarkCounts counts = { 0 };
     for (uint32_t l = 0; result && l < lane_count; l += 1)
     {
-        // A warm-up run of each variant, then the measured ones, the variants in an order that rotates by run.
-        for (uint32_t v = 0; result && v < variant_total; v += 1)
-        {
-            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, &variants[v], lanes[l], cpus, spin_ticks, &samples[v][0], &counts, 0, &table, &cache, false);
-        }
+        // A warm-up run, then the measured ones.
+        result = files_benchmark_run(&options, sources.paths, sources.count, !flat, &settings, lanes[l], cpus, spin_ticks, &samples[0], &counts, 0, &table, &cache, false);
         for (uint32_t r = 0; result && r < runs; r += 1)
         {
-            for (uint32_t k = 0; result && k < variant_total; k += 1)
-            {
-                const uint32_t v = (r + k) % variant_total;
-                result = files_benchmark_run(&options, sources.paths, sources.count, !flat, &variants[v], lanes[l], cpus, spin_ticks, &samples[v][r], &counts,
-                                             traces != 0 ? &traces[((uint64_t)v * lane_count + l) * runs + r] : 0, &table, &cache, false);
-            }
+            FilesTrace* trace = traces != 0 ? &traces[(uint64_t)l * runs + r] : 0;
+            result = files_benchmark_run(&options, sources.paths, sources.count, !flat, &settings, lanes[l], cpus, spin_ticks, &samples[r], &counts, trace, &table, &cache, false);
         }
-        for (uint32_t v = 0; result && v < variant_total; v += 1)
+        if (result)
         {
-            const FilesBenchmarkSample* const run_samples = samples[v];
-            double first_run = first_runs[v];
             for (uint32_t r = 0; r < runs; r += 1)
             {
-                values[r] = run_samples[r].ticks;
+                values[r] = samples[r].ticks;
             }
             const double run = (double)files_benchmark_median(values, runs) * milliseconds;
             first_run = l == 0 ? run : first_run;
-            first_runs[v] = first_run;
             for (uint32_t r = 0; r < runs; r += 1)
             {
-                values[r] = run_samples[r].roots;
+                values[r] = samples[r].roots;
             }
             const double roots = (double)files_benchmark_median(values, runs) * milliseconds;
             double phases[FILES_PHASE_COUNT];
@@ -845,38 +637,33 @@ int run_files_benchmark(int argc, char** argv)
             {
                 for (uint32_t r = 0; r < runs; r += 1)
                 {
-                    values[r] = run_samples[r].phases[phase];
+                    values[r] = samples[r].phases[phase];
                 }
                 phases[phase] = (double)files_benchmark_median(values, runs) * milliseconds;
             }
             for (uint32_t r = 0; r < runs; r += 1)
             {
-                values[r] = run_samples[r].ticks != 0 ? run_samples[r].busy_least * 1000 / run_samples[r].ticks : 0;
+                values[r] = samples[r].ticks != 0 ? samples[r].busy_least * 1000 / samples[r].ticks : 0;
             }
             const double least = (double)files_benchmark_median(values, runs) / 10.0;
             for (uint32_t r = 0; r < runs; r += 1)
             {
-                values[r] = run_samples[r].ticks != 0 ? run_samples[r].busy_most * 1000 / run_samples[r].ticks : 0;
+                values[r] = samples[r].ticks != 0 ? samples[r].busy_most * 1000 / samples[r].ticks : 0;
             }
             const double most = (double)files_benchmark_median(values, runs) / 10.0;
             printf("%5u  %6.2f  %7.2f  %8.2f  %9.1f  %7.2f  %6.2f  %8.2f  %4.2f  %7.2f  %8.2f  %6.2f  %5.2f  %5.2f  %19s  %4.1f-%.1f%%\n", lanes[l], run,
                    run != 0.0 ? first_run / run : 0.0, roots, run != 0.0 ? (double)counts.tokens / run / 1e3 : 0.0, phases[FILES_PHASE_PREPARE],
                    phases[FILES_PHASE_LOOKUP], phases[FILES_PHASE_EXCHANGE], phases[FILES_PHASE_ADD], phases[FILES_PHASE_REMAP], phases[FILES_PHASE_REQUESTS],
-                   phases[FILES_PHASE_SEARCH], phases[FILES_PHASE_ALONE], phases[FILES_PHASE_WAIT], variants[v].label, least, most);
+                   phases[FILES_PHASE_SEARCH], phases[FILES_PHASE_ALONE], phases[FILES_PHASE_WAIT], "", least, most);
         }
-        if (!result)
+        else
         {
             fprintf(stderr, "benchmark-files: a run on %u lanes failed\n", lanes[l]);
         }
     }
-    for (uint32_t v = 0; result && traces != 0 && v < variant_total; v += 1)
+    for (uint32_t l = 0; result && traces != 0 && l < lane_count; l += 1)
     {
-        for (uint32_t l = 0; l < lane_count; l += 1)
-        {
-            printf("%s", variants[v].label[0] != 0 ? "variant " : "");
-            printf("%s%s", variants[v].label, variants[v].label[0] != 0 ? ": " : "");
-            files_benchmark_rounds(&traces[((uint64_t)v * lane_count + l) * runs], runs, lanes[l], milliseconds);
-        }
+        files_benchmark_rounds(&traces[(uint64_t)l * runs], runs, lanes[l], milliseconds);
     }
     if (result)
     {
@@ -888,7 +675,7 @@ int run_files_benchmark(int argc, char** argv)
     if (result && !flat)
     {
         FilesBenchmarkSample sample;
-        result = files_benchmark_run(&options, sources.paths, sources.count, true, &variants[0], 1, cpus, 0, &sample, &counts, 0, &table, &cache, true) &&
+        result = files_benchmark_run(&options, sources.paths, sources.count, true, &settings, 1, cpus, 0, &sample, &counts, 0, &table, &cache, true) &&
                  files_benchmark_unused(&options, sources.paths, sources.count, &table, &cache);
         file_cache_release(&cache);
         intern_release(&table);

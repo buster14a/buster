@@ -71,6 +71,7 @@ jobs:
       ir_lowering: ${{ steps.files.outputs.ir_lowering }}
       ir_optimize: ${{ steps.files.outputs.ir_optimize }}
       checker: ${{ steps.files.outputs.checker }}
+      files: ${{ steps.files.outputs.files }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
       - name: Check out the triggering commit and its parents
@@ -84,7 +85,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker)
+          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker files)
           # The sources each module's conditioned benchmark samples measure, under src/buster/compiler/.
           declare -A sources=(
               [zen5]='x86_zen5[a-z_]*'
@@ -95,6 +96,7 @@ jobs:
               [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_benchmark'
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
               [checker]='c_check[a-z_]*'
+              [files]='c_files[a-z_]*'
           )
           # The plain benchmarks, each by the name its commands take after benchmark- or measure-, and the sources it
           # measures: `unit:FILE`, the translation unit of its own whose includes it measures, or for one in main.c's
@@ -1060,47 +1062,22 @@ jobs:
       - name: Benchmark the per-file jobs on the repository's translation units
         # Without taskset: it pins each lane to an allowed CPU of its own.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
-        run: |
-          # EXPERIMENT (#262, not for merging): main's merge against the new one with the lanes' bytes, partial takes and
-          # the probes' sharing, with base pages at the start of the lanes' arrays and of the arenas of lanes past lane 0
-          # (on more than 4 lanes, or from lane 4 on), the preparing lane populating mapped files, and the lanes' tables
-          # reserved as the lanes start.
-          head -n 3 /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag || true
-          a=lane-bytes=1048576,partial-take,probe-take
-          b=lane-bytes=2097152,partial-take,probe-take
-          s=small-arrays=1048576,small-columns=2097152,prepare-populate
-          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a,$s" --variant "$a,$s,reserve-tables" --variant "$a,$s,reserve-tables,small-above=4" \
-            --variant "$a,$s,reserve-tables,small-from=4" --variant "$a,prepare-populate,reserve-tables" --variant "$b,$s,reserve-tables,small-above=4" \
-            --variant "lane-bytes=1048576,partial-take,$s,reserve-tables,small-above=4" \
-            -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+        run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
-      - name: EXPERIMENT (#262) Test and benchmark the per-file jobs on musl, sqlite3.c and the C library corpus
-        # Without taskset: it pins each lane to an allowed CPU of its own. The frozen corpora of the preprocessor's oracle
-        # (docs/preprocessor-oracle.md).
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
+      - name: Benchmark the per-file jobs on musl, sqlite3.c and the flat C library corpus
+        # Where `changes` doesn't rule it out (the module's sources): docs/c-files.md's tables, on the preprocessor
+        # oracle's frozen corpora (docs/preprocessor-oracle.md), with sqlite3.c's walk round by round. Without taskset:
+        # it pins each lane to an allowed CPU of its own.
+        if: needs.changes.outputs.files != 'false'
         run: |
           unset CPATH C_INCLUDE_PATH
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           musl="$corpus/libc/musl"
-          musl_options=(-std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal"
-            -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include")
-          musl_units=("$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c)
-          status=0
-          echo "musl: ${#musl_units[@]} units"
-          ./build/compiler test-files "${musl_options[@]}" "${musl_units[@]}" || status=1
-          ./build/compiler test-files "$corpus/sqlite/sqlite3.c" || status=1
-          ./build/compiler test-files --flat "$corpus/libc" || status=1
-          a=lane-bytes=1048576,partial-take,probe-take
-          b=lane-bytes=2097152,partial-take,probe-take
-          s=small-arrays=1048576,small-columns=2097152,prepare-populate
-          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a,$s,reserve-tables" --variant "$a,$s,reserve-tables,small-above=4" \
-            --variant "$b,$s,reserve-tables,small-above=4" --variant "$a,prepare-populate,reserve-tables" "${musl_options[@]}" "${musl_units[@]}" || status=1
-          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a,$s,reserve-tables" --variant "$a,$s,reserve-tables,small-above=4" \
-            --variant "$b,$s,reserve-tables,small-above=4" --variant "$b,prepare-populate,reserve-tables" \
-            --variant "lane-bytes=2097152,partial-take,$s,reserve-tables,small-above=4" "$corpus/sqlite/sqlite3.c" || status=1
-          ./build/compiler benchmark-files --flat --rounds --variant old-merge --variant lane-bytes=4194304 --variant "$a,$s,reserve-tables" \
-            --variant "$a,$s,reserve-tables,small-above=4" --variant "$a,prepare-populate,reserve-tables" "$corpus/libc" || status=1
-          exit "$status"
+          ./build/compiler benchmark-files -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
+            -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+          ./build/compiler benchmark-files --rounds "$corpus/sqlite/sqlite3.c"
+          ./build/compiler benchmark-files --flat "$corpus/libc"
 
       - name: Benchmark the parser on main.c
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser,')

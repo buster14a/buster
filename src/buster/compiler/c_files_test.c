@@ -135,7 +135,8 @@ struct FilesTestWork
     bool follow;
     // The roots in two runs, the second from root `split` on (0 for one run).
     uint32_t split;
-    // The runs' FilesRun.lane_bytes and split_bytes, if `thresholds`.
+    // The runs' FilesRun.lane_bytes and split_bytes, if `thresholds` (with shared_bytes 0, so that a round of any bytes
+    // may take several lanes).
     bool thresholds;
     uint64_t lane_bytes;
     uint64_t split_bytes;
@@ -252,6 +253,7 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
         const uint32_t end = runs == 2 && r == 0 ? work->split : work->root_count;
         FilesRun files;
         result = files_run_initialize(&files, &run->cache, &search, work->roots + begin, end - begin, work->follow, lanes);
+        files.shared_bytes = work->thresholds ? 0 : files.shared_bytes;
         files.lane_bytes = work->thresholds ? work->lane_bytes : files.lane_bytes;
         files.split_bytes = work->thresholds ? work->split_bytes : files.split_bytes;
         char path[4200];
