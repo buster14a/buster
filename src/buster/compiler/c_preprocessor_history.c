@@ -13,15 +13,16 @@ static void* pp_history_initial(Preprocessor* pp, uint32_t size, uint32_t* capac
     return arena_push_array(&pp->history_initial, *capacity, size, 64);
 }
 
-// Grow once from the shared small slice to a table's full virtual reservation. Origins are indices, not pointers,
-// and no caller retains a record pointer across an append, so moving the initial records preserves every link.
-static bool pp_history_grow(Preprocessor* pp, void** records, uint32_t* capacity, uint32_t needed, uint32_t maximum, uint32_t size)
+// Grow once from the shared small slice to a table's full virtual reservation, whose first `small` bytes are base pages
+// (pp_array_small). Origins are indices, not pointers, and no caller retains a record pointer across an append, so
+// moving the initial records preserves every link.
+static bool pp_history_grow(Preprocessor* pp, void** records, uint32_t* capacity, uint32_t needed, uint32_t maximum, uint32_t size, uint64_t small)
 {
     bool result = needed <= *capacity;
     if (!result && needed <= maximum)
     {
         bool reserved = true;
-        void* grown = pp_array(pp, &reserved, maximum, size);
+        void* grown = pp_array_small(pp, &reserved, maximum, size, small);
         if (grown != 0)
         {
             memcpy(grown, *records, (uint64_t)*capacity * size);
@@ -37,9 +38,9 @@ static bool pp_history_grow(Preprocessor* pp, void** records, uint32_t* capacity
     return result;
 }
 
-BUSTER_INLINE bool pp_history_room(Preprocessor* pp, void** records, uint32_t* capacity, uint32_t needed, uint32_t maximum, uint32_t size)
+BUSTER_INLINE bool pp_history_room(Preprocessor* pp, void** records, uint32_t* capacity, uint32_t needed, uint32_t maximum, uint32_t size, uint64_t small)
 {
-    return needed <= *capacity || pp_history_grow(pp, records, capacity, needed, maximum, size);
+    return needed <= *capacity || pp_history_grow(pp, records, capacity, needed, maximum, size, small);
 }
 
 static bool pp_history_origin_grow(Preprocessor* pp, PPTokens* tokens, uint32_t needed)
@@ -75,7 +76,7 @@ static uint32_t pp_history_expansion(Preprocessor* pp, PPMacroId macro, uint32_t
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp_history_room(pp, (void**)&pp->history, &pp->history_capacity, pp->history_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPExpansion)))
+        if (pp_history_room(pp, (void**)&pp->history, &pp->history_capacity, pp->history_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPExpansion), BUSTER_ARENA_SMALL_BYTES))
         {
             const PPMacro* definition = &pp->macros[macro];
             result = ++pp->history_count;
@@ -102,7 +103,7 @@ static void pp_history_change(Preprocessor* pp, uint32_t token, uint32_t origin)
     const uint32_t previous = count != 0 ? pp->history_runs[count - 1].origin : 0;
     if (previous != origin)
     {
-        if (pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, count + 1, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun)))
+        if (pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, count + 1, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES))
         {
             pp->history_runs[count] = (PPHistoryRun)
             {
@@ -195,7 +196,7 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
                 const __m256i before = _mm256_mask_set1_epi32(_mm256_permutexvar_epi32(shifted, values), 1, (int)previous);
                 const __mmask8 changes = _mm256_mask_cmpneq_epi32_mask(valid, values, before);
                 const uint32_t added = (uint32_t)__builtin_popcount(changes);
-                if (added != 0 && pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, pp->history_run_count + added, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun)))
+                if (added != 0 && pp_history_room(pp, (void**)&pp->history_runs, &pp->history_run_capacity, pp->history_run_count + added, BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPHistoryRun), BUSTER_ARENA_SMALL_BYTES))
                 {
                     const __m256i positions = _mm256_add_epi32(lanes, _mm256_set1_epi32((int)(at + i - begin)));
                     const __m512i records = _mm512_or_si512(_mm512_cvtepu32_epi64(positions), _mm512_slli_epi64(_mm512_cvtepu32_epi64(values), 32));
@@ -229,7 +230,7 @@ static uint32_t pp_history_substitution(Preprocessor* pp, uint32_t source, uint3
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp_history_room(pp, (void**)&pp->substitutions, &pp->substitution_capacity, pp->substitution_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPSubstitution)))
+        if (pp_history_room(pp, (void**)&pp->substitutions, &pp->substitution_capacity, pp->substitution_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPSubstitution), BUSTER_PP_TABLE_SMALL_BYTES))
         {
             const uint32_t id = ++pp->substitution_count;
             pp->substitutions[id - 1] = (PPSubstitution)
@@ -268,8 +269,8 @@ static uint32_t pp_history_generated(Preprocessor* pp, PPGeneratedKind kind, uin
     uint32_t result = 0;
     if (!pp->options.no_history && !pp->fatal)
     {
-        if (pp_history_room(pp, (void**)&pp->generated, &pp->generated_capacity, pp->generated_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPGenerated)) &&
-            pp_history_room(pp, (void**)&pp->history_sources, &pp->history_source_capacity, pp->history_source_count + count, BUSTER_PP_MAX_HISTORY, sizeof(PPSource)))
+        if (pp_history_room(pp, (void**)&pp->generated, &pp->generated_capacity, pp->generated_count + 1, BUSTER_PP_MAX_HISTORY, sizeof(PPGenerated), BUSTER_PP_TABLE_SMALL_BYTES) &&
+            pp_history_room(pp, (void**)&pp->history_sources, &pp->history_source_capacity, pp->history_source_count + count, BUSTER_PP_MAX_HISTORY, sizeof(PPSource), BUSTER_ARENA_SMALL_BYTES))
         {
             const uint32_t id = ++pp->generated_count;
             pp->generated[id - 1] = (PPGenerated){

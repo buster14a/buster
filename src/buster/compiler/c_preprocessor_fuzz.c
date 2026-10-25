@@ -86,10 +86,12 @@ struct PPFuzzTally
 typedef struct PPFuzzState PPFuzzState;
 struct PPFuzzState
 {
-    Preprocessor runs[2];
-    InternTable tables[2];
-    bool tables_ready[2];
-    bool ran[2];
+    // The vectorized kernels' run and the scalar twins', with expansion starts (for the printers' line markers), and
+    // when both kernels run, theirs again as a compile runs them, without (pp_fuzz_run).
+    Preprocessor runs[4];
+    InternTable tables[4];
+    bool tables_ready[4];
+    bool ran[4];
     // The last check's text couldn't lex back into its stream (pp_fuzz_unprintable).
     bool unprintable;
 };
@@ -161,14 +163,18 @@ static bool pp_fuzz_text(Arena* arena, const PreprocessorFuzzCase* test_case, St
 }
 
 // Preprocesses `text` with the first `kernels` sets of kernels: state->runs[0] the vectorized ones, state->runs[1] the
-// scalar twins, each from a reset intern table; state->ran[k] says whether run k had no errors. The runs stay until
-// pp_fuzz_release. Returns false if a preprocessor can't be set up.
+// scalar twins, each from a reset intern table; state->ran[k] says whether run k had no errors. With both sets, also
+// state->runs[2] and [3], the same without expansion starts, as a compile runs them: the main loop takes some direct
+// paths only then (pp_fuzz_kernels compares them too). The runs stay until pp_fuzz_release. Returns false if a
+// preprocessor can't be set up.
 static bool pp_fuzz_run(PPFuzzState* state, bool c23, bool quiet, String8 text, uint32_t kernels)
 {
     bool result = text.length <= UINT32_MAX;
-    for (uint32_t k = 0; result && k < kernels; k += 1)
+    const uint32_t runs = kernels == 2 ? 4 : kernels;
+    for (uint32_t k = 0; result && k < runs; k += 1)
     {
-        const PPOptions options = pp_fuzz_options(c23, k == 1, quiet);
+        PPOptions options = pp_fuzz_options(c23, k % 2 == 1, quiet || k >= 2);
+        options.expansion_starts = k < 2;
         const bool table = state->tables_ready[k] ? intern_reset(&state->tables[k]) : intern_initialize(&state->tables[k]);
         state->tables_ready[k] = table;
         result = table && pp_initialize(&state->runs[k], &options, &state->tables[k]);
@@ -179,7 +185,7 @@ static bool pp_fuzz_run(PPFuzzState* state, bool c23, bool quiet, String8 text, 
 
 static void pp_fuzz_release(PPFuzzState* state)
 {
-    for (uint32_t k = 0; k < 2; k += 1)
+    for (uint32_t k = 0; k < 4; k += 1)
     {
         pp_release(&state->runs[k]);
         state->ran[k] = false;
@@ -865,6 +871,21 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
     else if (!pp_same_directive_tables(&runs[0], &runs[1], name))
     {
         result = BUSTER_PPF_KERNEL_TABLES;
+    }
+    else if (state->ran[2] != state->ran[3] || runs[2].errors != runs[3].errors || runs[2].warnings != runs[3].warnings)
+    {
+        result = BUSTER_PPF_KERNEL_RESULTS;
+        if (!pp_test_quiet)
+        {
+            printf("%s (as a compile runs it): the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", name, runs[2].errors,
+                   runs[3].errors, runs[2].warnings, runs[3].warnings);
+        }
+    }
+    else
+    {
+        char label[256];
+        snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
+        result = pp_same_streams(&runs[2], &runs[3], label) ? BUSTER_PPF_EQUAL : BUSTER_PPF_KERNEL_STREAMS;
     }
     for (uint32_t markers = 0; result == BUSTER_PPF_EQUAL && markers < 2; markers += 1)
     {

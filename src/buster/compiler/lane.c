@@ -85,6 +85,10 @@ struct Arena
 // BUSTER_ARENA_SMALL_BYTES in base pages, and the rest in huge pages. Returns an arena without capacity, in which every
 // push fails, if the address space can't be reserved.
 static __attribute__((unused)) Arena arena_reserve(uint64_t capacity);
+// arena_reserve with the first `small` bytes in base pages (a multiple of BUSTER_ARENA_PAGE_BYTES, at least
+// BUSTER_ARENA_SMALL_BYTES), for a table that usually stays below what a huge page is worth: the kernel clears a huge
+// page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X.
+static __attribute__((unused)) Arena arena_reserve_small(uint64_t capacity, uint64_t small);
 // Unmaps the arena, and leaves it without capacity.
 static __attribute__((unused)) void arena_release(Arena* arena);
 // `size` bytes at the first address from base + length that is a multiple of `alignment`, a power of two. Returns 0 and
@@ -105,9 +109,9 @@ static uint64_t arena_mapping_bytes(uint64_t capacity)
     return capacity > BUSTER_ARENA_SMALL_BYTES ? pages + BUSTER_ARENA_HUGE_PAGE_BYTES : pages;
 }
 
-// Past BUSTER_ARENA_SMALL_BYTES, base is placed in the mapping so that the huge pages start at
-// base + BUSTER_ARENA_SMALL_BYTES, on a huge page boundary.
-static Arena arena_reserve(uint64_t capacity)
+// Past the first `small` bytes, base is placed in the mapping so that the huge pages start at base + small, on a huge
+// page boundary (the mapping has a huge page's room for that past BUSTER_ARENA_SMALL_BYTES, whatever `small` is).
+static Arena arena_reserve_small(uint64_t capacity, uint64_t small)
 {
     Arena result = { 0 };
     if (capacity != 0 && capacity <= BUSTER_ARENA_MAX_CAPACITY)
@@ -119,12 +123,12 @@ static Arena arena_reserve(uint64_t capacity)
             // The advice only chooses page sizes, so the arena works whether or not the kernel takes it. Without
             // MADV_NOHUGEPAGE, a kernel whose transparent huge pages are "always" would give the start a huge page too.
             uint64_t offset = 0;
-            if (capacity > BUSTER_ARENA_SMALL_BYTES)
+            if (capacity > small)
             {
-                const uintptr_t huge_begin = ((uintptr_t)mapping + BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
-                offset = huge_begin - BUSTER_ARENA_SMALL_BYTES - (uintptr_t)mapping;
-                madvise(mapping, offset + BUSTER_ARENA_SMALL_BYTES, MADV_NOHUGEPAGE);
-                madvise((void*)huge_begin, mapping_bytes - offset - BUSTER_ARENA_SMALL_BYTES, MADV_HUGEPAGE);
+                const uintptr_t huge_begin = ((uintptr_t)mapping + small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+                offset = huge_begin - small - (uintptr_t)mapping;
+                madvise(mapping, offset + small, MADV_NOHUGEPAGE);
+                madvise((void*)huge_begin, mapping_bytes - offset - small, MADV_HUGEPAGE);
             }
             else
             {
@@ -136,6 +140,11 @@ static Arena arena_reserve(uint64_t capacity)
         }
     }
     return result;
+}
+
+static Arena arena_reserve(uint64_t capacity)
+{
+    return arena_reserve_small(capacity, BUSTER_ARENA_SMALL_BYTES);
 }
 
 static void arena_release(Arena* arena)
