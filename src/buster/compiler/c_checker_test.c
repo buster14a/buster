@@ -2543,6 +2543,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_repair_test.c"
 
 static void check_test_source_benchmark(CheckTest* test);
+static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_mutations(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
@@ -2646,6 +2647,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);
             check_test_source_benchmark(&test);
+            check_test_lowering_source_benchmark(&test);
         }
         check_test_types_close(&types);
     }

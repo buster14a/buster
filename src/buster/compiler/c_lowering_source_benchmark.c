@@ -13,18 +13,22 @@
 // (check_data_publish) and the object's bytes (object_build), not the file's write. The arenas are reserved once per
 // file and put back after each run, so each pass starts from the same state, with their pages touched by the warm-up.
 // The report gives each file's functions and objects defined, lowered and skipped, the medians of both ways and the
-// time saved, then the totals over the files that lower both ways. A file the checker rejects, or whose emission fails
-// either way in its warm-up (the backend's refusals name their feature), is reported and left out of the totals:
-// lowering everything also lowers what nothing calls, which the backend may not support. Every timed run must lower
-// what its warm-up did, the same counts and object bytes: a run that fails or differs leaves its file out of the totals
-// and fails the benchmark, since its time would be of other work.
+// time saved, then the totals over the files that lower both ways. A file the checker rejects is left out of the
+// totals, and so is one refused by name, with the reason the report names: CHECK_PROGRAM_UNSUPPORTED from the checked
+// program's preparation or either way's emission, or CHECK_DATA_UNSUPPORTED from either way's publication of its
+// static data (lowering everything also lowers what nothing calls, which the backend may not support). Any other
+// failure fails the benchmark, with the file left out and the reason printed: a file that doesn't preprocess or that
+// exhausts the checker's resources, a preparation or a warm-up that fails otherwise (the backend's, a resource's, an
+// invalid input's), and a timed run that fails or lowers other counts or object bytes than its warm-up, since its
+// time would be of other work. So does a run that measures no file.
 //
 // This measures the stages after checking alone: every body is checked whichever way the definitions are selected
 // (#155). It is a benchmark outside the compile path, with no vector path of its own.
 #ifndef BUSTER_C_LOWERING_SOURCE_BENCHMARK_INCLUDED
 #define BUSTER_C_LOWERING_SOURCE_BENCHMARK_INCLUDED
 
-// One way of selecting a file's definitions: what it lowered, its runs' times and why it failed, if it did.
+// One way of selecting a file's definitions: what it lowered, its runs' times and why it failed, if it did, with
+// `unsupported` when it failed for a feature refused by name, which leaves the file out without failing the benchmark.
 typedef struct LoweringSourceWay LoweringSourceWay;
 struct LoweringSourceWay
 {
@@ -34,13 +38,38 @@ struct LoweringSourceWay
     uint64_t nanoseconds[BUSTER_CHECK_SOURCE_MAX_PASSES];
     const char* failure;
     char feature[192];
+    bool unsupported;
+};
+
+// Where the tests (test-checker's check_test_lowering_source_benchmark) inject a failure: the checker, which runs out
+// of a resource there (a rejection is a real fixture's), the checked program's preparation, the referenced way's
+// emission or static data's publication in its warm-up, or its emission in the last timed run.
+typedef enum LoweringSourceStage
+{
+    LOWERING_SOURCE_STAGE_NONE,
+    LOWERING_SOURCE_STAGE_CHECK,
+    LOWERING_SOURCE_STAGE_PREPARE,
+    LOWERING_SOURCE_STAGE_EMIT,
+    LOWERING_SOURCE_STAGE_PUBLISH,
+    LOWERING_SOURCE_STAGE_TIMED,
+} LoweringSourceStage;
+
+// An injected failure, with the status a real one there would have: a refusal by name (CHECK_PROGRAM_UNSUPPORTED or
+// CHECK_DATA_UNSUPPORTED) when `unsupported`, a resource's failure otherwise (always, in the checker). The benchmark
+// classifies it as it would the real one.
+typedef struct LoweringSourceFault LoweringSourceFault;
+struct LoweringSourceFault
+{
+    LoweringSourceStage stage;
+    bool unsupported;
 };
 
 // Selects, lowers, publishes and builds the object of a checked file's program `full` with `mode`: whether it could,
-// with the counts in `way` and the reason in way->failure if not. Every arena is put back as it was.
+// with the counts in `way` and the reason in way->failure if not. `fault`, of stage EMIT or PUBLISH, fails that stage
+// as the tests inject it. Every arena is put back as it was.
 static bool lowering_source_run(LoweringSourceWay* way, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                 const Parser* parser, Preprocessor* pp, TypeTable* types, const char* file, Arena* output, Arena* scratch,
-                                Arena* code_output, Arena* bytes)
+                                Arena* code_output, Arena* bytes, LoweringSourceFault fault)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -50,19 +79,33 @@ static bool lowering_source_run(LoweringSourceWay* way, const CheckProgram* full
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     way->failure = NULL;
+    way->unsupported = false;
     bool valid = check_program_select_mode(&selected, full, data, mode, false, output, scratch);
     way->failure = way->failure == NULL && !valid ? "the selection failed" : way->failure;
-    const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, code_output, bytes, scratch,
-                                                     NULL, false);
+    bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, code_output, bytes, scratch,
+                                               NULL, false);
+    if (lowered && fault.stage == LOWERING_SOURCE_STAGE_EMIT)
+    {
+        lowered = false;
+        code.status = fault.unsupported ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
+        code.reason = "the tests' injection";
+    }
     if (valid && !lowered)
     {
         snprintf(way->feature, sizeof(way->feature), "%s%s", code.status == CHECK_PROGRAM_UNSUPPORTED ? "unsupported: " : "the backend failed: ",
                  code.reason != NULL ? code.reason : "this C type or operation");
         way->failure = way->feature;
+        way->unsupported = code.status == CHECK_PROGRAM_UNSUPPORTED;
     }
     valid = lowered && check_data_publish(&selected.data, types, selected.program.stream, selected.program.object_symbols, selected.program.object_count,
                                           &code.link, 0, bytes, scratch, &emission);
-    way->failure = lowered && !valid ? "its static data couldn't be published" : way->failure;
+    if (valid && fault.stage == LOWERING_SOURCE_STAGE_PUBLISH)
+    {
+        valid = false;
+        emission.status = fault.unsupported ? CHECK_DATA_UNSUPPORTED : CHECK_DATA_RESOURCE;
+    }
+    way->unsupported |= lowered && !valid && emission.status == CHECK_DATA_UNSUPPORTED;
+    way->failure = lowered && !valid ? (way->unsupported ? "unsupported: its static data's publication" : "its static data couldn't be published") : way->failure;
     ObjectUnits units = { 0 };
     ObjectSymbols symbols = { 0 };
     valid = valid && link_check(&code.link) == LINK_ERROR_NONE && object_prepare(&units, &code.link, 1, scratch) && object_map_symbols(&symbols, &code.link, scratch);
@@ -91,13 +134,16 @@ struct LoweringSourceTotals
     uint64_t lowered_functions[2];
     uint64_t lowered_objects[2];
     uint64_t nanoseconds[2];
-    // Files whose timed runs didn't all lower what their warm-ups did.
+    // Files the benchmark failed on: one that doesn't preprocess or exhausts the checker, a preparation or a warm-up
+    // that fails for another reason than a refusal by name, and timed runs that didn't all lower what their warm-ups did.
     uint64_t failures;
 };
 
-// The file's measurement, printed and added to `totals` when both ways lower it: whether the file could be measured
-// (a rejection or a refusal of either way is a result, not a failure of the benchmark).
-static bool lowering_source_file(const char* file, char** options, uint32_t option_count, uint64_t passes, LoweringSourceTotals* totals)
+// The file's measurement, printed and added to `totals` when both ways lower it, or a failure counted in `totals`
+// (the checker's rejection or a refusal by name is a result, not a failure), with `fault` injected: whether the
+// options could be read.
+static bool lowering_source_file(const char* file, char** options, uint32_t option_count, uint64_t passes, LoweringSourceFault fault,
+                                 LoweringSourceTotals* totals)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -120,8 +166,15 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
     valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
     pp_options.semantic_pragmas = true;
     CheckCorpusPath path = { 0 };
-    valid = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);
-    const bool accepted = valid && check_corpus_check_policy(&path, &parser, &pp, false, pp_options.quiet);
+    const bool preprocessed = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);
+    bool accepted = preprocessed && check_corpus_check_policy(&path, &parser, &pp, false, pp_options.quiet);
+    if (accepted && fault.stage == LOWERING_SOURCE_STAGE_CHECK)
+    {
+        accepted = false;
+        path.resource = true;
+    }
+    // The checker's rejection of the file is a result; its running out of a resource is the benchmark's failure.
+    const bool exhausted = preprocessed && !accepted && path.resource;
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
     bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, &path.output_arena, &path.scratch);
@@ -133,6 +186,14 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
         .initializer_reference_count = data.reference_count,
     };
     prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
+    if (prepared && fault.stage == LOWERING_SOURCE_STAGE_PREPARE)
+    {
+        prepared = false;
+        program.status = fault.unsupported ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
+    }
+    // A statement the checked program refuses by name leaves the file out; any other failure to prepare is the
+    // benchmark's (the data's preparation refuses nothing by name: its failures are resources and invalid inputs).
+    const bool unsupported = accepted && !prepared && program.status == CHECK_PROGRAM_UNSUPPORTED;
     // Each way's warm-up, then its last timed run.
     LoweringSourceWay ways[4] = { 0 };
     bool lowered[2] = { false, false };
@@ -142,10 +203,14 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
     for (uint32_t way = 0; prepared && way < 2; way += 1)
     {
         // The warm-up, which also says whether this way lowers the file at all.
+        const bool injected = way == 0 && (fault.stage == LOWERING_SOURCE_STAGE_EMIT || fault.stage == LOWERING_SOURCE_STAGE_PUBLISH);
         lowered[way] = lowering_source_run(ways + way, &program, &data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, &parser, &pp, &path.types, input,
-                                           &path.output_arena, &path.scratch, &code_output, &bytes);
+                                           &path.output_arena, &path.scratch, &code_output, &bytes, injected ? fault : (LoweringSourceFault){ 0 });
     }
-    bool measured = lowered[0] && lowered[1];
+    // Both ways warmed up, or every way that didn't was refused a feature by name, which only leaves the file out.
+    const bool warmed = lowered[0] && lowered[1];
+    const bool refused = prepared && !warmed && (lowered[0] || ways[0].unsupported) && (lowered[1] || ways[1].unsupported);
+    bool measured = warmed;
     uint32_t failed_pass = 0;
     uint32_t failed_way = 0;
     for (uint32_t pass = 0; measured && pass < passes; pass += 1)
@@ -155,25 +220,37 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
             const uint32_t way = (pass + step) & 1;
             LoweringSourceWay* run = ways + 2 + way;
             const uint64_t begin = check_source_time();
+            const bool injected = fault.stage == LOWERING_SOURCE_STAGE_TIMED && pass + 1 == passes && way == 0;
+            const LoweringSourceFault timed = { .stage = injected ? LOWERING_SOURCE_STAGE_EMIT : LOWERING_SOURCE_STAGE_NONE, .unsupported = fault.unsupported };
             const bool ran = lowering_source_run(run, &program, &data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, &parser, &pp, &path.types, input,
-                                                 &path.output_arena, &path.scratch, &code_output, &bytes);
+                                                 &path.output_arena, &path.scratch, &code_output, &bytes, timed);
             ways[way].nanoseconds[pass] = check_source_time() - begin;
             measured = ran && run->functions == ways[way].functions && run->objects == ways[way].objects && run->object_bytes == ways[way].object_bytes;
             failed_pass = pass;
             failed_way = way;
         }
     }
-    const bool consistent = !(lowered[0] && lowered[1]) || measured;
-    totals->failures += !consistent;
-    if (!accepted)
+    const bool consistent = !warmed || measured;
+    const bool failed = (valid && !preprocessed) || exhausted || (accepted && !prepared && !unsupported) || (prepared && !warmed && !refused) || !consistent;
+    totals->failures += failed;
+    if (valid && !preprocessed)
+    {
+        printf("lowering-source: file=%s failed=\"it couldn't be preprocessed\"\n", file);
+    }
+    else if (valid && exhausted)
+    {
+        printf("lowering-source: file=%s failed=\"the checker ran out of a resource\"\n", file);
+    }
+    else if (valid && !accepted)
     {
         printf("lowering-source: file=%s rejected=\"%s:%u:%u: %s\"\n", file, path.file, path.line, path.column, path.message);
     }
-    else if (!prepared)
+    else if (valid && !prepared)
     {
-        printf("lowering-source: file=%s failed=\"its static data or checked program couldn't be prepared\"\n", file);
+        printf("lowering-source: file=%s %s\n", file,
+               unsupported ? "unsupported=\"its checked program: an unsupported C statement\"" : "failed=\"its static data, checked program or arenas couldn't be prepared\"");
     }
-    else
+    else if (valid)
     {
         const uint64_t reachable = measured ? check_source_median(ways[0].nanoseconds, (uint32_t)passes) : 0;
         const uint64_t all = measured ? check_source_median(ways[1].nanoseconds, (uint32_t)passes) : 0;
@@ -203,7 +280,8 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
         }
         else
         {
-            printf(" referenced=\"%s\" all=\"%s\"\n", lowered[0] ? "lowered" : ways[0].failure, lowered[1] ? "lowered" : ways[1].failure);
+            printf(" referenced=\"%s\" all=\"%s\"%s\n", lowered[0] ? "lowered" : ways[0].failure, lowered[1] ? "lowered" : ways[1].failure,
+                   refused ? "" : " failed=\"a warm-up failed for another reason than a feature refused by name\"");
         }
     }
     arena_release(&bytes);
@@ -214,6 +292,40 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
     intern_release(&identifiers);
     arena_release(&option_arena);
     return valid;
+}
+
+// Measures each of `files` read with `options`, then prints the totals, with `fault` injected in every file: whether
+// the options could be read, with the files measured and failed on in `totals`.
+static bool lowering_source_files(LoweringSourceTotals* totals, char** files, uint32_t file_count, char** options, uint32_t option_count, uint64_t passes,
+                                  LoweringSourceFault fault)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < file_count; i += 1)
+    {
+        valid = lowering_source_file(files[i], options, option_count, passes, fault, totals);
+        fflush(stdout);
+    }
+    if (valid && totals->files == 0)
+    {
+        printf("lowering-source: no file was measured both ways\n");
+    }
+    if (valid)
+    {
+        printf("lowering-source: totals files=%" PRIu64 " functions_defined=%" PRIu64 " functions_lowered=%" PRIu64 " functions_skipped=%" PRIu64
+               " objects_defined=%" PRIu64 " objects_lowered=%" PRIu64 " objects_skipped=%" PRIu64 " lower_all_functions=%" PRIu64 " lower_all_objects=%" PRIu64
+               " referenced_ns=%" PRIu64 " all_ns=%" PRIu64 " saved_ns=%" PRId64 " passes=%" PRIu64 " failures=%" PRIu64 "\n",
+               totals->files, totals->functions, totals->lowered_functions[0], totals->functions - totals->lowered_functions[0], totals->objects,
+               totals->lowered_objects[0], totals->objects - totals->lowered_objects[0], totals->lowered_functions[1], totals->lowered_objects[1],
+               totals->nanoseconds[0], totals->nanoseconds[1], (int64_t)totals->nanoseconds[1] - (int64_t)totals->nanoseconds[0], passes, totals->failures);
+        fflush(stdout);
+    }
+    return valid;
+}
+
+// The command's exit status: 0 when it measured a file and failed on none.
+static int lowering_source_status(bool valid, const LoweringSourceTotals* totals)
+{
+    return valid && totals->failures == 0 && totals->files != 0 ? 0 : 1;
 }
 
 static int run_lowering_source_benchmark(int count, char** arguments)
@@ -247,27 +359,14 @@ static int run_lowering_source_benchmark(int count, char** arguments)
     }
     valid = valid && file_count != 0 && passes != 0 && passes <= BUSTER_CHECK_SOURCE_MAX_PASSES;
     LoweringSourceTotals totals = { 0 };
-    for (uint32_t i = 0; valid && i < file_count; i += 1)
-    {
-        valid = lowering_source_file(files[i], options, option_count, passes, &totals);
-        fflush(stdout);
-    }
-    if (valid)
-    {
-        printf("lowering-source: totals files=%" PRIu64 " functions_defined=%" PRIu64 " functions_lowered=%" PRIu64 " functions_skipped=%" PRIu64
-               " objects_defined=%" PRIu64 " objects_lowered=%" PRIu64 " objects_skipped=%" PRIu64 " lower_all_functions=%" PRIu64 " lower_all_objects=%" PRIu64
-               " referenced_ns=%" PRIu64 " all_ns=%" PRIu64 " saved_ns=%" PRId64 " passes=%" PRIu64 " failures=%" PRIu64 "\n",
-               totals.files, totals.functions, totals.lowered_functions[0], totals.functions - totals.lowered_functions[0], totals.objects,
-               totals.lowered_objects[0], totals.objects - totals.lowered_objects[0], totals.lowered_functions[1], totals.lowered_objects[1],
-               totals.nanoseconds[0], totals.nanoseconds[1], (int64_t)totals.nanoseconds[1] - (int64_t)totals.nanoseconds[0], passes, totals.failures);
-    }
-    else
+    valid = valid && lowering_source_files(&totals, files, file_count, options, option_count, passes, (LoweringSourceFault){ 0 });
+    if (!valid)
     {
         fprintf(stderr, "usage: compiler benchmark-lowering-source [--passes N] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
-    return valid && totals.failures == 0 ? 0 : 1;
+    return lowering_source_status(valid, &totals);
 }
 
 #endif

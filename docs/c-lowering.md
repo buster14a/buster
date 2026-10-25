@@ -266,11 +266,21 @@ two selections and everything `-c` does after one (lowering, Tier 0, branch
 sizing, encoding, the static data's publication and the object's bytes),
 `--passes` (21) medians. It prints each file's functions and objects defined,
 lowered and skipped, both medians and the time saved, then the totals over the
-files that lower both ways. Lowering everything also lowers what nothing calls,
-which the backend may refuse: then the file is reported with both outcomes.
-Every timed run must lower what its warm-up did, the same counts and object
-bytes: one that fails or differs leaves its file out of the totals, and the
-command exits with status 1.
+files that lower both ways. A file the checker rejects is left out of the
+totals, and so is one refused by name, with the reason the report names: a
+statement the checked program's preparation marks unsupported
+(`CHECK_PROGRAM_UNSUPPORTED`), or a feature that either way's emission or
+publication of the static data marks so (`CHECK_PROGRAM_UNSUPPORTED`,
+`CHECK_DATA_UNSUPPORTED`). Lowering everything also lowers what nothing calls,
+which the backend may refuse so: then the file is reported with both outcomes.
+Any other failure leaves its file out and makes the command exit with status 1:
+a file that doesn't preprocess or that exhausts the checker's resources, a
+preparation or a warm-up that fails otherwise (the backend's, a resource's, an
+invalid input's), and a timed run that fails or lowers other than its warm-up
+did (the same counts and object bytes). So does a run that measures no file.
+`test-checker` checks each outcome, on fixtures of its own and on failures
+injected where the real ones arise, with the status each would have
+(`c_lowering_source_benchmark_test.c`).
 
 The issue's case is `main.c`'s unit, whose intrinsic headers define about 5,200
 inline functions of which the compiler uses about 50. It can't be measured yet:
