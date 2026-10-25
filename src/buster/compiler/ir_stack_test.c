@@ -425,11 +425,13 @@ static void ir_stack_test_joins(IrLowerTestTally* tally, Arena* input, Arena* ou
     static const char source[] =
         "function (i1) -> i64 {\nb0:\n"
         "  %0 = param.i1 0\n  %1 = const.i64 0x10\n  %2 = stack_save.i64\n"
-        "  %3 = alloca.ptr %1\n  %4 = cbr.void %0, b1, b2\n"
-        "b1:\n  %5 = stack_save.i64\n  %6 = alloca.ptr %1\n  %7 = br.void b3\n"
-        "b2:\n  %8 = copy.i64 %2\n  %9 = br.void b3\n"
-        "b3:\n  %10 = phi.i64 [%5, b1], [%8, b2]\n"
-        "  %11 = stack_restore.void %10\n  %12 = ret.void %1\n}\n";
+        "  %3 = alloca.ptr %1\n  %4 = store.void %3, %1 align=16\n  %5 = cbr.void %0, b1, b2\n"
+        "b1:\n  %6 = stack_save.i64\n  %7 = alloca.ptr %1\n  %8 = br.void b3\n"
+        "b2:\n  %9 = copy.i64 %2\n  %10 = br.void b3\n"
+        "b3:\n  %11 = phi.i64 [%6, b1], [%9, b2]\n"
+        "  %12 = stack_restore.void %11\n  %13 = cbr.void %0, b4, b5\n"
+        "b4:\n  %14 = load.i64 %3 align=16\n  %15 = ret.void %14\n"
+        "b5:\n  %16 = ret.void %1\n}\n";
     const uint64_t mark = input->length;
     IrFunction function = { 0 };
     if (ir_stack_test_parse(tally, source, input, scratch, &function))
