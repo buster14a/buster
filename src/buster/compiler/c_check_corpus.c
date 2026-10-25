@@ -63,6 +63,9 @@ struct CheckCorpusPath
 
 #define BUSTER_CHECK_CORPUS_DEFERRED_REASONS 16
 
+// --deferred's reason for a unit that doesn't parse, which the reader never reads: tallied, not reported per file.
+static const char* const check_corpus_unparsed = "the unit doesn't parse";
+
 typedef struct CheckCorpusTally CheckCorpusTally;
 struct CheckCorpusTally
 {
@@ -1692,8 +1695,9 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
         fprintf(stderr, "%s: the deferred reader's result differs: %s\n", file, difference);
     }
     outcome->deferred = count == 3 && paths[2].deferred != NULL && !paths[2].deferred->unsupported;
-    outcome->deferred_reason = count == 3 && paths[2].deferred != NULL && paths[2].deferred->unsupported && paths[2].parsed ?
-                               (paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown") : NULL;
+    // A unit that doesn't parse has nothing to read apart; it counts as source order's too.
+    outcome->deferred_reason = count < 3 || !prepared || outcome->deferred ? NULL : !paths[2].parsed ? check_corpus_unparsed :
+                               paths[2].deferred != NULL && paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown";
     outcome->deferred_bodies = outcome->deferred ? paths[2].deferred->bodies : 0;
     outcome->equal &= outcome->deferred_equal;
     outcome->resource = paths[0].resource || paths[1].resource;
@@ -1809,7 +1813,7 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
         fprintf(report, "\t%u", diagnostic_path);
         fputc('\n', report);
     }
-    if (outcome.deferred_reason != NULL && tally->reports < report_limit)
+    if (outcome.deferred_reason != NULL && outcome.deferred_reason != check_corpus_unparsed && tally->reports < report_limit)
     {
         fprintf(stderr, "%s: deferred reading left to source order: %s\n", label, outcome.deferred_reason);
         tally->reports += 1;
