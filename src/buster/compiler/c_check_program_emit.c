@@ -47,9 +47,10 @@ struct CheckProgramCode
 // The local symbols whose names the compiler makes are named as clang names them, so that tools and #129's comparison
 // with clang's objects (c_lowering_symbols.c) read them alike: a block-scope static is "function.name", its function's
 // symbol name (its asm label, if it has one) and its own (an asm label of the static's own replaces both), and a
-// file-scope compound literal is ".compoundliteral". A name already made in the unit gets ".N", N from one counter for
-// the unit, as LLVM makes a name unique. `taken` is a table of mask + 1 NameIds, 0 for an empty slot, with room for
-// every made name and at least as many empty slots.
+// file-scope compound literal is ".compoundliteral". A made name that a symbol has already (one the source gives, an
+// identifier or an asm label, or one made before) gets ".N", N from one counter for the unit, as LLVM makes a name
+// unique in its module. `taken` is a table of mask + 1 NameIds, 0 for an empty slot, with room for every symbol's name
+// and at least as many empty slots.
 typedef struct CheckProgramNames CheckProgramNames;
 struct CheckProgramNames
 {
@@ -58,7 +59,38 @@ struct CheckProgramNames
     uint32_t unique;
 };
 
-// Adds `base`, or the first of its ".N" spellings no made name has, to the link's names: its NameId, or 0 when the
+// Whether a name of `names` is the `length` bytes at `bytes`, of hash `hash`: its slot in `slot` if so, and the empty
+// slot it would take if not.
+static bool check_program_emit_taken(const Link* link, const CheckProgramNames* names, const uint8_t* bytes, uint32_t length, uint64_t hash, uint32_t* slot)
+{
+    uint32_t probe = (uint32_t)hash & names->mask;
+    bool taken = false;
+    while (names->taken[probe] != 0 && !taken)
+    {
+        const NameId other = names->taken[probe];
+        taken = link->names.hash[other] == hash && link->names.length[other] == length && memcmp(link->names.bytes[other], bytes, length) == 0;
+        probe = taken ? probe : (probe + 1) & names->mask;
+    }
+    *slot = probe;
+    return taken;
+}
+
+// Adds `spelling`, the name the source gives a symbol, to the link's names and to the names a made one must not be: its
+// NameId, or 0 when the link has no room.
+static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length)
+{
+    const uint64_t hash = link_hash(spelling, length);
+    uint32_t slot = 0;
+    const bool taken = check_program_emit_taken(link, names, spelling, length, hash, &slot);
+    const NameId result = link_add_name_hashed(link, spelling, length, hash);
+    if (!taken && result != 0)
+    {
+        names->taken[slot] = result;
+    }
+    return result;
+}
+
+// Adds `base`, or the first of its ".N" spellings no name of `names` has, to the link's names: its NameId, or 0 when the
 // link or scratch has no room.
 static NameId check_program_emit_made_name(Link* link, CheckProgramNames* names, const uint8_t* base, uint32_t base_length, Arena* scratch)
 {
@@ -69,25 +101,13 @@ static NameId check_program_emit_made_name(Link* link, CheckProgramNames* names,
     {
         memcpy(candidate, base, base_length);
         uint32_t length = base_length;
-        uint64_t hash = 0;
+        uint64_t hash = link_hash(candidate, length);
         uint32_t slot = 0;
-        bool taken = true;
-        while (taken)
+        while (check_program_emit_taken(link, names, candidate, length, hash, &slot))
         {
+            names->unique += 1;
+            length = base_length + (uint32_t)snprintf((char*)candidate + base_length, 12, ".%u", names->unique);
             hash = link_hash(candidate, length);
-            slot = (uint32_t)hash & names->mask;
-            taken = false;
-            while (names->taken[slot] != 0 && !taken)
-            {
-                const NameId other = names->taken[slot];
-                taken = link->names.hash[other] == hash && link->names.length[other] == length && memcmp(link->names.bytes[other], candidate, length) == 0;
-                slot = taken ? slot : (slot + 1) & names->mask;
-            }
-            if (taken)
-            {
-                names->unique += 1;
-                length = base_length + (uint32_t)snprintf((char*)candidate + base_length, 12, ".%u", names->unique);
-            }
         }
         result = link_add_name_hashed(link, candidate, length, hash);
         names->taken[slot] = result;
@@ -308,24 +328,36 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     // A block-scope static's declaration is in a body (declaration_bodies) and has no linkage; a block-scope extern or
     // function declaration has linkage, and its symbol is the file-scope entity's.
     const CheckInput* input = program->input;
-    uint32_t made = 0;
-    for (uint32_t s = 0; s < program->symbol_count; s += 1)
-    {
-        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
-        made += declaration != BUSTER_CHECK_NONE &&
-                (input->compound_objects[declaration] || (input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0));
-    }
     uint32_t slots = 2;
-    while (slots <= (uint64_t)made * 2 && slots < (UINT32_C(1) << 31))
+    while (slots <= (uint64_t)program->symbol_count * 2 && slots < (UINT32_C(1) << 31))
     {
         slots *= 2;
     }
     CheckProgramNames names = { .mask = slots - 1 };
-    names.taken = valid && made != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, slots) : 0;
-    valid = valid && (made == 0 || names.taken != 0);
+    names.taken = valid && program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, slots) : 0;
+    NameId* given = valid && program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, program->symbol_count) : 0;
+    valid = valid && (program->symbol_count == 0 || (names.taken != 0 && given != 0));
     if (names.taken != 0)
     {
         memset(names.taken, 0, (uint64_t)slots * sizeof(NameId));
+    }
+    // The names the source gives come first, so that no made name is one of them.
+    for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
+    {
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+        const String8 renamed = symbol_names[s + 1];
+        const bool made = declaration != BUSTER_CHECK_NONE &&
+                          (input->compound_objects[declaration] ||
+                           (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0));
+        given[s] = 0;
+        if (declaration != BUSTER_CHECK_NONE && !made)
+        {
+            const uint32_t identifier = parser->tokens.names[declaration];
+            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
+                                             check_program_emit_given_name(&result->link, &names, intern_bytes(identifiers, identifier),
+                                                                           intern_length(identifiers, identifier));
+            valid = given[s] != 0;
+        }
     }
     for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
     {
@@ -366,8 +398,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             }
             else
             {
-                name = renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
-                                             link_add_name(&result->link, intern_bytes(identifiers, identifier), intern_length(identifiers, identifier));
+                name = given[s];
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;

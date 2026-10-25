@@ -193,9 +193,6 @@ int run_object_writer_benchmark(int argc, char** argv);
 #include "buster/compiler/runtime.c"
 #include "buster/compiler/import_test.c"
 int run_import_benchmark(int argc, char** argv);
-// #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), for the
-// checker's selection tests, test-checker-corpus --symbols and test-c-testsuite --cross-check.
-#include "buster/compiler/c_lowering_symbols.c"
 
 // Binding: the C runtime joined to a program's link and each name bound, and its tests, for the test-bind command. Its
 // benchmark is another translation unit.
@@ -370,6 +367,10 @@ int run_backend_benchmark(int argc, char** argv);
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
 // integration tests after those consumers so one checked unit can retain both executable bodies and static data.
 #include "buster/compiler/c_check_program.c"
+// #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), with the names
+// the checked source makes, for the checker's selection tests, test-checker-corpus --symbols and test-c-testsuite
+// --cross-check.
+#include "buster/compiler/c_lowering_symbols.c"
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"

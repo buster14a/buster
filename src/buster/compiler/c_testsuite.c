@@ -350,7 +350,8 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
     LoweringSymbols theirs = { 0 };
     if (valid)
     {
-        valid = arena.base != 0 && lowering_symbols_read_file(&ours, object, &arena) && lowering_symbols_read_file(&theirs, oracle, &arena);
+        // Without the source's names every name compares whole: no program of the subset makes a local name twice.
+        valid = arena.base != 0 && lowering_symbols_read_file(&ours, object, NULL, &arena) && lowering_symbols_read_file(&theirs, oracle, NULL, &arena);
         if (!valid)
         {
             snprintf(detail, capacity, "cross-check: an object for the symbols' comparison can't be read (error %u)",

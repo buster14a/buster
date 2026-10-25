@@ -536,8 +536,10 @@ What the lowering covers past scalars (#145's programs):
 - **Names.** A block-scope static is named as clang names it,
   `function.name` (its function's asm label, if it has one, for the
   function's name; an asm label of the static's own replaces both), and a
-  file-scope compound literal is `.compoundliteral`. A name already made in the
-  unit gets `.N`, as LLVM makes one unique (`check_program_emit_made_name`).
+  file-scope compound literal is `.compoundliteral`. A made name that a symbol
+  of the unit has already, made before it or given by the source (an
+  identifier or an asm label), gets `.N`, as LLVM makes one unique in its module
+  (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: `long double`, `_Complex`,

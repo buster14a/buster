@@ -3937,8 +3937,9 @@ on fixtures of each kind of definition (functions, objects and string literals),
 --symbols` on any corpus. `benchmark-lowering-source [--passes N]
 [preprocessor options] file...` measures what lowering only the referenced
 definitions saves against `--lower-all`, after checking, with each file's
-functions and objects defined, lowered and skipped; run it under the 9700X's
-lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
+functions and objects defined, lowered and skipped; a timed run that lowers
+other than its warm-up leaves its file out and fails the command. Run it under
+the 9700X's lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
 contract, the comparisons' results and what `main.c`'s measurement waits on.
 
 ## Type tests
@@ -4019,14 +4020,18 @@ others, its measurements are informational.
 
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
-[--symbols] [--seed N] [--keep] [preprocessor options] file-or-directory...`
-checks each file as the driver does and compares it with `clang -fsyntax-only`
-on the same options: acceptance, the first error's presumed file and line, and
-the scalar and vector paths, column by column. `--symbols` (#129) also writes
-each accepted file's object as `-c` does and compares the functions and objects
-it defines with `clang -O0 -c`'s; a difference must have one of two documented
+[--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options]
+file-or-directory...` checks each file as the driver does and compares it with
+`clang -fsyntax-only` on the same options: acceptance, the first error's
+presumed file and line, and the scalar and vector paths, column by column.
+`--symbols` (#129) also writes each accepted file's object as `-c` does and
+compares the functions and objects it defines with `clang -O0 -c`'s, with the
+names the checked source makes; a difference must have one of two documented
 reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
--O0's objects"), and a file the backend refuses is counted with its feature. `--semantic-mutations N` then checks N
+-O0's objects"), and a file the backend refuses is counted with its feature.
+`--symbols-minimum N` fails the run unless at least N files' objects were
+compared: the 9700X job's test step compares eight of the frozen musl `src`
+directories so, with the count they compare. `--semantic-mutations N` then checks N
 mutants of the units it found no difference in (#133's last "Done when" item,
 `c_check_mutation.c`):
 

@@ -11,10 +11,13 @@
 // selections (check_program_select_mode, C_LOWERING_REACHABLE and C_LOWERING_ALL) and everything -c does after one:
 // lowering, Tier 0, branch sizing, encoding and the link's code (check_program_emit), the static data's publication
 // (check_data_publish) and the object's bytes (object_build), not the file's write. The arenas are reserved once per
-// file and put back after each run, so each pass starts from the same state, with their pages touched by the warm-up. The report gives each file's functions and objects defined, lowered
-// and skipped, the medians of both ways and the time saved, then the totals over the files that lower both ways. A file
-// the checker rejects, or whose emission fails either way (the backend's refusals name their feature), is reported and
-// left out of the totals: lowering everything also lowers what nothing calls, which the backend may not support.
+// file and put back after each run, so each pass starts from the same state, with their pages touched by the warm-up.
+// The report gives each file's functions and objects defined, lowered and skipped, the medians of both ways and the
+// time saved, then the totals over the files that lower both ways. A file the checker rejects, or whose emission fails
+// either way in its warm-up (the backend's refusals name their feature), is reported and left out of the totals:
+// lowering everything also lowers what nothing calls, which the backend may not support. Every timed run must lower
+// what its warm-up did, the same counts and object bytes: a run that fails or differs leaves its file out of the totals
+// and fails the benchmark, since its time would be of other work.
 //
 // This measures the stages after checking alone: every body is checked whichever way the definitions are selected
 // (#155). It is a benchmark outside the compile path, with no vector path of its own.
@@ -88,6 +91,8 @@ struct LoweringSourceTotals
     uint64_t lowered_functions[2];
     uint64_t lowered_objects[2];
     uint64_t nanoseconds[2];
+    // Files whose timed runs didn't all lower what their warm-ups did.
+    uint64_t failures;
 };
 
 // The file's measurement, printed and added to `totals` when both ways lower it: whether the file could be measured
@@ -128,7 +133,8 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
         .initializer_reference_count = data.reference_count,
     };
     prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
-    LoweringSourceWay ways[2] = { 0 };
+    // Each way's warm-up, then its last timed run.
+    LoweringSourceWay ways[4] = { 0 };
     bool lowered[2] = { false, false };
     Arena code_output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
@@ -139,18 +145,26 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
         lowered[way] = lowering_source_run(ways + way, &program, &data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, &parser, &pp, &path.types, input,
                                            &path.output_arena, &path.scratch, &code_output, &bytes);
     }
-    const bool measured = lowered[0] && lowered[1];
+    bool measured = lowered[0] && lowered[1];
+    uint32_t failed_pass = 0;
+    uint32_t failed_way = 0;
     for (uint32_t pass = 0; measured && pass < passes; pass += 1)
     {
-        for (uint32_t step = 0; step < 2; step += 1)
+        for (uint32_t step = 0; measured && step < 2; step += 1)
         {
             const uint32_t way = (pass + step) & 1;
+            LoweringSourceWay* run = ways + 2 + way;
             const uint64_t begin = check_source_time();
-            lowering_source_run(ways + way, &program, &data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, &parser, &pp, &path.types, input,
-                                &path.output_arena, &path.scratch, &code_output, &bytes);
+            const bool ran = lowering_source_run(run, &program, &data, way == 0 ? C_LOWERING_REACHABLE : C_LOWERING_ALL, &parser, &pp, &path.types, input,
+                                                 &path.output_arena, &path.scratch, &code_output, &bytes);
             ways[way].nanoseconds[pass] = check_source_time() - begin;
+            measured = ran && run->functions == ways[way].functions && run->objects == ways[way].objects && run->object_bytes == ways[way].object_bytes;
+            failed_pass = pass;
+            failed_way = way;
         }
     }
+    const bool consistent = !(lowered[0] && lowered[1]) || measured;
+    totals->failures += !consistent;
     if (!accepted)
     {
         printf("lowering-source: file=%s rejected=\"%s:%u:%u: %s\"\n", file, path.file, path.line, path.column, path.message);
@@ -180,6 +194,12 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
             }
             totals->nanoseconds[0] += reachable;
             totals->nanoseconds[1] += all;
+        }
+        else if (!consistent)
+        {
+            const LoweringSourceWay* run = ways + 2 + failed_way;
+            printf(" failed=\"timed pass %u of %s: %s\"\n", failed_pass + 1, failed_way == 0 ? "referenced" : "all",
+                   run->failure != NULL ? run->failure : "it lowered other counts or object bytes than its warm-up");
         }
         else
         {
@@ -236,10 +256,10 @@ static int run_lowering_source_benchmark(int count, char** arguments)
     {
         printf("lowering-source: totals files=%" PRIu64 " functions_defined=%" PRIu64 " functions_lowered=%" PRIu64 " functions_skipped=%" PRIu64
                " objects_defined=%" PRIu64 " objects_lowered=%" PRIu64 " objects_skipped=%" PRIu64 " lower_all_functions=%" PRIu64 " lower_all_objects=%" PRIu64
-               " referenced_ns=%" PRIu64 " all_ns=%" PRIu64 " saved_ns=%" PRId64 " passes=%" PRIu64 "\n",
+               " referenced_ns=%" PRIu64 " all_ns=%" PRIu64 " saved_ns=%" PRId64 " passes=%" PRIu64 " failures=%" PRIu64 "\n",
                totals.files, totals.functions, totals.lowered_functions[0], totals.functions - totals.lowered_functions[0], totals.objects,
                totals.lowered_objects[0], totals.objects - totals.lowered_objects[0], totals.lowered_functions[1], totals.lowered_objects[1],
-               totals.nanoseconds[0], totals.nanoseconds[1], (int64_t)totals.nanoseconds[1] - (int64_t)totals.nanoseconds[0], passes);
+               totals.nanoseconds[0], totals.nanoseconds[1], (int64_t)totals.nanoseconds[1] - (int64_t)totals.nanoseconds[0], passes, totals.failures);
     }
     else
     {
@@ -247,7 +267,7 @@ static int run_lowering_source_benchmark(int count, char** arguments)
     }
     free(files);
     free(options);
-    return valid ? 0 : 1;
+    return valid && totals.failures == 0 ? 0 : 1;
 }
 
 #endif

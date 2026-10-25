@@ -6,9 +6,12 @@
 // Every object emitted is also compared with clang -O0 -c's of the same source (#129): the same functions, objects
 // and string literals (c_lowering_symbols.c), which no fixture defeats with a constant condition's dead arm.
 
-// Whether clang -O0 -c's object of `source` defines what `bytes` does (lowering_symbols_compare and _strings); if
-// not, the differences are printed under `name`.
-static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, const char* source, const char* name, const char* clang, Arena* scratch)
+// Whether clang -O0 -c's object of `source` defines what `bytes` does (lowering_symbols_compare and _strings, with the
+// source's `names`); if not, the differences are printed under `name`. Then each pair of `patches` (a list of strings
+// ending in null, if not null itself), a name in the object's string table and one no longer, must make the two
+// differ when the second replaces the first, as a wrong name would: the comparison's own check.
+static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, const char* const* patches, const char* source, const char* name,
+                                       const LoweringNames* names, const char* clang, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     char directory[] = "/tmp/buster-check-symbols-XXXXXX";
@@ -25,8 +28,8 @@ static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, cons
     LoweringSymbols ours = { 0 };
     LoweringSymbols theirs = { 0 };
     bool valid = created && parse_test_write(path, source, strlen(source)) && object_test_run(compile, out, err) == 0;
-    valid = valid && lowering_symbols_read(&ours, (String8){ .pointer = (char*)bytes, .length = size }, scratch) &&
-            lowering_symbols_read_file(&theirs, object, scratch);
+    valid = valid && lowering_symbols_read(&ours, (String8){ .pointer = (char*)bytes, .length = size }, names, scratch) &&
+            lowering_symbols_read_file(&theirs, object, names, scratch);
     char report[2048];
     const uint32_t differences = valid ? lowering_symbols_compare(&ours, "ours", &theirs, "clang", NULL, 0, report, sizeof(report)) : 0;
     char strings[2048];
@@ -34,6 +37,30 @@ static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, cons
     if (!valid || differences != 0 || string_differences != 0)
     {
         fprintf(stderr, "%s: against clang -O0 -c (%s): %s%s", name, valid ? "compared" : "not compared", valid ? report : "", valid ? strings : "\n");
+    }
+    bool caught = true;
+    for (uint32_t p = 0; valid && patches != 0 && patches[p] != 0; p += 2)
+    {
+        const uint64_t from_length = strlen(patches[p]) + 1;
+        const uint64_t to_length = strlen(patches[p + 1]);
+        uint8_t* copy = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, size);
+        const uint8_t* found = memmem(bytes, size, patches[p], from_length);
+        const bool once = found != 0 && memmem(found + 1, size - (uint64_t)(found + 1 - bytes), patches[p], from_length) == 0;
+        LoweringSymbols patched = { 0 };
+        bool differs = false;
+        if (copy != 0 && once && to_length < from_length)
+        {
+            memcpy(copy, bytes, size);
+            memset(copy + (found - bytes), 0, from_length);
+            memcpy(copy + (found - bytes), patches[p + 1], to_length);
+            differs = lowering_symbols_read(&patched, (String8){ .pointer = (char*)copy, .length = size }, names, scratch) &&
+                      lowering_symbols_compare(&patched, "patched", &theirs, "clang", NULL, 0, NULL, 0) != 0;
+        }
+        if (!differs)
+        {
+            fprintf(stderr, "%s: %s in place of %s made no difference from clang -O0 -c%s\n", name, patches[p + 1], patches[p], once ? "" : " (not found once)");
+        }
+        caught &= differs;
     }
     if (created)
     {
@@ -44,11 +71,11 @@ static bool check_test_program_symbols(const uint8_t* bytes, uint64_t size, cons
         rmdir(directory);
     }
     arena_pop_to(scratch, mark);
-    return valid && differences == 0 && string_differences == 0;
+    return valid && differences == 0 && string_differences == 0 && caught;
 }
 
 static void check_test_program_selection_run(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
-                                             CheckProgramStatus emission_status, const char* clang, const char* symbols_clang)
+                                             CheckProgramStatus emission_status, const char* clang, const char* symbols_clang, const char* const* patches)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -192,11 +219,14 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                     {
                         memcpy(expected, object.bytes, object.size);
                     }
+                    LoweringNames names = { 0 };
                     if (equal && symbols_clang != 0)
                     {
                         // The other paths' objects must be these bytes, so one comparison covers them all.
                         snprintf(description, sizeof(description), "%s: the object defines clang -O0 -c's functions, objects and literals", name);
-                        check_test_expect(test, check_test_program_symbols(object.bytes, object.size, source, name, symbols_clang, &scratch), description);
+                        check_test_expect(test, lowering_names_of_input(&names, &input, &parser, &identifiers, &scratch) &&
+                                               check_test_program_symbols(object.bytes, object.size, patches, source, name, &names, symbols_clang, &scratch),
+                                          description);
                     }
                 }
                 else if (equal)
@@ -229,7 +259,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
 static void check_test_program_selection_case(CheckTest* test, const char* source, const char* name, uint32_t functions, uint32_t objects,
                                               const char* clang, bool execute)
 {
-    check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, execute ? clang : 0, clang);
+    check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, execute ? clang : 0, clang, 0);
 }
 
 static void check_test_program_selection(CheckTest* test, const char* clang)
@@ -251,13 +281,13 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_run(test,
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));double take(double(*)(double));"
         "int tested(int n){return (int)take(pick)+n;}",
-        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     check_test_program_selection_case(test,
         "static int dead(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
         "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang, true);
     check_test_program_selection_run(test,
         "int pick(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
-        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int leaf(int n){return n+3;}static int middle(int n){return leaf(n);}"
@@ -311,22 +341,22 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "default-visibility-and-nocommon-publication", 1, 1, clang, true);
     check_test_program_selection_run(test,
         "extern int other(int) __attribute__((weak));int tested(int n){return other?other(n):7;}",
-        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     check_test_program_selection_run(test,
         "extern int other __attribute__((weak));int tested(int n){return &other?n:7;}",
-        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     check_test_program_selection_run(test,
         "static int kept __attribute__((retain))=3;int tested(int n){return n;}",
-        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     check_test_program_selection_run(test,
         "int tested(int n) __attribute__((visibility(\"hidden\")));int tested(int n){return n;}",
-        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     check_test_program_selection_run(test,
         "int kept __attribute__((common));int tested(int n){return n;}",
-        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     check_test_program_selection_run(test,
         "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",
-        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0);
+        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0);
     // #129's kinds of definition, each emitted exactly where clang -O0 -c emits it.
     check_test_program_selection_case(test,
         "static int used(int n){return n+1;}static int unused(int n){return n+2;}static int only_from_dead(int n){return n+3;}"
@@ -367,4 +397,12 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "static int kept(int n) __attribute__((used));static int kept(int n){return n+1;}static int kept_data __attribute__((used))=3;"
         "int tested(int n){return n;}",
         "used-function-and-object-roots", 2, 1, clang, true);
+    // Asm labels that end as a made name's suffix does, beside two statics of one name: each label is exact, the
+    // second static's suffix past the one a label spells, and a wrong label, or a made name without its suffix,
+    // must differ from clang's object.
+    static const char* const label_patches[] = { "tag.1", "tag.2", "tested.x.2", "tested.x", "tested.x.1", "tested.x.3", 0 };
+    check_test_program_selection_run(test,
+        "static int tagged __asm__(\"tag.1\") __attribute__((used))=1;static int spelled __asm__(\"tested.x.1\") __attribute__((used))=2;"
+        "int tested(int n){{static int x=3;n+=x;}{static int x=4;n+=x;}return n+tagged+spelled;}",
+        "numeric-suffix-asm-labels-beside-made-names", 1, 4, CHECK_PROGRAM_OK, clang, clang, label_patches);
 }

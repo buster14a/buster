@@ -6,7 +6,8 @@
 // graph and typed results with each other. Unsupported valid files are failures, never successful skips.
 // --semantic-mutations checks the files' semantic mutants the same way (c_check_mutation.c). --symbols compares, for
 // each file of the command line that the checker accepts, the functions and objects its -c object defines with
-// clang -O0 -c's (#129, check_corpus_symbols_file).
+// clang -O0 -c's (#129, check_corpus_symbols_file), and --symbols-minimum N fails the run unless at least N files'
+// objects were compared, so that a corpus whose files the backend comes to refuse can't pass by comparing none.
 // Include after c_checker_test.c for the shared source-oracle and exact-value comparison helpers.
 #ifndef BUSTER_C_CHECK_CORPUS_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_INCLUDED
@@ -912,7 +913,8 @@ static bool check_corpus_clang_object(const CheckCorpusSymbols* symbols, const c
     return succeeded;
 }
 
-// Whether the emitted name of the definition at `declaration` (its asm label, or its identifier) is `name`.
+// Whether the emitted name of the definition at `declaration` (its asm label, or its identifier) is `name`, which
+// can't be a made name's (LoweringNames).
 static bool check_corpus_symbol_named(const CheckInput* input, const Parser* parser, const InternTable* identifiers, uint32_t declaration,
                                       const LoweringSymbol* name)
 {
@@ -926,14 +928,15 @@ static bool check_corpus_symbol_named(const CheckInput* input, const Parser* par
             spelling = attributes->records[i].text;
         }
     }
-    return spelling.length == name->length && memcmp(spelling.pointer, name->name, name->length) == 0;
+    return !name->uniqued && spelling.length == name->length && memcmp(spelling.pointer, name->name, name->length) == 0;
 }
 
 // The reason a difference of an accepted file's comparison has, or CHECK_CORPUS_SYMBOL_REASONS for none: `selected`
-// and `code` are what -c emitted, `reached` what the selection reaches with unselected operands counted.
+// and `code` are what -c emitted, `reached` what the selection reaches with unselected operands counted, and `names`
+// the source's names, with which the comparison read both objects.
 static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifference* difference, const CheckCorpusPath* path, const Parser* parser,
                                                           const InternTable* identifiers, const CheckProgramSelection* selected,
-                                                          const CheckProgramCode* code, const CheckProgramSelection* reached)
+                                                          const CheckProgramCode* code, const CheckProgramSelection* reached, const LoweringNames* names)
 {
     CheckCorpusSymbolReason reason = CHECK_CORPUS_SYMBOL_REASONS;
     const CheckInput* input = &path->input;
@@ -942,17 +945,14 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
     for (SymbolId symbol = 1; difference->first && reason == CHECK_CORPUS_SYMBOL_REASONS && symbol <= selected->program.symbol_count; symbol += 1)
     {
         const NameId emitted = code->link.symbols.name[symbol];
-        LoweringSymbol candidate = { .name = code->link.names.bytes[emitted], .length = code->link.names.length[emitted] };
-        // The emitter's own uniquing suffix, as lowering_symbols_read drops it.
-        uint32_t digits = 0;
-        while (digits < candidate.length && candidate.name[candidate.length - 1 - digits] >= '0' && candidate.name[candidate.length - 1 - digits] <= '9')
-        {
-            digits += 1;
-        }
-        candidate.length -= digits != 0 && digits + 1 < candidate.length && candidate.name[candidate.length - 1 - digits] == '.' ? digits + 1 : 0;
+        // The emitted name as lowering_symbols_read compares it.
+        bool uniqued = false;
+        const uint8_t* spelling = code->link.names.bytes[emitted];
+        const uint32_t length = lowering_symbols_compared(names, spelling, code->link.names.length[emitted], code->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING,
+                                                          &uniqued);
         const uint32_t object = selected->program.symbol_objects[symbol - 1];
         const uint32_t declaration = selected->program.object_declarations[object];
-        if (candidate.length == name->length && memcmp(candidate.name, name->name, name->length) == 0 && declaration < input->token_count &&
+        if (length == name->length && uniqued == name->uniqued && memcmp(spelling, name->name, name->length) == 0 && declaration < input->token_count &&
             input->declaration_kinds[declaration] == C_BINDING_OBJECT)
         {
             const TypeId type = type_strip_aligned(types, input->declared_types[declaration]);
@@ -1054,9 +1054,13 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         }
         LoweringSymbols ours = { 0 };
         LoweringSymbols theirs = { 0 };
+        LoweringNames names = { 0 };
         const bool oracle = written && check_corpus_clang_object(symbols, file, theirs_path);
-        compared = oracle && lowering_symbols_read_file(&ours, ours_path, &path->scratch) && lowering_symbols_read_file(&theirs, theirs_path, &path->scratch);
-        failure = !written ? "its object couldn't be written" : !oracle ? "clang -O0 -c failed" : !compared ? "an object couldn't be read" : NULL;
+        const bool named = oracle && lowering_names_of_input(&names, &path->input, parser, pp->table, &path->scratch);
+        compared = named && lowering_symbols_read_file(&ours, ours_path, &names, &path->scratch) &&
+                   lowering_symbols_read_file(&theirs, theirs_path, &names, &path->scratch);
+        failure = !written ? "its object couldn't be written" : !oracle ? "clang -O0 -c failed" : !named ? "out of memory for the source's names" :
+                  !compared ? "an object couldn't be read" : NULL;
         const uint32_t count = compared ? lowering_symbols_compare(&ours, "ours", &theirs, "clang -O0 -c", NULL, 0, NULL, 0) : 0;
         LoweringDifference* differences = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(&path->scratch, LoweringDifference, count) : NULL;
         failure = count != 0 && differences == NULL ? "out of memory for its differences" : failure;
@@ -1067,7 +1071,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         }
         for (uint32_t i = 0; compared && i < count; i += 1)
         {
-            const CheckCorpusSymbolReason reason = check_corpus_symbol_reason(differences + i, path, parser, pp->table, &selected, &code, &reached);
+            const CheckCorpusSymbolReason reason = check_corpus_symbol_reason(differences + i, path, parser, pp->table, &selected, &code, &reached, &names);
             if (reason == CHECK_CORPUS_SYMBOL_REASONS)
             {
                 unexplained += 1;
@@ -1075,7 +1079,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
                 const int length = written_report + 1 < sizeof(report) ?
                                    snprintf(report + written_report, sizeof(report) - written_report, "%s only: %s %s %.*s\n",
                                             differences[i].first ? "ours" : "clang -O0 -c", lowering_symbols_type_name(only->type),
-                                            lowering_symbols_binding_name(only->binding), (int)only->length, (const char*)only->name) : 0;
+                                            lowering_symbols_binding_name(only->binding), (int)only->spelled, (const char*)only->name) : 0;
                 written_report += length > 0 ? (uint64_t)length : 0;
                 written_report = written_report < sizeof(report) ? written_report : sizeof(report) - 1;
             }
@@ -2314,6 +2318,7 @@ static int run_checker_corpus(int count, char** arguments)
     bool minimize_mutants = false;
     bool rejections = false;
     bool symbols_requested = false;
+    uint64_t symbols_minimum = 0;
     const uint32_t file_capacity = 1u << 20;
     char** files = calloc(file_capacity, sizeof(char*));
     char** inputs = calloc((size_t)count + 1, sizeof(char*));
@@ -2342,7 +2347,7 @@ static int run_checker_corpus(int count, char** arguments)
                            strcmp(argument, "--select-accepted") == 0 || strcmp(argument, "--semantic-rejections") == 0 ||
                            strcmp(argument, "--root") == 0 || strcmp(argument, "--reports") == 0 || strcmp(argument, "--limit") == 0 ||
                            strcmp(argument, "--random") == 0 || strcmp(argument, "--mutations") == 0 || strcmp(argument, "--semantic-mutations") == 0 ||
-                           strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0;
+                           strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0 || strcmp(argument, "--symbols-minimum") == 0;
         if (value)
         {
             valid = i + 1 < count;
@@ -2375,8 +2380,11 @@ static int run_checker_corpus(int count, char** arguments)
                 {
                     uint64_t* destination = strcmp(argument, "--limit") == 0 ? &limit : strcmp(argument, "--random") == 0 ? &random_count :
                                             strcmp(argument, "--mutations") == 0 ? &mutation_count : strcmp(argument, "--semantic-mutations") == 0 ? &semantic_count :
-                                            strcmp(argument, "--seed") == 0 ? &seed : strcmp(argument, "--minimize") == 0 ? &minimize : &report_limit;
+                                            strcmp(argument, "--seed") == 0 ? &seed : strcmp(argument, "--minimize") == 0 ? &minimize :
+                                            strcmp(argument, "--symbols-minimum") == 0 ? &symbols_minimum : &report_limit;
                     valid = check_corpus_number(text, destination);
+                    // A floor on the files compared asks for the comparison.
+                    symbols_requested |= destination == &symbols_minimum;
                 }
             }
         }
@@ -2580,7 +2588,7 @@ static int run_checker_corpus(int count, char** arguments)
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--symbols] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
+        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
                 "       test-checker-corpus [--clang PATH] --minimize-mutant FILE... [preprocessor options]\n");
     }
     if (report != 0)
@@ -2613,7 +2621,7 @@ static int run_checker_corpus(int count, char** arguments)
                         tally.files + tally.excluded == selected + random_count + mutation_count + semantic_count + mutations.units &&
                         tally.acceptance_differences == 0 && tally.line_differences == 0 && tally.diagnostic_path_differences == 0 &&
                         tally.path_differences == 0 && tally.resource_failures == 0 && tally.preprocessing_failures == 0 &&
-                        symbols.different == 0 && symbols.failures == 0;
+                        symbols.different == 0 && symbols.failures == 0 && symbols.compared >= symbols_minimum;
     if (semantic_count != 0)
     {
         for (uint32_t kind = 0; kind < CHECK_MUTATION_KIND_COUNT; kind += 1)
@@ -2627,8 +2635,8 @@ static int run_checker_corpus(int count, char** arguments)
     }
     if (symbols_requested)
     {
-        printf("checker-corpus: symbols compared=%" PRIu64 " different=%" PRIu64 " unexplained=%" PRIu64 " documented_%s=%" PRIu64 " documented_%s=%" PRIu64
-               " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols.different, symbols.unexplained,
+        printf("checker-corpus: symbols compared=%" PRIu64 " minimum=%" PRIu64 " different=%" PRIu64 " unexplained=%" PRIu64 " documented_%s=%" PRIu64
+               " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum, symbols.different, symbols.unexplained,
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_FOLDED], symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED],
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.unsupported,
                symbols.failures);

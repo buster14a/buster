@@ -161,8 +161,10 @@ may be emitted instead, for measurement: an inline-only definition is never one.
 Every body is checked either way; only lowering depends on the selection (#155).
 
 The emitter names the local symbols it makes as clang does (`function.name` for
-a block-scope static, `.compoundliteral` for a file-scope compound literal, `.N`
-for a repeated name), so that tools and the comparisons below read them alike.
+a block-scope static, `.compoundliteral` for a file-scope compound literal, and
+`.N` for a name that another symbol has already, made before it or given by the
+source, an identifier or an asm label, as LLVM makes a name unique in its
+module), so that tools and the comparisons below read them alike.
 
 ## Against clang -O0's objects
 
@@ -170,11 +172,21 @@ clang emits no unreferenced static or inline function, even at `-O0`, nor an
 object that only such a function refers to, and every static local of a
 function it emits: `clang -O0 -c`'s object is #129's oracle. `c_lowering_symbols.c`
 reads an object with the import path's reader and lists the functions, objects,
-thread-locals and IFUNCs it defines, with their bindings: not the assembler's
-local labels (`.L` names: string literals, which clang names `.L.str`), and a
-local's name without a final `.N`, the suffix LLVM makes a repeated local name
-unique with, by one counter for the module that string literals' names share,
-which no other compiler reproduces. Two objects' lists compare as multisets.
+thread-locals and IFUNCs it defines, with their bindings, but not the
+assembler's local labels (`.L` names: string literals, which clang names
+`.L.str`). Two objects' lists compare as multisets.
+
+Names compare exactly but for the uniquing suffix of the ones a compiler makes.
+LLVM takes a repeated name's `.N` from one counter for the module, which string
+literals' names advance too, and the emitter from its own, so their numbers
+differ. The checked source gives the comparison the bases of its made names, a
+block-scope static's `function.name` and `.compoundliteral`, and its asm labels
+(`lowering_names_of_input`): a local named by a base, `.` and N compares as the
+base and the fact that it had a suffix, and every other name exactly, an asm
+label above all, which is the user's name even where it ends as a suffix does
+(`tag.1`, or `f.x.1` beside `f`'s statics). An identifier has no dot, so only a
+label could spell a made name. `test-c-testsuite` compares every name exactly:
+none of its subset's programs makes a name twice in clang's objects.
 
 - **Fixtures** (`test-checker`, in `c_check_program_select_test.c`): every
   emitted fixture's object is compared with `clang -std=gnu17 -O0 -c`'s,
@@ -188,13 +200,24 @@ which no other compiler reproduces. Two objects' lists compare as multisets.
   static's and an unreferenced static's; objects referenced, unreferenced,
   tentative and reached through a chain of initializers; block-scope statics of
   emitted and unreferenced functions, two of them of one name; string literals of
-  emitted and unreferenced definitions; and `used` functions and objects.
+  emitted and unreferenced definitions; and `used` functions and objects. And
+  the comparison's own check: asm labels `tag.1` and `tested.x.1` beside two
+  statics `x` of `tested`, whose object must agree with clang's (`tested.x` and
+  `tested.x.2` in both) and differ from it once a name in its string table is
+  replaced: `tag.2` for the label, `tested.x` for the made `tested.x.2` (the
+  suffix lost) and `tested.x.3` for the label `tested.x.1`.
 - **c-testsuite** (`test-c-testsuite --cross-check`): each program's `-c`
   object against `clang -O0 -c`'s, functions and objects. All 219 programs the
   backend compiles agree.
 - **Corpora** (`test-checker-corpus --symbols`): each file the checker accepts,
   its object built as `-c` builds it, against `clang -O0 -c`'s of the file with
-  the corpus's options. A file the backend refuses is counted with its feature.
+  the corpus's options. A file the backend refuses is counted with its feature,
+  and `--symbols-minimum N` fails the run when fewer than N files' objects were
+  compared. The 9700X job compares eight of the frozen musl `src` directories
+  (`math`, `string`, `stdlib`, `fenv`, `legacy`, `process`, `signal` and
+  `multibyte`: 257 files the backend lowers, and every explained difference of
+  musl's, in about 9.5 s) with `--symbols-minimum 257`; `sqlite3.c`, which the
+  backend refuses, compares none.
 
 On corpora, clang -O0 decides two things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
@@ -223,6 +246,15 @@ The backend's refusals are its features, not the selection's: most of musl's
 are attributes (aliases, weak symbols, visibility), `long double`, parameters
 aligned past 8 bytes and inline assembly.
 
+On the 9700X, with its frozen corpus (musl 1.2.5 with the headers its Makefile
+generates, clang 23.1.1, `-march=znver5`, a run per 8 of `src`'s directories),
+1,474 of the 1,514 files are accepted, as clang accepts them; 452 are compared,
+with no unexplained difference, and 1,022 refused by the backend. The explained
+differences are all in `math`: 136 folded and 28 unselected. By directory, the
+most compared are `math` (109 of 355 accepted, 5.5 s), `string` (58 of 72,
+1.2 s), `thread` (49 of 131) and `network` (29 of 77); the 9700X job's subset
+takes `math` and seven small directories with many files the backend lowers.
+
 ## What the selection saves
 
 ```sh
@@ -236,6 +268,9 @@ sizing, encoding, the static data's publication and the object's bytes),
 lowered and skipped, both medians and the time saved, then the totals over the
 files that lower both ways. Lowering everything also lowers what nothing calls,
 which the backend may refuse: then the file is reported with both outcomes.
+Every timed run must lower what its warm-up did, the same counts and object
+bytes: one that fails or differs leaves its file out of the totals, and the
+command exits with status 1.
 
 The issue's case is `main.c`'s unit, whose intrinsic headers define about 5,200
 inline functions of which the compiler uses about 50. It can't be measured yet:
@@ -251,5 +286,24 @@ Where it works today, selection lets units compile that lowering everything
 can't: of musl's math files, the referenced definitions lower and all of them
 don't, refused by `long double` helpers in `libm.h` that nothing calls.
 
+On the 9700X (the 9700X job's run of `benchmark-lowering-source` on
+c-testsuite's programs, 21 passes, run 40179359967), the 219 programs that lower
+both ways define 341 functions and 682 objects; the selection lowers 322 and 645
+and skips 19 and 37. The skipped functions are glibc's static inline helpers
+that `<stdlib.h>` defines (`__bswap_16`, `__bswap_32`, `__bswap_64` and the three
+`__uint*_identity`), which lowering only what is referenced saves where a program
+includes it:
+
+| Program | Functions (defined, lowered) | Referenced only (µs) | Everything (µs) | Saved |
+| --- | --- | --- | --- | --- |
+| 00040 | 9, 3 | 26.5 | 31.8 | 16.5% |
+| 00181 | 10, 4 | 63.4 | 72.4 | 12.4% |
+| 00182 | 11, 5 | 43.2 | 48.6 | 11.2% |
+| all 219 | 341, 322 | 1,676 | 1,696 | 1.2% |
+
+A program that skips nothing costs the same either way, so the selection's own
+work is in the noise. These are small units: the measurement that matters,
+`main.c`'s, waits on the two items above.
+
 [The planner's qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-lowering-2026-10-23/README.md)
-retains the planner's original measurements; the source measurements are below.
+retains the planner's original synthetic measurements.

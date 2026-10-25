@@ -9,18 +9,26 @@
 // symbol counts when it is defined in a section the reader keeps and is a function, an object, a thread-local or an
 // IFUNC, with its binding, but not when its name starts with ".L". Those are assembler-local labels, which an object
 // keeps only where a relocation into a mergeable section needs one: clang's string literals (.L.str) and ours
-// (.Lbuster_string_N). A local's name loses a final ".N" (decimal digits after a dot that isn't its first byte):
-// LLVM makes a repeated local name unique so, by one counter over the whole module, string literals' names among
-// them, which another compiler doesn't reproduce; check_program_emit adds its own.
+// (.Lbuster_string_N).
+//
+// Names compare exactly, but for the ones a compiler makes and makes unique. A block-scope static is "function.name"
+// and a file-scope compound literal ".compoundliteral" (LoweringNames, from the checked source), and a name made a
+// second time gets ".N": LLVM's N comes from one counter over the whole module, which string literals' names advance
+// too, and check_program_emit's from a counter of its own, so the numbers differ. A local named by one of the source's
+// bases, then "." and N (decimal digits from 1 up), is compared as the base and the fact that it had a suffix, unless
+// one of the source's asm labels spells it: a label is the user's name, which must be exact. An identifier has no
+// dot, so only a label could spell such a name. Without the source's names (test-c-testsuite, whose clang objects
+// make no name twice), every name compares exactly.
 //
 // The reader also lists the strings of the object's mergeable string sections (BUSTER_LINK_CLASS_STRINGS, which the
 // reader gives sections of 1-byte entries), each once: the string literals it emits. clang's -O0 code drops a
 // constant condition's dead arm, and a literal only that arm refers to, where ours keeps both, so only fixtures that
 // have no such arm compare them (lowering_symbols_compare_strings).
 //
-// lowering_symbols_compare takes both lists, sorted by name, type and binding, and gives the entries that one of them
-// has more of than the other, the two multisets' differences, as records and as text. This is test tooling outside the compile path, with no
-// vector path. main.c includes it after import.c and object_writer_test.c, whose file reader it takes.
+// lowering_symbols_compare takes both lists, sorted by name, suffix, type and binding, and gives the entries that one
+// of them has more of than the other, the two multisets' differences, as records and as text. This is test tooling
+// outside the compile path, with no vector path. main.c includes it after c_check_program.c, import.c and
+// object_writer_test.c, whose file reader it takes.
 
 #ifndef BUSTER_C_LOWERING_SYMBOLS_INCLUDED
 #define BUSTER_C_LOWERING_SYMBOLS_INCLUDED 1
@@ -28,12 +36,26 @@
 typedef struct LoweringSymbol LoweringSymbol;
 struct LoweringSymbol
 {
-    // The name as compared (in the reading link's name bytes), without a local's uniquing suffix.
+    // The name as compared (in the reading link's name bytes): a made name without its uniquing suffix, which
+    // `uniqued` says it had, and any other whole. `spelled` is its length with the suffix, for reports.
     const uint8_t* name;
     uint32_t length;
+    uint32_t spelled;
     // BUSTER_LINK_SYMBOL_FUNCTION, _OBJECT, _TLS or _IFUNC, and _LOCAL, _GLOBAL or _WEAK.
     uint8_t type;
     uint8_t binding;
+    bool uniqued;
+};
+
+// What a unit's source says about its objects' names: the asm labels it spells, and the bases of the names a compiler
+// makes for its local definitions that have none of their own, each sorted by lowering_symbols_string_order.
+typedef struct LoweringNames LoweringNames;
+struct LoweringNames
+{
+    String8* labels;
+    uint32_t label_count;
+    String8* bases;
+    uint32_t base_count;
 };
 
 typedef struct LoweringSymbols LoweringSymbols;
@@ -64,14 +86,38 @@ static int lowering_symbols_order(const void* a, const void* b)
     const uint32_t common = x->length < y->length ? x->length : y->length;
     int result = common != 0 ? memcmp(x->name, y->name, common) : 0;
     result = result != 0 ? result : (x->length > y->length) - (x->length < y->length);
+    result = result != 0 ? result : (int)x->uniqued - (int)y->uniqued;
     result = result != 0 ? result : (int)x->type - (int)y->type;
     result = result != 0 ? result : (int)x->binding - (int)y->binding;
     return result;
 }
 
+// How the name `spelling` of `length` bytes, a symbol's of binding `binding`, compares: without a final ".N" when it
+// is a local's and `names` shows that a compiler made it (a base, then the suffix, and no label), with `uniqued` set,
+// and whole otherwise: its length as compared. N has no leading zero, as neither counter writes one.
+static uint32_t lowering_symbols_compared(const LoweringNames* names, const uint8_t* spelling, uint32_t length, uint8_t binding, bool* uniqued)
+{
+    uint32_t digits = 0;
+    while (names != 0 && binding == BUSTER_LINK_SYMBOL_LOCAL && digits < length && spelling[length - 1 - digits] >= '0' &&
+           spelling[length - 1 - digits] <= '9')
+    {
+        digits += 1;
+    }
+    const uint32_t base = digits != 0 && digits + 1 < length && spelling[length - 1 - digits] == '.' && spelling[length - digits] != '0' ?
+                          length - 1 - digits : length;
+    const String8 key = { .pointer = (char*)spelling, .length = base };
+    const String8 whole = { .pointer = (char*)spelling, .length = length };
+    const bool made = names != 0 && base != length && names->base_count != 0 &&
+                      bsearch(&key, names->bases, names->base_count, sizeof(String8), lowering_symbols_string_order) != 0 &&
+                      (names->label_count == 0 || bsearch(&whole, names->labels, names->label_count, sizeof(String8), lowering_symbols_string_order) == 0);
+    *uniqued = made;
+    return made ? base : length;
+}
+
 // The entities the object `bytes` defines, sorted, into `result`, every record in `arena`: whether it could be read.
-// On a failure the result is empty but for `import`, the reader's error, and the arena keeps what was pushed.
-static bool lowering_symbols_read(LoweringSymbols* result, String8 bytes, Arena* arena)
+// `names` are its source's (lowering_names_of_input), or null to compare every name whole. On a failure the result is
+// empty but for `import`, the reader's error, and the arena keeps what was pushed.
+static bool lowering_symbols_read(LoweringSymbols* result, String8 bytes, const LoweringNames* names, Arena* arena)
 {
     *result = (LoweringSymbols){ 0 };
     LinkCapacity capacity = { 0 };
@@ -93,23 +139,16 @@ static bool lowering_symbols_read(LoweringSymbols* result, String8 bytes, Arena*
         const uint8_t binding = flags & BUSTER_LINK_SYMBOL_BINDING;
         const NameId name = link.symbols.name[symbol];
         const uint8_t* spelling = name != 0 ? link.names.bytes[name] : 0;
-        uint32_t length = name != 0 ? link.names.length[name] : 0;
+        const uint32_t length = name != 0 ? link.names.length[name] : 0;
         const bool entity = type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_TLS ||
                             type == BUSTER_LINK_SYMBOL_IFUNC;
         const bool label = length >= 2 && spelling[0] == '.' && spelling[1] == 'L';
         if (link.symbols.atom[symbol] != 0 && entity && length != 0 && !label)
         {
-            uint32_t digits = 0;
-            while (binding == BUSTER_LINK_SYMBOL_LOCAL && digits < length && spelling[length - 1 - digits] >= '0' && spelling[length - 1 - digits] <= '9')
-            {
-                digits += 1;
-            }
-            // "name.N" keeps "name"; a name that is only ".N" or "N", or digits after anything but a dot, stays whole.
-            if (digits != 0 && digits + 1 < length && spelling[length - 1 - digits] == '.')
-            {
-                length -= digits + 1;
-            }
-            result->items[result->count++] = (LoweringSymbol){ .name = spelling, .length = length, .type = type, .binding = binding };
+            bool uniqued = false;
+            const uint32_t compared = lowering_symbols_compared(names, spelling, length, binding, &uniqued);
+            result->items[result->count++] = (LoweringSymbol){ .name = spelling, .length = compared, .spelled = length, .type = type,
+                                                               .binding = binding, .uniqued = uniqued };
         }
     }
     // Every byte of a string section may end a string, so there are at most as many strings as bytes.
@@ -156,13 +195,13 @@ static bool lowering_symbols_read(LoweringSymbols* result, String8 bytes, Arena*
 }
 
 // lowering_symbols_read of the file at `path`; an unreadable file gives IMPORT_ERROR_BOUNDS.
-static bool lowering_symbols_read_file(LoweringSymbols* result, const char* path, Arena* arena)
+static bool lowering_symbols_read_file(LoweringSymbols* result, const char* path, const LoweringNames* names, Arena* arena)
 {
     const String8 bytes = object_test_read_file(arena, path);
     bool valid = bytes.pointer != 0;
     if (valid)
     {
-        valid = lowering_symbols_read(result, bytes, arena);
+        valid = lowering_symbols_read(result, bytes, names, arena);
     }
     else
     {
@@ -192,7 +231,7 @@ static const char* lowering_symbols_binding_name(uint8_t binding)
 // The entries of `a` and `b` (each sorted by lowering_symbols_read) that one has more of than the other: how many. The
 // first `difference_capacity` of them go into `differences` (which may be null for none), and each that fits in
 // `report`'s `capacity` bytes goes there as "<label> only: TYPE BINDING name" on a line of its own, NUL-terminated (a
-// capacity of 0 lists none).
+// capacity of 0 lists none), the name as the object spells it.
 static uint32_t lowering_symbols_compare(const LoweringSymbols* a, const char* a_label, const LoweringSymbols* b, const char* b_label,
                                          LoweringDifference* differences_out, uint32_t difference_capacity, char* report, uint64_t capacity)
 {
@@ -226,7 +265,7 @@ static uint32_t lowering_symbols_compare(const LoweringSymbols* a, const char* a
             if (written + 1 < capacity)
             {
                 const int length = snprintf(report + written, capacity - written, "%s only: %s %s %.*s\n", label, lowering_symbols_type_name(only->type),
-                                            lowering_symbols_binding_name(only->binding), (int)only->length, (const char*)only->name);
+                                            lowering_symbols_binding_name(only->binding), (int)only->spelled, (const char*)only->name);
                 written += length > 0 ? (uint64_t)length : 0;
                 written = written < capacity ? written : capacity - 1;
             }
@@ -278,6 +317,92 @@ static uint32_t lowering_symbols_compare_strings(const LoweringSymbols* a, const
         }
     }
     return differences;
+}
+
+// The names of the unit `input` checked (LoweringNames), every record in `arena`: whether there was room. A label is
+// an asm label of a declaration that isn't a register variable's and that the checker didn't ignore. A block-scope
+// static without a label of its own gets the base "function.name": its function's label, from any of its
+// declarations, or its identifier, then its own, as check_program_emit names it (CheckProgramNames). A unit with a
+// compound literal gets ".compoundliteral".
+static bool lowering_names_of_input(LoweringNames* result, const CheckInput* input, const Parser* parser, const InternTable* identifiers, Arena* arena)
+{
+    *result = (LoweringNames){ 0 };
+    const uint32_t count = input->token_count;
+    uint64_t labels = 0;
+    bool compound = false;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? input->attributes[token] : 0;
+        for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+        {
+            labels += attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
+        }
+        compound |= input->compound_objects[token] != 0;
+    }
+    // Each object's label, by its identity (its canonical declaration's token + 1).
+    String8* object_labels = BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)count + 2);
+    result->labels = labels != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, labels) : 0;
+    result->bases = BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)count + 1);
+    bool valid = object_labels != 0 && (labels == 0 || result->labels != 0) && result->bases != 0;
+    if (valid)
+    {
+        memset(object_labels, 0, ((uint64_t)count + 2) * sizeof(String8));
+    }
+    for (uint32_t token = 0; valid && token < count; token += 1)
+    {
+        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? input->attributes[token] : 0;
+        for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored)
+            {
+                result->labels[result->label_count++] = attribute->text;
+                object_labels[input->objects[token] <= count + 1 ? input->objects[token] : 0] = attribute->text;
+            }
+        }
+    }
+    for (uint32_t token = 0; valid && token < count; token += 1)
+    {
+        const uint32_t opening = input->declaration_bodies[token];
+        const uint32_t object = input->objects[token] <= count + 1 ? input->objects[token] : 0;
+        const bool block_static = input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_OBJECT && input->static_objects[token] &&
+                                  input->linkage[token] == 0 && !input->compound_objects[token] && opening < count && object != 0 &&
+                                  object_labels[object].length == 0;
+        const uint32_t function = block_static ? input->body_declarations[opening] : BUSTER_CHECK_NONE;
+        if (function < count)
+        {
+            const uint32_t function_object = input->objects[function] <= count + 1 ? input->objects[function] : 0;
+            const String8 label = function_object != 0 ? object_labels[function_object] : (String8){ 0 };
+            const IdentId function_name = parser->tokens.names[function];
+            const IdentId own_name = parser->tokens.names[token];
+            const uint8_t* context = label.length != 0 ? (const uint8_t*)label.pointer : intern_bytes(identifiers, function_name);
+            const uint64_t context_length = label.length != 0 ? label.length : intern_length(identifiers, function_name);
+            const uint64_t own_length = intern_length(identifiers, own_name);
+            uint8_t* base = arena_push(arena, context_length + 1 + own_length, 1);
+            valid = base != 0;
+            if (valid)
+            {
+                memcpy(base, context, context_length);
+                base[context_length] = '.';
+                memcpy(base + context_length + 1, intern_bytes(identifiers, own_name), own_length);
+                result->bases[result->base_count++] = (String8){ .pointer = (char*)base, .length = context_length + 1 + own_length };
+            }
+        }
+    }
+    if (valid && compound)
+    {
+        result->bases[result->base_count++] = BUSTER_S8(".compoundliteral");
+    }
+    if (valid)
+    {
+        qsort(result->labels, result->label_count, sizeof(String8), lowering_symbols_string_order);
+        qsort(result->bases, result->base_count, sizeof(String8), lowering_symbols_string_order);
+    }
+    else
+    {
+        *result = (LoweringNames){ 0 };
+    }
+    return valid;
 }
 
 #endif
