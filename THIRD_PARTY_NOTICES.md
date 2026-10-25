@@ -380,6 +380,33 @@ references. These modules contain no copied LLVM implementation or fixtures.
 
 ## Review limits and distribution
 
+### Performance publication tools
+
+`tools/performance/bmf*.c`, `tools/performance/build.sh` and the accompanying
+format/tool documentation are original project contributions under the default
+terms. They use the existing manifest schema as their contract. Arrow IPC is
+decoded by Apache nanoarrow 0.7.0 at
+`2cfba631b40886f1418a463f3b7c4552c8ae0dc7`; its unmodified amalgamation and
+flatcc runtime remain **Apache-2.0 without the LLVM exception**. Their licenses,
+ASF NOTICE, embedded copyrights, generator procedure and source digests are
+retained under `tools/performance/vendor/nanoarrow` and its parent README.
+Unmodified yyjson 0.12.0 at `8b4a38dc994a110abaec8a400615567bd996105f` retains
+YaoYuan's MIT terms and copyright in `tools/performance/vendor/yyjson`.
+OpenSSL, PCRE2 and libcurl are external dynamic dependencies, not incorporated
+source. The retained buster-performance examples are independent validation
+inputs produced by Arrow JavaScript 21.1.0, not fixtures copied into Buster.
+
+`web/perf/data.mjs`, `web/tests/*` and `tools/performance/serve.c` are original
+reader, comparison, browser-test and localhost serving code under the default
+terms. The browser requires JavaScript/BigInt and Web Crypto; its tests use
+external Playwright 1.62.1. `web/perf/vendor/arrow/Arrow.es2015.min.js`,
+`LICENSE.txt` and `NOTICE.txt` are unchanged Apache Arrow JavaScript 21.1.0
+distribution files, from npm artifact `apache-arrow-21.1.0.tgz`, SHA-256
+`fa3fd5781698838eafc0f74f5ae35ab0bf13bb8cb227b3f57d40bf3b34055d72`.
+They retain **Apache-2.0 without the LLVM exception**, the ASF NOTICE and the
+distribution's own embedded attribution. The distributed JS file's SHA-256 is
+`d3f0ded2a2bdd1208232b942f8e4810f7a402564fac3c78b4574158cd542acb9`.
+
 The record covers the pinned tree and this adoption's changes. Unmerged PRs,
 future imports and external system libraries are not silently covered.
 Unrecorded original tool hashes are identified above; the retained compatible
