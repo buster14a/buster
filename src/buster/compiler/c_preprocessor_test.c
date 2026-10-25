@@ -6492,6 +6492,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_trailing_splices();
         passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_windows(fuzz.seed);
+        passed_all &= pp_test_window_units(directory, fuzz.seed);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
