@@ -99,6 +99,9 @@ typedef enum IrOp
     IR_SWITCH,
     IR_RET,
     IR_UNREACHABLE,
+    IR_ALLOCA,
+    IR_STACK_SAVE,
+    IR_STACK_RESTORE,
     IR_OP_COUNT,
 } IrOp;
 
@@ -357,6 +360,9 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "switch",
     "ret",
     "unreachable",
+    "alloca",
+    "stack_save",
+    "stack_restore",
 };
 
 static bool ir_integer(uint32_t type)
@@ -476,6 +482,7 @@ typedef enum IrRule
     IR_RULE_CONDITIONAL,
     IR_RULE_SWITCH,
     IR_RULE_RETURN,
+    IR_RULE_STACK,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -535,7 +542,10 @@ typedef enum IrRule
     X(IR_CBR,           1, 7, 1u << IR_VOID, IR_RULE_CONDITIONAL, 1) \
     X(IR_SWITCH,        1, 7, 1u << IR_VOID, IR_RULE_SWITCH, 1) \
     X(IR_RET,           0, 1, 1u << IR_VOID, IR_RULE_RETURN, 1) \
-    X(IR_UNREACHABLE,   0, 0, 1u << IR_VOID, IR_RULE_NONE, 1)
+    X(IR_UNREACHABLE,   0, 0, 1u << IR_VOID, IR_RULE_NONE, 1) \
+    X(IR_ALLOCA,        1, 1, 1u << IR_PTR, IR_RULE_STACK, 0) \
+    X(IR_STACK_SAVE,    0, 0, 1u << IR_I64, IR_RULE_NONE, 0) \
+    X(IR_STACK_RESTORE, 1, 1, 1u << IR_VOID, IR_RULE_STACK, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -753,6 +763,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
             } break;
             case IR_RULE_RETURN: valid = f->result_type == IR_VOID ? a == BUSTER_IR_NONE : a < f->instruction_count && f->type[a] == f->result_type; break;
+            // Validate the fixed-width stack rule outside the established explicit semantic cases.
+            default: valid = ir_rule_table[op] == IR_RULE_STACK && ta == IR_I64; break;
         }
         if (!valid)
         {

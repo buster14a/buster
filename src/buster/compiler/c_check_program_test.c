@@ -513,6 +513,22 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){int t=0;for(int i=0;i<3;i++)t+=sum(&(struct S){i,n});struct S s={n,2};struct T u={s,3};struct S arr[3]={{1,2},{3}};"
         "struct S z=n&1?s:arr[0];struct S e=({struct S w={n,n+1};w;});"
         "return t+((int[]){5,6,7})[n&1]+u.s.a*7+u.c+arr[1].a+arr[1].b+arr[2].a+z.a+e.b;}", "aggregate-values-and-compounds", clang);
+    // A discarded comma discards its right operand too: musl's vfwprintf.c copies a union with a long double so, and
+    // a folded comma's constant is nothing (#440).
+    check_test_program_source(test,
+        "union A{unsigned long i;long double f;void*p;};"
+        "int tested(int n){union A arg,list[4];int type[4]={0};for(int i=0;i<4;i++)list[i].f=n*0.5L+i;"
+        "int k=n&3;arg.f=0;if(n>=0)type[k]=n,arg=list[k];else (k,5);return (int)(arg.f*4)+type[k]*100;}", "comma-discards-aggregate-copy", clang);
+    // An aggregate assignment's value, the destination's address, read after its copy by another copy, a load at
+    // offset 0, a return, a conditional's arm, and after the pieces of a copy past 256 bytes (#440).
+    check_test_program_source(test,
+        "struct S{long a,b;};struct F{long double v;int k;};struct L{long a;unsigned char c[300];};"
+        "struct S pick(struct S*t,int n){struct S r;return r=t[n&1];}"
+        "int tested(int n){struct S s,t,w[2]={{n,2},{3,n}};struct F f,g[2]={{n*0.25L,1},{2.5L,n}};struct L x,y,z;"
+        "s=(t=w[n&1]);long a=(t=w[1]).a;long double v=(f=g[n&1]).v;struct S r=pick(w,n);struct S c=n>3?(t=w[0]):w[1];"
+        "for(int i=0;i<300;i++)z.c[i]=(unsigned char)(i^n);z.a=n;x=(y=z);"
+        "return (int)(s.a+s.b*3+t.b*5+a*7+r.a*11+c.b*13+x.a*17+f.k*19)+(int)(v*8)+x.c[n&255]+y.c[299];}",
+        "aggregate-assignment-values", clang);
     check_test_program_source(test,
         "int add(int a,int b){return a+b;}int mul(int a,int b){return a*b;}int(*pick(int n))(int,int){return n&1?add:mul;}"
         "int apply(int(*f)(int,int),int x){return (*f)(x,x);}"

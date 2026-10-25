@@ -508,7 +508,11 @@ What the lowering covers past scalars (#145's programs):
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
 - **Copies.** Struct and union assignment and initialization are `COPY`s of
   at most 256 bytes each, the source's address kept in a temporary between
-  them; a statement's assignment leaves no address to discard.
+  them; a statement's assignment leaves no address to discard, and neither
+  does a discarded comma's right operand (`k = 1, a = b;`). An assignment whose
+  value is used keeps its destination's address in a temporary too, pushed
+  again after the last `COPY`: whatever reads it takes its class from the entry
+  before it, which a `COPY`, of class `VOID`, can't give (#440).
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
