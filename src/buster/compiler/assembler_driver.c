@@ -9,7 +9,7 @@ static Object asm_object(AsmResult* result, String8 name, Arena* arena)
     Object object = {.error = OBJECT_ERROR_FULL};
     if (result->error == 0 && object_prepare(&units, &result->link, 1, arena) && object_map_symbols(&symbols, &result->link, arena))
     {
-        object = object_build(&result->link, &units, &symbols, 0, (ObjectOptions){0}, name, arena);
+        object = object_build(&result->link, &units, &symbols, 0, result->object_options, result->source_name.pointer != 0 ? result->source_name : name, arena);
     }
     return object;
 }
