@@ -1198,6 +1198,13 @@ static const PPTestCase pp_test_cases[] = {
     // M(2) after it, whose N expands.
     { "a name painted while its macro is disabled, then expanded", "#define N M(1)\n#define M(a) N a\nN\nM(2)\nint x = M(3);\n", 0, "c17",
       "N 1\nM(1) 2\nint x = M(1) 3;\n", false },
+    // Templates of a few tokens whose names' bodies make their expansions longer than a template writes: past 16 tokens,
+    // exactly 16 and 17 (pp_template_size).
+    { "expansions past a template's tokens",
+      "#define LONG a b c d e f g h i j\n#define M(x) LONG x LONG\n#define SEVEN 1 2 3 4 5 6 7\n#define B16(x) SEVEN x SEVEN x\n#define B17(x) SEVEN x SEVEN x x\nM(1)\nB16(.)\nB17(.)\n",
+      0, "c17", "a b c d e f g h i j 1 a b c d e f g h i j\n1 2 3 4 5 6 7 . 1 2 3 4 5 6 7 .\n1 2 3 4 5 6 7 . 1 2 3 4 5 6 7 . .\n", false },
+    // An empty expansion of a template with a space between its tokens leaves that space before the next token.
+    { "an empty expansion's spaces", "#define E(a,b) a b\n#define F(a) a\n[E(,)] [E(,)x] (F()y)\n", 0, "c17", "[ ] [ x] (y)\n", false },
     { "an alias's invocation", "#define F(x) x\n#define ALIAS F\nALIAS (7)\n", 0, "c17", "7\n", false },
     { "adjacent tokens don't paste", "#define PLUS +\n+PLUS\n", 0, "c17", "+ +\n", false },
     { "an unused argument isn't expanded", "#define BAD(x,y) x\n#define DROP(x) 0\nDROP(BAD(1))\n", 0, "c17", "0\n", false },
