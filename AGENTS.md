@@ -3820,19 +3820,21 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;
-- the driver, without files: fifteen cases' exit statuses and exact messages (a
-  valid, an empty and an invalid file, the last with `--scalar` too, an
+- the driver, without files: seventeen cases' exit statuses and exact messages
+  (a valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past
   the preprocessor's size limit, no file, an unknown option, GNU's keywords
-  turned off two ways, and two errors after a macro's expansion, which the
-  expansion history places and the driver records only for its diagnostics),
-  16 runs of each, after which the address space and the descriptors must be
-  as they were;
+  turned off two ways, two errors after a macro's expansion, which the
+  expansion history places and the driver records only for its diagnostics,
+  and a warning with code after it and alone, which the driver prints by
+  preprocessing the unit again), 16 runs of each, after which the address
+  space and the descriptors must be as they were;
   then every reservation and mapping of a run on a valid and on an invalid file
-  failed in turn (74 and 75), in children whose address space may grow a page
-  less than a run reached: the last fails, then, a page below the peak that run
-  reached, the one before it, down to the first. Each run must exit with status
-  1 having said why in a fatal error, and leave nothing behind;
+  and on the two warnings' files (whose replays' reservations among them)
+  failed in turn, in children whose address space may grow a page less than a
+  run reached: the last fails, then, a page below the peak that run reached,
+  the one before it, down to the first. Each run must exit with status 1 having
+  said why in a fatal error, and leave nothing behind;
 - files: every `.c` file under each path, preprocessed with -E's options, must
   parse; with `--clang`, the parser must accept exactly what `clang
   -fsyntax-only` with the same options accepts (our side reads clang's

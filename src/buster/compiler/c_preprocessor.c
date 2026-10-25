@@ -1197,6 +1197,11 @@ struct Preprocessor
     const char* history_name;
     const uint8_t* history_bytes;
     uint32_t history_length;
+    // The run's outcome at its end, which the replay must have too: its result and its diagnostics' counts.
+    bool history_result;
+    bool history_fatal;
+    uint32_t history_errors;
+    uint32_t history_warnings;
     Preprocessor* history_replay;
     Arena history_replay_arena;
     // Only set around synchronous expansion/substitution work; never inferred from a spelling location.
@@ -15555,8 +15560,9 @@ static bool pp_tokens_same(const PPTokens* a, const PPTokens* b)
 // Records a deferred history (PPOptions.defer_history): preprocesses the unit again as pp_run or pp_run_source ran it,
 // with history, into a preprocessor of its own (in an arena of its own) with the same options, file cache, intern table
 // and time, which prints the diagnostics if `report` says so, and takes its history, which the replay keeps until
-// pp_release. The replay must give the unit's output again, token for token; one that doesn't, or can't be made (out of
-// memory), leaves the unit without history, and a fatal error says so.
+// pp_release. The replay must be the run again: its result, its errors, warnings and fatal error, and its output, token
+// for token. One that isn't (it ran out of memory for its history, say, which an empty output wouldn't show), or can't
+// be made, leaves the unit without history, and a fatal error says so.
 static void pp_history_record(Preprocessor* pp, bool report)
 {
     pp->history_deferred = false;
@@ -15578,15 +15584,10 @@ static void pp_history_record(Preprocessor* pp, bool report)
         memcpy(replay->time, pp->time, sizeof(pp->time));
         memcpy(replay->timestamp, pp->timestamp, sizeof(pp->timestamp));
         replay->has_epoch = pp->has_epoch;
-        if (pp->history_path != 0)
-        {
-            pp_preprocess_file(replay, pp->history_path);
-        }
-        else
-        {
-            pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
-        }
-        same = pp_tokens_same(&replay->output, &pp->output);
+        const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
+                                                    pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
+        same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
+               replay->warnings == pp->history_warnings && pp_tokens_same(&replay->output, &pp->output);
     }
     if (same)
     {
@@ -15619,15 +15620,20 @@ static void pp_history_record(Preprocessor* pp, bool report)
         arena_release(&pp->history_replay_arena);
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, !ran         ? "no expansion history: the translation unit wasn't run by pp_run or pp_run_source" :
                                               !initialized ? "can't preprocess the translation unit again for its expansion history (out of memory)" :
-                                                             "the translation unit gave other tokens when preprocessed again for its expansion history");
+                                                             "the translation unit gave another result when preprocessed again for its expansion history");
     }
 }
 
-// The end of a deferred run (PPOptions.defer_history): the diagnostics after it are printed as the options ask, and its
-// own, which it counted without printing them, are printed with their notes by recording the history, as the unit's
-// own run would have printed them.
-static void pp_history_report(Preprocessor* pp)
+// The end of a run, with its result: its outcome is kept for a replay to match (pp_history_record). Then, for a deferred
+// run (PPOptions.defer_history), the diagnostics after it are printed as the options ask, and its own, which it counted
+// without printing them, are printed with their notes by recording the history, as the unit's own run would have
+// printed them.
+static void pp_history_report(Preprocessor* pp, bool result)
 {
+    pp->history_result = result;
+    pp->history_fatal = pp->fatal;
+    pp->history_errors = pp->errors;
+    pp->history_warnings = pp->warnings;
     if (pp->history_deferred)
     {
         pp->options.quiet = pp->history_quiet;
@@ -15652,13 +15658,14 @@ static bool pp_history_ensure(Preprocessor* pp)
 }
 
 // Preprocesses the main file (pp_preprocess_file); with PPOptions.defer_history, then prints the diagnostics the run
-// counted (pp_history_report). The output is pp->output, with keywords' kinds. Returns false if there were errors.
+// counted (pp_history_report). The output is pp->output, with keywords' kinds. Returns false if there were errors, the
+// replay's fatal error among them.
 static bool pp_run(Preprocessor* pp, const char* main_path)
 {
     pp->history_path = main_path;
     const bool result = pp_preprocess_file(pp, main_path);
-    pp_history_report(pp);
-    return result;
+    pp_history_report(pp, result);
+    return result && !pp->fatal;
 }
 
 // pp_run for a main file in memory, `length` bytes at `bytes`, named `name` (which, like the bytes, must outlive the
@@ -15670,8 +15677,8 @@ static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* byt
     pp->history_bytes = bytes;
     pp->history_length = length;
     const bool result = pp_preprocess_source(pp, name, bytes, length);
-    pp_history_report(pp);
-    return result;
+    pp_history_report(pp, result);
+    return result && !pp->fatal;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

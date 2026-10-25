@@ -1666,11 +1666,15 @@ that shares the unit's options, file cache, intern table and time (`__DATE__`,
 all, as the unit's own run would have, and the unit takes its history, which
 lives until `pp_release`. `pp_history_ensure` records it the same way, quietly,
 when a reader asks for it later: `pp_diagnose_output` and the parser's
-diagnostics (`parse_print_diagnostics`) call it. The replay must give the
-unit's output again, token for token; one that doesn't, or can't be made (out
-of memory), leaves the unit without history, and a fatal error says so. It
-takes the files the run read from the cache the run filled, as a later unit
-with that cache does. The unit preprocesses nothing more after its run.
+diagnostics (`parse_print_diagnostics`) call it. The replay must be the run
+again: its result, its errors, warnings and fatal error, and its output, token
+for token. One that isn't (it ran out of memory for its history, say, which an
+empty output wouldn't show), or can't be made, leaves the unit without history;
+a fatal error says so, and `pp_run` and `pp_run_source` return false, as do
+the drivers' statuses (`parse` checks the preprocessor's fatal error after its
+own diagnostics, which may have recorded the history). It takes the files the
+run read from the cache the run filled, as a later unit with that cache does.
+The unit preprocesses nothing more after its run.
 
 `-E` and `parse` defer the history. The checker's driver records it as the
 unit runs: `check_input_system_tokens` reads the history of every unit with a
@@ -1687,6 +1691,10 @@ the printed diagnostics must be the recording run's, byte for byte; once
 with nothing more printed. In the fuzz batch, the vectorized run as a compile
 runs it defers its history, which `pp_fuzz_kernels` records through
 `pp_run_source`'s replay and compares with the scalar twins' history.
+`test-parser`'s driver checks fail every reservation of `parse` and of `-E`
+in turn on two files with a warning, whose replays print it: one with code,
+and one of directives alone, whose output is empty, where the replay's history
+grows while it runs. Each failure must end with status 1 and a fatal error.
 
 Measured on the 9700X ([record](https://github.com/buster14a/buster-performance/blob/09c8fc3597bc310da2bea0fbc5ed1d6bde0ac63c/docs/measurements/preprocessor-history-replay-117-2026-10-25/README.md)), main at `7c428ce` against the
 replay's `a964539`. `benchmark-preprocessor --history-cost` on `sqlite3.c` gives

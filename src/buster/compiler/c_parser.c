@@ -12220,7 +12220,8 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
             {
                 parse_print_diagnostics(&parser, &pp);
             }
-            result = parsed_unit ? 0 : 1;
+            // The diagnostics' places may have needed the expansion history, whose replay can fail (a fatal error).
+            result = parsed_unit && !pp.fatal ? 0 : 1;
         }
         // What a failed reservation left reserved too.
         parse_release(&parser);
