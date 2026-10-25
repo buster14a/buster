@@ -4808,8 +4808,38 @@ static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
     return count;
 }
 
-// A conversion between U64 and F32 or F64, which SSE has no instruction for before AVX-512: deferred, in registers (the
-// operand's, the result's and the stacks' first free ones), with no branch and no memory.
+// Whether a conversion between U64 and F32 or F64, at the stacks' depths before it (`depth` and `floating`), takes the
+// register form of tier0_emit_u64_convert: where its scratch registers exist, the integer stack's at `depth` to F32 or
+// F64 (its operand's is at depth − 1), and to U64 the integer stack's at depth + 1 (its result's is at depth) and the
+// floating stack's at `floating` (its operand's is at floating − 1). The integer table has 15 depths, 14 with a frame
+// pointer. Elsewhere the red zone form takes its place, which needs no register but its operand's and its result's, so
+// that every depth that has room for the conversion's value takes it (#429's review).
+static bool tier0_u64_convert_registers(bool to_u64, uint32_t depth, uint32_t floating, bool pointer)
+{
+    const uint32_t integer = to_u64 ? depth + 1 : depth;
+    return integer < (uint32_t)tier0_integer_depth_count(pointer) && (!to_u64 || floating < BUSTER_TIER0_FLOATING_DEPTHS);
+}
+
+// A conversion's registers in a selection's tops (both selections'): its result's, the integer stack's at its depth to
+// U64 and the floating stack's free one to F32 or F64, into `tops`; and the register form's scratch registers into
+// `scratch`, by whether the function has a frame pointer ([1]) or not ([0]), which a selection knows only once it has
+// seen every entry.
+static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floating, Tier0Tops* tops, Tier0Tops* scratch)
+{
+    tops->integer = to_u64 && depth > tops->integer ? depth : tops->integer;
+    tops->floating = !to_u64 && floating > tops->floating ? floating : tops->floating;
+    for (uint32_t pointer = 0; pointer < 2; pointer += 1)
+    {
+        const bool registers = tier0_u64_convert_registers(to_u64, (uint32_t)depth, (uint32_t)floating, pointer != 0);
+        const int32_t integer = to_u64 ? depth + 1 : depth;
+        scratch[pointer].integer = registers && integer > scratch[pointer].integer ? integer : scratch[pointer].integer;
+        scratch[pointer].floating = registers && to_u64 && floating > scratch[pointer].floating ? floating : scratch[pointer].floating;
+    }
+}
+
+// A conversion between U64 and F32 or F64, which SSE has no instruction for before AVX-512: deferred, with no branch, in
+// one of two forms of as many records, so that measuring needn't know which (tier0_u64_convert_registers chooses).
+// The register form uses the operand's and the result's registers and the stacks' first free ones, and no memory:
 //   - To F32 or F64 from U64, x in the register at d − 1, the result in the floating stack's free register: a signed
 //     conversion of x where its top bit is clear, and otherwise of x halved with its lowest bit kept, (x >> 1) | (x & 1),
 //     which rounds as x does (made in the register at d, then cmovns chooses), then the result's exponent raised by x's
@@ -4819,23 +4849,29 @@ static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
 //   - To U64 from F32 or F64, the value in the floating stack's top register, the result in the register at d: one signed
 //     truncation, of the value less a bias, 2^63 where the value is at least that and 0 below it (cmovae from the compare
 //     with 2^63, which the register at d + 1 and the floating stack's free register hold), then the top bit set back from
-//     the compare's result, which setae keeps in the register at d + 1. The subtraction is exact (Sterbenz's lemma from
-//     2^63, and of 0 below it) and the truncation's operand is below 2^63, so a value in U64's range raises no invalid
-//     exception, and an inexact one only where it has a fraction, as C's conversion does (#429's review): truncating both
-//     ways and choosing raised them for nothing. A value out of U64's range (C leaves it undefined) gives the signed
-//     truncation's result, its top bit flipped.
-// The operand's register is the conversion's to overwrite: it consumes the value. Through red zone temporaries instead,
-// as #429's first versions went, the loads that read what the stores before them wrote took a conversion-heavy loop to
-// twice clang -O0's time on the 9700X.
+//     the compare's result, which setae keeps in the register at d + 1 (a shift by 63 keeps its lowest bit alone, so
+//     the rest of the register needn't be cleared). The subtraction is exact (Sterbenz's lemma from 2^63, and of 0 below
+//     it) and the truncation's operand is below 2^63, so a value in U64's range raises no invalid exception, and an
+//     inexact one only where it has a fraction, as C's conversion does (#429's review): truncating both ways and choosing
+//     raised them for nothing. A value out of U64's range (C leaves it undefined) gives the signed truncation's result,
+//     its top bit flipped.
+// The red zone form keeps to the operand's and the result's registers, its scratch values in red zone temporaries 0 to 2
+// instead: from U64, x's copy in temporary 0 and the result's bits in temporary 1; to U64, 2^63 in temporary 0, setae's
+// byte in temporary 1 (shifted into the top bit in place) and the bias in temporary 2. It is as exact, and raises the
+// same exceptions, but its loads wait for the stores before them: as the only form, it took a conversion-heavy loop to
+// twice clang -O0's time on the 9700X, so it takes only the depths the register form has no room at.
+// The operand's register is the conversion's to overwrite: it consumes the value.
 #define BUSTER_TIER0_FROM_U64_RECORDS 14
-#define BUSTER_TIER0_TO_U64_RECORDS 12
-static void tier0_emit_u64_convert(const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
+#define BUSTER_TIER0_TO_U64_RECORDS 11
+static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t class = entries->key_classes[i];
     const uint32_t depth = entries->depths[i];
     const uint32_t floating = entries->floating_depths[i];
     const uint8_t direct = BUSTER_X86_REGISTER_DIRECT;
-    if (tier0_class_floating(class))
+    const bool to_u64 = !tier0_class_floating(class);
+    const bool registers = tier0_u64_convert_registers(to_u64, depth, floating, pointer);
+    if (!to_u64 && registers)
     {
         const bool single = class == BUSTER_TYPED_CLASS_F32;
         const uint8_t x = tier0_integer_depths[depth - 1];
@@ -4856,7 +4892,29 @@ static void tier0_emit_u64_convert(const Tier0Entries* entries, uint32_t i, Tier
         tier0_put(writer, tier0_instruction(single ? X86_FORM_ADD_R32_RM32 : X86_FORM_ADD_R64_RM64, halved, x, direct, 0, 0));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_MOVD_X_RM32 : X86_FORM_MOVQ_X_RM64, result, halved, direct, 0, 0));
     }
-    else
+    else if (!to_u64)
+    {
+        // x halved in its own register (x's copy in temporary 0), x's sign tested in its copy, and the exponent raised in
+        // the result's bits in temporary 1.
+        const bool single = class == BUSTER_TYPED_CLASS_F32;
+        const uint8_t x = tier0_integer_depths[depth - 1];
+        const uint8_t result = (uint8_t)floating;
+        tier0_put(writer, tier0_red_zone(X86_FORM_MOV_RM64_R64, x, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_AND_RM32_IMM8, 0, x, direct, 0, 1));
+        tier0_put(writer, tier0_instruction(X86_FORM_ADD_R32_RM32, x, x, direct, 0, 0));
+        tier0_put(writer, tier0_red_zone(X86_FORM_OR_R64_RM64, x, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 1));
+        tier0_put(writer, tier0_red_zone(X86_FORM_CMP_RM64_IMM8, 0, 0));
+        tier0_put(writer, tier0_red_zone(X86_FORM_CMOVGE_R64_RM64, x, 0));
+        tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SD_X_RM64, result, x, direct, 0, 0));
+        tier0_put(writer, tier0_red_zone(X86_FORM_MOV_R64_RM64, x, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 63));
+        tier0_put(writer, tier0_instruction(X86_FORM_SHL_RM64_IMM8, 0, x, direct, 0, single ? 23 : 52));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, result, 1));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_ADD_RM32_R32 : X86_FORM_ADD_RM64_R64, x, 1));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, result, 1));
+    }
+    else if (registers)
     {
         const bool single = entries->variants[i] == BUSTER_TYPED_CLASS_F32;
         const uint8_t value = (uint8_t)(floating - 1);
@@ -4875,9 +4933,29 @@ static void tier0_emit_u64_convert(const Tier0Entries* entries, uint32_t i, Tier
         tier0_put(writer, tier0_instruction(single ? X86_FORM_SUBSS_X_XM32 : X86_FORM_SUBSD_X_XM64, value, limit, direct, 0, 0));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTTSS2SI_R64_XM32 : X86_FORM_CVTTSD2SI_R64_XM64, result, value, direct, 0, 0));
         // The top bit back: the compare's result shifted into place.
-        tier0_put(writer, tier0_instruction(X86_FORM_MOVZX_R32_RM8, bit, bit, direct, 0, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHL_RM64_IMM8, 0, bit, direct, 0, 63));
         tier0_put(writer, tier0_instruction(X86_FORM_XOR_R64_RM64, result, bit, direct, 0, 0));
+    }
+    else
+    {
+        const bool single = entries->variants[i] == BUSTER_TYPED_CLASS_F32;
+        const uint8_t value = (uint8_t)(floating - 1);
+        const uint8_t result = tier0_integer_depths[depth];
+        // 2^63 in temporary 0, through the result's register, which holds nothing yet.
+        tier0_put(writer, single ? tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, result, 0, 0, 0x5f000000) : tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, result, 0, 0x43e00000, 0));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 0));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_UCOMISS_X_XM32 : X86_FORM_UCOMISD_X_XM64, value, 0));
+        tier0_put(writer, tier0_red_zone(X86_FORM_SETAE_RM8, 0, 1));
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, result, 0, 0, 0));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_CMOVAE_R32_RM32 : X86_FORM_CMOVAE_R64_RM64, result, 0));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64, result, 2));
+        tier0_put(writer, tier0_red_zone(single ? X86_FORM_SUBSS_X_XM32 : X86_FORM_SUBSD_X_XM64, value, 2));
+        tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTTSS2SI_R64_XM32 : X86_FORM_CVTTSD2SI_R64_XM64, result, value, direct, 0, 0));
+        // The top bit back: setae's byte shifted into it in place (its lowest bit alone survives a shift by 63).
+        X86Instruction top = tier0_red_zone(X86_FORM_SHL_RM64_IMM8, 0, 1);
+        top.immediate = 63;
+        tier0_put(writer, top);
+        tier0_put(writer, tier0_red_zone(X86_FORM_XOR_R64_RM64, result, 1));
     }
 }
 
@@ -4924,7 +5002,7 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
-        tier0_emit_u64_convert(entries, i, writer);
+        tier0_emit_u64_convert(entries, frame->pointer, i, writer);
     }
     else
     {
@@ -5387,6 +5465,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
     uint32_t unsupported = function->count;
     int32_t integer_top = -1;
     int32_t floating_top = -1;
+    Tier0Tops convert_scratch[2] = { { -1, -1 }, { -1, -1 } };
     uint32_t clobbers = 0;
     uint32_t save_slots = 0;
     bool fixed = false;
@@ -5465,11 +5544,12 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_CONVERT)
                 {
-                    // A conversion between U64 and a floating class (tier0_emit_u64_convert): the integer stack's register at
-                    // its depth (its result's, or its scratch's) and to U64 the next one, and the floating stack's free one.
-                    const int32_t integer = function->classes[i] == BUSTER_TYPED_CLASS_U64 ? depth + 1 : depth;
-                    integer_top = integer > integer_top ? integer : integer_top;
-                    floating_top = floating > floating_top ? floating : floating_top;
+                    // A conversion between U64 and a floating class (tier0_emit_u64_convert): its result's register, and its
+                    // register form's scratch ones, which the tops take once the frame pointer is known.
+                    Tier0Tops tops = { integer_top, floating_top };
+                    tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, depth, floating, &tops, convert_scratch);
+                    integer_top = tops.integer;
+                    floating_top = tops.floating;
                 }
                 else
                 {
@@ -5481,6 +5561,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         }
         entries->templates[i] = entry;
     }
+    // The conversions' register forms' scratch registers, as the frame pointer decides them.
+    const Tier0Tops convert = convert_scratch[pointer ? 1 : 0];
+    integer_top = convert.integer > integer_top ? convert.integer : integer_top;
+    floating_top = convert.floating > floating_top ? convert.floating : floating_top;
     // An aggregate's copies take each stack's first free register.
     if (function->argument_sizes != 0)
     {
@@ -7207,6 +7291,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     __mmask8 any_unsupported = 0;
     int32_t deferred_integer_top = -1;
     int32_t deferred_floating_top = -1;
+    Tier0Tops convert_scratch[2] = { { -1, -1 }, { -1, -1 } };
     uint32_t clobbers = 0;
     uint32_t save_slots = 0;
     bool fixed = false;
@@ -7290,9 +7375,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             }
             else if (function->kinds[i] == BUSTER_TYPED_CONVERT)
             {
-                const int32_t integer = function->classes[i] == BUSTER_TYPED_CLASS_U64 ? entry_depth + 1 : entry_depth;
-                deferred_integer_top = integer > deferred_integer_top ? integer : deferred_integer_top;
-                deferred_floating_top = entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
+                Tier0Tops tops = { deferred_integer_top, deferred_floating_top };
+                tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, entry_depth, entry_floating, &tops, convert_scratch);
+                deferred_integer_top = tops.integer;
+                deferred_floating_top = tops.floating;
             }
             else
             {
@@ -7306,6 +7392,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     {
         unsupported = (words[i] & BUSTER_TIER0_WORD_UNSUPPORTED) != 0 ? i : count;
     }
+    const Tier0Tops convert = convert_scratch[pointer ? 1 : 0];
+    deferred_integer_top = convert.integer > deferred_integer_top ? convert.integer : deferred_integer_top;
+    deferred_floating_top = convert.floating > deferred_floating_top ? convert.floating : deferred_floating_top;
     if (function->argument_sizes != 0)
     {
         const Tier0Tops tops = tier0_select_scratch(function, entries, (Tier0Tops){ deferred_integer_top, deferred_floating_top });
