@@ -25,6 +25,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
   structs returned in x87 registers ("Long double", below).
+- **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
+  AVX-512 ("Conversions between U64 and floating values", below).
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -307,6 +309,23 @@ another class from one whose is, a function returning a `_Complex long double` (
 a call whose x87 result neither an F80 class nor a result object takes, and an F80 entry or a long double result in a
 function without `x87`.
 
+## Conversions between U64 and floating values (#136's item 5)
+
+SSE converts between floating values and signed integers alone (AVX-512's `vcvtusi2sd` and `vcvttsd2usi` are past the
+baseline). Tier 0's `CONVERT` from U64 to F32 or F64, and from those to U64, is deferred (`tier0_emit_u64_convert`), with
+no branch and no register but its operand's and its result's, through red zone temporaries:
+
+- **To F32 or F64 from U64:** a signed conversion of the value where its top bit is clear, and otherwise of the value
+  halved with its lowest bit kept, `(x >> 1) | (x & 1)`, which rounds as the value does (`cmovge` chooses which), then
+  the result's exponent raised by the value's top bit, which doubles it exactly where it was halved. 14 records, where
+  clang -O0 branches between the two conversions.
+- **To U64 from F32 or F64:** the value truncated as a signed integer where it is below 2^63, and otherwise less 2^63,
+  truncated, with its top bit flipped back; `cmove` chooses, from one compare with 2^63 that `setae` keeps past the
+  `xor`'s flags. 13 records. A value out of U64's range, which C leaves undefined, gives the signed truncations' result.
+
+Each selection counts the result's register in its stack's top. Neither takes a home's variant, so no local fuses into
+one.
+
 ## Symbols outside the image
 
 `GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
@@ -561,8 +580,9 @@ Before the programs, checks of their own:
 - **applies:** the vector path's application of the chosen forms against the scalar path's
   (`x86_choice_instruction`), on 2,000 batches of random records, each with a candidate form of a random row or
   `X86_FORM_NONE` (which keeps the record) and a random value.
-- **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
-  places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
+- **errors:** both paths must refuse the same streams alike: an entry without a template (`NOT` of a double, which
+  `tier0_validate` refuses too) at 200 places among 64-entry blocks, before another (the first entry reported), and
+  14 to 17 values on the integer
   stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate). And both must
   compile 40 locals set from constants their stores absorb, from INT32_MIN on: past 32 locals emission gathers the
   homes, and an absorbed lane mustn't look its value up as a local's.
@@ -574,6 +594,12 @@ Before the programs, checks of their own:
     some address-taken, and `VA_LIST`s of 24 bytes. Both paths compile them, and must agree. Each local's place, from
     its `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment (8 but for objects), inside the frame and apart
     from every other local's bytes. Under an object aligned to 16, rsp must be a multiple of 16.
+- **unsigned floating:** the conversions between U64 and the floating classes (`tier0_emit_u64_convert`), each as a
+  function of its parameter, compiled by both paths into the same records, encoded by both encoders and run on 20
+  named values: from U64 around 2^53, 2^63 and 2^64, where the halving's kept bit decides the rounding (ties to even
+  and just past them), and to U64 from values below 2^63, at it and up to the largest below 2^64, each against C's
+  conversion. The generator's programs have these conversions too (`Tier0ProgramOptions.unsigned_floating`, in the
+  shapes with floating values; to U64 only where C defines it, in the clang cross-check's).
 - **copies:**
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
@@ -916,7 +942,6 @@ path's 11.1.
   15 integer or 16 floating depths: every argument is on the stacks at the call. The issue defers them to the scalar
   path, with frame slots.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
-  - conversions between U64 and floating values;
   - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field

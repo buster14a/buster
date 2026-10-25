@@ -230,6 +230,25 @@ static uint64_t tier0_test_convert(uint32_t to, uint32_t from, uint64_t value)
             result = tier0_test_bits(to, d);
         }
     }
+    else if (to == BUSTER_TYPED_CLASS_U64 && from_floating)
+    {
+        // Tier 0's unsigned truncation (tier0_emit_u64_convert): the signed one below 2^63 (or unordered), and from 2^63
+        // the signed one of the value less 2^63, its top bit flipped.
+        if (from == BUSTER_TYPED_CLASS_F32)
+        {
+            float f = 0.0f;
+            const uint32_t low = (uint32_t)value;
+            memcpy(&f, &low, sizeof(f));
+            const bool high = f >= 0x1p63f;
+            result = (uint64_t)_mm_cvttss_si64(_mm_set_ss(high ? f - 0x1p63f : f)) ^ (high ? 1ull << 63 : 0);
+        }
+        else
+        {
+            const double d = tier0_test_double(from, value);
+            const bool high = d >= 0x1p63;
+            result = (uint64_t)_mm_cvttsd_si64(_mm_set_sd(high ? d - 0x1p63 : d)) ^ (high ? 1ull << 63 : 0);
+        }
+    }
     else if (!to_floating && from_floating)
     {
         const bool wide = tier0_class_bytes(to) == 8 || to == BUSTER_TYPED_CLASS_U32;
@@ -1599,9 +1618,9 @@ static void tier0_test_applies(Tier0TestTally* tally)
     }
 }
 
-// The errors both paths must report alike, on streams of the test's own: the first unsupported entry (a conversion from
-// U64 to a floating class, which the first slice leaves out) wherever it falls among 64-entry blocks and after another,
-// and an expression deeper than the integer depths.
+// The errors both paths must report alike, on streams of the test's own: the first entry without a template (NOT of a
+// double, which tier0_validate refuses too: a stream the paths take covers every entry) wherever it falls among
+// 64-entry blocks and after another, and an expression deeper than the integer depths.
 static void tier0_test_errors(Tier0TestTally* tally)
 {
     enum
@@ -1614,7 +1633,7 @@ static void tier0_test_errors(Tier0TestTally* tally)
     Arena arena = arena_reserve(1ull << 28);
     for (uint32_t place = 0; place < 200; place += 1)
     {
-        // `place` constants discarded, a conversion that fails, more constants, another, the return.
+        // `place` constants discarded, an entry without a template, more constants, another, the return.
         uint32_t count = 0;
         uint32_t expected = 0;
         for (uint32_t c = 0; c < 2; c += 1)
@@ -1630,9 +1649,9 @@ static void tier0_test_errors(Tier0TestTally* tally)
                 count += 2;
             }
             kinds[count] = BUSTER_TYPED_CONST;
-            classes[count] = BUSTER_TYPED_CLASS_U64;
+            classes[count] = BUSTER_TYPED_CLASS_F64;
             values[count] = c + 1;
-            kinds[count + 1] = BUSTER_TYPED_CONVERT;
+            kinds[count + 1] = BUSTER_TYPED_NOT;
             classes[count + 1] = BUSTER_TYPED_CLASS_F64;
             values[count + 1] = 0;
             kinds[count + 2] = BUSTER_TYPED_DISCARD;
@@ -1655,7 +1674,7 @@ static void tier0_test_errors(Tier0TestTally* tally)
         const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
         tier0_test_expect(tally, scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == scalar.error && scalar.node == expected && vector.node == expected,
-                          "errors", "the conversion at entry %u: the scalar path's error %d at %u, the vector path's %d at %u", expected, scalar.error, scalar.node,
+                          "errors", "the entry at %u: the scalar path's error %d at %u, the vector path's %d at %u", expected, scalar.error, scalar.node,
                           vector.error, vector.node);
         arena_pop_to(&arena, mark);
     }
@@ -2437,6 +2456,163 @@ static void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* 
     if (shared != MAP_FAILED)
     {
         munmap(shared, sizeof(Tier0TestProbe) * (BUSTER_TIER0_TEST_PROBE_RUNS + 1));
+    }
+}
+
+// The conversions between U64 and the floating classes (tier0_emit_u64_convert) on named values, as functions that
+// convert their parameter, compiled by both paths and run: from U64 around 2^53, 2^63 and 2^64, where the halving's
+// lowest bit decides the rounding (ties to even, and just past them), and from values below 2^63, at it and up to the
+// largest below 2^64, each against C's conversion of it.
+#define BUSTER_TIER0_TEST_UNSIGNED_VALUES 20
+static void tier0_test_unsigned_floating(Tier0TestTally* tally)
+{
+    static const uint64_t integers[BUSTER_TIER0_TEST_UNSIGNED_VALUES] = {
+        0, 1, (1ull << 53) - 1, (1ull << 53) + 1, (1ull << 53) + 3, 1ull << 62, (1ull << 63) - 1, 1ull << 63, (1ull << 63) + 1,
+        0x8000000000000400ull, 0x8000000000000401ull, 0x8000000000000c00ull, 0x8000008000000000ull, 0x8000008000000001ull,
+        0xfffffffffffffbffull, 0xfffffffffffffc00ull, 0xffffff7fffffffffull, 0xffffff8000000000ull, UINT64_MAX, 0x0123456789abcdefull,
+    };
+    static const double doubles[BUSTER_TIER0_TEST_UNSIGNED_VALUES] = {
+        0.0, 0.5, 1.0, 1.75, 4503599627370497.0, 0x1p62, 0x1p63 - 1024.0, 0x1p63, 0x1p63 + 2048.0, 0x1p64 - 2048.0,
+        1e19, 12345.678, 0x1.fffffffffffffp62, 0x1.0000000000001p63, 0x1.8p63, 9007199254740993.0, 3.0e18, 0x1p63 - 2048.0,
+        0x1.23456789abcdep63, 0.999,
+    };
+    static const float floats[BUSTER_TIER0_TEST_UNSIGNED_VALUES] = {
+        0.0f, 0.5f, 1.0f, 3.5f, 0x1p24f, 0x1.fffffep62f, 0x1p63f, 0x1.000002p63f, 0x1.fffffep63f, 1e19f, 16777217.0f, 0x1p40f,
+        0x1.8p63f, 0x1.4p63f, 12345.678f, 0x1p62f, 0x1.000002p62f, 0x1p53f, 0.999f, 0x1.234566p63f,
+    };
+    static const char* const names[4] = { "to double", "to float", "from double", "from float" };
+    static const uint8_t to[4] = { BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t from[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32 };
+    // Each signature's code by each path, a page each; the results, the child's.
+    uint64_t* shared = mmap(0, sizeof(uint64_t) * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t* region = mmap(0, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Arena arena = arena_reserve(1u << 20);
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && arena.base != 0, "unsigned floating", "no memory");
+    for (uint32_t signature = 0; signature < 4 && ready; signature += 1)
+    {
+        const uint8_t kinds[3] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONVERT, BUSTER_TYPED_RETURN };
+        const uint8_t classes[3] = { from[signature], to[signature], to[signature] };
+        const uint64_t values[3] = { 0, 0, 0 };
+        const uint8_t local_classes[1] = { from[signature] };
+        const uint8_t local_flags[1] = { 0 };
+        const bool from_floating = tier0_class_floating(from[signature]);
+        const AbiLocation parameter = { .registers = { from_floating ? BUSTER_ABI_REGISTER_VECTOR : BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE },
+                                        .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds;
+        function.classes = classes;
+        function.values = values;
+        function.count = 3;
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = 1;
+        function.parameter_count = 1;
+        function.parameters = &parameter;
+        function.result = (AbiReturn){ .kind = BUSTER_ABI_RESULT_REGISTERS, .part_bytes = 8,
+                                       .registers = { from_floating ? BUSTER_ABI_RAX : BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
+                                                      BUSTER_ABI_REGISTER_NONE } };
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "unsigned floating",
+                                  "%s: rule \"%s\" at %u, error %d, or the paths differ", names[signature], check.rule != 0 ? check.rule : "", check.node, scalar.error);
+        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0, "unsigned floating",
+                                           "%s: an invalid record or a branch", names[signature]);
+        for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+        {
+            const Tier0Code* code = encoder == 0 ? &vector : &scalar;
+            uint8_t* page = region + (signature * 2 + encoder) * BUSTER_TIER0_TEST_PAGE;
+            const int64_t length = encoder == 0 ? x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0)
+                                                : x86_encode_scalar(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "unsigned floating", "%s: encoder %u failed", names[signature], encoder);
+        }
+    }
+    ready = ready && tier0_test_expect(tally, mprotect(region, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating", "the code can't be loaded");
+    const pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        for (uint32_t run = 0; run < 8; run += 1)
+        {
+            void* address = region + run * BUSTER_TIER0_TEST_PAGE;
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+            {
+                uint64_t bits = 0;
+                if (run < 2)
+                {
+                    double (*convert)(uint64_t) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    const double d = convert(integers[v]);
+                    memcpy(&bits, &d, sizeof(d));
+                }
+                else if (run < 4)
+                {
+                    float (*convert)(uint64_t) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    const float f = convert(integers[v]);
+                    uint32_t low = 0;
+                    memcpy(&low, &f, sizeof(f));
+                    bits = low;
+                }
+                else if (run < 6)
+                {
+                    uint64_t (*convert)(double) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    bits = convert(doubles[v]);
+                }
+                else
+                {
+                    uint64_t (*convert)(float) = 0;
+                    memcpy(&convert, &address, sizeof(convert));
+                    bits = convert(floats[v]);
+                }
+                shared[run * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = bits;
+            }
+        }
+        _exit(0);
+    }
+    if (child > 0)
+    {
+        int status = 0;
+        waitpid(child, &status, 0);
+        const bool ran = tier0_test_expect(tally, WIFEXITED(status) && WEXITSTATUS(status) == 0, "unsigned floating", "the child's status %d", status);
+        for (uint32_t run = 0; run < 8 && ran; run += 1)
+        {
+            const uint32_t signature = run / 2;
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+            {
+                uint64_t expected = 0;
+                if (signature == 0)
+                {
+                    const double d = (double)integers[v];
+                    memcpy(&expected, &d, sizeof(d));
+                }
+                else if (signature == 1)
+                {
+                    const float f = (float)integers[v];
+                    uint32_t low = 0;
+                    memcpy(&low, &f, sizeof(f));
+                    expected = low;
+                }
+                else
+                {
+                    expected = signature == 2 ? (uint64_t)doubles[v] : (uint64_t)floats[v];
+                }
+                const uint64_t seen = shared[run * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
+                tier0_test_expect(tally, seen == expected, "unsigned floating", "%s, %s path: value %u gave 0x%016" PRIx64 ", 0x%016" PRIx64 " expected", names[signature],
+                                  run % 2 == 0 ? "vector" : "scalar", v, seen, expected);
+            }
+        }
+    }
+    arena_release(&arena);
+    if (region != MAP_FAILED)
+    {
+        munmap(region, 8 * BUSTER_TIER0_TEST_PAGE);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(uint64_t) * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES);
     }
 }
 
@@ -4414,9 +4590,9 @@ static int run_tier0_tests(int argc, char** argv)
                 { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
                   .access = true },
                 { .functions = 4, .statements = 16, .expression_nodes = 14, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
-                  .access = true, .vlas = true },
+                  .access = true, .vlas = true, .unsigned_floating = true },
                 { .functions = 8, .statements = 24, .expression_nodes = 20, .calls = true, .loops = true, .floating = true, .pointers = true, .objects = true, .indirect = true,
-                  .access = true, .vlas = true },
+                  .access = true, .vlas = true, .unsigned_floating = true },
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             // The larger shape with records passed and returned by value (#137): a program of its own seed for seed.
@@ -4475,6 +4651,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_variadic_calls(&tally, &tables);
                 tier0_test_report("variadic calls", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_unsigned_floating(&tally);
+                tier0_test_report("unsigned floating", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
