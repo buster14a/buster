@@ -10366,15 +10366,19 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
             while (result && !ended)
             {
                 const PPMacro* link = &pp->macros[next];
-                const PPFileData* body = &pp->datas[link->data];
-                const uint8_t body_kind = body->kinds[link->body_begin] & 0x7F;
                 bool repeated = false;
                 for (uint32_t k = 0; k < depth; k += 1)
                 {
                     repeated |= chain[k] == next;
                 }
-                result = depth < BUSTER_PP_CONDITION_CHAIN && !repeated && (link->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 &&
-                         link->disabled == 0 && link->body_end - link->body_begin == 1 && (body_kind == C_TOKEN_NUMERIC_CONSTANT || body_kind == C_TOKEN_RAW_IDENTIFIER);
+                // The body is read only for an object-like macro of one token (an empty one's first token would be past
+                // its replacement list, and a builtin has none).
+                const bool single = depth < BUSTER_PP_CONDITION_CHAIN && !repeated &&
+                                    (link->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && link->disabled == 0 &&
+                                    link->body_end - link->body_begin == 1;
+                const PPFileData* body = single ? &pp->datas[link->data] : 0;
+                const uint8_t body_kind = single ? body->kinds[link->body_begin] & 0x7F : 0;
+                result = single && (body_kind == C_TOKEN_NUMERIC_CONSTANT || body_kind == C_TOKEN_RAW_IDENTIFIER);
                 chain[depth < BUSTER_PP_CONDITION_CHAIN ? depth : 0] = next;
                 depth += 1;
                 next = result && body_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[body->values[link->body_begin]] : 0;

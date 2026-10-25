@@ -1127,6 +1127,12 @@ static const PPTestCase pp_test_cases[] = {
     // self-referential name, which it leaves to the capture.
     { "#if lines without a capture", "#define ONE 1\n#define TWO 2\n#define CHAIN ONE\n#define CHAIN2 CHAIN\n#define NAME undefined_name\n#define TRUE_NAME true\n#define SELF SELF\n#if CHAIN2 + TWO == 3 && defined(ONE) && defined TWO && !defined(THREE)\na\n#elif CHAIN\nb\n#endif\n#if NAME || SELF\nc\n#elif defined CHAIN2 && CHAIN2 > 0\nd\n#endif\n#if TRUE_NAME\ne\n#endif\n#if 0\n#elif TWO*TWO == 4\nf\n#endif\n#ifdef ONE\n#if ONE ? CHAIN : TWO\ng\n#endif\n#endif\n",
       0, "c23", "a\nd\ne\nf\ng\n", false },
+    // Names on such lines that pp_condition_direct leaves to the capture without reading their bodies (#410's review): an
+    // empty object-like macro, one defined at the end of an included file (its body begins at the file's last token), a
+    // builtin, a function-like macro and one that pastes; and an empty one alone, an error.
+    { "#if lines of macros without a body of one token", "#include \"other.h\"\n#define EMPTY\n#define ZERO 0\n#define F() 1\n#define P 1 ## 0\n#if EMPTY 1\na\n#endif\n#if EMPTY_LAST 2 == 2 && ZERO == 0\nb\n#endif\n#if __LINE__ > 0\nc\n#endif\n#if F() == 1\nd\n#endif\n#if P == 10\ne\n#endif\n",
+      "#define EMPTY_LAST\n", "c17", "a\nb\nc\nd\ne\n", false },
+    { "#if of an empty macro", "#define EMPTY\n#if EMPTY\nx\n#endif\ny\n", 0, "c17", "y\n", true, 0, 0, 0, 0, 1 },
     // Invocations read from a file's text whose names have no space before them: an empty expansion's trailing space, and
     // a nonempty one's, go to the next token (pp_invoke_file's, as pp_finish_simple's).
     { "spaces after invocations in a file's text", "#define E(a, b) a b\n#define F(a, b, c) [a b c]\n#define G(a)\n#define H(a, b) a b\nx=E(,)+1;\ny=E( , )-2;\nz=F(,,)*3;\nw=G(1)+4;\nv=H(,)H(,)5;\nu=H(1,)+6;\n",
