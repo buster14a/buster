@@ -74,6 +74,9 @@ struct CBindings
     uint8_t* operation;
     uint8_t* kind;
     bool valid;
+    // Events below base aren't this stream's own (#113: a body's stream continues a copy of the top level's), and
+    // don't order its points: its first event may come before the last of them.
+    uint32_t base;
 };
 
 typedef struct CBindingStatistics CBindingStatistics;
@@ -144,7 +147,7 @@ static __attribute__((unused)) uint32_t c_bindings_mark(const CBindings* binding
 static uint32_t c_bindings_append(CBindings* bindings, CBindingNamespace space, uint32_t name, uint32_t token, uint32_t point, uint32_t depth, CBindingOperation operation, CBindingKind kind)
 {
     uint32_t result = 0;
-    const bool ordered = bindings->count == 0 || point >= bindings->point[bindings->count - 1];
+    const bool ordered = bindings->count == bindings->base || point >= bindings->point[bindings->count - 1];
     bindings->valid = bindings->valid && bindings->count < bindings->capacity && ordered &&
                       (uint32_t)space < C_BINDING_NAMESPACES && name != 0 && name < bindings->name_capacity && (uint32_t)kind < C_BINDING_KINDS;
     if (bindings->valid)
@@ -191,7 +194,7 @@ static uint32_t c_bindings_lookup(const CBindings* bindings, CBindingNamespace s
 
 static bool c_bindings_restore(CBindings* bindings, uint32_t mark, uint32_t point)
 {
-    const bool ordered = bindings->count == 0 || point >= bindings->point[bindings->count - 1];
+    const bool ordered = bindings->count == bindings->base || point >= bindings->point[bindings->count - 1];
     bindings->valid = bindings->valid && mark <= bindings->active_count && bindings->count < bindings->capacity && ordered;
     if (bindings->valid)
     {
@@ -199,6 +202,13 @@ static bool c_bindings_restore(CBindings* bindings, uint32_t mark, uint32_t poin
         bindings->operation[event] = C_BINDING_RESTORE;
         bindings->declaration[event] = mark;
         bindings->point[event] = point;
+        // A restore names no declaration: its other fields are written all the same, so that the stream's columns
+        // don't keep whatever its slot held (#113's lanes reuse their slots from body to body).
+        bindings->key[event] = 0;
+        bindings->end[event] = BUSTER_C_BINDING_NONE;
+        bindings->previous[event] = 0;
+        bindings->depth[event] = 0;
+        bindings->kind[event] = 0;
         while (bindings->active_count > mark)
         {
             const uint32_t old = bindings->active[--bindings->active_count];

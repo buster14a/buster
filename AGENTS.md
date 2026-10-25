@@ -4006,15 +4006,48 @@ measures the synthetic index/query handoff and completeness checks; use
 9700X's per-run lock and pinned to CPU 2. `check_input` publishes the real
 source reader's retained events, declaration types, tag completion positions
 and body slots through `c_check_environment.c`; `test-checker` checks their
-scratch lifetime and scalar/vector replay. Actual deferred body/effect
-checking and corpus acceptance are still pending.
+scratch lifetime and scalar/vector replay. `c_check_deferred.c` is their
+consumer: the deferred reader below ("Deferred function bodies").
 [docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
 `c_check_body_bindings.c` supplies the next independent name-resolution
 consumer: private per-body views/replay, source-position file fallbacks and
 stable declaration identities. `test-checker` compares both kernels on
 reversed one/eight-lane body schedules and guarded columns.
-[docs/c-body-bindings.md](docs/c-body-bindings.md) records its contract and the
-semantic/type/effect/corpus integration still required for #113.
+[docs/c-body-bindings.md](docs/c-body-bindings.md) records its contract.
+
+## Deferred function bodies
+
+`src/buster/compiler/c_check_deferred.c` is #113's deferred reader:
+`check_input_deferred` checks a unit as `check_input` does, but reads each
+file-scope function body apart from the top level, out of order on any number
+of lanes, from the reader's state at the body's opening (the history's heads,
+a view of the top level's table), and merges the bodies in source order
+(`c_types.c`'s change records and `type_replay`), into source order's result.
+A unit it can't merge yet (a body with a declaration with linkage, a
+transparent union or an intrinsic, a completion of its parameter-list tag, an
+error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
+
+`./build/compiler test-checker-deferred [--keep]` checks 39 fixtures of the
+issue's cases through the scalar path, the vector path and the deferred reader
+on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
+the deferred result must be the vector path's column for column, merged or
+left to source order as each fixture says, on no more lanes than bodies, its
+reader copied only by lanes that take a part. Each that merges must give source
+order's result again with its merge failing after the replay, and count as a
+resource failure with its state's allocation failing; and the benchmark's
+`--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+`test-checker-corpus --deferred N
+[--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
+comparison and tallies the units left to source order by reason.
+`./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
+LIST] [-E's options] file...` times source order's reader against the deferred
+one on one lane and on N, with the parse, the top level, the bodies' walks,
+their position checks, the lanes' span and the merge apart; `--cpus` pins the
+command to the first CPU and a lane team to the list (on the 9700X, `--cpus
+2,0,1,3,4,5,6,7` under its lock). The 9700X job runs the fixtures, c-testsuite
+and the frozen SQLite source with `--deferred 8`, and the benchmark where the
+checker changes. [docs/c-deferred-bodies.md](docs/c-deferred-bodies.md) has
+the design, the corpora and the measurements.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
 binding kernels: stack replay and the vector batch against an independent
@@ -4137,8 +4170,9 @@ others, its measurements are informational.
 
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
-[--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options]
-file-or-directory...` checks each file as the driver does and compares it with
+[--symbols] [--symbols-minimum N] [--seed N] [--deferred N [--deferred-bindings
+stacks|batch|direct]] [--keep] [preprocessor options] file-or-directory...`
+checks each file as the driver does and compares it with
 `clang -fsyntax-only` on the same options: acceptance, the first error's
 presumed file and line, and the scalar and vector paths, column by column.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and

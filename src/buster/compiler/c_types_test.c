@@ -41,7 +41,7 @@
 // are invalid or a check fails.
 //
 // Layout, in this order: the tally, the random numbers and the table helpers; the fixtures; hash-consing; batches;
-// layout; conversions; compatibility; printing; run_type_tests.
+// layout; conversions; compatibility; printing; #113's deferred bodies (c_types_deferred_test.c); run_type_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -4365,6 +4365,9 @@ static bool type_test_batch_after_completion(void)
     return tally.failures == 0;
 }
 
+// #113's deferred bodies: the change records, views and replay.
+#include "c_types_deferred_test.c"
+
 static int run_type_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -4413,6 +4416,7 @@ static int run_type_tests(int argc, char** argv)
         passed = type_test_hash_consing(seed, (uint32_t)count) && passed;
         passed = type_test_batches(seed, (uint32_t)count * 8) && passed;
         passed = type_test_batch_after_completion() && passed;
+        passed = type_test_deferred(seed, (uint32_t)count / 20) && passed;
         passed = type_test_layout_fixtures_check() && passed;
         passed = type_test_member_lookup() && passed;
         passed = type_test_layout_twins(seed, (uint32_t)count / 4) && passed;
