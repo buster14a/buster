@@ -68,7 +68,7 @@ diagnostic alone does not prove complete unwind or scheduling coverage.
 | Native PerfSample v58.2 fixture | Ordered snapshots; root/leaf call trees; self/inclusive sample counts; thread/CPU and exact half-open filtering | Cumulative counter state supplies no inferred per-sample weight |
 | Original Linux collector → StackSample v58.2 | Exact source periods; same sampling views; matching ELF symbols/build identities; source-labelled paired-running intervals | User mode, selected CPU and leader lifetime; unresolved libraries; no DWARF/source content or assembly |
 | Native TrackEvent | Literal/interned names, begin/end intervals, instants, integer/double counters, explicit flows | Legacy/delta event encodings and incremental counters are refused; no dependency inferred from correlation |
-| Native ftrace sched_switch | Paired CPU running intervals; original post-switch state retained | Compact ftrace encodings unsupported; no invented wakeup/blocking reasons or task-reuse reconstruction |
+| Native ftrace sched_switch | Paired running/off-CPU intervals; explicit runnable post-state; observed changes of endpoint CPU | Compact ftrace unsupported; sleeping wakeup boundaries, exact migration instant, blocking reasons and task reuse remain unknown |
 | Superluminal packages | Original resource may be retained/downloaded | No direct proprietary package or instance-CSV sampling import is claimed |
 
 The C query accepts supported dictionary-backed samples in one authoritative

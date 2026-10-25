@@ -124,7 +124,7 @@ export function parseTrace(input)
     const threads = new Map();
     const warnings = new Set();
     const clocks = new Map();
-    const result = {samples, tracks, intervals: [], counters: [], flows: [], running: [], threads, warnings: [], lost: 0n, skipped: 0n, packets: 0, fields: 0, primaryClock: 6n, dictionaries};
+    const result = {samples, tracks, intervals: [], counters: [], flows: [], running: [], offCpu: [], migrations: [], threads, warnings: [], lost: 0n, skipped: 0n, packets: 0, fields: 0, primaryClock: 6n, dictionaries};
     let retained = 0;
     let stackFrames = 0;
     let eventOrder = 0;
@@ -388,13 +388,41 @@ export function parseTrace(input)
         else if (old) warnings.add('Discontinuous scheduling records; unpaired interval is unavailable');
         running.set(String(event.cpu), event);
     }
+    const transitions = [];
+    for (const event of switches)
+    {
+        if (event.previous !== 0n) transitions.push({...event, tid: event.previous, out: true});
+        if (event.next !== 0n) transitions.push({...event, tid: event.next, out: false});
+    }
+    transitions.sort((a, b) => order(a.time, b.time) || (a.out === b.out ? 0 : a.out ? -1 : 1));
+    const switchedOut = new Map();
+    for (const event of transitions)
+    {
+        const id = String(event.tid);
+        if (event.out)
+        {
+            if (switchedOut.has(id)) warnings.add('Discontinuous off-CPU transition; an unmatched interval remains unknown');
+            switchedOut.set(id, event);
+        }
+        else
+        {
+            const before = switchedOut.get(id);
+            if (before && before.time <= event.time)
+            {
+                const interval = {start: before.time, end: event.time, tid: event.tid, fromCpu: before.cpu, toCpu: event.cpu, postState: before.state, runnable: before.state === 0n};
+                result.offCpu.push(interval);
+                if (before.cpu !== event.cpu) result.migrations.push(interval);
+            }
+            switchedOut.delete(id);
+        }
+    }
     const times = [...samples.map(item => item.time), ...events.map(item => item.time), ...switches.map(item => item.time)];
     demand(times.length > 0, 'Native trace has no supported timed observations');
     result.start = times.reduce((a, b) => a < b ? a : b);
     result.end = times.reduce((a, b) => a > b ? a : b) + 1n;
     result.fields = budget.fields;
     result.warnings = [...warnings];
-    result.capabilities = {sampled_stacks: samples.length > 0, period_weights: samples.some(sample => sample.weight !== null), instrumented_intervals: result.intervals.some(item => item.end > item.time), scheduling: result.running.length > 0, counters: result.counters.length > 0, explicit_flows: result.flows.length > 0, source_lines: samples.some(sample => sample.stack.some(frame => frame.source !== null)), assembly: false, off_cpu_reasons: false, pid_tid_lifetime_reconstruction: false};
+    result.capabilities = {sampled_stacks: samples.length > 0, period_weights: samples.some(sample => sample.weight !== null), instrumented_intervals: result.intervals.some(item => item.end > item.time), scheduling: result.running.length > 0, paired_off_cpu: result.offCpu.length > 0, observed_cpu_transitions: result.migrations.length > 0, counters: result.counters.length > 0, explicit_flows: result.flows.length > 0, source_lines: samples.some(sample => sample.stack.some(frame => frame.source !== null)), assembly: false, off_cpu_reasons: false, pid_tid_lifetime_reconstruction: false};
     return result;
 }
 
@@ -440,6 +468,8 @@ export function queryProfile(trace, start = trace.start, end = trace.end, filter
     const counters = trace.counters.filter(item => item.time >= start && item.time < end);
     const intervals = trace.intervals.filter(item => item.time < end && (item.end > start || item.end === item.time && item.time >= start));
     const running = trace.running.filter(item => item.start < end && item.end > start && (filters.tid === undefined || item.tid === BigInt(filters.tid)) && (filters.cpu === undefined || item.cpu === BigInt(filters.cpu)));
+    const offCpu = (trace.offCpu ?? []).filter(item => item.start < end && item.end > start && (filters.tid === undefined || item.tid === BigInt(filters.tid)));
+    const migrations = (trace.migrations ?? []).filter(item => item.start < end && item.end >= start && (filters.tid === undefined || item.tid === BigInt(filters.tid)) && (filters.cpu === undefined || item.fromCpu === BigInt(filters.cpu) || item.toCpu === BigInt(filters.cpu)));
     const observedRunning = new Map();
     for (const item of running)
     {
@@ -447,5 +477,5 @@ export function queryProfile(trace, start = trace.start, end = trace.end, filter
         const duration = (item.end < end ? item.end : end) - (item.start > start ? item.start : start);
         observedRunning.set(key, (observedRunning.get(key) ?? 0n) + duration);
     }
-    return {start, end, sampleCount: selected.length, totalSamples: trace.samples.length, weights: [...weights.values()], unknownWeights, unwindDiagnostics, functions: [...functions.values()].sort((a, b) => b.count - a.count || b.self - a.self), tree: root, samples: selected.slice(0, 20000), timelineTruncated: selected.length > 20000, counters, intervals, flows: trace.flows.filter(flow => flow.from.time < end && flow.to.time >= start), running, observedRunning};
+    return {start, end, sampleCount: selected.length, totalSamples: trace.samples.length, weights: [...weights.values()], unknownWeights, unwindDiagnostics, functions: [...functions.values()].sort((a, b) => b.count - a.count || b.self - a.self), tree: root, samples: selected.slice(0, 20000), timelineTruncated: selected.length > 20000, counters, intervals, flows: trace.flows.filter(flow => flow.from.time < end && flow.to.time >= start), running, offCpu, migrations, observedRunning};
 }

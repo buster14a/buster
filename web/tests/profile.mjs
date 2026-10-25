@@ -36,6 +36,7 @@ try
     check(all.weights.length === 0 && all.unknownWeights === 8, 'Cumulative PerfSample timebase counts are never summed as periods');
     check(trace.counters.length === 8 && trace.flows.length === 1, 'Eight native counter points and one explicit dispatch flow');
     check(all.observedRunning.get('CPU 2 TID 100') === 9000000n && all.observedRunning.get('CPU 3 TID 101') === 3000000n, 'Scheduling totals follow exact switch intervals');
+    check(trace.offCpu.find(item => item.tid === 100n && item.runnable)?.end - trace.offCpu.find(item => item.tid === 100n && item.runnable)?.start === 1000000n, 'Paired native runnable interval matches independent SQL; sleeping wakeup boundaries are not invented');
     check(trace.intervals.find(item => item.name === 'parse').end - trace.intervals.find(item => item.name === 'parse').time === 2500000n, 'Instrumented parse duration is separate from sampling weight');
     check(trace.intervals.find(item => item.name === 'encode task').end - trace.intervals.find(item => item.name === 'encode task').time === 3000000n, 'Instrumented encode duration = three milliseconds');
     check(!trace.capabilities.assembly && !trace.capabilities.source_lines && !trace.capabilities.off_cpu_reasons, 'Unavailable source/assembly/blocking capabilities stay explicit');

@@ -133,7 +133,7 @@ export function renderProfile(parent, metadata, query, onRange)
     if (query.timelineTruncated || marks > 50000) chronology.append(element('p', {class: 'notice'}, 'Chronological drawing uses at most 20,000 samples / 50,000 frame marks. Query totals cover the complete selected population.'));
     parent.append(chronology);
     const spans = section('Scheduling & instrumented intervals', 'Only retained source intervals are shown. Sample gaps have no implied thread state. Paired perf switch intervals retain their source label; unknown initial/final edges are omitted.');
-    const intervals = [...query.intervals.map(item => ({start: item.time, end: item.end, name: item.name, lane: metadata.tracks.get(item.track)?.name ?? item.track, depth: item.depth})), ...query.running.map(item => ({...item, name: `Observed running: TID ${item.tid} on CPU ${item.cpu}`, lane: `CPU ${item.cpu}`, depth: 0}))];
+    const intervals = [...query.intervals.map(item => ({start: item.time, end: item.end, name: item.name, lane: metadata.tracks.get(item.track)?.name ?? item.track, depth: item.depth})), ...query.running.map(item => ({...item, name: `Observed running: TID ${item.tid} on CPU ${item.cpu}`, lane: `CPU ${item.cpu}`, depth: 0})), ...query.offCpu.map(item => ({...item, name: `${item.runnable ? 'Runnable after switch-out' : 'Off CPU; wakeup boundary/reason unknown'}: TID ${item.tid}; source post-state ${item.postState}; endpoint CPUs ${item.fromCpu} → ${item.toCpu}`, lane: `TID ${item.tid} off CPU`, depth: 1}))];
     if (intervals.length)
     {
         const names = [...new Set(intervals.map(item => item.lane))];
@@ -156,6 +156,7 @@ export function renderProfile(parent, metadata, query, onRange)
     }
     else spans.append(element('p', {class: 'notice'}, 'No scheduling/instrumentation interval is available in this source and selection.'));
     for (const [name, duration] of query.observedRunning) spans.append(element('p', {}, `${name}: ${duration} ns of verified running overlap.`));
+    for (const item of query.migrations) spans.append(element('p', {}, `Observed CPU transition for TID ${item.tid}: CPU ${item.fromCpu} at switch-out ${item.start} ns → CPU ${item.toCpu} at switch-in ${item.end} ns. The exact migration instant and task-reuse history remain unknown.`));
     spans.append(element('p', {class: 'note'}, `${query.flows.length} explicit source flows overlap this range. Off-CPU blocking reasons, general PID/TID lifetime reconstruction and assembly are unavailable.`));
     parent.append(spans);
     const counters = section('Correlated counters', 'Each track retains its own unit. Points are source readings; a line between readings is a visual guide, not an observed continuous signal.');
