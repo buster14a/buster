@@ -299,9 +299,9 @@ struct ExecutableDebug
 // 32 bits) of a symbol's definition (its atom's place, not a stub's, an absolute symbol's value, or for a symbol
 // without a definition its reference: address 0 for a weak one defined nowhere), plus the addend, as a debugger reads
 // it from the file (a PIE's at its base of 0: no dynamic relocation reaches a section that isn't loaded); or a
-// thread-local's offset in the TLS segment (DTPOFF32 and DTPOFF64) plus the addend. A reference whose target is 0 is
-// one to discarded code (a section that section GC dropped): it gets lld's tombstone, 0, or 1 in .debug_ranges and
-// .debug_loc, whose lists 0 would end. The references are columns, which a producer's vector paths fill a batch at a
+// thread-local's offset in the TLS segment (DTPOFF32, which must fit 32 signed bits, and DTPOFF64) plus the addend. A
+// reference whose target is 0 is one to discarded code (a section that section GC dropped): it gets lld's tombstone, 0,
+// or 1 in .debug_ranges and .debug_loc, whose lists 0 would end. The references are columns, which a producer's vector paths fill a batch at a
 // time: each one's field's offset in its section, its addend, its target, its section's kind (the field's section is
 // EXECUTABLE_SECTION_DEBUG_INFO plus it) and its kind (EXECUTABLE_DEBUG_ABS64 and the others). The bytes are the
 // producer's, writable, and alive through executable_write with the columns; the writer takes this or ExecutableDebug,
@@ -6666,8 +6666,9 @@ static bool executable_debug_sections_valid(const ExecutableOptions* options)
 }
 
 // The value debug section reference `r` gets (see ExecutableDebugSections), or false if it can't have one: a reference
-// outside its section, of an unknown kind or to a symbol the link hasn't, an ABS32 or DTPOFF32 whose value doesn't fit
-// 32 bits, or a DTPOFF to a symbol that isn't thread-local.
+// outside its section, of an unknown kind or to a symbol the link hasn't, an ABS32 whose value doesn't fit 32 unsigned
+// bits or a DTPOFF32 whose value doesn't fit 32 signed bits (as lld checks R_X86_64_32 and R_X86_64_DTPOFF32), or a
+// DTPOFF to a symbol that isn't thread-local.
 static bool executable_debug_value(const Link* link, const ExecutableLayout* layout, const ExecutableDebugSections* debug, uint64_t r, uint64_t* value)
 {
     const uint8_t kind = debug->kinds[r];
@@ -6705,7 +6706,8 @@ static bool executable_debug_value(const Link* link, const ExecutableLayout* lay
     {
         result = layout->base + (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] + (uint64_t)addend;
     }
-    valid = valid && (width == 8 || result <= UINT32_MAX);
+    const bool fits = kind == EXECUTABLE_DEBUG_DTPOFF32 ? result + UINT64_C(0x80000000) <= UINT32_MAX : result <= UINT32_MAX;
+    valid = valid && (width == 8 || fits);
     *value = result;
     return valid;
 }

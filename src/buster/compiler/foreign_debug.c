@@ -233,7 +233,8 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
                 *count += 1;
                 written = false;
             }
-            const bool fits = !written || width == 8 || value <= UINT32_MAX;
+            // A 4-byte field's value: R_X86_64_32's unsigned, R_X86_64_DTPOFF32's signed (lld's checkUInt and checkInt).
+            const bool fits = !written || width == 8 || (type == R_X86_64_DTPOFF32 ? value + UINT64_C(0x80000000) <= UINT32_MAX : value <= UINT32_MAX);
             if (written && fits)
             {
                 memcpy(section->bytes + relocation.r_offset, &value, width);
@@ -311,7 +312,9 @@ static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection
         written = _mm512_mask_mov_epi64(written, (uint8_t)~named, addends);
         written = _mm512_mask_add_epi64(written, sectioned, values, addends);
         const __mmask8 writes = (uint8_t)~recorded;
-        take = take && _mm512_mask_cmpgt_epu64_mask(writes & (uint8_t)~wide, written, _mm512_set1_epi64(0xffffffff)) == 0;
+        // A 4-byte field's value fits 32 unsigned bits (R_X86_64_32), or 32 signed bits (R_X86_64_DTPOFF32): biased by 2^31.
+        const __m512i checked = _mm512_mask_add_epi64(written, module32, written, _mm512_set1_epi64(INT64_C(0x80000000)));
+        take = take && _mm512_mask_cmpgt_epu64_mask(writes & (uint8_t)~wide, checked, _mm512_set1_epi64(0xffffffff)) == 0;
         if (!take)
         {
             result = foreign_debug_relocate(section, i, i + 8, count);

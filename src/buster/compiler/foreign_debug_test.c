@@ -10,7 +10,9 @@
 // out. A section of another compression (objcopy's zstd, where binutils has it) and one whose zlib stream is damaged
 // are refused, naming their object and section. Excluded debug sections (SHF_EXCLUDE) are left out, as GNU ld and lld
 // leave them out, and empty ones and empty relocation sections link, also where no other section of their kind has bytes
-// and the link has no debug relocation (foreign_debug_test_sections).
+// and the link has no debug relocation (foreign_debug_test_sections). A thread-local offset (R_X86_64_DTPOFF32) is a
+// signed 32-bit field and an R_X86_64_32 an unsigned one, by the writer's and the immediate paths, each refused past its
+// range (foreign_debug_test_offsets).
 // The relocation kernels' vector path is checked against its exact twin on each debug relocation section, ending at a
 // PROT_NONE page, with each rare relocation at each of a batch's lanes (foreign_debug_test_kernels).
 // With --cross-check, ld.lld links the same objects: llvm-dwarfdump --verify finds no error in either output, their
@@ -811,6 +813,157 @@ static void foreign_debug_test_sections(ForeignTestTally* tally, const char* dir
     arena_pop_to(arena, mark);
 }
 
+// The thread-local offsets' fixtures (foreign_debug_test_offsets): a thread-local at module offset 0 (the link's only
+// one, with a main that has none), and a .debug_info whose fields, after a marker, are R_X86_64_DTPOFF32's against it
+// with addend -1 (0xffffffff, as GNU ld and lld write it) and -2^31 (the least a signed 32-bit field holds), then two
+// without a symbol, whose value is their addend: a DTPOFF32 of -1 and an R_X86_64_32 of 2^32 - 1 (the most an unsigned
+// one holds). Then four that a link refuses: a DTPOFF32 past the signed range either way (2^31 and -2^31 - 1, which GNU
+// ld and lld refuse too), and without a symbol a DTPOFF32 of 2^31 and an R_X86_64_32 of -1. (lld gives every symbol-less
+// relocation in a debug section its tombstone, and GNU ld a DTPOFF32 without a symbol a value from the TLS segment's
+// address, so those aren't compared with theirs.)
+static const char* const foreign_debug_test_offset_sources[5] = {
+    "    .text\n    .globl dbg_tls_marker\n    .type dbg_tls_marker, @function\ndbg_tls_marker:\n    ret\n    .size dbg_tls_marker, .-dbg_tls_marker\n"
+    "    .section .tdata,\"awT\",@progbits\n    .globl dbg_tls_value\n    .type dbg_tls_value, @object\n    .size dbg_tls_value, 4\ndbg_tls_value:\n    .long 5\n"
+    "    .section .debug_info,\"\",@progbits\n    .long 0x99999999\n"
+    "    .reloc ., R_X86_64_DTPOFF32, dbg_tls_value-1\n    .long 0\n"
+    "    .reloc ., R_X86_64_DTPOFF32, dbg_tls_value-0x80000000\n    .long 0\n"
+    "    .reloc ., R_X86_64_DTPOFF32, -1\n    .long 0\n"
+    "    .reloc ., R_X86_64_32, 0xffffffff\n    .long 0\n",
+    "    .section .tdata,\"awT\",@progbits\n    .globl dbg_tls_value\n    .type dbg_tls_value, @object\n    .size dbg_tls_value, 4\ndbg_tls_value:\n    .long 5\n"
+    "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_DTPOFF32, dbg_tls_value+0x80000000\n    .long 0\n",
+    "    .section .tdata,\"awT\",@progbits\n    .globl dbg_tls_value\n    .type dbg_tls_value, @object\n    .size dbg_tls_value, 4\ndbg_tls_value:\n    .long 5\n"
+    "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_DTPOFF32, dbg_tls_value-0x80000001\n    .long 0\n",
+    "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_DTPOFF32, 0x80000000\n    .long 0\n",
+    "    .section .debug_info,\"\",@progbits\n    .reloc ., R_X86_64_32, -1\n    .long 0\n",
+};
+
+// Thread-local offsets in debug sections (foreign_debug_test_offset_sources), each fixture linked with a main compiled
+// without -g on 1 lane, on 8 (the writer's lane paths) and by the exact path: the first into the same bytes, which run,
+// with each field as its comment says, and every other refused; with --cross-check, lld writes the first's fields with a
+// symbol alike and refuses the two with a symbol past the range.
+static void foreign_debug_test_offsets(ForeignTestTally* tally, const char* directory, ForeignTestSystem* system, bool cross_check, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    ForeignTestPath plain;
+    snprintf(plain, sizeof(plain), "%s/dbg_plain.o", directory);
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(foreign_debug_test_offset_sources); fixture += 1)
+    {
+        ForeignTestPath source;
+        ForeignTestPath object;
+        ForeignTestPath errors;
+        snprintf(source, sizeof(source), "%s/dbg_offsets%u.s", directory, fixture);
+        snprintf(object, sizeof(object), "%s/dbg_offsets%u.o", directory, fixture);
+        snprintf(errors, sizeof(errors), "%s.err", object);
+        char* assemble[] = { (char*)"as", source, (char*)"-o", object, 0 };
+        const bool assembled = foreign_test_write(source, foreign_debug_test_offset_sources[fixture], strlen(foreign_debug_test_offset_sources[fixture])) &&
+                               object_test_run(assemble, "/dev/null", errors) == 0;
+        foreign_test_expect(tally, assembled, "assemble a thread-local offsets' fixture", errors);
+        ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
+        char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 16);
+        const bool lined = assembled && line != 0 && arguments != 0;
+        if (lined)
+        {
+            *line = (ForeignTestLine){ 0 };
+            foreign_test_pie_begin(line, system);
+            foreign_test_add(line, plain, true, true);
+            foreign_test_add(line, object, true, true);
+            foreign_test_pie_end(line, system);
+        }
+        static const char* const ways[3] = { "--lanes=1", "--lanes=8", "--scalar" };
+        String8 files[3] = { 0 };
+        for (uint32_t way = 0; lined && way < 3; way += 1)
+        {
+            ForeignTestPath output;
+            ForeignTestPath link_errors;
+            snprintf(output, sizeof(output), "%s/offsets%u.out%u", directory, fixture, way);
+            snprintf(link_errors, sizeof(link_errors), "%s.err", output);
+            static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = (char*)ways[way];
+            arguments[count + 1] = (char*)"-o";
+            arguments[count + 2] = output;
+            count += 3;
+            for (uint32_t i = 0; i < line->our_count; i += 1)
+            {
+                arguments[count] = line->ours[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const int status = object_test_run(arguments, "/dev/null", link_errors);
+            if (fixture == 0)
+            {
+                foreign_test_expect(tally, status == 0, "link-foreign links thread-local offsets in range", link_errors);
+                files[way] = status == 0 ? foreign_test_read(arena, output) : (String8){ 0 };
+                const uint8_t* fields = files[way].pointer != 0 ? foreign_debug_test_marked(files[way], ".debug_info", 0x99999999, 4, 20) : 0;
+                uint32_t values[4] = { 0 };
+                if (fields != 0)
+                {
+                    memcpy(values, fields + 4, sizeof(values));
+                }
+                char* run[] = { output, 0 };
+                foreign_test_expect(tally, status == 0 && object_test_run(run, "/dev/null", "/dev/null") == 0, "the program runs", output);
+                foreign_test_expect(tally, fields != 0 && values[0] == 0xffffffffu && values[1] == 0x80000000u && values[2] == 0xffffffffu && values[3] == 0xffffffffu,
+                                    "each thread-local offset and value in range as a signed or unsigned 32-bit field holds it", output);
+            }
+            else
+            {
+                foreign_test_expect(tally, status > 0, "link-foreign refuses a 32-bit field's value past its range", output);
+            }
+        }
+        for (uint32_t way = 1; lined && fixture == 0 && way < 3; way += 1)
+        {
+            foreign_test_expect(tally, files[0].pointer != 0 && files[way].pointer != 0 && files[0].length == files[way].length &&
+                                       memcmp(files[0].pointer, files[way].pointer, files[0].length) == 0,
+                                "the same bytes on 8 lanes and by the exact path as on 1", object);
+        }
+        // lld's, where it agrees: the fields with a symbol, and the two with a symbol past the range refused.
+        if (lined && cross_check && fixture <= 2)
+        {
+            ForeignTestPath theirs;
+            ForeignTestPath lld_errors;
+            snprintf(theirs, sizeof(theirs), "%s/offsets%u.lld", directory, fixture);
+            snprintf(lld_errors, sizeof(lld_errors), "%s.err", theirs);
+            static const char* const head[] = { "ld.lld", "--hash-style=gnu", "--build-id", "--eh-frame-hdr", "-z", "now", "-z", "relro", "-o" };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+            {
+                arguments[count] = (char*)head[i];
+                count += 1;
+            }
+            arguments[count] = theirs;
+            count += 1;
+            for (uint32_t i = 0; i < line->their_count; i += 1)
+            {
+                arguments[count] = line->theirs[i];
+                count += 1;
+            }
+            arguments[count] = 0;
+            const int status = object_test_run(arguments, "/dev/null", lld_errors);
+            if (fixture == 0)
+            {
+                const String8 file = status == 0 ? foreign_test_read(arena, theirs) : (String8){ 0 };
+                const uint8_t* fields = file.pointer != 0 ? foreign_debug_test_marked(file, ".debug_info", 0x99999999, 4, 20) : 0;
+                uint32_t values[2] = { 0 };
+                if (fields != 0)
+                {
+                    memcpy(values, fields + 4, sizeof(values));
+                }
+                foreign_test_expect(tally, fields != 0 && values[0] == 0xffffffffu && values[1] == 0x80000000u, "lld writes the thread-local offsets with a symbol as ours", theirs);
+            }
+            else
+            {
+                foreign_test_expect(tally, status > 0, "lld refuses the thread-local offset past the signed range too", lld_errors);
+            }
+        }
+    }
+    arena_pop_to(arena, mark);
+}
+
 // One run of a relocation section's kernel for foreign_debug_test_kernels: its bytes, records, count and result.
 typedef struct ForeignDebugTestRun ForeignDebugTestRun;
 struct ForeignDebugTestRun
@@ -912,9 +1065,11 @@ static bool foreign_debug_test_twins(const uint8_t* file, uint64_t length, uint3
 // path or that changes what a batch writes: R_X86_64_NONE, a type debug sections don't take (R_X86_64_PC32), a
 // thread-local offset (where its symbol is a debug section's, refused), a field past the section, a symbol past the
 // table, its symbol's section through SHN_XINDEX without the extended table, no symbol, an ABS32 whose value doesn't
-// fit, a field that overlaps the one before or comes before it, a negated addend, and its symbol at a place in its
-// section (a section's symbol, which compilers use, is at 0). Each copy's runs must agree: the same failure, or the
-// same bytes and records.
+// fit, a field that overlaps the one before or comes before it, a negated addend, its symbol at a place in its
+// section (a section's symbol, which compilers use, is at 0), and without a symbol (its value its addend) a thread-local
+// offset of -1, of 2^31 (past a signed 32-bit field's reach), of -2^31 (its least), and an ABS32 of -1 (past an
+// unsigned one's) and of 2^32 - 1 (its most). Each copy's runs must agree: the same failure, or the same bytes and
+// records.
 static void foreign_debug_test_kernels(ForeignTestTally* tally, const char* directory, Arena* arena)
 {
     ForeignTestPath source;
@@ -948,7 +1103,7 @@ static void foreign_debug_test_kernels(ForeignTestTally* tally, const char* dire
         uint8_t* copy = debug ? arena_push(arena, place + (total + 1) * sizeof(Elf64_Rela), 8) : 0;
         foreign_test_expect(tally, !debug || (entries != 0 && copy != 0), "room for the kernels' copies", object);
         sections += entries != 0 && copy != 0 ? 1 : 0;
-        for (uint32_t change = 0; entries != 0 && copy != 0 && change < 13; change += 1)
+        for (uint32_t change = 0; entries != 0 && copy != 0 && change < 18; change += 1)
         {
             for (uint64_t j = 0; j < (change == 0 ? 9 : 24) && j < total; j += 1)
             {
@@ -976,6 +1131,12 @@ static void foreign_debug_test_kernels(ForeignTestTally* tally, const char* dire
                     case 10: changed->r_offset = j != 0 ? entries[j - 1].r_offset - 4 : changed->r_offset; break;
                     case 11: changed->r_addend = -changed->r_addend - 3; break;
                     case 12: symbol_value = index; break;
+                    // No symbol: R_X86_64_DTPOFF32's value is signed, R_X86_64_32's unsigned.
+                    case 13: changed->r_info = ELF64_R_INFO(0, R_X86_64_DTPOFF32); changed->r_addend = -1; break;
+                    case 14: changed->r_info = ELF64_R_INFO(0, R_X86_64_DTPOFF32); changed->r_addend = INT64_C(0x80000000); break;
+                    case 15: changed->r_info = ELF64_R_INFO(0, R_X86_64_DTPOFF32); changed->r_addend = INT32_MIN; break;
+                    case 16: changed->r_info = ELF64_R_INFO(0, R_X86_64_32); changed->r_addend = -1; break;
+                    case 17: changed->r_info = ELF64_R_INFO(0, R_X86_64_32); changed->r_addend = INT64_C(0xffffffff); break;
                     default: break;
                 }
                 memcpy(copy, bytes.pointer, bytes.length);
@@ -1038,6 +1199,7 @@ static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_c
     {
         foreign_debug_test_refusals(&tally, directory, system, arena);
         foreign_debug_test_sections(&tally, directory, system, cross_check, arena);
+        foreign_debug_test_offsets(&tally, directory, system, cross_check, arena);
         foreign_debug_test_kernels(&tally, directory, arena);
     }
     return foreign_test_report(&tally);
