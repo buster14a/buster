@@ -44,7 +44,7 @@ a CPU-dispatch mechanism or a promise of support for other compiler hosts.
 Target macros come from that same resolution, without invoking another
 compiler. `test-x86-target` compares the complete preamble with Clang 23 for all
 six target choices, alongside the existing language/optimization configurations
-(22 option sets total), and `test-preprocessor --clang` for every CPU and switch. Only `__BUSTER__` and the three Clang patch-version
+(26 option sets total), and `test-preprocessor --clang` for every CPU and switch. Only `__BUSTER__` and the three Clang patch-version
 macros are excluded from comparison. The preprocessor also queries the explicit
 `x86_target_builtins` table for target-sensitive `__has_builtin` answers. Its
 eleven names are compared with Clang at every target. This extends the existing
