@@ -603,7 +603,10 @@ static InterpreterStatus interpreter_stack_allocate(InterpreterStack* stack, uin
             }
             else
             {
-                *allocation = (InterpreterStackAllocation){ .previous = stack->allocation, .bytes = bytes };
+                *allocation = (InterpreterStackAllocation){
+                    .previous = stack->allocation,
+                    .bytes = bytes,
+                };
                 stack->allocation = allocation;
                 *address = (uintptr_t)bytes;
                 stack->position = *address;
@@ -632,7 +635,13 @@ static InterpreterStatus interpreter_stack_save(InterpreterStack* stack, Interpr
         {
             runtime->stack_serial += 1;
             stack->position = stack->position != 0 ? stack->position : (position + 15) & ~(uintptr_t)15;
-            *saved = (InterpreterStackSave){ .previous = stack->saved, .allocation = stack->allocation, .mark = arena->length, .handle = runtime->stack_serial, .position = stack->position };
+            *saved = (InterpreterStackSave){
+                .previous = stack->saved,
+                .allocation = stack->allocation,
+                .mark = arena->length,
+                .handle = runtime->stack_serial,
+                .position = stack->position,
+            };
             stack->saved = saved;
         }
     }

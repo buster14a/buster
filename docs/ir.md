@@ -305,6 +305,15 @@ temporary scratch capacity for each path. Its ns/stack-operation number charges
 the entire mixed lowering; it is not marginal operation latency or a native
 runtime measurement.
 
+Three additional isolated streams each lower 512 target operations: allocation
+with constant-size operands/discards, saves with discards, and restores using
+one initial save plus repeated DUP/restore pairs. Their ns/target-operation
+figures include validation, planning, classification, exact allocation/emission
+and verification, along with the stated operand setup. They measure lowering
+throughput per operation, not generated instruction or runtime latency. Both
+paths must agree before timing; retained bytes and minimum scratch capacity are
+reported separately for every shape.
+
 The strict generated dynamic case uses integer expressions with VLA storage,
 calls and control flow, with memory and undefined-byte checking enabled.
 Handwritten fixtures separately cover floating memory and ordinary fixed
