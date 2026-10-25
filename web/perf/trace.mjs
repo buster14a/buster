@@ -175,6 +175,7 @@ export function parseTrace(input)
         if (outer.field !== 1) { warnings.add(`Unknown top-level field ${outer.field} retained only in original download`); continue; }
         demand(outer.wire === 2 && ++result.packets <= LIMIT, 'Native packet budget exceeded');
         const packet = message(outer.value, budget);
+        demand([1, 2, 6, 11, 60, 66, 135].filter(field => last(packet, field)).length <= 1, 'Conflicting supported native packet payloads');
         demand(!last(packet, 50) && !last(packet, 97), 'Compressed native packets need an unsupported reader capability');
         const sequenceID = integer(packet, 10);
         let sequence = sequences.get(String(sequenceID));
@@ -202,7 +203,7 @@ export function parseTrace(input)
             if (last(data, 2))
             {
                 const clock = integer(data, 2);
-                demand(samples.length === 0 || clock === result.primaryClock, 'Primary trace clock changed after samples');
+                demand(samples.length + events.length + switches.length === 0 || clock === result.primaryClock, 'Primary trace clock changed after timed observations');
                 result.primaryClock = clock;
             }
             for (const item of items(data, 1))
@@ -437,8 +438,8 @@ export function queryProfile(trace, start = trace.start, end = trace.end, filter
         unwindDiagnostics += Boolean(sample.unwind);
     }
     const counters = trace.counters.filter(item => item.time >= start && item.time < end);
-    const intervals = trace.intervals.filter(item => item.time < end && item.end >= start);
-    const running = trace.running.filter(item => item.start < end && item.end > start && (filters.tid === undefined || item.tid === BigInt(filters.tid)));
+    const intervals = trace.intervals.filter(item => item.time < end && (item.end > start || item.end === item.time && item.time >= start));
+    const running = trace.running.filter(item => item.start < end && item.end > start && (filters.tid === undefined || item.tid === BigInt(filters.tid)) && (filters.cpu === undefined || item.cpu === BigInt(filters.cpu)));
     const observedRunning = new Map();
     for (const item of running)
     {

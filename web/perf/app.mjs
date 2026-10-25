@@ -63,7 +63,9 @@ function inspect(row, index)
     if (traces.length)
     {
         $('row-details').append(element('p', {class: 'note'}, binding ? `Execution key: ${exactText(row[binding])}. Open only a profile whose execution identity matches this row.` : 'This table does not bind a per-row execution. Available profile associations remain dataset-level and are labelled separately.'));
-        for (const profile of traces)
+        const linked = binding ? traces.filter(profile => profile.execution_id === exactText(row[binding])) : traces;
+        if (!linked.length) $('row-details').append(element('p', {class: 'notice'}, 'No native profile is retained for this exact execution identity.'));
+        for (const profile of linked)
         {
             const button = element('button', {class: 'secondary'}, `Inspect ${profile.id} · ${profile.execution_id}`);
             button.addEventListener('click', () => guard(async () => { $('profile').value = profile.id; tab('profile'); await loadProfile(profile); }));
@@ -162,8 +164,8 @@ async function loadTable(id, restore = false)
     const metrics = measurements();
     if (!restore) $('view').value = metrics.length ? 'lines' : 'table';
     options($('metric'), (metrics.length ? metrics : fields.map(field => field[0])).map(name => [name, name]), restore ? initial.get('metric') : metrics[0]);
-    options($('x'), fields, restore ? initial.get('x') : table.definition.dimensions?.find(name => name !== $('metric').value) ?? fields[0]?.[0]);
-    options($('group'), [['', 'No additional group'], ...fields], restore ? initial.get('group') : table.definition.bindings?.build_context);
+    options($('x'), fields, (restore ? initial.get('x') : null) ?? table.definition.dimensions?.find(name => name !== $('metric').value) ?? fields[0]?.[0]);
+    options($('group'), [['', 'No additional group'], ...fields], (restore ? initial.get('group') : null) ?? table.definition.bindings?.build_context);
     options($('facet'), [['', 'No facet'], ...fields], restore ? initial.get('facet') : '');
     facetValues(restore ? initial.get('facet-value') : '*');
     options($('compare-column'), fields, table.definition.bindings?.build_context ?? fields[0]?.[0]);
