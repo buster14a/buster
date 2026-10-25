@@ -441,7 +441,13 @@ static bool pp_test_system_levels(const Preprocessor* a, const Preprocessor* b, 
         printf("%s: the kernels keep other system runs (%u and %u)\n", label, a->system_run_count, b->system_run_count);
     }
     const uint32_t count = a->output.count;
-    uint8_t* levels = result && !a->system_runs_inexact ? malloc((uint64_t)count * 2 + 2) : 0;
+    const bool compared = result && !a->system_runs_inexact;
+    uint8_t* levels = compared ? malloc((uint64_t)count * 2 + 2) : 0;
+    if (compared && levels == 0)
+    {
+        printf("%s: no memory to compare the system levels\n", label);
+        result = false;
+    }
     if (levels != 0)
     {
         uint8_t* twin = levels + count + 1;
@@ -2448,9 +2454,10 @@ static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char
     return result;
 }
 
-// Output tokens' system levels written by hand, for both paths (pp_system_levels and its twin): a case's main file, its
-// header (as both sys/s.h, under -isystem, and other.h, beside it), each output token's level (u: a user file's, s: a
-// system header's, e: an extern "C" one's), or null for a case whose runs can't say (Preprocessor.system_runs_inexact).
+// Output tokens' system levels written by hand: a case's main file, its header (as both sys/s.h, under -isystem, and
+// other.h, beside it), each output token's level (u: a user file's, s: a system header's, e: an extern "C" one's), which
+// both paths must give (pp_system_levels and its twin); or for a case whose runs can't say (`inexact`,
+// Preprocessor.system_runs_inexact), the levels the history gives, which the checker then judges by.
 typedef struct PPTestSystemCase PPTestSystemCase;
 struct PPTestSystemCase
 {
@@ -2458,6 +2465,7 @@ struct PPTestSystemCase
     const char* source;
     const char* header;
     const char* levels;
+    bool inexact;
 };
 
 static const PPTestSystemCase pp_test_system_cases[] = {
@@ -2471,8 +2479,11 @@ static const PPTestSystemCase pp_test_system_cases[] = {
     { "an extern C header's line marker", "# 1 \"c-header.h\" 3 4\n#define E(x) x\nE(1) e\n", "", "ee" },
     { "#pragma GCC system_header", "#define MAINMAC main_value\n#include \"other.h\"\nint c = BEFORE;\n",
       "#define BEFORE before_value\nint a = BEFORE;\n#pragma GCC system_header\nint b = BEFORE + MAINMAC;\n", "uuuuusssssssuuuuu" },
-    // A line marker read while F's arguments are collected: its tokens come from before it and are written after it.
-    { "a line marker among an invocation's arguments", "#define F(x) x\nF(\n# 3 \"s.h\" 3\na) F(b)\n", "", 0 },
+    // A line marker read while the arguments of a system header's F are collected in the user's file: F's body is where
+    // the invocation starts, before the marker, and its argument where it is read, after it; the runs would have both
+    // after it, and the body's own place is the system header. The second F is all after the marker.
+    { "a line marker among an invocation's arguments", "# 1 \"sys.h\" 3\n#define F(x) [x]\n# 5 \"user.c\"\nF(\n# 10 \"s.h\" 3\na) F(b)\n", "",
+      "ususss", true },
 };
 
 // Each of pp_test_system_cases, preprocessed as a compile runs it with its history: both paths must give its levels, or
@@ -2503,21 +2514,21 @@ static bool pp_test_system_case_levels(const char* directory)
         bool result = made && arena.base != 0 && pp_test_write_file(header, test->header) && pp_test_write_file(other, test->header) &&
                       pp_test_write_file(path, test->source) && pp_parse_options(4, arguments, &options, &arena, &input, &output, &markers);
         const bool ready = result && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
-        result = ready && pp_run(&pp, path) && pp.system_runs_inexact == (test->levels == 0);
+        result = ready && pp_run(&pp, path) && pp.system_runs_inexact == test->inexact;
         const uint32_t count = pp.output.count;
-        uint8_t* levels = result && test->levels != 0 ? malloc((uint64_t)count * 2 + 2) : 0;
-        if (levels != 0)
+        uint8_t* levels = result ? malloc((uint64_t)count * 2 + 2) : 0;
+        result = levels != 0 && strlen(test->levels) == count;
+        if (result)
         {
             pp_system_levels(&pp, levels);
             pp_system_levels_history(&pp, levels + count + 1);
-            result = strlen(test->levels) == count;
-            for (uint32_t i = 0; result && i < count; i += 1)
-            {
-                const uint8_t wanted = test->levels[i] == 's' ? BUSTER_PP_SYSTEM_FILE : test->levels[i] == 'e' ? BUSTER_PP_EXTERN_C_FILE : BUSTER_PP_USER_FILE;
-                result = levels[i] == wanted && levels[count + 1 + i] == wanted;
-            }
-            free(levels);
         }
+        for (uint32_t i = 0; result && i < count; i += 1)
+        {
+            const uint8_t wanted = test->levels[i] == 's' ? BUSTER_PP_SYSTEM_FILE : test->levels[i] == 'e' ? BUSTER_PP_EXTERN_C_FILE : BUSTER_PP_USER_FILE;
+            result = (test->inexact || levels[i] == wanted) && levels[count + 1 + i] == wanted;
+        }
+        free(levels);
         if (!result)
         {
             printf("system levels: %s: %u output tokens, %s, not the levels written for it\n", test->name, count,
