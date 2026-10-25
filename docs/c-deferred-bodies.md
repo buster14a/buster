@@ -24,8 +24,15 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 2. **The file scope's history.** `c_environment_build` (#319's index,
    [the environment guide](c-environments.md)) indexes the top level's
    file-scope declarations by name and activation position.
-3. **The lanes.** The reader runs no more lanes than bodies.
-   `lane_parts_by_cost` cuts the bodies into parts by token count and each
+3. **The lanes.** The reader runs one lane, and one more per
+   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (12,288) of the bodies' tokens beyond
+   twice the largest body's, with no more lanes than it is given or than
+   bodies: a lane costs its copy of the reader and its wake-up, which its share
+   of the walks must pay for, and a lane woken for the bodies reads them at
+   about half the first lane's speed, so the lane that takes the largest body
+   may take twice as long as the first would ("How many lanes", below).
+   `CheckDeferred.every_lane` runs every lane the bodies can take, as the tests
+   and `test-checker-corpus` do. `lane_parts_by_cost` cuts the bodies into parts by token count and each
    lane takes parts with `lane_take`, costliest first. A lane copies the top
    level's reader once, when it takes its first part
    (`check_deferred_lane_prepare`), so that a lane that takes none copies
@@ -141,16 +148,28 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 39 fixtures of the
-  issue's cases, each written to a file and checked as `test-checker-corpus`
-  checks one: on the scalar path, the vector path, and the vector path with
-  every body read apart, on 1, 2, 3 and 8 lanes through the stacks, the batch
-  and the direct binding resolution. The deferred result must be the vector
-  path's column for column, and each fixture says whether the reader merges it.
-  A merged unit's bodies must run on no more lanes than they are
-  (`CheckDeferred.active`), and its reader be copied by one of them at least and
-  by no more (`CheckDeferred.copies`). Each fixture that merges runs again on 8
-  lanes with the first lane taking every part (`CheckDeferred.hold_lanes`), when
+- `./build/compiler test-checker-deferred [--keep]`: 45 fixtures, 39 of the
+  issue's cases and 6 of the lanes' rule, each written to a file and checked as
+  `test-checker-corpus` checks one: on the scalar path, the vector path, and the
+  vector path with every body read apart, on 1, 2, 3 and 8 lanes through the
+  stacks, the batch and the direct binding resolution, the issue's cases on
+  every lane their bodies can take (`CheckDeferred.every_lane`). The
+  deferred result must be the vector path's column for column, and each fixture
+  says whether the reader merges it. A merged unit's bodies must run on the
+  rule's lanes (`CheckDeferred.active`), and its reader be copied by one of them
+  at least and by no more (`CheckDeferred.copies`). Each of the issue's cases
+  runs again on 8 lanes by the reader's own rule, which reads most of them on
+  one. The rule's fixtures are functions of empty statements whose bodies have
+  known tokens, read by the rule alone, whose bodies, tokens, largest body and
+  lanes must be the ones they were made with: on each side of a second lane
+  (`BUSTER_CHECK_DEFERRED_LANE_TOKENS` tokens beyond twice the largest body's,
+  and one fewer) and of an eighth (seven times as many, and one fewer), and a
+  largest body of four times as many beside four bodies of as many, a token
+  fewer, which take one lane, and beside five, which take two. Mutants of the
+  rule fail: main's cap of as many lanes as bodies and a lane too many 54
+  checks each, the largest body counted once 33, a ceiling's division 17, and
+  `every_lane` not read 186. Each of the issue's cases that merges runs again
+  on 8 lanes with the first lane taking every part (`CheckDeferred.hold_lanes`), when
   no other lane may copy the reader; on 1 and 8 lanes with its merge failing
   right after the replay (`CheckDeferred.fail_after_replay`), which must give
   source order's result; and with the allocation of the reader's state failing
@@ -179,7 +198,10 @@ passes every checker test.
   five tags' fixtures, and one without the table's reset 19 fixtures.
 - `./build/compiler test-checker-corpus --deferred N [--deferred-bindings
   stacks|batch|direct] ...` adds the deferred reader on N lanes as a third path
-  to each file's comparison, which must give the vector path's columns; a
+  to each file's comparison, on every lane the bodies can take up to N
+  (`CheckDeferred.every_lane`: how many lanes read the bodies doesn't change
+  the merge's result, which the comparison checks on as many as it can), which
+  must give the vector path's columns; a
   difference counts as a path difference and prints the first differing
   column. The summary gives the units merged and left to source order, their
   bodies, the differences, and the units left to source order by reason.
@@ -203,16 +225,20 @@ c-testsuite, SQLite and Lua.
 ## Measurements
 
 `./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
-LIST] [preprocessor options] file...` preprocesses each file once, then per
-pass parses it and checks it by source order's `check_input` and by the
-deferred reader on one lane and on `--lanes` (8), in turns that rotate. It
-reports medians in nanoseconds per token: the parse; source order's reading;
-and each deferred reading's whole, its top level, the history's index, the
-bodies' walks and their position checks (summed over the lanes), the lanes'
-span, the merge and the rest (the phases after the merge); the position checks
-per body too, and the lanes that copied the reader (`copies`). `--cpus` pins the
-command to the first CPU, where the parse,
-source order and the top level run, and its lanes to the list.
+LIST] [--every-lane] [preprocessor options] file...` preprocesses each file
+once, then per pass parses it and checks it by source order's `check_input` and
+by the deferred reader on one lane and on up to `--lanes` (8), in turns that
+rotate. It reports the bodies, their tokens and the largest body's, and medians
+in nanoseconds per token: the parse; source order's reading; and each deferred
+reading's whole, its top level, the history's index, the bodies' walks and
+their position checks (summed over the lanes), the lanes' span, the merge and
+the rest (the phases after the merge); the position checks per body too, the
+lanes the bodies ran on (`active`: as many as the rule gives them, or with
+`--every-lane` every lane they can take) and those that copied the reader
+(`copies`); and what a lane costs, in nanoseconds: a copy of the reader
+(`copy`), and the first lane's wait at the partition for every lane to start
+(`wake`). `--cpus` pins the command to the first CPU, where the parse, source
+order and the top level run, and its lanes to the list.
 
 On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with
 `--cpus 2,0,1,3,4,5,6,7`, the medians of 9 passes, ranges over three processes

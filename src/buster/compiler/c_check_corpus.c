@@ -622,12 +622,15 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
     path->resource |= !ready;
 }
 
-// --deferred's lanes (0 for none) and binding resolution: the third path of check_corpus_measure. For
-// test-checker-deferred: with check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay;
-// with check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; and
-// with check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes).
+// --deferred's lanes (0 for none) and binding resolution: the third path of check_corpus_measure, which reads on every
+// lane the bodies can take, up to the lanes, however few tokens they have (CheckDeferred.every_lane). For
+// test-checker-deferred: without check_corpus_deferred_every_lane, the reader's own rule of how many lanes; with
+// check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay; with
+// check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; and with
+// check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes).
 static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
+static bool check_corpus_deferred_every_lane = true;
 static bool check_corpus_deferred_fail_merge;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
@@ -695,6 +698,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                 path->deferred = check_corpus_deferred_fail_state ? NULL : BUSTER_ARENA_PUSH_ARRAY(&path->deferred_arena, CheckDeferred, 1);
                 if (path->deferred != NULL)
                 {
+                    path->deferred->every_lane = check_corpus_deferred_every_lane;
                     path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
                     path->deferred->hold_lanes = check_corpus_deferred_hold_lanes;
                 }
@@ -2016,11 +2020,14 @@ struct CheckCorpusOutcome
     uint64_t vector_nodes;
     uint64_t binding_uses;
     uint64_t binding_fallback_uses;
-    // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, the lanes they ran
-    // on and those that copied its reader, and whether it gave the vector path's result exactly.
+    // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, their tokens and the
+    // largest one's, the lanes they ran on and those that copied its reader, and whether it gave the vector path's result
+    // exactly.
     bool deferred;
     bool deferred_equal;
     uint64_t deferred_bodies;
+    uint64_t deferred_body_tokens;
+    uint32_t deferred_largest_body;
     uint32_t deferred_active;
     uint64_t deferred_copies;
     // Why a parsed unit was left to source order, for the report.
@@ -2076,6 +2083,8 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
                                paths[2].deferred == NULL ? "the deferred path's state or tables couldn't be allocated" :
                                paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown";
     outcome->deferred_bodies = outcome->deferred ? paths[2].deferred->bodies : 0;
+    outcome->deferred_body_tokens = outcome->deferred ? paths[2].deferred->body_tokens : 0;
+    outcome->deferred_largest_body = outcome->deferred ? paths[2].deferred->largest_body : 0;
     outcome->deferred_active = outcome->deferred ? paths[2].deferred->active : 0;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
     outcome->equal &= outcome->deferred_equal;
