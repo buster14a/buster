@@ -610,6 +610,7 @@ static uint64_t ir_lower_test_dynamic_interpret(const IrFunction* functions, con
         {
             const IrFunction* function = &functions[result.function];
             fprintf(stderr, "  %s.%s a=%u b=%u c=%u\n", ir_op_names[function->op[result.entry]], ir_type_names[function->type[result.entry]], function->a[result.entry], function->b[result.entry], function->c[result.entry]);
+            ir_print(function, execution, stderr);
         }
     }
     return result.value.low;
