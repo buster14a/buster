@@ -235,7 +235,9 @@ as it counts every call's (`tier0_count_deferred`), from the parts, the copies' 
 and the counter's loops over the values alone: each is specialized on whether the function has `argument_sizes`
 (`tier0_emit_call` and `tier0_count_call`, always inlined, the flag a constant at each use). The aggregates' placement
 and moves (`tier0_place_aggregates`, `tier0_aggregate_moves`) and the result's loads (`tier0_load_result`) are passes
-of their own, out of line. Selection takes the copies' scratch in a pass of its own (`tier0_select_scratch`), and the
+of their own, out of line, and so are the optional parts' checks (`tier0_frame_input_valid`, once per function), whose
+code, inline, changed clang's code for the paths' shared passes. Selection takes the copies' scratch in a pass of its
+own (`tier0_select_scratch`), and the
 passes over the parameters leave out what only objects need without one among them (`Tier0Frame.object_parameters`).
 [Measurements](#measurements) has what this saves on code without aggregates.
 
@@ -799,7 +801,12 @@ path's 11.1.
   main's 166.8 (78.1 and 78.9 cycles, 14.10 and 14.23 ns, in its two runs before), and the scalar path, after #407's
   fusion, 574.5 against 572.8 (230.8 cycles against 230.2 and 232.7). The cycles' differences are within main's own
   spread; the 2 instructions per entry left on the vector path are each call's setup and each function's checks of its
-  optional columns.
+  optional columns. #400's last head (`42dd119`), whose stricter checks of the parameters' registers don't run on these
+  programs, measured 169.22 and 576.86 instructions per entry against main's 166.77 and 572.82 at `04dcadb`: inline
+  in the paths' shared passes, the checks' code changed clang's code for the passes. With the checks out of line
+  (#411), the job measured 169.31 and 574.35, the cycles (80.27 and 232.97, against 80.11 and 229.83) within the runs'
+  spread. Under Intel SDE, no variant of the passes tried brought the vector path back to the 0.5 instructions per entry
+  fewer that `ac4ccbd`'s inlining happened to give.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
