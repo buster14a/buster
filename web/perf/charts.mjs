@@ -84,6 +84,20 @@ function xy(table, options, rows, line)
     const x = row => 88 + 842 * (xs ? coordinate(rational(row[options.x]), ...xs) : categories.length < 2 ? 0.5 : categories.indexOf(key(row[options.x])) / (categories.length - 1));
     const y = value => 330 - 288 * coordinate(value, ...ys);
     const svg = chartFrame(`${line ? 'History/parameter lines' : 'Scatter'}: ${options.y}`, options.x, options.y);
+    if (options.onTimeRange && xs && rows.every(row => row[options.x] === null || typeof row[options.x] === 'bigint' || Number.isSafeInteger(row[options.x])))
+    {
+        let anchor = null;
+        const at = event =>
+        {
+            const bounds = svg.getBoundingClientRect();
+            const fraction = BigInt(Math.round(Math.max(0, Math.min(1, ((event.clientX - bounds.left) / bounds.width * 960 - 88) / 842)) * 1000000));
+            const minimum = xs[0].n / xs[0].d, maximum = xs[1].n / xs[1].d;
+            return minimum + (maximum - minimum) * fraction / 1000000n;
+        };
+        svg.addEventListener('pointerdown', event => { if (event.button === 0) { anchor = at(event); svg.setPointerCapture(event.pointerId); } });
+        svg.addEventListener('pointerup', event => { const tail = at(event), head = anchor; anchor = null; if (head !== null && head !== tail) options.onTimeRange(head < tail ? head : tail, head < tail ? tail : head); });
+        svg.addEventListener('pointercancel', () => { anchor = null; });
+    }
     for (const [position, value] of [[330, ys[0]], [43, ys[1]]]) svg.append(svgElement('text', {x: 78, y: position, 'text-anchor': 'end', class: 'axis'}, rationalText(value)));
     if (categories.length) for (const index of [...new Set([0, Math.floor((categories.length - 1) / 2), categories.length - 1])]) svg.append(svgElement('text', {x: numericX && xs ? x(rows.find(row => key(row[options.x]) === categories[index])) : 88 + 842 * (categories.length < 2 ? 0.5 : index / (categories.length - 1)), y: 350, 'text-anchor': 'middle', class: 'axis'}, categories[index].slice(0, 28)));
     const legend = element('div', {class: 'legend'});

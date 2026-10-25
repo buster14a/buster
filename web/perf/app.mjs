@@ -98,7 +98,22 @@ function filteredRows()
 {
     const names = new Set(state.table.fields.map(field => field.name));
     for (const name of state.filters.keys()) if (!names.has(name)) throw new Error('Shared filter refers to a missing column');
-    return state.table.rows.filter(row => [...state.filters].every(([name, value]) => exactText(row[name]) === value) && (!$('facet').value || $('facet-value').value === '*' || exactText(row[$('facet').value]) === $('facet-value').value));
+    const binding = profileTimeBinding();
+    const range = state.profile?.lastQuery;
+    return state.table.rows.filter(row =>
+    {
+        const raw = binding ? row[binding.column] : null;
+        const time = typeof raw === 'bigint' || Number.isSafeInteger(raw) ? BigInt(raw) + binding.origin : null;
+        return [...state.filters].every(([name, value]) => exactText(row[name]) === value) && (!$('facet').value || $('facet-value').value === '*' || exactText(row[$('facet').value]) === $('facet-value').value) && (!binding || !range || time !== null && time >= range.start && time < range.end);
+    });
+}
+function profileTimeBinding()
+{
+    const binding = state.table?.definition.bindings?.time;
+    const traces = state.dataset?.manifest.traces ?? [];
+    const id = binding?.trace_id ?? (traces.length === 1 ? traces[0].id : null);
+    if (!state.profile || id !== state.profile.id || binding?.unit !== 'ns' || !/^\d+$/u.test(binding.origin_in_trace_ns ?? '') || !state.table.fields.some(field => field.name === binding.column)) return null;
+    return {column: binding.column, origin: BigInt(binding.origin_in_trace_ns)};
 }
 function draw()
 {
@@ -116,7 +131,10 @@ function draw()
         {
             const renderer = renderers.get($('view').value);
             if (!renderer) throw new Error('Unsupported renderer. Select an installed first-party view.');
-            $('chart').append(renderer.render(state.table, {x: $('x').value, y: column, group: $('group').value, facet: $('facet').value, onInspect: inspect}, state.rows));
+            const binding = profileTimeBinding();
+            const onTimeRange = binding && binding.column === $('x').value ? (a, b) => guard(() => applyRange(a + binding.origin, b + binding.origin)) : null;
+            $('chart').append(renderer.render(state.table, {x: $('x').value, y: column, group: $('group').value, facet: $('facet').value, onInspect: inspect, onTimeRange}, state.rows));
+            if (binding) $('chart').append(element('p', {class: 'note'}, 'This table explicitly binds nanoseconds into the selected native trace. Its rows follow the shared half-open range. Drag the time axis to update every profile view.'));
         }
         catch (error) { $('chart').append(element('p', {class: 'notice'}, error.message)); }
     }
@@ -300,14 +318,7 @@ async function applyRange(start, end)
     if (state.profile?.identity !== identity || rangeLoad !== state.rangeLoad || $('range-start').value !== left.toString() || $('range-end').value !== right.toString()) return;
     renderProfile($('profile-views'), state.profile, response.result, (a, b) => guard(() => applyRange(a, b)));
     state.profile.lastQuery = response.result; state.profile.range_ms = response.elapsed_ms;
-    // Time-linked table rows require an explicit trace/column/origin binding.
-    const binding = state.table?.definition.metadata?.profile_time;
-    if (binding?.trace_id === state.profile.id && binding.clock_id === Number(state.profile.primaryClock ?? 6n) && state.table.fields.some(field => field.name === binding.column) && /^\d+$/u.test(binding.origin_ns ?? ''))
-    {
-        const origin = BigInt(binding.origin_ns);
-        state.rows = filteredRows().filter(row => typeof row[binding.column] === 'bigint' && row[binding.column] + origin >= left && row[binding.column] + origin < right);
-        state.page = 0; exactTable();
-    }
+    if (profileTimeBinding()) draw();
     share(); say(`Shared selection [${left}, ${right}) ns · ${response.result.sampleCount} samples · native query ${response.elapsed_ms.toFixed(1)} ms.`);
 }
 async function census()
