@@ -196,6 +196,9 @@ struct Tier0ProgramOptions
     // until their scope ends (STACK_SAVE and STACK_RESTORE). A program without them is the same as before they
     // existed, seed for seed.
     bool vlas;
+    // Conversions between U64 and the floating classes. A program without them is the same as before they existed,
+    // seed for seed.
+    bool unsigned_floating;
 };
 
 typedef struct Tier0GeneratedFunction Tier0GeneratedFunction;
@@ -271,6 +274,7 @@ struct Tier0Program
     const Tier0Records* records;
     bool overflow;
     bool defined;
+    bool unsigned_floating;
 };
 
 // The C name of a class.
@@ -741,13 +745,14 @@ static void tier0_generate_expression(const Tier0Program* program, const Tier0Sc
         }
         else if (choice < 52)
         {
-            // A conversion from another class (never between U64 and a floating class, which Tier 0 leaves out).
+            // A conversion from another class, between U64 and a floating class only with the option
+            // (Tier0ProgramOptions.unsigned_floating).
             uint32_t from = tier0_generate_class(state, floating);
-            const bool unsupported = (from == BUSTER_TYPED_CLASS_U64 && is_floating) || (wanted == BUSTER_TYPED_CLASS_U64 && tier0_class_floating(from));
+            const bool unsigned_floating = (from == BUSTER_TYPED_CLASS_U64 && is_floating) || (wanted == BUSTER_TYPED_CLASS_U64 && tier0_class_floating(from));
             // C's defined conversions to an integer from a floating value: of a short's value, into int or long.
             const bool into_wide = wanted == BUSTER_TYPED_CLASS_I32 || wanted == BUSTER_TYPED_CLASS_I64;
             const bool undefined = defined && tier0_class_floating(from) && !tier0_class_floating(wanted) && (!into_wide || tree->count + 2 > budget);
-            if (from != wanted && !unsupported && !undefined)
+            if (from != wanted && (!unsigned_floating || program->unsigned_floating) && !undefined)
             {
                 node->kind = BUSTER_TIER0_EXPRESSION_CONVERT;
                 child_classes[0] = (uint8_t)from;
@@ -2896,6 +2901,7 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     const uint32_t functions = options.functions < 1 ? 1 : options.functions > BUSTER_TIER0_GENERATE_MAX_FUNCTIONS ? BUSTER_TIER0_GENERATE_MAX_FUNCTIONS : options.functions;
     program->function_count = functions;
     program->defined = options.defined;
+    program->unsigned_floating = options.unsigned_floating;
     // Every statement can hold a few expressions and a call's arguments.
     const uint64_t per_function = (uint64_t)(options.statements + 16) * (4 * options.expression_nodes + 64) + 512;
     program->entry_capacity = (uint32_t)(per_function * functions);

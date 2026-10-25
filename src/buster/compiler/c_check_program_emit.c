@@ -214,14 +214,12 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         }
         else
         {
-            // Tier 0's own refusals are features it doesn't have yet: an entry without a template (the conversions
-            // between unsigned 64-bit integers and floating values), or values past its depth tables.
-            const bool convert = codes[b].node < function->count && function->kinds[codes[b].node] == BUSTER_TYPED_CONVERT;
+            // Tier 0's own refusals are features it doesn't have yet: an entry without a template, or values past its
+            // depth tables.
             result->status = codes[b].error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
                              codes[b].error == TIER0_ERROR_UNSUPPORTED || codes[b].error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
             result->reason = codes[b].error == TIER0_ERROR_DEPTH ? "expressions with more values live at once than Tier 0 has registers for" :
-                             codes[b].error != TIER0_ERROR_UNSUPPORTED ? NULL :
-                             convert ? "conversions between unsigned 64-bit integers and floating types" : "this operation in Tier 0";
+                             codes[b].error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
             result->backend_error = codes[b].error;
             result->backend_node = codes[b].node;
             result->token = program->bodies[b].declaration;

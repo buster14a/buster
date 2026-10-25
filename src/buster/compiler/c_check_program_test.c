@@ -852,6 +852,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "return (int)(a[3]*4)+(int)(p[-1]*2)+(int)sizeof(long double)+(int)_Alignof(long double)+(int)sizeof a;}"
         "long double half(long double a){return a/2;}",
         "long-double-indirect-and-unprototyped-calls", clang);
+    // Conversions between unsigned long and float or double (Tier 0's tier0_emit_u64_convert): to them near 2^53, past
+    // 2^63 where the halving's kept bit rounds, and near 2^64; back from values up to 2^64 less 4096, every one in range.
+    check_test_program_source(test,
+        "unsigned long big(int n){return 0xfffffffffffffc00ul-(unsigned long)(n+3)*0x400ul;}"
+        "int tested(int n){unsigned long u=big(n),w=(1ul<<63)+(unsigned long)(n+3)*1024u+1,t=(1ul<<53)+(unsigned long)(n+3);"
+        "double d=u,e=t;float f=w,g=t;"
+        "unsigned long r=(unsigned long)(d/2)+(unsigned long)(f/4)+(unsigned long)e+(unsigned long)g+(unsigned long)f+(unsigned long)(d-4096.0);"
+        "unsigned long hi=(unsigned long)(double)w;return (int)(r%9973)^(int)(hi%10007)^(int)(u%1000)^(int)(t%977);}",
+        "unsigned-long-floating-conversions", clang);
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);
