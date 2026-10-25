@@ -2039,11 +2039,11 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             }
                             i += 1;
                         }
-                        // GNU attributes after the width, the member's (check_input_width reads the width itself).
+                        // GNU attributes after the width, the member's, which the parser hangs on the member's end, outside
+                        // the width's tree.
                         const bool attributed = i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_ATTRIBUTE;
                         int64_t bits = 0;
-                        valid &= (attributed ? check_input_width(reader, begin, i, &bits) : check_input_constant(reader, begin, i, &bits)) && bits >= 0 &&
-                                 bits <= UINT32_MAX;
+                        valid &= check_input_constant(reader, begin, i, &bits) && bits >= 0 && bits <= UINT32_MAX;
                         width = (uint32_t)bits;
                         valid = valid && (!attributed || check_input_read_attributes(reader, &i, frame->close, &attributes));
                         for (uint32_t ignored = colon; ignored < i; ignored += 1)

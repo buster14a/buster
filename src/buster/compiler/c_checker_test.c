@@ -2418,18 +2418,27 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // GNU attributes after a bit-field's width, the member's, as clang lays them out: aligned, packed (a compound
-            // width, which the checker reads as raw tokens), two groups, an unnamed field's and an empty one.
+            // GNU attributes after a bit-field's width, the member's, as clang (and GCC) lay them out: aligned, packed (a
+            // compound width), two groups, an unnamed field's and an empty one; then widths of every form a width takes,
+            // which the parser's tree keeps whole apart from the attributes: _Generic alone and in a sum (#430's review),
+            // sizeof, a cast of a floating constant, __builtin_offsetof in ?: and __builtin_choose_expr.
             "attributes after a bit-field's width",
             "enum { N = 5 };\n"
             "struct S { int a : 3 __attribute__((aligned(4))), b : 2; char c; };\n"
             "struct T { char x; unsigned long y : 1 + 2 __attribute__((packed)); char z; };\n"
             "struct U { char x; int y : N __attribute__((aligned(16))) __attribute__((unused)); char z : (N - 1) __attribute__(()); };\n"
             "struct V { char x; long : 0 __attribute__((aligned(8))); char y; };\n"
+            "struct O { char a; int b; };\n"
+            "struct W { char x; unsigned a : _Generic(0, int: 3, default: 1) __attribute__((packed));\n"
+            "           unsigned b : _Generic(0L, int: 1, long: 2) + 3 __attribute__((aligned(8))); char y; };\n"
+            "struct X { char x; unsigned a : sizeof(short) * 2 __attribute__((aligned(4))), b : (int)2.5 + N __attribute__((packed));\n"
+            "           unsigned c : __builtin_offsetof(struct O, b) ? 6 : 1 __attribute__(()); unsigned d : __builtin_choose_expr(1, 7, 1.0) __attribute__((aligned(2))); };\n"
             "_Static_assert(sizeof(struct S) == 4 && _Alignof(struct S) == 4, \"S\");\n"
             "_Static_assert(sizeof(struct T) == 3 && _Alignof(struct T) == 1, \"T\");\n"
             "_Static_assert(sizeof(struct U) == 32 && _Alignof(struct U) == 16, \"U\");\n"
-            "_Static_assert(sizeof(struct V) == 9 && _Alignof(struct V) == 1, \"V\");\n",
+            "_Static_assert(sizeof(struct V) == 9 && _Alignof(struct V) == 1, \"V\");\n"
+            "_Static_assert(sizeof(struct W) == 16 && _Alignof(struct W) == 8, \"W\");\n"
+            "_Static_assert(sizeof(struct X) == 12 && _Alignof(struct X) == 4, \"X\");\n",
             false,
             false
         },

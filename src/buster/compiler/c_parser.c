@@ -3910,11 +3910,12 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     }
     else if (kind == PARSE_KIND_ATTRIBUTE && conditional && group == PARSE_ROLE_OPEN_STRUCT)
     {
-        // GNU attributes after a bit-field's width end it, as clang takes them: the member's, a postfix group of the
-        // width's last operand, as an attribute after a declarator is of its name.
+        // GNU attributes after a bit-field's width end it, as clang takes them: the member's, which hang on what ends the
+        // member's declarator (its `,` or `;`), as a tag's attributes hang on what follows them, outside the width's
+        // expression, whose tree stays whole.
         step->role = PARSE_ROLE_LEAF_RIGHT;
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
-        frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE;
+        frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT;
         frame->attribute_continuation = PARSE_MODE_AFTER_WIDTH;
     }
     else if (kind == PARSE_KIND_L_SQUARE)

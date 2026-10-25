@@ -3282,9 +3282,8 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
     return valid;
 }
 
-// `tokens` reads the range as raw tokens (check_constant_raw_expression) whatever the parser's tree says of them.
-static bool check_input_constant_read_as(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached, bool tokens,
-                                         CheckValue* value, TypeId* type, uint32_t* failed_token)
+static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached,
+                                      CheckValue* value, TypeId* type, uint32_t* failed_token)
 {
     const uint64_t mark = reader->scratch->length;
     CheckConstantInput input;
@@ -3292,7 +3291,6 @@ static bool check_input_constant_read_as(CheckInputReader* reader, uint32_t firs
     bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
     if (valid)
     {
-        input.raw |= tokens;
         if (input.raw)
         {
             valid = check_constant_raw_bind(&input, type_name) && check_constant_raw_prepare(&input) &&
@@ -3319,12 +3317,6 @@ static bool check_input_constant_read_as(CheckInputReader* reader, uint32_t firs
     return valid;
 }
 
-static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached,
-                                      CheckValue* value, TypeId* type, uint32_t* failed_token)
-{
-    return check_input_constant_read_as(reader, first, end, type_name, cached, false, value, type, failed_token);
-}
-
 static bool check_input_evaluate(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value)
 {
     TypeId unused = 0;
@@ -3348,21 +3340,6 @@ static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint3
     CheckValue value = { 0 };
     const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_integer_constant(reader, &value) &&
                        check_action_i64(reader->types, &value, number);
-    if (valid)
-    {
-        check_input_constant_warning(reader, first, end, &value, true);
-    }
-    return valid;
-}
-
-// A bit-field's width that GNU attributes follow (`int x : 3 __attribute__((packed))`): the parser hangs them on the
-// width's last operand as a postfix group, so its tokens are read as they are, apart from the tree.
-static bool check_input_width(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)
-{
-    CheckValue value = { 0 };
-    TypeId unused = 0;
-    const bool valid = check_input_constant_read_as(reader, first, end, false, false, true, &value, &unused, 0) &&
-                       check_input_integer_constant(reader, &value) && check_action_i64(reader->types, &value, number);
     if (valid)
     {
         check_input_constant_warning(reader, first, end, &value, true);
