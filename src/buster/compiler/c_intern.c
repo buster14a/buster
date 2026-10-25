@@ -1119,3 +1119,74 @@ static __attribute__((unused)) void intern_bulk_end(InternTable* table, InternBu
     }
     *bulk = (InternBulk){ 0 };
 }
+
+// EXPERIMENT (#262): makes `table` a copy of `from`, the same spellings with the same ids and records, in at least
+// `buckets` buckets (a power of two), so that a lane refining into it finds `from`'s spellings with their ids and gives
+// new ones ids from from->count on. With as many buckets as `from`, the buckets are copied; with more, `from`'s spellings
+// are placed again. The table's memory is reused where it fits: its records' room always, and its buckets and spans
+// when it has as many buckets as the copy needs; else they are laid out anew in a mapping of their own, as intern_grow
+// lays them out. Reading `from` while no lane writes it, any number of lanes copy it at once. Returns false if the
+// memory can't be reserved.
+static __attribute__((unused)) bool intern_copy(InternTable* table, const InternTable* from, uint64_t buckets)
+{
+    const uint64_t wanted = buckets > from->bucket_mask + 1 ? buckets : from->bucket_mask + 1;
+    uint32_t capacity;
+    bool result = true;
+    if (table->record_arena.base == 0)
+    {
+        // The first layout goes at the start of the record arena, before the records, as intern_initialize_with's.
+        *table = (InternTable){ 0 };
+        table->record_arena = arena_reserve(intern_layout_bytes(wanted, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
+        result = intern_lay_out(table, &table->record_arena, wanted);
+        table->records = result ? table->record_arena.base + table->record_arena.length : 0;
+    }
+    else if (table->bucket_mask + 1 != wanted)
+    {
+        InternTable laid = *table;
+        laid.arena = arena_reserve(intern_layout_bytes(wanted, &capacity));
+        result = intern_lay_out(&laid, &laid.arena, wanted);
+        if (result)
+        {
+            arena_release(&table->arena);
+            *table = laid;
+        }
+        else
+        {
+            arena_release(&laid.arena);
+        }
+    }
+    else
+    {
+        // The same layout again: every bucket is written below, or cleared first if `from`'s spellings are placed.
+        result = true;
+    }
+    const uint64_t record_bytes = from->record_arena.length - (uint64_t)(from->records - from->record_arena.base);
+    table->record_arena.length = result ? (uint64_t)(table->records - table->record_arena.base) : table->record_arena.length;
+    uint8_t* records = result ? arena_push(&table->record_arena, record_bytes, 1) : 0;
+    result = records != 0;
+    if (result)
+    {
+        memcpy(records, from->records, record_bytes);
+        memcpy(table->spans, from->spans, (uint64_t)from->count * sizeof(InternSpan));
+        table->count = from->count;
+        if (wanted == from->bucket_mask + 1)
+        {
+            memcpy(table->buckets, from->buckets, wanted * BUSTER_INTERN_BUCKET_BYTES);
+        }
+        else
+        {
+            memset(table->buckets, 0, wanted * BUSTER_INTERN_BUCKET_BYTES);
+            for (IdentId id = 1; id < from->count; id += 1)
+            {
+                const uint8_t* bytes = table->records + table->spans[id].offset;
+                const uint32_t length = table->spans[id].length;
+                intern_place(table, intern_slot(intern_first_bytes(bytes, length), id), intern_hash_bytes(bytes, length));
+            }
+        }
+    }
+    else
+    {
+        table->count = 0;
+    }
+    return result;
+}

@@ -109,6 +109,7 @@ struct FilesBenchmarkVariant
     bool partial_take;
     bool probe_take;
     uint32_t probe_lanes;
+    bool clone_tables;
     const char* label;
 };
 
@@ -190,6 +191,7 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     benchmark.run.partial_take = variant->partial_take;
     benchmark.run.probe_take = variant->probe_take;
     benchmark.run.probe_lanes = variant->probe_lanes;
+    benchmark.run.clone_tables = variant->clone_tables;
     benchmark.spin_ticks = spin_ticks;
     benchmark.ticks = 0;
     if (trace != 0)
@@ -312,6 +314,58 @@ static void files_benchmark_rounds(const FilesTrace* traces, uint32_t runs, uint
         printf("%s %6lu %7lu %8.3f %8.3f %7.3f %9.3f %7.3f %6.3f %7.3f | %8.3f %7.3f %.3f-%.3f\n", what, (unsigned long)(first->waves[at + 1] - first->waves[at]),
                (unsigned long)(first->probes[at + 1] - first->probes[at]), medians[0], medians[1], medians[2], medians[3], medians[4], medians[5], medians[6], medians[7],
                medians[8], medians[9], medians[10]);
+        // EXPERIMENT (#262): lane 0's and the busiest other lane's lexing, refining, directive tables and own table (ms),
+        // tables' growths and page faults; and lane 0's merge steps (lookup, exchange, add, rewrite).
+        double detail[2][6];
+        for (uint32_t side = 0; side < 2; side += 1)
+        {
+            for (uint32_t value = 0; value < 6; value += 1)
+            {
+                for (uint32_t r = 0; r < runs; r += 1)
+                {
+                    const FilesTrace* trace = &traces[r];
+                    uint64_t result = 0;
+                    for (uint32_t l = side == 0 ? 0 : 1; l < (side == 0 ? 1 : traced); l += 1)
+                    {
+                        uint64_t spent = 0;
+                        if (value < 3)
+                        {
+                            const uint32_t phase = value == 0 ? PP_PHASE_LEX : value == 1 ? PP_PHASE_REFINE : PP_PHASE_DIRECTIVES;
+                            spent = trace->prepare_ticks[at + 1][l][phase] - trace->prepare_ticks[at][l][phase];
+                        }
+                        else if (value == 3)
+                        {
+                            spent = trace->table_ticks[at + 1][l] - trace->table_ticks[at][l];
+                        }
+                        else if (value == 4)
+                        {
+                            spent = trace->table_grows[at + 1][l] - trace->table_grows[at][l];
+                        }
+                        else
+                        {
+                            spent = trace->faults[at + 1][l] - trace->faults[at][l];
+                        }
+                        result = spent > result ? spent : result;
+                    }
+                    values[r] = result;
+                }
+                const double median = (double)files_benchmark_median(values, runs);
+                detail[side][value] = value < 4 ? median * milliseconds : median;
+            }
+        }
+        double steps[4];
+        for (uint32_t step = 0; step < 4; step += 1)
+        {
+            for (uint32_t r = 0; r < runs; r += 1)
+            {
+                values[r] = files_benchmark_interval(&traces[r], at, 0, FILES_PHASE_LOOKUP + step);
+            }
+            steps[step] = (double)files_benchmark_median(values, runs) * milliseconds;
+        }
+        printf("         lane 0: lex %.3f refine %.3f tables %.3f own table %.3f, %.0f growths, %.0f faults; merge %.3f %.3f %.3f %.3f | others: lex %.3f refine %.3f tables %.3f "
+               "own table %.3f, %.0f growths, %.0f faults\n",
+               detail[0][0], detail[0][1], detail[0][2], detail[0][3], detail[0][4], detail[0][5], steps[0], steps[1], steps[2], steps[3], detail[1][0], detail[1][1],
+               detail[1][2], detail[1][3], detail[1][4], detail[1][5]);
     }
 }
 
@@ -506,7 +560,7 @@ int run_files_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--variant") == 0 && next != 0 && variant_count < BUSTER_FILES_BENCHMARK_MAX_VARIANTS)
         {
             // EXPERIMENT (#262): a comma-separated list of lane-bytes=N, read-limit=N, bytes=map|read|populate, old-merge,
-            // partial-take, probe-take and probe-lanes=N, each over the command line's settings.
+            // partial-take, probe-take, probe-lanes=N and clone-tables, each over the command line's settings.
             variant_specs[variant_count] = next;
             variant_count += 1;
             i += 1;
@@ -601,6 +655,10 @@ int run_files_benchmark(int argc, char** argv)
             else if (length == 10 && strncmp(p, "probe-take", 10) == 0)
             {
                 variants[v].probe_take = true;
+            }
+            else if (length == 12 && strncmp(p, "clone-tables", 12) == 0)
+            {
+                variants[v].clone_tables = true;
             }
             else if (length > 12 && strncmp(p, "probe-lanes=", 12) == 0)
             {

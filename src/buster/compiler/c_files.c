@@ -61,6 +61,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <immintrin.h>
 
@@ -138,6 +139,12 @@ struct FilesTrace
     uint64_t probes[BUSTER_FILES_TRACE_ROUNDS + 2];
     uint64_t clock[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
     uint64_t ticks[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES][FILES_PHASE_COUNT];
+    // EXPERIMENT (#262): each lane's preparing by pp_prepare_into's phases, the making of its own table and its tables'
+    // growths, and its thread's minor page faults (getrusage).
+    uint64_t prepare_ticks[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES][PP_PHASE_COUNT];
+    uint64_t table_ticks[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
+    uint64_t table_grows[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
+    uint64_t faults[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
 };
 
 // What a lane knows of a spelling of its table, by its lane-local id: its hash, the round's file it first occurred in
@@ -236,6 +243,11 @@ struct FilesLane
     uint64_t prepared;
     uint64_t tokens;
     FileCacheCounts counts;
+    // EXPERIMENT (#262), for the trace: pp_prepare_into's phases, the making of the lane's own table, and the growths of
+    // the tables it refined into.
+    uint64_t prepare_ticks[PP_PHASE_COUNT];
+    uint64_t table_ticks;
+    uint64_t table_grows;
 };
 
 // An item of the walk: a path a file was reached by (its entry in the cache's paths), the search directory the path was
@@ -312,6 +324,10 @@ struct FilesRun
     bool probe_take;
     uint32_t probe_lanes;
     uint64_t probe_next;
+    // EXPERIMENT (#262): each working lane of a round starts it with a copy of the shared table (intern_copy), so that
+    // the spellings the shared table has get their shared ids as the lane refines, and only the round's new spellings
+    // need the merge.
+    bool clone_tables;
     // The lanes' state, by lane index.
     FilesLane* lanes;
     uint32_t lane_count;
@@ -439,12 +455,16 @@ static void files_find_new(FilesRun* run, FilesLane* mine, uint32_t lane)
         {
             FilesSpelling* spelling = &mine->spellings[id];
             spelling->hash = intern_hash_bytes(intern_bytes(&mine->table, id), intern_length(&mine->table, id));
-            _mm_prefetch((const char*)(shared->buckets + (spelling->hash & shared->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_T0);
+            if (!run->clone_tables)
+            {
+                _mm_prefetch((const char*)(shared->buckets + (spelling->hash & shared->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_T0);
+            }
         }
         for (IdentId id = batch; id < end; id += 1)
         {
             const FilesSpelling* spelling = &mine->spellings[id];
-            mine->shared[id] = intern_find_hashed(shared, intern_bytes(&mine->table, id), intern_length(&mine->table, id), spelling->hash);
+            // EXPERIMENT (#262): a lane that copied the shared table has only spellings new to it from round_begin on.
+            mine->shared[id] = run->clone_tables ? 0 : intern_find_hashed(shared, intern_bytes(&mine->table, id), intern_length(&mine->table, id), spelling->hash);
             counts[files_partition(spelling->hash, run->partition_count)] += mine->shared[id] == 0;
             found += mine->shared[id] != 0;
         }
@@ -704,7 +724,7 @@ static void files_take_ids(FilesRun* run, FilesLane* mine)
 // Step 6: a prepared file's identifiers (and its guard) from the lane's ids to the shared table's, 64 tokens at a time:
 // one compare finds the identifiers, and those that aren't predefined names (whose ids every table shares) take their
 // shared ids, 16 at a time by a gather. files_remap_scalar is its twin, a token at a time.
-static void files_remap(PPFileData* data, const IdentId* shared)
+static void files_remap(PPFileData* data, const IdentId* shared, IdentId first)
 {
     for (uint32_t i = 0; i < data->token_count; i += 64)
     {
@@ -717,11 +737,11 @@ static void files_remap(PPFileData* data, const IdentId* shared)
             const __mmask16 named = (__mmask16)(identifiers >> (16 * quarter));
             uint32_t* values = data->values + i + 16 * quarter;
             const __m512i ids = _mm512_maskz_loadu_epi32(named, values);
-            const __mmask16 local = _mm512_mask_cmpge_epu32_mask(named, ids, _mm512_set1_epi32(C_NAME_COUNT));
+            const __mmask16 local = _mm512_mask_cmpge_epu32_mask(named, ids, _mm512_set1_epi32((int)first));
             _mm512_mask_storeu_epi32(values, local, _mm512_mask_i32gather_epi32(ids, local, ids, shared, sizeof(IdentId)));
         }
     }
-    data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
+    data->guard = data->guard >= first ? shared[data->guard] : data->guard;
 }
 
 // EXPERIMENT (#262, not for merging): main's step 6.
@@ -742,14 +762,14 @@ static void files_remap_v1(PPFileData* data, const IdentId* shared)
     data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
 }
 
-static void files_remap_scalar(PPFileData* data, const IdentId* shared)
+static void files_remap_scalar(PPFileData* data, const IdentId* shared, IdentId first)
 {
     for (uint32_t t = 0; t < data->token_count; t += 1)
     {
         const IdentId id = data->values[t];
-        data->values[t] = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && id >= C_NAME_COUNT ? shared[id] : id;
+        data->values[t] = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && id >= first ? shared[id] : id;
     }
-    data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
+    data->guard = data->guard >= first ? shared[data->guard] : data->guard;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -808,7 +828,9 @@ static void files_prepare(FilesRun* run)
         for (uint32_t file = 0; lane == 0 && file < run->record_count; file += 1)
         {
             PPFileData* data = &cache->records[run->records[file]];
-            run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, cache->table, arenas->columns, &arenas->arena, data, 0);
+            const uint64_t mask = cache->table->bucket_mask;
+            run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, cache->table, arenas->columns, &arenas->arena, data, run->trace != 0 ? mine->prepare_ticks : 0);
+            mine->table_grows += cache->table->bucket_mask != mask;
             mine->prepared += run->file_status[file] == PP_PREPARE_DONE;
             mine->tokens += run->file_status[file] == PP_PREPARE_DONE ? data->token_count : 0;
         }
@@ -818,14 +840,23 @@ static void files_prepare(FilesRun* run)
     {
         // A lane's own table is made at its first round of several lanes, the size of a working lane's share of the
         // round's bytes.
-        if (mine->table.records == 0)
+        uint64_t buckets = BUSTER_FILES_MIN_BUCKETS;
+        while (buckets * BUSTER_FILES_BYTES_PER_BUCKET < bytes / lanes)
         {
-            uint64_t buckets = BUSTER_FILES_MIN_BUCKETS;
-            while (buckets * BUSTER_FILES_BYTES_PER_BUCKET < bytes / lanes)
-            {
-                buckets *= 2;
-            }
+            buckets *= 2;
+        }
+        if (run->clone_tables && lane < lanes)
+        {
+            // EXPERIMENT (#262): a working lane copies the shared table, which no lane writes until the merge adds to it.
+            const uint64_t begin = __rdtsc();
+            files_fail(run, !intern_copy(&mine->table, cache->table, buckets));
+            mine->table_ticks += __rdtsc() - begin;
+        }
+        else if (!run->clone_tables && mine->table.records == 0)
+        {
+            const uint64_t begin = __rdtsc();
             files_fail(run, !intern_initialize_with(&mine->table, buckets));
+            mine->table_ticks += __rdtsc() - begin;
         }
         mine->round_begin = mine->table.count;
         // The files follow the lists that last the run.
@@ -857,7 +888,9 @@ static void files_prepare(FilesRun* run)
             {
                 PPFileData* data = &cache->records[run->records[file]];
                 const IdentId first = mine->table.count;
-                run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, &mine->table, arenas->columns, &arenas->arena, data, 0);
+                const uint64_t mask = mine->table.bucket_mask;
+                run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, &mine->table, arenas->columns, &arenas->arena, data, run->trace != 0 ? mine->prepare_ticks : 0);
+                mine->table_grows += mine->table.bucket_mask != mask;
                 run->file_first[file] = first;
                 run->file_end[file] = mine->table.count;
                 for (IdentId id = first; id < mine->table.count; id += 1)
@@ -981,11 +1014,11 @@ static void files_prepare(FilesRun* run)
                 }
                 else if (cache->prepare.vectorized)
                 {
-                    files_remap(data, mine->shared);
+                    files_remap(data, mine->shared, run->clone_tables ? mine->round_begin : C_NAME_COUNT);
                 }
                 else
                 {
-                    files_remap_scalar(data, mine->shared);
+                    files_remap_scalar(data, mine->shared, run->clone_tables ? mine->round_begin : C_NAME_COUNT);
                 }
                 mine->prepared += 1;
                 mine->tokens += data->token_count;
@@ -1591,6 +1624,12 @@ static void files_trace(FilesRun* run, const FilesLane* mine, uint32_t lane, uin
         {
             trace->clock[slot][lane] = mine->tick;
             memcpy(trace->ticks[slot][lane], mine->ticks, sizeof(mine->ticks));
+            memcpy(trace->prepare_ticks[slot][lane], mine->prepare_ticks, sizeof(mine->prepare_ticks));
+            trace->table_ticks[slot][lane] = mine->table_ticks;
+            trace->table_grows[slot][lane] = mine->table_grows;
+            struct rusage usage;
+            // RUSAGE_THREAD (1), which <sys/resource.h> names only with _GNU_SOURCE.
+            trace->faults[slot][lane] = getrusage(1, &usage) == 0 ? (uint64_t)usage.ru_minflt : 0;
         }
         if (lane == 0 && (!round || at <= BUSTER_FILES_TRACE_ROUNDS))
         {
