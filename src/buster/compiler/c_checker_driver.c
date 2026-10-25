@@ -809,6 +809,9 @@ static int run_check_command(int count, char** arguments, bool executable)
     bool syntax_only = false;
     bool quiet = false;
     bool lazy_system_headers = false;
+    // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
+    // lowering only the referenced ones saves.
+    bool lower_all = false;
     // The direct path's -l libraries and -L directories, which every other mode leaves alone.
     CheckDriverLibraries libraries = {
         .names = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
@@ -856,6 +859,10 @@ static int run_check_command(int count, char** arguments, bool executable)
         {
             lazy_system_headers = true;
         }
+        else if (strcmp(arguments[i], "--lower-all") == 0)
+        {
+            lower_all = true;
+        }
         else if (strcmp(arguments[i], "-fno-lazy-system-headers") == 0)
         {
             lazy_system_headers = false;
@@ -891,7 +898,7 @@ static int run_check_command(int count, char** arguments, bool executable)
     options.semantic_pragmas = true;
     if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [-fsyntax-only | -c] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [-fsyntax-only | -c] "
                         "[-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
@@ -1127,7 +1134,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                         if (result == 0 && emit_object && !prefix_only)
                         {
                             CheckProgramSelection selected;
-                            if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
+                            if (check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, &output_arena, &scratch))
                             {
                                 const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
                                 result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
@@ -1142,7 +1149,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                         if (result == 0 && link && !prefix_only)
                         {
                             CheckProgramSelection selected;
-                            if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
+                            if (check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, &output_arena, &scratch))
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types,
                                                                  output != 0 ? output : "a.out", scalar, verify, &libraries, &scratch) ? 0 : 1;

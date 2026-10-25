@@ -44,6 +44,57 @@ struct CheckProgramCode
     uint64_t code_bytes;
 };
 
+// The local symbols whose names the compiler makes are named as clang names them, so that tools and #129's comparison
+// with clang's objects (c_lowering_symbols.c) read them alike: a block-scope static is "function.name", its function's
+// symbol name (its asm label, if it has one) and its own (an asm label of the static's own replaces both), and a
+// file-scope compound literal is ".compoundliteral". A name already made in the unit gets ".N", N from one counter for
+// the unit, as LLVM makes a name unique. `taken` is a table of mask + 1 NameIds, 0 for an empty slot, with room for
+// every made name and at least as many empty slots.
+typedef struct CheckProgramNames CheckProgramNames;
+struct CheckProgramNames
+{
+    NameId* taken;
+    uint32_t mask;
+    uint32_t unique;
+};
+
+// Adds `base`, or the first of its ".N" spellings no made name has, to the link's names: its NameId, or 0 when the
+// link or scratch has no room.
+static NameId check_program_emit_made_name(Link* link, CheckProgramNames* names, const uint8_t* base, uint32_t base_length, Arena* scratch)
+{
+    // ".N" takes at most 11 bytes past the base, and snprintf a 12th for its NUL.
+    uint8_t* candidate = base_length <= UINT32_MAX - 12 ? arena_push(scratch, (uint64_t)base_length + 12, 1) : 0;
+    NameId result = 0;
+    if (candidate != 0)
+    {
+        memcpy(candidate, base, base_length);
+        uint32_t length = base_length;
+        uint64_t hash = 0;
+        uint32_t slot = 0;
+        bool taken = true;
+        while (taken)
+        {
+            hash = link_hash(candidate, length);
+            slot = (uint32_t)hash & names->mask;
+            taken = false;
+            while (names->taken[slot] != 0 && !taken)
+            {
+                const NameId other = names->taken[slot];
+                taken = link->names.hash[other] == hash && link->names.length[other] == length && memcmp(link->names.bytes[other], candidate, length) == 0;
+                slot = taken ? slot : (slot + 1) & names->mask;
+            }
+            if (taken)
+            {
+                names->unique += 1;
+                length = base_length + (uint32_t)snprintf((char*)candidate + base_length, 12, ".%u", names->unique);
+            }
+        }
+        result = link_add_name_hashed(link, candidate, length, hash);
+        names->taken[slot] = result;
+    }
+    return result;
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
 // #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND.
 static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
@@ -254,6 +305,28 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         .priorities = valid ? data_capacity.priorities + runtime.priorities : 0,
     };
     valid = valid && link_initialize(&result->link, output, output, capacity);
+    // A block-scope static's declaration is in a body (declaration_bodies) and has no linkage; a block-scope extern or
+    // function declaration has linkage, and its symbol is the file-scope entity's.
+    const CheckInput* input = program->input;
+    uint32_t made = 0;
+    for (uint32_t s = 0; s < program->symbol_count; s += 1)
+    {
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+        made += declaration != BUSTER_CHECK_NONE &&
+                (input->compound_objects[declaration] || (input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0));
+    }
+    uint32_t slots = 2;
+    while (slots <= (uint64_t)made * 2 && slots < (UINT32_C(1) << 31))
+    {
+        slots *= 2;
+    }
+    CheckProgramNames names = { .mask = slots - 1 };
+    names.taken = valid && made != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, slots) : 0;
+    valid = valid && (made == 0 || names.taken != 0);
+    if (names.taken != 0)
+    {
+        memset(names.taken, 0, (uint64_t)slots * sizeof(NameId));
+    }
     for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
     {
         const uint32_t object = program->symbol_objects[s];
@@ -263,15 +336,36 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         if (declaration != BUSTER_CHECK_NONE)
         {
             const uint32_t identifier = parser->tokens.names[declaration];
-            if (program->input->compound_objects[declaration])
+            const String8 renamed = symbol_names[s + 1];
+            const uint32_t opening = input->declaration_bodies[declaration];
+            if (input->compound_objects[declaration])
             {
-                char spelling[48];
-                const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_compound_%u", object);
-                name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+                name = check_program_emit_made_name(&result->link, &names, (const uint8_t*)".compoundliteral", sizeof(".compoundliteral") - 1, scratch);
+            }
+            else if (renamed.length == 0 && opening != BUSTER_CHECK_NONE && input->linkage[declaration] == 0)
+            {
+                // The function's name: its symbol's asm label, or its identifier (--lower-all selects the statics of
+                // an inline-only function, which has no symbol, and then no label).
+                const uint32_t function = opening < input->token_count ? input->body_declarations[opening] : BUSTER_CHECK_NONE;
+                const uint32_t function_object = function != BUSTER_CHECK_NONE ? input->objects[function] : 0;
+                const SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
+                const String8 label = function_symbol != 0 ? symbol_names[function_symbol] : (String8){ 0 };
+                const uint32_t function_identifier = function != BUSTER_CHECK_NONE ? parser->tokens.names[function] : 0;
+                const uint8_t* context = label.length != 0 ? (const uint8_t*)label.pointer : intern_bytes(identifiers, function_identifier);
+                const uint32_t context_length = label.length != 0 ? (uint32_t)label.length : intern_length(identifiers, function_identifier);
+                const uint32_t own_length = intern_length(identifiers, identifier);
+                const uint64_t base_length = (uint64_t)context_length + 1 + own_length;
+                uint8_t* base = function != BUSTER_CHECK_NONE && base_length < UINT32_MAX - 12 ? arena_push(scratch, base_length, 1) : 0;
+                if (base != 0)
+                {
+                    memcpy(base, context, context_length);
+                    base[context_length] = '.';
+                    memcpy(base + context_length + 1, intern_bytes(identifiers, identifier), own_length);
+                    name = check_program_emit_made_name(&result->link, &names, base, (uint32_t)base_length, scratch);
+                }
             }
             else
             {
-                const String8 renamed = symbol_names[s + 1];
                 name = renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
                                              link_add_name(&result->link, intern_bytes(identifiers, identifier), intern_length(identifiers, identifier));
             }
