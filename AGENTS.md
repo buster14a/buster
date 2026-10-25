@@ -4262,7 +4262,10 @@ that clang's code is the oracle of the convention and the x87's arithmetic of
 the values: each break of the class's rules refused at its entry; functions of
 long double parameters and results (on the stack around an integer in a
 register, a struct of one returned in st0 and one received from C into its
-object, long doubles to a variadic C function, one kept across a call); and
+object, long doubles to a variadic C function, one kept across a call); the
+conversions to and from the 64-bit integers and `int` on named cases around
+2^63, at the limits and on fractions, each called under rounding upward, which
+must truncate and leave the control word as it was; and
 `--count` random programs of statements writing long doubles and what converts
 from them (integers, floats, doubles, compares) from inputs of every class,
 through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions

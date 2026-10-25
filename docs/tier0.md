@@ -629,6 +629,11 @@ Before the programs, checks of their own:
   - **functions** of long double parameters and results called from C: two on the stack around an integer in a
     register, a struct of one returned in st0, a call of a C function whose such struct comes back into its object, long
     doubles passed to a variadic C function, and one kept in its slot across a call;
+  - **boundaries:** each conversion with a sequence of its own on named cases: to `unsigned long` at 0 and 1, below 2^63
+    by 1 and by a half, at it, past it by 1 and at 10^19, and at its largest value; to `long` and `int` at their limits
+    and on fractions of either sign; and back from `unsigned long` (2^63 ± 1 and the largest two values among them) and
+    `long`. Each must give C's conversion of the value, every case in range, and each call, made under rounding upward,
+    must truncate and leave the control word as it was;
   - **programs:** 300 random functions (`--count`) of statements that each write a value into 16 bytes of an output (a
     long double; an integer, a float or a double converted from one; a compare's result), from inputs of every class,
     through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions both ways (unsigned 64-bit ones past

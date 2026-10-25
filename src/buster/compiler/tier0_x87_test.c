@@ -30,6 +30,7 @@
 #define BUSTER_TIER0_TEST_X87_ARGUMENTS 192
 #define BUSTER_TIER0_TEST_X87_TASKS 512
 #define BUSTER_TIER0_TEST_X87_SLOTS 128
+#define BUSTER_TIER0_TEST_X87_BOUNDARIES 16
 
 // A long double from its 80 bits: the significand, then the sign and exponent.
 static long double tier0_test_x87_make(uint64_t significand, uint16_t top)
@@ -158,7 +159,14 @@ static long double tier0_test_x87_sum(int count, ...)
 #define BUSTER_TIER0_TEST_X87_THIRD 6
 #define BUSTER_TIER0_TEST_X87_V 7
 #define BUSTER_TIER0_TEST_X87_SUM 8
-#define BUSTER_TIER0_TEST_X87_SIGNATURES 9
+// The boundaries' conversions (tier0_test_x87_boundaries): a long double to an unsigned long, a long and an int, and
+// back from an unsigned long and a long.
+#define BUSTER_TIER0_TEST_X87_TO_U64 9
+#define BUSTER_TIER0_TEST_X87_TO_I64 10
+#define BUSTER_TIER0_TEST_X87_TO_I32 11
+#define BUSTER_TIER0_TEST_X87_FROM_U64 12
+#define BUSTER_TIER0_TEST_X87_FROM_I64 13
+#define BUSTER_TIER0_TEST_X87_SIGNATURES 14
 
 typedef struct Tier0TestX87Abi Tier0TestX87Abi;
 struct Tier0TestX87Abi
@@ -186,10 +194,11 @@ static bool tier0_test_x87_abi(Tier0Tables* tables, Tier0TestX87Abi* abi)
     {
         abi_classify_all(&tables->abi, &tables->types);
         const TypeId ld = BUSTER_TYPE_LONG_DOUBLE;
-        const TypeId results[BUSTER_TIER0_TEST_X87_SIGNATURES] = { ld, ld, BUSTER_TYPE_VOID, ld, abi->record, ld, abi->record, ld, ld };
-        uint32_t counts[BUSTER_TIER0_TEST_X87_SIGNATURES] = { 2, 3, 4, 3, 1, 1, 1, 2, 3 };
-        uint32_t named[BUSTER_TIER0_TEST_X87_SIGNATURES] = { 2, 3, 4, 3, 1, 1, 1, 2, 1 };
-        uint8_t variadic[BUSTER_TIER0_TEST_X87_SIGNATURES] = { 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+        const TypeId results[BUSTER_TIER0_TEST_X87_SIGNATURES] = { ld, ld, BUSTER_TYPE_VOID, ld, abi->record, ld, abi->record, ld, ld,
+                                                                  BUSTER_TYPE_ULONG, BUSTER_TYPE_LONG, BUSTER_TYPE_INT, ld, ld };
+        uint32_t counts[BUSTER_TIER0_TEST_X87_SIGNATURES] = { 2, 3, 4, 3, 1, 1, 1, 2, 3, 1, 1, 1, 1, 1 };
+        uint32_t named[BUSTER_TIER0_TEST_X87_SIGNATURES] = { 2, 3, 4, 3, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1 };
+        uint8_t variadic[BUSTER_TIER0_TEST_X87_SIGNATURES] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0 };
         const TypeId arguments[] = {
             ld, ld,
             BUSTER_TYPE_LONG, ld, BUSTER_TYPE_DOUBLE,
@@ -200,6 +209,11 @@ static bool tier0_test_x87_abi(Tier0Tables* tables, Tier0TestX87Abi* abi)
             ld,
             ld, ld,
             BUSTER_TYPE_INT, ld, ld,
+            ld,
+            ld,
+            ld,
+            BUSTER_TYPE_ULONG,
+            BUSTER_TYPE_LONG,
         };
         uint32_t at = 0;
         for (uint32_t s = 0; s < BUSTER_TIER0_TEST_X87_SIGNATURES; s += 1)
@@ -850,6 +864,13 @@ struct Tier0TestX87Shared
     uint64_t floats[BUSTER_TIER0_TEST_X87_FLOATS];
     uint8_t out[BUSTER_TIER0_TEST_X87_OUTPUTS * 16];
     long double results[8];
+    // The boundaries' cases (tier0_test_x87_boundaries): which conversion, each case's argument and result, and the x87
+    // control word after each call.
+    uint32_t boundary_signature;
+    uint32_t boundary_count;
+    long double boundary_values[BUSTER_TIER0_TEST_X87_BOUNDARIES];
+    uint64_t boundary_integers[BUSTER_TIER0_TEST_X87_BOUNDARIES];
+    uint16_t boundary_controls[BUSTER_TIER0_TEST_X87_BOUNDARIES];
 };
 
 // Runs `run` on `code` (`length` bytes) in a child, which must exit with status 0: the code mapped executable at a page of
@@ -1322,6 +1343,131 @@ static void tier0_test_x87_functions(Tier0TestTally* tally, const Tier0TestX87Ab
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The boundaries
+
+// The control word each call of the boundaries' cases starts under: rounding upward, which a conversion to an integer must
+// not use (it truncates) and must leave as it was (it restores the word it changed), 64-bit precision, every exception
+// masked.
+#define BUSTER_TIER0_TEST_X87_UPWARD 0x0b7f
+// The default control word, which the run puts back.
+#define BUSTER_TIER0_TEST_X87_DEFAULT_CONTROL 0x037f
+
+// Calls the boundaries' conversion (shared->boundary_signature) on each case, each under BUSTER_TIER0_TEST_X87_UPWARD,
+// recording its result and the control word after it.
+static void tier0_test_x87_run_boundary(const void* code, Tier0TestX87Shared* shared)
+{
+    typedef uint64_t (*ToInteger)(long double);
+    typedef long double (*FromInteger)(uint64_t);
+    const uint16_t upward = BUSTER_TIER0_TEST_X87_UPWARD;
+    const uint16_t original = BUSTER_TIER0_TEST_X87_DEFAULT_CONTROL;
+    const uint32_t signature = shared->boundary_signature;
+    const bool to_integer = signature == BUSTER_TIER0_TEST_X87_TO_U64 || signature == BUSTER_TIER0_TEST_X87_TO_I64 || signature == BUSTER_TIER0_TEST_X87_TO_I32;
+    ToInteger to = 0;
+    FromInteger from = 0;
+    memcpy(&to, &code, sizeof(to));
+    memcpy(&from, &code, sizeof(from));
+    for (uint32_t k = 0; k < shared->boundary_count; k += 1)
+    {
+        uint16_t control = 0;
+        __asm__ volatile("fldcw %0" : : "m"(upward) : "memory");
+        if (to_integer)
+        {
+            // An int result is eax's: the upper half of rax isn't the function's.
+            const uint64_t result = to(shared->boundary_values[k]);
+            shared->boundary_integers[k] = signature == BUSTER_TIER0_TEST_X87_TO_I32 ? (uint64_t)(int64_t)(int32_t)result : result;
+        }
+        else
+        {
+            shared->boundary_values[k] = from(shared->boundary_integers[k]);
+        }
+        __asm__ volatile("fnstcw %0" : "=m"(control) : : "memory");
+        shared->boundary_controls[k] = control;
+    }
+    __asm__ volatile("fldcw %0" : : "m"(original) : "memory");
+}
+
+// Each conversion between long double and the 64-bit integers that has its own sequence, as Tier 0 emits it alone, on
+// named cases rather than random ones: unsigned long at 0 and 1, below 2^63 (by 1 and by a half), at it and past it (by
+// 1 and to 10^19), and its largest value both ways; long and int at their limits and on fractions of either sign. Each
+// result must be C's conversion of the same value, every case in range (C leaves the others undefined), and each call,
+// started under rounding upward, must truncate and leave the control word as it was.
+static void tier0_test_x87_boundaries(Tier0TestTally* tally, const Tier0TestX87Abi* abi, Tier0TestX87Shared* shared)
+{
+    static const long double unsigned_values[] = { 0.0L, 0.75L, 1.0L, 0x1p63L - 1.0L, 0x1p63L - 0.5L, 0x1p63L, 0x1p63L + 1.0L, 1e19L, 0x1p64L - 1.0L };
+    static const long double signed_values[] = { -0x1p63L, -0x1p63L + 0.5L, 0x1p63L - 1.0L, 0x1p63L - 1.5L, -1.75L, 1.75L, -0.5L, 0.0L };
+    static const long double int_values[] = { 2147483647.0L, 2147483647.75L, -2147483648.0L, -2147483648.75L, -1.5L, 1.5L, 0.999L };
+    static const uint64_t unsigned_integers[] = { 0, 1, (UINT64_C(1) << 63) - 1, UINT64_C(1) << 63, (UINT64_C(1) << 63) + 1, UINT64_MAX - 1, UINT64_MAX };
+    static const uint64_t signed_integers[] = { (uint64_t)INT64_MIN, (uint64_t)(INT64_MIN + 1), UINT64_MAX, 0, (uint64_t)INT64_MAX };
+    static const char* const names[] = { "to unsigned long", "to long", "to int", "from unsigned long", "from long" };
+    static const uint8_t classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I64 };
+    uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
+    Arena arena = arena_reserve(1ull << 24);
+    const bool ready = tier0_test_expect(tally, image != 0 && arena.base != 0, "x87", "no memory");
+    for (uint32_t which = 0; which < BUSTER_ARRAY_LENGTH(names) && ready; which += 1)
+    {
+        const uint32_t signature = BUSTER_TIER0_TEST_X87_TO_U64 + which;
+        const bool to_integer = which < 3;
+        const uint32_t class = classes[which];
+        Tier0TestX87Written written;
+        memset(&written, 0, sizeof(written));
+        written.parameter_count = 1;
+        if (to_integer)
+        {
+            tier0_test_x87_local(&written, 0, BUSTER_TYPED_CLASS_VOID);
+            tier0_test_x87_put(&written, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_CONVERT, class, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_RETURN, class, 0);
+        }
+        else
+        {
+            tier0_test_x87_local(&written, 0, class);
+            tier0_test_x87_put(&written, BUSTER_TYPED_LOCAL, class, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_F80, 0);
+        }
+        const long double* values = which == 0 ? unsigned_values : which == 1 ? signed_values : int_values;
+        const uint32_t value_count = which == 0 ? BUSTER_ARRAY_LENGTH(unsigned_values) : which == 1 ? BUSTER_ARRAY_LENGTH(signed_values) : BUSTER_ARRAY_LENGTH(int_values);
+        const uint64_t* integers = which == 3 ? unsigned_integers : signed_integers;
+        const uint32_t integer_count = which == 3 ? BUSTER_ARRAY_LENGTH(unsigned_integers) : BUSTER_ARRAY_LENGTH(signed_integers);
+        shared->boundary_signature = signature;
+        shared->boundary_count = to_integer ? value_count : integer_count;
+        for (uint32_t k = 0; k < shared->boundary_count; k += 1)
+        {
+            shared->boundary_values[k] = to_integer ? values[k] : 0.0L;
+            shared->boundary_integers[k] = to_integer ? 0 : integers[k];
+            shared->boundary_controls[k] = 0;
+        }
+        arena_pop_to(&arena, 0);
+        const Tier0Function function = tier0_test_x87_written_function(&written, abi, signature, 0);
+        Tier0Error error = TIER0_OK;
+        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
+        const bool ran = length != 0 &&
+                         tier0_test_expect(tally, tier0_test_x87_native(image, length, tier0_test_x87_run_boundary, shared), "x87", "%s: the native run failed", names[which]);
+        for (uint32_t k = 0; k < shared->boundary_count && ran; k += 1)
+        {
+            if (to_integer)
+            {
+                const long double value = values[k];
+                const uint64_t expected = which == 0 ? (uint64_t)value : which == 1 ? (uint64_t)(int64_t)value : (uint64_t)(int64_t)(int32_t)value;
+                tier0_test_expect(tally, shared->boundary_integers[k] == expected, "x87", "%s: %La gave %#" PRIx64 ", %#" PRIx64 " expected", names[which], value,
+                                  shared->boundary_integers[k], expected);
+            }
+            else
+            {
+                const long double expected = which == 3 ? (long double)integers[k] : (long double)(int64_t)integers[k];
+                tier0_test_expect(tally, tier0_test_x87_same(shared->boundary_values[k], expected), "x87", "%s: %#" PRIx64 " gave %La, %La expected", names[which],
+                                  integers[k], shared->boundary_values[k], expected);
+            }
+            tier0_test_expect(tally, shared->boundary_controls[k] == BUSTER_TIER0_TEST_X87_UPWARD, "x87", "%s: case %u left the control word %#x, %#x expected",
+                              names[which], k, shared->boundary_controls[k], BUSTER_TIER0_TEST_X87_UPWARD);
+        }
+    }
+    arena_release(&arena);
+    free(image);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The rules
 
 // A break of the class's rules, refused at entry `node`, or (`node` UINT32_MAX) a stream it takes.
@@ -1476,7 +1622,8 @@ static void tier0_test_x87_rules(Tier0TestTally* tally, const Tier0TestX87Abi* a
     }
 }
 
-// The x87 check: the rules, the functions called from C and calling C, then `count` random programs.
+// The x87 check: the rules, the functions called from C and calling C, the conversions' boundaries, then `count` random
+// programs.
 static void tier0_test_x87(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, uint32_t* too_deep, uint64_t* entries)
 {
     Tier0TestX87Abi abi;
@@ -1486,6 +1633,7 @@ static void tier0_test_x87(Tier0TestTally* tally, Tier0Tables* tables, uint64_t 
     {
         tier0_test_x87_rules(tally, &abi);
         tier0_test_x87_functions(tally, &abi, shared);
+        tier0_test_x87_boundaries(tally, &abi, shared);
         tier0_test_x87_programs(tally, &abi, seed, count, shared, too_deep, entries);
     }
     if (shared != MAP_FAILED)
