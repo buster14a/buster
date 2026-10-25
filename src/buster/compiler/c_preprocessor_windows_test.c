@@ -10,10 +10,12 @@
 // identifiers that share long prefixes, so that refinement's candidates and new spellings come in every block. Each is
 // prepared whole by the vectorized kernels and by their scalar twins, which must agree too, and in windows of 1 byte to
 // 8 KB, in five language modes; sources of up to 96 KB give refinement many blocks of BUSTER_REFINE_BLOCK_TOKENS, which
-// the windows complete at every place.
+// the windows complete at every place. Each windowed preparation's line pages are checked against a count a byte at a
+// time; and sources with __LINE__ around the pages' starts are preprocessed as units (pp_test_window_units), which must
+// count from the pages and give the scalar twins' output.
 //
-// Layout: the random sources, the preparations and their comparison, the line ends' scan (pp_window_has_line_end) against
-// a byte-at-a-time one, and pp_test_windows.
+// Layout: the random sources, the preparations and their comparison, the line pages, lines in units, the line ends' scan
+// (pp_window_has_line_end) against a byte-at-a-time one, and pp_test_windows.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -46,12 +48,13 @@ struct PPWindowTestText
 {
     uint8_t* bytes;
     uint32_t length;
+    uint32_t capacity;
 };
 
 static void pp_window_test_append(PPWindowTestText* text, const char* piece)
 {
     const uint32_t length = (uint32_t)strlen(piece);
-    if (text->length + length <= BUSTER_PP_WINDOW_TEST_CAPACITY)
+    if (text->length + length <= text->capacity)
     {
         memcpy(text->bytes + text->length, piece, length);
         text->length += length;
@@ -60,7 +63,7 @@ static void pp_window_test_append(PPWindowTestText* text, const char* piece)
 
 static void pp_window_test_byte(PPWindowTestText* text, uint8_t byte)
 {
-    if (text->length < BUSTER_PP_WINDOW_TEST_CAPACITY)
+    if (text->length < text->capacity)
     {
         text->bytes[text->length] = byte;
         text->length += 1;
@@ -138,7 +141,7 @@ static void pp_window_test_long_line(PPWindowTestText* text, uint64_t* random, u
     if (r % 3 == 0)
     {
         pp_window_test_append(text, "/*");
-        while (text->length < end && text->length < BUSTER_PP_WINDOW_TEST_CAPACITY)
+        while (text->length < end && text->length < text->capacity)
         {
             pp_window_test_append(text, " long comment");
         }
@@ -147,7 +150,7 @@ static void pp_window_test_long_line(PPWindowTestText* text, uint64_t* random, u
     else if (r % 3 == 1)
     {
         pp_window_test_append(text, "\"");
-        while (text->length < end && text->length < BUSTER_PP_WINDOW_TEST_CAPACITY)
+        while (text->length < end && text->length < text->capacity)
         {
             pp_window_test_append(text, "long string ");
         }
@@ -155,7 +158,7 @@ static void pp_window_test_long_line(PPWindowTestText* text, uint64_t* random, u
     }
     else
     {
-        while (text->length < end && text->length < BUSTER_PP_WINDOW_TEST_CAPACITY)
+        while (text->length < end && text->length < text->capacity)
         {
             pp_window_test_identifier(text, random);
             pp_window_test_append(text, (pp_window_test_random(random) & 7) == 0 ? "\\\n" : " ");
@@ -351,6 +354,209 @@ static bool pp_window_test_same(PPPrepareStatus a_status, const PPFileData* a, P
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The line pages
+
+// A window-prepared file's line pages (PPFileData.line_pages) against the line ends counted a byte at a time: each
+// page's entry, and the line pp_page_line gives every token's start and the end, against the count from the file's
+// start. A "\r\n" ends its line at the '\n', and a '\r' alone at itself.
+static bool pp_window_test_line_pages(const PPFileData* data, uint64_t source, uint32_t window)
+{
+    bool result = data->line_pages != 0;
+    uint32_t lines = 0;
+    uint32_t page = 0;
+    uint32_t token = 0;
+    uint32_t failed = UINT32_MAX;
+    for (uint32_t at = 0; result && at <= data->length; at += 1)
+    {
+        if (at % BUSTER_PP_LINE_PAGE_BYTES == 0)
+        {
+            result = data->line_pages[page] == lines;
+            page += 1;
+        }
+        while (result && token < data->token_count && data->starts[token] == at)
+        {
+            result = pp_page_line(data, at) == lines + 1;
+            token += 1;
+        }
+        result = result && (at != data->length || pp_page_line(data, at) == lines + 1);
+        failed = result ? failed : at;
+        const uint8_t byte = at < data->length ? data->bytes[at] : 0;
+        lines += byte == '\n' || (byte == '\r' && (at + 1 == data->length || data->bytes[at + 1] != '\n'));
+    }
+    if (!result && !pp_test_quiet)
+    {
+        printf("windows: source %lu, window %u: the line pages differ from a count a byte at a time at byte %u%s\n", (unsigned long)source, window, failed,
+               data->line_pages == 0 ? " (no pages)" : "");
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Lines in units
+
+// The sources pp_test_window_units runs as units, the fewest and the most bytes each may have (past two of each of its
+// windows), and the bytes of the last one, which is past two of the default windows (BUSTER_PP_WINDOW_BYTES).
+#define BUSTER_PP_WINDOW_UNIT_SOURCES 24
+#define BUSTER_PP_WINDOW_UNIT_MIN_BYTES (32u << 10)
+#define BUSTER_PP_WINDOW_UNIT_MAX_BYTES (96u << 10)
+#define BUSTER_PP_WINDOW_UNIT_LARGE_BYTES (2u * BUSTER_PP_WINDOW_BYTES + (40u << 10))
+
+// A source of about `target` bytes for a unit, whose questions about lines fall around each line page's start
+// (BUSTER_PP_LINE_PAGE_BYTES). Its lines of tokens end in "\n", "\r\n" or a '\r' alone, and now and then a line end's
+// '\r' ends a page. Its __LINE__s come just before and at a page's start and at random places; in a macro's arguments
+// over several lines (the line of its ')'); through an object-like macro; spelled with a line splice; and in #if. It
+// has #line and line markers among its lines, from which the printer's line markers count.
+static void pp_window_test_unit_source(PPWindowTestText* text, uint64_t* random, uint32_t target)
+{
+    static const char* const pieces[] = {
+        "int", "x", "=", "1;", "f(a, b)", "/* c */", "\"s\"", "'c'", "L", "__LINE__", "F(__LINE__,\n\n L)", "__LI\\\nNE__", "F(L, \r\n__LINE__\r\n)",
+    };
+    static const char* const ends[] = { "\n", "\n", "\n", "\r\n", "\r" };
+    text->length = 0;
+    pp_window_test_append(text, "#define F(x, y) x y\n#define L __LINE__\n");
+    while (text->length < target)
+    {
+        const uint64_t r = pp_window_test_random(random);
+        const uint32_t to_page = BUSTER_PP_LINE_PAGE_BYTES - text->length % BUSTER_PP_LINE_PAGE_BYTES;
+        char directive[64];
+        if (to_page == 1 && (r & 3) != 0)
+        {
+            // A line end whose '\r' ends the page: a "\r\n" counts at its '\n', on the next page, and a '\r' alone at
+            // itself. Then a question at the next page's first byte.
+            pp_window_test_append(text, (r & 4) != 0 ? "\r\n__LINE__" : "\r__LINE__");
+        }
+        else if (to_page <= 12 && (r & 3) == 0)
+        {
+            // A question whose token starts a few bytes before the page's start, or at it.
+            pp_window_test_append(text, to_page <= 9 ? " __LINE__" : "__LINE__ ");
+        }
+        else if (r % 97 == 0)
+        {
+            const uint32_t number = 1 + (uint32_t)((r >> 8) % 9999);
+            const uint32_t form = (uint32_t)((r >> 24) % 3);
+            snprintf(directive, sizeof(directive), form == 0 ? "\n#line %u\n" : form == 1 ? "\n# %u \"lines.c\"\n" : "\n#if __LINE__ %% %u\nL\n#endif\n", number);
+            pp_window_test_append(text, directive);
+        }
+        else
+        {
+            pp_window_test_append(text, pieces[(r >> 8) % BUSTER_ARRAY_LENGTH(pieces)]);
+            pp_window_test_append(text, (r >> 20) % 4 == 0 ? ends[(r >> 24) % BUSTER_ARRAY_LENGTH(ends)] : " ");
+        }
+    }
+    pp_window_test_append(text, "\n");
+}
+
+// One run of pp_test_window_units: `path` preprocessed as a unit by the scalar twins, whole, or by the vectorized kernels
+// in windows of `window` bytes (0 for the default), printed with line markers by its kernels' printer into `*printed`
+// (`free` it). Leaves the run to release in `pp` (which `*ready` says) and its options' memory in `arena`.
+static bool pp_window_test_unit(const char* path, bool scalar, uint32_t window, InternTable* table, Preprocessor* pp, bool* ready, Arena* arena, char** printed,
+                                size_t* printed_length)
+{
+    char* arguments[] = { (char*)"-std=c17", (char*)path };
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    *arena = arena_reserve(1ull << 20);
+    bool result = arena->base != 0 && pp_parse_options(2, arguments, &options, arena, &input, &output, &markers);
+    options.scalar = scalar;
+    options.window_bytes = window;
+    *ready = result && intern_initialize(table) && pp_initialize(pp, &options, table);
+    result = *ready && pp_run(pp, path) && pp->errors == 0;
+    *printed = result ? pp_test_print(pp, !scalar, true, printed_length) : 0;
+    return *printed != 0;
+}
+
+// BUSTER_PP_WINDOW_UNIT_SOURCES sources from `seed` (pp_window_test_unit_source), each preprocessed as a unit in
+// `directory`. The file cache prepares its file and the unit's data copies the record (pp_copy_prepared). The vectorized
+// kernels prepare it in windows of several sizes: smaller than a line page, a page, a byte past one, and larger, and the
+// last source in the default windows. __LINE__, #line and -E's line markers then count from its line pages, which each
+// run's data of the file must have. The scalar twins prepare it whole and count from a cursor. Each run's output and the
+// text -E prints with line markers must be the scalar twins', byte for byte. Returns whether every run's are.
+static bool pp_test_window_units(const char* directory, uint64_t seed)
+{
+    static const uint32_t windows[] = { 1000, BUSTER_PP_LINE_PAGE_BYTES, BUSTER_PP_LINE_PAGE_BYTES + 1, 10000 };
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/window-lines.c", directory);
+    const uint32_t capacity = BUSTER_PP_WINDOW_UNIT_LARGE_BYTES + (64u << 10);
+    PPWindowTestText text = { .bytes = malloc(capacity + 1), .capacity = capacity };
+    const bool allocated = text.bytes != 0;
+    uint64_t random = seed ^ 0x117117117ull;
+    uint64_t failures = 0;
+    uint64_t units = 0;
+    uint64_t questions = 0;
+    for (uint32_t s = 0; allocated && s < BUSTER_PP_WINDOW_UNIT_SOURCES; s += 1)
+    {
+        const bool large = s + 1 == BUSTER_PP_WINDOW_UNIT_SOURCES;
+        const uint32_t target = large ? BUSTER_PP_WINDOW_UNIT_LARGE_BYTES
+                                      : BUSTER_PP_WINDOW_UNIT_MIN_BYTES + (uint32_t)(pp_window_test_random(&random) % (BUSTER_PP_WINDOW_UNIT_MAX_BYTES - BUSTER_PP_WINDOW_UNIT_MIN_BYTES));
+        pp_window_test_unit_source(&text, &random, target);
+        text.bytes[text.length] = 0;
+        bool ready[2] = { false, false };
+        Arena arenas[2] = { 0 };
+        char* printed[2] = { 0, 0 };
+        size_t lengths[2] = { 0, 0 };
+        const bool written = pp_test_write_file(path, (const char*)text.bytes);
+        const bool twin = written && pp_window_test_unit(path, true, 0, &tables[0], &runs[0], &ready[0], &arenas[0], &printed[0], &lengths[0]);
+        bool same = twin;
+        for (uint32_t w = 0; twin && w < (large ? 1u : BUSTER_ARRAY_LENGTH(windows)); w += 1)
+        {
+            const uint32_t window = large ? 0 : windows[w];
+            const uint32_t bytes = window != 0 ? window : BUSTER_PP_WINDOW_BYTES;
+            bool ran = pp_window_test_unit(path, false, window, &tables[1], &runs[1], &ready[1], &arenas[1], &printed[1], &lengths[1]);
+            // The file's data in the run: its bytes are the source's, and windows prepared it.
+            bool paged = false;
+            for (uint32_t d = 0; ran && d < runs[1].data_count; d += 1)
+            {
+                const PPFileData* data = &runs[1].datas[d];
+                paged |= data->length == text.length && data->length >= 2ull * bytes && data->line_pages != 0;
+            }
+            char label[64];
+            snprintf(label, sizeof(label), "windows: unit %u, window %u", s, window);
+            const bool agrees = ran && paged && pp_same_streams(&runs[1], &runs[0], label) && lengths[0] == lengths[1] && memcmp(printed[0], printed[1], lengths[0]) == 0;
+            if (!agrees && !pp_test_quiet)
+            {
+                printf("%s: %s\n", label, !ran ? "the run fails" : !paged ? "the file's data has no line pages" : "the output or its text with line markers isn't the scalar twins'");
+            }
+            same &= agrees;
+            units += 1;
+            if (ready[1])
+            {
+                pp_release(&runs[1]);
+            }
+            intern_release(&tables[1]);
+            arena_release(&arenas[1]);
+            free(printed[1]);
+            printed[1] = 0;
+        }
+        // The numbers that __LINE__ gave (pp_number_token's, which a macro made).
+        for (uint32_t t = 0; twin && t < runs[0].output.count; t += 1)
+        {
+            questions += runs[0].output.kinds[t] == C_TOKEN_NUMERIC_CONSTANT && (runs[0].output.flags[t] & BUSTER_PP_FROM_MACRO) != 0;
+        }
+        if (!twin && !pp_test_quiet)
+        {
+            printf("windows: unit %u: the scalar twins' run fails\n", s);
+        }
+        failures += !same;
+        if (ready[0])
+        {
+            pp_release(&runs[0]);
+        }
+        intern_release(&tables[0]);
+        arena_release(&arenas[0]);
+        free(printed[0]);
+    }
+    unlink(path);
+    free(text.bytes);
+    printf("windows: %lu of %u sources differ as units (%lu windowed units; %lu __LINE__s in the scalar twins' outputs)\n", (unsigned long)failures,
+           BUSTER_PP_WINDOW_UNIT_SOURCES, (unsigned long)units, (unsigned long)questions);
+    return allocated && failures == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The line ends' scan
 
 // pp_window_has_line_end a byte at a time.
@@ -418,7 +624,7 @@ static uint64_t pp_window_test_line_ends(uint64_t* random, uint64_t* checks)
 
 // BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
 // without, digit separators or not, without "//" comments and digraphs, and with literal prefixes to split), prepared
-// whole by both kernels and in windows of several sizes.
+// whole by both kernels and in windows of several sizes, each window's line pages against a count a byte at a time.
 static bool pp_test_windows(uint64_t seed)
 {
     static const uint32_t windows[] = { 1, 7, 64, 100, 333, 1024, 4096, 8192 };
@@ -430,7 +636,7 @@ static bool pp_test_windows(uint64_t seed)
         { .standard = 1999, .gnu = true },
     };
     static PPWindowTestRun runs[3];
-    PPWindowTestText text = { .bytes = malloc(BUSTER_PP_WINDOW_TEST_CAPACITY) };
+    PPWindowTestText text = { .bytes = malloc(BUSTER_PP_WINDOW_TEST_CAPACITY), .capacity = BUSTER_PP_WINDOW_TEST_CAPACITY };
     bool initialized = text.bytes != 0;
     for (uint32_t k = 0; k < 3; k += 1)
     {
@@ -466,6 +672,7 @@ static bool pp_test_windows(uint64_t seed)
                 PPFileData data;
                 const PPPrepareStatus status = pp_window_test_prepare(&runs[2], &prepare, &text, windows[w], &data);
                 same &= pp_window_test_same(whole_status, &whole, status, &data, "windows", s, windows[w]);
+                same &= status != PP_PREPARE_DONE || pp_window_test_line_pages(&data, s, windows[w]);
                 windowed += 1;
             }
         }

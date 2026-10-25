@@ -223,6 +223,8 @@ int run_snapshot_benchmark(int argc, char** argv);
 // Foreign inputs (other compilers' objects, archives, shared libraries and scripts: opened, parsed and resolved, with
 // the archive members the link needs loaded and COMDAT groups picked) and their tests, for the test-foreign command. Its
 // benchmark is another translation unit.
+#include "buster/compiler/inflate.c"
+#include "buster/compiler/inflate_test.c"
 #include "buster/compiler/foreign.c"
 #include "buster/compiler/foreign_unwind.c"
 #include "buster/compiler/foreign_unwind_benchmark.c"
@@ -369,6 +371,10 @@ int run_backend_benchmark(int argc, char** argv);
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
 // integration tests after those consumers so one checked unit can retain both executable bodies and static data.
 #include "buster/compiler/c_check_program.c"
+// #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), with the names
+// the checked source makes, for the checker's selection tests, test-checker-corpus --symbols and test-c-testsuite
+// --cross-check.
+#include "buster/compiler/c_lowering_symbols.c"
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
@@ -398,8 +404,12 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_source_benchmark.c"
 // #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.
 #include "buster/compiler/c_check_deferred_benchmark.c"
+// #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
+#include "buster/compiler/c_lowering_source_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
+#include "buster/compiler/c_lowering_source_benchmark_test.c"
+#include "buster/compiler/c_check_corpus_symbols_test.c"
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
@@ -789,6 +799,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_snapshot_benchmark(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-inflate") == 0)
+    {
+        result = run_inflate_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-foreign") == 0)
     {
         result = run_foreign_tests(argc - 2, argv + 2);
@@ -988,6 +1002,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
     {
         result = run_checker_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
+    {
+        result = run_lowering_source_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {

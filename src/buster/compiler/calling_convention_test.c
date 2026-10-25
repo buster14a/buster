@@ -3423,9 +3423,14 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         };
     }
     uint32_t total = count;
-    // (In a compiled world after another member: this compiler's checker refuses a struct of a flexible array member
-    // alone, which clang takes as an extension.)
-    if (!world->gcc && !is_union && count > (world->compiled ? 1u : 0u) && type_test_below(random, 16) == 0)
+    // (In a compiled world after a named member: this compiler's checker refuses a struct whose only named member is a
+    // flexible array member, which clang takes as an extension, unnamed bit-fields before it or not.)
+    bool named = !world->compiled;
+    for (uint32_t m = 0; m + 1 < count; m += 1)
+    {
+        named |= members[m].name != 0;
+    }
+    if (!world->gcc && !is_union && count > (world->compiled ? 1u : 0u) && named && type_test_below(random, 16) == 0)
     {
         const TypeId element = abi_test_world_pick(world, random, true);
         const TypeId open = type_incomplete_array(table, type_unqualified(element));
@@ -3507,7 +3512,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const TypeId builtin = BUSTER_TYPE_BUILTIN(code);
         const bool valid = type_is_valid(table, builtin);
         const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 8) ||
-                                                             builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE));
+                                                             builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE));
         if (valid && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || (!clang_only && !gcc_member)) && compiled)
         {
             abi_test_world_add(world, builtin);
@@ -3922,15 +3927,17 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
 }
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a struct or a union aligned to 16 at most.
+// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a struct or a union aligned
+// to 16 at most.
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
     const uint8_t kind = table->types.kind[resolved];
     const bool scalar = (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] <= 8) || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER ||
                         (kind == BUSTER_TYPE_KIND_FLOATING && (table->types.code[resolved] == BUSTER_TYPE_CODE_FLOAT || table->types.code[resolved] == BUSTER_TYPE_CODE_DOUBLE));
-    const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-    return (scalar && type_alignment_log2(table, type) <= 3) || (aggregate && type_alignment_log2(table, type) <= 4);
+    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[resolved] == BUSTER_TYPE_CODE_LONG_DOUBLE) || kind == BUSTER_TYPE_KIND_STRUCT ||
+                      kind == BUSTER_TYPE_KIND_UNION;
+    return (scalar && type_alignment_log2(table, type) <= 3) || (wide && type_alignment_log2(table, type) <= 4);
 }
 
 // Random calls: their results (void now and then), counts (mostly small, a few long ones past the registers), named
@@ -4891,10 +4898,12 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         signature->named = named;
         signature->variadic = variadic;
         uint32_t offset = 0;
-        // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values, and copies its
-        // aggregates through each stack's first free register (#136); our caller's `r = c_callee(...)` holds r's address
-        // under them when the result is a struct or a union. So in a compiled world an argument past 13 integer or 15
-        // floating ones becomes one of the other stack's (21 named and 6 unnamed fit both).
+        // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values (a long double's
+        // value on the integer one), and copies its aggregates through each stack's first free register (#136); past
+        // them it takes values to its frame's deep slots, but not a call's aggregates or a function's long doubles. Our
+        // caller's `r = c_callee(...)` holds r's address under them when the result is a struct, a union or a long double.
+        // So in a compiled world an argument past 13 integer or 15 floating ones becomes one of the other stack's (21 named
+        // and 6 unnamed fit both).
         uint32_t depths[2] = { 0, 0 };
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -4905,7 +4914,8 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
                 type = types[type_test_below(random, type_count)];
             }
             type = cross->gcc && variadic && a < named && abi_test_gcc_variadic_differs(cross->abi, type) ? BUSTER_TYPE_LONG : type;
-            const bool floating = type_kind(table, type_strip_aligned(table, type)) == BUSTER_TYPE_KIND_FLOATING;
+            const TypeId stripped = type_strip_aligned(table, type);
+            const bool floating = type_kind(table, stripped) == BUSTER_TYPE_KIND_FLOATING && type_unqualified(stripped) != BUSTER_TYPE_LONG_DOUBLE;
             const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 2);
             type = cross->compiled && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : type;
             depths[floating != full] += 1;
