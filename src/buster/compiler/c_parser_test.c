@@ -303,6 +303,8 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) { a: int x; }\n", "", 0 },
     { "[[deprecated]] int x; int y [[maybe_unused]];\n", "", 0 },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
+    // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
+    { "typedef int U; typedef enum E : unsigned short { A } T; typedef enum : const U { B } V, W; int n = sizeof(T) + sizeof(V) + sizeof(W);\n", "", 0 },
     { "int x = (int){1}; int a[3] = { [1 ... 2] = 0 };\n", "", 0 },
     // GNU's single array designator may omit '=', including a range, a prefix operand and a braced initializer.
     { "int a[] = { [0] 1, [3] 4, [4] -1, [5] (int)2 };\n", "", 0 },

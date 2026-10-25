@@ -2329,6 +2329,101 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        {
+            // A GNU extension clang takes (a warning under -pedantic alone), with clang's layouts.
+            "struct whose only named member is a flexible array member",
+            "struct T { int a[]; }; struct U { int : 0; char c[]; }; struct V { char : 3; long l[]; };\n"
+            "struct W { struct T t; int b; }; struct T *p; int n = sizeof(struct T) + sizeof(struct U);\n"
+            "_Static_assert(sizeof(struct T) == 0 && _Alignof(struct T) == 4, \"T\");\n"
+            "_Static_assert(sizeof(struct U) == 0 && _Alignof(struct U) == 1, \"U\");\n"
+            "_Static_assert(sizeof(struct V) == 8 && _Alignof(struct V) == 8 && __builtin_offsetof(struct V, l) == 8, \"V\");\n"
+            "_Static_assert(sizeof(struct W) == 4, \"W\");\n",
+            false,
+            false
+        },
+        {
+            "flexible array member before another member",
+            "struct S { int a[]; int b; };\n",
+            true,
+            false
+        },
+        {
+            // C23's fixed underlying type, which clang takes in every mode: complete at its base (sizeof in its own list),
+            // its enumerators of its own type, the base's qualifiers dropped, an attribute before its name applied at the
+            // base, packed ignored, its declarations alone (here in a block, a new enum) keeping or making it.
+            "enum with a fixed underlying type",
+            "enum E : unsigned char { A = 255, B = 0 }; enum E : unsigned char; typedef unsigned int U;\n"
+            "_Static_assert(sizeof(enum E) == 1 && _Alignof(enum E) == 1 && _Generic(A, enum E: 1, default: 0) && _Generic(+A, int: 1, default: 0), \"E\");\n"
+            "enum F : long long { C = -1, D }; enum G : short; enum G : short { H = sizeof(enum G) }; enum I : const U { J = 4294967295u };\n"
+            "_Static_assert(sizeof(enum F) == 8 && D == 0 && H == 2 && J == 4294967295u && sizeof(enum I) == 4, \"F G I\");\n"
+            "enum K : _Bool { L, M }; enum N : signed char { O = -128, P = 127 }; enum : unsigned long { Q = 1ul << 63 }; enum R : unsigned { S = -1 };\n"
+            "_Static_assert(M == 1 && sizeof(enum K) == 1 && Q == 9223372036854775808ul && S == 4294967295u, \"K Q S\");\n"
+            "enum __attribute__((aligned(8))) T : char { V }; enum __attribute__((packed)) W : int { X }; enum Y : short { Z } __attribute__((packed));\n"
+            "_Static_assert(_Alignof(enum T) == 8 && sizeof(enum T) == 1 && sizeof(enum W) == 4 && sizeof(enum Y) == 2, \"T W Y\");\n"
+            "struct St { enum E e : 4; enum E f : 8; enum F g; }; _Static_assert(sizeof(struct St) == 16, \"St\");\n"
+            "int f(enum E e) { switch (e) { case A: return 1; case B: return 2; default: return 3; } }\n"
+            "unsigned g(void) { enum E e = A; enum E : unsigned char; return e + 1u; }\n"
+            "int h(enum N n) { return n == O ? 1 : n; }\n",
+            false,
+            false
+        },
+        {
+            // A negative value's significant bits, its sign not checked (clang's isRepresentableIntegerValue), and a
+            // value's active bits, less the sign bit of a signed type.
+            "fixed enum: an enumerator past its type",
+            "enum E : unsigned char {\n  A = 256\n};\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: the successor past its type",
+            "enum E : signed char {\n  A = 127,\n  B\n};\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: redeclared with another type",
+            "enum E : int;\nenum E : long { A };\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: declared with a declarator",
+            "int a;\nenum E : int x;\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: an enum without one given one",
+            "enum E { A };\nenum E : int;\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: one with it defined without it",
+            "enum E : int;\nenum E { A };\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: defined twice",
+            "enum E : int { A };\nenum E : int { B };\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: a floating type",
+            "int a;\nenum E : float { A };\n",
+            true,
+            false
+        },
+        {
+            // Its alignment applied after its body, which the enum's completion at its base came before: refused.
+            "fixed enum: aligned after its body",
+            "enum F : char { B } __attribute__((aligned(8)));\n",
+            true,
+            true
+        },
     };
     enum
     {

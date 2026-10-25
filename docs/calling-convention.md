@@ -1435,10 +1435,10 @@ as Tier 0's frame objects are, with flexible array members, bit-fields, packing
 and member alignments;
 no `nullptr_t`, `_BitInt`, vector, complex or `_Atomic` type, and none of
 clang's directed records. They leave out what this compiler's front end
-doesn't take yet: C23's enums of a fixed underlying type, an attribute after a
-bit-field's width (a bit-field's attributes go before its type instead, which
-clang and GCC read alike), and a struct whose only named member is a flexible
-array member, unnamed bit-fields before it or not (a GNU extension). Tier 0 holds a call's arguments on its stacks at once (15
+doesn't take yet: an attribute after a bit-field's width (a bit-field's
+attributes go before its type instead, which clang and GCC read alike). C23's
+enums of a fixed underlying type and a struct whose only named member is a
+flexible array member (a GNU extension) are among their types. Tier 0 holds a call's arguments on its stacks at once (15
 integer and 16 floating values) and copies its aggregates through each stack's
 first free register, and our caller's `r = c_callee(...)` holds `r`'s address
 under the arguments when the result is a struct, a union or a `long double`, so

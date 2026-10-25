@@ -5297,6 +5297,18 @@ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const ui
                             i = parse_after_group(kernels, kinds, i + 1);
                         }
                         i += kinds[i] == PARSE_KIND_IDENTIFIER;
+                        // An enum's underlying type (C23's `enum E : T`), which a typedef's `:` after the tag always is: the
+                        // type's specifiers, as parse_scalar_enum_base takes them, then its body.
+                        if (kind == PARSE_KIND_ENUM && kinds[i] == PARSE_KIND_COLON)
+                        {
+                            i += 1;
+                            while (kinds[i] == PARSE_KIND_TYPE || kinds[i] == PARSE_KIND_QUALIFIER ||
+                                   (kinds[i] == PARSE_KIND_IDENTIFIER && kernels->typedef_names[names[i]] != 0) ||
+                                   (kinds[i] == PARSE_KIND_ATOMIC && kinds[i + 1] != PARSE_KIND_L_PAREN))
+                            {
+                                i += 1;
+                            }
+                        }
                         i = kinds[i] == PARSE_KIND_L_BRACE ? parse_after_group(kernels, kinds, i) : i;
                     }
                     else if (kind == PARSE_KIND_IDENTIFIER && !type_seen && kernels->typedef_names[names[i]] != 0)

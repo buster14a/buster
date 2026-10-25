@@ -1197,25 +1197,27 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             false
         },
         {
-            "sole flexible member GNU extension rejected",
-            "struct S { int data[]; };\n",
-            true,
+            // A GNU extension clang takes (a warning under -pedantic alone), with clang's layouts: unnamed bit-fields
+            // before it are no named member, and so it is the struct's only one.
+            "sole flexible member GNU extension",
+            "struct S { int data[]; };\n"
+            "_Static_assert(sizeof(struct S) == 0 && _Alignof(struct S) == 4, \"S\");\n",
             false,
-            true
+            false
         },
         {
-            "unnamed zero-width field is not a flexible member predecessor",
-            "struct S { int :0; int data[]; };\n",
-            true,
+            "unnamed zero-width field before a sole flexible member",
+            "struct T { int :0; int data[]; };\n"
+            "_Static_assert(sizeof(struct T) == 0 && _Alignof(struct T) == 4, \"T\");\n",
             false,
-            true
+            false
         },
         {
-            "unnamed bitfield is not a flexible member predecessor",
-            "struct S { int :1; int data[]; };\n",
-            true,
+            "unnamed bitfield before a sole flexible member",
+            "struct U { int :1; int data[]; };\n"
+            "_Static_assert(sizeof(struct U) == 4 && _Alignof(struct U) == 4 && __builtin_offsetof(struct U, data) == 4, \"U\");\n",
             false,
-            true
+            false
         },
         {
             "flexible member after named field and unnamed padding",
