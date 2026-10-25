@@ -921,7 +921,12 @@ static int run_check_command(int count, char** arguments, bool executable)
     }
     else if (!BUSTER_CHECK_SOURCE_ROWS && link && (options.predefines.debug || options.predefines.debug_modules))
     {
-        // -g's link, whole, in the unit whose lowering keeps the source rows (its own unit folds this branch away).
+        // -g's link, whole, in the unit whose lowering keeps the source rows (its own unit folds this branch away). This
+        // call's arenas, which hold only the parsed options, go first: that call reserves its own, and the two calls'
+        // together would take twice the address space (an RLIMIT_AS that a compile without -g fits would refuse it).
+        arena_release(&output_arena);
+        arena_release(&scratch);
+        arena_release(&arena);
         result = run_source_debug_command(count, arguments);
     }
     else

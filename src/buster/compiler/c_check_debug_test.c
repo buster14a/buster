@@ -20,6 +20,8 @@
 //   the lines their statements are on, in their files, and none of a macro's definition or a blank line. Each program's
 //   functions lowered with the entries' source tokens and without them, by both unit ABI batches: the same typed
 //   functions, each entry's token alike by both batches and the function's own.
+// - Address space: -g's link, which the default command sends to this unit, fits in 64 GiB more RLIMIT_AS than the
+//   same program's link without -g needs (found by halves), where the arenas of both calls together took 192 GiB more.
 // - The driver, with --cross-check (gdb and llvm-dwarfdump): the fixture linked with -g by each path into the same
 //   bytes, which run; llvm-dwarfdump --verify finds no error; gdb stops at a line's breakpoint on that line, at a
 //   function's breakpoint on its first statement, steps over an untaken branch, and gives a backtrace's frames their
@@ -837,6 +839,68 @@ static void check_debug_test_driver(CheckDebugTestTally* tally, const char* dire
                             "the header's function stops in the header, called from its callee's line (the call's first)", report);
 }
 
+// A link by the executable's default command (/proc/self/exe, which sends one with -g to this unit) in a child whose
+// address space RLIMIT_AS bounds at `limit` bytes: whether it succeeded.
+static bool check_debug_test_limited(char* const* arguments, uint64_t limit)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        const struct rlimit space = { .rlim_cur = limit, .rlim_max = limit };
+        const int null = open("/dev/null", O_WRONLY);
+        if (null >= 0 && dup2(null, 1) == 1 && dup2(null, 2) == 2 && setrlimit(RLIMIT_AS, &space) == 0)
+        {
+            execv("/proc/self/exe", arguments);
+        }
+        _exit(127);
+    }
+    int status = 0;
+    pid_t waited = child;
+    while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
+    {
+    }
+    return child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// -g's link takes no more address space than the link without it (#426's review): the default command sends it to this
+// unit after releasing its own arenas, whose 192 GiB the forwarded call would otherwise have reserved again. The least
+// RLIMIT_AS a program's link without -g fits, found by halves to 4 GiB below the hard limit (or 64 TiB), and its link
+// with -g under 64 GiB more.
+static void check_debug_test_address_space(CheckDebugTestTally* tally, const char* directory)
+{
+    char source[PATH_MAX];
+    char output[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_space.c", directory);
+    snprintf(output, sizeof(output), "%s/dbg_space", directory);
+    static const char text[] = "int dbg_space_square(int x)\n{\n    return x * x;\n}\n\nint main(void)\n{\n    return dbg_space_square(3) - 9;\n}\n";
+    char* plain[] = { (char*)"/proc/self/exe", (char*)"-o", output, source, 0 };
+    char* debug[] = { (char*)"/proc/self/exe", (char*)"-g", (char*)"-o", output, source, 0 };
+    struct rlimit space;
+    const uint64_t most = UINT64_C(1) << 46;
+    const uint64_t top = getrlimit(RLIMIT_AS, &space) == 0 && space.rlim_max != RLIM_INFINITY && space.rlim_max < most ? space.rlim_max : most;
+    const bool fits = foreign_test_write(source, text, sizeof(text) - 1) && check_debug_test_limited(plain, top);
+    check_debug_test_expect(tally, fits, "link a program without -g", source);
+    uint64_t low = UINT64_C(1) << 30;
+    uint64_t high = top;
+    while (fits && high - low > (UINT64_C(4) << 30))
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        if (check_debug_test_limited(plain, middle))
+        {
+            high = middle;
+        }
+        else
+        {
+            low = middle;
+        }
+    }
+    const uint64_t limit = high + (UINT64_C(64) << 30);
+    char detail[PATH_MAX + 64];
+    snprintf(detail, sizeof(detail), "%s, %llu GiB", source, (unsigned long long)(limit >> 30));
+    check_debug_test_expect(tally, !fits || (limit <= top && check_debug_test_limited(debug, limit)), "link it with -g in 64 GiB more address space than it takes without",
+                            detail);
+}
+
 static int run_check_debug_tests(int argc, char** argv)
 {
     CheckDebugTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
@@ -882,6 +946,7 @@ static int run_check_debug_tests(int argc, char** argv)
         check_debug_test_rows(&tally);
         check_debug_test_keep(&tally);
         check_debug_test_sources(&tally, directory, programs);
+        check_debug_test_address_space(&tally, directory);
         if (cross_check)
         {
             check_debug_test_driver(&tally, directory, &arena);

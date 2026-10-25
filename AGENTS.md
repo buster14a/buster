@@ -338,7 +338,7 @@ designs and the compilers already built this way.
   other until it was split into the types, checker and checker builtins
   units. The default C command runs in the checker's unit, but with `-g` in
   a unit of its own (`main_unit_debug.c`), which `run_check_command` sends the
-  link to: only that unit's lowering keeps the typed entries' source tokens
+  link to after releasing its own arenas: only that unit's lowering keeps the typed entries' source tokens
   (`BUSTER_CHECK_SOURCE_ROWS`), so that the others compile none of that work
   and the default compile runs main's code. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
@@ -568,8 +568,10 @@ designs and the compilers already built this way.
   (`BUSTER_UNIT_DEBUG`), whose lowering alone keeps the tokens.
   `test-check-debug [--cross-check]`, in that unit, checks the twins at
   `PROT_NONE` pages, the lines against `pp_presumed` on fixtures and generated
-  programs, that lowering with the tokens changes no typed function, and with
-  `--cross-check` the executable through `llvm-dwarfdump --verify` and gdb.
+  programs, that lowering with the tokens changes no typed function, that
+  `-g`'s link fits in 64 GiB more `RLIMIT_AS` than the same link without it,
+  and with `--cross-check` the executable through `llvm-dwarfdump --verify`
+  and gdb.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order

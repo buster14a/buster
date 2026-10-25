@@ -152,8 +152,9 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
 
 Only one unit of the build keeps those tokens: the default C command's link
 with `-g` runs in a unit of its own (`main_unit_debug.c`, which
-`run_check_command` sends it to), whose lowering alone tracks each task's
-token (`BUSTER_CHECK_SOURCE_ROWS`). In every other unit, the default
+`run_check_command` sends it to after releasing its own arenas, so that the
+two calls never hold six 64 GiB reservations at once), whose lowering alone
+tracks each task's token (`BUSTER_CHECK_SOURCE_ROWS`). In every other unit, the default
 command's among them, the tracking and the raw rows fold away at compile
 time, so that a compile without `-g` runs the same code as before this
 feature but for Tier 0's per-function check of `entry_records`, and writes the
