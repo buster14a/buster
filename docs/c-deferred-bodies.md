@@ -24,9 +24,12 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 2. **The file scope's history.** `c_environment_build` (#319's index,
    [the environment guide](c-environments.md)) indexes the top level's
    file-scope declarations by name and activation position.
-3. **The lanes.** `lane_parts_by_cost` cuts the bodies into parts by token
-   count and each lane takes parts with `lane_take`, costliest first. A lane
-   copies the top level's reader once (`check_deferred_lane_prepare`): its
+3. **The lanes.** The reader runs no more lanes than bodies.
+   `lane_parts_by_cost` cuts the bodies into parts by token count and each
+   lane takes parts with `lane_take`, costliest first. A lane copies the top
+   level's reader once, when it takes its first part
+   (`check_deferred_lane_prepare`), so that a lane that takes none copies
+   nothing (#432's review): its
    binding stacks (the top level's events, then room for the largest body),
    the per-name and per-tag arrays the walk writes, the scope stacks and
    reports, the appended tables, and the table (`type_copy`, with room for the
@@ -141,9 +144,18 @@ passes every checker test.
   every body read apart, on 1, 2, 3 and 8 lanes through the stacks, the batch
   and the direct binding resolution. The deferred result must be the vector
   path's column for column, and each fixture says whether the reader merges it.
-  Each fixture that merges runs again on 1 and 8 lanes with its merge failing
+  A merged unit's bodies must run on no more lanes than they are
+  (`CheckDeferred.active`), and its reader be copied by one of them at least and
+  by no more (`CheckDeferred.copies`). Each fixture that merges runs again on 8
+  lanes with the first lane taking every part (`CheckDeferred.hold_lanes`), when
+  no other lane may copy the reader; on 1 and 8 lanes with its merge failing
   right after the replay (`CheckDeferred.fail_after_replay`), which must give
-  source order's result.
+  source order's result; and with the allocation of the reader's state failing
+  (`check_corpus_deferred_fail_state`), which must count as a resource failure
+  (`test-checker-corpus`'s `resources`), not as a result that differs. Then
+  `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
+  ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
+  refused without a write past the room, and so are malformed lists.
   They are: the issue's three (a later declaration, a later completion, an
   enumerator from an initializer); typedefs shadowed and redeclared after a
   body; tags completed, redeclared and shadowed around bodies, and completed
@@ -193,7 +205,8 @@ reports medians in nanoseconds per token: the parse; source order's reading;
 and each deferred reading's whole, its top level, the history's index, the
 bodies' walks and their position checks (summed over the lanes), the lanes'
 span, the merge and the rest (the phases after the merge); the position checks
-per body too. `--cpus` pins the command to the first CPU, where the parse,
+per body too, and the lanes that copied the reader (`copies`). `--cpus` pins the
+command to the first CPU, where the parse,
 source order and the top level run, and its lanes to the list.
 
 On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with

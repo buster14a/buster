@@ -5,7 +5,12 @@
 // written to a file and checked as test-checker-corpus checks one (check_corpus_measure): on the scalar path, the vector
 // path, and the vector path with every body read apart, which must give the vector path's results exactly, column by
 // column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the direct
-// binding resolution, and each fixture says whether the deferred reader must merge it or leave it to source order.
+// binding resolution, and each fixture says whether the deferred reader must merge it or leave it to source order. A
+// merged unit's bodies must run on no more lanes than they are, and its reader be copied by one of them at least and
+// by no more (#432's review). A unit that merges is checked again with its first lane taking every part, when no other
+// lane may copy the reader; with its merge failing after the replay, which must give source order's result; and with
+// the allocation of the deferred reader's state failing, which must count as a resource failure, not as a result that
+// differs. Then benchmark-checker-deferred's --cpus parser.
 //
 //   ./build/compiler test-checker-deferred [--keep]
 //
@@ -95,6 +100,41 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "error-in-a-later-phase", "int f(int* p) { return p + 1.0; }\nint g(void) { return 2; }\n", true },
 };
 
+static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);
+
+// benchmark-checker-deferred's --cpus (#432's review), into room for BUSTER_CHECK_DEFERRED_MAX_LANES CPUs that ends at a
+// PROT_NONE page: each list of 1 to that many is read whole, one of one more is refused, and so is every other invalid
+// list. A write past the room faults.
+static bool check_deferred_test_cpus(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* pages = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = pages != MAP_FAILED && mprotect(pages + page, page, PROT_NONE) == 0;
+    uint32_t* cpus = valid ? (uint32_t*)(pages + page) - BUSTER_CHECK_DEFERRED_MAX_LANES : 0;
+    char text[1024];
+    uint64_t length = 0;
+    for (uint32_t i = 0; valid && i <= BUSTER_CHECK_DEFERRED_MAX_LANES; i += 1)
+    {
+        length += (uint64_t)snprintf(text + length, sizeof(text) - length, "%s%u", i == 0 ? "" : ",", i);
+        const uint32_t count = check_deferred_benchmark_cpus(text, cpus, BUSTER_CHECK_DEFERRED_MAX_LANES);
+        valid = i < BUSTER_CHECK_DEFERRED_MAX_LANES ? count == i + 1 && cpus[0] == 0 && cpus[i] == i : count == 0;
+    }
+    char limit[2][16];
+    snprintf(limit[0], sizeof(limit[0]), "%u", (uint32_t)(BUSTER_LANE_CPU_MASK_WORDS * 64 - 1));
+    snprintf(limit[1], sizeof(limit[1]), "%u", (uint32_t)(BUSTER_LANE_CPU_MASK_WORDS * 64));
+    valid = valid && check_deferred_benchmark_cpus(limit[0], cpus, BUSTER_CHECK_DEFERRED_MAX_LANES) == 1;
+    const char* const invalid[] = { "", ",", "1,", ",1", "1,,2", "a", "1a", "-1", "+1", "1 2", limit[1] };
+    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+    {
+        valid = check_deferred_benchmark_cpus(invalid[i], cpus, BUSTER_CHECK_DEFERRED_MAX_LANES) == 0;
+    }
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, page * 2);
+    }
+    return valid;
+}
+
 // Many bodies, for the lanes' parts: a unit of `count` small functions that call one another.
 static void check_deferred_many(char* text, uint64_t capacity, uint32_t count)
 {
@@ -152,17 +192,42 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 check_corpus_deferred_bindings = modes[m];
                 CheckCorpusOutcome outcome;
                 check_corpus_measure(path, &options, false, true, &outcome);
-                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected;
+                // No more lanes than bodies, and the reader copied by one of them at least and by no more.
+                const uint64_t most = outcome.deferred_bodies < lane_counts[l] ? outcome.deferred_bodies : lane_counts[l];
+                const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) &&
+                                                          outcome.deferred_copies <= most);
+                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied;
                 checks += 1;
                 failures += !passed;
                 merged += outcome.deferred;
                 bodies += outcome.deferred_bodies;
                 if (!passed)
                 {
-                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s\n", name, lane_counts[l], mode_names[m],
+                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
-                            !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "");
+                            !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
+                            copied ? "" : " (its reader copied by too many lanes or by none)");
                 }
+            }
+        }
+        // A unit that merges, with its first lane taking every part: no other lane copies the reader.
+        if (valid && expected)
+        {
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_hold_lanes = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_hold_lanes = false;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred &&
+                                outcome.deferred_copies == (outcome.deferred_bodies != 0);
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on 8 lanes with the first taking every part: %s\n", name,
+                        !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" : "a lane without a part copied the reader");
             }
         }
         // A unit that merges, with its merge failing after the replay into the caller's table: source order's result,
@@ -185,11 +250,39 @@ static int run_checker_deferred_tests(int count, char** arguments)
                         !outcome.equal ? "the scalar and vector paths differ" : "merged");
             }
         }
+        // A unit that merges, with the allocation of the deferred reader's state failing: a resource failure, which
+        // check_corpus_check_policy keeps through the input's result, and not a result that differs.
+        if (valid && expected)
+        {
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_fail_state = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_fail_state = false;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.resource && !outcome.deferred &&
+                                outcome.deferred_reason != NULL && strcmp(outcome.deferred_reason, "the deferred path's state or tables couldn't be allocated") == 0;
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s with the deferred reader's state not allocated: %s\n", name,
+                        !outcome.prepared ? "not preprocessed" : !outcome.resource ? "not a resource failure" : !outcome.deferred_equal ? "reported as a difference" :
+                        !outcome.equal ? "the scalar and vector paths differ" : "merged, or another reason");
+            }
+        }
         check_corpus_deferred_lanes = 0;
         if (!keep)
         {
             unlink(path);
         }
+    }
+    const bool cpus = check_deferred_test_cpus();
+    checks += 1;
+    failures += !cpus;
+    if (!cpus)
+    {
+        fprintf(stderr, "test-checker-deferred: benchmark-checker-deferred's --cpus parser read a list wrong\n");
     }
     if (!keep && valid)
     {

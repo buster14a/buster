@@ -3926,8 +3926,12 @@ source order, with the reason. The driver still checks in source order.
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
-left to source order as each fixture says, and each that merges must give
-source order's result again with its merge failing after the replay. `test-checker-corpus --deferred N
+left to source order as each fixture says, on no more lanes than bodies, its
+reader copied only by lanes that take a part. Each that merges must give source
+order's result again with its merge failing after the replay, and count as a
+resource failure with its state's allocation failing; and the benchmark's
+`--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+`test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison and tallies the units left to source order by reason.
 `./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus

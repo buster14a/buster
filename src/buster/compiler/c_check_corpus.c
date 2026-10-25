@@ -619,11 +619,15 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
     path->resource |= !ready;
 }
 
-// --deferred's lanes (0 for none) and binding resolution: the third path of check_corpus_measure. With
-// check_corpus_deferred_fail_merge (test-checker-deferred's), the deferred reader's merge fails after its replay.
+// --deferred's lanes (0 for none) and binding resolution: the third path of check_corpus_measure. For
+// test-checker-deferred: with check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay;
+// with check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; and
+// with check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes).
 static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_fail_merge;
+static bool check_corpus_deferred_fail_state;
+static bool check_corpus_deferred_hold_lanes;
 
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
@@ -685,10 +689,11 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             if (path->parsed && path->deferred_lanes != 0)
             {
                 path->deferred_arena = arena_reserve(UINT64_C(1) << 24);
-                path->deferred = BUSTER_ARENA_PUSH_ARRAY(&path->deferred_arena, CheckDeferred, 1);
+                path->deferred = check_corpus_deferred_fail_state ? NULL : BUSTER_ARENA_PUSH_ARRAY(&path->deferred_arena, CheckDeferred, 1);
                 if (path->deferred != NULL)
                 {
                     path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
+                    path->deferred->hold_lanes = check_corpus_deferred_hold_lanes;
                 }
                 path->adapted = path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
                                                                                 &path->scratch, path->deferred_lanes, path->deferred_bindings);
@@ -699,7 +704,8 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                 path->adapted = path->parsed ? check_input(&path->input, view, pp, &path->types, &path->input_arena, &path->scratch) :
                                               check_input_prefix(&path->input, view, pp, &path->types, &path->input_arena, &path->scratch);
             }
-            path->resource = path->input.resource;
+            // Or'd: until the input, only the deferred reader's state, if it couldn't be allocated, sets it.
+            path->resource |= path->input.resource;
             for (uint32_t report = 0; report < path->input.report_count; report += 1)
             {
                 if (path->input.reports[report].token < path->token)
@@ -1655,11 +1661,13 @@ struct CheckCorpusOutcome
     uint64_t vector_nodes;
     uint64_t binding_uses;
     uint64_t binding_fallback_uses;
-    // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, and whether it
-    // gave the vector path's result exactly.
+    // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, the lanes they ran
+    // on and those that copied its reader, and whether it gave the vector path's result exactly.
     bool deferred;
     bool deferred_equal;
     uint64_t deferred_bodies;
+    uint32_t deferred_active;
+    uint64_t deferred_copies;
     // Why a parsed unit was left to source order, for the report.
     const char* deferred_reason;
     const char* phase;
@@ -1693,7 +1701,10 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->prepared = prepared;
     outcome->parsed = paths[0].parsed;
     outcome->equal = prepared && (!both || check_corpus_equal(paths, paths + 1, parsers, parsers + 1));
-    outcome->deferred_equal = count < 3 || (accepted[2] == accepted[1] && check_corpus_equal(paths + 1, paths + 2, parsers + 1, parsers + 2));
+    // The deferred path running out of room (its state's allocation among it) is a resource failure, not a result that
+    // differs from the vector path's.
+    const bool deferred_resource = count == 3 && paths[2].resource;
+    outcome->deferred_equal = count < 3 || deferred_resource || (accepted[2] == accepted[1] && check_corpus_equal(paths + 1, paths + 2, parsers + 1, parsers + 2));
     if (!outcome->deferred_equal)
     {
         char difference[512];
@@ -1703,10 +1714,13 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred = count == 3 && paths[2].deferred != NULL && !paths[2].deferred->unsupported;
     // A unit that doesn't parse has nothing to read apart; it counts as source order's too.
     outcome->deferred_reason = count < 3 || !prepared || outcome->deferred ? NULL : !paths[2].parsed ? check_corpus_unparsed :
-                               paths[2].deferred != NULL && paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown";
+                               paths[2].deferred == NULL ? "the deferred path's state or tables couldn't be allocated" :
+                               paths[2].deferred->reason != NULL ? paths[2].deferred->reason : "unknown";
     outcome->deferred_bodies = outcome->deferred ? paths[2].deferred->bodies : 0;
+    outcome->deferred_active = outcome->deferred ? paths[2].deferred->active : 0;
+    outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
     outcome->equal &= outcome->deferred_equal;
-    outcome->resource = paths[0].resource || paths[1].resource;
+    outcome->resource = paths[0].resource || paths[1].resource || deferred_resource;
     outcome->accepted[1] = both ? outcome->accepted[1] : outcome->accepted[0];
     outcome->lines[0] = paths[0].line;
     outcome->lines[1] = both ? paths[1].line : paths[0].line;

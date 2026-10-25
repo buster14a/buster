@@ -13,8 +13,9 @@
 // deferred one's whole, its top level's walk, the file scope's history (the environment's index), the bodies' walks
 // (summed over the lanes) and their position checks (each body's heads from the history and its table's view, set and
 // taken back), the lanes' span, the merge and the rest (the reader's phases after the merge, as after source order's
-// walk); the position checks per body too. A unit the deferred reader leaves to source order is said so. This measures
-// the reader (check_input) alone, not the graph's checking after it.
+// walk); the position checks per body too, and how many lanes copied the reader (those that took a part, no more than
+// the bodies). A unit the deferred reader leaves to source order is said so. This measures the reader (check_input)
+// alone, not the graph's checking after it.
 //
 // With --cpus (a comma-separated list of at least --lanes CPUs), the command pins itself to the first, where the parse,
 // source order and the top level run, and its lanes to the list in order, in a team of its own that every run reuses.
@@ -32,6 +33,7 @@ struct CheckDeferredSample
     uint64_t lanes[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t merge[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t rest[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint64_t copies[BUSTER_CHECK_SOURCE_MAX_PASSES];
 };
 
 // One check of the parsed unit: source order's (lanes 0) or the deferred reader's, into `arenas` (types, its index,
@@ -130,6 +132,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                 sample->merge[pass] = deferred.merge_ns;
                 const uint64_t phases = deferred.top_ns + deferred.environment_ns + deferred.lanes_ns + deferred.merge_ns;
                 sample->rest[pass] = time > phases ? time - phases : 0;
+                sample->copies[pass] = deferred.copies;
                 merged &= !deferred.unsupported;
                 reason = deferred.unsupported ? deferred.reason : reason;
                 bodies = deferred.bodies;
@@ -150,8 +153,9 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
         for (uint32_t way = 0; way < 2; way += 1)
         {
             const CheckDeferredSample* sample = samples + way;
-            printf("checker-deferred:   lanes=%u whole=%.2f top=%.2f environment=%.3f walks=%.2f positions=%.3f lanes_span=%.2f merge=%.2f rest=%.2f"
-                   " ns/token, positions=%.1f ns/body\n", way == 0 ? 1 : lanes, (double)check_source_median(sample->whole, count) / tokens,
+            printf("checker-deferred:   lanes=%u copies=%" PRIu64 " whole=%.2f top=%.2f environment=%.3f walks=%.2f positions=%.3f lanes_span=%.2f merge=%.2f"
+                   " rest=%.2f ns/token, positions=%.1f ns/body\n", way == 0 ? 1 : lanes, check_source_median(sample->copies, count),
+                   (double)check_source_median(sample->whole, count) / tokens,
                    (double)check_source_median(sample->top, count) / tokens, (double)check_source_median(sample->environment, count) / tokens,
                    (double)check_source_median(sample->walks, count) / tokens, (double)check_source_median(sample->positions, count) / tokens,
                    (double)check_source_median(sample->lanes, count) / tokens, (double)check_source_median(sample->merge, count) / tokens,
@@ -174,7 +178,8 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     return valid;
 }
 
-// Parses a comma-separated list of CPUs into `cpus`, at most `capacity` of them: how many, or 0 if it is invalid.
+// Parses a comma-separated list of CPUs into `cpus`, at most `capacity` of them: how many, or 0 if it is invalid. A
+// list of more than `capacity` writes none past them (test-checker-deferred's check of 65 at a guard page).
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity)
 {
     uint32_t count = 0;
@@ -185,9 +190,12 @@ static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, 
         char* end = 0;
         const unsigned long cpu = strtoul(p, &end, 10);
         valid = *p >= '0' && *p <= '9' && end != p && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64 && count < capacity;
-        cpus[count] = valid ? (uint32_t)cpu : 0;
-        count += valid ? 1 : 0;
-        p = valid ? end : p;
+        if (valid)
+        {
+            cpus[count] = (uint32_t)cpu;
+            count += 1;
+            p = end;
+        }
         valid = valid && (*p == 0 || (*p == ',' && p[1] != 0));
         p += valid && *p == ',';
     }
