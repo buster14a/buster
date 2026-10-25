@@ -369,6 +369,10 @@ int run_backend_benchmark(int argc, char** argv);
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
 // integration tests after those consumers so one checked unit can retain both executable bodies and static data.
 #include "buster/compiler/c_check_program.c"
+// #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), with the names
+// the checked source makes, for the checker's selection tests, test-checker-corpus --symbols and test-c-testsuite
+// --cross-check.
+#include "buster/compiler/c_lowering_symbols.c"
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
@@ -395,8 +399,12 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
+// #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
+#include "buster/compiler/c_lowering_source_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
+#include "buster/compiler/c_lowering_source_benchmark_test.c"
+#include "buster/compiler/c_check_corpus_symbols_test.c"
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
@@ -981,6 +989,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
     {
         result = run_checker_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
+    {
+        result = run_lowering_source_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {

@@ -3,8 +3,8 @@
 //
 // The c-testsuite harness (#145), for the test-c-testsuite command:
 //
-//   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--cross-check]
-//                                   [--keep] DIR
+//   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH]
+//                                   [--cross-check] [--keep] DIR
 //   build/compiler test-c-testsuite --self-test
 //
 // DIR is a checkout of c-testsuite (https://github.com/c-testsuite/c-testsuite) or its tests/single-exec directory. Each
@@ -18,10 +18,11 @@
 // names a feature it doesn't support yet ("unsupported: ...") is unsupported, with that feature, when both paths exit as
 // the compiler does for a unit with errors (status 1). Anything else fails: another compile error, a crash or a timeout
 // of the compiler (even after it named a feature) or of the program, a wrong status or output, the two paths
-// disagreeing. With --cross-check (which needs readelf and cc), each test is also compiled with -c, its object listed by
-// readelf, linked by cc with -lm and run, and that program must give the expected output too, whatever the direct path
-// did: wrong code in a test the direct path can't link still fails. -c may refuse a test as unsupported, exiting as a
-// refusal does, only where the direct path refused it too.
+// disagreeing. With --cross-check (which needs readelf, cc and clang), each test is also compiled with -c, its object
+// listed by readelf, linked by cc with -lm and run, and that program must give the expected output too, whatever the
+// direct path did: wrong code in a test the direct path can't link still fails. -c may refuse a test as unsupported,
+// exiting as a refusal does, only where the direct path refused it too. Then the object must define the functions and
+// objects that clang -O0 -c's (--clang's) defines, no more and no fewer (#129's selection, c_lowering_symbols.c).
 //
 // --self-test checks the harness itself, on tests of its own and a stand-in compiler (c_testsuite_self_test).
 //
@@ -94,6 +95,8 @@ struct CTestsuite
     char tests[PATH_MAX];
     char work[PATH_MAX];
     char compiler[PATH_MAX];
+    // --cross-check's oracle of the definitions -c emits.
+    char clang[PATH_MAX];
     char (*names)[BUSTER_C_TESTSUITE_NAME_BYTES];
     uint32_t count;
     // A program's time limit and a compile's, in seconds.
@@ -330,9 +333,54 @@ static bool c_testsuite_ran(const CTestsuite* suite, const char* program, const 
     return passed;
 }
 
-// --cross-check's half of a test: its object from -c, listed by readelf, linked by cc and run. Whether it gave the
-// expected output; if not, why, in `detail`. -c may refuse a test as unsupported only where the direct path did too:
-// when that compiled it (`required`), -c must compile it as well.
+// Whether the object at `object` defines the functions and objects that clang -O0 -c's object of `source` does; if not,
+// why, in `detail`: the first difference.
+static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, const char* directory, const char* object, char* detail, uint64_t capacity)
+{
+    char oracle[PATH_MAX];
+    char log[PATH_MAX];
+    snprintf(oracle, sizeof(oracle), "%s/object-clang.o", directory);
+    snprintf(log, sizeof(log), "%s/object-clang.txt", directory);
+    char* const compile[] = { (char*)suite->clang, "-O0", "-c", "-w", (char*)source, "-o", oracle, 0 };
+    bool timed_out = false;
+    const int status = c_testsuite_run(compile, directory, log, suite->compile_timeout, &timed_out);
+    bool valid = c_testsuite_compiled(status, timed_out, log, "cross-check: clang -O0 -c", detail, capacity);
+    Arena arena = valid ? arena_reserve(UINT64_C(1) << 32) : (Arena){ 0 };
+    LoweringSymbols ours = { 0 };
+    LoweringSymbols theirs = { 0 };
+    if (valid)
+    {
+        // Without the source's names every name compares whole: no program of the subset makes a local name twice.
+        valid = arena.base != 0 && lowering_symbols_read_file(&ours, object, NULL, &arena) && lowering_symbols_read_file(&theirs, oracle, NULL, &arena);
+        if (!valid)
+        {
+            snprintf(detail, capacity, "cross-check: an object for the symbols' comparison can't be read (error %u)",
+                     ours.import.error != IMPORT_ERROR_NONE ? ours.import.error : theirs.import.error);
+        }
+    }
+    if (valid)
+    {
+        char report[192];
+        const uint32_t differences = lowering_symbols_compare(&ours, "-c", &theirs, "clang -O0 -c", NULL, 0, report, sizeof(report));
+        char* line_end = strchr(report, '\n');
+        if (line_end != 0)
+        {
+            *line_end = 0;
+        }
+        valid = differences == 0;
+        if (!valid)
+        {
+            snprintf(detail, capacity, "cross-check: the object's symbols aren't clang -O0 -c's: %s, %u in all", report, differences);
+        }
+    }
+    arena_release(&arena);
+    return valid;
+}
+
+// --cross-check's half of a test: its object from -c, listed by readelf, linked by cc and run, and its symbols compared
+// with clang -O0 -c's. Whether it gave the expected output and the same symbols; if not, why, in `detail`. -c may refuse
+// a test as unsupported only where the direct path did too: when that compiled it (`required`), -c must compile it as
+// well.
 static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source, const char* directory, const char* expected, bool required,
                                     char* detail, uint64_t capacity)
 {
@@ -380,6 +428,10 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     if (valid)
     {
         valid = c_testsuite_ran(suite, program, directory, output, expected, "cross-check: cc's program", detail, capacity);
+    }
+    if (valid)
+    {
+        valid = c_testsuite_symbols(suite, source, directory, object, detail, capacity);
     }
     return valid || (unsupported && !required);
 }
@@ -709,7 +761,8 @@ static bool c_testsuite_report(const CTestsuite* suite, bool subset)
 // The self-test's stand-in for the compiler, a shell script: it "compiles" a test into a script, after checking that the
 // source it was given exists from the test's directory, where it runs. 00001's program prints its expected line, 00002
 // is unsupported, and 00003's program doesn't end. With C_TESTSUITE_REFUSE_OBJECTS set, -c refuses every test as
-// unsupported, and set to `kill`, it is then killed by a signal. With C_TESTSUITE_ABNORMAL set, every compile refuses
+// unsupported, and set to `kill`, it is then killed by a signal. With C_TESTSUITE_EXTRA_SYMBOL set, -c of 00001 writes a
+// real object (cc's) of a program that prints the expected line, with a function more than 00001 has. With C_TESTSUITE_ABNORMAL set, every compile refuses
 // its test, naming a feature, and then ends otherwise than a refusal does but in 00001's vector path: 00001's scalar path
 // and both of 00002's are killed by a signal, and both of 00003's sleep past the compile's time limit.
 static const char c_testsuite_stand_in[] =
@@ -728,6 +781,9 @@ static const char c_testsuite_stand_in[] =
     "    esac\n"
     "fi\n"
     "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_REFUSE_OBJECTS\" ]; then refuse 'a stand-in object' \"$C_TESTSUITE_REFUSE_OBJECTS\"; fi\n"
+    "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_EXTRA_SYMBOL\" ]; then case \"$source\" in *00001.c)\n"
+    "    printf '#include <stdio.h>\\nint extra_symbol(void) { return 1; }\\nint main(void) { puts(\"passed\"); return 0; }\\n' > \"$output.c\"\n"
+    "    exec cc -c \"$output.c\" -o \"$output\";; esac; fi\n"
     "case \"$source\" in *00002.c) refuse 'a stand-in feature';; esac\n"
     "case \"$source\" in *00003.c) body='exec sleep 30';; *) body='echo passed';; esac\n"
     "printf '#!/bin/sh\\n%s\\n' \"$body\" > \"$output\" && chmod +x \"$output\"\n";
@@ -771,11 +827,12 @@ static bool c_testsuite_expect(const CTestsuite* suite, const char* scenario, co
     return same;
 }
 
-// The harness on three tests of its own, with the stand-in compiler, in five scenarios: from a DIR and a $TMPDIR relative
+// The harness on three tests of its own, with the stand-in compiler, in six scenarios: from a DIR and a $TMPDIR relative
 // to the current directory; waiting without a pidfd, by polling; with --cross-check where -c refuses what the direct
 // path compiles, which must fail; with refusals that name their feature but are then killed by a signal or for their
-// time, in one path or both, which must fail, not be unsupported (#377's review); and with --cross-check where -c's
-// refusals are killed, which must fail whether or not the direct path compiled the test. 00003's program, and in the
+// time, in one path or both, which must fail, not be unsupported (#377's review); with --cross-check where -c's
+// refusals are killed, which must fail whether or not the direct path compiled the test; and with --cross-check where
+// -c's object defines a function that clang -O0 -c's doesn't, which must fail though its program passes. 00003's program, and in the
 // fourth scenario its compiles, must be killed at their one-second timeouts, long before they would end.
 static int c_testsuite_self_test(CTestsuite* suite)
 {
@@ -788,7 +845,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
         { "checkout/tests/single-exec/00003.c", "int main(void) { for (;;) { } }\n" },
         { "checkout/tests/single-exec/00003.c.expected", "" },
     };
-    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check", "killed refusals", "killed -c refusals" };
+    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check", "killed refusals", "killed -c refusals", "symbols" };
     static const CTestsuiteExpectation expectations[][3] = {
         {
             { C_TESTSUITE_PASSED, "" },
@@ -813,6 +870,11 @@ static int c_testsuite_self_test(CTestsuite* suite)
         {
             { C_TESTSUITE_FAILED, "-c: killed by signal 9" },
             { C_TESTSUITE_FAILED, "-c: killed by signal 9" },
+            { C_TESTSUITE_FAILED, "the program: timed out" },
+        },
+        {
+            { C_TESTSUITE_FAILED, "cross-check: the object's symbols aren't clang -O0 -c's: -c only: FUNC GLOBAL extra_symbol, 1 in all" },
+            { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
             { C_TESTSUITE_FAILED, "the program: timed out" },
         },
     };
@@ -847,17 +909,19 @@ static int c_testsuite_self_test(CTestsuite* suite)
     {
         const bool relative = scenario == 0;
         c_testsuite_without_pidfd = scenario == 1;
-        suite->cross_check = scenario == 2 || scenario == 4;
+        suite->cross_check = scenario == 2 || scenario == 4 || scenario == 5;
         snprintf(path, sizeof(path), "%s/checkout", base);
         valid = !relative || (chdir(base) == 0 && setenv("TMPDIR", "work", 1) == 0);
         valid = valid && (scenario != 2 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "1", 1) == 0);
         valid = valid && (scenario != 3 || setenv("C_TESTSUITE_ABNORMAL", "1", 1) == 0);
         valid = valid && (scenario != 4 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "kill", 1) == 0);
+        valid = valid && (scenario != 5 || setenv("C_TESTSUITE_EXTRA_SYMBOL", "1", 1) == 0);
         const uint64_t start = c_testsuite_now();
         const bool ran = valid && c_testsuite_execute(suite, relative ? "checkout" : path, 0, 3);
         const uint64_t elapsed = c_testsuite_now() - start;
         unsetenv("C_TESTSUITE_REFUSE_OBJECTS");
         unsetenv("C_TESTSUITE_ABNORMAL");
+        unsetenv("C_TESTSUITE_EXTRA_SYMBOL");
         valid = (saved != 0 ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0) && chdir(original) == 0;
         const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], expectations[scenario]) && elapsed < UINT64_C(20) * 1000000000;
         if (ran)
@@ -903,6 +967,7 @@ static int run_c_testsuite_tests(int argc, char** argv)
     bool valid = true;
     suite.timeout = 10;
     suite.compile_timeout = BUSTER_C_TESTSUITE_COMPILE_SECONDS;
+    snprintf(suite.clang, sizeof(suite.clang), "clang");
     for (int i = 0; valid && i < argc; i += 1)
     {
         char* end = 0;
@@ -924,6 +989,11 @@ static int run_c_testsuite_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--compiler") == 0 && i + 1 < argc)
         {
             compiler = argv[++i];
+        }
+        else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
+        {
+            const int length = snprintf(suite.clang, sizeof(suite.clang), "%s", argv[++i]);
+            valid = length > 0 && length < (int)sizeof(suite.clang);
         }
         else if (strcmp(argv[i], "--cross-check") == 0)
         {
@@ -949,8 +1019,8 @@ static int run_c_testsuite_tests(int argc, char** argv)
     int result = 1;
     if (!valid || (self_test ? root != 0 : root == 0))
     {
-        fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--cross-check] "
-                        "[--keep] DIR\n       compiler test-c-testsuite --self-test\n");
+        fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] "
+                        "[--cross-check] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
     }
     else
     {
