@@ -360,9 +360,17 @@ designs and the compilers already built this way.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
-  It compiles the translation units at once, a clang process each, and links
-  them in order: the same executable as one clang command for all of them.
-  It reports how long the compiles took, and the three that took longest.
+  It compiles the translation units in a clang process each, one per core of
+  the CPUs it may run on at a time (`cores`), the longest first (`order`, by
+  their times on the 9700X: a new source goes where its time puts it, and the
+  build stops at a source that `order` doesn't name), and links them in the
+  sources' order: the same executable as one clang command for all of them.
+  Two compiles on one core's threads slow each other down, the longest among
+  them: on the 9700X before the homes (`main.c`), its 15 threads compiling at
+  once took 40.0 s and 331 s of CPU, and its 8 cores one compile each 32.3 s
+  and 233 s; with the homes, one compile per core takes 25.3 s and 200 s, the
+  cores' work rather than the longest unit's. It reports how long the
+  compiles took, and the three that took longest.
   `BUSTER_DEBUG_INFO=0` builds without `-g`, which took a fifth of the build's
   time; the 9700X job builds so, since nothing there reads it (clang's code
   then differs in a few functions' stack slots). The checker's unit takes

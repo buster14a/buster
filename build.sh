@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ./build.sh builds build/compiler, the only thing it writes under build/ besides compile_commands.json. It compiles the
-# translation units at once, each in a clang process of its own (main.c, which includes most of the compiler, takes
-# most of the time, and the others compile beside it), then links their objects in the sources' order: the same
-# executable as one clang command for all of them. It reports how long the compiles took, and which took longest.
+# translation units in a clang process each, one per core at a time, the longest first (main.c's units, which include
+# most of the compiler, take most of the time), then links their objects in the sources' order: the same executable as
+# one clang command for all of them. It reports how long the compiles took, and which took longest.
 # ./build.sh check-call-graph checks the no-recursion rule on the built compiler's call graph: it writes the LLVM IR of
 # the same translation units into a temporary directory, at once too, and runs build/compiler check-call-graph on it.
 # The IR is clang's before any LLVM pass, so a call in it is a call in the source, at the build's own optimization
@@ -27,6 +27,54 @@ case "${BUSTER_DEBUG_INFO-1}" in
     *) echo "build.sh: BUSTER_DEBUG_INFO must be 0 or 1" >&2; exit 1 ;;
 esac
 sources+=(src/buster/compiler/main_unit_fragments.c)
+# The order the compiles start in, each source's file name once, the longest first by their times on the 9700X (#270):
+# the build runs at most one compile per core (cores, below), so a long one that started late would make it wait for
+# it. A new source goes where its time puts it.
+order=(main_unit_checker.c main_unit_backend.c main_unit_frontend.c main_unit_executable.c main_unit_dynamic.c
+    main_unit_link.c c_parser_benchmark.c main.c main_unit_x86.c main_unit_types.c main_unit_check_builtins.c
+    c_files_benchmark.c c_preprocessor_benchmark.c main_unit_fragments.c link_benchmark.c executable_benchmark.c
+    main_unit_assembler.c foreign_benchmark.c tier0_benchmark.c snapshot_benchmark.c x86_64_encoder_benchmark.c
+    bind_benchmark.c c_refine_benchmark.c c_checker_benchmark.c import_benchmark.c tier1_select_benchmark.c
+    c_lexer_benchmark.c branch_sizing_benchmark.c object_writer_benchmark.c x86_64_disassembler_benchmark.c
+    calling_convention_benchmark.c tier1_schedule_benchmark.c x86_semantics_benchmark.c tier1_model_measure.c
+    c_types_benchmark.c dominators_benchmark.c tier1_frame_benchmark.c tier1_allocate_benchmark.c lane_benchmark.c
+    floors_benchmark.c dataflow_benchmark.c c_builtin_benchmark.c)
+# The sources' indices in `order`'s order, into `indices`. Fails, naming it, for a file that `order` names twice or that
+# isn't a source, and for a source that it doesn't name.
+compile_order()
+{
+    local -A index=()
+    local name
+    indices=()
+    for i in "${!sources[@]}"; do
+        index["$(basename "${sources[$i]}")"]="$i"
+    done
+    for name in "${order[@]}"; do
+        [ -n "${index[$name]-}" ] || { echo "build.sh: order names $name, which isn't a source or is named twice" >&2; return 1; }
+        indices+=("${index[$name]}")
+        unset "index[$name]"
+    done
+    [ "${#index[@]}" -eq 0 ] || { echo "build.sh: order doesn't name ${!index[*]}" >&2; return 1; }
+}
+compile_order
+# The number of cores of the CPUs this process may run on, by their core_cpus_list, or 0 if /sys doesn't say: the
+# build runs at most one compile per core, since two clang processes on a core's two threads slow each other down, the
+# longest among them. On the 9700X before main.c's homes, its 15 threads compiling at once took 40.0 s and 331 s of CPU,
+# and its 8 cores one compile each, the longest first, 32.3 s and 233 s; with them, 25.3 s and 200 s (#270).
+cores()
+{
+    local range cpu
+    local -A seen=()
+    local IFS=,
+    for range in $(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status); do
+        for ((cpu = ${range%-*}; cpu <= ${range#*-}; cpu += 1)); do
+            if [ -r "/sys/devices/system/cpu/cpu$cpu/topology/core_cpus_list" ]; then
+                seen["$(< "/sys/devices/system/cpu/cpu$cpu/topology/core_cpus_list")"]=1
+            fi
+        done
+    done
+    echo "${#seen[@]}"
+}
 capture()
 {
     clang -S -emit-llvm "$optimization" -Xclang -disable-llvm-passes "${flags[@]}" "$1" -o "$2"
@@ -54,19 +102,32 @@ timed()
     echo "$((end - start))" > "$1"
     return "$status"
 }
-# Runs "$2 INDEX" for each source's index at once, each in a process of its own whose standard error goes to the
-# directory $1, with the microseconds it took, then prints what each wrote there in the sources' order. Fails if any of
-# them failed.
+# Runs "$2 INDEX" for each source's index, in `indices`' order and at most $3 at once, each in a process of its own whose
+# standard error goes to the directory $1, with the microseconds it took, then prints what each wrote there in the
+# sources' order. Fails if any of them failed.
 each_source()
 {
-    local failed=0
+    local failed=0 running=0 finished status
+    local -A statuses=()
     pids=()
-    for i in "${!sources[@]}"; do
+    for i in "${indices[@]}"; do
+        if [ "$running" -ge "$3" ]; then
+            status=0
+            wait -n -p finished || status=$?
+            statuses["$finished"]="$status"
+            running=$((running - 1))
+        fi
         timed "$1/$i.time" "$2" "$i" 2> "$1/$i.log" &
-        pids+=("$!")
+        pids[$i]="$!"
+        running=$((running + 1))
     done
     for i in "${!sources[@]}"; do
-        wait "${pids[$i]}" || failed=1
+        status="${statuses[${pids[$i]}]-}"
+        if [ -z "$status" ]; then
+            status=0
+            wait "${pids[$i]}" || status=$?
+        fi
+        [ "$status" -eq 0 ] || failed=1
         cat "$1/$i.log" >&2
     done
     pids=()
@@ -104,9 +165,10 @@ build_compiler()
 {
     object_directory="$(mktemp -d)"
     temporary+=("$object_directory")
-    local start end
+    local start end jobs
+    jobs="$(cores)"
     now start
-    each_source "$object_directory" compile_source
+    each_source "$object_directory" compile_source "$((jobs != 0 ? jobs : ${#sources[@]}))"
     now end
     report_times "$object_directory" "$((end - start))"
     local linked=()
@@ -151,7 +213,7 @@ if [ "$1" = check-call-graph ]; then
         exit 1
     fi
     mkdir "$ir/logs"
-    each_source "$ir/logs" capture_source
+    each_source "$ir/logs" capture_source "${#sources[@]}"
     names=()
     for source in "${sources[@]}"; do
         names+=("$(basename "${source%.c}").ll")
