@@ -202,6 +202,8 @@ struct AsmParser
     uint32_t instruction_capacity;
     uint32_t symbol_count;
     uint32_t fragment_count;
+    uint32_t* fragment_order;
+    uint32_t* fragment_begin;
     uint32_t instruction_count;
     uint32_t numeric[10];
     AsmSection* sections;
@@ -2482,32 +2484,10 @@ static void asm_fragment_offsets(AsmParser* parser, const uint32_t* order, const
 
 static void asm_layout(AsmParser* parser)
 {
-    bool changed = !asm_layout_records(parser);
-    const uint64_t saved = parser->arena->length;
-    uint32_t* order = changed ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->fragment_count + 1) : 0;
-    uint32_t* begin = changed ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->section_count + 1) : 0;
-    uint32_t* cursors = changed ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->section_count) : 0;
-    if (changed && (order == 0 || begin == 0 || cursors == 0))
-    {
-        asm_fail(parser, 0, "arena exhausted partitioning layout fragments");
-    }
-    if (changed && parser->result.error == 0)
-    {
-        memset(begin, 0, (parser->section_count + 1) * sizeof(uint32_t));
-        for (uint32_t i = 0; i < parser->fragment_count; i += 1)
-        {
-            begin[parser->fragments[i].section + 1] += 1;
-        }
-        for (uint32_t s = 0; s < parser->section_count; s += 1)
-        {
-            begin[s + 1] += begin[s];
-        }
-        memcpy(cursors, begin, parser->section_count * sizeof(uint32_t));
-        for (uint32_t i = 0; i < parser->fragment_count; i += 1)
-        {
-            order[cursors[parser->fragments[i].section]++] = i;
-        }
-    }
+    asm_partition_fragments(parser);
+    bool changed = parser->result.error == 0 && !asm_layout_records(parser);
+    const uint32_t* order = parser->fragment_order;
+    const uint32_t* begin = parser->fragment_begin;
     while (changed && parser->result.error == 0)
     {
         changed = false;
@@ -2533,7 +2513,6 @@ static void asm_layout(AsmParser* parser)
             }
         }
     }
-    parser->arena->length = saved;
     for (uint32_t i = 0; i < parser->instruction_count && parser->result.error == 0; i += 1)
     {
         AsmInstruction* instruction = &parser->instructions[i];
@@ -2783,13 +2762,11 @@ static void asm_emit(AsmParser* parser)
         {
             continue;
         }
-        for (uint32_t f = 0; f < parser->fragment_count && parser->result.error == 0; f += 1)
+        const uint32_t end = parser->fragment_begin[section + 1];
+        for (uint32_t position = parser->fragment_begin[section]; position < end && parser->result.error == 0; position += 1)
         {
+            const uint32_t f = parser->fragment_order[position];
             AsmFragment* fragment = &parser->fragments[f];
-            if (fragment->section != section)
-            {
-                continue;
-            }
             uint8_t* bytes = link->atoms.bytes[atom];
             if (fragment->kind == ASM_VALUE)
             {
@@ -2801,17 +2778,18 @@ static void asm_emit(AsmParser* parser)
                 uint32_t fragments[256];
                 uint32_t count = 0;
                 uint32_t size = 0;
-                uint32_t next = f;
-                while (next < parser->fragment_count && count < 256)
+                uint32_t next = position;
+                while (next < end && count < 256)
                 {
-                    AsmFragment* item = &parser->fragments[next];
-                    if (item->section != section || (item->kind != ASM_INSTRUCTION && item->kind != ASM_LABEL))
+                    const uint32_t id = parser->fragment_order[next];
+                    AsmFragment* item = &parser->fragments[id];
+                    if (item->kind != ASM_INSTRUCTION && item->kind != ASM_LABEL)
                     {
                         break;
                     }
                     if (item->kind == ASM_INSTRUCTION)
                     {
-                        fragments[count] = next;
+                        fragments[count] = id;
                         records[count++] = parser->instructions[item->instruction].record;
                         size += item->size;
                     }
@@ -2830,7 +2808,7 @@ static void asm_emit(AsmParser* parser)
                         asm_instruction_fixups(parser, atom, &parser->instructions[parser->fragments[fragments[j]].instruction]);
                     }
                 }
-                f = next - 1;
+                position = next - 1;
             }
             else if (fragment->kind == ASM_BYTES)
             {

@@ -462,11 +462,13 @@ static void asm_cfi_emit(AsmParser* parser)
         {
             const uint32_t previous = parser->section;
             parser->section = BUSTER_LINK_CLASS_EH_FRAME;
-            AsmFragment* fragment = &parser->fragments[asm_fragment(parser, ASM_BYTES, 0)];
+            const uint32_t id = asm_fragment(parser, ASM_BYTES, 0);
+            AsmFragment* fragment = &parser->fragments[id];
             fragment->bytes = bytes;
             fragment->size = writer.size;
             parser->sections[parser->section].size = writer.size;
             parser->sections[parser->section].alignment = 3;
+            asm_partition_append(parser, id);
             parser->section = previous;
         }
         scratch_end(scratch);

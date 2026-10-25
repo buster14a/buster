@@ -207,6 +207,12 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
         ".text\nsigned_cfi: .cfi_startproc\n.cfi_def_cfa 7,-16\n"
         ".cfi_offset 6,16\n.cfi_val_offset 12,-24\nnop\n.cfi_def_cfa_offset -24\n"
         "ret\n.cfi_endproc\n",
+        ".text\ninterleaved_frame: .cfi_startproc\npushq %rbp\n.cfi_def_cfa_offset 16\n"
+        ".section .data.interleaved,\"aw\",@progbits\npointer: .quad .Lfinish\n.text\n"
+        "movq %rsp,%rbp\n.cfi_def_cfa_register 6\n"
+        ".section .rodata.interleaved,\"a\",@progbits\nvalue: .long 7\n.text\n"
+        "movl $1,%eax\njmp .Lfinish\n.zero 140\n.p2align 4\n.Lfinish:\n"
+        "popq %rbp\n.cfi_def_cfa 7,8\nret\n.cfi_endproc\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
     {

@@ -219,6 +219,12 @@ emitting bytes, then compacts temporary locals only after seeing every fixup.
 `assembler_cfi.c` retains ordered directives as events attached to fragment IDs.
 `asm_cfi_emit` consumes final fragment positions after monotone branch relaxation,
 deduplicates identical initial CIE programs and emits FDEs in procedure order.
+Layout and emission share stable per-section fragment ranges. The single
+post-layout CFI fragment is inserted into their reserved extra slot, preserving
+all source fragment identities and each section's order. Emission visits only
+that section's range; adding function sections does not multiply full-stream
+rescans. Instruction encoding may batch across intervening declarations of
+other sections because their final bytes are contiguous in the code section.
 Empty CFI emits no atom; malformed state, capacities and representability limits
 produce diagnostics and restore the assembly arena. The native code generator's
 fixed-frame CFI producer remains separate.

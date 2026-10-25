@@ -251,3 +251,52 @@ static void asm_object_options(AsmParser* parser)
         };
     }
 }
+
+// Stable section ranges are shared by layout and emission. Reserve one extra order entry for post-layout CFI.
+// Fragment identities remain source identities; grouping never changes the order within a section.
+static void asm_partition_fragments(AsmParser* parser)
+{
+    parser->fragment_order = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->fragment_count + 1);
+    parser->fragment_begin = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->section_count + 1);
+    Scratch scratch = scratch_begin(parser->arena);
+    uint32_t* cursors = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, parser->section_count);
+    if (parser->fragment_order == 0 || parser->fragment_begin == 0 || cursors == 0)
+    {
+        asm_fail(parser, 0, "arena exhausted partitioning section fragments");
+    }
+    else
+    {
+        uint32_t* begin = parser->fragment_begin;
+        memset(begin, 0, (parser->section_count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < parser->fragment_count; i += 1)
+        {
+            begin[parser->fragments[i].section + 1] += 1;
+        }
+        for (uint32_t i = 0; i < parser->section_count; i += 1)
+        {
+            begin[i + 1] += begin[i];
+        }
+        memcpy(cursors, begin, parser->section_count * sizeof(uint32_t));
+        for (uint32_t i = 0; i < parser->fragment_count; i += 1)
+        {
+            parser->fragment_order[cursors[parser->fragments[i].section]++] = i;
+        }
+    }
+    scratch_end(scratch);
+}
+
+static void asm_partition_append(AsmParser* parser, uint32_t id)
+{
+    if (parser->result.error == 0)
+    {
+        const uint32_t section = parser->fragments[id].section;
+        const uint32_t position = parser->fragment_begin[section + 1];
+        // This is the single CFI fragment appended after layout; the original order allocation has its spare slot.
+        memmove(parser->fragment_order + position + 1, parser->fragment_order + position, (id - position) * sizeof(uint32_t));
+        parser->fragment_order[position] = id;
+        for (uint32_t i = section + 1; i <= parser->section_count; i += 1)
+        {
+            parser->fragment_begin[i] += 1;
+        }
+    }
+}
