@@ -95,11 +95,27 @@ typedef enum ObjectError
     OBJECT_ERROR_FILE,
 } ObjectError;
 
+// Optional producer-owned descriptors, indexed by AtomId. Each described atom is already a complete section.
+// Names are counted slices, not NUL-terminated strings. A non-null table must cover every atom including id 0.
+typedef struct ObjectAtomSection ObjectAtomSection;
+struct ObjectAtomSection
+{
+    String8 name;
+    uint32_t type;
+    uint64_t flags;
+    uint64_t entry_size;
+};
+
 typedef struct ObjectOptions ObjectOptions;
 struct ObjectOptions
 {
     // A section per TEXT atom, as -ffunction-sections, rather than one .text.
     bool function_sections;
+    const ObjectAtomSection* atom_sections;
+    uint32_t atom_section_count;
+    // Optional bytes indexed by SymbolId: discard a marked local unless a relocation needs its own symbol.
+    const uint8_t* temporary_symbols;
+    uint32_t temporary_symbol_count;
 };
 
 // What object_prepare finds once for a link, which every unit's object reads.
@@ -600,6 +616,7 @@ struct ObjectSection
     uint32_t relocation_index;
     uint32_t symbol;
     uint32_t name;
+    const ObjectAtomSection* explicit_section;
 };
 
 // What object_build counts and places for one object.
@@ -625,6 +642,8 @@ struct ObjectBuilder
     // global_base, and the undefined ones from undefined_base, symbol_count in all.
     uint64_t section_symbol_count;
     uint64_t local_count;
+    // Original local place -> compact local place, UINT32_MAX for an elided temporary; absent on default writes.
+    uint32_t* local_places;
     uint64_t global_count;
     uint64_t local_base;
     uint64_t global_base;
@@ -672,7 +691,7 @@ static bool object_count_sections(ObjectBuilder* builder)
     {
         const uint32_t begin = units->atom_begin[key + class];
         const uint32_t end = units->atom_begin[key + class + 1];
-        const bool apart = builder->options.function_sections && class == BUSTER_LINK_CLASS_TEXT;
+        const bool apart = builder->options.atom_sections != 0 || (builder->options.function_sections && class == BUSTER_LINK_CLASS_TEXT);
         for (uint32_t first = begin; result && first < end; first = apart ? first + 1 : end)
         {
             ObjectSection* section = &builder->sections[builder->section_count];
@@ -681,7 +700,16 @@ static bool object_count_sections(ObjectBuilder* builder)
                 .atom_end = apart ? first + 1 : end,
                 .class = class,
                 .alignment = 1,
+                .explicit_section = builder->options.atom_sections != 0 ? &builder->options.atom_sections[units->atoms[first]] : 0,
             };
+            const ObjectAtomSection* explicit = section->explicit_section;
+            if (explicit != 0)
+            {
+                result = explicit->name.pointer != 0 && explicit->name.length != 0 && explicit->name.length < UINT32_MAX &&
+                         memchr(explicit->name.pointer, 0, explicit->name.length) == 0 &&
+                         (explicit->type == object_class_sections[class].type || (!object_class_is_zero_fill(class) && explicit->type == SHT_PROGBITS)) &&
+                         ((explicit->flags & SHF_MERGE) == 0 || explicit->entry_size != 0);
+            }
             uint64_t offset = 0;
             for (uint32_t i = section->atom_begin; result && i < section->atom_end; i += 1)
             {
@@ -718,11 +746,20 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
     const uint32_t* begin = units->symbol_begin + 2 * (uint64_t)builder->unit;
     builder->local_count = begin[1] - begin[0];
     builder->global_count = begin[2] - begin[1];
+    if (builder->options.temporary_symbols != 0)
+    {
+        builder->local_places = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, builder->local_count);
+        for (uint32_t i = begin[0]; builder->local_places != 0 && i < begin[1]; i += 1)
+        {
+            builder->local_places[i - begin[0]] = !builder->options.temporary_symbols[units->symbols[i]];
+        }
+    }
 
     // Room for every fixup to refer to a different undefined symbol; and the object's stamp, after a clear once the
     // stamps have wrapped around.
     builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, builder->fixup_count);
-    bool result = (builder->undefined != 0 || builder->fixup_count == 0) && builder->symbols->count == symbols->count;
+    bool result = (builder->undefined != 0 || builder->fixup_count == 0) && builder->symbols->count == symbols->count &&
+                  (builder->options.temporary_symbols == 0 || builder->local_count == 0 || builder->local_places != 0);
     builder->error = result ? OBJECT_ERROR_NONE : OBJECT_ERROR_FULL;
     builder->symbols->stamp += 1;
     if (builder->symbols->stamp == 0)
@@ -774,6 +811,14 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                     const uint64_t info = symbol_info[target];
                     const bool defined = info >> 32 == unit;
                     entry = stamp | (defined ? (uint32_t)info : BUSTER_OBJECT_SYMBOL_UNDEFINED | (uint32_t)undefined_count);
+                    if (defined && builder->options.atom_sections != 0 && ((uint32_t)entry & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL)
+                    {
+                        // Explicit mergeable sections include fixed-width constants, not only the default string
+                        // class. Their PC-relative/addended relocations need the original local target as well.
+                        const ObjectAtomSection* section = &builder->options.atom_sections[symbols->atom[target]];
+                        entry &= ~(uint64_t)BUSTER_OBJECT_SYMBOL_IN_POOL;
+                        entry |= (section->flags & SHF_MERGE) != 0 ? BUSTER_OBJECT_SYMBOL_IN_POOL : 0;
+                    }
                     entries[target] = entry;
                     if (!defined)
                     {
@@ -797,11 +842,41 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                         result = place <= INT64_MAX && !__builtin_add_overflow(addend, (int64_t)place, &adjusted);
                         sections[units->atom_section[target_atom]].symbol = 1;
                     }
+                    else if (builder->local_places != 0)
+                    {
+                        builder->local_places[code & BUSTER_OBJECT_SYMBOL_PLACE] = 1;
+                    }
                 }
             }
         }
     }
     builder->undefined_count = undefined_count;
+    if (builder->local_places != 0)
+    {
+        // Charge only retained local names, renumber unnamed locals as object_fill_symbols does.
+        names -= units->unit_name_bytes[builder->unit];
+        uint32_t kept = 0;
+        uint64_t unnamed = 0;
+        for (uint32_t i = begin[0]; i < begin[2]; i += 1)
+        {
+            const bool local = i < begin[1];
+            const bool keep = !local || builder->local_places[i - begin[0]] != 0;
+            if (local)
+            {
+                builder->local_places[i - begin[0]] = keep ? kept++ : UINT32_MAX;
+            }
+            const uint32_t bytes = symbol_name_bytes[units->symbols[i]];
+            if (keep && bytes != 0)
+            {
+                names += bytes;
+            }
+            else if (keep && local)
+            {
+                names += BUSTER_OBJECT_LOCAL_LABEL_BYTES + object_decimal_digits(unnamed++) + 1;
+            }
+        }
+        builder->local_count = kept;
+    }
     result = result && undefined_count <= BUSTER_OBJECT_SYMBOL_PLACE;
     if (!result && builder->error == OBJECT_ERROR_NONE)
     {
@@ -815,7 +890,11 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
 static uint64_t object_section_name_bytes(const ObjectBuilder* builder, const ObjectSection* section)
 {
     uint64_t result = strlen(object_class_sections[section->class].name);
-    if (builder->options.function_sections && section->class == BUSTER_LINK_CLASS_TEXT)
+    if (section->explicit_section != 0)
+    {
+        result = section->explicit_section->name.length;
+    }
+    else if (builder->options.function_sections && section->class == BUSTER_LINK_CLASS_TEXT)
     {
         const NameId name = builder->units->atom_name[builder->units->atoms[section->atom_begin]];
         result = name != 0 ? BUSTER_OBJECT_FUNCTION_SECTION_PREFIX_BYTES + builder->link->names.length[name] : result;
@@ -886,13 +965,14 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
         {
             const ObjectSection* section = &builder->sections[s];
             const ObjectSectionFormat* format = &object_class_sections[section->class];
+            const ObjectAtomSection* explicit = section->explicit_section;
             headers[section->index] = (Elf64_Shdr){
                 .sh_name = section->name,
-                .sh_type = format->type,
-                .sh_flags = format->flags,
+                .sh_type = explicit != 0 ? explicit->type : format->type,
+                .sh_flags = explicit != 0 ? explicit->flags : format->flags,
                 .sh_size = section->size,
                 .sh_addralign = section->alignment,
-                .sh_entsize = format->entry_size,
+                .sh_entsize = explicit != 0 ? explicit->entry_size : format->entry_size,
             };
             if (section->relocation_index != 0)
             {
@@ -1068,6 +1148,10 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
                     const uint8_t kind = kind_bits & BUSTER_LINK_FIXUP_KIND;
                     int64_t addend = (kind_bits & BUSTER_LINK_FIXUP_WIDE) != 0 ? wide_addends[(uint32_t)addends[fixup]] : addends[fixup];
                     uint64_t index = bases[code >> BUSTER_OBJECT_SYMBOL_KIND_SHIFT] + (code & BUSTER_OBJECT_SYMBOL_PLACE);
+                    if ((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL && builder->local_places != 0)
+                    {
+                        index = builder->local_base + builder->local_places[code & BUSTER_OBJECT_SYMBOL_PLACE];
+                    }
                     if ((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL && object_uses_section_symbol(kind, code, addend))
                     {
                         const AtomId target_atom = symbol_atoms[target];
@@ -1163,6 +1247,10 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
     uint64_t unnamed = 0;
     for (uint32_t i = begin[0]; i < begin[2]; i += 1)
     {
+        if (i < begin[1] && builder->local_places != 0 && builder->local_places[i - begin[0]] == UINT32_MAX)
+        {
+            continue;
+        }
         const SymbolId symbol = unit_symbols[i];
         const uint32_t name_bytes_with_nul = symbol_name_bytes[symbol];
         const bool labelled = name_bytes_with_nul == 0 && i < begin[1];
@@ -1260,7 +1348,14 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
             name += BUSTER_OBJECT_RELA_PREFIX_BYTES;
         }
         const NameId atom_name = builder->units->atom_name[builder->units->atoms[section->atom_begin]];
-        if (builder->options.function_sections && section->class == BUSTER_LINK_CLASS_TEXT && atom_name != 0)
+        if (section->explicit_section != 0)
+        {
+            const String8 text = section->explicit_section->name;
+            memcpy(names + name, text.pointer, text.length);
+            names[name + text.length] = 0;
+            name += text.length + 1;
+        }
+        else if (builder->options.function_sections && section->class == BUSTER_LINK_CLASS_TEXT && atom_name != 0)
         {
             memcpy(names + name, BUSTER_OBJECT_FUNCTION_SECTION_PREFIX, BUSTER_OBJECT_FUNCTION_SECTION_PREFIX_BYTES);
             memcpy(names + name + BUSTER_OBJECT_FUNCTION_SECTION_PREFIX_BYTES, builder->link->names.bytes[atom_name], (uint64_t)builder->link->names.length[atom_name] + 1);
@@ -1299,7 +1394,8 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
         .symbols = symbols,
         .error = OBJECT_ERROR_NONE,
     };
-    bool built = unit < units->count;
+    bool built = unit < units->count && (options.atom_sections == 0 || options.atom_section_count == link->atoms.count) &&
+                 (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count);
     if (!built)
     {
         builder.error = OBJECT_ERROR_RANGE;
