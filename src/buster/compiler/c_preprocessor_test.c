@@ -335,9 +335,74 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
     return result;
 }
 
+// A run as the drivers make one, with its history deferred (PPOptions.defer_history), against one that records it, both
+// by the vectorized kernels without expansion starts: the same stream, errors and warnings, and the same diagnostics
+// printed byte for byte, notes and all (the deferred run prints its own by recording the history at its end); then,
+// once pp_history_ensure has recorded it, the same history, with nothing more printed. Returns whether they agree.
+static bool pp_test_deferred_history(const PPOptions* options, const char* path, const char* label)
+{
+    static InternTable tables[2];
+    static Preprocessor runs[2];
+    char* texts[2] = { 0, 0 };
+    size_t lengths[2] = { 0, 0 };
+    FILE* streams[2];
+    bool ready[2];
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        PPOptions run = *options;
+        run.scalar = false;
+        run.expansion_starts = false;
+        run.defer_history = k == 1;
+        streams[k] = open_memstream(&texts[k], &lengths[k]);
+        run.diagnostics = streams[k];
+        ready[k] = streams[k] != 0 && intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
+        if (ready[k])
+        {
+            pp_run(&runs[k], path);
+        }
+        if (streams[k] != 0)
+        {
+            fflush(streams[k]);
+        }
+    }
+    bool result = ready[0] && ready[1] && pp_tokens_same(&runs[0].output, &runs[1].output) && runs[0].errors == runs[1].errors &&
+                  runs[0].warnings == runs[1].warnings && lengths[0] == lengths[1] && (lengths[0] == 0 || memcmp(texts[0], texts[1], lengths[0]) == 0);
+    if (!result)
+    {
+        printf("%s: with its history deferred, a run gives other tokens or diagnostics (%u and %u errors, %u and %u warnings, %zu and %zu bytes printed)\n",
+               label, runs[0].errors, runs[1].errors, runs[0].warnings, runs[1].warnings, lengths[0], lengths[1]);
+    }
+    const size_t printed = lengths[1];
+    const bool recorded = result && pp_history_ensure(&runs[1]);
+    if (streams[1] != 0)
+    {
+        fflush(streams[1]);
+    }
+    result = result && recorded && lengths[1] == printed && pp_same_streams(&runs[0], &runs[1], label);
+    if (!result)
+    {
+        printf("%s: the deferred history, recorded, %s\n", label, recorded ? "differs from the history the run recorded" : "is missing");
+    }
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        if (ready[k])
+        {
+            pp_release(&runs[k]);
+        }
+        intern_release(&tables[k]);
+        if (streams[k] != 0)
+        {
+            fclose(streams[k]);
+        }
+        free(texts[k]);
+    }
+    return result;
+}
+
 // Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
 // takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
-// the statistics (but the timing ones) must agree in this configuration too. Returns whether they do.
+// the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
+// deferred, as the drivers run it (pp_test_deferred_history). Returns whether they do.
 static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name)
 {
     static InternTable tables[2];
@@ -381,7 +446,7 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
         }
         intern_release(&tables[k]);
     }
-    return result;
+    return result && pp_test_deferred_history(options, path, label);
 }
 
 // The text one of the printers gives for a run, in memory (null if it fails); `free` it.

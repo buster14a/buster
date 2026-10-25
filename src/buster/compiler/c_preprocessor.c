@@ -313,6 +313,14 @@ struct PPOptions
     bool clang_features;
     // Recording is on by default; the benchmark's control disables it without changing preprocessing.
     bool no_history;
+    // Record the expansion history only once something needs it (pp_history_ensure): pp_run and pp_run_source then
+    // record none, and preprocess the unit again, with history, when a diagnostic or a consumer of the history first
+    // asks for it (into a preprocessor of its own, with these options, file cache and intern table). Their own
+    // diagnostics are counted, not printed, and a unit that had any runs again at its end to print them with their
+    // notes, as it would have. A clean unit never runs again. -E and `parse` defer it; the checker reads the history of
+    // every unit with a system header (check_input_system_tokens), so its driver records it as the unit runs. The unit
+    // preprocesses nothing more after its run, and its options' no_history stays set.
+    bool defer_history;
     // Enter a file whose include guard is defined rather than skip it (#120's control: the output is the same).
     bool no_guard_skip;
     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
@@ -1180,6 +1188,17 @@ struct Preprocessor
     uint32_t history_run_count;
     uint32_t history_run_capacity;
     Arena history_initial;
+    // PPOptions.defer_history's state: whether the history is still to record, the quiet flag the options asked for (a
+    // deferred run counts its diagnostics without printing them), how pp_run or pp_run_source ran the unit (its path, or
+    // its name and bytes), for the replay, and the replay, whose history the fields above point into once recorded.
+    bool history_deferred;
+    bool history_quiet;
+    const char* history_path;
+    const char* history_name;
+    const uint8_t* history_bytes;
+    uint32_t history_length;
+    Preprocessor* history_replay;
+    Arena history_replay_arena;
     // Only set around synchronous expansion/substitution work; never inferred from a spelling location.
     uint32_t history_current;
     uint32_t history_anchor;
@@ -1350,6 +1369,7 @@ static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, 
 
 static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
+static bool pp_history_ensure(Preprocessor* pp);
 
 #include "c_preprocessor_history.c"
 
@@ -15081,6 +15101,11 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
+    // A deferred history records nothing and prints no diagnostic until pp_history_ensure (PPOptions.defer_history).
+    pp->history_deferred = options->defer_history && !options->no_history;
+    pp->history_quiet = options->quiet;
+    pp->options.no_history |= pp->history_deferred;
+    pp->options.quiet |= pp->history_deferred;
     const PPPrepare prepare = pp_prepare_options(options);
     pp->vectorized = prepare.vectorized;
     pp->refine_flags = prepare.refine_flags;
@@ -15129,7 +15154,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->invocations = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPInvocation));
     pp->argument_records = pp_array(pp, &result, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
     pp->capture_frames = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
-    if (result && !options->no_history)
+    if (result && !pp->options.no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
         // table that outgrows its slice reserves a large arena, avoiding eight mappings/advice calls on small units.
@@ -15304,6 +15329,12 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
 
 static void pp_release(Preprocessor* pp)
 {
+    // The replay that recorded a deferred history, which shares this unit's file cache.
+    if (pp->history_replay != 0)
+    {
+        pp_release(pp->history_replay);
+    }
+    arena_release(&pp->history_replay_arena);
     pp_tokens_release(&pp->output);
     pp_tokens_release(&pp->arguments);
     pp_tokens_release(&pp->captures);
@@ -15466,8 +15497,11 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
 
 // Preprocesses the main file: the prelude (pp_run_prelude), then the file. The output is pp->output, with keywords'
 // kinds. Returns false if there were errors.
+static void pp_history_report(Preprocessor* pp);
+
 static bool pp_run(Preprocessor* pp, const char* main_path)
 {
+    pp->history_path = main_path;
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
@@ -15483,6 +15517,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
         pp_resolve_keywords(pp);
         result = false;
     }
+    pp_history_report(pp);
     return result;
 }
 
@@ -15490,6 +15525,9 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
 // its standard input <stdin>: test-preprocessor's fuzz runs give it the text clang reads.
 static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
 {
+    pp->history_name = name;
+    pp->history_bytes = bytes;
+    pp->history_length = length;
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_virtual_file(pp, name, (const char*)bytes, length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE)
@@ -15505,7 +15543,111 @@ static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* byt
         pp_resolve_keywords(pp);
         result = false;
     }
+    pp_history_report(pp);
     return result;
+}
+
+// Whether two streams are the same, token for token.
+static bool pp_tokens_same(const PPTokens* a, const PPTokens* b)
+{
+    return a->count == b->count && memcmp(a->kinds, b->kinds, a->count) == 0 && memcmp(a->flags, b->flags, a->count) == 0 &&
+           memcmp(a->values, b->values, (uint64_t)a->count * sizeof(uint32_t)) == 0 && memcmp(a->locations, b->locations, (uint64_t)a->count * sizeof(uint32_t)) == 0;
+}
+
+// Records a deferred history (PPOptions.defer_history): preprocesses the unit again as pp_run or pp_run_source ran it,
+// with history, into a preprocessor of its own (in an arena of its own) with the same options, file cache, intern table
+// and time, which prints the diagnostics if `report` says so, and takes its history, which the replay keeps until
+// pp_release. The replay must give the unit's output again, token for token; one that doesn't, or can't be made (out of
+// memory), leaves the unit without history, and a fatal error says so.
+static void pp_history_record(Preprocessor* pp, bool report)
+{
+    pp->history_deferred = false;
+    const bool ran = pp->history_path != 0 || pp->history_name != 0;
+    pp->history_replay_arena = ran ? arena_reserve(sizeof(Preprocessor) + 64) : (Arena){ 0 };
+    Preprocessor* replay = arena_push(&pp->history_replay_arena, sizeof(Preprocessor), _Alignof(Preprocessor));
+    PPOptions options = pp->options;
+    options.no_history = false;
+    options.defer_history = false;
+    options.quiet = !report;
+    options.timing = false;
+    options.files = pp->cache;
+    const bool initialized = replay != 0 && pp_initialize(replay, &options, pp->table);
+    bool same = initialized;
+    if (initialized)
+    {
+        // The unit's time, which __DATE__, __TIME__ and __TIMESTAMP__ give.
+        memcpy(replay->date, pp->date, sizeof(pp->date));
+        memcpy(replay->time, pp->time, sizeof(pp->time));
+        memcpy(replay->timestamp, pp->timestamp, sizeof(pp->timestamp));
+        replay->has_epoch = pp->has_epoch;
+        if (pp->history_path != 0)
+        {
+            pp_run(replay, pp->history_path);
+        }
+        else
+        {
+            pp_run_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
+        }
+        same = pp_tokens_same(&replay->output, &pp->output);
+    }
+    if (same)
+    {
+        pp->history = replay->history;
+        pp->history_count = replay->history_count;
+        pp->history_capacity = replay->history_capacity;
+        pp->substitutions = replay->substitutions;
+        pp->substitution_count = replay->substitution_count;
+        pp->substitution_capacity = replay->substitution_capacity;
+        pp->generated = replay->generated;
+        pp->generated_count = replay->generated_count;
+        pp->generated_capacity = replay->generated_capacity;
+        pp->history_sources = replay->history_sources;
+        pp->history_source_count = replay->history_source_count;
+        pp->history_source_capacity = replay->history_source_capacity;
+        pp->history_runs = replay->history_runs;
+        pp->history_run_count = replay->history_run_count;
+        pp->history_run_capacity = replay->history_run_capacity;
+        pp->history_replay = replay;
+    }
+    else
+    {
+        if (replay != 0)
+        {
+            pp_release(replay);
+        }
+        arena_release(&pp->history_replay_arena);
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, !ran         ? "no expansion history: the translation unit wasn't run by pp_run or pp_run_source" :
+                                              !initialized ? "can't preprocess the translation unit again for its expansion history (out of memory)" :
+                                                             "the translation unit gave other tokens when preprocessed again for its expansion history");
+    }
+}
+
+// The end of a deferred run (PPOptions.defer_history): the diagnostics after it are printed as the options ask, and its
+// own, which it counted without printing them, are printed with their notes by recording the history, as the unit's
+// own run would have printed them.
+static void pp_history_report(Preprocessor* pp)
+{
+    if (pp->history_deferred)
+    {
+        pp->options.quiet = pp->history_quiet;
+        if (!pp->history_quiet && (pp->errors != 0 || pp->warnings != 0))
+        {
+            pp_history_record(pp, true);
+        }
+    }
+}
+
+// The unit's expansion history, recorded now if PPOptions.defer_history put it off. A reader of the history
+// (pp_history_at, the history's records) given a unit whose history may be deferred calls this first, as
+// pp_diagnose_output and parse_print_diagnostics do. Returns whether there is a history: a unit with
+// PPOptions.no_history, run otherwise than by pp_run or pp_run_source, or whose replay fails has none.
+static bool pp_history_ensure(Preprocessor* pp)
+{
+    if (pp->history_deferred)
+    {
+        pp_history_record(pp, false);
+    }
+    return pp->history != 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -17273,6 +17415,8 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     bool markers = true;
     const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
+    // -E reads no history but its diagnostics' notes, which record it when there are diagnostics.
+    options.defer_history = true;
     if (arena.base == 0)
     {
         fprintf(stderr, "fatal error: can't reserve memory\n");

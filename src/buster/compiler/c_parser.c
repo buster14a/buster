@@ -12146,8 +12146,13 @@ static void parse_diagnostic_message(const Parser* parser, const Preprocessor* p
 }
 
 // Prints the parse's diagnostics, as clang does: "file:line:column: error: message", then what stopped it, if anything did.
+// Their places come from the expansion history, recorded first if it was deferred (pp_history_ensure).
 static void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
 {
+    if (parser->diagnostic_count != 0)
+    {
+        pp_history_ensure(pp);
+    }
     for (uint32_t d = 0; d < parser->diagnostic_count; d += 1)
     {
         const ParseDiagnostic* diagnostic = &parser->diagnostics[d];
@@ -12201,6 +12206,8 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
         static Preprocessor pp;
         static Parser parser;
         const ParseOptions parse_options = { .scalar = scalar, .tree_only = true };
+        // The history only for diagnostics, which record it when there are any (PPOptions.defer_history).
+        options.defer_history = true;
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table) || !parse_initialize(&parser, &parse_options, options.language))
         {
             fprintf(stderr, "fatal error: can't reserve memory\n");
