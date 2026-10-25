@@ -341,8 +341,8 @@ async function census()
     if (!entry) return;
     const bytes = await verifiedFetch(new URL(entry.url, location.href), entry.sha256, entry.bytes);
     const families = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
-    if (!Array.isArray(families) || families.length !== 19) throw new Error('Frozen family census differs');
-    const container = $('family-census'); container.append(element('h3', {}, 'Frozen archive · 19 families'));
+    if (!Array.isArray(families) || !families.length || families.length > 4096) throw new Error('Unsupported family census');
+    const container = $('family-census'); container.append(element('h3', {}, `Frozen archive · ${families.length} families`));
     for (const family of families)
     {
         const item = element('div', {class: 'family-item'});

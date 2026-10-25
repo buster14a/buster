@@ -126,11 +126,13 @@ static bool publish_dataset(const char *repository, const char *revision, PerfBy
     PerfBuffer object = {0};
     char actual[65];
     char physical[8192];
-    int size = snprintf(physical, sizeof(physical), "%s/%.*s", repository, (int)path.size, path.data);
+    int size = snprintf(physical, sizeof(physical), "%s/%.*s", repository, (int)path.size, path.data == NULL ? (const unsigned char *)"" : path.data);
     PerfDataset dataset = {.evidence_root = repository};
     bool result = size > 0 && (size_t)size < sizeof(physical) && publish_git(repository, revision, path, &object) && perf_sha256(perf_buffer_bytes(&object), actual) && perf_dataset_load(&dataset, physical, canonical);
     PerfBuffer local = {0};
     result = result && perf_read_file(physical, &local) && perf_bytes_equal(perf_buffer_bytes(&local), perf_buffer_bytes(&object));
+    uint32_t selected_table = perf_json_find(index, definition, "table");
+    result = result && (selected_table == UINT32_MAX || perf_identity(&dataset.document, "tables", perf_json_text(index, selected_table)) != UINT32_MAX);
     for (size_t i = 0; i < dataset.resource_count && result; ++i)
     {
         const PerfJson *json = &dataset.document;
@@ -218,14 +220,24 @@ int main(int argc, char **argv)
     }
     PerfBytes census_path = perf_json_text(&index, perf_json_find(&index, 0, "census"));
     PerfBuffer census = {0};
+    PerfJson census_document = {0};
     char digest[65];
     char url[8192];
     char census_size[32];
-    result = result && publish_git(argv[3], argv[4], census_path, &census) && perf_sha256(perf_buffer_bytes(&census), digest);
+    result = result && publish_git(argv[3], argv[4], census_path, &census) && perf_sha256(perf_buffer_bytes(&census), digest) && perf_json_parse(&census_document, perf_buffer_bytes(&census)) && census_document.nodes[0].kind == PERF_JSON_ARRAY && perf_json_count(&census_document, 0) != 0 && perf_json_count(&census_document, 0) <= 4096;
     snprintf(url, sizeof(url), "https://raw.githubusercontent.com/buster14a/buster-performance/%s/%.*s", argc == 8 ? argv[4] : "", (int)census_path.size, census_path.data == NULL ? (const unsigned char *)"" : census_path.data);
     snprintf(census_size, sizeof(census_size), "%zu", census.size);
     bool census_first = true;
-    result = result && perf_buffer_append(&catalog, perf_literal("],\"census\":{")) && publish_field(&catalog, "url", perf_literal(url), &census_first) && publish_field(&catalog, "sha256", perf_literal(digest), &census_first) && publish_field(&catalog, "bytes", perf_literal(census_size), &census_first) && perf_buffer_append(&catalog, perf_literal("}}\n")) && catalog.size <= 262144 && publish_write(directory, "catalog.json", perf_buffer_bytes(&catalog)) && publish_record(&seal, "catalog.json", perf_buffer_bytes(&catalog), &seal_first);
+    result = result && perf_buffer_append(&catalog, perf_literal("],\"census\":{")) && publish_field(&catalog, "url", perf_literal(url), &census_first) && publish_field(&catalog, "sha256", perf_literal(digest), &census_first) && publish_field(&catalog, "bytes", perf_literal(census_size), &census_first) && perf_buffer_append(&catalog, perf_literal("}}\n")) && catalog.size <= 262144;
+    PerfJson catalog_document = {0};
+    result = result && perf_json_parse(&catalog_document, perf_buffer_bytes(&catalog));
+    uint32_t catalog_datasets = perf_json_find(&catalog_document, 0, "datasets");
+    for (uint32_t entry = perf_json_first(&catalog_document, catalog_datasets); entry != UINT32_MAX && result; entry = perf_json_after(&catalog_document, catalog_datasets, entry))
+    {
+        PerfBytes id = perf_json_text(&catalog_document, perf_json_find(&catalog_document, entry, "id"));
+        result = perf_identifier(id) && perf_identity(&catalog_document, "datasets", id) == entry;
+    }
+    result = result && publish_write(directory, "catalog.json", perf_buffer_bytes(&catalog)) && publish_record(&seal, "catalog.json", perf_buffer_bytes(&catalog), &seal_first);
     result = result && perf_buffer_append(&seal, perf_literal("]}\n")) && publish_write(directory, "generation.json", perf_buffer_bytes(&seal)) && publish_write(argv[6], ".nojekyll", (PerfBytes){0});
     if (result)
     {
@@ -239,6 +251,8 @@ int main(int argc, char **argv)
     free(seal.data);
     free(catalog.data);
     free(census.data);
+    perf_json_free(&census_document);
+    perf_json_free(&catalog_document);
     free(index_bytes.data);
     perf_json_free(&index);
     return result ? 0 : 1;
