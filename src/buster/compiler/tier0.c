@@ -5955,13 +5955,14 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
-        // A conversion between U64 and a floating class: its operand on one stack, its result on the other.
+        // A conversion between U64 and a floating class: its operand on one stack, its result on the other, and the
+        // stacks' first free registers (to U64, the integer stack's next one too).
         const uint32_t to = tier0_class_floating(entries->key_classes[i]) ? 1 : 0;
         uses[0] = true;
         uses[1] = true;
         window[1 - to] = 1;
-        touch[1 - to] = (int32_t)before[1 - to] - 1;
-        touch[to] = (int32_t)before[to];
+        touch[0] = (int32_t)before[0] + (to == 0 ? 1 : 0);
+        touch[1] = (int32_t)before[1];
     }
     else
     {
