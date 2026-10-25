@@ -86,6 +86,8 @@
 // before it looks them up (files_find_new).
 #define BUSTER_FILES_PLACE_BATCH 32
 #define BUSTER_FILES_FIND_BATCH 16
+// EXPERIMENT (#262): Linux's MADV_POPULATE_READ (5.14), which the C library's headers may not name.
+#define BUSTER_FILES_MADV_POPULATE_READ 22
 // How lanes get files' bytes (FileCacheBytes, file_cache_probe), and the largest file every lane count reads into its
 // arena rather than maps: each mapping holds the process's memory map lock, on which lanes that map at once queue (14%
 // of the samples of 8 lanes preparing the C library corpus), and its pages fault in as the lexer reads them, while a
@@ -145,6 +147,9 @@ struct FilesTrace
     uint64_t table_ticks[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
     uint64_t table_grows[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
     uint64_t faults[BUSTER_FILES_TRACE_ROUNDS + 2][BUSTER_FILES_TRACE_LANES];
+    // EXPERIMENT (#262): the system's huge page faults, their fallbacks to base pages and direct compaction stalls over
+    // the run (/proc/vmstat's thp_fault_alloc, thp_fault_fallback and compact_stall), which benchmark-files reads.
+    uint64_t vmstat[3];
 };
 
 // What a lane knows of a spelling of its table, by its lane-local id: its hash, the round's file it first occurred in
@@ -328,6 +333,12 @@ struct FilesRun
     // the spellings the shared table has get their shared ids as the lane refines, and only the round's new spellings
     // need the merge.
     bool clone_tables;
+    // EXPERIMENT (#262): the base pages at the start of each lane's spellings, shared ids and own table (0 for
+    // arena_reserve's).
+    uint64_t lane_array_small;
+    // EXPERIMENT (#262): on more than one lane, the preparing lane maps a mapped file's pages (MADV_POPULATE_READ) before
+    // it lexes them, as MAP_POPULATE does for one lane's probes.
+    bool prepare_populate;
     // The lanes' state, by lane index.
     FilesLane* lanes;
     uint32_t lane_count;
@@ -815,6 +826,15 @@ static uint32_t files_working_lanes(const FilesRun* run)
 // one works alone on lane 0, one file after another straight into the shared table; several take rule 1's parts of the
 // files by their bytes (or one range each, when fewer than all or for few bytes), each into its own table, and then
 // merge. Every way gives the same ids, so which one runs is only a matter of speed: a lane alone needs no merge.
+// EXPERIMENT (#262): maps a mapped file's pages before its preparation lexes them (FilesRun.prepare_populate).
+static void files_populate(const FilesRun* run, const PPFileData* data)
+{
+    if (run->prepare_populate && run->lane_count > 1 && data->mapped && data->length != 0)
+    {
+        madvise((void*)data->bytes, data->length, BUSTER_FILES_MADV_POPULATE_READ);
+    }
+}
+
 static void files_prepare(FilesRun* run)
 {
     const uint32_t lane = lane_index();
@@ -829,6 +849,7 @@ static void files_prepare(FilesRun* run)
         {
             PPFileData* data = &cache->records[run->records[file]];
             const uint64_t mask = cache->table->bucket_mask;
+            files_populate(run, data);
             run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, cache->table, arenas->columns, &arenas->arena, data, run->trace != 0 ? mine->prepare_ticks : 0);
             mine->table_grows += cache->table->bucket_mask != mask;
             mine->prepared += run->file_status[file] == PP_PREPARE_DONE;
@@ -855,7 +876,7 @@ static void files_prepare(FilesRun* run)
         else if (!run->clone_tables && mine->table.records == 0)
         {
             const uint64_t begin = __rdtsc();
-            files_fail(run, !intern_initialize_with(&mine->table, buckets));
+            files_fail(run, !intern_initialize_small(&mine->table, buckets, run->lane_array_small != 0 ? run->lane_array_small : BUSTER_ARENA_SMALL_BYTES));
             mine->table_ticks += __rdtsc() - begin;
         }
         mine->round_begin = mine->table.count;
@@ -889,6 +910,7 @@ static void files_prepare(FilesRun* run)
                 PPFileData* data = &cache->records[run->records[file]];
                 const IdentId first = mine->table.count;
                 const uint64_t mask = mine->table.bucket_mask;
+                files_populate(run, data);
                 run->file_status[file] = (uint8_t)pp_prepare_into(&cache->prepare, &mine->table, arenas->columns, &arenas->arena, data, run->trace != 0 ? mine->prepare_ticks : 0);
                 mine->table_grows += mine->table.bucket_mask != mask;
                 run->file_first[file] = first;
@@ -1593,8 +1615,9 @@ static bool files_lane_begin(FilesRun* run, FilesLane* mine)
     bool result = true;
     if (run->lane_count > 1)
     {
-        mine->spelling_arena = arena_reserve((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(FilesSpelling) + 64);
-        mine->shared_arena = arena_reserve((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(IdentId) + 64);
+        const uint64_t small = run->lane_array_small != 0 ? run->lane_array_small : BUSTER_ARENA_SMALL_BYTES;
+        mine->spelling_arena = arena_reserve_small((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(FilesSpelling) + 64, small);
+        mine->shared_arena = arena_reserve_small((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(IdentId) + 64, small);
         mine->spellings = arena_push_array(&mine->spelling_arena, BUSTER_INTERN_MAX_IDS, sizeof(FilesSpelling), 64);
         mine->shared = arena_push_array(&mine->shared_arena, BUSTER_INTERN_MAX_IDS, sizeof(IdentId), 64);
         result = mine->spellings != 0 && mine->shared != 0;

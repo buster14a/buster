@@ -623,6 +623,8 @@ struct FileCache
     // The largest file a lookup (file_cache_lookup_path: a translation unit's) reads into its lane's bytes arena rather
     // than maps: BUSTER_FILE_CACHE_READ_LIMIT, unless benchmark-preprocessor's --read-limit sets another.
     uint32_t read_limit;
+    // EXPERIMENT (#262): the base pages at the start of the column arenas of lanes past lane 0 (0 for arena_reserve's).
+    uint64_t lane_small_bytes;
 };
 
 // A range of the location space: one inclusion of a file, or a chunk of scratch spellings (`file` BUSTER_PP_NONE).
@@ -3057,7 +3059,8 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
         bool reserved = true;
         for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            *arenas[i] = arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            const bool small = lane != 0 && cache->lane_small_bytes != 0 && i < 3;
+            *arenas[i] = small ? arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, cache->lane_small_bytes) : arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
             reserved = arenas[i]->base != 0;
         }
         for (uint32_t i = 0; !reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)

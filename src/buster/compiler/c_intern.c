@@ -908,11 +908,19 @@ static bool intern_add_names(InternTable* table)
 // Reserves the table's memory, with `buckets` buckets (a power of two) to start with, and adds the predefined names.
 // Returns false if the memory can't be reserved. c_files.c starts each lane's table at the size of the lane's share of
 // the files, so that it grows little or not at all.
+static __attribute__((unused)) bool intern_initialize_small(InternTable* table, uint64_t buckets, uint64_t small);
 static __attribute__((unused)) bool intern_initialize_with(InternTable* table, uint64_t buckets)
+{
+    return intern_initialize_small(table, buckets, BUSTER_ARENA_SMALL_BYTES);
+}
+
+// intern_initialize_with with the first `small` bytes of the record arena (its first buckets, spans and records) in
+// base pages (arena_reserve_small).
+static __attribute__((unused)) bool intern_initialize_small(InternTable* table, uint64_t buckets, uint64_t small)
 {
     uint32_t capacity;
     *table = (InternTable){ 0 };
-    table->record_arena = arena_reserve(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
+    table->record_arena = arena_reserve_small(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX, small);
     bool result = intern_lay_out(table, &table->record_arena, buckets);
     table->records = result ? table->record_arena.base + table->record_arena.length : 0;
     // Id 0's spelling: an empty one, so that no other spelling is at offset 0.

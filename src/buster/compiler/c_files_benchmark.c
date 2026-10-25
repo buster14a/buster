@@ -110,6 +110,9 @@ struct FilesBenchmarkVariant
     bool probe_take;
     uint32_t probe_lanes;
     bool clone_tables;
+    uint64_t lane_array_small;
+    uint64_t lane_small_bytes;
+    bool prepare_populate;
     const char* label;
 };
 
@@ -171,6 +174,27 @@ static void files_benchmark_lane(void* argument)
     }
 }
 
+// EXPERIMENT (#262): the system's huge page faults, their fallbacks and direct compaction stalls so far (/proc/vmstat), or
+// zeros.
+static void files_benchmark_vmstat(uint64_t* values)
+{
+    static const char* const names[] = { "\nthp_fault_alloc ", "\nthp_fault_fallback ", "\ncompact_stall " };
+    static char buffer[32768];
+    values[0] = values[1] = values[2] = 0;
+    const int fd = open("/proc/vmstat", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0)
+    {
+        const ssize_t length = read(fd, buffer, sizeof(buffer) - 1);
+        close(fd);
+        buffer[length > 0 ? length : 0] = 0;
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            const char* at = strstr(buffer, names[i]);
+            values[i] = at != 0 ? strtoull(at + strlen(names[i]), 0, 10) : 0;
+        }
+    }
+}
+
 // One run from nothing on `lanes` lanes (pinned to `cpus`): its times in `sample`, what it did in `counts` and, unless
 // `trace` is null, where its time went round by round. Leaves the cache and its table filled when `keep` (for
 // files_benchmark_unused), else releases them.
@@ -182,6 +206,7 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     static FilesBenchmark benchmark;
     PPOptions with = *options;
     bool result = intern_initialize(table) && file_cache_initialize(cache, table, pp_prepare_options(&with));
+    cache->lane_small_bytes = variant->lane_small_bytes;
     with.files = cache;
     result = result && pp_initialize(&search, &with, table) && files_run_initialize(&benchmark.run, cache, &search, roots, root_count, follow, lanes);
     benchmark.run.bytes = variant->bytes;
@@ -192,6 +217,8 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     benchmark.run.probe_take = variant->probe_take;
     benchmark.run.probe_lanes = variant->probe_lanes;
     benchmark.run.clone_tables = variant->clone_tables;
+    benchmark.run.lane_array_small = variant->lane_array_small;
+    benchmark.run.prepare_populate = variant->prepare_populate;
     benchmark.spin_ticks = spin_ticks;
     benchmark.ticks = 0;
     if (trace != 0)
@@ -199,7 +226,18 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
         *trace = (FilesTrace){ 0 };
         benchmark.run.trace = trace;
     }
+    uint64_t before[3];
+    files_benchmark_vmstat(before);
     result = result && lane_run(lanes, files_benchmark_lane, &benchmark, cpus) && !benchmark.run.failed;
+    if (trace != 0)
+    {
+        uint64_t after[3];
+        files_benchmark_vmstat(after);
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            trace->vmstat[i] = after[i] - before[i];
+        }
+    }
     *sample = (FilesBenchmarkSample){
         .ticks = benchmark.ticks,
         .roots = benchmark.run.roots_prepared > benchmark.start ? benchmark.run.roots_prepared - benchmark.start : 0,
@@ -266,6 +304,17 @@ static void files_benchmark_rounds(const FilesTrace* traces, uint32_t runs, uint
     static uint64_t values[BUSTER_FILES_BENCHMARK_MAX_RUNS];
     const uint32_t traced = lanes < BUSTER_FILES_TRACE_LANES ? lanes : BUSTER_FILES_TRACE_LANES;
     printf("rounds on %u lanes (medians of %u runs, ms; lane 0, then the other lanes' most and least):\n", lanes, runs);
+    // EXPERIMENT (#262): the system's huge page faults, fallbacks and compaction stalls per run.
+    double vmstat[3];
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        for (uint32_t r = 0; r < runs; r += 1)
+        {
+            values[r] = traces[r].vmstat[i];
+        }
+        vmstat[i] = (double)files_benchmark_median(values, runs);
+    }
+    printf("  per run (medians, the whole system's): %.0f huge page faults, %.0f fallbacks, %.0f compaction stalls\n", vmstat[0], vmstat[1], vmstat[2]);
     printf("  round  files      bytes  lanes  waves  probes     wall  prepare   merge  requests  search  alone    wait |  prepare  search    waits\n");
     for (uint32_t at = 0; at <= traces[0].rounds; at += 1)
     {
@@ -560,7 +609,8 @@ int run_files_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--variant") == 0 && next != 0 && variant_count < BUSTER_FILES_BENCHMARK_MAX_VARIANTS)
         {
             // EXPERIMENT (#262): a comma-separated list of lane-bytes=N, read-limit=N, bytes=map|read|populate, old-merge,
-            // partial-take, probe-take, probe-lanes=N and clone-tables, each over the command line's settings.
+            // partial-take, probe-take, probe-lanes=N, clone-tables, small-arrays=N, small-columns=N and
+            // prepare-populate, each over the command line's settings.
             variant_specs[variant_count] = next;
             variant_count += 1;
             i += 1;
@@ -659,6 +709,18 @@ int run_files_benchmark(int argc, char** argv)
             else if (length == 12 && strncmp(p, "clone-tables", 12) == 0)
             {
                 variants[v].clone_tables = true;
+            }
+            else if (length > 13 && strncmp(p, "small-arrays=", 13) == 0)
+            {
+                variants[v].lane_array_small = strtoull(p + 13, 0, 10);
+            }
+            else if (length > 14 && strncmp(p, "small-columns=", 14) == 0)
+            {
+                variants[v].lane_small_bytes = strtoull(p + 14, 0, 10);
+            }
+            else if (length == 16 && strncmp(p, "prepare-populate", 16) == 0)
+            {
+                variants[v].prepare_populate = true;
             }
             else if (length > 12 && strncmp(p, "probe-lanes=", 12) == 0)
             {
