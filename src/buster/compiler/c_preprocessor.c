@@ -5106,9 +5106,12 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             named += 1;
         }
     }
-    // A simple macro's template: its items are its body's tokens, one each.
-    const bool templated = simple && count <= BUSTER_PP_TEMPLATE_TOKENS && macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS &&
-                           pp->template_count < BUSTER_PP_MAX_TEMPLATES;
+    // A simple macro's template: its items are its body's tokens, one each. Only the vectorized kernels write expansions
+    // from templates, in a run that records no history (a deferred unit's): the scalar twins and the history's runs
+    // take pp_emit_simple_write and pp_substitute_simple, their twin. Neither changes during a preprocessor's run, so
+    // the others make none.
+    const bool templated = simple && pp->vectorized && pp->options.no_history && count <= BUSTER_PP_TEMPLATE_TOKENS &&
+                           macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < BUSTER_PP_MAX_TEMPLATES;
     if (templated)
     {
         PPTemplate* template = &pp->templates[pp->template_count];
@@ -8326,11 +8329,10 @@ BUSTER_INLINE void pp_template_body(const Preprocessor* pp, const PPMacro* macro
     *locations = _mm512_add_epi32(_mm512_maskz_loadu_epi32(valid, data->starts + begin), bases);
 }
 
-// The template of a macro, when an expansion of it records no history (a deferred unit's: the history's runs take
-// pp_emit_simple_write and pp_substitute_simple), or null.
+// The template of a macro, or null (pp_compile_macro makes them for the vectorized runs that record no history).
 BUSTER_INLINE PPTemplate* pp_template_of(Preprocessor* pp, const PPMacro* macro)
 {
-    return macro->template_index != 0 && pp->options.no_history ? &pp->templates[macro->template_index - 1] : 0;
+    return macro->template_index != 0 ? &pp->templates[macro->template_index - 1] : 0;
 }
 
 // pp_template_names' search: the template's names of macros as pp_emit_simple_names finds them, kept in the template.
@@ -8548,18 +8550,14 @@ BUSTER_INLINE void pp_template_write(Preprocessor* pp, const PPInvocation* invoc
     }
 }
 
-// pp_emit_simple_write of an expansion of `size` tokens (pp_template_size), when its macro has a template whose names
-// pp_template_names found (painted, or going straight in) and it has at most BUSTER_PP_TEMPLATE_TOKENS tokens, for which
-// pp_emit_simple_size's room is made: written by pp_template_write. Returns false, having written nothing, otherwise.
-static bool pp_emit_template(Preprocessor* pp, const PPInvocation* invocation, const PPTemplate* template, uint32_t size, const PPFileData* file,
-                             uint32_t file_base, uint8_t* trailing)
+// pp_emit_simple_write of an expansion of at most BUSTER_PP_TEMPLATE_TOKENS tokens (pp_template_size) from its macro's
+// template, whose names pp_template_names found (painted, or going straight in), with pp_emit_simple_size's room made:
+// written by pp_template_write. The callers test the template and the size, so that the runs without templates (the
+// history's) don't call it.
+static void pp_emit_template(Preprocessor* pp, const PPInvocation* invocation, const PPTemplate* template, const PPFileData* file, uint32_t file_base,
+                             uint8_t* trailing)
 {
-    const bool result = template != 0 && size <= BUSTER_PP_TEMPLATE_TOKENS;
-    if (result)
-    {
-        pp_template_write(pp, invocation, template, file, file_base, &pp->output, template->painted, template->expanding, true, trailing);
-    }
-    return result;
+    pp_template_write(pp, invocation, template, file, file_base, &pp->output, template->painted, template->expanding, true, trailing);
 }
 
 static bool pp_emit_simple(Preprocessor* pp, const PPInvocation* invocation, uint8_t* trailing)
@@ -8573,7 +8571,11 @@ static bool pp_emit_simple(Preprocessor* pp, const PPInvocation* invocation, uin
         result = pp_template_names(pp, invocation->macro, template);
         const uint32_t size = result ? pp_template_size(pp, template, invocation->arguments, true) : 0;
         result = result && size != 0 && (uint64_t)pp->output.count + size + BUSTER_PP_TOKEN_SLACK <= pp->output.capacity;
-        if (result && !pp_emit_template(pp, invocation, template, size, 0, 0, trailing))
+        if (result && size <= BUSTER_PP_TEMPLATE_TOKENS)
+        {
+            pp_emit_template(pp, invocation, template, 0, 0, trailing);
+        }
+        else if (result)
         {
             pp_emit_simple_names(pp, invocation->macro, &plan);
             pp_emit_simple_size(pp, invocation, &plan);
@@ -8804,7 +8806,11 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
             const uint32_t saved_origin = pp->diagnostic_origin;
             pp->diagnostic_origin = 0;
             uint8_t trailing;
-            if (!pp_emit_template(pp, &invocation, template, size, data, base, &trailing))
+            if (template != 0 && size <= BUSTER_PP_TEMPLATE_TOKENS)
+            {
+                pp_emit_template(pp, &invocation, template, data, base, &trailing);
+            }
+            else
             {
                 // Past a template's size, pp_emit_simple_write, with the plan the template's names and size stood for.
                 if (template != 0)

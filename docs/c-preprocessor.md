@@ -587,6 +587,25 @@ macro's expansion, an argument being expanded, or a directive's line):
   tokens (`pp_scan_arguments`) and writes them from there, never copying them
   into `pp->arguments`. Everything is checked before anything changes, and an
   invocation that isn't simple goes to `pp_expand_current`.
+- **Templates** (#117). In a vectorized run whose history is deferred, a simple
+  macro whose body has at most 16 tokens gets a template when it is compiled
+  (`PPTemplate`, `pp_compile_macro`): its tokens as the output stores them, each
+  parameter's index, and masks of its parameters, its names and the spaces
+  before its items. An expansion of at most 16 tokens is then built in registers
+  and stored at once (`pp_template_write`). Each segment (a run of the body, an
+  argument, or the body of a name that goes straight in) moves to its place with
+  one masked permute, and the spacing rules apply to the whole expansion as
+  masks. It goes into the output (`pp_emit_template`), or into the expansions
+  when a name in it must be read again (`pp_substitute_template`). Which of a
+  template's names are painted or go straight in is found once, and kept while
+  no macro is defined or undefined (`Preprocessor.macro_epoch`) and the names'
+  macros stay enabled (`pp_template_names`). A plan with a painted name isn't
+  kept, since it depends on the expansions under way. An expansion's size comes
+  from the template and its arguments' lengths (`pp_template_size`). The scalar
+  twins and a run that records the history go item by item as before, and make
+  no templates: that path is the templates' twin. `test-preprocessor` compares
+  each case's deferred run with its recorded one, and each fuzz case's deferred
+  run with its scalar twins' runs.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
@@ -2551,11 +2570,13 @@ spellings alone would miss this change (#272).
 
 - **The main loop**, against #117's 2 ms: "The main loop against #117's budget"
   above has where the time goes and the plan. History replay is in, for `-E`,
-  `parse` and the checker's driver ("Deferred history", "System levels"). Next,
-  the parser's input for file runs from the file cache (to agree with #126's
-  and #335's owners), and a leaner expansion engine. #110's object-macro
-  eligibility cache was measured and rejected (see "Object-macro eligibility
-  cache experiment" above).
+  `parse` and the checker's driver ("Deferred history", "System levels"), and
+  so are the line pages and the leaner engine's first step, templates for
+  simple invocations. Next, the parser's input for file runs from the file
+  cache (asked on #126), and more of the leaner engine: the general
+  invocations' substitution and buffers, and the directives' dispatch.
+  #110's object-macro eligibility cache was measured and rejected (see
+  "Object-macro eligibility cache experiment" above).
 - **Clearing pages.** In a single run, prefaulting the arenas on another core
   while the first files are lexed would hide most of the 13%. Across many
   translation units, the arenas are reused (#152).
