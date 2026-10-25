@@ -32,6 +32,8 @@ typedef enum ForeignLinkError
     FOREIGN_LINK_ERROR_IMPORT,
     FOREIGN_LINK_ERROR_LINK,
     FOREIGN_LINK_ERROR_IFUNC,
+    // A compressed debug section that doesn't decompress: a compression other than zlib, or a malformed stream.
+    FOREIGN_LINK_ERROR_COMPRESSION,
 } ForeignLinkError;
 
 typedef struct ForeignLinkResult ForeignLinkResult;
@@ -59,6 +61,7 @@ typedef enum ForeignLinkPhase
     FOREIGN_LINK_PHASE_COPIES,
     FOREIGN_LINK_PHASE_CHECK,
     FOREIGN_LINK_PHASE_EXPORTS,
+    FOREIGN_LINK_PHASE_DEBUG,
     FOREIGN_LINK_PHASES,
 } ForeignLinkPhase;
 
@@ -73,6 +76,8 @@ struct ForeignLink
     ExecutableDynamic dynamic;
     // A static executable's and a static PIE's (foreign_link_static_finish).
     ExecutableRuntime runtime;
+    // The selected objects' debug sections, built whole, and their references to the link's symbols (foreign_debug.c).
+    ExecutableDebugSections debug;
     // Original library version index -> output version index, one table per ForeignLibrary; null for dropped DSOs.
     uint16_t** library_versions;
     ForeignLinkUnwind** unwind;
@@ -96,22 +101,24 @@ static bool foreign_link_bounded(const ForeignLinkBounds* plan, uint32_t name);
 
 static __attribute__((unused)) ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena);
 static __attribute__((unused)) ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter);
-// What a static link takes for the startup that applies its IRELATIVE relocations (foreign_link_startup_applies): the
-// entry's name, and the caller's word that the output's own startup applies them (link-foreign's
-// --startup-applies-irelative).
-typedef struct ForeignLinkStartup ForeignLinkStartup;
-struct ForeignLinkStartup
+// What the caller asks of a conversion: for a static link, the entry's name and the caller's word that the output's own
+// startup applies its IRELATIVE relocations (link-foreign's --startup-applies-irelative), which the conversion asks
+// only when glibc's startup doesn't (foreign_link_startup_applies); and whether the output leaves the inputs' DWARF out
+// (link-foreign's -S and -s), which then isn't built (foreign_debug_build).
+typedef struct ForeignLinkOptions ForeignLinkOptions;
+struct ForeignLinkOptions
 {
     String8 entry;
     bool applies_irelative;
+    bool strip_debug;
 };
 
-// `interpreter` is a dynamic PIE's alone, and `startup` a static kind's. A shared library's soname is its caller's to
-// set in the result's ExecutableDynamic (empty for none).
+// `interpreter` is a dynamic PIE's alone. A shared library's soname is its caller's to set in the result's
+// ExecutableDynamic (empty for none).
 static __attribute__((unused)) ForeignLinkResult foreign_link_build_kind(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind,
-                                                                         String8 interpreter, ForeignLinkStartup startup);
+                                                                         String8 interpreter, ForeignLinkOptions options);
 static __attribute__((unused)) ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter,
-                                                                           ForeignLinkStartup startup);
+                                                                           ForeignLinkOptions options);
 
 static bool foreign_link_add_capacity(LinkCapacity* total, LinkCapacity added)
 {
@@ -1705,10 +1712,11 @@ struct ForeignLinkBuild
     RuntimeKind kind;
     String8 interpreter;
     bool defer_undefined;
-    ForeignLinkStartup startup;
+    ForeignLinkOptions options;
     // The calling thread's scratch, from foreign_link_build_begin to foreign_link_build_finish: the input order, the
     // __start_ and __stop_ plan and the names the link requires live there.
     Scratch scratch;
+    uint32_t* order;
     uint8_t* required;
     ForeignLinkBounds bounds;
     ForeignLinkResult result;
@@ -1745,6 +1753,7 @@ static void foreign_link_build_begin(ForeignLinkBuild* build)
     }
     build->scratch = scratch_begin(arena);
     uint32_t* order = result.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_order(foreign, build->scratch.arena) : 0;
+    build->order = order;
     build->bounds = (ForeignLinkBounds){ 0 };
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
@@ -1916,16 +1925,16 @@ static bool foreign_link_left_to_linker(const Foreign* foreign, uint32_t id)
 // copy of them elsewhere: such a link needs the caller's word. The inputs' identities are the files the resolution
 // read, and only a link with an IFUNC that a fixup reaches asks (foreign_link_build_end): a few stats, and none for a
 // static link without one.
-static bool foreign_link_startup_applies(const Foreign* foreign, RuntimeKind kind, ForeignLinkStartup startup)
+static bool foreign_link_startup_applies(const Foreign* foreign, RuntimeKind kind, ForeignLinkOptions options)
 {
     ForeignFileIdentity start_file = { 0 };
     ForeignFileIdentity libc_archive = { 0 };
-    if (!startup.applies_irelative)
+    if (!options.applies_irelative)
     {
         runtime_library_identity(runtime_object_names[kind][RUNTIME_OBJECT_START], &start_file.device, &start_file.inode);
         runtime_library_identity("libc.a", &libc_archive.device, &libc_archive.inode);
     }
-    const uint32_t start = foreign_link_name_id(foreign, startup.entry);
+    const uint32_t start = foreign_link_name_id(foreign, options.entry);
     const uint32_t main_start = foreign_link_name_id(foreign, foreign_string("__libc_start_main"));
     const uint32_t relocator = foreign_link_name_id(foreign, foreign_string("_dl_relocate_static_pie"));
     const uint32_t ifunc_relocator = foreign_link_name_id(foreign, foreign_string("_dl_relocate_static_pie_ifunc"));
@@ -1939,7 +1948,7 @@ static bool foreign_link_startup_applies(const Foreign* foreign, RuntimeKind kin
                                                        foreign_link_refers(foreign, main_start, relocator) && foreign_link_defined_in(foreign, relocator, libc_archive) &&
                                                            foreign_link_refers(foreign, relocator, dynamic) && foreign_link_left_to_linker(foreign, dynamic) &&
                                                            (!foreign_link_refers(foreign, main_start, ifunc_relocator) || foreign_link_defined_in(foreign, ifunc_relocator, libc_archive));
-    return startup.applies_irelative || (entered && applies);
+    return options.applies_irelative || (entered && applies);
 }
 
 // The steps after the relocations but the check: the __start_ and __stop_ sections' relocations, a dynamic PIE's copies,
@@ -1971,7 +1980,7 @@ static void foreign_link_build_end(ForeignLinkBuild* build)
     }
     // A static link's IFUNCs stand when its startup applies their IRELATIVE relocations, which only a link with one
     // reached asks (from the resolution's names and objects: _DYNAMIC's own symbol, added above, isn't one).
-    if (result.error == FOREIGN_LINK_ERROR_IFUNC && static_kind && foreign_link_startup_applies(foreign, build->kind, build->startup))
+    if (result.error == FOREIGN_LINK_ERROR_IFUNC && static_kind && foreign_link_startup_applies(foreign, build->kind, build->options))
     {
         result = (ForeignLinkResult){ 0 };
     }
@@ -2030,8 +2039,9 @@ static ForeignLinkError foreign_link_shared_finish(ForeignLink* output, const Fo
     return exports != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
 }
 
-// The last step, after the check: a dynamic PIE's exports, a shared library's or a static executable's inputs for the
-// writer; and the scratch given back.
+#include "buster/compiler/foreign_debug.c"
+
+// The step after the check: a dynamic PIE's exports, a shared library's or a static executable's inputs for the writer.
 static void foreign_link_build_finish(ForeignLinkBuild* build)
 {
     if (build->result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_DYNAMIC)
@@ -2046,13 +2056,22 @@ static void foreign_link_build_finish(ForeignLinkBuild* build)
     {
         foreign_link_static_finish(build->output, build->foreign, build->kind);
     }
+}
+
+// The last step: the debug sections, unless the output leaves them out; and the scratch given back.
+static void foreign_link_build_debug(ForeignLinkBuild* build)
+{
+    if (build->result.error == FOREIGN_LINK_ERROR_NONE && !build->options.strip_debug)
+    {
+        build->result = foreign_debug_build(build->output, build->foreign, build->order, build->arena);
+    }
     scratch_end(build->scratch);
 }
 
 #include "buster/compiler/foreign_link_lanes.c"
 
 static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter, bool defer_undefined,
-                                                 ForeignLinkStartup startup)
+                                                 ForeignLinkOptions options)
 {
     ForeignLinkBuild build = {
         .output = output,
@@ -2062,7 +2081,7 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
         .kind = kind,
         .interpreter = interpreter,
         .defer_undefined = defer_undefined,
-        .startup = startup,
+        .options = options,
         .start = foreign_now(),
     };
     if (foreign->path == FOREIGN_PATH_VECTOR && foreign->lanes > 1)
@@ -2104,6 +2123,8 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
         build.ends[FOREIGN_LINK_PHASE_CHECK] = foreign_now();
         foreign_link_build_finish(&build);
         build.ends[FOREIGN_LINK_PHASE_EXPORTS] = foreign_now();
+        foreign_link_build_debug(&build);
+        build.ends[FOREIGN_LINK_PHASE_DEBUG] = foreign_now();
     }
     uint64_t previous = build.start;
     for (uint32_t phase = 0; phase < FOREIGN_LINK_PHASES; phase += 1)
@@ -2118,25 +2139,25 @@ static ForeignLinkResult foreign_link_build_mode(ForeignLink* output, const Fore
 // A static executable whose entry is _start.
 static ForeignLinkResult foreign_link_build(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena)
 {
-    const ForeignLinkStartup startup = { .entry = foreign_string("_start") };
-    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_STATIC, (String8){ 0 }, false, startup);
+    const ForeignLinkOptions options = { .entry = foreign_string("_start") };
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_STATIC, (String8){ 0 }, false, options);
 }
 
 static ForeignLinkResult foreign_link_build_dynamic(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, String8 interpreter)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_DYNAMIC, interpreter, false, (ForeignLinkStartup){ 0 });
+    return foreign_link_build_mode(output, foreign, arena, name_arena, RUNTIME_KIND_DYNAMIC, interpreter, false, (ForeignLinkOptions){ 0 });
 }
 
 static ForeignLinkResult foreign_link_build_kind(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter,
-                                                 ForeignLinkStartup startup)
+                                                 ForeignLinkOptions options)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, false, startup);
+    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, false, options);
 }
 
 // Reachability, including FDE/CIE dependencies, decides which unresolved references remain errors. Preserve those
 // names as GLOBAL/NONE until foreign_gc_link diagnoses the surviving closure; ordinary producers remain eager.
 static ForeignLinkResult foreign_link_build_for_gc(ForeignLink* output, const Foreign* foreign, Arena* arena, Arena* name_arena, RuntimeKind kind, String8 interpreter,
-                                                   ForeignLinkStartup startup)
+                                                   ForeignLinkOptions options)
 {
-    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, true, startup);
+    return foreign_link_build_mode(output, foreign, arena, name_arena, kind, interpreter, true, options);
 }

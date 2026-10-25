@@ -164,6 +164,14 @@ struct CheckLowerWriter
     uint32_t overflow_anchor;
     CBuiltinVaLowerCall* varargs;
     uint32_t varargs_count;
+    // Long double's constants (Tier0Function.x87_constants), two words each: the first is +0.0, which a CONST F80 0 reads
+    // (a truth test's, a conversion to bool's, a dead value's), and each other constant has a place of its own. The
+    // function takes the table when it has long double values (`x87`, Tier0Function.x87's): an entry of class F80, or its
+    // result.
+    uint64_t* x87_constants;
+    uint32_t x87_constant_count;
+    uint32_t x87_constant_capacity;
+    bool x87;
     bool scalar;
     bool track;
 };
@@ -214,6 +222,12 @@ static uint8_t check_lower_class(const TypeTable* types, TypeId type)
     {
         result = base == BUSTER_TYPE_FLOAT ? BUSTER_TYPED_CLASS_F32 : BUSTER_TYPED_CLASS_F64;
     }
+    else if (base == BUSTER_TYPE_LONG_DOUBLE)
+    {
+        // Tier 0 keeps a long double's values in memory (check_lower_x87): its locals and parameters are frame objects,
+        // read and written through their addresses as its globals are.
+        result = BUSTER_TYPED_CLASS_F80;
+    }
     else if (check_action_integer_type(types, base, &bits, &sign))
     {
         result = bits == 1 ? BUSTER_TYPED_CLASS_U8 : bits == 8 ? BUSTER_TYPED_CLASS_I8 : bits == 16 ? BUSTER_TYPED_CLASS_I16 :
@@ -234,6 +248,14 @@ static bool check_lower_aggregate(const TypeTable* types, TypeId type)
     return kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
 }
 
+// Whether a type is long double (BUSTER_TYPED_CLASS_F80), whose values Tier 0 has no LOCAL, STORE_LOCAL, SET_LOCAL,
+// GLOBAL, STORE_GLOBAL or SET_GLOBAL for: a local or a parameter of it is a frame object, and every object of it is read
+// through its address (LOAD) and written through it (STORE and SET), the address first.
+static bool check_lower_x87(const TypeTable* types, TypeId type)
+{
+    return check_lower_class(types, type) == BUSTER_TYPED_CLASS_F80;
+}
+
 // An expression's class on the stack: check_lower_class's, or U64 for an aggregate (its address).
 static uint8_t check_lower_value_class(const TypeTable* types, TypeId type)
 {
@@ -247,17 +269,13 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     const TypeId base = type_unqualified(type_strip_aligned(types, type));
     const uint8_t kind = type_kind(types, base);
     const char* feature = "values of this type";
-    if (base == BUSTER_TYPE_LONG_DOUBLE)
-    {
-        feature = "long double";
-    }
-    else if (base == BUSTER_TYPE_INT128 || base == BUSTER_TYPE_UINT128)
+    if (base == BUSTER_TYPE_INT128 || base == BUSTER_TYPE_UINT128)
     {
         feature = "__int128";
     }
     else if (base == BUSTER_TYPE_FLOAT16 || base == BUSTER_TYPE_FLOAT128 || kind == BUSTER_TYPE_KIND_FLOATING)
     {
-        feature = "floating types other than float and double";
+        feature = "floating types other than float, double and long double";
     }
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
@@ -288,7 +306,7 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
 
 // Why a struct or union can't be passed or returned by value, or NULL. Tier 0 takes every location abi_assign gives one
 // as an argument or a parameter, of up to BUSTER_TIER0_MAX_ARGUMENT_BYTES aligned to 16 at most, and every result in
-// registers but an x87 one.
+// registers that tier0_aggregate_result_valid takes: eightbytes, or one or two long doubles in st0 and st1.
 static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId type, bool result)
 {
     const TypeTable* types = writer->program->types;
@@ -484,6 +502,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
                 writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
                 writer->classes[writer->count] = top;
                 writer->values[writer->count++] = 0;
+                writer->x87 |= top == BUSTER_TYPED_CLASS_F80;
             }
         }
         if (writer->output->status == CHECK_PROGRAM_OK)
@@ -492,6 +511,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             {
                 check_lower_track(writer, kind, class, value);
             }
+            writer->x87 |= class == BUSTER_TYPED_CLASS_F80;
             writer->kinds[writer->count] = kind;
             writer->classes[writer->count] = class;
             writer->values[writer->count] = value;
@@ -608,10 +628,16 @@ static void check_lower_mark(CheckLowerWriter* writer, uint32_t label)
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_LABEL, .node = label });
 }
 
+// A local of a value's class. A long double's value has none (check_lower_x87): what would keep one in a temporary (a
+// statement expression's operands or value, `?:` without its middle operand, a builtin's operand) is refused.
 static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
 {
     const uint32_t local = writer->local_count;
-    if (local < writer->local_capacity && local < BUSTER_TIER0_MAX_LOCALS && class < BUSTER_TYPED_CLASSES && class != BUSTER_TYPED_CLASS_VOID)
+    if (class == BUSTER_TYPED_CLASS_F80)
+    {
+        check_lower_unsupported(writer, "long double values kept in temporaries (statement expressions, ?: without its middle operand, builtins)");
+    }
+    else if (local < writer->local_capacity && local < BUSTER_TIER0_MAX_LOCALS && class < BUSTER_TYPED_CLASSES && class != BUSTER_TYPED_CLASS_VOID)
     {
         writer->local_classes[local] = class;
         writer->local_flags[local] = 0;
@@ -1197,6 +1223,29 @@ static void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId
     }
 }
 
+// A long double constant's place in the function's table (CheckLowerWriter.x87_constants), its 80 bits as static data
+// writes them (check_data_float_bytes): +0.0's is place 0, which every function's table has.
+static uint64_t check_lower_x87_constant(CheckLowerWriter* writer, long double value)
+{
+    uint8_t bytes[16] = { 0 };
+    check_data_float_bytes(bytes, BUSTER_TYPE_LONG_DOUBLE, value);
+    uint64_t significand = 0;
+    memcpy(&significand, bytes, sizeof(significand));
+    const uint64_t top = (uint64_t)bytes[8] | ((uint64_t)bytes[9] << 8);
+    uint64_t place = 0;
+    if ((significand | top) != 0 && writer->x87_constant_count >= writer->x87_constant_capacity)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    else if ((significand | top) != 0)
+    {
+        place = writer->x87_constant_count++;
+        writer->x87_constants[2 * place] = significand;
+        writer->x87_constants[2 * place + 1] = top;
+    }
+    return place;
+}
+
 static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* value)
 {
     const uint8_t class = check_lower_class(writer->program->types, value->type);
@@ -1205,9 +1254,18 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
     {
         check_lower_address(writer, value->object, value->offset);
     }
+    else if (class == BUSTER_TYPED_CLASS_F80 && value->constant_kind != CHECK_CONSTANT_FLOATING)
+    {
+        // Static data takes a long double's value from a floating constant alone, and so does this.
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
     else
     {
-        if (value->constant_kind == CHECK_CONSTANT_FLOATING)
+        if (class == BUSTER_TYPED_CLASS_F80)
+        {
+            bits = check_lower_x87_constant(writer, value->floating);
+        }
+        else if (value->constant_kind == CHECK_CONSTANT_FLOATING)
         {
             if (class == BUSTER_TYPED_CLASS_F32)
             {
@@ -1299,8 +1357,13 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     }
     else
     {
+        // A callee takes a hidden result pointer as aligned to the result's canonical type, an aligned typedef's attribute
+        // left out (clang's ABI info has canonical types; its stores through the pointer may be movaps): the object is
+        // aligned to the more aligned of the two.
+        const uint32_t declared = aggregate_result ? type_alignment_log2(types, result) : 0;
+        const uint32_t canonical = aggregate_result ? type_alignment_log2(types, type_strip_aligned(types, result)) : 0;
         const uint32_t call = writer->call_count++;
-        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), type_alignment_log2(types, result)) : BUSTER_CHECK_NONE;
+        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) : BUSTER_CHECK_NONE;
         writer->call_targets[call] = direct ? writer->program->object_symbols[value.object] : 0;
         writer->call_first[call] = writer->argument_count;
         writer->call_counts[call] = count;
@@ -1530,7 +1593,9 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     const uint32_t object = graph->ops[left] == CHECK_OP_VALUE ? stream->values[left].object : 0;
     const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
     const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
-    const bool direct = local != BUSTER_CHECK_NONE || symbol != 0;
+    // A long double goes through its address, as memory does, and a postfix one's old value through a frame object.
+    const bool x87 = stored_class == BUSTER_TYPED_CLASS_F80;
+    const bool direct = !x87 && (local != BUSTER_CHECK_NONE || symbol != 0);
     const uint8_t get = local != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_GLOBAL;
     const uint64_t destination = local != BUSTER_CHECK_NONE ? local : symbol;
     const uint8_t store = direct ? (postfix ? local != BUSTER_CHECK_NONE ? BUSTER_TYPED_SET_LOCAL : BUSTER_TYPED_SET_GLOBAL :
@@ -1541,7 +1606,8 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     if (postfix && !direct)
     {
         address_temporary = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
-        old_temporary = check_lower_temporary(writer, stored_class);
+        old_temporary = x87 ? check_lower_object(writer, type_size(program->types, stored), type_alignment_log2(program->types, stored)) :
+                              check_lower_temporary(writer, stored_class);
     }
     check_lower_instruction(writer, store, stored_class, direct ? destination : 0);
     check_lower_convert(writer, calculated, stored);
@@ -1575,6 +1641,10 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
             {
                 one = UINT64_C(0x3ff0000000000000);
             }
+            else if (calculated_class == BUSTER_TYPED_CLASS_F80)
+            {
+                one = check_lower_x87_constant(writer, 1.0L);
+            }
             check_lower_instruction(writer, BUSTER_TYPED_CONST, calculated_class, one);
         }
         else
@@ -1595,6 +1665,19 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     {
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
         check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_operand(writer, node, 0, true, 0);
+    }
+    else if (x87)
+    {
+        // The old value stored into its object (whose address goes first) and read back for the new one.
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, old_temporary);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
+        check_lower_instruction(writer, BUSTER_TYPED_STORE, stored_class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, old_temporary);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_operand(writer, node, 0, true, 0);
     }
     else
@@ -1795,6 +1878,7 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
             {
                 check_lower_track(writer, writer->kinds[i], writer->classes[i], writer->values[i]);
             }
+            writer->x87 |= writer->classes[i] == BUSTER_TYPED_CLASS_F80;
             writer->count += 1;
         }
         if (labels[result.count] != BUSTER_CHECK_NONE)
@@ -2076,6 +2160,11 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         {
             check_lower_unsupported(writer, "this floating builtin");
         }
+        else if (classify && check_lower_x87(program->types, effect->floating_type))
+        {
+            // The recipes test a float's or a double's bits.
+            check_lower_unsupported(writer, "floating builtins on long double");
+        }
         else if (selectors && effect->selected_selector < 5)
         {
             // A known category still retains Clang's exact evaluated selector prefix and its side effects. Clang's
@@ -2258,6 +2347,11 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         else if (task.address || address_value)
         {
             check_lower_address(writer, object, value.offset);
+        }
+        else if (value.category == CHECK_LVALUE && object != 0 && object < program->object_count && class == BUSTER_TYPED_CLASS_F80)
+        {
+            check_lower_address(writer, object, value.offset);
+            check_lower_emit(writer, BUSTER_TYPED_LOAD, class, 0);
         }
         else if (value.category == CHECK_LVALUE && object != 0 && object < program->object_count)
         {
@@ -2591,7 +2685,9 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
         const uint32_t object = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : graph->ops[a] == CHECK_OP_VALUE ? stream->values[a].object : 0;
         const uint32_t local = object != 0 && object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
         const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
-        if (local != BUSTER_CHECK_NONE || symbol != 0)
+        // A long double is stored through its object's address, which goes first (check_lower_x87).
+        const bool x87 = class == BUSTER_TYPED_CLASS_F80;
+        if (!x87 && (local != BUSTER_CHECK_NONE || symbol != 0))
         {
             check_lower_instruction(writer, local != BUSTER_CHECK_NONE ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
                                      local != BUSTER_CHECK_NONE ? local : symbol);
@@ -2602,6 +2698,12 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
             check_lower_instruction(writer, BUSTER_TYPED_STORE, class, 0);
             check_lower_operand(writer, node, 1, false, value.type);
             check_lower_operand(writer, node, 0, true, 0);
+        }
+        else if (local != BUSTER_CHECK_NONE || symbol != 0)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, 0);
+            check_lower_operand(writer, node, 0, false, value.type);
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_ADDRESS, .node = object });
         }
         else
         {
@@ -3262,11 +3364,16 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
     // no stream, and is refused below without reading one.
     const uint64_t varargs = program->status == CHECK_PROGRAM_OK && program->stream != 0 ? program->stream->varargs_count : 0;
+    // Each long double constant a function's table holds comes from a node of that type (a constant's, or ++ and --'s
+    // 1.0), so no function has more than the program has nodes, besides +0.0: a bound without a pass over the nodes'
+    // types, which every program would pay for (#423's review). Only a function with long double values writes the table.
+    const uint64_t x87_capacity64 = (uint64_t)nodes + 1;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + 32;
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 2 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
                                       varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 4 + 1;
-    bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX;
+    bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
+                 x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     if (valid && !check_program_helpers(&lowered->helpers, program, output, scratch))
     {
@@ -3312,7 +3419,8 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_ABI(first, uint32_t, abi_capacity);
     BUSTER_CHECK_LOWER_ABI(variadic, uint8_t, abi_capacity);
 #undef BUSTER_CHECK_LOWER_ABI
-    CheckLowerWriter writer = { .program = program, .output = lowered, .abi = &abi, .capacity = capacity, .local_capacity = local_capacity, .scalar = scalar };
+    CheckLowerWriter writer = { .program = program, .output = lowered, .abi = &abi, .capacity = capacity, .local_capacity = local_capacity, .scalar = scalar,
+                                .x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0 };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer.field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer.field != 0
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTask, capacity);
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
@@ -3344,6 +3452,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_COLUMN(builtins, CBuiltinLowerCall, (uint64_t)builtin_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(miscellaneous, CBuiltinMiscLowerCall, (uint64_t)program->stream->misc_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(floating, CBuiltinFloatLowerCall, (uint64_t)program->stream->floating_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(x87_constants, uint64_t, 2 * x87_capacity64);
 #undef BUSTER_CHECK_LOWER_COLUMN
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes every signature together after.
@@ -3433,6 +3542,10 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.save_anchor = BUSTER_CHECK_NONE;
         writer.overflow_anchor = BUSTER_CHECK_NONE;
         writer.varargs_count = 0;
+        writer.x87 = check_lower_x87(types, result);
+        writer.x87_constant_count = 1;
+        writer.x87_constants[0] = 0;
+        writer.x87_constants[1] = 0;
         memset(writer.extent_locals, 0xff, ((uint64_t)input->vla_count + 1) * sizeof(uint32_t));
         memset(writer.labels, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
         if (writer.track)
@@ -3470,17 +3583,19 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
             const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
             const char* passed = check_lower_passed(&writer, parameter_type);
+            // So is a long double one (check_lower_x87), from its 16 bytes on the stack.
+            const bool object = aggregate || check_lower_x87(types, parameter_type);
             writer.token = parameter;
-            if (alignment > (aggregate ? BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 : 3u))
+            if (alignment > (object ? BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 : 3u))
             {
-                check_lower_unsupported(&writer, aggregate ? "parameters aligned past 16 bytes" : "parameters aligned past 8 bytes");
+                check_lower_unsupported(&writer, object ? "parameters aligned past 16 bytes" : "parameters aligned past 8 bytes");
             }
             if (passed != NULL)
             {
                 check_lower_unsupported(&writer, passed);
             }
-            const uint32_t local = aggregate ? check_lower_object(&writer, type_size(types, parameter_type), alignment) :
-                                               check_lower_temporary(&writer, check_lower_class(types, parameter_type));
+            const uint32_t local = object ? check_lower_object(&writer, type_size(types, parameter_type), alignment) :
+                                            check_lower_temporary(&writer, check_lower_class(types, parameter_type));
             if ((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer.local_count)
             {
                 writer.local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
@@ -3551,6 +3666,11 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                     {
                         check_lower_unsupported(&writer, "local objects of incomplete type");
                     }
+                    local = check_lower_object(&writer, type_size(types, local_type), alignment);
+                }
+                else if (check_lower_x87(types, local_type))
+                {
+                    // A long double is a frame object too (check_lower_x87), aligned to 16.
                     local = check_lower_object(&writer, type_size(types, local_type), alignment);
                 }
                 else if (type_kind_is_array(kind) || alignment > 3)
@@ -3649,6 +3769,12 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         {
             BUSTER_CHECK_LOWER_COPY(argument_sizes, argument_sizes, uint32_t, writer.argument_count);
             BUSTER_CHECK_LOWER_COPY(call_result_objects, call_result_objects, uint32_t, writer.call_count);
+        }
+        if (writer.x87)
+        {
+            BUSTER_CHECK_LOWER_COPY(x87_constants, x87_constants, uint64_t, 2 * (uint64_t)writer.x87_constant_count);
+            function->x87_constant_count = writer.x87_constant_count;
+            function->x87 = true;
         }
 #undef BUSTER_CHECK_LOWER_COPY
         // A variadic definition that starts its list has its incoming frame (Tier0Function.incoming_variadic): its own

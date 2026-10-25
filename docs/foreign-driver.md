@@ -9,7 +9,7 @@ link order. It does not invoke a system linker to produce its output.
 ```text
 build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared]
     [-soname NAME] [--dynamic-linker PATH] [--no-dynamic-linker]
-    [--lanes N] [--scalar] [-s|--strip-all] [--time]
+    [--lanes N] [--scalar] [-s|--strip-all] [-S|--strip-debug] [--time]
     [--gc-sections|--no-gc-sections]
     [--merge-strings|--no-merge-strings]
     [--dedup-unwind|--no-dedup-unwind] [--startup-applies-irelative]
@@ -23,10 +23,12 @@ GCC's `-static-pie` line is `-static -pie --no-dynamic-linker -z text`), and
 `-shared` a shared library, which has no entry point unless `-e` names one,
 with `-soname NAME` (or GNU ld's `-h NAME`, `--soname=NAME`) for its
 `DT_SONAME`. `-shared` with `-static` or `-pie`, and `--no-dynamic-linker`
-without `-static -pie`, are refused. Named regular symbols are emitted
-by default; `-s` and `--strip-all` omit `.symtab` and `.strtab` while preserving
-the dynamic symbol table and runtime dependencies. `--scalar` selects the exact
-resolver, symbol-selection and writer paths. `--lanes N` runs the resolution,
+without `-static -pie`, are refused. Named regular symbols and the inputs'
+DWARF are emitted by default (below, "Debug information"); `-s` and
+`--strip-all` omit `.symtab`, `.strtab` and the DWARF while preserving the
+dynamic symbol table and runtime dependencies, and `-S` and `--strip-debug`
+omit the DWARF alone. `--scalar` selects the exact resolver, symbol-selection,
+conversion and writer paths. `--lanes N` runs the resolution,
 the conversion and the writer on up to N lanes, at most one per CPU the process
 may run on: lanes past those share CPUs, and each of their syncs waits for a
 lane the scheduler has set aside. `--time` reports, on standard
@@ -226,6 +228,81 @@ them after the writer returns, including error paths. The terminal CIE
 result is a caller contract, not a runtime type barrier; it must not go to
 ET_REL output or another GC/original-import pass.
 
+## Debug information
+
+The importer leaves the inputs' non-allocated sections out of the link, so the
+conversion builds the output's DWARF beside it (`foreign_debug.c`, #395): each
+selected object's debug sections (`.debug_info`, `.debug_abbrev`,
+`.debug_line`, `.debug_str`, `.debug_line_str`, `.debug_loclists`,
+`.debug_rnglists`, `.debug_aranges`, `.debug_addr`, `.debug_str_offsets`,
+`.debug_ranges`, `.debug_loc` and the rest of DWARF 4's and 5's), concatenated
+by name in input order, each contribution at its alignment after the one
+before, as GNU ld and lld concatenate them. `.debug_str`'s and
+`.debug_line_str`'s strings aren't merged, which lld does: the sections are
+larger, and only their offsets differ from lld's. A section of a COMDAT group
+the resolution discarded goes with its group, and an excluded one
+(`SHF_EXCLUDE`) is left out, as GNU ld and lld leave it out of a final link.
+An empty one keeps its place, which a reference into it takes. Each output
+section has its contributions' largest alignment (a compressed one's
+`ch_addralign`), in the file and in its `sh_addralign`, as GNU ld and lld
+align it.
+
+Each debug relocation is applied where the layout doesn't decide it and left
+to the writer where it does:
+
+- a reference into a debug section (`DW_FORM_sec_offset`'s and `DW_FORM_strp`'s
+  `R_X86_64_32`, or `R_X86_64_64` in 64-bit DWARF) is that section's place in
+  its output section plus the symbol's value and the addend, written now;
+- a reference to code or data the link keeps (a `DW_AT_low_pc`'s or a line
+  program's `R_X86_64_64`, an `R_X86_64_32` address, a thread-local's
+  `R_X86_64_DTPOFF32` or `_64`) is the writer's, by the link's symbol
+  (`ExecutableOptions.debug_sections`), which patches the definition's address
+  or the thread-local's offset in the TLS segment after the layout;
+- a reference to a section that COMDAT selection or `--gc-sections` dropped, or
+  to an excluded debug section, or to a symbol the link has none of, gets lld's
+  tombstone: all ones in `.debug_names`, whose name index would read 0 as its
+  first unit's offset (an `R_X86_64_32`'s 32 bits of it, as lld truncates it),
+  1 in `.debug_ranges` and `.debug_loc`, whose lists 0 would end, and 0
+  elsewhere.
+
+Relocation types that DWARF doesn't use are refused, naming the object, the
+section and the relocation, and so are a thread-local offset into a debug
+section and a 4-byte field's value past its range: `R_X86_64_32`'s unsigned,
+`R_X86_64_DTPOFF32`'s signed, as GNU ld and lld check them. So are two fields
+of a section that overlap, which GNU ld and lld write in the relocations'
+order and compilers never emit: their bytes would otherwise depend on which of
+the writer's lanes patched last, or on a field written in the conversion being
+patched again after. Fields out of order that don't overlap are taken. A relocation
+without a symbol is its addend, as GNU ld writes an address's (lld writes its
+tombstone for any relocation without a symbol in a debug section). A compressed section (`SHF_COMPRESSED` of type `ELFCOMPRESS_ZLIB`, which
+GNU as writes for `-g` by default and GCC's and clang's `-gz` ask for)
+contributes its bytes decompressed by `inflate.c` (written from RFCs 1950 and
+1951), at the size and alignment its compression header gives; another
+compression (`-gz=zstd`'s) is refused, and so is a zlib stream that doesn't
+decompress to its size or whose Adler-32 differs, even where the header
+declares no bytes.
+
+The build is a plan and two passes. The plan, on the calling thread or lane 0,
+places each section in its output section and lists the contributions and the
+relocation sections. The bytes pass copies or decompresses each contribution,
+and the relocations pass applies each relocation section's relocations, each
+into its own range of the records, which the end compacts in order. On lanes,
+each pass's items go costliest first (a large object's sections are separate
+streams to decompress) with a sync between the passes; the calling thread takes
+them in order. Either way the same bytes and records come out. A relocation
+section's relocations go eight at a time by the vector path: the plan resolves
+each object's symbols once into a table of what they mean (a place in a debug
+section, the link's symbol, a tombstone, or left to the exact path), so that a
+batch takes one gather, then scatters its fields and compresses its records
+for the writer. A batch with a rare relocation (a type DWARF doesn't use, a
+field outside the section, a symbol through `SHN_XINDEX`, a value that doesn't
+fit, fields out of order) goes to the exact path, its twin, which reads the
+symbols themselves and which `--scalar` takes for all of them. A
+DEFLATE stream is one chain of dependent codes, so its decoding stays serial,
+spread over the lanes stream by stream; its Adler-32 is computed 64 bytes at a
+time. `-S` and `-s` skip the whole build, and `--time` reports it as the
+conversion's `debug` phase.
+
 ## Regular symbols
 
 Regular-symbol selection follows all three optional transformations and uses
@@ -337,7 +414,34 @@ linker writes as its own valid choice is classified and counted, never
 dropped silently: mold's `IRELATIVE` relocation of a pointer to an IFUNC
 outside the GOT in a PIE, where `link-foreign` and lld relocate the pointer
 relative to the IFUNC's stub, must be one of `link-foreign`'s stub pointers,
-one for one. The corpus is its two original programs (C, with threads,
+one for one. The foreign DWARF case (`foreign_debug_test.c`) compiles original C and
+C++ fixtures with `-g` by gcc, whose GNU as compresses the debug sections, and by
+clang, which doesn't, at `-O0` and `-O2`, in DWARF 5 and 4, and with
+`-gz=zlib` and `-gz=none`, and links each as a PIE on 1 lane, on 8 and by the
+exact path: the same bytes, which run and print what the program computes. The
+C++ fixture's inline functions are COMDAT groups in both units, whose losing
+copies' DWARF keeps tombstones; `--gc-sections` keeps the DWARF of what it
+collects the same way; `-S` leaves the debug sections out. Assembly fixtures
+check excluded debug sections (left out, with lld's tombstones in the
+references into them, `.debug_names`' all ones among them, as by section GC),
+an empty section's place, and empty relocation
+sections, also where no other section of the empty one's kind has bytes and the
+link has no debug relocation, each as lld links them. A zstd section and a
+damaged zlib stream are refused, and so is a section whose header declares no
+bytes but whose stream gives some or isn't one; with an empty stream, it links.
+The relocation passes' vector path is checked
+against its exact twin on each debug relocation section of a `-g` object, which
+ends at a `PROT_NONE` page, as compiled, cut to each length short of a batch,
+and with each rare relocation at each of a batch's places. With
+`--cross-check`, lld links the same objects: `llvm-dwarfdump --verify` finds no
+error in either output, their `--statistics` agree but for the string sections'
+sizes, and gdb, stopped in a function of each, gives the same backtrace,
+arguments and locals but for addresses. `test-inflate` checks the decompressor
+against gzip's streams of generated inputs at levels 1, 6 and 9, streams made by
+hand bit by bit for each error, every cut and three changes of each byte of
+streams to 4 KB ending at `PROT_NONE` pages, and the Adler-32's vector path
+against its twin.
+The corpus is its two original programs (C, with threads,
 thread-locals, an archive, constructors, a weak reference, a registry and
 IFUNCs called, loaded from the GOT and pointed to from data, and
 C++, with iostream, exceptions across translation units, RTTI, templates in
@@ -358,3 +462,12 @@ lld's 98.3, 102.5 and 128.2 on one thread. "Foreign executables, as built" in
 the linker design has the tables, the appendix's own inputs and where the time
 goes. GC, string pooling and CIE pooling remain
 disabled by default; their own measurements are in the linker design.
+
+With DWARF, SQLite's shell compiled by GCC at `-O2 -g` (GNU as's
+zlib-compressed sections) links in 9.20 ms on one lane, 6.84 of them the
+`debug` phase, mostly decompressing about 5 MB of DWARF, against lld's 29.3 ms
+on one thread and 15.0 on eight and mold's 25.8 and 16.4; from uncompressed
+sections (`-gz=none`), in 3.38 ms (0.96 of DWARF) against lld's 18.2 and 11.8
+and mold's 14.7 and 13.1; with `-S`, in 1.76 ms. The relocations' vector path
+takes the uncompressed DWARF in 0.96 ms against the exact path's 1.40
+([the record](https://github.com/buster14a/buster-performance/tree/cabd9313cbdf76b566c0d63ed990c15925d466cf/docs/measurements/foreign-dwarf-395-2026-10-25)).

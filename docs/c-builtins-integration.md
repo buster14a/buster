@@ -138,8 +138,10 @@ each in either order, the high eightbyte alone, or a 16-byte vector's SSE and
 SSEUP halves from one XMM register's slot) and advances both cursors;
 otherwise, and for a stack plan, the value is the aligned overflow area's
 address, which advances past the aggregate's slots. An ignored (empty) one's
-value is its object's address. Wider classes, such as `long double`, are
-explicit refusals.
+value is its object's address. A `long double` (Tier 0's F80) is always in the
+overflow area: its plan aligns the area to 16, loads the value's 16 bytes and
+advances past them. Wider classes, such as `_Complex long double`, are explicit
+refusals.
 
 The ordinary Tier 0 live-value spill area is not a SysV variadic register-save
 area. The optional [incoming variadic frame](tier0.md#incoming-variadic-frames)

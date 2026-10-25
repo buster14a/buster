@@ -268,9 +268,9 @@ designs and the compilers already built this way.
   `test-check-varargs`, `test-check-builtins-misc`, `test-builtin-lowering` and
   `test-builtin-varargs` distinguish semantic constraints from emitted execution.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
-  structs and unions too), `va_copy` and `va_end` through them over Tier 0's
-  incoming variadic frames (#137); full Tier 1 coverage and corpus acceptance
-  remain separate requirements.
+  structs, unions and long doubles too), `va_copy` and `va_end` through them
+  over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
+  acceptance remain separate requirements.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -307,9 +307,8 @@ designs and the compilers already built this way.
   against its expected output; `--cross-check` also links its `-c` object with
   `cc`. `--self-test` checks the harness with a stand-in compiler.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
-  `5c72756` that must pass; the 9700X job fetches that commit and runs both.
-  [The c-testsuite guide](docs/c-testsuite.md) has the details and the
-  programs still refused, each with what it waits on.
+  `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
+  and runs both. [The c-testsuite guide](docs/c-testsuite.md) has the details.
 - `src/buster/compiler/main.c` is the executable entry point: its commands, and
   for anything else the semantic driver (`run_check_command`, in
   `c_checker_driver.c`): `./build/compiler [--scalar] -fsyntax-only [-E's
@@ -541,14 +540,30 @@ designs and the compilers already built this way.
   version definitions are refused in the existing symbol pass before output.
 - `src/buster/compiler/debug.c` emits bounded DWARF 5 function names, ranges
   and source lines with scalar/vector twins and explicit late address slots.
-  `ExecutableOptions.debug` attaches one contribution at final TEXT addresses,
-  with nonallocated debug sections and a regular function symbol table.
-  `test-debug --cross-check` checks original fixtures with readelf, GDB and
-  perf; `benchmark-debug` measures validation through address finalization.
-  [The debug guide](docs/debug.md) records the contract, units written after
-  others (`DebugOutput.bases`), whose four offsets point at their own
-  contributions, and the source-row production still pending; `streaming.c`
-  makes a unit per 256 functions as they compile.
+  `ExecutableOptions.debug` attaches one unit or several (#395), each written
+  after the others at its bases (`DebugOutput.bases`) and finalized at its
+  functions' TEXT addresses, with nonallocated debug sections and a regular
+  function symbol table; `ExecutableOptions.debug_sections` takes sections a
+  producer built whole instead (`link-foreign`'s), with the references the
+  layout decides as columns the writer patches on its lanes.
+  `test-debug --cross-check` checks original fixtures, as one unit and as two,
+  with readelf, GDB and perf; `benchmark-debug` measures validation through
+  address finalization. [The debug guide](docs/debug.md) records the contract
+  and the source-row production still pending; `streaming.c` makes a unit per
+  256 functions as they compile.
+- `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
+  selected objects' debug sections (#395): concatenated by name in input order
+  (strings not merged), references between debug sections resolved, those to
+  code and data left to the writer, lld's tombstones for discarded code. Its
+  relocation passes take 8 relocations at a time with the exact pass as their
+  twin; `inflate.c` decompresses zlib-compressed sections (RFCs 1950 and 1951;
+  serial within a stream, the streams spread over lanes, the Adler-32 64 bytes
+  at a time). `test-inflate` checks the decompressor against gzip's streams,
+  hand-made errors and every cut and changed byte at `PROT_NONE` pages;
+  `test-foreign --cross-check` (`foreign_debug_test.c`) links gcc's and clang's
+  `-g` fixtures by both paths and on lanes, against lld with
+  `llvm-dwarfdump --verify` and gdb, and checks the relocation kernels' twins.
+  The driver's contract ("Debug information") has the details.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
@@ -679,7 +694,8 @@ designs and the compilers already built this way.
   IFUNC a fixup reaches unless its entry is glibc's startup, recognized by its
   files (the system's `crt1.o` or `rcrt1.o`, by identity, then `libc.a`'s
   `__libc_start_main`), which applies their `IRELATIVE` relocations, or
-  `--startup-applies-irelative` says the program's own does. GC, literal
+  `--startup-applies-irelative` says the program's own does. It keeps the
+  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
   pooling and CIE pooling are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
@@ -796,7 +812,10 @@ designs and the compilers already built this way.
   variable-length arrays' allocations and the stack's saved and restored
   positions, which give their function a frame pointer. An optional per-unit
   access column reaches the symbols a unit doesn't define through their GOT
-  slots, and thread-locals by local-exec or initial-exec. The output is
+  slots, and thread-locals by local-exec or initial-exec. Long double's values
+  (class F80) live in a 16-byte frame slot per integer depth, each entry of
+  them deferred: loaded onto the x87, computed and stored back, its locals and
+  parameters objects and its constants an optional column. The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
@@ -874,9 +893,11 @@ designs and the compilers already built this way.
   With `PPOptions.defer_history` a unit records none while it runs: its
   diagnostics, and `pp_history_ensure` for a later reader, record it by
   preprocessing the unit again (`docs/c-preprocessor.md`, "Deferred history").
-  `-E` and `parse` defer it; the checker's driver records it, since
-  `check_input_system_tokens` reads it. A reader of a unit whose history may
-  be deferred calls `pp_history_ensure` first.
+  `-E`, `parse` and the checker's driver defer it (but with `--scalar` and
+  `-flazy-system-headers`). A reader of a unit whose history may be deferred
+  calls `pp_history_ensure` first. `check_input_system_tokens` judges system
+  headers' tokens from runs the main loop keeps (`pp_system_levels`, "System
+  levels"), with the history's judgment (`pp_system_levels_history`) as twin.
   `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
   Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
   compares recording it with deferring it and reports retained and temporary
@@ -950,6 +971,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-bind --cross-check
 ./build/compiler benchmark-bind
 ./build/compiler test-executable
+./build/compiler test-inflate
 ./build/compiler test-dynamic --cross-check
 ./build/compiler test-static --cross-check
 ./build/compiler benchmark-executable
@@ -4129,11 +4151,13 @@ and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Two compiled runs
 (#137), against clang and against GCC at 16 bytes, put this compiler on our
 side: a world of what its C passes (integers to 64 bits, enums, pointers,
-`float`, `double` and the records, arrays and aligned typedefs of them, aligned
-to 16 at most), without what its front end doesn't take yet (C23's enums of a
+`float`, `double`, `long double` and the records, arrays and aligned typedefs of
+them, aligned to 16 at most), without what its front end doesn't take yet (C23's enums of a
 fixed underlying type, an attribute after a bit-field's width, which goes
-before its type instead, a struct of a flexible array member alone), and
-signatures within Tier 0's depths (13 integer and 15 floating arguments); our
+before its type instead, a struct whose only named member is a flexible array
+member), and
+signatures within Tier 0's depths (13 integer arguments, long doubles among them,
+and 15 floating ones); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the
@@ -4264,7 +4288,23 @@ of both TLS models (`_Thread_local` in C), and functions' addresses through the
 GOT. The native run gives each symbol a GOT slot and the thread-locals a block
 of their own, which FS points at for the entry's call alone. An `access` check
 before the programs compiles every global kind of every class by each access:
-both paths alike, with the access's references, and validation's rule.
+both paths alike, with the access's references, and validation's rule. After
+the programs, the `x87` check (`tier0_x87_test.c`, #136's item 8) compiles long
+double code by both paths into the same records, encoded by both encoders into
+the same bytes and run natively, called from C through function pointers, so
+that clang's code is the oracle of the convention and the x87's arithmetic of
+the values: each break of the class's rules refused at its entry; functions of
+long double parameters and results (on the stack around an integer in a
+register, a struct of one returned in st0 and one received from C into its
+object, long doubles to a variadic C function, one kept across a call); the
+conversions to and from the 64-bit integers and `int` on named cases around
+2^63, at the limits and on fractions, each called under rounding upward, which
+must truncate and leave the control word as it was; and
+`--count` random programs of statements writing long doubles and what converts
+from them (integers, floats, doubles, compares) from inputs of every class,
+through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
+both ways and calls of C functions, against the check's own stack machine. The
+programs must reach every kind and conversion of the class.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines

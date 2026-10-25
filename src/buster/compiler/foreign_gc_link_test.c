@@ -636,7 +636,7 @@ static void foreign_gc_link_test_undefined(ForeignTestTally* tally, const char* 
                 arena_pop_to(&input_arena, 0);
                 arena_pop_to(&input_names, 0);
                 ForeignLink input = { 0 };
-                const ForeignLinkResult built = foreign_link_build_for_gc(&input, &foreign, &input_arena, &input_names, RUNTIME_KIND_STATIC, (String8){ 0 }, (ForeignLinkStartup){ .entry = foreign_string("_start") });
+                const ForeignLinkResult built = foreign_link_build_for_gc(&input, &foreign, &input_arena, &input_names, RUNTIME_KIND_STATIC, (String8){ 0 }, (ForeignLinkOptions){ .entry = foreign_string("_start") });
                 const bool ready = foreign.failure.error == FOREIGN_ERROR_NONE && built.error == FOREIGN_LINK_ERROR_NONE;
                 foreign_test_expect(tally, ready, "GC producer defers strong undefined until reachability", descriptions[mode]);
                 if (ready)

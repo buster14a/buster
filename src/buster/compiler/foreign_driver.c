@@ -37,6 +37,7 @@ struct ForeignDriver
     bool merge_strings;
     bool dedup_unwind;
     bool strip_all;
+    bool strip_debug;
     bool time;
     bool help;
     // Whether -e named the entry point: a shared library has none otherwise.
@@ -67,7 +68,7 @@ static void foreign_driver_usage(void)
     fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared] [-soname NAME] [--dynamic-linker PATH]\n"
                     "                    [--no-dynamic-linker] [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
                     "                    [--dedup-unwind|--no-dedup-unwind] [--startup-applies-irelative]\n"
-                    "                    [-s|--strip-all] [--scalar] [--lanes N] [--time] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
+                    "                    [-s|--strip-all] [-S|--strip-debug] [--scalar] [--lanes N] [--time] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
                     "Defaults: static executable, a.out, entry _start, one lane; GC, string merging and unwind deduplication off.\n"
                     "Supply startup objects and runtime libraries explicitly, in link order, as GCC's driver gives them to GNU ld.\n"
                     "-pie writes a dynamic PIE, -static -pie a static PIE and -shared a shared library (no entry point without -e).\n"
@@ -76,7 +77,8 @@ static void foreign_driver_usage(void)
                     "or rcrt1.o, as GCC's driver finds them, calling libc.a's __libc_start_main. Other startup needs\n"
                     "--startup-applies-irelative to say it applies them (those between __rela_iplt_start and __rela_iplt_end, or a\n"
                     "static PIE's through _DYNAMIC).\n"
-                    "Named regular symbols are emitted by default; -s/--strip-all omits them, preserving dynamic symbols.\n"
+                    "Named regular symbols and the inputs' DWARF are emitted by default; -s/--strip-all omits both, preserving\n"
+                    "dynamic symbols, and -S/--strip-debug the DWARF alone.\n"
                     "Archive groups, --whole-archive, --as-needed, -Bstatic and -Bdynamic retain input order.\n"
                     "--time reports each stage's time on standard error.\n");
 }
@@ -243,6 +245,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         {
             driver->strip_all = true;
         }
+        else if (strcmp(argument, "-S") == 0 || strcmp(argument, "--strip-debug") == 0)
+        {
+            driver->strip_debug = true;
+        }
         else if (strcmp(argument, "--time") == 0)
         {
             driver->time = true;
@@ -328,13 +334,19 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
             "unsupported or malformed relocation",
             "invalid link representation",
             "an IFUNC that the loader can't bind as a dynamic symbol, which a shared library doesn't take yet",
+            "a compressed debug section whose zlib stream doesn't decompress to its size",
         };
         // An IFUNC's refusal says why for the kind (foreign_link_refuse_ifuncs).
         const char* ifunc = runtime_kind_is_static(kind) ? "an IFUNC whose IRELATIVE relocation nothing applies: the entry isn't glibc's startup (the system's "
                                                            "crt1.o or rcrt1.o, calling libc.a's __libc_start_main), and no --startup-applies-irelative says the "
                                                            "output's own applies it" :
                                                            messages[FOREIGN_LINK_ERROR_IFUNC];
+        // A compressed debug section's refusal says which way it doesn't decompress (foreign_debug_build).
+        const char* compression = result.import.error == IMPORT_ERROR_UNSUPPORTED ?
+                                      "a debug section compressed otherwise than with zlib (-gz=zstd's), which link-foreign doesn't decompress: compile with -gz=zlib or -gz=none" :
+                                      messages[FOREIGN_LINK_ERROR_COMPRESSION];
         const char* message = result.error == FOREIGN_LINK_ERROR_IFUNC                      ? ifunc :
+                              result.error == FOREIGN_LINK_ERROR_COMPRESSION                ? compression :
                               (uint32_t)result.error < BUSTER_ARRAY_LENGTH(messages) ? messages[result.error] :
                                                                                        "conversion failed";
         fprintf(stderr, "link-foreign: %s", message);
@@ -579,6 +591,7 @@ static void foreign_driver_report(uint32_t lanes, const uint64_t* resolve, const
         "copies",
         "check",
         "exports",
+        "debug",
     };
     static const char* const write_phases[EXECUTABLE_PHASES] = {
         "count",
@@ -684,12 +697,13 @@ static int run_foreign_link(int argc, char** argv)
     ends[FOREIGN_DRIVER_STAGE_RESOLVE] = foreign_driver_now();
     if (succeeded && !driver.help)
     {
-        const ForeignLinkStartup startup = {
+        const ForeignLinkOptions options = {
             .entry = driver.entry,
             .applies_irelative = driver.startup_irelative,
+            .strip_debug = driver.strip_all || driver.strip_debug,
         };
-        ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, startup) :
-                                               foreign_link_build_kind(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, startup);
+        ForeignLinkResult result = driver.gc ? foreign_link_build_for_gc(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, options) :
+                                               foreign_link_build_kind(&converted, &foreign, &arena, &names, driver.kind, driver.interpreter, options);
         // The conversion's phases, before section GC replaces the link.
         memcpy(convert, converted.phase_nanoseconds, sizeof(convert));
         if (result.error == FOREIGN_LINK_ERROR_NONE && driver.gc)
@@ -740,6 +754,14 @@ static int run_foreign_link(int argc, char** argv)
     if (succeeded && !driver.help)
     {
         converted.dynamic.soname = driver.kind == RUNTIME_KIND_SHARED ? driver.soname : (String8){ 0 };
+        // The inputs' DWARF, unless -s or -S strips it, as GNU ld strips it.
+        bool debug = !driver.strip_all && !driver.strip_debug;
+        uint64_t debug_bytes = 0;
+        for (uint32_t kind = 0; debug && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
+        {
+            debug_bytes += converted.debug.sections[kind].length;
+        }
+        debug = debug && debug_bytes != 0;
         ForeignDriverWrite write = {
             .link = &converted.link,
             .arena = &arena,
@@ -748,6 +770,7 @@ static int run_foreign_link(int argc, char** argv)
                 .entry = foreign_driver_entry(&driver, &foreign, &converted),
                 .dynamic = driver.kind != RUNTIME_KIND_STATIC ? &converted.dynamic : 0,
                 .runtime = runtime_kind_is_static(driver.kind) ? &converted.runtime : 0,
+                .debug_sections = debug ? &converted.debug : 0,
                 .exact = driver.path == FOREIGN_PATH_EXACT,
                 // The atoms' bytes are the inputs' private mappings: staged, a chunk is patched in a lane's buffer
                 // rather than in pages that each write would copy.

@@ -37,6 +37,10 @@ function rename(bytes, from, to)
 try
 {
     const started = performance.now();
+    const oneField = readArrow(new Uint8Array(await (await fetch('/evidence/profile-example/arbitrary-custom.schema.arrow')).arrayBuffer())).fields.slice(0, 1);
+    const sharedBudget = {cells: 1999999};
+    check(readJSONL('{"time_ns":"0"}\n', oneField, sharedBudget).length === 1 && sharedBudget.cells === 2000000, 'JSONL counts exact nested/primitive cells against a shared aggregate budget');
+    rejects(() => readJSONL('{"time_ns":"1"}\n', oneField, sharedBudget), 'A later partition cannot reset the aggregate materialization budget');
     let rows = 0;
     let cells = 0;
     for (const [directory, name] of [['foreign-strings-example', 'link-results'], ['foreign-strings-example', 'executions'], ['profile-example', 'arbitrary-custom']])
@@ -94,6 +98,7 @@ try
     const population = (value, prefix) => [1, 2, 3].map(pair => ({value: BigInt(value), execution: prefix + pair, pair, case: 'one', correct: true, coverage: 'complete', status: 'ok', machine: 'fixed', corpus: 'fixed', harness: 'fixed', scope: 'whole', configuration: 'fixed', profiled: false}));
     const a = population(10, 'a');
     const b = population(12, 'b');
+    check(comparePopulation(dataset, {...compared, definition: {...compared.definition, metadata: {}}}, 'value', a, b).independentLeft === null, 'Unknown experimental-unit identities do not acquire an independent count');
     check(comparePopulation(dataset, compared, 'value', a, b).classification === 'regression', 'Matched independent pairs expose regression and uncertainty');
     check(comparePopulation(dataset, compared, 'value', a, population(8, 'b')).classification === 'improvement', 'Direction-aware improvement');
     check(comparePopulation(dataset, compared, 'value', population(0, 'a'), b).relative === null, 'Zero baseline has no relative percentage');
