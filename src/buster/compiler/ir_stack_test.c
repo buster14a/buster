@@ -420,6 +420,30 @@ static void ir_stack_test_calls(IrLowerTestTally* tally, Arena* input, Arena* ou
     arena_pop_to(input, mark);
 }
 
+static void ir_stack_test_joins(IrLowerTestTally* tally, Arena* input, Arena* output, Arena* scratch, Arena* execution)
+{
+    static const char source[] =
+        "function (i1) -> i64 {\nb0:\n"
+        "  %0 = param.i1 0\n  %1 = const.i64 0x10\n  %2 = stack_save.i64\n"
+        "  %3 = alloca.ptr %1\n  %4 = cbr.void %0, b1, b2\n"
+        "b1:\n  %5 = stack_save.i64\n  %6 = alloca.ptr %1\n  %7 = br.void b3\n"
+        "b2:\n  %8 = copy.i64 %2\n  %9 = br.void b3\n"
+        "b3:\n  %10 = phi.i64 [%5, b1], [%8, b2]\n"
+        "  %11 = stack_restore.void %10\n  %12 = ret.void %1\n}\n";
+    const uint64_t mark = input->length;
+    IrFunction function = { 0 };
+    if (ir_stack_test_parse(tally, source, input, scratch, &function))
+    {
+        for (uint64_t condition = 0; condition < 2; condition += 1)
+        {
+            ir_stack_test_execute(tally, &function, condition, 16, INTERPRETER_OK, execution);
+            ir_stack_test_consumers(tally, &function, condition, 16, output, scratch, execution);
+            ir_stack_test_chain(tally, &function, condition, 16, scratch, execution);
+        }
+    }
+    arena_pop_to(input, mark);
+}
+
 static void ir_stack_test_faults(IrLowerTestTally* tally, Arena* input, Arena* output, Arena* scratch, Arena* execution)
 {
     static const char* const sources[] = {
@@ -564,8 +588,45 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
     arena_pop_to(&output, 0);
     arena_pop_to(&twin, 0);
     arena_pop_to(&execution, 0);
+    const uint8_t edge_kinds[] = {
+        BUSTER_TYPED_STACK_SAVE,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ALLOCA,
+        BUSTER_TYPED_DISCARD,
+        BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_STACK_RESTORE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN,
+    };
+    uint8_t edge_classes[sizeof(edge_kinds)];
+    memset(edge_classes, BUSTER_TYPED_CLASS_U64, sizeof(edge_classes));
+    const uint64_t edge_values[] = { 0, 0, 7, 16, 0, 0, 7, 0, 89, 0 };
+    const Tier0Function edge_source = {
+        .kinds = edge_kinds,
+        .classes = edge_classes,
+        .values = edge_values,
+        .count = sizeof(edge_kinds),
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 1,
+        .parameter_count = 1,
+        .parameters = &parameter,
+    };
+    if (ir_lower_test_lower(tally, &edge_source, IR_I64, 1, &output, &twin, &scratch, &function, 131, 1))
+    {
+        for (uint64_t condition = 0; condition < 2; condition += 1)
+        {
+            ir_stack_test_execute(tally, &function, condition, 89, INTERPRETER_OK, &execution);
+            ir_stack_test_chain(tally, &function, condition, 89, &scratch, &execution);
+        }
+    }
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin, 0);
     ir_stack_test_native_boundary(tally, &output, &twin, &scratch);
     ir_stack_test_calls(tally, &output, &twin, &scratch, &execution);
+    ir_stack_test_joins(tally, &output, &twin, &scratch, &execution);
     ir_stack_test_faults(tally, &output, &twin, &scratch, &execution);
     if (ir_stack_test_parse(tally, ir_stack_test_loop, &output, &scratch, &function))
     {
