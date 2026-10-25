@@ -26,7 +26,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
-  - each typed entry's first record (`Tier0Code.entry_records`, the epilogue's after the last), which with branch
+  - each typed entry's first record (`Tier0Code.entry_records`, the epilogue's after the last), when the producer asks
+    for it (`Tier0Function.entry_records`; a compile without it allocates and copies nothing for it), which with branch
     sizing's offsets says where each entry's code starts: the C driver's source rows for `-g` (#395,
     `c_check_debug.c`);
   - `LinkReference`s for `link_add_code_fixups`;
@@ -501,7 +502,8 @@ value (#137), 300 each by default. Each program:
 
 1. Every function must pass `tier0_validate`.
 2. Both paths must compile it to the same records, branch columns, references and entries' first records, which must
-   ascend within the records.
+   ascend within the records; and a compile without the entries' first records must make the same code and none of
+   them.
 3. The records must pass `x86_validate` and the branch columns `branch_sizing_validate`.
 4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs, which an alarm stops
    after 10 s (a frame laid out wrong can make code loop). The result and every global's bytes must equal what the

@@ -109,7 +109,8 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
 
 - **Raw rows**, in `check_program_emit` after branch sizing: each typed
   entry's first record (`Tier0Code.entry_records`) at its byte offset, with
-  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`,
+  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`; a
+  compile without `-g` asks for neither, and keeps and copies nothing for them;
   saved with each lowering task so that an operation's entry takes its own
   node's token, not its last operand's, and a call's its callee's, as GCC and
   clang place a call across lines), kept where the next entry's code
@@ -127,7 +128,10 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
 - **Kept rows**: those in the function's file (a line sequence has one; a
   row of an included file's code is left out) whose line differs from the
   kept row before's, and the row where the body starts, whatever its line,
-  which the function marks `prologue_end`.
+  which the function marks `prologue_end`. A file is one key per name (a
+  hash table of the files' paths and the `#line`s' names), so that two
+  `#line`s naming one file keep their rows together, and the unit's file
+  table is built by key without comparing names.
 
 A function is named by its identifier, at its declaration's line, in the
 file of its declaration (a header's for a function a header defines, a

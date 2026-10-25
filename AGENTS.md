@@ -811,8 +811,9 @@ designs and the compilers already built this way.
   positions, which give their function a frame pointer. An optional per-unit
   access column reaches the symbols a unit doesn't define through their GOT
   slots, and thread-locals by local-exec or initial-exec. The output is
-  the records with #144's branch columns, `LinkReference`s and each entry's
-  first record (`entry_records`, for source rows). `tier0_compile`
+  the records with #144's branch columns, `LinkReference`s and, when asked for
+  (`Tier0Function.entry_records`), each entry's first record, for source
+  rows. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
@@ -999,6 +1000,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
 ./build/compiler benchmark-backend
+./build/compiler test-check-debug --cross-check
+./build/compiler benchmark-check-debug
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
