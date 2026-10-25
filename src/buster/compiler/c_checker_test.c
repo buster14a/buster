@@ -1815,6 +1815,8 @@ struct CheckSourceFixture
     bool rejected;
     bool unsupported;
     bool extension;
+    // The C standard both sides check it in, GNU's dialect of it: 0 for gnu17, or 2023 for gnu23.
+    uint32_t standard;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1837,7 +1839,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     static Parser parsers[2];
     const PPOptions pp_options = {
         .language = {
-            .standard = 2017,
+            .standard = fixture->standard != 0 ? fixture->standard : 2017,
             .gnu = true
         },
         .no_standard_includes = true,
@@ -2368,6 +2370,39 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            // A fixed enum's enumerators are of its base's type in its list, and after it of the enum's in C23 alone, as
+            // clang 23 types them (#428's review): before C23, two such enums' enumerators of one base are of one type.
+            "fixed enum: enumerators of the base's type before C23",
+            "enum E : int { A, B = _Generic(A, int: 2, default: 3) }; enum F : int { C };\n"
+            "_Static_assert(B == 2 && _Generic(A, __typeof__(C): 1, default: 0) == 1 && _Generic(A, int: 1, default: 0), \"C17\");\n"
+            "enum G : unsigned char { D }; _Static_assert(_Generic(D, unsigned char: 1, default: 0) && _Generic(+D, int: 1, default: 0), \"G\");\n",
+            false,
+            false
+        },
+        {
+            "fixed enum: enumerators of the enum's type after its list in C23",
+            "enum E : int { A, B = _Generic(A, int: 2, default: 3) }; enum F : int { C };\n"
+            "_Static_assert(B == 2 && _Generic(A, __typeof__(C): 1, default: 0) == 0 && _Generic(A, enum E: 1, default: 0), \"C23\");\n"
+            "enum G : unsigned char { D }; _Static_assert(_Generic(D, enum G: 1, default: 0) && _Generic(+D, int: 1, default: 0), \"G\");\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            // The same assertion in the other dialect: each must refuse it.
+            "fixed enum: C23's enumerator types refused before it",
+            "enum E : int { A }; enum F : int { C }; _Static_assert(_Generic(A, __typeof__(C): 1, default: 0) == 0, \"C17\");\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: earlier enumerator types refused in C23",
+            "enum E : int { A }; enum F : int { C }; _Static_assert(_Generic(A, __typeof__(C): 1, default: 0) == 1, \"C23\");\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
             // A negative value's significant bits, its sign not checked (clang's isRepresentableIntegerValue), and a
             // value's active bits, less the sign bit of a signed type.
             "fixed enum: an enumerator past its type",
@@ -2545,6 +2580,25 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         "-std=gnu17"
     };
     ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
+    // The fixtures in gnu23, again in their dialect.
+    char* c23_pointers[FILE_COUNT];
+    uint32_t c23_fixtures[FILE_COUNT];
+    ParseTestClang c23_outcomes[FILE_COUNT];
+    uint32_t c23_count = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        c23_pointers[c23_count] = paths[i];
+        c23_fixtures[c23_count] = i;
+        c23_count += fixtures[i].standard == 2023 ? 1 : 0;
+    }
+    const char* c23_arguments[] = {
+        "-std=gnu23"
+    };
+    ready = ready && (c23_count == 0 || parse_test_clang(clang, c23_arguments, BUSTER_ARRAY_LENGTH(c23_arguments), c23_pointers, c23_count, c23_outcomes));
+    for (uint32_t k = 0; ready && k < c23_count; k += 1)
+    {
+        outcomes[c23_fixtures[k]] = c23_outcomes[k];
+    }
     check_test_expect(test, ready, "clang source oracle could not run");
     for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
     {

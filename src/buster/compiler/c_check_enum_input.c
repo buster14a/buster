@@ -69,10 +69,11 @@ static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagF
 }
 
 // An enumerator of an enum with a fixed underlying type (complete from its base): its value, explicit or the one before
-// plus 1, must be representable in that type, and is converted to it; its type is the enum's, in its list too (C23
-// 6.7.2.2). Explicit values are representable as clang's isRepresentableIntegerValue has it: a negative one by its
-// significant bits, the others by their active bits, less the sign bit for a signed type. An error is reported at the
-// enumerator's name, as clang reports it.
+// plus 1, must be representable in that type, and is converted to it; its type is that type in its list, as clang 23
+// types it (Sema::CheckEnumConstant), and after the list the enum's in C23 alone (check_input_enum_complete). Explicit
+// values are representable as clang's isRepresentableIntegerValue has it: a negative one by its significant bits, the
+// others by their active bits, less the sign bit for a signed type. An error is reported at the enumerator's name, as
+// clang reports it.
 static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTagFrame* frame, uint32_t name, bool explicit_value, CheckValue* value)
 {
     const TypeTable* types = reader->types;
@@ -110,7 +111,7 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
             .integer = frame->count == 0 ? 0 : (previous + 1) & mask,
         };
     }
-    value->type = frame->type;
+    value->type = underlying;
     if (!valid)
     {
         check_input_report(reader, name, CHECK_INPUT_DECLARATION);
@@ -291,12 +292,17 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     bool valid = frame->count != 0;
     if (reader->enum_fixed[tag] != BUSTER_CHECK_ENUM_NONE)
     {
-        // Complete from its base, with its enumerators of its own type; an alignment after its body comes too late for
-        // that (one before its name was applied there).
+        // Complete from its base, with its enumerators of the base's type in its list; an alignment after its body comes
+        // too late for that (one before its name was applied there). After the list, its enumerators are of its own type
+        // in C23 and keep the base's before it, as clang 23 types them (Sema::ActOnEnumBody, C23 6.7.3.3p16).
         if (valid && alignment != 0 && alignment != reader->types->tags.alignment_log2[tag])
         {
             check_input_report(reader, frame->close, CHECK_INPUT_UNSUPPORTED);
             valid = false;
+        }
+        for (uint32_t member = frame->first; valid && reader->parser->language.standard >= 2023 && member != BUSTER_CHECK_NONE; member = members[member].next)
+        {
+            reader->declared_types[members[member].member.name] = frame->type;
         }
         reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_LISTED;
     }
