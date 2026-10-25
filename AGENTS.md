@@ -893,9 +893,11 @@ designs and the compilers already built this way.
   With `PPOptions.defer_history` a unit records none while it runs: its
   diagnostics, and `pp_history_ensure` for a later reader, record it by
   preprocessing the unit again (`docs/c-preprocessor.md`, "Deferred history").
-  `-E` and `parse` defer it; the checker's driver records it, since
-  `check_input_system_tokens` reads it. A reader of a unit whose history may
-  be deferred calls `pp_history_ensure` first.
+  `-E`, `parse` and the checker's driver defer it (but with `--scalar` and
+  `-flazy-system-headers`). A reader of a unit whose history may be deferred
+  calls `pp_history_ensure` first. `check_input_system_tokens` judges system
+  headers' tokens from runs the main loop keeps (`pp_system_levels`, "System
+  levels"), with the history's judgment (`pp_system_levels_history`) as twin.
   `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
   Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
   compares recording it with deferring it and reports retained and temporary
