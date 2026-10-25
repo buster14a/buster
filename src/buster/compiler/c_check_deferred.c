@@ -572,10 +572,19 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     }
     const uint64_t walk_end = deferred->timing ? check_deferred_now() : 0;
     types->changes = 0;
-    result->unsupported = !valid || reader->lane_unsupported || input->report_count != 0 || input->resource || !reader->bindings.valid || changes->full;
+    // A completion of a tag the top level made (a definition's parameter-list tag, which its body declares again,
+    // #436): everything after the body sees the tag complete in source order, which the merge doesn't carry yet.
+    bool completes = false;
+    for (uint32_t i = 0; i < changes->count; i += 1)
+    {
+        const TypeChange* change = changes->items + i;
+        completes |= (change->operation == BUSTER_TYPE_CHANGE_LAYOUT || change->operation == BUSTER_TYPE_CHANGE_ENUM) && change->tag < view.tags;
+    }
+    result->unsupported = !valid || reader->lane_unsupported || input->report_count != 0 || input->resource || !reader->bindings.valid || changes->full ||
+                          completes;
     result->reason = !valid || input->resource || changes->full ? "a body ran out of room" : reader->lane_unsupported ? reader->lane_reason :
                      input->report_count != 0 ? "a body reports an error" :
-                     !reader->bindings.valid ? "a body's bindings ran out of room" : 0;
+                     !reader->bindings.valid ? "a body's bindings ran out of room" : completes ? "a body completes a tag the top level made" : 0;
     if (!result->unsupported)
     {
         Arena* arena = &lane->results;

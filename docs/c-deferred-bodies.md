@@ -123,6 +123,9 @@ source order, said with the reason:
   scope): the file-scope entity's type, which later declarations see;
 - a body makes a union transparent, which applies to what follows it;
 - a body uses an intrinsic, whose tables the merge doesn't take yet;
+- a body completes a tag the top level made: its definition's parameter-list
+  tag, which the body declares again (#436), whose completion everything after
+  the body sees in source order and the merge doesn't carry yet;
 - a body's walk reports an error (a later phase's error is merged like any
   other: the phases run on the merged state);
 - a table runs out of room.
@@ -138,7 +141,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 37 fixtures of the
+- `./build/compiler test-checker-deferred [--keep]`: 39 fixtures of the
   issue's cases, each written to a file and checked as `test-checker-corpus`
   checks one: on the scalar path, the vector path, and the vector path with
   every body read apart, on 1, 2, 3 and 8 lanes through the stacks, the batch
@@ -166,7 +169,9 @@ passes every checker test.
   `_Generic`, compound literals and statics; recursion and forward calls,
   labels; unions made transparent in a body and at file scope between bodies;
   tags first named in a prototype's parameter, a sizeof in an array's bound
-  and a definition's parameter, and one declared before its prototype;
+  and a definition's parameter, and one declared before its prototype; a
+  definition's parameter-list tag used in its body, which merges, and
+  completed there, which goes to source order;
   errors in a body, at the top level, in the syntax and in a later phase; and
   400 bodies that call each other. Mutants that skip a lane's withdrawals
   when it moves back, or its restores when it moves on, fail 12 and 9 checks;

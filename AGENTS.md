@@ -3966,10 +3966,10 @@ of lanes, from the reader's state at the body's opening (the history's heads,
 a view of the top level's table), and merges the bodies in source order
 (`c_types.c`'s change records and `type_replay`), into source order's result.
 A unit it can't merge yet (a body with a declaration with linkage, a
-transparent union or an intrinsic, an error in a body's walk) is checked in
-source order, with the reason. The driver still checks in source order.
+transparent union or an intrinsic, a completion of its parameter-list tag, an
+error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
 
-`./build/compiler test-checker-deferred [--keep]` checks 37 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 39 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or

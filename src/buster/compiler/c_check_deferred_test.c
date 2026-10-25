@@ -99,6 +99,10 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "error-at-the-top-level", "int f(void) { return 1; }\nint x[-1];\nint g(void) { return 2; }\n", false },
     { "syntax-error", "int f(void) { return 1 +; }\nint g(void) { return 2; }\n", false },
     { "error-in-a-later-phase", "int f(int* p) { return p + 1.0; }\nint g(void) { return 2; }\n", true },
+    // A body that completes its definition's parameter-list tag, which it declares again (#436), completes a tag the
+    // top level made: source order's, whose completion everything after the body sees. And one that only uses it.
+    { "parameter-list-tag-completed-in-its-body", "int f(struct T *p) { struct T { int x; }; return p->x; }\nint g(void) { return 2; }\n", false },
+    { "parameter-list-tag-used-in-its-body", "int f(struct T *p) { struct T *q = p; return q != 0; }\nint g(void) { return 2; }\n", true },
 };
 
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);
