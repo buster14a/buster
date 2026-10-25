@@ -178,6 +178,9 @@ struct CheckDeferred
     bool timing;
     // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
     const uint32_t* cpus;
+    // For the tests (test-checker-deferred): the merge fails right after its replay into the caller's table, as one
+    // that runs out of room there does, and the unit goes to source order.
+    bool fail_after_replay;
     uint64_t top_ns;
     uint64_t environment_ns;
     uint64_t lanes_ns;
@@ -347,10 +350,34 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     return valid;
 }
 
+// The file scope's declaration of `key` that source order's reader sees at `point`, given the history's last one
+// activated at or before it (`handle`, an event + 1, 0 for none): that one, unless a restore ended it at or before the
+// point, as it ends a tag first named in a file-scope declarator (`void g(struct S *p);`) at the declarator's end, which
+// the history keeps since its depth is 0. Then the latest of the name's earlier ones that is still active, or none.
+static uint32_t check_deferred_visible(const CEnvironment* environment, uint32_t key, uint32_t point, uint32_t handle)
+{
+    const CBindings* bindings = environment->bindings;
+    const uint32_t begin = environment->offsets[key];
+    uint32_t slot = environment->offsets[key + 1];
+    while (slot > begin && environment->handles[slot - 1] != handle)
+    {
+        slot -= 1;
+    }
+    // The handle's place in the name's history (slot - 1); one the history doesn't hold is none.
+    uint32_t result = slot > begin ? handle : 0;
+    while (result != 0 && bindings->end[result - 1] != BUSTER_C_BINDING_NONE && bindings->point[bindings->end[result - 1]] <= point)
+    {
+        slot -= 1;
+        result = slot > begin ? environment->handles[slot - 1] : 0;
+    }
+    return result;
+}
+
 // Sets the lane's heads of every name the body (`body`) and its parameters spell to the file scope's at the body's
 // opening: the binding state source order's reader has there, for the names the body can look up. Each name once (by
 // the lane's stamps), its label head none and its ordinary and tag heads from the history, 16 keys at a time
-// (c_environment_lookup_batch). The keys stay for check_deferred_heads_clear. Whether the history took every key.
+// (c_environment_lookup_batch), each checked against the restores (check_deferred_visible, which the rare declaration
+// that ended takes). The keys stay for check_deferred_heads_clear. Whether the history took every key.
 static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lane, const CheckDeferredCut* cut, uint32_t body)
 {
     CheckInputReader* reader = &lane->reader;
@@ -378,10 +405,13 @@ static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
             token = pass == 0 ? token + 1 : reader->parameter_next[token];
         }
     }
-    const bool valid = c_environment_lookup_batch(&deferred->environment, lane->keys, lane->points, count, lane->handles);
+    const CEnvironment* environment = &deferred->environment;
+    const bool valid = c_environment_lookup_batch(environment, lane->keys, lane->points, count, lane->handles);
     for (uint32_t i = 0; i < count; i += 1)
     {
-        bindings->heads[lane->keys[i]] = valid ? lane->handles[i] : 0;
+        const uint32_t handle = valid ? lane->handles[i] : 0;
+        const bool ended = handle != 0 && environment->bindings->end[handle - 1] != BUSTER_C_BINDING_NONE;
+        bindings->heads[lane->keys[i]] = ended ? check_deferred_visible(environment, lane->keys[i], cut->opening, handle) : handle;
     }
     lane->key_count = count;
     lane->history_reads += count / 2;
@@ -736,7 +766,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         };
         valid = parts[1 + b].types != 0 && parts[1 + b].tags != 0 && parts[1 + b].merged != 0;
     }
-    valid = valid && type_replay(deferred->table, parts, bodies + 1, scratch);
+    valid = valid && type_replay(deferred->table, parts, bodies + 1, scratch) && !deferred->fail_after_replay;
     // Each appended table's places, and the events'.
     uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)bodies + 1);
     valid = valid && counts != 0;
@@ -1234,9 +1264,14 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
 {
     const bool timing = deferred->timing;
     const uint32_t* cpus = deferred->cpus;
-    *deferred = (CheckDeferred){ .lanes = lanes, .table = types, .timing = timing, .cpus = cpus };
+    const bool fail_after_replay = deferred->fail_after_replay;
+    *deferred = (CheckDeferred){ .lanes = lanes, .table = types, .timing = timing, .cpus = cpus, .fail_after_replay = fail_after_replay };
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
+    // The caller's table as it comes, which a fallback to source order takes it back to: the merge replays into it, and
+    // may fail after that.
+    const TypeViewMark empty = type_view_mark(types);
+    const TypeError empty_error = types->last_error;
     deferred->arena = arena_reserve(UINT64_C(1) << 36);
     // Address space for the top level's table and its record at the caller's capacities: pages are committed as
     // they are touched.
@@ -1284,9 +1319,13 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     deferred->reason = deferred->unsupported && deferred->reason == 0 ? "the top level's walk stopped" : deferred->reason;
     if (deferred->unsupported)
     {
-        // Source order, from nothing: the caller's table is untouched until the merge, which only a merged unit makes.
+        // Source order, from nothing: the caller's table back to how it came (a merge that failed after its replay
+        // filled it), and the input's records gone.
+        const bool reset = type_view_reset(types, empty);
+        types->last_error = empty_error;
         arena_pop_to(arena, arena_mark);
-        checked = check_input_bindings_mode(input, parser, pp, types, arena, scratch, binding_mode);
+        checked = reset && check_input_bindings_mode(input, parser, pp, types, arena, scratch, binding_mode);
+        input->resource |= !reset;
     }
     return checked;
 }

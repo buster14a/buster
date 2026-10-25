@@ -619,6 +619,12 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
     path->resource |= !ready;
 }
 
+// --deferred's lanes (0 for none) and binding resolution: the third path of check_corpus_measure. With
+// check_corpus_deferred_fail_merge (test-checker-deferred's), the deferred reader's merge fails after its replay.
+static uint32_t check_corpus_deferred_lanes;
+static CheckInputBindingMode check_corpus_deferred_bindings;
+static bool check_corpus_deferred_fail_merge;
+
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
     path->suppress_warnings = suppress_warnings;
@@ -680,6 +686,10 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             {
                 path->deferred_arena = arena_reserve(UINT64_C(1) << 24);
                 path->deferred = BUSTER_ARENA_PUSH_ARRAY(&path->deferred_arena, CheckDeferred, 1);
+                if (path->deferred != NULL)
+                {
+                    path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
+                }
                 path->adapted = path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
                                                                                 &path->scratch, path->deferred_lanes, path->deferred_bindings);
                 path->resource |= path->deferred == NULL;
@@ -1657,10 +1667,6 @@ struct CheckCorpusOutcome
     char message[256];
     char spelling[96];
 };
-
-// --deferred's lanes (0 for none) and binding resolution: the third path of check_corpus_measure.
-static uint32_t check_corpus_deferred_lanes;
-static CheckInputBindingMode check_corpus_deferred_bindings;
 
 // Preprocesses `file` and checks it on the scalar path and, when `both`, on the vector path too, which must give the
 // same results exactly (`equal`; true when the vector path doesn't run). With --deferred, a third path, the vector

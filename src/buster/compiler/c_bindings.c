@@ -202,6 +202,13 @@ static bool c_bindings_restore(CBindings* bindings, uint32_t mark, uint32_t poin
         bindings->operation[event] = C_BINDING_RESTORE;
         bindings->declaration[event] = mark;
         bindings->point[event] = point;
+        // A restore names no declaration: its other fields are written all the same, so that the stream's columns
+        // don't keep whatever its slot held (#113's lanes reuse their slots from body to body).
+        bindings->key[event] = 0;
+        bindings->end[event] = BUSTER_C_BINDING_NONE;
+        bindings->previous[event] = 0;
+        bindings->depth[event] = 0;
+        bindings->kind[event] = 0;
         while (bindings->active_count > mark)
         {
             const uint32_t old = bindings->active[--bindings->active_count];

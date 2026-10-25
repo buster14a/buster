@@ -333,8 +333,8 @@ struct CheckInputReader
     TypeId predefined_types[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
     uint32_t builtin_member_names[10];
     // #113: the walk's token, where each predefined type was made (BUSTER_CHECK_NONE while it isn't), and the
-    // deferred reader's state. A lane reads one body (c_check_deferred.c): from its opening, whose activations the top
-    // level made, to the token after its closing, where only its scopes end. lane_unsupported says it did what only
+    // deferred reader's state. A lane reads one body (c_check_deferred.c): from its opening, whose activations and
+    // initializers' finishes the top level made, to the token after its closing, where only its scopes end. lane_unsupported says it did what only
     // source order can merge, and the unit is read in source order instead; lane_reason says what, first.
     uint32_t position;
     uint32_t predefined_positions[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
@@ -2481,7 +2481,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         reader->position = i;
         type_changes_at(reader->types, i);
-        for (uint32_t declaration = reader->lane && i == end ? BUSTER_CHECK_NONE : reader->initializer_finish_heads[i]; declaration != BUSTER_CHECK_NONE;
+        // A lane's opening and the token after its closing are the top level's, which finished their initializers.
+        for (uint32_t declaration = reader->lane && (i == begin || i == end) ? BUSTER_CHECK_NONE : reader->initializer_finish_heads[i]; declaration != BUSTER_CHECK_NONE;
              declaration = reader->initializer_finish_next[declaration])
         {
             if (!check_input_initializer_finish(reader, declaration))

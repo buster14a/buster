@@ -47,6 +47,15 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "enum-completed-between-bodies", "enum E;\nint f(void) { enum E* e = 0; return e != 0; }\nenum E { A, B };\nint g(void) { enum E e = B; return e; }\n", true },
     { "typedef-of-a-later-completion",
       "struct S;\nint f(void) { typedef struct S T; T* t = 0; return t != 0; }\nstruct S { int x; };\nint g(void) { typedef struct S T; T t = { 2 }; return t.x; }\n", true },
+    // A tag first named in a file-scope declarator (a prototype's parameter, a sizeof in an array's bound, a
+    // definition's parameter) ends with the declarator in source order's reader, which the history doesn't say: a later
+    // body that names the tag makes one of its own. The last declares the tag first, which every body sees.
+    { "tag-in-a-prototype", "void g(struct S *p);\nint f(void) { struct S *q = 0; return q != 0; }\n", true },
+    { "tag-in-a-prototype-then-passed", "void g(struct S *p);\nvoid f(void) { struct S *q = 0; g(q); }\n", true },
+    { "tag-in-a-prototype-two-bodies", "void g(struct S *p);\nint f1(void) { struct S *q = 0; return q != 0; }\nint f2(void) { struct S *r = 0; return r != 0; }\n", true },
+    { "tag-in-an-array-bound", "int a[sizeof(struct X *)];\nint f(void) { struct X *q = 0; return q != 0; }\n", true },
+    { "tag-in-a-definitions-parameters", "int h(struct T *p) { struct T *q = p; return q != 0; }\n", true },
+    { "tag-declared-before-a-prototype", "struct S;\nvoid g(struct S *p);\nint f(void) { struct S *q = 0; return q != 0; }\n", true },
     // Block-scope declarations with linkage name the file-scope entity, which later declarations see: source order's.
     { "block-scope-extern", "int g = 3;\nint f(void) { extern int g; return g; }\n", false },
     { "block-scope-function", "int f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
@@ -154,6 +163,26 @@ static int run_checker_deferred_tests(int count, char** arguments)
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "");
                 }
+            }
+        }
+        // A unit that merges, with its merge failing after the replay into the caller's table: source order's result,
+        // from the table taken back to how it came.
+        for (uint32_t l = 0; valid && expected && l < 2; l += 1)
+        {
+            check_corpus_deferred_lanes = l == 0 ? 1 : 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_fail_merge = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_fail_merge = false;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && !outcome.deferred;
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on %u lanes with its merge failing after the replay: %s\n", name, check_corpus_deferred_lanes,
+                        !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the result differs from source order's" :
+                        !outcome.equal ? "the scalar and vector paths differ" : "merged");
             }
         }
         check_corpus_deferred_lanes = 0;
