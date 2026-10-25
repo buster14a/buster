@@ -109,8 +109,7 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
 
 - **Raw rows**, in `check_program_emit` after branch sizing: each typed
   entry's first record (`Tier0Code.entry_records`) at its byte offset, with
-  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`; a
-  compile without `-g` asks for neither, and keeps and copies nothing for them;
+  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`;
   saved with each lowering task so that an operation's entry takes its own
   node's token, not its last operand's, and a call's its callee's, as GCC and
   clang place a call across lines), kept where the next entry's code
@@ -132,6 +131,15 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
   hash table of the files' paths and the `#line`s' names), so that two
   `#line`s naming one file keep their rows together, and the unit's file
   table is built by key without comparing names.
+
+Only one unit of the build keeps those tokens: the default C command's link
+with `-g` runs in a unit of its own (`main_unit_debug.c`, which
+`run_check_command` sends it to), whose lowering alone tracks each task's
+token (`BUSTER_CHECK_SOURCE_ROWS`). In every other unit, the default
+command's among them, the tracking and the raw rows fold away at compile
+time, so that a compile without `-g` runs the same code as before this
+feature but for Tier 0's per-function check of `entry_records`, and writes the
+same executable.
 
 A function is named by its identifier, at its declaration's line, in the
 file of its declaration (a header's for a function a header defines, a

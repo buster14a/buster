@@ -20,10 +20,15 @@
 #define BUSTER_UNIT_FRAGMENTS 9
 #define BUSTER_UNIT_CHECKER 10
 #define BUSTER_UNIT_CHECK_BUILTINS 11
+#define BUSTER_UNIT_DEBUG 12
 #ifndef BUSTER_UNIT
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
 #define BUSTER_IN_UNIT(unit) (BUSTER_UNIT == (unit))
+// The default C command with -g runs in a unit of its own (run_check_command sends it there): the only one whose lowering
+// keeps each typed entry's source token for DWARF's rows (c_check_program_lower.c). The other units' lowering, the
+// default command's among them, compiles none of that work, and their emission none of the rows' (#395, #426).
+#define BUSTER_CHECK_SOURCE_ROWS BUSTER_IN_UNIT(BUSTER_UNIT_DEBUG)
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -475,6 +480,7 @@ int main_unit_dynamic(int argc, char** argv, bool* found);
 int main_unit_types(int argc, char** argv, bool* found);
 int main_unit_checker(int argc, char** argv, bool* found);
 int main_unit_check_builtins(int argc, char** argv, bool* found);
+int main_unit_debug(int argc, char** argv, bool* found);
 int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 
@@ -866,11 +872,11 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_checker_driver_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-debug") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DEBUG) && argc >= 2 && strcmp(argv[1], "test-check-debug") == 0)
     {
         result = run_check_debug_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-debug") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DEBUG) && argc >= 2 && strcmp(argv[1], "benchmark-check-debug") == 0)
     {
         result = run_check_debug_benchmark(argc - 2, argv + 2);
     }
@@ -1271,6 +1277,10 @@ int main(int argc, char** argv)
     }
     if (!found)
     {
+        result = main_unit_debug(argc, argv, &found);
+    }
+    if (!found)
+    {
         result = main_unit_backend(argc, argv, &found);
     }
     if (!found)
@@ -1330,6 +1340,16 @@ int main_unit_checker(int argc, char** argv, bool* found)
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECK_BUILTINS
 int main_unit_check_builtins(int argc, char** argv, bool* found)
+{
+    return main_command(argc, argv, found);
+}
+#elif BUSTER_UNIT == BUSTER_UNIT_DEBUG
+int run_source_debug_command(int count, char** arguments)
+{
+    return run_check_command(count, arguments, true);
+}
+
+int main_unit_debug(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
 }

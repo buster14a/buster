@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-check-debug [--seed N] [--programs N] [--cross-check] [--keep]: the C driver's source rows and DWARF (#395,
-// c_check_debug.c).
+// c_check_debug.c), in the unit whose lowering keeps them (BUSTER_UNIT_DEBUG, main.c).
 //
 // - Raw rows: check_debug_rows against check_debug_rows_scalar on random functions (their entries' first records
 //   ascending, with runs of entries that start no code, and each record's offset after the one before), of every entry
@@ -17,7 +17,9 @@
 //   lines and #lines, compiled through the pipeline with source rows by each path: every row's file and line by the
 //   vector path and the exact path alike, the exact path's as pp_presumed gives them, each function's rows within its
 //   lines where nothing moves them, both paths' units and sections the same bytes, and the fixtures' functions with
-//   the lines their statements are on, in their files, and none of a macro's definition or a blank line.
+//   the lines their statements are on, in their files, and none of a macro's definition or a blank line. Each program's
+//   functions lowered with the entries' source tokens and without them, by both unit ABI batches: the same typed
+//   functions, each entry's token alike by both batches and the function's own.
 // - The driver, with --cross-check (gdb and llvm-dwarfdump): the fixture linked with -g by each path into the same
 //   bytes, which run; llvm-dwarfdump --verify finds no error; gdb stops at a line's breakpoint on that line, at a
 //   function's breakpoint on its first statement, steps over an untaken branch, and gives a backtrace's frames their
@@ -429,6 +431,34 @@ static void check_debug_test_compile(CheckDebugTestUnit* unit, Preprocessor* pp,
     unit->ready = ready;
 }
 
+// The lowering with the entries' source tokens, which only this unit keeps (BUSTER_CHECK_SOURCE_ROWS): each of the
+// compiled program's functions lowered with them and without them, by both unit ABI batches, the same typed function,
+// and each entry's token alike by both batches and one of the function's own, from its declaration to its closing brace.
+static void check_debug_test_lowering(CheckDebugTestTally* tally, CheckDebugTestUnit* unit, const Parser* parser, const char* what)
+{
+    const CheckProgram* program = &unit->selected.program;
+    const uint64_t mark = unit->output.length;
+    CheckProgramLowered plain = { 0 };
+    CheckProgramLowered sourced[2] = { 0 };
+    const bool lowered = check_program_lower(&plain, program, true, false, &unit->output, &unit->scratch) &&
+                         check_program_lower(sourced, program, true, true, &unit->output, &unit->scratch) &&
+                         check_program_lower(sourced + 1, program, false, true, &unit->output, &unit->scratch);
+    check_debug_test_expect(tally, lowered, "lower with the entries' source tokens as without them", what);
+    for (uint32_t b = 0; lowered && b < program->body_count; b += 1)
+    {
+        const uint32_t count = sourced[0].functions[b].count;
+        const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
+        bool own = check_test_program_function(plain.functions + b, sourced[0].functions + b) && count == sourced[1].functions[b].count &&
+                   memcmp(sourced[0].entry_tokens[b], sourced[1].entry_tokens[b], (uint64_t)count * sizeof(uint32_t)) == 0;
+        for (uint32_t e = 0; own && e < count; e += 1)
+        {
+            own = sourced[0].entry_tokens[b][e] >= program->bodies[b].declaration && sourced[0].entry_tokens[b][e] <= closing;
+        }
+        check_debug_test_expect(tally, own, "each entry's source token is the function's own, alike by both batches, which change nothing else", what);
+    }
+    arena_pop_to(&unit->output, mark);
+}
+
 // Each row's file and line by both paths, and the exact path's against pp_presumed; each function's rows within its
 // declaration's and closing brace's lines when its span holds (nothing between them moves a line). Returns the rows.
 static uint64_t check_debug_test_lines(CheckDebugTestTally* tally, CheckDebugTestUnit* unit, Preprocessor* pp, const Parser* parser, const char* what)
@@ -662,6 +692,7 @@ static void check_debug_test_sources(CheckDebugTestTally* tally, const char* dir
             check_debug_test_expect(tally, unit.ready, "compile through the pipeline with source rows", path);
             if (unit.ready)
             {
+                check_debug_test_lowering(tally, &unit, &parser, path);
                 rows += check_debug_test_lines(tally, &unit, &pp, &parser, path);
                 CheckDebug built;
                 const bool made = check_debug_build(&built, &unit.selected.program, &unit.rows, &parser, &pp, path_kind == 0, &unit.output, &unit.scratch);

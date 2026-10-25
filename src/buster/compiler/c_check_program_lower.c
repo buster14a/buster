@@ -70,7 +70,8 @@ struct CheckLowerTask
     CheckLowerTaskKind kind;
     uint32_t node;
     TypeId type;
-    // The source token current when the task was pushed, which its entries take (CheckLowerWriter.source).
+    // The source token current when the task was pushed, which its entries take (CheckLowerWriter.source); 0 outside
+    // the unit of source rows.
     uint32_t source;
     uint64_t value;
     bool address;
@@ -152,7 +153,8 @@ struct CheckLowerWriter
     uint32_t token;
     // The token whose lowering writes the next entries: an expression's node's, a statement's or an initializer part's,
     // saved with each task pushed and restored when it runs, so that an operation's entry, written after its operands',
-    // takes its own node's token. `token`, which diagnostics name, is the last one set.
+    // takes its own node's token. `token`, which diagnostics name, is the last one set. Only the unit of source rows keeps
+    // it (check_lower_source).
     uint32_t source;
     uint32_t stack_head;
     uint32_t stack_count;
@@ -464,12 +466,23 @@ static void check_lower_place(CheckLowerWriter* writer, uint32_t label)
     }
 }
 
-// Entry `index`'s source token, when the lowering keeps them (`sources`).
+// Entry `index`'s source token, when the lowering keeps them (`sources`, in the unit of source rows).
 static void check_lower_token(CheckLowerWriter* writer, uint32_t index)
 {
-    if (writer->sources)
+    if (BUSTER_CHECK_SOURCE_ROWS && writer->sources)
     {
         writer->tokens[index] = writer->source;
+    }
+}
+
+// The token whose lowering writes the next entries (CheckLowerWriter.source). Only the unit of the default command with
+// -g keeps it (BUSTER_CHECK_SOURCE_ROWS, main.c): in every other unit this, the tasks' copies of it and its stores fold
+// away, so that their lowering does none of this work.
+static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
+{
+    if (BUSTER_CHECK_SOURCE_ROWS)
+    {
+        writer->source = token;
     }
 }
 
@@ -529,7 +542,10 @@ static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
 {
     if (writer->depth < writer->capacity)
     {
-        task.source = writer->source;
+        if (BUSTER_CHECK_SOURCE_ROWS)
+        {
+            task.source = writer->source;
+        }
         writer->tasks[writer->depth++] = task;
     }
     else
@@ -1273,7 +1289,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     const uint32_t callee = graph->operand0[node];
     // The call's entries are its callee's line's, as GCC and clang place a call (the call's own node is its closing
     // parenthesis, which a call across lines ends on).
-    writer->source = graph->tokens[callee];
+    check_lower_source(writer, graph->tokens[callee]);
     CheckValue value = stream->values[callee];
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
     bool mangled = false;
@@ -2248,7 +2264,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     const TypeId type_b = stream->conversions[node].operands[1].type;
     const uint8_t class = check_lower_value_class(types, value.type);
     writer->token = graph->tokens[node];
-    writer->source = writer->token;
+    check_lower_source(writer, writer->token);
     const uint8_t value_kind = type_kind(types, type_strip_aligned(types, value.type));
     // A function, an array or an aggregate: its value is its address, which nothing loads through.
     const bool aggregate = check_lower_aggregate(types, value.type);
@@ -2707,7 +2723,7 @@ static void check_lower_drain(CheckLowerWriter* writer)
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         const CheckLowerTask task = writer->tasks[--writer->depth];
-        writer->source = task.source;
+        check_lower_source(writer, task.source);
         if (task.kind == CHECK_LOWER_INSTRUCTION)
         {
             check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
@@ -2913,7 +2929,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
         {
             const CheckInitPart* write = &plan->parts[part];
             writer->token = write->token;
-            writer->source = write->token;
+            check_lower_source(writer, write->token);
             if (object)
             {
                 check_lower_object_part(writer, control.target, part, local);
@@ -3099,7 +3115,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     const CheckControl control = program->controls[writer->body->first + index];
     check_lower_place(writer, index);
     writer->token = control.token;
-    writer->source = control.token;
+    check_lower_source(writer, control.token);
     if (control.kind == CHECK_CONTROL_JUMP)
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
@@ -3277,7 +3293,8 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
     return calls;
 }
 
-// With `sources`, each function's entries' source tokens too (CheckProgramLowered.entry_tokens).
+// With `sources`, each function's entries' source tokens too (CheckProgramLowered.entry_tokens), which only the unit of
+// source rows keeps (BUSTER_CHECK_SOURCE_ROWS, main.c): another unit's request is refused.
 static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources, Arena* output, Arena* scratch)
 {
     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
@@ -3317,6 +3334,12 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         terminal |= lowered->helpers.items[i].terminates;
     }
     const bool track = program->region_count != 0 || terminal;
+    if (valid && sources && !BUSTER_CHECK_SOURCE_ROWS)
+    {
+        lowered->status = CHECK_PROGRAM_UNSUPPORTED;
+        lowered->reason = "source rows outside the unit that keeps them";
+        valid = false;
+    }
     for (uint32_t i = 0; valid && i < input->asm_count; i += 1)
     {
         if (input->asm_statements[i].body == BUSTER_CHECK_NONE)
@@ -3467,7 +3490,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.body = program->bodies + b;
         writer.result = result;
         writer.token = body.declaration;
-        writer.source = body.declaration;
+        check_lower_source(&writer, body.declaration);
         writer.hidden = BUSTER_CHECK_NONE;
         writer.variadic = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
         writer.save_anchor = BUSTER_CHECK_NONE;
@@ -3618,7 +3641,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                                           writer.count == 0 || writer.kinds[writer.count - 1] != BUSTER_TYPED_RETURN;
         check_lower_place(&writer, body.count);
         // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer).
-        writer.source = program->parser->tree.parents[body.opening];
+        check_lower_source(&writer, program->parser->tree.parents[body.opening]);
         for (uint32_t local = 0; local < writer.local_count; local += 1)
         {
             if (writer.indirect[local] == BUSTER_CHECK_LOWER_VLA_DECLARED)

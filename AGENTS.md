@@ -327,7 +327,7 @@ designs and the compilers already built this way.
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as twelve translation units: `main.c` itself, the driver's unit, and each
+  it as thirteen translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -337,7 +337,11 @@ designs and the compilers already built this way.
   build waits for its largest unit, so keep the units balanced: the types
   unit, which had grown to hold the checker, took 2.5 times as long as any
   other until it was split into the types, checker and checker builtins
-  units. A test runner that calls each section once (`run_checker_tests`)
+  units. The default C command runs in the checker's unit, but with `-g` in
+  a unit of its own (`main_unit_debug.c`), which `run_check_command` sends the
+  link to: only that unit's lowering keeps the typed entries' source tokens
+  (`BUSTER_CHECK_SOURCE_ROWS`), so that the others compile none of that work
+  and the default compile runs main's code. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
   one function that its optimizer takes superlinear time over.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
@@ -558,11 +562,13 @@ designs and the compilers already built this way.
   lines as the diagnostics place them, bounded per function by its
   declaration's and closing brace's places, and keeps a row per change of line
   in the function's file, and the body's start; each pass a vector path with
-  an exact twin (`--scalar`). `test-check-debug [--cross-check]` checks the
-  twins at `PROT_NONE` pages, the lines against `pp_presumed` on fixtures and
-  generated programs, and with `--cross-check` the executable through
-  `llvm-dwarfdump --verify` and gdb. [The debug guide](docs/debug.md) ("The C
-  driver's `-g`") has the details.
+  an exact twin (`--scalar`). The link runs in the `-g` unit
+  (`BUSTER_UNIT_DEBUG`), whose lowering alone keeps the tokens.
+  `test-check-debug [--cross-check]`, in that unit, checks the twins at
+  `PROT_NONE` pages, the lines against `pp_presumed` on fixtures and generated
+  programs, that lowering with the tokens changes no typed function, and with
+  `--cross-check` the executable through `llvm-dwarfdump --verify` and gdb.
+  [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps

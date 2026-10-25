@@ -801,6 +801,10 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
     return result;
 }
 
+// The default C command with -g, in the unit whose lowering keeps the typed entries' source tokens
+// (BUSTER_CHECK_SOURCE_ROWS, main.c), which run_check_command sends such a link to from every other unit.
+int run_source_debug_command(int count, char** arguments);
+
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
 static int run_check_command(int count, char** arguments, bool executable)
@@ -910,6 +914,11 @@ static int run_check_command(int count, char** arguments, bool executable)
     else if (!check_input_target_supported(&options))
     {
         fprintf(stderr, "error: checker requires C, signed char, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
+    }
+    else if (!BUSTER_CHECK_SOURCE_ROWS && link && (options.predefines.debug || options.predefines.debug_modules))
+    {
+        // -g's link, whole, in the unit whose lowering keeps the source rows (its own unit folds this branch away).
+        result = run_source_debug_command(count, arguments);
     }
     else
     {
@@ -1158,7 +1167,8 @@ static int run_check_command(int count, char** arguments, bool executable)
                             if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types, output != 0 ? output : "a.out", scalar, verify,
-                                                                 options.predefines.debug || options.predefines.debug_modules, &libraries, &scratch) ? 0 : 1;
+                                                                 BUSTER_CHECK_SOURCE_ROWS && (options.predefines.debug || options.predefines.debug_modules), &libraries,
+                                                                 &scratch) ? 0 : 1;
                             }
                             else
                             {

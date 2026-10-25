@@ -251,24 +251,6 @@ static void check_test_program_source(CheckTest* test, const char* source, const
             check_test_expect(test, check_test_program_function(lower[0].functions + b, lower[1].functions + b),
                               "complete typed function and ABI locations agree across unit batches");
         }
-        // With the entries' source tokens (#395): the same functions, and each entry's token, alike by both batches, one of
-        // the function's own, from its declaration to its closing brace.
-        CheckProgramLowered sourced[2] = { 0 };
-        const bool sources = lowered && check_program_lower(sourced, &program, true, true, &output, &scratch) &&
-                             check_program_lower(sourced + 1, &program, false, true, &output, &scratch);
-        check_test_expect(test, !lowered || sources, "lowering with the entries' source tokens succeeds as without them");
-        for (uint32_t b = 0; sources && b < program.body_count; b += 1)
-        {
-            const uint32_t count = sourced[0].functions[b].count;
-            const uint32_t closing = parser.tree.parents[program.bodies[b].opening];
-            bool own = check_test_program_function(lower[0].functions + b, sourced[0].functions + b) && count == sourced[1].functions[b].count &&
-                       memcmp(sourced[0].entry_tokens[b], sourced[1].entry_tokens[b], (uint64_t)count * sizeof(uint32_t)) == 0;
-            for (uint32_t e = 0; own && e < count; e += 1)
-            {
-                own = sourced[0].entry_tokens[b][e] >= program.bodies[b].declaration && sourced[0].entry_tokens[b][e] <= closing;
-            }
-            check_test_expect(test, own, "each entry's source token is the function's own, alike by both batches, which change nothing else");
-        }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
         const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, true) &&
