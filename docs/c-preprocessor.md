@@ -1754,7 +1754,7 @@ one without the runs at line notes each fail `test-preprocessor`. The
 checker's corpus comparisons judge with the history on the scalar path and
 with the runs on the vector one, which must give the same tokens.
 
-Measured on the 9700X ([record](https://github.com/buster14a/buster-performance/blob/7afeefe26a969c5e117044e9ccd414bb59cd55f8/docs/measurements/preprocessor-system-levels-133-2026-10-25/README.md)) on `sqlite3.c`, which the checker
+Measured on the 9700X ([record](https://github.com/buster14a/buster-performance/blob/a9998a456d968efb525551703f7547e84b9e5a88/docs/measurements/preprocessor-system-levels-133-2026-10-25/README.md)) on `sqlite3.c`, which the checker
 accepts without a diagnostic:
 
 - **The checker's whole compile:** `-fsyntax-only` takes 147.310-147.784 ms
