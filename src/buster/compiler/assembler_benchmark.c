@@ -151,6 +151,7 @@ static int run_assembler_benchmark(int count, char** arguments)
 {
     uint32_t functions = 256;
     const char* workload = "mixed";
+    const char* input = 0;
     bool external = false;
     uint32_t after_scalar = 0;
     int only = -1;
@@ -160,6 +161,10 @@ static int run_assembler_benchmark(int count, char** arguments)
         if (strcmp(arguments[i], "--external") == 0)
         {
             external = true;
+        }
+        else if (strcmp(arguments[i], "--input") == 0 && i + 1 < count)
+        {
+            input = arguments[++i];
         }
         else if (strcmp(arguments[i], "--after-scalar") == 0 && i + 1 < count)
         {
@@ -203,9 +208,19 @@ static int run_assembler_benchmark(int count, char** arguments)
         x86_match_initialize(index, &target);
     }
     const uint64_t initialization_ns = asm_clock() - initialization_start;
-    const String8 source = okay ? asm_benchmark_source(&source_arena, functions, workload) : (String8){0};
+    String8 source = {0};
+    if (okay && input != 0)
+    {
+        okay = asm_read_file(input, &source_arena, &source);
+        workload = input;
+        functions = 0; // The input's function count is not inferred from instruction bytes or symbol names.
+    }
+    else if (okay)
+    {
+        source = asm_benchmark_source(&source_arena, functions, workload);
+    }
     okay &= source.pointer != 0;
-    uint64_t samples[2][7][BUSTER_ASM_BENCHMARK_PASSES];
+    uint64_t samples[2][8][BUSTER_ASM_BENCHMARK_PASSES];
     uint64_t memory = 0;
     uint32_t instructions = 0;
     uint8_t* reference = 0;
@@ -260,6 +275,7 @@ static int run_assembler_benchmark(int count, char** arguments)
                 samples[path][4][pass - 1] = result.emit_ns;
                 samples[path][5][pass - 1] = finished - assembled;
                 samples[path][6][pass - 1] = finished - start;
+                samples[path][7][pass - 1] = result.cfi_ns;
             }
             memory = work.length;
             instructions = result.instructions;
@@ -273,7 +289,7 @@ static int run_assembler_benchmark(int count, char** arguments)
         {
             printf("component samples follow %u ms of scalar assembly (outside the sample)\n", after_scalar);
         }
-        printf("path       lex       parse       match      layout    encode/link  object      total (ms)\n");
+        printf("path       lex       parse       match      layout    encode/link  object      total       CFI (ms, included in encode/link)\n");
         for (uint32_t path = 0; path < 2; path += 1)
         {
             if (only >= 0 && path != (uint32_t)only)
@@ -281,7 +297,7 @@ static int run_assembler_benchmark(int count, char** arguments)
                 continue;
             }
             printf("%-7s", path != 0 ? "vector" : "scalar");
-            for (uint32_t phase = 0; phase < 7; phase += 1)
+            for (uint32_t phase = 0; phase < 8; phase += 1)
             {
                 printf(" %10.3f", asm_benchmark_median(samples[path][phase], BUSTER_ASM_BENCHMARK_PASSES) / 1e6);
             }
@@ -294,7 +310,7 @@ static int run_assembler_benchmark(int count, char** arguments)
     }
     else if (!source.pointer)
     {
-        fprintf(stderr, "usage: compiler benchmark-assembler [--functions 1..2048] [--workload mixed|registers|simd|att] [--only scalar|vector] [--after-scalar MS] [--external]\n");
+        fprintf(stderr, "usage: compiler benchmark-assembler [--input FILE | --functions 1..2048 --workload mixed|registers|simd|att] [--only scalar|vector] [--after-scalar MS] [--external]\n");
     }
     arena_release(&work);
     arena_release(&source_arena);
