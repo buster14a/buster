@@ -37,6 +37,10 @@ function rename(bytes, from, to)
 try
 {
     const started = performance.now();
+    const oneField = readArrow(new Uint8Array(await (await fetch('/evidence/profile-example/arbitrary-custom.schema.arrow')).arrayBuffer())).fields.slice(0, 1);
+    const sharedBudget = {cells: 1999999};
+    check(readJSONL('{"time_ns":"0"}\n', oneField, sharedBudget).length === 1 && sharedBudget.cells === 2000000, 'JSONL counts exact nested/primitive cells against a shared aggregate budget');
+    rejects(() => readJSONL('{"time_ns":"1"}\n', oneField, sharedBudget), 'A later partition cannot reset the aggregate materialization budget');
     let rows = 0;
     let cells = 0;
     for (const [directory, name] of [['foreign-strings-example', 'link-results'], ['foreign-strings-example', 'executions'], ['profile-example', 'arbitrary-custom']])
