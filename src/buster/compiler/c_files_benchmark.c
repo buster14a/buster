@@ -112,7 +112,10 @@ struct FilesBenchmarkVariant
     bool clone_tables;
     uint64_t lane_array_small;
     uint64_t lane_small_bytes;
+    uint32_t small_from;
+    uint32_t small_above;
     bool prepare_populate;
+    bool reserve_tables;
     const char* label;
 };
 
@@ -207,6 +210,7 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     PPOptions with = *options;
     bool result = intern_initialize(table) && file_cache_initialize(cache, table, pp_prepare_options(&with));
     cache->lane_small_bytes = variant->lane_small_bytes;
+    cache->lane_small_from = lanes > variant->small_above ? variant->small_from : UINT32_MAX;
     with.files = cache;
     result = result && pp_initialize(&search, &with, table) && files_run_initialize(&benchmark.run, cache, &search, roots, root_count, follow, lanes);
     benchmark.run.bytes = variant->bytes;
@@ -219,6 +223,9 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     benchmark.run.clone_tables = variant->clone_tables;
     benchmark.run.lane_array_small = variant->lane_array_small;
     benchmark.run.prepare_populate = variant->prepare_populate;
+    benchmark.run.small_from = variant->small_from;
+    benchmark.run.small_above = variant->small_above;
+    benchmark.run.reserve_tables = variant->reserve_tables;
     benchmark.spin_ticks = spin_ticks;
     benchmark.ticks = 0;
     if (trace != 0)
@@ -609,8 +616,8 @@ int run_files_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--variant") == 0 && next != 0 && variant_count < BUSTER_FILES_BENCHMARK_MAX_VARIANTS)
         {
             // EXPERIMENT (#262): a comma-separated list of lane-bytes=N, read-limit=N, bytes=map|read|populate, old-merge,
-            // partial-take, probe-take, probe-lanes=N, clone-tables, small-arrays=N, small-columns=N and
-            // prepare-populate, each over the command line's settings.
+            // partial-take, probe-take, probe-lanes=N, clone-tables, small-arrays=N, small-columns=N,
+            // small-from=N, small-above=N, prepare-populate and reserve-tables, each over the command line's settings.
             variant_specs[variant_count] = next;
             variant_count += 1;
             i += 1;
@@ -721,6 +728,18 @@ int run_files_benchmark(int argc, char** argv)
             else if (length == 16 && strncmp(p, "prepare-populate", 16) == 0)
             {
                 variants[v].prepare_populate = true;
+            }
+            else if (length == 14 && strncmp(p, "reserve-tables", 14) == 0)
+            {
+                variants[v].reserve_tables = true;
+            }
+            else if (length > 11 && strncmp(p, "small-from=", 11) == 0)
+            {
+                variants[v].small_from = (uint32_t)strtoul(p + 11, 0, 10);
+            }
+            else if (length > 12 && strncmp(p, "small-above=", 12) == 0)
+            {
+                variants[v].small_above = (uint32_t)strtoul(p + 12, 0, 10);
             }
             else if (length > 12 && strncmp(p, "probe-lanes=", 12) == 0)
             {

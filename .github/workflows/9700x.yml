@@ -1062,15 +1062,17 @@ jobs:
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
         run: |
           # EXPERIMENT (#262, not for merging): main's merge against the new one with the lanes' bytes, partial takes and
-          # the probes' sharing, with base pages at the start of the lanes' arrays and of the arenas of lanes past lane 0.
+          # the probes' sharing, with base pages at the start of the lanes' arrays and of the arenas of lanes past lane 0
+          # (on more than 4 lanes, or from lane 4 on), the preparing lane populating mapped files, and the lanes' tables
+          # reserved as the lanes start.
           head -n 3 /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag || true
-          grep -E '^(thp_fault_alloc|thp_fault_fallback|compact_stall|compact_fail|compact_success) ' /proc/vmstat || true
           a=lane-bytes=1048576,partial-take,probe-take
-          small=small-arrays=1048576,small-columns=2097152
-          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a" --variant "$a,small-arrays=1048576" --variant "$a,small-columns=2097152" \
-            --variant "$a,$small" --variant "$a,$small,prepare-populate" --variant "$a,prepare-populate" \
-            --variant "lane-bytes=2097152,partial-take,probe-take,$small" -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-          grep -E '^(thp_fault_alloc|thp_fault_fallback|compact_stall|compact_fail|compact_success) ' /proc/vmstat || true
+          b=lane-bytes=2097152,partial-take,probe-take
+          s=small-arrays=1048576,small-columns=2097152,prepare-populate
+          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a,$s" --variant "$a,$s,reserve-tables" --variant "$a,$s,reserve-tables,small-above=4" \
+            --variant "$a,$s,reserve-tables,small-from=4" --variant "$a,prepare-populate,reserve-tables" --variant "$b,$s,reserve-tables,small-above=4" \
+            --variant "lane-bytes=1048576,partial-take,$s,reserve-tables,small-above=4" \
+            -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: EXPERIMENT (#262) Test and benchmark the per-file jobs on musl, sqlite3.c and the C library corpus
         # Without taskset: it pins each lane to an allowed CPU of its own. The frozen corpora of the preprocessor's oracle
@@ -1090,13 +1092,14 @@ jobs:
           ./build/compiler test-files --flat "$corpus/libc" || status=1
           a=lane-bytes=1048576,partial-take,probe-take
           b=lane-bytes=2097152,partial-take,probe-take
-          small=small-arrays=1048576,small-columns=2097152
-          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a" --variant "$a,$small" --variant "$a,$small,prepare-populate" \
-            --variant "$b,$small,prepare-populate" "${musl_options[@]}" "${musl_units[@]}" || status=1
-          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a" --variant "$a,$small" --variant "$a,$small,prepare-populate" --variant "$b" \
-            --variant "$b,$small,prepare-populate" "$corpus/sqlite/sqlite3.c" || status=1
-          ./build/compiler benchmark-files --flat --rounds --variant old-merge --variant lane-bytes=4194304 --variant "lane-bytes=4194304,$small" --variant "$a,$small" \
-            --variant "$a,$small,prepare-populate" "$corpus/libc" || status=1
+          s=small-arrays=1048576,small-columns=2097152,prepare-populate
+          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a,$s,reserve-tables" --variant "$a,$s,reserve-tables,small-above=4" \
+            --variant "$b,$s,reserve-tables,small-above=4" --variant "$a,prepare-populate,reserve-tables" "${musl_options[@]}" "${musl_units[@]}" || status=1
+          ./build/compiler benchmark-files --rounds --variant old-merge --variant "$a,$s,reserve-tables" --variant "$a,$s,reserve-tables,small-above=4" \
+            --variant "$b,$s,reserve-tables,small-above=4" --variant "$b,prepare-populate,reserve-tables" \
+            --variant "lane-bytes=2097152,partial-take,$s,reserve-tables,small-above=4" "$corpus/sqlite/sqlite3.c" || status=1
+          ./build/compiler benchmark-files --flat --rounds --variant old-merge --variant lane-bytes=4194304 --variant "$a,$s,reserve-tables" \
+            --variant "$a,$s,reserve-tables,small-above=4" --variant "$a,prepare-populate,reserve-tables" "$corpus/libc" || status=1
           exit "$status"
 
       - name: Benchmark the parser on main.c

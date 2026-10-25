@@ -916,11 +916,22 @@ static __attribute__((unused)) bool intern_initialize_with(InternTable* table, u
 
 // intern_initialize_with with the first `small` bytes of the record arena (its first buckets, spans and records) in
 // base pages (arena_reserve_small).
+static __attribute__((unused)) bool intern_initialize_in(InternTable* table, uint64_t buckets);
 static __attribute__((unused)) bool intern_initialize_small(InternTable* table, uint64_t buckets, uint64_t small)
 {
     uint32_t capacity;
     *table = (InternTable){ 0 };
     table->record_arena = arena_reserve_small(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX, small);
+    return intern_initialize_in(table, buckets);
+}
+
+// EXPERIMENT (#262): intern_initialize_with in the record arena the caller reserved (table->record_arena, with nothing
+// pushed yet and room for intern_layout_bytes(buckets) and BUSTER_INTERN_RECORD_BYTES_MAX), which a lane reserves before
+// its first round of several lanes.
+static __attribute__((unused)) bool intern_initialize_in(InternTable* table, uint64_t buckets)
+{
+    const Arena arena = table->record_arena;
+    *table = (InternTable){ .record_arena = arena };
     bool result = intern_lay_out(table, &table->record_arena, buckets);
     table->records = result ? table->record_arena.base + table->record_arena.length : 0;
     // Id 0's spelling: an empty one, so that no other spelling is at offset 0.

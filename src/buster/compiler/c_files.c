@@ -86,6 +86,9 @@
 // before it looks them up (files_find_new).
 #define BUSTER_FILES_PLACE_BATCH 32
 #define BUSTER_FILES_FIND_BATCH 16
+// EXPERIMENT (#262): the most buckets a lane's own table starts with when its memory was reserved before its first round
+// (FilesRun.reserve_tables); it grows past them as any table does.
+#define BUSTER_FILES_MAX_LANE_BUCKETS (1u << 18)
 // EXPERIMENT (#262): Linux's MADV_POPULATE_READ (5.14), which the C library's headers may not name.
 #define BUSTER_FILES_MADV_POPULATE_READ 22
 // How lanes get files' bytes (FileCacheBytes, file_cache_probe), and the largest file every lane count reads into its
@@ -334,8 +337,13 @@ struct FilesRun
     // need the merge.
     bool clone_tables;
     // EXPERIMENT (#262): the base pages at the start of each lane's spellings, shared ids and own table (0 for
-    // arena_reserve's).
+    // arena_reserve's), for the lanes from small_from on when the group has more than small_above lanes.
     uint64_t lane_array_small;
+    uint32_t small_from;
+    uint32_t small_above;
+    // EXPERIMENT (#262): each lane reserves its own table's memory as it starts (files_lane_begin), and only the lanes
+    // that work on a round lay theirs out, at their first.
+    bool reserve_tables;
     // EXPERIMENT (#262): on more than one lane, the preparing lane maps a mapped file's pages (MADV_POPULATE_READ) before
     // it lexes them, as MAP_POPULATE does for one lane's probes.
     bool prepare_populate;
@@ -826,6 +834,13 @@ static uint32_t files_working_lanes(const FilesRun* run)
 // one works alone on lane 0, one file after another straight into the shared table; several take rule 1's parts of the
 // files by their bytes (or one range each, when fewer than all or for few bytes), each into its own table, and then
 // merge. Every way gives the same ids, so which one runs is only a matter of speed: a lane alone needs no merge.
+// EXPERIMENT (#262): the base pages at the start of lane `lane`'s spellings, shared ids and own table.
+static uint64_t files_lane_small(const FilesRun* run, uint32_t lane)
+{
+    const bool small = run->lane_array_small != 0 && lane >= run->small_from && run->lane_count > run->small_above;
+    return small ? run->lane_array_small : BUSTER_ARENA_SMALL_BYTES;
+}
+
 // EXPERIMENT (#262): maps a mapped file's pages before its preparation lexes them (FilesRun.prepare_populate).
 static void files_populate(const FilesRun* run, const PPFileData* data)
 {
@@ -873,10 +888,17 @@ static void files_prepare(FilesRun* run)
             files_fail(run, !intern_copy(&mine->table, cache->table, buckets));
             mine->table_ticks += __rdtsc() - begin;
         }
-        else if (!run->clone_tables && mine->table.records == 0)
+        else if (!run->clone_tables && run->reserve_tables && lane < lanes && mine->table.records == 0)
+        {
+            // EXPERIMENT (#262): a working lane lays its table out in the memory it reserved as it started.
+            const uint64_t begin = __rdtsc();
+            files_fail(run, !intern_initialize_in(&mine->table, buckets < BUSTER_FILES_MAX_LANE_BUCKETS ? buckets : BUSTER_FILES_MAX_LANE_BUCKETS));
+            mine->table_ticks += __rdtsc() - begin;
+        }
+        else if (!run->clone_tables && !run->reserve_tables && mine->table.records == 0)
         {
             const uint64_t begin = __rdtsc();
-            files_fail(run, !intern_initialize_small(&mine->table, buckets, run->lane_array_small != 0 ? run->lane_array_small : BUSTER_ARENA_SMALL_BYTES));
+            files_fail(run, !intern_initialize_small(&mine->table, buckets, files_lane_small(run, lane)));
             mine->table_ticks += __rdtsc() - begin;
         }
         mine->round_begin = mine->table.count;
@@ -1615,12 +1637,18 @@ static bool files_lane_begin(FilesRun* run, FilesLane* mine)
     bool result = true;
     if (run->lane_count > 1)
     {
-        const uint64_t small = run->lane_array_small != 0 ? run->lane_array_small : BUSTER_ARENA_SMALL_BYTES;
+        const uint64_t small = files_lane_small(run, (uint32_t)(mine - run->lanes));
         mine->spelling_arena = arena_reserve_small((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(FilesSpelling) + 64, small);
         mine->shared_arena = arena_reserve_small((uint64_t)BUSTER_INTERN_MAX_IDS * sizeof(IdentId) + 64, small);
+        if (run->reserve_tables)
+        {
+            uint32_t capacity;
+            mine->table.record_arena = arena_reserve_small(intern_layout_bytes(BUSTER_FILES_MAX_LANE_BUCKETS, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX, small);
+            result = mine->table.record_arena.base != 0;
+        }
         mine->spellings = arena_push_array(&mine->spelling_arena, BUSTER_INTERN_MAX_IDS, sizeof(FilesSpelling), 64);
         mine->shared = arena_push_array(&mine->shared_arena, BUSTER_INTERN_MAX_IDS, sizeof(IdentId), 64);
-        result = mine->spellings != 0 && mine->shared != 0;
+        result = result && mine->spellings != 0 && mine->shared != 0;
     }
     mine->lists = arena_reserve((uint64_t)BUSTER_FILES_MAX_FILES * sizeof(uint32_t) + (uint64_t)BUSTER_LANE_MAX_PARTS * sizeof(uint32_t) + 4096 * sizeof(uint64_t));
     mine->names = arena_reserve(BUSTER_FILES_ARENA_BYTES);
