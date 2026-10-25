@@ -71,6 +71,7 @@ jobs:
       ir_lowering: ${{ steps.files.outputs.ir_lowering }}
       ir_optimize: ${{ steps.files.outputs.ir_optimize }}
       checker: ${{ steps.files.outputs.checker }}
+      files: ${{ steps.files.outputs.files }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
       - name: Check out the triggering commit and its parents
@@ -84,7 +85,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker)
+          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker files)
           # The sources each module's conditioned benchmark samples measure, under src/buster/compiler/.
           declare -A sources=(
               [zen5]='x86_zen5[a-z_]*'
@@ -95,6 +96,7 @@ jobs:
               [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_benchmark'
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
               [checker]='c_check[a-z_]*'
+              [files]='c_files[a-z_]*'
           )
           # The plain benchmarks, each by the name its commands take after benchmark- or measure-, and the sources it
           # measures: `unit:FILE`, the translation unit of its own whose includes it measures, or for one in main.c's
@@ -509,6 +511,15 @@ jobs:
           # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
           # so asking clang -fsyntax-only again (--clang) only repeats that.
           ./build/compiler test-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+          == Test the per-file jobs on the frozen musl units
+          # #262's corpora: musl's 1,355 units with its build's options, the cache filled on 1, 2, 3 and 8 lanes and with
+          # the ids in another order, as test-files does for the repository's units.
+          unset CPATH C_INCLUDE_PATH
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          musl="$corpus/libc/musl"
+          ./build/compiler test-files -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
+            -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
           == Test the runner
           ./build/compiler test-parallel
           == Test the foreign inputs
@@ -609,6 +620,9 @@ jobs:
           ./build/compiler test-inflate
           == Test selective lowering against its independent oracle and Clang symbols
           ./build/compiler test-lowering --clang
+          == Test the per-file jobs on the frozen C library corpus, flat
+          unset CPATH C_INCLUDE_PATH
+          ./build/compiler test-files --flat /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc
           == Check the frozen SQLite source against Clang
           # --deferred 8 also reads its bodies apart on 8 lanes (#113), whose result must be the vector path's. --symbols
           # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129): it refuses
@@ -696,6 +710,9 @@ jobs:
           ./build/compiler test-tier1-frame-execution
           == Test the per-file jobs on the repository's sources, flat
           ./build/compiler test-files --flat src
+          == Test the per-file jobs on the frozen sqlite3.c
+          unset CPATH C_INCLUDE_PATH
+          ./build/compiler test-files /var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c
           == Test scoped name-resolution kernels
           ./build/compiler test-bindings
           == Test deferred-body source-position environments
@@ -1091,9 +1108,25 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --tables src
 
       - name: Benchmark the per-file jobs on the repository's translation units
-        # Without taskset: it pins each lane to an allowed CPU of its own.
+        # With the walk round by round (#262), from the same runs. Without taskset: it pins each lane to an allowed CPU
+        # of its own.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
-        run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+        run: ./build/compiler benchmark-files --rounds -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: Benchmark the per-file jobs on musl, sqlite3.c and the flat C library corpus
+        # Where `changes` doesn't rule it out (the module's sources): docs/c-files.md's tables, on the preprocessor
+        # oracle's frozen corpora (docs/preprocessor-oracle.md), with sqlite3.c's walk round by round. Without taskset:
+        # it pins each lane to an allowed CPU of its own.
+        if: needs.changes.outputs.files != 'false'
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          musl="$corpus/libc/musl"
+          ./build/compiler benchmark-files -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
+            -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+          ./build/compiler benchmark-files --rounds "$corpus/sqlite/sqlite3.c"
+          ./build/compiler benchmark-files --flat "$corpus/libc"
 
       - name: Benchmark the parser on main.c
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser,')

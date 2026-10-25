@@ -33,10 +33,14 @@
 //     (only the computed include's).
 //   - Spellings: generated files of identifiers (a shared vocabulary drawn unevenly, names of their own, long ones, line
 //     splices and UCNs) prepared without following includes, enough new spellings for the shared table to grow during a
-//     merge, and a translation unit that includes them all; and again in two runs into one cache, whose second finds most
-//     of its spellings in the shared table, against one run of all of them on one lane.
+//     merge, and a translation unit that includes them all: in parts, split once, and with two lanes working (in parts,
+//     from the run's counter, and split once) and the others idle; and again in two runs into one cache, whose second
+//     finds most of its spellings in the shared table, against one run of all of them on one lane.
 //   - Contexts: a guarded header that includes itself through ./ and sub/.., which the walk must take once, and one
 //     header in two directories (a hard link) whose own local.h differ, which it must walk in both.
+//   - Rounds: the walk's trace (benchmark-files --rounds) on include chains of exactly the rounds it keeps apart (16) and
+//     of more (21), a file a round: on every lane count it must keep each round, the last kept one with every later one,
+//     and snapshots that go forward on every lane from the walk's start to its end, the one after the last kept round's.
 //   - Special paths: a FIFO that an include under #if 0 names (the walk's probe mustn't block) and an active one
 //     names, and a quoted name of 2,400 bytes in a directory of 2,539, whose three requests must share one search.
 //   - Memory: runs short of the round's arena or of one lane's scratch memory, which may fail, but after which every
@@ -134,7 +138,8 @@ struct FilesTestWork
     bool follow;
     // The roots in two runs, the second from root `split` on (0 for one run).
     uint32_t split;
-    // The runs' FilesRun.lane_bytes and split_bytes, if `thresholds`.
+    // The runs' FilesRun.lane_bytes and split_bytes, if `thresholds` (with shared_bytes 0, so that a round of any bytes
+    // may take several lanes).
     bool thresholds;
     uint64_t lane_bytes;
     uint64_t split_bytes;
@@ -251,6 +256,7 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
         const uint32_t end = runs == 2 && r == 0 ? work->split : work->root_count;
         FilesRun files;
         result = files_run_initialize(&files, &run->cache, &search, work->roots + begin, end - begin, work->follow, lanes);
+        files.shared_bytes = work->thresholds ? 0 : files.shared_bytes;
         files.lane_bytes = work->thresholds ? work->lane_bytes : files.lane_bytes;
         files.split_bytes = work->thresholds ? work->split_bytes : files.split_bytes;
         char path[4200];
@@ -952,6 +958,159 @@ static bool files_test_dollars(const char* directory, const uint32_t* lanes, uin
     return result;
 }
 
+// The rounds check's chain of headers, and its roots' first headers: walks of BUSTER_FILES_TRACE_ROUNDS rounds and of
+// more, a round per file.
+#define BUSTER_FILES_TEST_CHAIN 20
+#define BUSTER_FILES_TEST_CHAIN_ROOTS 2
+
+// One walk of `root` on `lanes` lanes that keeps its trace (FilesRun.trace) in `trace`, with the rounds it made and the
+// files it prepared.
+static bool files_test_traced_walk(const char* root, uint32_t lanes, const char* directory, FilesTrace* trace, uint32_t* rounds, uint64_t* prepared)
+{
+    static Preprocessor search;
+    InternTable table = { 0 };
+    FileCache cache = { 0 };
+    PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    bool result = intern_initialize(&table) && file_cache_initialize(&cache, &table, pp_prepare_options(&options));
+    options.files = &cache;
+    result = result && pp_initialize(&search, &options, &table);
+    const char* roots[1] = { root };
+    FilesRun run = { 0 };
+    result = result && files_run_initialize(&run, &cache, &search, roots, 1, true, lanes);
+    *trace = (FilesTrace){ 0 };
+    run.trace = trace;
+    char path[4200];
+    const int saved = files_test_quiet_begin(directory, path, sizeof(path));
+    result = result && lane_run(lanes, files_run_lane, &run, 0) && !run.failed;
+    const uint64_t written = files_test_quiet_end(saved, path);
+    *rounds = run.rounds;
+    if (run.cache != 0)
+    {
+        files_run_release(&run);
+    }
+    *prepared = cache.prepared_records;
+    pp_release(&search);
+    file_cache_release(&cache);
+    intern_release(&table);
+    return result && written == 0;
+}
+
+// Is a trace of a walk of `rounds` rounds, a file each, on `lanes` lanes what it must be (FilesTrace)? It keeps
+// min(rounds, BUSTER_FILES_TRACE_ROUNDS) rounds and the walk's count, each a file on one working lane but the last kept
+// one, which counts every later round's file too; and its snapshots from the walk's start to its end, the one after the
+// last kept round's, go forward on every traced lane: its TSC and each phase's ticks, and the waves and probes. Prints
+// what isn't.
+static bool files_test_trace(const FilesTrace* trace, uint32_t rounds, uint32_t lanes, const char* root)
+{
+    const uint32_t kept = rounds < BUSTER_FILES_TRACE_ROUNDS ? rounds : BUSTER_FILES_TRACE_ROUNDS;
+    const uint32_t traced = lanes < BUSTER_FILES_TRACE_LANES ? lanes : BUSTER_FILES_TRACE_LANES;
+    bool result = trace->rounds == kept && trace->walked == rounds;
+    if (!result)
+    {
+        printf("rounds: %s on %u lanes: the trace keeps %u rounds (%u) of %u (%u)\n", root, lanes, trace->rounds, kept, trace->walked, rounds);
+    }
+    for (uint32_t r = 0; result && r < kept; r += 1)
+    {
+        const uint32_t files = r + 1 < kept ? 1 : rounds - r;
+        result = trace->files[r] == files && trace->bytes[r] != 0 && trace->working[r] == 1;
+        if (!result)
+        {
+            printf("rounds: %s on %u lanes: round %u has %u files (%u), %lu bytes and %u working lanes (1)\n", root, lanes, r, trace->files[r], files,
+                   (unsigned long)trace->bytes[r], trace->working[r]);
+        }
+    }
+    for (uint32_t at = 0; result && at <= kept; at += 1)
+    {
+        result = trace->waves[at + 1] >= trace->waves[at] && trace->probes[at + 1] >= trace->probes[at];
+        if (!result)
+        {
+            printf("rounds: %s on %u lanes: the waves or the probes go back from snapshot %u to %u\n", root, lanes, at, at + 1);
+        }
+        for (uint32_t l = 0; result && l < traced; l += 1)
+        {
+            result = trace->clock[at][l] != 0 && trace->clock[at + 1][l] >= trace->clock[at][l];
+            for (uint32_t p = 0; result && p < FILES_PHASE_COUNT; p += 1)
+            {
+                result = trace->ticks[at + 1][l][p] >= trace->ticks[at][l][p];
+            }
+            if (!result)
+            {
+                printf("rounds: %s on %u lanes: lane %u's snapshot %u doesn't go on to snapshot %u\n", root, lanes, l, at, at + 1);
+            }
+        }
+    }
+    return result;
+}
+
+// The walk's trace (FilesRun.trace, benchmark-files --rounds) on include chains of exactly BUSTER_FILES_TRACE_ROUNDS
+// rounds and of more (#422's review): headers h1.h to h20.h, each but the last including the next, and two roots that
+// include h6.h and h1.h, whose walks take a round per file, 16 and 21, on every lane count (files_test_trace).
+static bool files_test_rounds(const char* directory, const uint32_t* lanes, uint32_t lane_count)
+{
+    static const uint32_t firsts[BUSTER_FILES_TEST_CHAIN_ROOTS] = { BUSTER_FILES_TEST_CHAIN + 2 - BUSTER_FILES_TRACE_ROUNDS, 1 };
+    static FilesTrace trace;
+    char path[4200];
+    char text[64];
+    bool result = true;
+    for (uint32_t h = 1; result && h <= BUSTER_FILES_TEST_CHAIN; h += 1)
+    {
+        if (h < BUSTER_FILES_TEST_CHAIN)
+        {
+            snprintf(text, sizeof(text), "#include \"h%u.h\"\nint h%u;\n", h + 1, h);
+        }
+        else
+        {
+            snprintf(text, sizeof(text), "int h%u;\n", h);
+        }
+        snprintf(path, sizeof(path), "%s/h%u.h", directory, h);
+        result = files_test_write(path, text);
+    }
+    char roots[BUSTER_FILES_TEST_CHAIN_ROOTS][4200];
+    for (uint32_t i = 0; result && i < BUSTER_FILES_TEST_CHAIN_ROOTS; i += 1)
+    {
+        snprintf(roots[i], sizeof(roots[i]), "%s/rounds%u.c", directory, i);
+        snprintf(text, sizeof(text), "#include \"h%u.h\"\n", firsts[i]);
+        result = files_test_write(roots[i], text);
+    }
+    for (uint32_t i = 0; result && i < BUSTER_FILES_TEST_CHAIN_ROOTS; i += 1)
+    {
+        // The root and the headers from its first on.
+        const uint32_t rounds = BUSTER_FILES_TEST_CHAIN - firsts[i] + 2;
+        for (uint32_t l = 0; result && l < lane_count; l += 1)
+        {
+            uint32_t walked = 0;
+            uint64_t prepared = 0;
+            result = files_test_traced_walk(roots[i], lanes[l], directory, &trace, &walked, &prepared);
+            if (result && (walked != rounds || prepared != rounds))
+            {
+                printf("rounds: %s on %u lanes: %u rounds (%u) and %lu files prepared (%u)\n", roots[i], lanes[l], walked, rounds, (unsigned long)prepared, rounds);
+                result = false;
+            }
+            else if (!result)
+            {
+                printf("rounds: %s on %u lanes: the walk failed or wrote to stderr\n", roots[i], lanes[l]);
+            }
+            result = result && files_test_trace(&trace, rounds, lanes[l], roots[i]);
+        }
+    }
+    if (result)
+    {
+        printf("rounds: walks of %u and %u rounds traced on every lane count, the last kept round with the later ones, to the walk's end\n",
+               BUSTER_FILES_TEST_CHAIN - firsts[0] + 2, BUSTER_FILES_TEST_CHAIN - firsts[1] + 2);
+    }
+    for (uint32_t i = 0; i < BUSTER_FILES_TEST_CHAIN_ROOTS; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/rounds%u.c", directory, i);
+        unlink(path);
+    }
+    for (uint32_t h = 1; h <= BUSTER_FILES_TEST_CHAIN; h += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%u.h", directory, h);
+        unlink(path);
+    }
+    return result;
+}
+
 #define BUSTER_FILES_TEST_DEEP_LEVELS 10
 #define BUSTER_FILES_TEST_DEEP_NAME 250
 #define BUSTER_FILES_TEST_LONG_NAME 2400
@@ -1281,8 +1440,8 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     };
     FilesTestRun reference = { 0 };
     result = result && files_test_work(&work, lanes, lane_count, directory, id_order, &reference);
-    // And with one range per lane, then with two lanes working (one range each) and the others idle, on every lane
-    // count, against the same reference.
+    // And with one range per lane, then with two lanes working and the others idle, taking parts from the run's
+    // counter and with one range each, on every lane count, against the same reference.
     FilesTestWork once = work;
     once.name = "spellings, split once";
     once.thresholds = true;
@@ -1293,6 +1452,9 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
     two.thresholds = true;
     two.lane_bytes = written / 2;
     two.split_bytes = 0;
+    FilesTestWork two_once = two;
+    two_once.name = "spellings, two lanes working, split once";
+    two_once.split_bytes = UINT64_MAX;
     for (uint32_t l = 1; result && l < lane_count; l += 1)
     {
         FilesTestRun other;
@@ -1300,11 +1462,13 @@ static bool files_test_spellings(const char* directory, const uint32_t* lanes, u
         files_test_release_run(&other);
         result = result && files_test_run(&two, lanes[l], directory, 0, &other) && files_test_same(&two, &reference, &other, false);
         files_test_release_run(&other);
+        result = result && files_test_run(&two_once, lanes[l], directory, 0, &other) && files_test_same(&two_once, &reference, &other, false);
+        files_test_release_run(&other);
     }
     const bool grew = result && reference.ids > 40960;
     if (result)
     {
-        printf("spellings: %u files, %u ids, %lu tokens, the same on every lane count, in parts, split once and on two lanes\n",
+        printf("spellings: %u files, %u ids, %lu tokens, the same on every lane count, in parts, split once and on two lanes (in parts and split once)\n",
                BUSTER_FILES_TEST_SPELLING_FILES, reference.ids, (unsigned long)reference.tokens);
     }
     if (result && !grew)
@@ -1526,6 +1690,7 @@ static int run_files_tests(int argument_count, char** arguments)
         signal(SIGALRM, files_test_watchdog);
         passed_all &= files_test_contexts(directory, lanes, lane_count, id_order);
         passed_all &= files_test_dollars(directory, lanes, lane_count, id_order);
+        passed_all &= files_test_rounds(directory, lanes, lane_count);
         passed_all &= files_test_special(directory, lanes, lane_count, id_order);
         passed_all &= files_test_memory(directory, seed);
         signal(SIGALRM, SIG_DFL);
