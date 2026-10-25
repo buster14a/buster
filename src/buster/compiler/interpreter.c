@@ -572,7 +572,8 @@ static InterpreterStatus interpreter_stack_allocate(InterpreterStack* stack, uin
     const uint64_t mark = arena->length;
     if (status == INTERPRETER_OK && size == 0)
     {
-        // Zero reserves no bytes and changes no stack position. Its aligned address cannot be dereferenced.
+        // Zero reserves no bytes and changes no logical position, including across save bookkeeping. The address
+        // may alias an older live object; memory checks still require a live registered extent for any access.
         if (stack->position == 0)
         {
             const uintptr_t position = (uintptr_t)arena->base + mark;
