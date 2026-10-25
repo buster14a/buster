@@ -15327,14 +15327,8 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     return result;
 }
 
-static void pp_release(Preprocessor* pp)
+static void pp_release_unit(Preprocessor* pp)
 {
-    // The replay that recorded a deferred history, which shares this unit's file cache.
-    if (pp->history_replay != 0)
-    {
-        pp_release(pp->history_replay);
-    }
-    arena_release(&pp->history_replay_arena);
     pp_tokens_release(&pp->output);
     pp_tokens_release(&pp->arguments);
     pp_tokens_release(&pp->captures);
@@ -15357,6 +15351,18 @@ static void pp_release(Preprocessor* pp)
         arena_release(&pp->arrays[i]);
     }
     *pp = (Preprocessor){ 0 };
+}
+
+// Releases a unit, and the replay that recorded its deferred history (PPOptions.defer_history), which shares its file
+// cache and has no replay of its own.
+static void pp_release(Preprocessor* pp)
+{
+    if (pp->history_replay != 0)
+    {
+        pp_release_unit(pp->history_replay);
+    }
+    arena_release(&pp->history_replay_arena);
+    pp_release_unit(pp);
 }
 
 static void pp_resolve_keywords(Preprocessor* pp);
@@ -15496,12 +15502,10 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
 }
 
 // Preprocesses the main file: the prelude (pp_run_prelude), then the file. The output is pp->output, with keywords'
-// kinds. Returns false if there were errors.
-static void pp_history_report(Preprocessor* pp);
-
-static bool pp_run(Preprocessor* pp, const char* main_path)
+// kinds. Returns false if there were errors. pp_run's work, which a deferred history's replay does again
+// (pp_history_record).
+static bool pp_preprocess_file(Preprocessor* pp, const char* main_path)
 {
-    pp->history_path = main_path;
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
@@ -15517,17 +15521,12 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
         pp_resolve_keywords(pp);
         result = false;
     }
-    pp_history_report(pp);
     return result;
 }
 
-// pp_run for a main file in memory, `length` bytes at `bytes`, named `name` (which must outlive the run), as clang names
-// its standard input <stdin>: test-preprocessor's fuzz runs give it the text clang reads.
-static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
+// pp_preprocess_file for a main file in memory, `length` bytes at `bytes`, named `name`: pp_run_source's work.
+static bool pp_preprocess_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
 {
-    pp->history_name = name;
-    pp->history_bytes = bytes;
-    pp->history_length = length;
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_virtual_file(pp, name, (const char*)bytes, length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE)
@@ -15543,7 +15542,6 @@ static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* byt
         pp_resolve_keywords(pp);
         result = false;
     }
-    pp_history_report(pp);
     return result;
 }
 
@@ -15582,11 +15580,11 @@ static void pp_history_record(Preprocessor* pp, bool report)
         replay->has_epoch = pp->has_epoch;
         if (pp->history_path != 0)
         {
-            pp_run(replay, pp->history_path);
+            pp_preprocess_file(replay, pp->history_path);
         }
         else
         {
-            pp_run_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
+            pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         }
         same = pp_tokens_same(&replay->output, &pp->output);
     }
@@ -15607,13 +15605,16 @@ static void pp_history_record(Preprocessor* pp, bool report)
         pp->history_runs = replay->history_runs;
         pp->history_run_count = replay->history_run_count;
         pp->history_run_capacity = replay->history_run_capacity;
+        // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
+        // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
+        pp->diagnostic_include_range = replay->diagnostic_include_range;
         pp->history_replay = replay;
     }
     else
     {
         if (replay != 0)
         {
-            pp_release(replay);
+            pp_release_unit(replay);
         }
         arena_release(&pp->history_replay_arena);
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, !ran         ? "no expansion history: the translation unit wasn't run by pp_run or pp_run_source" :
@@ -15648,6 +15649,29 @@ static bool pp_history_ensure(Preprocessor* pp)
         pp_history_record(pp, false);
     }
     return pp->history != 0;
+}
+
+// Preprocesses the main file (pp_preprocess_file); with PPOptions.defer_history, then prints the diagnostics the run
+// counted (pp_history_report). The output is pp->output, with keywords' kinds. Returns false if there were errors.
+static bool pp_run(Preprocessor* pp, const char* main_path)
+{
+    pp->history_path = main_path;
+    const bool result = pp_preprocess_file(pp, main_path);
+    pp_history_report(pp);
+    return result;
+}
+
+// pp_run for a main file in memory, `length` bytes at `bytes`, named `name` (which, like the bytes, must outlive the
+// run and its replay), as clang names its standard input <stdin>: test-preprocessor's fuzz runs give it the text clang
+// reads.
+static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
+{
+    pp->history_name = name;
+    pp->history_bytes = bytes;
+    pp->history_length = length;
+    const bool result = pp_preprocess_source(pp, name, bytes, length);
+    pp_history_report(pp);
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

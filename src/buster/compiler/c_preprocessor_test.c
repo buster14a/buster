@@ -337,8 +337,9 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
 
 // A run as the drivers make one, with its history deferred (PPOptions.defer_history), against one that records it, both
 // by the vectorized kernels without expansion starts: the same stream, errors and warnings, and the same diagnostics
-// printed byte for byte, notes and all (the deferred run prints its own by recording the history at its end); then,
-// once pp_history_ensure has recorded it, the same history, with nothing more printed. Returns whether they agree.
+// printed byte for byte, notes and all (the deferred run prints its own by recording the history at its end); then a
+// diagnostic at the first output token a macro made (or the last token) through pp_diagnose_output, which records the
+// deferred history first, printed alike; and the same history, with nothing more printed. Returns whether they agree.
 static bool pp_test_deferred_history(const PPOptions* options, const char* path, const char* label)
 {
     static InternTable tables[2];
@@ -372,17 +373,32 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         printf("%s: with its history deferred, a run gives other tokens or diagnostics (%u and %u errors, %u and %u warnings, %zu and %zu bytes printed)\n",
                label, runs[0].errors, runs[1].errors, runs[0].warnings, runs[1].warnings, lengths[0], lengths[1]);
     }
+    const uint32_t count = runs[0].output.count;
+    uint32_t probe = count;
+    for (uint32_t i = 0; result && probe == count && i < count; i += 1)
+    {
+        probe = (runs[0].output.flags[i] & BUSTER_PP_FROM_MACRO) ? i : probe;
+    }
+    probe = probe == count && count != 0 ? count - 1 : probe;
+    for (uint32_t k = 0; result && probe < count && k < 2; k += 1)
+    {
+        pp_diagnose_output(&runs[k], PP_SEVERITY_WARNING, probe, "deferred history probe");
+        fflush(streams[k]);
+    }
+    const bool probed = result && lengths[0] == lengths[1] && (lengths[0] == 0 || memcmp(texts[0], texts[1], lengths[0]) == 0);
     const size_t printed = lengths[1];
-    const bool recorded = result && pp_history_ensure(&runs[1]);
+    const bool recorded = probed && pp_history_ensure(&runs[1]);
     if (streams[1] != 0)
     {
         fflush(streams[1]);
     }
-    result = result && recorded && lengths[1] == printed && pp_same_streams(&runs[0], &runs[1], label);
-    if (!result)
+    const bool same = recorded && lengths[1] == printed && pp_same_streams(&runs[0], &runs[1], label);
+    if (result && !same)
     {
-        printf("%s: the deferred history, recorded, %s\n", label, recorded ? "differs from the history the run recorded" : "is missing");
+        printf("%s: the deferred history, recorded, %s\n", label,
+               !probed ? "prints a diagnostic at an output token otherwise" : recorded ? "differs from the history the run recorded" : "is missing");
     }
+    result = same;
     for (uint32_t k = 0; k < 2; k += 1)
     {
         if (ready[k])

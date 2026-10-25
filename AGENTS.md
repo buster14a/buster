@@ -3820,11 +3820,14 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;
-- the driver, without files: eleven cases' exit statuses and exact messages (a
+- the driver, without files: fifteen cases' exit statuses and exact messages (a
   valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past
-  the preprocessor's size limit, no file and an unknown option), 16 runs of
-  each, after which the address space and the descriptors must be as they were;
+  the preprocessor's size limit, no file, an unknown option, GNU's keywords
+  turned off two ways, and two errors after a macro's expansion, which the
+  expansion history places and the driver records only for its diagnostics),
+  16 runs of each, after which the address space and the descriptors must be
+  as they were;
   then every reservation and mapping of a run on a valid and on an invalid file
   failed in turn (74 and 75), in children whose address space may grow a page
   less than a run reached: the last fails, then, a page below the peak that run
