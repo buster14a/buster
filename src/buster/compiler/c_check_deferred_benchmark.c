@@ -36,7 +36,8 @@ struct CheckDeferredSample
 
 // One check of the parsed unit: source order's (lanes 0) or the deferred reader's, into `arenas` (types, its index,
 // the input and scratch), taken back first. Whether it ran, with the deferred reader's state in `deferred`.
-static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp, Arena* arenas, uint32_t lanes, CheckDeferred* deferred, uint64_t* nanoseconds)
+static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp, Arena* arenas, uint32_t lanes, const uint32_t* cpus, CheckDeferred* deferred,
+                                         uint64_t* nanoseconds)
 {
     for (uint32_t i = 0; i < 4; i += 1)
     {
@@ -60,13 +61,14 @@ static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp,
     else if (valid)
     {
         deferred->timing = true;
+        deferred->cpus = cpus;
         check_input_deferred(deferred, &input, parser, pp, &types, arenas + 2, arenas + 3, lanes, CHECK_INPUT_BINDINGS_DEFAULT);
     }
     *nanoseconds = check_source_time() - begin;
     return valid;
 }
 
-static bool check_deferred_benchmark_file(const char* file, char** options, uint32_t option_count, uint64_t passes, uint32_t lanes)
+static bool check_deferred_benchmark_file(const char* file, char** options, uint32_t option_count, uint64_t passes, uint32_t lanes, const uint32_t* cpus)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -111,7 +113,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
             const uint32_t way = (pass + step) % 3;
             uint64_t time = 0;
             const uint32_t run_lanes = way == 0 ? 0 : way == 1 ? 1 : lanes;
-            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, &deferred, &time);
+            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, &deferred, &time);
             if (way == 0)
             {
                 sequential[pass] = time;
@@ -160,6 +162,8 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     {
         printf("checker-deferred: file=%s failed=\"it couldn't be preprocessed, parsed or checked\"\n", file);
     }
+    // A unit read in source order measures no deferred reading: the command fails, having said why.
+    valid = valid && merged;
     for (uint32_t i = 0; i < 4; i += 1)
     {
         arena_release(arenas + i);
@@ -220,8 +224,9 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
         {
             files[file_count++] = arguments[i];
         }
-        else
+        else if (strcmp(arguments[i], "--no-default-config") != 0)
         {
+            // An option and its value, which pp_parse_options reads with each file (clang's --no-default-config aside).
             options[option_count++] = arguments[i];
             if (pp_option_takes_value(arguments[i]))
             {
@@ -243,7 +248,7 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     bool measured = valid && (!cpus_given || pinned);
     for (uint32_t i = 0; measured && i < file_count; i += 1)
     {
-        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes);
+        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes, pinned ? cpus : 0);
         fflush(stdout);
     }
     if (pinned)

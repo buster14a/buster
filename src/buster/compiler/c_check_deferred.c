@@ -113,6 +113,13 @@ struct CheckDeferredLane
     // The top level's withdrawals (CheckDeferred.withdrawals) from which on the lane's table has them withdrawn: its
     // bodies come in runs in source order, so each moves the cursor rather than withdrawing everything again.
     uint32_t withdrawn_from;
+    // The position checks' columns (check_deferred_heads): each name's last body (its index + 1) and, for the body
+    // being read, its names' ordinary and tag keys, the opening as each key's point, and the history's handles.
+    uint32_t* stamps;
+    uint32_t* keys;
+    uint32_t* points;
+    uint32_t* handles;
+    uint32_t key_count;
     // What the lane did (CheckDeferred's counts), summed after the lanes.
     uint64_t bodies;
     uint64_t body_tokens;
@@ -164,6 +171,8 @@ struct CheckDeferred
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
     // their position checks: setting each body's heads from the history and its table's view, and taking them back.
     bool timing;
+    // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
+    const uint32_t* cpus;
     uint64_t top_ns;
     uint64_t environment_ns;
     uint64_t lanes_ns;
@@ -298,6 +307,17 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
         valid = reader->transparent_unions != 0;
     }
     lane->withdrawn_from = deferred->withdrawal_count;
+    // Two keys for each name the body and its parameters spell, at most.
+    const uint64_t keys = room * 2;
+    lane->stamps = valid ? check_deferred_copy(arena, 0, 0, names, sizeof(uint32_t)) : 0;
+    lane->keys = lane->stamps != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
+    lane->points = lane->keys != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
+    lane->handles = lane->points != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
+    valid = lane->handles != 0;
+    if (valid)
+    {
+        memset(lane->stamps, 0, (uint64_t)names * sizeof(uint32_t));
+    }
     reader->scope_marks = valid ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
     reader->scope_ends = reader->scope_marks != 0 ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
     reader->scope_openings = reader->scope_ends != 0 ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
@@ -319,34 +339,60 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     return valid;
 }
 
-// Sets the lane's heads of every name the body and its parameters spell to the file scope's at the body's opening
-// (with `clear`, back to none): the binding state source order's reader has there, for the names the body can look up.
-static void check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lane, const CheckDeferredCut* cut, bool clear)
+// Sets the lane's heads of every name the body (`body`) and its parameters spell to the file scope's at the body's
+// opening: the binding state source order's reader has there, for the names the body can look up. Each name once (by
+// the lane's stamps), its label head none and its ordinary and tag heads from the history, 16 keys at a time
+// (c_environment_lookup_batch). The keys stay for check_deferred_heads_clear. Whether the history took every key.
+static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lane, const CheckDeferredCut* cut, uint32_t body)
 {
     CheckInputReader* reader = &lane->reader;
     const Parser* parser = reader->parser;
     CBindings* bindings = &reader->bindings;
     const uint32_t names = bindings->name_capacity;
-    uint64_t reads = 0;
+    const uint32_t stamp = body + 1;
+    uint32_t count = 0;
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
         uint32_t token = pass == 0 ? cut->opening : reader->parameters[cut->opening];
         while (token != BUSTER_CHECK_NONE && (pass == 1 || token <= cut->closing))
         {
             const uint32_t name = parser->tokens.names[token];
-            if (name != 0 && name < names)
+            if (name != 0 && name < names && lane->stamps[name] != stamp)
             {
-                for (uint32_t space = 0; space < C_BINDING_NAMESPACES; space += 1)
-                {
-                    const uint32_t key = space * names + name;
-                    bindings->heads[key] = clear || space == C_BINDING_LABEL ? 0 : c_environment_lookup_key(&deferred->environment, key, cut->opening);
-                }
-                reads += 1;
+                lane->stamps[name] = stamp;
+                lane->keys[count] = C_BINDING_ORDINARY * names + name;
+                lane->keys[count + 1] = C_BINDING_TAG * names + name;
+                lane->points[count] = cut->opening;
+                lane->points[count + 1] = cut->opening;
+                bindings->heads[C_BINDING_LABEL * names + name] = 0;
+                count += 2;
             }
             token = pass == 0 ? token + 1 : reader->parameter_next[token];
         }
     }
-    lane->history_reads += clear ? 0 : reads;
+    const bool valid = c_environment_lookup_batch(&deferred->environment, lane->keys, lane->points, count, lane->handles);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        bindings->heads[lane->keys[i]] = valid ? lane->handles[i] : 0;
+    }
+    lane->key_count = count;
+    lane->history_reads += count / 2;
+    return valid;
+}
+
+// Takes the heads check_deferred_heads set, and what the walk left in them, back to none.
+static void check_deferred_heads_clear(CheckDeferredLane* lane)
+{
+    CBindings* bindings = &lane->reader.bindings;
+    const uint32_t names = bindings->name_capacity;
+    for (uint32_t i = 0; i < lane->key_count; i += 2)
+    {
+        const uint32_t name = lane->keys[i] - C_BINDING_ORDINARY * names;
+        bindings->heads[C_BINDING_ORDINARY * names + name] = 0;
+        bindings->heads[C_BINDING_TAG * names + name] = 0;
+        bindings->heads[C_BINDING_LABEL * names + name] = 0;
+    }
+    lane->key_count = 0;
 }
 
 // Sets the lane's table to have the top level's withdrawals from `first` on withdrawn, and those before given back: the
@@ -441,7 +487,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->bindings.count = reader->bindings.base;
     reader->bindings.active_count = 0;
     reader->bindings.valid = true;
-    check_deferred_heads(deferred, lane, cut, false);
+    const bool history = check_deferred_heads(deferred, lane, cut, body);
     // The table as the top level's was at the opening: its later types hidden, its later definitions withdrawn.
     const TypeViewMark view = type_view_mark(types);
     types->hidden_begin = cut->types;
@@ -458,7 +504,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     }
     check_deferred_withdraw_to(deferred, lane, low);
     const uint64_t tokens = (uint64_t)cut->closing - cut->opening + 1;
-    bool valid = type_changes_initialize(&result->changes, &lane->results, (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 2 + 64));
+    bool valid = history && type_changes_initialize(&result->changes, &lane->results, (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 8 + 64), (uint32_t)(tokens * 2 + 64));
     types->changes = valid ? &result->changes : 0;
     const uint64_t walk_begin = deferred->timing ? check_deferred_now() : 0;
     if (valid)
@@ -534,15 +580,17 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         }
         result->inference_end = reader->inference_end;
         result->unsupported = !kept;
+        result->reason = !kept ? "a body's result ran out of room" : result->reason;
     }
     // The lane back to the top level's state.
     const uint64_t undo_begin = deferred->timing ? check_deferred_now() : 0;
-    check_deferred_heads(deferred, lane, cut, true);
+    check_deferred_heads_clear(lane);
     const bool reset = type_view_reset(types, view);
     for (uint32_t i = 0; i < top_input->vla_count; i += 1)
     {
         input->vlas[i] = top_input->vlas[i];
     }
+    result->reason = !reset && !result->unsupported ? "a lane's table couldn't be taken back" : result->reason;
     result->unsupported |= !reset;
     lane->ready = reset;
     lane->bodies += 1;
@@ -573,6 +621,7 @@ static void check_deferred_lane(void* argument)
         for (uint64_t body = deferred->boundaries[part]; body < deferred->boundaries[part + 1]; body += 1)
         {
             deferred->results[body].unsupported = true;
+            deferred->results[body].reason = "a lane's copy of the reader ran out of room";
             if (lane->ready)
             {
                 check_deferred_body(deferred, lane, (uint32_t)body);
@@ -1105,7 +1154,9 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     }
     CheckDeferredRun run = { .deferred = deferred };
     const uint64_t lanes_begin = deferred->timing ? check_deferred_now() : 0;
-    valid = valid && (deferred->body_count == 0 || lane_run(deferred->lanes, check_deferred_lane, &run, 0));
+    const bool ran = !valid || deferred->body_count == 0 || lane_run(deferred->lanes, check_deferred_lane, &run, deferred->cpus);
+    deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
+    valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
     for (uint32_t lane = 0; lane < deferred->lanes && lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)
     {
@@ -1156,7 +1207,8 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
                                  Arena* scratch, uint32_t lanes, CheckInputBindingMode binding_mode)
 {
     const bool timing = deferred->timing;
-    *deferred = (CheckDeferred){ .lanes = lanes, .table = types, .timing = timing };
+    const uint32_t* cpus = deferred->cpus;
+    *deferred = (CheckDeferred){ .lanes = lanes, .table = types, .timing = timing, .cpus = cpus };
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
     deferred->arena = arena_reserve(UINT64_C(1) << 36);
