@@ -20,6 +20,9 @@
 //   the lines their statements are on, in their files, and none of a macro's definition or a blank line. Each program's
 //   functions lowered with the entries' source tokens and without them, by both unit ABI batches: the same typed
 //   functions, each entry's token alike by both batches and the function's own.
+// - A unit whose selection keeps no function: emitted with source rows into an empty set, a unit of no functions, by
+//   both paths alike; with --cross-check, linked with -g against a shared library holding its main (cc), into an
+//   executable that runs, whose DWARF llvm-dwarfdump --verify takes.
 // - Address space: -g's link, which the default command sends to this unit, fits in 64 GiB more RLIMIT_AS than the
 //   same program's link without -g needs (found by halves), where the arenas of both calls together took 192 GiB more.
 // - The driver, with --cross-check (gdb and llvm-dwarfdump): the fixture linked with -g by each path into the same
@@ -775,6 +778,102 @@ static void check_debug_test_sources(CheckDebugTestTally* tally, const char* dir
     printf("  lines: the fixture and %u generated programs, %llu rows by each path\n", programs, (unsigned long long)rows);
 }
 
+// A unit whose selection keeps no function (#426's review): data and an unused static function, emitted with source
+// rows by each path into an empty set of rows, which make a debug.c unit of no functions, the same bytes by both.
+static void check_debug_test_empty(CheckDebugTestTally* tally, const char* directory)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/dbg_nofunctions.c", directory);
+    static const char text[] = "int dbg_nofunctions_value = 7;\n\nstatic int dbg_nofunctions_unused(void)\n{\n    return dbg_nofunctions_value;\n}\n";
+    const bool written = foreign_test_write(path, text, sizeof(text) - 1);
+    uint8_t* sections[2][BUSTER_DEBUG_SECTIONS] = { 0 };
+    uint64_t sizes[2][BUSTER_DEBUG_SECTIONS] = { 0 };
+    bool built[2] = { false, false };
+    for (uint32_t side = 0; written && side < 2; side += 1)
+    {
+        CheckDebugTestUnit unit;
+        check_debug_test_compile(&unit, &pp, &parser, &identifiers, path, directory, side == 0);
+        check_debug_test_expect(tally, unit.ready && unit.selected.program.body_count == 0 && unit.rows.count == 0,
+                                "emit a unit whose selection keeps no function with source rows, none of them", path);
+        CheckDebug debug;
+        built[side] = unit.ready && check_debug_build(&debug, &unit.selected.program, &unit.rows, &parser, &pp, side == 0, &unit.output, &unit.scratch);
+        check_debug_test_expect(tally, built[side] && debug.unit.function_count == 0 && debug.unit.row_count == 0, "make its debug.c unit, of no functions", path);
+        for (uint32_t section = 0; built[side] && section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            sizes[side][section] = debug.output.sections[section].size;
+            sections[side][section] = malloc(sizes[side][section] + 1);
+            if (sections[side][section] != 0)
+            {
+                memcpy(sections[side][section], debug.output.sections[section].bytes, sizes[side][section]);
+            }
+        }
+        check_debug_test_close(&unit);
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+    bool same = built[0] && built[1];
+    for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        same = same && sections[0][section] != 0 && sections[1][section] != 0 && sizes[0][section] == sizes[1][section] &&
+               memcmp(sections[0][section], sections[1][section], sizes[0][section]) == 0;
+        free(sections[0][section]);
+        free(sections[1][section]);
+    }
+    check_debug_test_expect(tally, same, "the empty unit's sections are the same bytes by both paths", path);
+}
+
+// The driver's link with -g of a unit whose selection keeps no function, its main a shared library's (built with cc):
+// by each path into the same bytes, which run, with DWARF llvm-dwarfdump --verify finds no error in.
+static void check_debug_test_library_main(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char library_source[PATH_MAX];
+    char library[PATH_MAX];
+    char library_errors[PATH_MAX + 8];
+    char source[PATH_MAX];
+    char search[PATH_MAX + 2];
+    char environment[PATH_MAX + 32];
+    snprintf(library_source, sizeof(library_source), "%s/dbg_libmain.c", directory);
+    snprintf(library, sizeof(library), "%s/libdbgmain.so", directory);
+    snprintf(library_errors, sizeof(library_errors), "%s.err", library);
+    snprintf(source, sizeof(source), "%s/dbg_nofunctions.c", directory);
+    snprintf(search, sizeof(search), "-L%s", directory);
+    snprintf(environment, sizeof(environment), "LD_LIBRARY_PATH=%s", directory);
+    static const char text[] = "int main(void)\n{\n    return 0;\n}\n";
+    char* compile[] = { (char*)"cc", (char*)"-shared", (char*)"-fPIC", (char*)"-o", library, library_source, 0 };
+    const bool made = foreign_test_write(library_source, text, sizeof(text) - 1) && object_test_run(compile, "/dev/null", library_errors) == 0;
+    check_debug_test_expect(tally, made, "cc builds a shared library whose main the unit without functions takes", library_errors);
+    String8 files[2] = { 0 };
+    char outputs[2][PATH_MAX];
+    for (uint32_t path = 0; made && path < 2; path += 1)
+    {
+        char errors[PATH_MAX + 8];
+        snprintf(outputs[path], sizeof(outputs[path]), "%s/dbg_nofunctions%s", directory, path == 0 ? "" : ".scalar");
+        snprintf(errors, sizeof(errors), "%s.err", outputs[path]);
+        char* arguments[] = { (char*)"/proc/self/exe", (char*)"-g", (char*)"-o", outputs[path], source, search, (char*)"-ldbgmain", path == 1 ? (char*)"--scalar" : 0, 0 };
+        const bool linked = object_test_run(arguments, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, linked, "the driver links a unit without functions with -g, its main a library's", errors);
+        files[path] = linked ? foreign_test_read(arena, outputs[path]) : (String8){ 0 };
+        char* run[] = { (char*)"env", environment, outputs[path], 0 };
+        check_debug_test_expect(tally, linked && object_test_run(run, "/dev/null", "/dev/null") == 0, "it runs and returns 0", outputs[path]);
+    }
+    if (made)
+    {
+        check_debug_test_expect(tally, files[0].pointer != 0 && files[1].pointer != 0 && files[0].length == files[1].length &&
+                                           memcmp(files[0].pointer, files[1].pointer, files[0].length) == 0,
+                                "the vector path's executable is --scalar's, byte for byte", outputs[0]);
+        char report[PATH_MAX + 16];
+        snprintf(report, sizeof(report), "%s.verify", outputs[0]);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", outputs[0], 0 };
+        object_test_run(verify, report, "/dev/null");
+        const String8 verified = foreign_test_read(arena, report);
+        check_debug_test_expect(tally, verified.pointer != 0 && strstr(verified.pointer, "No errors.") != 0, "llvm-dwarfdump --verify finds no error in its unit of no functions", report);
+    }
+}
+
 // gdb's transcript of `commands` on `program`, into `report`.
 static String8 check_debug_test_gdb(const char* program, const char* report, const char* const* commands, uint32_t count, Arena* arena)
 {
@@ -946,10 +1045,12 @@ static int run_check_debug_tests(int argc, char** argv)
         check_debug_test_rows(&tally);
         check_debug_test_keep(&tally);
         check_debug_test_sources(&tally, directory, programs);
+        check_debug_test_empty(&tally, directory);
         check_debug_test_address_space(&tally, directory);
         if (cross_check)
         {
             check_debug_test_driver(&tally, directory, &arena);
+            check_debug_test_library_main(&tally, directory, &arena);
         }
         if (!keep && tally.failures == 0)
         {

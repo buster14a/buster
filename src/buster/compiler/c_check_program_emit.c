@@ -308,17 +308,19 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->token = program->bodies[b].declaration;
         }
     }
-    // The raw rows' room: each body's entries, its prologue's and its epilogue's.
+    // The raw rows' room: each body's entries, its prologue's and its epilogue's. A program whose selection kept no
+    // function has none, an empty set of rows (a unit of no functions to debug.c), not a failure.
     const uint64_t row_capacity = result->lowered.entries + 2 * (uint64_t)count;
     if (rows != NULL)
     {
-        *rows = (CheckProgramRows){ .capacity = valid && row_capacity <= UINT32_MAX - BUSTER_CHECK_DEBUG_SLACK ? (uint32_t)row_capacity : 0 };
-        rows->offsets = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
-        rows->tokens = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
-        rows->first = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-        rows->counts = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-        rows->sizes = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-        rows->bodies = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        const bool fits = valid && row_capacity <= UINT32_MAX - BUSTER_CHECK_DEBUG_SLACK;
+        *rows = (CheckProgramRows){ .capacity = fits ? (uint32_t)row_capacity : 0 };
+        rows->offsets = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+        rows->tokens = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+        rows->first = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        rows->counts = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        rows->sizes = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        rows->bodies = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
         valid = valid && rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0;
     }
     const CheckProgramHelpers* helpers = &result->lowered.helpers;
