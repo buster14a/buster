@@ -315,22 +315,28 @@ function without `x87`.
 
 SSE converts between floating values and signed integers alone (AVX-512's `vcvtusi2sd` and `vcvttsd2usi` are past the
 baseline). Tier 0's `CONVERT` from U64 to F32 or F64, and from those to U64, is deferred (`tier0_emit_u64_convert`), with
-no branch and no register but its operand's and its result's, through red zone temporaries:
+no branch and no memory: in the operand's register, the result's and the stacks' first free ones.
 
 - **To F32 or F64 from U64:** a signed conversion of the value where its top bit is clear, and otherwise of the value
-  halved with its lowest bit kept, `(x >> 1) | (x & 1)`, which rounds as the value does (`cmovge` chooses which), then
-  the result's exponent raised by the value's top bit, which doubles it exactly where it was halved. 14 records, where
-  clang -O0 branches between the two conversions.
+  halved with its lowest bit kept, `(x >> 1) | (x & 1)`, which rounds as the value does (made in the integer stack's
+  free register; `cmovns` chooses which), then the result's exponent raised by the value's top bit, which doubles it
+  exactly where it was halved. The result's register is zeroed first (`xorps`), so that `cvtsi2sd` doesn't wait for the
+  value it held. 14 records, where clang -O0 branches between the two conversions.
 - **To U64 from F32 or F64:** one signed truncation, of the value less a bias: 2^63 where the value is at least that
-  (`cmovae` from one compare with 2^63), 0 below it. The top bit comes back from the compare's result, which `setae`
-  keeps (`shl` and `xor`). 13 records. The subtraction is exact (Sterbenz's lemma from 2^63, and of 0 below it), and the
-  truncation's operand is below 2^63. So a value in U64's range raises the invalid exception never and inexact only
-  where it has a fraction, as C's conversion does. (#429's first sequence truncated both ways and chose, which raised
-  invalid from 2^63 on, and inexact for a value like 1.0.) A value out of U64's range, which C leaves undefined, gives
-  the signed truncation's result with its top bit flipped.
+  (`cmovae` from one compare with 2^63, which the integer stack's register past the result's and the floating stack's
+  free one hold), 0 below it. The top bit comes back from the compare's result, which `setae` keeps (`shl` and `xor`).
+  12 records. The subtraction is exact (Sterbenz's lemma from 2^63, and of 0 below it), and the truncation's operand is
+  below 2^63. So a value in U64's range raises the invalid exception never and inexact only where it has a fraction, as
+  C's conversion does. (#429's first sequence truncated both ways and chose, which raised invalid from 2^63 on, and
+  inexact for a value like 1.0.) A value out of U64's range, which C leaves undefined, gives the signed truncation's
+  result with its top bit flipped.
 
-Each selection counts the result's register in its stack's top. Neither takes a home's variant, so no local fuses into
-one.
+Each selection counts the registers they write in its stacks' tops. Neither takes a home's variant, so no local fuses
+into one.
+
+#429's first versions went through red zone temporaries, with no register but the operand's and the result's: on the
+9700X, a loop of the four conversions (#429's review) took 2.1 times clang -O0's time, 25.7 cycles an iteration against
+12.2, as each conversion's loads waited for the stores before them.
 
 ## Deep values (#136's item 6)
 
