@@ -7,6 +7,10 @@
 // of a generated variadic frame. These tests do not supply the absent source selector or variadic prologue wiring.
 // Every helper starts after a prefix, and va_arg preserves an output pointer already on the value stack. Guard pages
 // bound publication tails and refusal snapshots. Native execution is confined to an alarm-bounded child process.
+// Structs and unions (#137): a helper per shape copies va_arg's bytes out, for shapes of every plan (eightbytes of
+// both kinds in either order, the high one alone, on the stack, aligned to 16, one of 3 bytes, a 16-byte vector in one
+// XMM register), read from Clang's lists between scalars that leave each kind of register too few, against Clang's own
+// va_arg of a copy.
 
 #include <stdarg.h>
 
@@ -20,6 +24,9 @@
 #define BUSTER_CBUILTIN_VA_TEST_COPY (BUSTER_CBUILTIN_VA_TEST_C23_START + 1)
 #define BUSTER_CBUILTIN_VA_TEST_END (BUSTER_CBUILTIN_VA_TEST_COPY + 1)
 #define BUSTER_CBUILTIN_VA_TEST_PROGRAMS (BUSTER_CBUILTIN_VA_TEST_END + 1)
+#define BUSTER_CBUILTIN_VA_TEST_SHAPES 12u
+// The aggregate helpers after the others, one per shape.
+#define BUSTER_CBUILTIN_VA_TEST_HELPERS (BUSTER_CBUILTIN_VA_TEST_PROGRAMS + BUSTER_CBUILTIN_VA_TEST_SHAPES)
 #define BUSTER_CBUILTIN_VA_TEST_PAGE 4096u
 
 typedef struct CBuiltinVaLowerTestTally CBuiltinVaLowerTestTally;
@@ -37,6 +44,8 @@ struct CBuiltinVaLowerTestStream
     uint64_t values[BUSTER_CBUILTIN_VA_TEST_ENTRIES];
     uint8_t local_classes[BUSTER_CBUILTIN_VA_TEST_LOCALS];
     uint8_t local_flags[BUSTER_CBUILTIN_VA_TEST_LOCALS];
+    uint32_t local_sizes[BUSTER_CBUILTIN_VA_TEST_LOCALS];
+    uint8_t local_alignments[BUSTER_CBUILTIN_VA_TEST_LOCALS];
     CBuiltinLowerBuffer buffer;
 };
 
@@ -51,8 +60,139 @@ struct CBuiltinVaLowerTestProgram
 typedef struct CBuiltinVaLowerTestNative CBuiltinVaLowerTestNative;
 struct CBuiltinVaLowerTestNative
 {
-    CBuiltinVaLowerTestProgram programs[2][BUSTER_CBUILTIN_VA_TEST_PROGRAMS];
+    CBuiltinVaLowerTestProgram programs[2][BUSTER_CBUILTIN_VA_TEST_HELPERS];
 };
+
+// The aggregate shapes, as C types and as the plans abi_va_arg gives them: their bytes, alignment, location kind, each
+// eightbyte's source, flags, and the first byte that holds data (the high eightbyte alone's padding comes before it).
+typedef struct CBuiltinVaTestGeneralPair CBuiltinVaTestGeneralPair;
+struct CBuiltinVaTestGeneralPair
+{
+    long a;
+    long b;
+};
+typedef struct CBuiltinVaTestVectorPair CBuiltinVaTestVectorPair;
+struct CBuiltinVaTestVectorPair
+{
+    double a;
+    double b;
+};
+typedef struct CBuiltinVaTestGeneralVector CBuiltinVaTestGeneralVector;
+struct CBuiltinVaTestGeneralVector
+{
+    long a;
+    double b;
+};
+typedef struct CBuiltinVaTestVectorGeneral CBuiltinVaTestVectorGeneral;
+struct CBuiltinVaTestVectorGeneral
+{
+    double a;
+    long b;
+};
+typedef struct CBuiltinVaTestInt CBuiltinVaTestInt;
+struct CBuiltinVaTestInt
+{
+    int a;
+};
+typedef struct CBuiltinVaTestFloats CBuiltinVaTestFloats;
+struct CBuiltinVaTestFloats
+{
+    float a;
+    float b;
+};
+typedef struct CBuiltinVaTestInts CBuiltinVaTestInts;
+struct CBuiltinVaTestInts
+{
+    int a;
+    int b;
+    int c;
+};
+typedef struct CBuiltinVaTestLongs CBuiltinVaTestLongs;
+struct CBuiltinVaTestLongs
+{
+    long a;
+    long b;
+    long c;
+};
+typedef struct CBuiltinVaTestAligned CBuiltinVaTestAligned;
+struct CBuiltinVaTestAligned
+{
+    _Alignas(16) long a;
+    long b;
+};
+typedef struct CBuiltinVaTestHigh CBuiltinVaTestHigh;
+struct CBuiltinVaTestHigh
+{
+    long : 64;
+    long b;
+};
+typedef struct CBuiltinVaTestChars CBuiltinVaTestChars;
+struct CBuiltinVaTestChars
+{
+    char c[3];
+};
+// SSE and SSEUP: both eightbytes in one XMM register's 16-byte slot.
+typedef double CBuiltinVaTestDoubles __attribute__((vector_size(16)));
+typedef struct CBuiltinVaTestVector CBuiltinVaTestVector;
+struct CBuiltinVaTestVector
+{
+    CBuiltinVaTestDoubles v;
+};
+
+typedef struct CBuiltinVaLowerTestShape CBuiltinVaLowerTestShape;
+struct CBuiltinVaLowerTestShape
+{
+    uint32_t size;
+    uint8_t alignment_log2;
+    uint8_t kind;
+    uint8_t sources[2];
+    uint8_t flags;
+    uint8_t first;
+};
+
+#define BUSTER_CBUILTIN_VA_TEST_G BUSTER_ABI_VA_GENERAL
+#define BUSTER_CBUILTIN_VA_TEST_V BUSTER_ABI_VA_VECTOR
+#define BUSTER_CBUILTIN_VA_TEST_N BUSTER_ABI_VA_NONE
+
+static const CBuiltinVaLowerTestShape cbuiltin_va_lower_test_shapes[BUSTER_CBUILTIN_VA_TEST_SHAPES] =
+{
+    { 16, 3, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_G, BUSTER_CBUILTIN_VA_TEST_G }, 0, 0 },
+    { 16, 3, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_V, BUSTER_CBUILTIN_VA_TEST_V }, 0, 0 },
+    { 16, 3, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_G, BUSTER_CBUILTIN_VA_TEST_V }, 0, 0 },
+    { 16, 3, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_V, BUSTER_CBUILTIN_VA_TEST_G }, 0, 0 },
+    { 4, 2, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_G, BUSTER_CBUILTIN_VA_TEST_N }, 0, 0 },
+    { 8, 2, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_V, BUSTER_CBUILTIN_VA_TEST_N }, 0, 0 },
+    { 12, 2, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_G, BUSTER_CBUILTIN_VA_TEST_G }, 0, 0 },
+    { 24, 3, BUSTER_ABI_LOCATION_STACK, { BUSTER_CBUILTIN_VA_TEST_N, BUSTER_CBUILTIN_VA_TEST_N }, 0, 0 },
+    { 16, 4, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_G, BUSTER_CBUILTIN_VA_TEST_G }, 0, 0 },
+    { 16, 3, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_N, BUSTER_CBUILTIN_VA_TEST_G }, BUSTER_ABI_FLAG_HIGH, 8 },
+    { 3, 0, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_G, BUSTER_CBUILTIN_VA_TEST_N }, 0, 0 },
+    { 16, 4, BUSTER_ABI_LOCATION_REGISTERS, { BUSTER_CBUILTIN_VA_TEST_V, BUSTER_CBUILTIN_VA_TEST_N }, 0, 0 },
+};
+
+// A shape's plan, as abi_va_arg gives it: a register per eightbyte of its kind, its bytes in whole slots, and its
+// overflow alignment its own, at least 8.
+static AbiVaArg cbuiltin_va_lower_test_shape_plan(const CBuiltinVaLowerTestShape* shape)
+{
+    uint8_t general = 0;
+    uint8_t vector = 0;
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        general += shape->sources[k] == BUSTER_ABI_VA_GENERAL ? 1 : 0;
+        vector += shape->sources[k] == BUSTER_ABI_VA_VECTOR ? 1 : 0;
+    }
+    const AbiVaArg result =
+    {
+        .kind = shape->kind,
+        .integer_registers = general,
+        .vector_registers = vector,
+        .sources = { shape->sources[0], shape->sources[1] },
+        .flags = shape->flags,
+        .overflow_alignment_log2 = (uint8_t)(shape->alignment_log2 > 3 ? shape->alignment_log2 : 3),
+        .stack_bytes = (shape->size + 7) / 8 * 8,
+    };
+    return result;
+}
 
 static const uint8_t cbuiltin_va_lower_test_classes[BUSTER_CBUILTIN_VA_TEST_CLASSES] =
 {
@@ -131,10 +271,20 @@ static bool cbuiltin_va_lower_test_program(CBuiltinVaLowerTestTally* tally, Aren
     CBuiltinVaLowerTestStream streams[2];
     CBuiltinLowerResult lowered[2] = { 0 };
     bool result = true;
+    // An aggregate's helper has its frame object after the parameters (call->object), and copies its bytes out.
+    const bool aggregate = argument && call->size != 0;
+    const uint32_t locals = parameters + (aggregate ? 1 : 0);
     for (uint32_t path = 0; path < 2; path += 1)
     {
         CBuiltinVaLowerTestStream* stream = &streams[path];
-        cbuiltin_va_lower_test_stream(stream, parameters);
+        cbuiltin_va_lower_test_stream(stream, locals);
+        if (aggregate)
+        {
+            stream->local_classes[parameters] = BUSTER_TYPED_CLASS_VOID;
+            stream->local_flags[parameters] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+            stream->local_sizes[parameters] = (call->size + 7) / 8 * 8;
+            stream->local_alignments[parameters] = cbuiltin_va_lower_test_shapes[item - BUSTER_CBUILTIN_VA_TEST_PROGRAMS].alignment_log2;
+        }
         cbuiltin_va_lower_test_emit(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_C(0x55));
         cbuiltin_va_lower_test_emit(stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
         if (argument)
@@ -150,7 +300,7 @@ static bool cbuiltin_va_lower_test_program(CBuiltinVaLowerTestTally* tally, Aren
         if (argument && lowered[path].error == CBUILTIN_LOWER_OK)
         {
             result &= cbuiltin_va_lower_test_expect(tally, lowered[path].result_class == call->result_class, "argument result class", item);
-            cbuiltin_va_lower_test_emit(stream, BUSTER_TYPED_SET, call->result_class, 0);
+            cbuiltin_va_lower_test_emit(stream, aggregate ? BUSTER_TYPED_COPY : BUSTER_TYPED_SET, aggregate ? BUSTER_TYPED_CLASS_VOID : call->result_class, aggregate ? call->size : 0);
         }
         cbuiltin_va_lower_test_emit(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
         cbuiltin_va_lower_test_emit(stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
@@ -163,7 +313,8 @@ static bool cbuiltin_va_lower_test_program(CBuiltinVaLowerTestTally* tally, Aren
         memcmp(scalar_stream->classes, vector_stream->classes, scalar_stream->buffer.count) == 0 &&
         memcmp(scalar_stream->values, vector_stream->values, scalar_stream->buffer.count * sizeof(uint64_t)) == 0 &&
         memcmp(scalar_stream->local_classes, vector_stream->local_classes, scalar_stream->buffer.local_count) == 0 &&
-        memcmp(scalar_stream->local_flags, vector_stream->local_flags, scalar_stream->buffer.local_count) == 0, "publication twins", item);
+        memcmp(scalar_stream->local_flags, vector_stream->local_flags, scalar_stream->buffer.local_count) == 0 &&
+        memcmp(scalar_stream->local_sizes, vector_stream->local_sizes, sizeof(scalar_stream->local_sizes)) == 0, "publication twins", item);
     const AbiLocation locations[3] =
     {
         {
@@ -192,6 +343,8 @@ static bool cbuiltin_va_lower_test_program(CBuiltinVaLowerTestTally* tally, Aren
             .local_classes = buffer->local_classes,
             .local_flags = buffer->local_flags,
             .local_count = buffer->local_count,
+            .local_sizes = aggregate ? streams[path].local_sizes : 0,
+            .local_alignments = aggregate ? streams[path].local_alignments : 0,
             .parameter_count = parameters,
             .parameters = locations,
             .result =
@@ -359,6 +512,187 @@ static void cbuiltin_va_lower_test_real_lists(CBuiltinVaLowerTestTally* tally, c
         0.0, -0.0, 1.0, -1.0, 0.125, -0.25, 99.75, -101.5, 0x1.0p-1022, 0x1.0p-1074);
 }
 
+// Clang's own va_arg of shape `shape` from `oracle`, which it advances, its bytes into `bytes`.
+static void cbuiltin_va_lower_test_shape_oracle(va_list oracle, uint32_t shape, uint8_t* bytes)
+{
+    if (shape == 0)
+    {
+        const CBuiltinVaTestGeneralPair value = va_arg(oracle, CBuiltinVaTestGeneralPair);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 1)
+    {
+        const CBuiltinVaTestVectorPair value = va_arg(oracle, CBuiltinVaTestVectorPair);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 2)
+    {
+        const CBuiltinVaTestGeneralVector value = va_arg(oracle, CBuiltinVaTestGeneralVector);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 3)
+    {
+        const CBuiltinVaTestVectorGeneral value = va_arg(oracle, CBuiltinVaTestVectorGeneral);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 4)
+    {
+        const CBuiltinVaTestInt value = va_arg(oracle, CBuiltinVaTestInt);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 5)
+    {
+        const CBuiltinVaTestFloats value = va_arg(oracle, CBuiltinVaTestFloats);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 6)
+    {
+        const CBuiltinVaTestInts value = va_arg(oracle, CBuiltinVaTestInts);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 7)
+    {
+        const CBuiltinVaTestLongs value = va_arg(oracle, CBuiltinVaTestLongs);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 8)
+    {
+        const CBuiltinVaTestAligned value = va_arg(oracle, CBuiltinVaTestAligned);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 9)
+    {
+        const CBuiltinVaTestHigh value = va_arg(oracle, CBuiltinVaTestHigh);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else if (shape == 10)
+    {
+        const CBuiltinVaTestChars value = va_arg(oracle, CBuiltinVaTestChars);
+        memcpy(bytes, &value, sizeof(value));
+    }
+    else
+    {
+        const CBuiltinVaTestVector value = va_arg(oracle, CBuiltinVaTestVector);
+        memcpy(bytes, &value, sizeof(value));
+    }
+}
+
+// The shapes' sequences: each argument a shape's index, or a long or a double between them; then the sequence's end.
+// The helpers' named arguments take one general register and one vector register, which leave five and seven to the
+// sequences, so that each shape is read from registers in one sequence and from the overflow area in another: once the
+// registers of its kinds run out, or when one of a kind is left for a shape that needs two, which the next long or
+// double then takes (sequences 1 and 3).
+#define BUSTER_CBUILTIN_VA_TEST_LONG 100u
+#define BUSTER_CBUILTIN_VA_TEST_DOUBLE 101u
+#define BUSTER_CBUILTIN_VA_TEST_STOP 0xffu
+#define BUSTER_CBUILTIN_VA_TEST_SEQUENCES 5u
+
+static const uint8_t cbuiltin_va_lower_test_sequences[BUSTER_CBUILTIN_VA_TEST_SEQUENCES][24] =
+{
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, BUSTER_CBUILTIN_VA_TEST_STOP },
+    { BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, 0, BUSTER_CBUILTIN_VA_TEST_LONG, 4, 1, 9, 10, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_STOP },
+    { BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, 1, 11, 5, 2, 0, 6, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_STOP },
+    { BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_DOUBLE, 1, 2, 3, 8, 7, 6, BUSTER_CBUILTIN_VA_TEST_LONG, BUSTER_CBUILTIN_VA_TEST_DOUBLE, BUSTER_CBUILTIN_VA_TEST_STOP },
+    { 11, 8, 9, 10, 7, 3, 6, 5, 4, BUSTER_CBUILTIN_VA_TEST_STOP },
+};
+
+// What the sequences' reading needs, the helpers' one named general argument, and how each shape was read: bit 0 from
+// registers (the overflow area untouched), bit 1 from the overflow area.
+#define BUSTER_CBUILTIN_VA_TEST_REGISTERS 1u
+#define BUSTER_CBUILTIN_VA_TEST_OVERFLOW 2u
+typedef struct CBuiltinVaLowerTestRun CBuiltinVaLowerTestRun;
+struct CBuiltinVaLowerTestRun
+{
+    CBuiltinVaLowerTestTally* tally;
+    const CBuiltinVaLowerTestNative* native;
+    uint32_t path;
+    uint32_t sequence;
+    uint8_t read[BUSTER_CBUILTIN_VA_TEST_SHAPES];
+};
+
+// The run's sequence's arguments, read by the helpers from a list Clang started, each against Clang's va_arg of a copy:
+// an aggregate's data bytes copied out exactly, nothing around them written, and both cursors alike after it.
+static __attribute__((noinline)) void cbuiltin_va_lower_test_clang_shapes(CBuiltinVaLowerTestRun* run, double named, ...)
+{
+    va_list generated;
+    va_list oracle;
+    va_start(generated, named);
+    va_copy(oracle, generated);
+    CBuiltinVaLowerTestTally* tally = run->tally;
+    const CBuiltinVaLowerTestNative* native = run->native;
+    const uint32_t path = run->path;
+    const uint8_t* kinds = cbuiltin_va_lower_test_sequences[run->sequence];
+    for (uint32_t i = 0; kinds[i] != BUSTER_CBUILTIN_VA_TEST_STOP; i += 1)
+    {
+        const uint32_t item = 1000 + run->sequence * 100 + i;
+        if (kinds[i] == BUSTER_CBUILTIN_VA_TEST_LONG || kinds[i] == BUSTER_CBUILTIN_VA_TEST_DOUBLE)
+        {
+            const uint32_t class = kinds[i] == BUSTER_CBUILTIN_VA_TEST_LONG ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64;
+            uint64_t expected = 0;
+            cbuiltin_va_lower_test_oracle(oracle, class, &expected);
+            cbuiltin_va_lower_test_read(tally, native, path, class, generated, expected, item);
+        }
+        else
+        {
+            const CBuiltinVaLowerTestShape* shape = &cbuiltin_va_lower_test_shapes[kinds[i]];
+            uint8_t bytes[48];
+            uint8_t expected[48];
+            memset(bytes, 0xa5, sizeof(bytes));
+            memset(expected, 0xa5, sizeof(expected));
+            cbuiltin_va_lower_test_shape_oracle(oracle, kinds[i], expected + 8);
+            uint64_t (*entry)(void*, void*) = (uint64_t (*)(void*, void*))(void*)native->programs[path][BUSTER_CBUILTIN_VA_TEST_PROGRAMS + kinds[i]].bytes;
+            AbiVaList before;
+            AbiVaList after;
+            memcpy(&before, generated, sizeof(before));
+            const uint64_t result = entry(generated, bytes + 8);
+            memcpy(&after, generated, sizeof(after));
+            run->read[kinds[i]] |= after.overflow_arg_area == before.overflow_arg_area ? BUSTER_CBUILTIN_VA_TEST_REGISTERS : BUSTER_CBUILTIN_VA_TEST_OVERFLOW;
+            const bool outside = memcmp(bytes, expected, 8) == 0 && memcmp(bytes + 8 + shape->size, expected + 8 + shape->size, sizeof(bytes) - 8 - shape->size) == 0;
+            const bool data = memcmp(bytes + 8 + shape->first, expected + 8 + shape->first, shape->size - shape->first) == 0;
+            cbuiltin_va_lower_test_expect(tally, result == 0 && outside && data, "native aggregate bytes", item);
+        }
+        cbuiltin_va_lower_test_expect(tally, cbuiltin_va_lower_test_same_list(generated, oracle), "aggregate cursor updates", item);
+    }
+    va_end(oracle);
+    va_end(generated);
+}
+
+static void cbuiltin_va_lower_test_real_shapes(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path)
+{
+    const CBuiltinVaTestGeneralPair general_pair = { -7, 0x123456789abcdef };
+    const CBuiltinVaTestVectorPair vector_pair = { 1.25, -0x1.0p-1022 };
+    const CBuiltinVaTestGeneralVector general_vector = { INT64_MIN, 99.5 };
+    const CBuiltinVaTestVectorGeneral vector_general = { -0.0, INT64_MAX };
+    const CBuiltinVaTestInt four = { -42 };
+    const CBuiltinVaTestFloats eight = { 1.5f, -2.25f };
+    const CBuiltinVaTestInts twelve = { 1, -2, 3 };
+    const CBuiltinVaTestLongs longs = { 10, 20, 30 };
+    const CBuiltinVaTestAligned aligned = { 0x1111, 0x2222 };
+    CBuiltinVaTestHigh high;
+    memset(&high, 0x5a, sizeof(high));
+    high.b = 0x3333;
+    const CBuiltinVaTestChars chars = { { 'x', 'y', 'z' } };
+    // Distinct halves, the high one's last byte 0xc0 (-3.5's sign and exponent).
+    const CBuiltinVaTestVector vector = { { 1.25, -3.5 } };
+    CBuiltinVaLowerTestRun run = { tally, native, path, 0, { 0 } };
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, general_pair, vector_pair, general_vector, vector_general, four, eight, twelve, longs, aligned, high, chars, vector);
+    run.sequence = 1;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, 1L, 2L, 3L, 4L, general_pair, 5L, four, vector_pair, high, chars, 7.5);
+    run.sequence = 2;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, vector_pair, vector, eight, general_vector, general_pair, twelve, 8L);
+    run.sequence = 3;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, 1L, 2L, 3L, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, vector_pair, general_vector, vector_general, aligned, longs, twelve, 6L, 7.0);
+    run.sequence = 4;
+    cbuiltin_va_lower_test_clang_shapes(&run, 0.5, vector, aligned, high, chars, longs, vector_general, twelve, eight, four);
+    // Every shape read both ways, but the one always on the stack.
+    for (uint32_t k = 0; k < BUSTER_CBUILTIN_VA_TEST_SHAPES; k += 1)
+    {
+        const bool stack = cbuiltin_va_lower_test_shapes[k].kind == BUSTER_ABI_LOCATION_STACK;
+        const uint8_t expected = stack ? BUSTER_CBUILTIN_VA_TEST_OVERFLOW : BUSTER_CBUILTIN_VA_TEST_REGISTERS | BUSTER_CBUILTIN_VA_TEST_OVERFLOW;
+        cbuiltin_va_lower_test_expect(tally, run.read[k] == expected, "shape read from registers and from the overflow area", k);
+    }
+}
+
 static void cbuiltin_va_lower_test_synthetic(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path)
 {
     uint8_t save[BUSTER_ABI_SAVE_AREA_BYTES] __attribute__((aligned(16)));
@@ -482,7 +816,7 @@ static void cbuiltin_va_lower_test_guards(CBuiltinVaLowerTestTally* tally)
     {
         for (uint32_t path = 0; path < 2; path += 1)
         {
-            for (uint32_t variant = 0; variant < 7; variant += 1)
+            for (uint32_t variant = 0; variant < 9; variant += 1)
             {
                 const uint32_t entries = expected.count + 2;
                 const uint32_t locals = expected.temporary_count + 1;
@@ -517,6 +851,20 @@ static void cbuiltin_va_lower_test_guards(CBuiltinVaLowerTestTally* tally)
                     request.id = CBUILTIN_VA_START;
                     request.gp_offset = 49;
                     request.fp_offset = 48;
+                }
+                else if (variant == 7)
+                {
+                    // An aggregate whose plan counts two general registers for one general eightbyte.
+                    request.size = 16;
+                    request.object = 0;
+                    request.plan.integer_registers = 2;
+                    request.plan.stack_bytes = 16;
+                }
+                else if (variant == 8)
+                {
+                    // An aggregate whose object is a value, not a frame object.
+                    request.size = 8;
+                    request.object = 0;
                 }
                 uint8_t snapshots[5][BUSTER_CBUILTIN_VA_TEST_PAGE];
                 for (uint32_t i = 0; i < 5; i += 1)
@@ -602,6 +950,25 @@ static int run_builtin_varargs_lower_tests(int argc, char** argv)
                 native.programs[path][p] = programs[path];
             }
         }
+        // An aggregate helper per shape: va_arg into its frame object (local 2) and the bytes copied out.
+        for (uint32_t k = 0; valid && k < BUSTER_CBUILTIN_VA_TEST_SHAPES; k += 1)
+        {
+            const CBuiltinVaLowerCall call =
+            {
+                .id = CBUILTIN_VA_ARG,
+                .list = 0,
+                .result_class = BUSTER_TYPED_CLASS_U64,
+                .plan = cbuiltin_va_lower_test_shape_plan(&cbuiltin_va_lower_test_shapes[k]),
+                .size = cbuiltin_va_lower_test_shapes[k].size,
+                .object = 2,
+            };
+            CBuiltinVaLowerTestProgram programs[2] = { 0 };
+            valid = cbuiltin_va_lower_test_program(&tally, &arena, &call, 2, true, programs, BUSTER_CBUILTIN_VA_TEST_PROGRAMS + k);
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                native.programs[path][BUSTER_CBUILTIN_VA_TEST_PROGRAMS + k] = programs[path];
+            }
+        }
         CBuiltinVaLowerTestTally* shared = MAP_FAILED;
         if (valid)
         {
@@ -618,6 +985,7 @@ static int run_builtin_varargs_lower_tests(int argc, char** argv)
                 {
                     cbuiltin_va_lower_test_synthetic(shared, &native, path);
                     cbuiltin_va_lower_test_real_lists(shared, &native, path);
+                    cbuiltin_va_lower_test_real_shapes(shared, &native, path);
                 }
                 _exit(shared->failures == 0 ? 0 : 1);
             }
@@ -633,7 +1001,7 @@ static int run_builtin_varargs_lower_tests(int argc, char** argv)
         }
         for (uint32_t path = 0; path < 2; path += 1)
         {
-            for (uint32_t p = 0; p < BUSTER_CBUILTIN_VA_TEST_PROGRAMS; p += 1)
+            for (uint32_t p = 0; p < BUSTER_CBUILTIN_VA_TEST_HELPERS; p += 1)
             {
                 if (native.programs[path][p].bytes != 0 && native.programs[path][p].bytes != MAP_FAILED)
                 {

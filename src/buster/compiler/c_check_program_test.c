@@ -384,8 +384,28 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
 
+// A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
+// before reading either, and writes nothing.
+static void check_test_program_refused(CheckTest* test)
+{
+    Arena output = arena_reserve(1ull << 16);
+    Arena scratch = arena_reserve(1ull << 16);
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        const CheckProgram program = { .status = CHECK_PROGRAM_INVALID };
+        CheckProgramLowered lowered = { 0 };
+        const bool ready = output.base != 0 && scratch.base != 0;
+        const bool lowered_ok = ready && check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+        check_test_expect(test, ready && !lowered_ok && lowered.status == CHECK_PROGRAM_INVALID && lowered.functions == 0 && output.length == 0 && scratch.length == 0,
+                          "a refused program without its stream or input lowers to nothing");
+    }
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_refused(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
@@ -840,15 +860,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "file-assembly-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test,
         "extern int missing;int tested(int n,...){__builtin_va_list ap;__builtin_va_start(ap,(missing++,n));"
-        "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, false, 0, 1);
+        "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, true, 0, 1);
     check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, false, 0, 1);
     check_test_program_boundary(test, "int global;struct S{int x;int*p;};int tested(int n){struct S s={n,&global};return s.x;}",
                                 "aggregate-primary-initialization", true, true, 1, 1);
     check_test_program_boundary(test, "struct S{int x;};struct S make(int n);int tested(int n){return make(n).x;}",
-                                "aggregate-result-machine-boundary", true, false, 1, 0);
+                                "aggregate-result-lowering", true, true, 1, 0);
     check_test_program_boundary(test, "struct S{int x;};int take(struct S);int tested(int n){struct S s={n};return take(s);}",
-                                "aggregate-argument-machine-boundary", true, false, 1, 1);
+                                "aggregate-argument-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "struct B{unsigned x:3;};int tested(int n){struct B b;b.x=n;return b.x;}",
                                 "bit-field-lowering", true, true, 0, 0);
     check_test_program_boundary(test,

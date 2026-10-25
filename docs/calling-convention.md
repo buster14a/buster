@@ -1180,11 +1180,13 @@ disagree with itself.
 ## Tests
 
 `./build/compiler test-calling-convention [--seed N] [--count N]
-[--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--keep]`.
-`--seed N` changes every random input, `--count N` the random worlds' sizes
-and how many random calls are assigned (2,000 by default), `--signatures N`
-the cross-check's signatures per run (400), `--clang` and `--gcc` its
-compilers, and `--keep` keeps its files. The counts below are the defaults'
+[--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--buster PATH]
+[--keep]`. `--seed N` changes every random input, `--count N` the random
+worlds' sizes and how many random calls are assigned (2,000 by default),
+`--signatures N` the cross-check's signatures per run (400), `--clang` and
+`--gcc` its compilers, `--buster` the compiler of our side's C in the compiled
+runs (this executable, `/proc/self/exe`, by default), and `--keep` keeps its
+files. The counts below are the defaults'
 (seed 1).
 
 - **Merge** (192 checks): clang's `merge` and `postMerge` written again as
@@ -1342,8 +1344,10 @@ compilers, and `--keep` keeps its files. The counts below are the defaults'
 
 ### The cross-check
 
-`--cross-check`, contract 4 on #135, needs no front end. For each compiler
-(clang and GCC; `--clang`, `--gcc`) and each vector width it builds a world of
+`--cross-check`, contract 4 on #135, needs no front end for its record runs;
+its compiled runs put this compiler's own C on our side (below). For each
+compiler (clang and GCC; `--clang`, `--gcc`) and each vector width it builds a
+world of
 types (600 random ones beside the builtin, `_BitInt` and vector ones),
 signatures over its passable ones (`--signatures`, 400 by default), and their
 locations from `abi_assign`. clang's first five are directed
@@ -1422,6 +1426,42 @@ own bytes), which the fixtures' `SIGN` and `ZERO` check instead. The files go
 in a directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a
 failure.
 
+**The compiled runs** (#137): two more runs, against clang and against GCC at
+16 bytes, put C that this compiler compiles on our side. Their worlds
+(`AbiTestWorld.compiled`) hold what its C passes: integers of up to 64 bits,
+enums, pointers, `float` and `double`, and the structs, unions, arrays and
+aligned typedefs made of them, aligned to 16 at most as Tier 0's frame objects
+are, with flexible array members, bit-fields, packing and member alignments;
+no `nullptr_t`, `_BitInt`, vector, complex or `_Atomic` type, and none of
+clang's directed records. They leave out what this compiler's front end
+doesn't take yet: C23's enums of a fixed underlying type, an attribute after a
+bit-field's width (a bit-field's attributes go before its type instead, which
+clang and GCC read alike), and a struct of a flexible array member alone (a
+GNU extension). Tier 0 holds a call's arguments on its stacks at once (15
+integer and 16 floating values) and copies its aggregates through each stack's
+first free register, and our caller's `r = c_callee(...)` holds `r`'s address
+under the arguments when the result is a struct or a union, so a compiled
+world's signature passes at most 13 integer values (an aggregate is its
+address) and 15 floating ones, an argument past them becoming one of the
+other stack's. Our side is C (`abi_test_write_ours`): per signature, a callee
+that stores each parameter's bytes, its unnamed ones read with `va_arg`, and
+returns the result's from the signature's data, and a caller that copies each
+argument's bytes into a local of its type, calls the C callee with them and
+stores the result's bytes. This executable (or `--buster PATH`) compiles it
+with `--verify -std=gnu23 -w -c`, the vector paths' records checked by
+`x86_validate`, and again with `--scalar`, whose object must be the same
+bytes; the compiler's driver links the object with the C side, which checks
+every argument and result both ways as in the record runs. C names neither the
+al our caller sets nor the hidden pointer our callee gets back, so those
+checks are the record runs' alone.
+
+On the cloud VM (not the 9700X: Intel, clang 23.1.5, this compiler under
+Intel SDE for its AVX-512), the compiled runs pass at seeds 1 to 11, with both
+paths' objects the same bytes every time: against clang, 4,400 signatures of
+26,801 arguments, 60,660 checks; against GCC's worlds, compiled there by GCC 13
+(`-std=gnu2x` for `-std=gnu23`), 4,400 signatures of 25,907 arguments, 58,842
+checks.
+
 With the defaults (seed 1), each run has 400 signatures of 2,200 to 2,600
 arguments, and the six runs make about 34,300 checks; on the 9700X the whole
 `--cross-check` takes 4.8 s, about a clang run's time. The runs are
@@ -1434,8 +1474,8 @@ Seeds 1 to 100 pass, with clang 23.1.3 and GCC 16.2.1.
 Capture descriptors stay above stderr, even when the command starts with
 standard streams closed. Before the ordinary cross-check, bounded child
 processes exercise all eight combinations of open/closed standard descriptors
-with `/bin/false` as both compilers. Each must exit 1, preserve the standard
-descriptors' state and retain all six runs' failure files; the regression
+with `/bin/false` as every compiler. Each must exit 1, preserve the standard
+descriptors' state and retain all eight runs' failure files; the regression
 then removes its own files. A 10-second alarm and an 8 MiB file-size limit
 bound a replay that regresses into writing back into its capture. Two more
 children exhaust the descriptor limit at duplication and at the second
