@@ -9,9 +9,16 @@ the semantic driver:
 ```sh
 ./build/compiler check [--scalar] [--dump-typed] [--dump-static] [preprocessor options] file.c
 ./build/compiler [--scalar] -fsyntax-only [preprocessor options] file.c
-./build/compiler [--scalar] -c [-o file.o] [preprocessor options] file.c
-./build/compiler [--scalar] [--verify] [-o a.out] [preprocessor options] file.c
+./build/compiler [--scalar] [--lower-all] -c [-o file.o] [preprocessor options] file.c
+./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
+
+`-c` and the direct path lower only the definitions that the unit's roots reach,
+as clang does ([#129](https://github.com/buster14a/buster/issues/129),
+`check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced
+static or inline function gets no code, and an object only such a function
+refers to no data. `--lower-all` lowers every definition that may be emitted,
+referenced or not, a test option for measuring what that saves.
 
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
@@ -525,6 +532,12 @@ What the lowering covers past scalars (#145's programs):
   block's `STACK_SAVE`, where it needs no restore.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
+
+- **Names.** A block-scope static is named as clang names it,
+  `function.name` (its function's asm label, if it has one, for the
+  function's name; an asm label of the static's own replaces both), and a
+  file-scope compound literal is `.compoundliteral`. A name already made in the
+  unit gets `.N`, as LLVM makes one unique (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: `long double`, `_Complex`,

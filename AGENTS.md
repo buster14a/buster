@@ -302,10 +302,12 @@ designs and the compilers already built this way.
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
-  [--cross-check] [--keep] DIR` compiles each of c-testsuite's single-exec
-  programs by the direct path, by both paths into the same bytes, and runs it
-  against its expected output; `--cross-check` also links its `-c` object with
-  `cc`. `--self-test` checks the harness with a stand-in compiler.
+  [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's
+  single-exec programs by the direct path, by both paths into the same bytes,
+  and runs it against its expected output; `--cross-check` also links its `-c`
+  object with `cc`, and compares the functions and objects it defines with
+  `clang -O0 -c`'s (#129, `c_lowering_symbols.c`). `--self-test` checks the
+  harness with a stand-in compiler.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
   `5c72756` that must pass; the 9700X job fetches that commit and runs both.
   [The c-testsuite guide](docs/c-testsuite.md) has the details and the
@@ -320,7 +322,10 @@ designs and the compilers already built this way.
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`. `./build/compiler parse
+  checking every function's records with `x86_validate`, and `--lower-all`
+  lowering every definition, referenced or not (#129's test option; `-c` and
+  the direct path lower only what the unit's roots reach,
+  `check_program_select`). `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -3921,10 +3926,20 @@ request these columns.
 emission planning with an independent graph oracle and Clang object symbols
 on original, manually modeled C fixtures. `benchmark-lowering` measures
 synthetic graph preparation and vector/scalar selection; use the shared 9700X
-lock and pin timings to CPU 2. [The lowering guide](docs/c-lowering.md) records
-the semantic producer contract and the source/checker/backend integration
-still required for #129. These commands do not establish corpus lowering or
-whole-compiler savings.
+lock and pin timings to CPU 2.
+
+On the source path, `check_program_select` (`c_check_program_select.c`) gives
+the planner the checked program's definitions, roots and evaluated references,
+and `-c` and the direct path lower what it selects. `c_lowering_symbols.c`
+compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
+on fixtures of each kind of definition (functions, objects and string literals),
+`test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
+--symbols` on any corpus. `benchmark-lowering-source [--passes N]
+[preprocessor options] file...` measures what lowering only the referenced
+definitions saves against `--lower-all`, after checking, with each file's
+functions and objects defined, lowered and skipped; run it under the 9700X's
+lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
+contract, the comparisons' results and what `main.c`'s measurement waits on.
 
 ## Type tests
 
@@ -4004,10 +4019,14 @@ others, its measurements are informational.
 
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
-[--seed N] [--keep] [preprocessor options] file-or-directory...` checks each
-file as the driver does and compares it with `clang -fsyntax-only` on the same
-options: acceptance, the first error's presumed file and line, and the scalar
-and vector paths, column by column. `--semantic-mutations N` then checks N
+[--symbols] [--seed N] [--keep] [preprocessor options] file-or-directory...`
+checks each file as the driver does and compares it with `clang -fsyntax-only`
+on the same options: acceptance, the first error's presumed file and line, and
+the scalar and vector paths, column by column. `--symbols` (#129) also writes
+each accepted file's object as `-c` does and compares the functions and objects
+it defines with `clang -O0 -c`'s; a difference must have one of two documented
+reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
+-O0's objects"), and a file the backend refuses is counted with its feature. `--semantic-mutations N` then checks N
 mutants of the units it found no difference in (#133's last "Done when" item,
 `c_check_mutation.c`):
 

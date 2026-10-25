@@ -13,7 +13,7 @@ harness.
 ## The command
 
 ```sh
-./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--cross-check] [--keep] DIR
+./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] [--cross-check] [--keep] DIR
 ./build/compiler test-c-testsuite --self-test
 ```
 
@@ -30,11 +30,16 @@ For each, the harness:
 2. runs the program in a directory of its own, with standard input from
    `/dev/null`, under `--timeout` (10 s; a compile gets 120 s), killing its
    process group at the deadline;
-3. with `--cross-check`, which needs `readelf` and `cc`, also writes the object
-   with `-c`, lists it with `readelf -a -W` (no warnings or errors), links it
-   with `cc ... -lm` and runs that, which must give the expected output too.
-   `-c` may refuse a test only where the direct path refused it too; a test the
-   direct path can't link but `-c` takes must still run right.
+3. with `--cross-check`, which needs `readelf`, `cc` and clang (`--clang PATH`,
+   `clang` by default), also writes the object with `-c`, lists it with
+   `readelf -a -W` (no warnings or errors), links it with `cc ... -lm` and runs
+   that, which must give the expected output too. `-c` may refuse a test only
+   where the direct path refused it too; a test the direct path can't link but
+   `-c` takes must still run right. Then the object must define the functions and
+   objects that `clang -O0 -c`'s object of the test defines, no more and no fewer:
+   [#129](https://github.com/buster14a/buster/issues/129)'s selection of what to
+   lower, compared as [the lowering guide](c-lowering.md) describes ("Against
+   clang -O0's objects").
 
 A test passes when everything it was put through gave the expected status and
 output. A refusal that names a feature (`error: unsupported: FEATURE`) makes it
@@ -54,14 +59,16 @@ the same options, and `--keep` keeps the work directory (under `$TMPDIR` or
 `/tmp`), which a failure keeps anyway.
 
 `--self-test` (about 6 s) runs the harness on three tests of its own with a
-stand-in compiler, a shell script, in five scenarios: from a DIR and a `$TMPDIR`
+stand-in compiler, a shell script, in six scenarios: from a DIR and a `$TMPDIR`
 relative to the current directory (the processes run elsewhere, so the harness
 makes every path absolute); waiting by polling as it does where `pidfd_open`
 fails; with `--cross-check` where `-c` refuses a test the direct path compiles,
 which must fail; with refusals that name their feature but are then killed (by
 a signal in the scalar path alone and in both, and for their time in both),
-each of which must fail; and with `--cross-check` where `-c`'s refusals are
-then killed, which must fail whether or not the direct path compiled the test.
+each of which must fail; with `--cross-check` where `-c`'s refusals are
+then killed, which must fail whether or not the direct path compiled the test;
+and with `--cross-check` where `-c` writes a real object (`cc`'s) that defines a
+function more than `clang -O0 -c`'s, which must fail though its program passes.
 The stand-in's third program, which sleeps 30 s, must be killed at a one-second
 timeout, and so must its compiles where they sleep.
 
@@ -105,7 +112,9 @@ and the subset with `--cross-check --jobs 4` among its tests at once.
 
 On the cloud VM (Intel, clang 23.1.5), not a 9700X measurement: 220 tests, 219
 passed, 1 unsupported, 0 failed; the vector and scalar paths wrote the same
-executable for every test that compiles, and `--cross-check` agreed.
+executable for every test that compiles, and `--cross-check` agreed. With the
+symbols' stage (on a Zen 4 laptop, clang 23.1.3), every object of the 219
+defines `clang -O0 -c`'s functions and objects.
 
 This establishes correct programs, not their speed or size: Tier 0's code
 against `clang -O0`'s and the whole compile against tcc's are #136's and
