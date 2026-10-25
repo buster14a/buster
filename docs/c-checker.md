@@ -107,10 +107,12 @@ attribute applicability have separate bounded consumers.
 
 An enum with a fixed underlying type (`enum E : T`, C23's, which clang takes in
 every mode) is complete at its base, so that its own list may take `sizeof` of
-it. Its enumerators have its type, each value representable in the base as
-clang's `isRepresentableIntegerValue` has it (a negative one by its significant
-bits, any other by its active bits, less a signed base's sign bit) and
-converted to it; the base drops `const` and `volatile` (`restrict`, which
+it. Its enumerators have the base's type in its list, and after it the enum's
+in C23 but still the base's before it, as clang 23 types them (two such enums'
+enumerators of one base are of one type before C23, and of two after it). Each
+value is representable in the base as clang's `isRepresentableIntegerValue` has
+it (a negative one by its significant bits, any other by its active bits, less a
+signed base's sign bit) and converted to it; the base drops `const` and `volatile` (`restrict`, which
 needs a pointer, is refused), and an integer type of any width but `_BitInt`
 takes it. GNU attributes among the base's specifiers are the base type's, as
 clang has them: ignored, but one that would make it a vector's (`vector_size`,
