@@ -107,6 +107,8 @@ struct FilesBenchmarkVariant
     uint64_t lane_bytes;
     bool old_merge;
     bool partial_take;
+    bool probe_take;
+    uint32_t probe_lanes;
     const char* label;
 };
 
@@ -186,6 +188,8 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
     benchmark.run.lane_bytes = variant->lane_bytes;
     benchmark.run.old_merge = variant->old_merge;
     benchmark.run.partial_take = variant->partial_take;
+    benchmark.run.probe_take = variant->probe_take;
+    benchmark.run.probe_lanes = variant->probe_lanes;
     benchmark.spin_ticks = spin_ticks;
     benchmark.ticks = 0;
     if (trace != 0)
@@ -501,8 +505,8 @@ int run_files_benchmark(int argc, char** argv)
         }
         else if (strcmp(argument, "--variant") == 0 && next != 0 && variant_count < BUSTER_FILES_BENCHMARK_MAX_VARIANTS)
         {
-            // EXPERIMENT (#262): a comma-separated list of lane-bytes=N, read-limit=N, bytes=map|read|populate, old-merge
-            // and partial-take, each over the command line's settings.
+            // EXPERIMENT (#262): a comma-separated list of lane-bytes=N, read-limit=N, bytes=map|read|populate, old-merge,
+            // partial-take, probe-take and probe-lanes=N, each over the command line's settings.
             variant_specs[variant_count] = next;
             variant_count += 1;
             i += 1;
@@ -593,6 +597,14 @@ int run_files_benchmark(int argc, char** argv)
             else if (length == 12 && strncmp(p, "partial-take", 12) == 0)
             {
                 variants[v].partial_take = true;
+            }
+            else if (length == 10 && strncmp(p, "probe-take", 10) == 0)
+            {
+                variants[v].probe_take = true;
+            }
+            else if (length > 12 && strncmp(p, "probe-lanes=", 12) == 0)
+            {
+                variants[v].probe_lanes = (uint32_t)strtoul(p + 12, 0, 10);
             }
             else
             {

@@ -1054,8 +1054,37 @@ static __attribute__((unused)) bool intern_bulk_begin(InternTable* table, uint32
 }
 
 // The spans of ids [begin, end) of those the table had before intern_bulk_begin, and their slots in the buckets it grew
-// to (nothing if it didn't grow). Every lane, for ranges that cover the old ids.
+// to (nothing if it didn't grow). Every lane, for ranges that cover the old ids. BUSTER_INTERN_REPLACE_BATCH spellings
+// at a time are hashed and their buckets prefetched for writing before any is placed, so that the batch's misses in the
+// new buckets overlap.
+#define BUSTER_INTERN_REPLACE_BATCH 16
 static __attribute__((unused)) void intern_bulk_replace(InternTable* table, const InternBulk* bulk, uint32_t begin, uint32_t end)
+{
+    const uint32_t last = !bulk->grew ? begin : end < bulk->first ? end : bulk->first;
+    for (uint32_t batch = begin; batch < last; batch += BUSTER_INTERN_REPLACE_BATCH)
+    {
+        const uint32_t count = last - batch < BUSTER_INTERN_REPLACE_BATCH ? last - batch : BUSTER_INTERN_REPLACE_BATCH;
+        uint64_t hashes[BUSTER_INTERN_REPLACE_BATCH];
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const InternSpan span = bulk->old_spans[batch + i];
+            table->spans[batch + i] = span;
+            hashes[i] = intern_hash_bytes(table->records + span.offset, span.length);
+            _mm_prefetch((const char*)(table->buckets + (hashes[i] & table->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES), _MM_HINT_ET0);
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const InternSpan span = table->spans[batch + i];
+            if (batch + i != 0)
+            {
+                intern_place_shared(table, intern_slot(intern_first_bytes(table->records + span.offset, span.length), batch + i), hashes[i]);
+            }
+        }
+    }
+}
+
+// EXPERIMENT (#262, not for merging): main's intern_bulk_replace.
+static __attribute__((unused)) void intern_bulk_replace_v1(InternTable* table, const InternBulk* bulk, uint32_t begin, uint32_t end)
 {
     for (uint32_t id = begin; bulk->grew && id < end && id < bulk->first; id += 1)
     {

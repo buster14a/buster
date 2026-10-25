@@ -307,6 +307,11 @@ struct FilesRun
     bool old_merge;
     bool partial_take;
     uint64_t taken;
+    // EXPERIMENT (#262): a wave's probes taken from a counter (`probe_next`) rather than in ranges, and on one lane per
+    // `probe_lanes` probes (every lane for 0).
+    bool probe_take;
+    uint32_t probe_lanes;
+    uint64_t probe_next;
     // The lanes' state, by lane index.
     FilesLane* lanes;
     uint32_t lane_count;
@@ -942,7 +947,14 @@ static void files_prepare(FilesRun* run)
         if (room)
         {
             const Range64 old = lane_range(run->bulk.first);
-            intern_bulk_replace(cache->table, &run->bulk, (uint32_t)old.begin, (uint32_t)old.end);
+            if (run->old_merge)
+            {
+                intern_bulk_replace_v1(cache->table, &run->bulk, (uint32_t)old.begin, (uint32_t)old.end);
+            }
+            else
+            {
+                intern_bulk_replace(cache->table, &run->bulk, (uint32_t)old.begin, (uint32_t)old.end);
+            }
             files_add_first(run, mine);
         }
         files_sync(mine, FILES_PHASE_ADD);
@@ -1339,14 +1351,25 @@ static void files_search(FilesRun* run)
             files_collect_probes(run);
             run->waves += 1;
             run->probes_made += run->probe_count;
+            run->probe_next = 0;
             files_tick(mine, FILES_PHASE_ALONE);
         }
         probes = (uint32_t)files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && !run->failed ? run->probe_count : 0);
         // How the lanes get the files' bytes (file_cache_probe): files of up to run->read_limit bytes read, and larger
         // ones mapped, with MAP_POPULATE on one lane, and as run->bytes says on more.
-        const Range64 range = lane_range(probes);
         const FileCacheBytes how = run->lane_count > 1 ? run->bytes : FILE_CACHE_MAP_POPULATED;
-        for (uint64_t p = range.begin; p < range.end; p += 1)
+        // EXPERIMENT (#262): the probing lanes, and how they share the probes.
+        const uint64_t wanted = run->probe_lanes != 0 ? (probes + run->probe_lanes - 1) / run->probe_lanes : run->lane_count;
+        const uint32_t probing = (uint32_t)(wanted < run->lane_count ? (wanted != 0 ? wanted : 1) : run->lane_count);
+        const Range64 range = lane < probing ? range_part(probes, lane, probing) : (Range64){ 0 };
+        if (run->probe_take && lane < probing)
+        {
+            for (uint64_t p = __atomic_fetch_add(&run->probe_next, 1, __ATOMIC_RELAXED); p < probes; p = __atomic_fetch_add(&run->probe_next, 1, __ATOMIC_RELAXED))
+            {
+                file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
+            }
+        }
+        for (uint64_t p = range.begin; !run->probe_take && p < range.end; p += 1)
         {
             file_cache_probe(run->cache, run->probes[p].path, how, run->read_limit, &run->cache->lanes[lane].bytes, &run->found[p], &mine->counts);
         }
