@@ -550,6 +550,14 @@ the walk must do what it did. The checks:
   without end, and one header in two directories (a hard link) whose own
   `local.h` differ, which it must walk in both: 5 files in 3 rounds, and the
   unit opens nothing after the walk.
+- **Rounds:** the trace that `benchmark-files --rounds` prints, on two walks
+  of a chain of headers, each including the next, a file a round: of exactly
+  the 16 rounds the trace keeps apart (`BUSTER_FILES_TRACE_ROUNDS`), and of 21.
+  On every lane count it must keep each round's file, bytes and working lane,
+  the last kept round with every later one, and snapshots that go forward on
+  every traced lane (the TSC, each phase's ticks, the waves and the probes)
+  from the walk's start to its end, the one after the last kept round's (#422's
+  review: the end overwrote the last round's start).
 - **Special paths:** a FIFO that an `#include` under `#if 0` names, which the
   walk mustn't block opening, and that an active one names (an error, as the
   unit gives alone); and a quoted name of 2,400 bytes under `#if 0`, twice in a

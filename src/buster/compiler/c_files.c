@@ -142,12 +142,15 @@ typedef enum FilesPhase
 // reads its TSC and its phases' ticks at the walk's start, at the top of each round (before the round is prepared and its
 // includes are searched for) and at the end; and lane 0 reads the waves and probes so far then, and each round's files,
 // bytes and working lanes. So the first interval is the roots' search, and each later one a round: its preparation, then
-// the searches for the files of the next.
+// the searches for the files of the next. A walk of more rounds than the trace keeps has no snapshot at the top of those
+// past the last it keeps, whose interval goes on to the walk's end, the snapshot after it (test-files' rounds check).
 typedef struct FilesTrace FilesTrace;
 struct FilesTrace
 {
-    // The rounds traced (at most BUSTER_FILES_TRACE_ROUNDS), and the snapshots taken: one more, and the end.
+    // The rounds traced (at most BUSTER_FILES_TRACE_ROUNDS), whose snapshots are one more than they, and the end's; and
+    // the rounds the walk made.
     uint32_t rounds;
+    uint32_t walked;
     uint32_t files[BUSTER_FILES_TRACE_ROUNDS];
     uint64_t bytes[BUSTER_FILES_TRACE_ROUNDS];
     uint32_t working[BUSTER_FILES_TRACE_ROUNDS];
@@ -1546,14 +1549,15 @@ static bool files_lane_begin(FilesRun* run, FilesLane* mine)
 
 // A trace's snapshot `at` (FilesTrace): this lane's TSC at its last phase boundary and its phases' ticks, and on lane 0
 // the waves and probes so far and, at the top of a round (`round`), the round's files, bytes and working lanes, those of
-// the rounds past the last traced one added to its own.
+// the rounds past the last traced one added to its own. The walk's start is snapshot 0, and its end (not `round`) the one
+// after the last traced round's, BUSTER_FILES_TRACE_ROUNDS + 1 at most.
 static void files_trace(FilesRun* run, const FilesLane* mine, uint32_t lane, uint32_t at, bool round)
 {
     FilesTrace* trace = run->trace;
     if (trace != 0 && lane < BUSTER_FILES_TRACE_LANES)
     {
-        const uint32_t slot = at < BUSTER_FILES_TRACE_ROUNDS + 1 ? at : BUSTER_FILES_TRACE_ROUNDS;
-        // A round past the last traced one has no snapshot of its own: the last traced round's goes on to its end.
+        const uint32_t slot = round && at > BUSTER_FILES_TRACE_ROUNDS ? BUSTER_FILES_TRACE_ROUNDS : at;
+        // A round past the last traced one has no snapshot of its own: the last traced round's goes on to the end.
         if (!round || at <= BUSTER_FILES_TRACE_ROUNDS)
         {
             trace->clock[slot][lane] = mine->tick;
@@ -1569,6 +1573,7 @@ static void files_trace(FilesRun* run, const FilesLane* mine, uint32_t lane, uin
             const uint32_t r = slot - 1;
             const uint32_t working = files_working_lanes(run);
             trace->rounds = slot;
+            trace->walked = at;
             trace->files[r] += run->record_count;
             trace->bytes[r] += run->record_count != 0 ? run->costs[run->record_count - 1] : 0;
             trace->working[r] = working > trace->working[r] ? working : trace->working[r];

@@ -22,7 +22,8 @@
 // others wait, and waiting at syncs); and how busy the least and the most busy lane were (all but waiting), as a share
 // of the run. Then what a run did: its rounds and waves, files, bytes, tokens, shared ids, the merge's candidates, and
 // the opens, mappings and reads of its probes. With --rounds, then where each lane count's time went round by round
-// (files_benchmark_rounds), from a trace the walk keeps only when asked (FilesRun.trace). --shared-bytes, --lane-bytes,
+// (files_benchmark_rounds), from a trace the walk keeps only when asked (FilesRun.trace), whose last row, past 16 rounds,
+// counts every later round too (named by their range). --shared-bytes, --lane-bytes,
 // --read-limit and --bytes set FilesRun's shared_bytes, lane_bytes, read_limit and bytes (which lanes prepare a round,
 // and how they get files' bytes). Without --flat, it then preprocesses each root as a translation unit with
 // the cache of a run on one lane, and counts the files the walk prepared that no unit entered, with their tokens and
@@ -302,13 +303,23 @@ static void files_benchmark_rounds(const FilesTrace* traces, uint32_t runs, uint
         }
         const FilesTrace* first = &traces[0];
         char what[64];
+        // The last traced round counts every later round's too (FilesTrace), which its row names.
+        char label[24];
+        if (at == BUSTER_FILES_TRACE_ROUNDS && first->walked > BUSTER_FILES_TRACE_ROUNDS)
+        {
+            snprintf(label, sizeof(label), "%u-%u", at - 1, first->walked - 1);
+        }
+        else
+        {
+            snprintf(label, sizeof(label), "%u", at - 1);
+        }
         if (at == 0)
         {
             snprintf(what, sizeof(what), "  roots      -          -      -");
         }
         else
         {
-            snprintf(what, sizeof(what), "  %5u %6u %10lu %6u", at - 1, first->files[at - 1], (unsigned long)first->bytes[at - 1], first->working[at - 1]);
+            snprintf(what, sizeof(what), "  %5s %6u %10lu %6u", label, first->files[at - 1], (unsigned long)first->bytes[at - 1], first->working[at - 1]);
         }
         printf("%s %6lu %7lu %8.3f %8.3f %7.3f %9.3f %7.3f %6.3f %7.3f | %8.3f %7.3f %.3f-%.3f\n", what, (unsigned long)(first->waves[at + 1] - first->waves[at]),
                (unsigned long)(first->probes[at + 1] - first->probes[at]), medians[0], medians[1], medians[2], medians[3], medians[4], medians[5], medians[6], medians[7],

@@ -3755,6 +3755,10 @@ the guard spelled the same, and the walk must do what it did:
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
   directories (a hard link) whose own `local.h` differ, walked in both;
+- rounds: `benchmark-files --rounds`' trace on walks of a chain of headers,
+  a file a round, of exactly the 16 rounds the trace keeps apart and of 21: it
+  must keep each round, the last kept one with every later one, and snapshots
+  that go forward on every traced lane from the walk's start to its end;
 - dollars: a cache filled with `$` as punctuation (`-fno-dollars-in-identifiers`,
   #281), whose unit must split `aa$bb` into three tokens on every lane count;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
