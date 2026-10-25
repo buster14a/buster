@@ -519,3 +519,168 @@ static bool debug_test_native_write(const char* object_path, const char* executa
     arena_release(&arena);
     return executable_test_report(&tally);
 }
+
+// Units written one after another at their bases (DebugOutput.bases) into one buffer per section, `outputs[i]` unit
+// i's, attached by one descriptor with their function counts. Every lane count and the exact twins write the same file,
+// whose sections are the units' contributions one after another, each finalized at its functions' native addresses;
+// and a descriptor whose units' counts don't add up to the functions, or don't match the units' .debug_addr headers, is
+// refused before publication. The caller's gdb and perf read the file this leaves.
+static bool debug_test_native_units(const char* object_path, const char* executable_path, const DebugUnit* units, const DebugOutput* outputs, uint32_t unit_count)
+{
+    ExecutableTestTally tally = { .check = "debug native units" };
+    Arena arena = arena_reserve(64ull << 20);
+    const String8 object = object_test_read_file(&arena, object_path);
+    LinkCapacity capacity = { 0 };
+    Link link = { 0 };
+    ImportObject imported = { 0 };
+    bool ready = object.pointer != 0 && unit_count >= 2 && import_object_capacity(object, &capacity).error == IMPORT_ERROR_NONE;
+    ready = ready && link_initialize(&link, &arena, &arena, capacity) &&
+            import_object(&link, object, 0, BUSTER_LINK_SOURCE_PROGRAM, &arena, &imported).error == IMPORT_ERROR_NONE && link_check(&link) == LINK_ERROR_NONE;
+    uint32_t total = 0;
+    for (uint32_t unit = 0; unit < unit_count; unit += 1)
+    {
+        total += units[unit].function_count;
+    }
+    SymbolId* functions = BUSTER_ARENA_PUSH_ARRAY(&arena, SymbolId, total);
+    uint32_t* positions = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, total);
+    uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, unit_count);
+    ready = ready && functions != 0 && positions != 0 && counts != 0;
+    const SymbolId entry = ready ? debug_native_symbol(&link, BUSTER_S8("_start")) : 0;
+    ready = ready && entry != 0;
+    // The descriptor: the functions and their line addresses, in the whole .debug_line, unit after unit.
+    ExecutableDebug debug = {
+        .functions = functions,
+        .line_addresses = positions,
+        .function_count = total,
+        .unit_functions = counts,
+        .unit_count = unit_count,
+    };
+    uint32_t function = 0;
+    for (uint32_t unit = 0; ready && unit < unit_count; unit += 1)
+    {
+        counts[unit] = units[unit].function_count;
+        const uint64_t line_base = (uint64_t)(outputs[unit].sections[DEBUG_SECTION_LINE].bytes - outputs[0].sections[DEBUG_SECTION_LINE].bytes);
+        for (uint32_t i = 0; ready && i < units[unit].function_count; i += 1)
+        {
+            functions[function] = debug_native_symbol(&link, units[unit].functions[i].name);
+            positions[function] = (uint32_t)(line_base + outputs[unit].line_addresses[i]);
+            ready = functions[function] != 0;
+            function += 1;
+        }
+    }
+    for (uint32_t section = 0; ready && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        const DebugSection* last = &outputs[unit_count - 1].sections[section];
+        debug.sections[section] = (String8){
+            .pointer = (char*)outputs[0].sections[section].bytes,
+            .length = (uint64_t)(last->bytes + last->size - outputs[0].sections[section].bytes),
+        };
+    }
+    const uint8_t* atoms = ready ? executable_test_save(&link, &arena) : 0;
+    ready = ready && atoms != 0;
+    executable_test_expect(&tally, ready, "import fixture and describe the units", 0);
+    const String8 path = { .pointer = (char*)executable_path, .length = strlen(executable_path) };
+    static const char* const names[] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
+    String8 first = { 0 };
+    const uint32_t vector_writes = BUSTER_ARRAY_LENGTH(executable_test_lane_counts);
+    for (uint32_t write = 0; ready && write < vector_writes + 2; write += 1)
+    {
+        const bool exact = write >= vector_writes;
+        const uint32_t lanes = exact ? (write == vector_writes ? 1 : 8) : executable_test_lane_counts[write];
+        const bool poisoned = executable_test_reset(&link, executable_path);
+        executable_test_restore(&link, atoms);
+        ExecutableResult written = { 0 };
+        const bool succeeded = poisoned && debug_native_write(&link, entry, path, &debug, lanes, exact, &written);
+        const String8 file = succeeded ? executable_test_read(&arena, executable_path) : (String8){ 0 };
+        first = write == 0 ? file : first;
+        const bool identical = file.pointer != 0 && first.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0;
+        executable_test_expect(&tally, succeeded && identical, "lane/exact writes of the units reproduce the poisoned file", write);
+        // Each unit finalized at its functions' native addresses, from a copy of its source bytes, against its part of
+        // the file's sections.
+        const ExecutableTestImage image = executable_test_image(file);
+        const Elf64_Shdr* text = image.valid ? executable_test_section(&image, ".text") : 0;
+        bool matched = text != 0;
+        function = 0;
+        for (uint32_t unit = 0; matched && unit < unit_count; unit += 1)
+        {
+            uint64_t* addresses = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, units[unit].function_count);
+            matched = addresses != 0;
+            for (uint32_t i = 0; matched && i < units[unit].function_count; i += 1)
+            {
+                const SymbolId symbol = functions[function + i];
+                addresses[i] = BUSTER_EXECUTABLE_BASE + link.atoms.address[link.symbols.atom[symbol]] + link.symbols.value[symbol];
+            }
+            DebugOutput expected = outputs[unit];
+            for (uint32_t section = 0; matched && section < BUSTER_DEBUG_SECTIONS; section += 1)
+            {
+                const uint64_t size = outputs[unit].sections[section].size;
+                uint8_t* copy = arena_push(&arena, size, 8);
+                matched = copy != 0;
+                if (matched)
+                {
+                    memcpy(copy, outputs[unit].sections[section].bytes, size);
+                    expected.sections[section] = (DebugSection){ .bytes = copy, .capacity = size, .size = size };
+                }
+            }
+            matched = matched && debug_finalize(&units[unit], &expected, addresses) == DEBUG_OK;
+            for (uint32_t section = 0; matched && section < BUSTER_DEBUG_SECTIONS; section += 1)
+            {
+                const Elf64_Shdr* placed = executable_test_section(&image, names[section]);
+                const uint64_t at = (uint64_t)(outputs[unit].sections[section].bytes - outputs[0].sections[section].bytes);
+                matched = placed != 0 && placed->sh_size == debug.sections[section].length && placed->sh_offset <= file.length &&
+                          placed->sh_size <= file.length - placed->sh_offset &&
+                          memcmp(file.pointer + placed->sh_offset + at, expected.sections[section].bytes, expected.sections[section].size) == 0;
+            }
+            function += units[unit].function_count;
+        }
+        executable_test_expect(&tally, matched, "each unit is finalized at its functions' addresses in its own contributions", write);
+        ready = succeeded && identical && matched;
+    }
+    // Descriptors the writer refuses: counts that don't add up, a count that moves a unit's .debug_addr header, and a
+    // unit's header that doesn't match its count.
+    for (uint32_t change = 0; ready && change < 3; change += 1)
+    {
+        uint32_t bad_counts[8];
+        memcpy(bad_counts, counts, (uint64_t)unit_count * sizeof(uint32_t));
+        ExecutableDebug bad = debug;
+        bad.unit_functions = bad_counts;
+        char* addr = 0;
+        uint32_t saved_length = 0;
+        if (change == 0)
+        {
+            bad_counts[0] += 1;
+        }
+        else if (change == 1)
+        {
+            bad_counts[0] += 1;
+            bad_counts[1] -= 1;
+        }
+        else
+        {
+            addr = arena_push(&arena, debug.sections[DEBUG_SECTION_ADDR].length, 8);
+            if (addr != 0)
+            {
+                memcpy(addr, debug.sections[DEBUG_SECTION_ADDR].pointer, debug.sections[DEBUG_SECTION_ADDR].length);
+                memcpy(&saved_length, addr, 4);
+                saved_length += 8;
+                memcpy(addr, &saved_length, 4);
+                bad.sections[DEBUG_SECTION_ADDR].pointer = addr;
+            }
+        }
+        executable_test_restore(&link, atoms);
+        ExecutableResult refused = { 0 };
+        const bool succeeded = debug_native_write(&link, entry, path, &bad, 3, false, &refused);
+        const bool same = executable_test_same_file(&arena, executable_path, first);
+        executable_test_expect(&tally, !succeeded && refused.error == EXECUTABLE_ERROR_UNSUPPORTED && same, "a descriptor whose units don't match is refused", change);
+    }
+    // The file the units' writes left, for the caller's consumers.
+    if (ready)
+    {
+        executable_test_restore(&link, atoms);
+        ExecutableResult written = { 0 };
+        ready = debug_native_write(&link, entry, path, &debug, 2, false, &written) && executable_test_same_file(&arena, executable_path, first);
+        executable_test_expect(&tally, ready, "write the units' file for the consumers", 0);
+    }
+    arena_release(&arena);
+    return executable_test_report(&tally) && ready;
+}

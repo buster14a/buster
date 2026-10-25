@@ -562,6 +562,8 @@ jobs:
           == Test DWARF source lines and late address finalization
           # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
           ./build/compiler test-debug --cross-check
+          == Test zlib decompression of debug sections against gzip's streams
+          ./build/compiler test-inflate
           == Test selective lowering against its independent oracle and Clang symbols
           ./build/compiler test-lowering --clang
           == Check the frozen SQLite source against Clang

@@ -515,7 +515,7 @@ static void foreign_unwind_dedup_link_test_program(ForeignTestTally* tally, cons
         ForeignLink input = { 0 };
         const ForeignLinkResult imported = foreign_link_build_for_gc(&input, &foreign, &input_arena, &input_names,
                                                                      cpp ? RUNTIME_KIND_DYNAMIC : RUNTIME_KIND_STATIC, runtime.loader_path,
-                                                                     (ForeignLinkStartup){ .entry = foreign_string("_start") });
+                                                                     (ForeignLinkOptions){ .entry = foreign_string("_start") });
         ready = foreign.failure.error == FOREIGN_ERROR_NONE && imported.error == FOREIGN_LINK_ERROR_NONE;
         foreign_test_expect(tally, ready, "resolve COMDAT inputs for GC and terminal CIE pooling", cpp ? "C++" : "assembly");
         if (ready)
