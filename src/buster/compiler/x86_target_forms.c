@@ -9,10 +9,11 @@
 #include "buster/compiler/x86_target.c"
 
 // Bit 63 denotes a classified row; absent initializers remain unavailable. This is metadata beside the encoder,
-// not another field in its 16-byte instruction or hot templates.
+// not another field in its 16-byte instruction or hot templates. Cache-line alignment keeps each eight-row SIMD
+// load within one line regardless of the surrounding tables' placement in the compiler executable.
 #define BUSTER_X86_TARGET_KNOWN (UINT64_C(1) << 63)
 #define BUSTER_X86_TARGET_ROW(name, ...) [X86_FORM_##name] = BUSTER_X86_TARGET_KNOWN | BUSTER_X86_TARGET_REQUIRED,
-static const uint64_t x86_target_requirements[X86_FORM_COUNT] = {
+static const uint64_t x86_target_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
 #define BUSTER_X86_TARGET_REQUIRED UINT64_C(0)
     BUSTER_X86_ARITHMETIC_FORMS(BUSTER_X86_TARGET_ROW, ADD, "add", 0)
     BUSTER_X86_ARITHMETIC_FORMS(BUSTER_X86_TARGET_ROW, OR, "or", 1)

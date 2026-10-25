@@ -108,6 +108,11 @@ architecture gate establish instruction legality. The assembler oracle checks
 every classified form at baseline/v2/v3/v4/Zen 5 and with individual features
 removed, including FMA and AVX512VL/BW/DQ. An unavailable tool, malformed input,
 unknown architecture or unexpected diagnostic fails the oracle.
+GNU as 2.47 has one explicitly reported coverage gap: its dual FMA/AVX512F
+templates accept the 144 packed EVEX XMM/YMM FMA forms with AVX512VL disabled.
+Those cases remain denied by the policy and covered by independent F|VL
+minimal-feature negatives; they are counted separately from external assembler
+comparisons. If a later assembler rejects them, they follow the normal comparison.
 
 `test-x86-target` also replays the existing Tier 1 selector and native-emission
 fixtures at baseline/v3/v4, with both covers and both allocation paths. Its

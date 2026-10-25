@@ -223,6 +223,19 @@ static bool x86_target_test_compiler_macros(void)
 // an instruction is an architecture-dependent refusal after the control. Every other diagnostic still fails.
 static bool x86_target_test_gas(const char* directory)
 {
+    // GAS 2.47's dual FMA/AVX512F templates admit these explicit EVEX forms without AVX512VL. Keep the
+    // architectural policy strict: the independent minimal-feature tests above require F and VL for every row.
+    // Count this external-oracle gap only where GAS accepts it; a corrected assembler follows the normal check.
+    static const uint8_t gas_vl_fma[X86_FORM_COUNT] = {
+#define BUSTER_X86_TARGET_GAS_VL(name, ...) [X86_FORM_##name] = 1,
+        BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFMADD, "vfmadd", 0x98)
+        BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFMSUB, "vfmsub", 0x9a)
+        BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFNMADD, "vfnmadd", 0x9c)
+        BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFNMSUB, "vfnmsub", 0x9e)
+        BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFMADDSUB, "vfmaddsub", 0x96)
+        BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFMSUBADD, "vfmsubadd", 0x97)
+#undef BUSTER_X86_TARGET_GAS_VL
+    };
     static const struct
     {
         const char* profile;
@@ -276,6 +289,7 @@ static bool x86_target_test_gas(const char* directory)
         passed &= fclose(file) == 0;
     }
     uint64_t checks = 0;
+    uint32_t gaps = 0;
     for (uint32_t c = 0; passed && c < BUSTER_ARRAY_LENGTH(configurations); c += 1)
     {
         char march[512];
@@ -319,7 +333,9 @@ static bool x86_target_test_gas(const char* directory)
                 char* after = 0;
                 const unsigned long line = number != 0 ? strtoul(number, &after, 10) : 0;
                 const bool placed = line >= 3 && line - 3 < count && after != number && after != 0 && *after == ':';
-                const bool refusal = placed && c != 0 && strncmp(after, ": Error: ", sizeof(": Error: ") - 1) == 0;
+                // GAS also uses its ordinary error category for an internal assembler failure.
+                const bool internal = placed && strncmp(after, ": Error: internal error", sizeof(": Error: internal error") - 1) == 0;
+                const bool refusal = placed && c != 0 && !internal && strncmp(after, ": Error: ", sizeof(": Error: ") - 1) == 0;
                 ready &= refusal;
                 if (refusal)
                 {
@@ -352,12 +368,18 @@ static bool x86_target_test_gas(const char* directory)
         x86_target_forms(&target, allowed);
         for (uint32_t i = 0; ready && i < count; i += 1)
         {
-            if ((allowed[forms[i]] != 0) == (rejected[i] != 0))
+            const bool gap = configurations[c].disabled == BUSTER_X86_FEATURE(AVX512VL) && gas_vl_fma[forms[i]] && !rejected[i];
+            if (gap)
+            {
+                passed &= allowed[forms[i]] == 0;
+                gaps += 1;
+            }
+            else if ((allowed[forms[i]] != 0) == (rejected[i] != 0))
             {
                 fprintf(stderr, "target GAS %s: form %u (%s), policy %u, oracle %u\n", march, forms[i], x86_form_descriptions[forms[i]].mnemonic, allowed[forms[i]], !rejected[i]);
                 passed = false;
             }
-            checks += 1;
+            checks += !gap;
         }
         passed &= ready;
         if (errors != 0)
@@ -367,6 +389,6 @@ static bool x86_target_test_gas(const char* directory)
         free(diagnostics);
     }
     unlink(source);
-    printf("target forms against GAS architecture gate: %s (%llu checks, including independent feature removals)\n", passed ? "pass" : "FAIL", (unsigned long long)checks);
+    printf("target forms against GAS architecture gate: %s (%llu comparisons, %u explicit GAS AVX512VL/FMA gaps; independent feature removals)\n", passed ? "pass" : "FAIL", (unsigned long long)checks, gaps);
     return passed;
 }
