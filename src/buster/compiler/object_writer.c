@@ -811,6 +811,14 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                     const uint64_t info = symbol_info[target];
                     const bool defined = info >> 32 == unit;
                     entry = stamp | (defined ? (uint32_t)info : BUSTER_OBJECT_SYMBOL_UNDEFINED | (uint32_t)undefined_count);
+                    if (defined && builder->options.atom_sections != 0 && ((uint32_t)entry & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL)
+                    {
+                        // Explicit mergeable sections include fixed-width constants, not only the default string
+                        // class. Their PC-relative/addended relocations need the original local target as well.
+                        const ObjectAtomSection* section = &builder->options.atom_sections[symbols->atom[target]];
+                        entry &= ~(uint64_t)BUSTER_OBJECT_SYMBOL_IN_POOL;
+                        entry |= (section->flags & SHF_MERGE) != 0 ? BUSTER_OBJECT_SYMBOL_IN_POOL : 0;
+                    }
                     entries[target] = entry;
                     if (!defined)
                     {

@@ -128,6 +128,41 @@ static void asm_test_cfi_sections(AsmTest* test, const char* directory, bool cro
     }
 }
 
+static void asm_test_sparse_cfi(AsmTest* test)
+{
+    static const char body[] = "\n.text\nsparse: .cfi_startproc\nret\n.cfi_endproc\n";
+    static const uint32_t padding[] = {16, 1u << 20};
+    Arena files = arena_reserve(1ull << 24);
+    uint64_t first_size = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(padding); i += 1)
+    {
+        files.length = 0;
+        const uint32_t size = padding[i] + sizeof(body) - 1;
+        char* source = arena_push(&files, size, 1);
+        asm_test_check(test, source != 0, "sparse CFI source allocation", 0);
+        if (source != 0)
+        {
+            source[0] = '#';
+            memset(source + 1, 'x', padding[i] - 1);
+            memcpy(source + padding[i], body, sizeof(body) - 1);
+            AsmResult result = asm_test_pair(test, (String8){.pointer = source, .length = size}, 1, X86_ARCH_BASELINE);
+            uint64_t frame_bytes = 0;
+            for (AtomId atom = 1; result.error == 0 && atom < result.link.atoms.count; atom += 1)
+            {
+                if (result.link.atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME)
+                {
+                    frame_bytes += result.link.atoms.size[atom];
+                }
+            }
+            const uint64_t retained = test->vector.length;
+            asm_test_check(test, result.error == 0 && frame_bytes == 48 && (i == 0 || retained == first_size), "CFI arena reservation independent of unrelated source bytes", result.error);
+            printf("assembler sparse CFI: source %u bytes, retained arena %llu bytes, .eh_frame %llu bytes\n", size, (unsigned long long)retained, (unsigned long long)frame_bytes);
+            first_size = retained;
+        }
+    }
+    arena_release(&files);
+}
+
 static void asm_test_compatibility(AsmTest* test, const char* directory, bool cross_check)
 {
     static const char* const accepted[] =
@@ -213,6 +248,8 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
         ".section .rodata.interleaved,\"a\",@progbits\nvalue: .long 7\n.text\n"
         "movl $1,%eax\njmp .Lfinish\n.zero 140\n.p2align 4\n.Lfinish:\n"
         "popq %rbp\n.cfi_def_cfa 7,8\nret\n.cfi_endproc\n",
+        ".section .rodata.cst8,\"aM\",@progbits,8\n.p2align 3\n.Lconstant: .quad 0x12345678\n"
+        ".text\nconstant_reader: movq .Lconstant(%rip),%rax\nret\n.data\nconstant_address: .quad .Lconstant+1\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
     {
@@ -278,6 +315,7 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
     }
     asm_test_expression_operators(test, directory, cross_check);
     asm_test_cfi_sections(test, directory, cross_check);
+    asm_test_sparse_cfi(test);
     if (cross_check)
     {
         static const uint32_t deltas[] = {0, 1, 63, 64, 255, 256, 65535, 65536};

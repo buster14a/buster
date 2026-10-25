@@ -171,6 +171,7 @@ struct AsmCfiProcedure
     uint32_t first;
     uint32_t count;
     uint32_t return_column;
+    uint32_t initial_count;
     uint32_t relocation;
     bool simple;
     bool signal;

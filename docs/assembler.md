@@ -228,6 +228,10 @@ other sections because their final bytes are contiguous in the code section.
 Empty CFI emits no atom; malformed state, capacities and representability limits
 produce diagnostics and restore the assembly arena. The native code generator's
 fixed-frame CFI producer remains separate.
+CFI byte capacity depends on its event count, procedure headers and actual escape
+payload, with separate scratch for the largest understood initial CIE program.
+Unrelated source bytes do not inflate either buffer. A sparse-CFI stress case
+compares retained arena use with a 16-byte and a 1 MiB comment prefix.
 
 The vector path is selected explicitly, without host dispatch:
 

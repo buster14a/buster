@@ -338,10 +338,34 @@ static void asm_cfi_emit(AsmParser* parser)
 {
     if (parser->procedure_count != 0)
     {
-        const uint64_t bound = (uint64_t)parser->cfi_count * 64 + (uint64_t)parser->procedure_count * 128 + parser->source.length;
+        uint64_t escape_bytes = 0;
+        uint32_t initial_max = 0;
+        for (uint32_t i = 0; i < parser->cfi_count; i += 1)
+        {
+            escape_bytes += parser->cfi[i].size;
+        }
+        for (uint32_t i = 0; i < parser->procedure_count; i += 1)
+        {
+            AsmCfiProcedure* procedure = &parser->procedures[i];
+            const AsmFragment* start = &parser->fragments[parser->symbols[procedure->symbol].fragment];
+            uint32_t count = 0;
+            // Escapes and saved-state programs stay in the FDE even at PC zero.
+            while (count < procedure->count && parser->cfi[procedure->first + count].opcode != BUSTER_ASM_CFI_ESCAPE &&
+                   parser->cfi[procedure->first + count].opcode != 0x0a &&
+                   parser->fragments[parser->cfi[procedure->first + count].fragment].offset == start->offset)
+            {
+                count += 1;
+            }
+            procedure->initial_count = count;
+            initial_max = count > initial_max ? count : initial_max;
+        }
+        // Headers/alignment and bounded encodings per event, plus only the actual opaque escape payload. CIEs
+        // never embed escapes, so scratch covers the largest understood initial program rather than all source.
+        const uint64_t bound = (uint64_t)parser->cfi_count * 64 + (uint64_t)parser->procedure_count * 128 + escape_bytes;
+        const uint64_t candidate_bound = (uint64_t)initial_max * 64 + 64;
         uint8_t* bytes = bound <= BUSTER_ASM_MAX_SECTION ? arena_push(parser->arena, bound, 8) : 0;
         Scratch scratch = scratch_begin(parser->arena);
-        uint8_t* candidate_bytes = bound <= BUSTER_ASM_MAX_SECTION ? arena_push(scratch.arena, bound, 8) : 0;
+        uint8_t* candidate_bytes = candidate_bound <= BUSTER_ASM_MAX_SECTION ? arena_push(scratch.arena, candidate_bound, 8) : 0;
         uint32_t slots = 16;
         while (slots < parser->procedure_count * 2)
         {
@@ -362,7 +386,7 @@ static void asm_cfi_emit(AsmParser* parser)
             AsmCfiProcedure* procedure = &parser->procedures[i];
             const AsmFragment* start = &parser->fragments[parser->symbols[procedure->symbol].fragment];
             const AsmFragment* finish = &parser->fragments[procedure->end];
-            AsmCfiWriter candidate = {.bytes = candidate_bytes, .capacity = writer.capacity};
+            AsmCfiWriter candidate = {.bytes = candidate_bytes, .capacity = candidate_bound <= BUSTER_ASM_MAX_SECTION ? candidate_bound : 0};
             asm_cfi_integer(&candidate, 0, 4);
             asm_cfi_integer(&candidate, 0, 4);
             asm_cfi_integer(&candidate, 1, 1);
@@ -386,14 +410,10 @@ static void asm_cfi_emit(AsmParser* parser)
                     asm_cfi_integer(&candidate, initial[j], 1);
                 }
             }
-            uint32_t first = 0;
-            // GAS leaves escapes and saved-state programs in the FDE even at PC zero. A CIE contains only the
-            // understood initial rules before that boundary; raw bytes may themselves change location.
-            while (first < procedure->count && parser->cfi[procedure->first + first].opcode != BUSTER_ASM_CFI_ESCAPE &&
-                   parser->cfi[procedure->first + first].opcode != 0x0a &&
-                   parser->fragments[parser->cfi[procedure->first + first].fragment].offset == start->offset)
+            const uint32_t first = procedure->initial_count;
+            for (uint32_t initial = 0; initial < first; initial += 1)
             {
-                asm_cfi_event(&candidate, &parser->cfi[procedure->first + first++]);
+                asm_cfi_event(&candidate, &parser->cfi[procedure->first + initial]);
             }
             asm_cfi_pad(&candidate, 4);
             asm_cfi_length(&candidate, 0);
