@@ -284,11 +284,14 @@ does not invent VLA scope information. Return releases the invocation's storage.
 
 Structural verification checks types, operands, CFG and ordinary dominance; it
 does not claim a path-sensitive lifetime/provenance proof for handles transported
-through mutable memory. Checked execution diagnoses forged, foreign-frame or
-discarded handles and accesses to released or undefined bytes. The reference
-interpreters lazily place dynamic records/bytes/definedness in the existing
-arena and register live extents with the existing memory registry. Restoration
-unregisters later dynamic extents and rewinds their storage together. No dynamic
+through mutable memory. Checked execution rejects handle values that do not
+match a retained capture in the current invocation. An independently fabricated
+integer with identical bits passes that numeric membership check; handle
+provenance remains a producer obligation. Checked memory accesses diagnose
+released or undefined bytes. The reference interpreters lazily place dynamic
+records/bytes/definedness in the existing arena and register live extents with
+the existing memory registry. Restoration unregisters later dynamic extents and
+rewinds their storage together. No dynamic
 records are allocated by ordinary functions. A restored address reused by a new
 allocation cannot distinguish an old pointer's provenance: as with native
 address reuse, callers must respect lifetimes.
