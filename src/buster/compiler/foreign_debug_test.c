@@ -95,9 +95,23 @@ static const ForeignDebugTestVariant foreign_debug_test_variants[] = {
     { .name = "clangxx-O0", .compiler = "clang++", .flags = { "-g", "-O0" }, .cxx = true },
 };
 
-// A program's output, and where gdb stops in it.
+// A program's output.
 static const char* const foreign_debug_test_expected[2] = { "total 34 -\n", "max 0 7\n" };
-static const char* const foreign_debug_test_stops[2] = { "dbg_sum", "dbg_other" };
+
+// Where gdb stops in a variant's program, so that every local it prints holds what the program put there: at
+// dbg_other in the C++ program, which has none; at dbg_sum in an optimized C one, whose locations give the values; and
+// in an -O0 one at dbg_sum's first add to its total (at the function's first line, its `total` was the stack's leftover
+// bytes, which differ between two executables whose startups leave different ones). An optimized build's line 8 shares
+// its address with line 7, and gdb moves a breakpoint there to a line the run doesn't reach.
+static const char* foreign_debug_test_stop(const ForeignDebugTestVariant* variant)
+{
+    bool unoptimized = false;
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(variant->flags) && variant->flags[f] != 0; f += 1)
+    {
+        unoptimized = unoptimized || strcmp(variant->flags[f], "-O0") == 0;
+    }
+    return variant->cxx ? "dbg_other" : unoptimized ? "dbg_sum.c:8" : "dbg_sum";
+}
 
 // The pairs "key": value of llvm-dwarfdump --statistics' JSON, as "key=value" rows, sorted, but the file's name and the
 // sizes of the sections whose strings lld merges.
@@ -385,7 +399,7 @@ static void foreign_debug_test_variant(ForeignTestTally* tally, const char* dire
             foreign_debug_test_statistics(foreign_test_read(arena, report), &statistics[side]);
             snprintf(report, sizeof(report), "%s.gdb", outputs[side]);
             char stop[64];
-            snprintf(stop, sizeof(stop), "break %s", foreign_debug_test_stops[variant->cxx ? 1 : 0]);
+            snprintf(stop, sizeof(stop), "break %s", foreign_debug_test_stop(variant));
             char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-ex", (char*)"set debuginfod enabled off", (char*)"-ex", stop, (char*)"-ex", (char*)"run",
                             (char*)"-ex", (char*)"bt", (char*)"-ex", (char*)"info args", (char*)"-ex", (char*)"info locals", (char*)outputs[side], 0 };
             const bool debugged = object_test_run(gdb, report, "/dev/null") == 0;
