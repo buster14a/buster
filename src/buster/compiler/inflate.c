@@ -593,15 +593,13 @@ static uint32_t inflate_adler32_vector(const uint8_t* bytes, uint64_t length)
     return (uint32_t)(b << 16 | a);
 }
 
-// Decompresses the zlib stream `input` into `output`, which must come out exactly `size` bytes long.
-static InflateError inflate_zlib(const uint8_t* input, uint64_t input_length, uint8_t* output, uint64_t size)
+// inflate_zlib's stream, at least its header's 2 bytes and its Adler-32's 4 long, so that both are inside it.
+static InflateError inflate_zlib_stream(const uint8_t* input, uint64_t input_length, uint8_t* output, uint64_t size)
 {
-    InflateError error = input_length >= 6 ? INFLATE_ERROR_NONE : INFLATE_ERROR_TRUNCATED;
-    const uint32_t method = error == INFLATE_ERROR_NONE ? input[0] : 0;
-    const uint32_t flags = error == INFLATE_ERROR_NONE ? input[1] : 0;
-    error = error == INFLATE_ERROR_NONE && ((method & 15) != 8 || (method >> 4) > 7 || (method << 8 | flags) % 31 != 0 || (flags & 0x20) != 0) ? INFLATE_ERROR_HEADER :
-                                                                                                                                                 error;
-    InflateBits in = { .next = input + 2, .end = input + (input_length >= 6 ? input_length - 4 : 2) };
+    const uint32_t method = input[0];
+    const uint32_t flags = input[1];
+    InflateError error = (method & 15) != 8 || (method >> 4) > 7 || (method << 8 | flags) % 31 != 0 || (flags & 0x20) != 0 ? INFLATE_ERROR_HEADER : INFLATE_ERROR_NONE;
+    InflateBits in = { .next = input + 2, .end = input + input_length - 4 };
     uint64_t at = 0;
     bool last = false;
     // The two codes: a dynamic block's code length code is built in the literals' place, which it fills after.
@@ -638,5 +636,13 @@ static InflateError inflate_zlib(const uint8_t* input, uint64_t input_length, ui
     const uint8_t* check = input + input_length - 4;
     const uint32_t expected = error == INFLATE_ERROR_NONE ? (uint32_t)check[0] << 24 | (uint32_t)check[1] << 16 | (uint32_t)check[2] << 8 | check[3] : 0;
     error = error == INFLATE_ERROR_NONE && inflate_adler32_vector(output, size) != expected ? INFLATE_ERROR_CHECKSUM : error;
+    return error;
+}
+
+// Decompresses the zlib stream `input` into `output`, which must come out exactly `size` bytes long. A stream shorter
+// than its header and its Adler-32 is truncated before anything points into it.
+static InflateError inflate_zlib(const uint8_t* input, uint64_t input_length, uint8_t* output, uint64_t size)
+{
+    const InflateError error = input_length >= 6 ? inflate_zlib_stream(input, input_length, output, size) : INFLATE_ERROR_TRUNCATED;
     return error;
 }
