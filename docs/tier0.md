@@ -315,28 +315,47 @@ function without `x87`.
 
 SSE converts between floating values and signed integers alone (AVX-512's `vcvtusi2sd` and `vcvttsd2usi` are past the
 baseline). Tier 0's `CONVERT` from U64 to F32 or F64, and from those to U64, is deferred (`tier0_emit_u64_convert`), with
-no branch and no memory: in the operand's register, the result's and the stacks' first free ones.
+no branch, in one of two forms:
+
+- **the register form**, in the operand's register, the result's and the stacks' first free ones, with no memory;
+- **the red zone form**, with no register but the operand's and the result's, its scratch values in red zone
+  temporaries, where the register form's free registers are past their tables.
+
+`tier0_u64_convert_registers` chooses, from the stacks' depths before the conversion, d (integer) and f (floating), and
+the integer table's depths (15, or 14 with a frame pointer):
+
+| Conversion | Register form | Red zone form |
+| --- | --- | --- |
+| to F32 or F64 (the operand at d − 1, the scratch at d) | d < 15, or d < 14 with a frame pointer | d = 15, or 14 with one |
+| to U64 (the result at d, the scratch at d + 1; the operand at f − 1, the scratch at f) | d + 1 < 15 (or 14) and f < 16 | d + 1 = 15 (or 14), or f = 16 |
+
+So every depth with room for the conversion's own values takes it, as it did before the register form (#429's review:
+the register form alone refused a conversion to U64 with 14 integers or 16 floating values below it, and one from U64
+with its operand in the integer table's last register). The two forms of a direction have as many records, so that
+measuring needn't know which a conversion takes. Each selection counts the conversion's result in its stacks' tops,
+and the register form's scratch registers where it takes the conversion, which a frame pointer decides only once the
+selection has seen every entry: it keeps the scratch's highest depths both with and without one, and takes the right
+one at the end. Neither form takes a home's variant, so no local fuses into one.
 
 - **To F32 or F64 from U64:** a signed conversion of the value where its top bit is clear, and otherwise of the value
   halved with its lowest bit kept, `(x >> 1) | (x & 1)`, which rounds as the value does (made in the integer stack's
   free register; `cmovns` chooses which), then the result's exponent raised by the value's top bit, which doubles it
   exactly where it was halved. The result's register is zeroed first (`xorps`), so that `cvtsi2sd` doesn't wait for the
-  value it held. 14 records, where clang -O0 branches between the two conversions.
+  value it held. The red zone form halves the value in its own register, from its copy in a temporary, and raises the
+  exponent in the result's bits in another. 14 records, where clang -O0 branches between the two conversions.
 - **To U64 from F32 or F64:** one signed truncation, of the value less a bias: 2^63 where the value is at least that
   (`cmovae` from one compare with 2^63, which the integer stack's register past the result's and the floating stack's
-  free one hold), 0 below it. The top bit comes back from the compare's result, which `setae` keeps (`shl` and `xor`).
-  12 records. The subtraction is exact (Sterbenz's lemma from 2^63, and of 0 below it), and the truncation's operand is
-  below 2^63. So a value in U64's range raises the invalid exception never and inexact only where it has a fraction, as
-  C's conversion does. (#429's first sequence truncated both ways and chose, which raised invalid from 2^63 on, and
+  free one hold, or a temporary), 0 below it. The top bit comes back from the compare's result, which `setae` keeps (in
+  that register's low byte, or a temporary's), shifted into place by 63, which keeps its lowest bit alone, and `xor`ed
+  in. 11 records. The subtraction is exact (Sterbenz's lemma from 2^63, and of 0 below it), and the truncation's operand
+  is below 2^63. So a value in U64's range raises the invalid exception never and inexact only where it has a fraction,
+  as C's conversion does. (#429's first sequence truncated both ways and chose, which raised invalid from 2^63 on, and
   inexact for a value like 1.0.) A value out of U64's range, which C leaves undefined, gives the signed truncation's
   result with its top bit flipped.
 
-Each selection counts the registers they write in its stacks' tops. Neither takes a home's variant, so no local fuses
-into one.
-
-#429's first versions went through red zone temporaries, with no register but the operand's and the result's: on the
-9700X, a loop of the four conversions (#429's review) took 2.1 times clang -O0's time, 25.7 cycles an iteration against
-12.2, as each conversion's loads waited for the stores before them.
+#429's first versions had the red zone form alone: on the 9700X, a loop of the four conversions (#429's review) took 2.1
+times clang -O0's time, 25.7 cycles an iteration against 12.2, as each conversion's loads waited for the stores before
+them. So it takes only the depths where the register form has no room.
 
 ## Deep values (#136's item 6)
 
@@ -655,21 +674,32 @@ Before the programs, checks of their own:
     its `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment (8 but for objects), inside the frame and apart
     from every other local's bytes. Under an object aligned to 16, rsp must be a multiple of 16.
 - **unsigned floating:** the conversions between U64 and the floating classes (`tier0_emit_u64_convert`), each as a
-  function of its parameter, compiled by both paths into the same records, encoded by both encoders and run on 20
-  named values: from U64 around 2^53, 2^63 and 2^64, where the halving's kept bit decides the rounding (ties to even
-  and just past them), and to U64 from values below 2^63, at it and up to the largest below 2^64, each against C's
-  conversion. Each call's MXCSR invalid and inexact flags must be those of C's conversion of the same value (compiled
-  with `FENV_ACCESS`), and every conversion to U64 runs again with invalid unmasked, where a spurious one would raise
-  SIGFPE. The generator's programs have these conversions too (`Tier0ProgramOptions.unsigned_floating`, in the shapes
-  with floating values; to U64 only where C defines it, in the clang cross-check's).
-- **deep** (`tier0_deep_test.c`, #136's item 6): seven functions of one U64 parameter whose stacks fill their tables, then
-  cross the line with an entry of each kind the generated programs reach rarely or never: a value pushed past it and
-  dropped back to it (a `DISCARD`, which uses no register), `?:` whose condition, branch and arms' values cross it, a
-  compare fused into its branch that drops two values across it, 17 floating values (through U64 conversions, one of
+  function of its parameter, compiled by both paths into the same records, encoded by both encoders and run on 22
+  named values under each of MXCSR's four rounding modes: from U64 around 2^53, 2^63 and 2^64, where the halving's kept
+  bit decides the rounding (ties to even and just past them), and to U64 from -0.5, -0.0 and values below 2^63, at it
+  and up to the largest below 2^64, each against C's conversion under the same mode. Each call's MXCSR invalid and
+  inexact flags must be those of C's conversion of the same value (compiled with `FENV_ACCESS`), and every conversion
+  to U64 runs again with invalid unmasked, where a spurious one would raise SIGFPE. The generator's programs have these
+  conversions too (`Tier0ProgramOptions.unsigned_floating`, in the shapes with floating values; to U64 only where C
+  defines it, in the clang cross-check's).
+- **unsigned floating limits:** the same conversions at the stacks' limits (#429's review), each as a function of x and
+  `out` that holds integers and doubles below the conversion, stores their sums at `out[0]` and `out[1]` and returns
+  the conversion: from U64 with x in the integer table's last register but one and in its last, without a frame
+  pointer and with one (14 depths), and with the result in xmm15; to U64 with the result in the table's last register
+  but one and in its last, with and without a frame pointer, with x in xmm14 and in xmm15, and with both limits at once.
+  Both paths must compile each alike in the form the check's own rule gives (the red zone form's records are those at
+  negative displacements from rsp), the prologue must push the register form's scratch where it is callee-saved, and
+  each call, as the unsigned floating check makes them, must give C's conversion and its flags and both sums.
+- **deep** (`tier0_deep_test.c`, #136's item 6): eight functions of one U64 parameter whose stacks fill their tables,
+  then cross the line with an entry of each kind the generated programs reach rarely or never: a value pushed past it
+  and dropped back to it (a `DISCARD`, which uses no register), `?:` whose condition, branch and arms' values cross it,
+  a compare fused into its branch that drops two values across it, 17 floating values (through U64 conversions, one of
   them dropped across the floating line), division by a local (whose dividend only rax reads) and by a value, `%`, and
-  shifts by a register past it, a frame pointer's 14 values and two past them, and both stacks crossing at one
-  conversion. Each must compile by both paths into the same records with deep entries, a frame pointer exactly in its
-  case, be encoded alike by both encoders, and give this file's model of it natively on six inputs.
+  shifts by a register past it, a frame pointer's 14 values and two past them, both stacks crossing at one conversion,
+  and rsp moved past a frame pointer's line (#434's review): rsp saved, two allocations stored through and loaded back,
+  rsp restored, every entry a deep one while the values below are in their slots, which rbp addresses. Each must
+  compile by both paths into the same records with deep entries, a frame pointer exactly in the cases that have one,
+  be encoded alike by both encoders, and give this file's model of it natively on six inputs.
 - **copies:**
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
