@@ -446,10 +446,13 @@ static uint32_t check_input_enum_base_end(const Parser* parser, uint32_t tag, ui
     if (parser->tokens.kinds[tag] == PARSE_KIND_ENUM && colon < end && parser->tokens.kinds[colon] == PARSE_KIND_COLON &&
         parser->tree.roles[colon] == PARSE_ROLE_SPECIFIER)
     {
+        // The base's specifiers, and GNU attributes among them (`enum E : int __attribute__((unused)) { ... }`), which clang
+        // takes as the base type's.
         position = colon + 1;
-        while (position < end && parser->tree.roles[position] == PARSE_ROLE_SPECIFIER)
+        while (position < end && (parser->tree.roles[position] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[position] == PARSE_KIND_ATTRIBUTE))
         {
-            position += 1;
+            const uint32_t close = position + 1 < end ? parser->tree.parents[position + 1] : end;
+            position = parser->tokens.kinds[position] == PARSE_KIND_ATTRIBUTE && close < end ? close + 1 : position + 1;
         }
     }
     return position;
@@ -555,7 +558,22 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         const uint8_t kind = parser->tokens.kinds[i];
         if (check_input_qualifier(name, &qualifiers))
         {
-            // Dropped, as clang drops them (with a warning).
+            // const and volatile dropped, as clang drops them (with a warning); restrict, which needs a pointer, refused.
+            valid = (qualifiers & BUSTER_TYPE_RESTRICT) == 0;
+        }
+        else if (kind == PARSE_KIND_ATTRIBUTE)
+        {
+            // GNU attributes among the specifiers, which clang ignores in a base (with a warning), but one that would make
+            // the type a vector's, which isn't an integer type. Parsed, not evaluated: a vector's size doesn't decide that,
+            // and an argument's evaluation would come back here through a tag of its own.
+            uint32_t cursor = i;
+            CheckInputAttributes parsed = { 0 };
+            valid = check_input_attributes(reader, &cursor, end, &parsed) && cursor > i;
+            for (uint32_t a = 0; valid && a < parsed.count; a += 1)
+            {
+                valid = parsed.records[a].kind != CHECK_ATTRIBUTE_VECTOR_SIZE && parsed.records[a].kind != CHECK_ATTRIBUTE_EXT_VECTOR_TYPE;
+            }
+            i = cursor - 1;
         }
         else if (name == C_NAME_LONG)
         {
@@ -639,8 +657,9 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
 // completes an earlier forward declaration. Body completion is handled separately by the iterative tag reader.
 // An enum with a fixed underlying type is complete at its base, so that its body's enumerators read it (`sizeof`
 // it), and it may be declared without its body only by a declaration of it alone (`enum E : T;`). Its redeclarations
-// keep its base, and only one lists its enumerators; one without a base can't list them, nor one with a base those of
-// an enum without one, as clang has it.
+// in its scope keep its base (a declaration alone, `enum E;`, too; a reference, `enum E x;`, has none), and only one
+// lists its enumerators; one without a base can't list them, nor one with a base those of an enum without one, as clang
+// has it.
 static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token, uint32_t end, bool definition)
 {
     const Parser* parser = reader->parser;
@@ -653,12 +672,16 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                              parser->tokens.names[token] == C_NAME_UNION ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT;
         const uint32_t name = i < end && parser->tokens.kinds[i] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[i] : 0;
         const uint32_t declaration = name != 0 ? i++ : token;
+        // Attributes after the name are the declaration's, not the tag's: before a `;` they make it a reference, as clang
+        // has it (`struct S __attribute__((unused));` names the visible S), where a `;` right after the name declares one.
+        const uint32_t after_name = i;
         i = check_input_skip_attributes(parser, i, end);
+        const bool attributed = i != after_name;
         const uint32_t colon = i;
         i = check_input_enum_base_end(parser, token, colon, end);
         const bool fixed = i != colon;
         const bool body = i < end && parser->tokens.kinds[i] == PARSE_KIND_L_BRACE;
-        const bool forward = i < end && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
+        const bool forward = !attributed && i < end && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
         const uint32_t previous = name != 0 ? c_bindings_lookup(&reader->bindings, C_BINDING_TAG, name) : 0;
         const bool same_scope = previous != 0 && reader->bindings.depth[previous - 1] == reader->scope_count;
         valid &= name != 0 || body;
@@ -679,7 +702,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             const uint8_t state = tag != 0 && kind == BUSTER_TYPE_KIND_ENUM ? reader->enum_fixed[tag] : BUSTER_CHECK_ENUM_NONE;
             valid = type_kind(reader->types, type) == kind &&
                     (state == BUSTER_CHECK_ENUM_NONE ? !fixed && (!body || !type_is_complete(reader->types, type)) :
-                                                       (fixed || !body) && (!body || state == BUSTER_CHECK_ENUM_FIXED) &&
+                                                       (fixed || (!body && !forward)) && (!body || state == BUSTER_CHECK_ENUM_FIXED) &&
                                                        (!fixed || reader->types->types.base[type_index(type)] == underlying));
             if (!valid && type_kind(reader->types, type) == kind && kind == BUSTER_TYPE_KIND_ENUM)
             {
