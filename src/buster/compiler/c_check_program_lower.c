@@ -166,7 +166,8 @@ struct CheckLowerWriter
     uint32_t varargs_count;
     // Long double's constants (Tier0Function.x87_constants), two words each: the first is +0.0, which a CONST F80 0 reads
     // (a truth test's, a conversion to bool's, a dead value's), and each other constant has a place of its own. The
-    // function takes the table when it has an entry of class F80 (`x87`).
+    // function takes the table when it has long double values (`x87`, Tier0Function.x87's): an entry of class F80, or its
+    // result.
     uint64_t* x87_constants;
     uint32_t x87_constant_count;
     uint32_t x87_constant_capacity;
@@ -510,7 +511,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             {
                 check_lower_track(writer, kind, class, value);
             }
-            writer->x87 |= kind == BUSTER_TYPED_CONST && class == BUSTER_TYPED_CLASS_F80;
+            writer->x87 |= class == BUSTER_TYPED_CLASS_F80;
             writer->kinds[writer->count] = kind;
             writer->classes[writer->count] = class;
             writer->values[writer->count] = value;
@@ -1877,6 +1878,7 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
             {
                 check_lower_track(writer, writer->kinds[i], writer->classes[i], writer->values[i]);
             }
+            writer->x87 |= writer->classes[i] == BUSTER_TYPED_CLASS_F80;
             writer->count += 1;
         }
         if (labels[result.count] != BUSTER_CHECK_NONE)
@@ -3543,7 +3545,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.save_anchor = BUSTER_CHECK_NONE;
         writer.overflow_anchor = BUSTER_CHECK_NONE;
         writer.varargs_count = 0;
-        writer.x87 = false;
+        writer.x87 = check_lower_x87(types, result);
         writer.x87_constant_count = 1;
         writer.x87_constants[0] = 0;
         writer.x87_constants[1] = 0;
@@ -3775,6 +3777,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         {
             BUSTER_CHECK_LOWER_COPY(x87_constants, x87_constants, uint64_t, 2 * (uint64_t)writer.x87_constant_count);
             function->x87_constant_count = writer.x87_constant_count;
+            function->x87 = true;
         }
 #undef BUSTER_CHECK_LOWER_COPY
         // A variadic definition that starts its list has its incoming frame (Tier0Function.incoming_variadic): its own

@@ -267,7 +267,7 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
 (#137's X87 results). Its class is F80 (`BUSTER_TYPED_CLASS_F80`), whose values Tier 0 keeps in memory:
 
 - **A value** takes an integer depth, as an address does, and lives in that depth's 16-byte slot of the frame
-  (`Tier0Frame.x87_area`: a slot per integer depth after the fixed slots, in a function with an F80 entry). An entry
+  (`Tier0Frame.x87_area`: a slot per integer depth after the fixed slots, in a function with long double values). An entry
   loads its operands from their slots onto the x87 stack, computes, and stores its result into its slot, leaving the x87
   stack empty, so that nothing lives there across entries, calls or joins. Every F80 entry is deferred: emitted by
   `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a time, as calls are.
@@ -278,6 +278,14 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
 - **Its constants** are an optional column of the function's (`x87_constants`, `x87_constant_count` values of two words:
   the significand, then the sign and exponent), which `CONST F80` indexes. A constant is three immediate stores into its
   slot.
+- **A function says whether it has long double values** (`Tier0Function.x87`: an entry of class F80, or a long double
+  result), which its producer knows as it writes them. Only such a function has the slots, and only its compile looks
+  for long double's entries: selection, measuring and the deferred entries' emitter are each written once with the flag
+  a constant (`tier0_select_entries`, `tier0_select_vector_entries`, `tier0_measure_vector_entries` and
+  `tier0_emit_deferred_entry`), the instance without long doubles inline where the code was before and the one with them
+  out of line. A function without long doubles then compiles with the code Tier 0 had before them, but for a test of the
+  flag at each of those uses (#423's measurements, below). A struct result in x87 registers, which goes to its object,
+  takes no slot: any function's calls handle one.
 - **The kinds:** `CONST`, `DUP`, `NEG` (`fchs`), `LOAD`, `STORE`, `SET`, `ADD`, `SUB`, `MUL` and `DIV` (`faddp` and the
   others on st(1) and st(0)), the compares (`fucomip`, the operands swapped for `<` and `<=`, with clang's results for
   unordered operands: true for `!=` alone), `CONVERT` to and from every class, `CALL`, `DISCARD`, `JUMP_VALUE` and
@@ -296,7 +304,8 @@ Each truncation restores the control word it changed, which the convention has c
 past the column, an integer operation of the class or a branch on it, an F80 argument anywhere but its 16 bytes of the
 outgoing area at a multiple of 16, a `RETURN` of F80 from a function whose result isn't one long double in st0 and of
 another class from one whose is, a function returning a `_Complex long double` (st0 and st1, which no class holds),
-and a call whose x87 result neither an F80 class nor a result object takes.
+a call whose x87 result neither an F80 class nor a result object takes, and an F80 entry or a long double result in a
+function without `x87`.
 
 ## Symbols outside the image
 
@@ -867,6 +876,18 @@ path's 11.1.
   (#411), the job measured 169.31 and 574.35, the cycles (80.27 and 232.97, against 80.11 and 229.83) within the runs'
   spread. Under Intel SDE, no variant of the passes tried brought the vector path back to the 0.5 instructions per entry
   fewer that `ac4ccbd`'s inlining happened to give.
+- **Long double (#136's item 8)** at no cost to code without it (#423's review). On these programs, which have no long
+  double, the 9700X measured `6c33fae`, whose x87 checks were inline in both selections' loops, in the call's emitter and
+  count and in the deferred entries' dispatch, against main's `7c428ce` in four rounds in alternating order: the vector
+  path at 171.56 instructions per entry (81.0 to 81.9 cycles) against 169.31 (79.2 to 79.6), and alone 79.5 cycles
+  against 77.8 and 78.0; the scalar path at 580.49 instructions against 574.35, its cycles (231.4 to 231.8 against 232.5
+  to 232.8) within the runs' spread. The checks themselves cost little: on the 7940HS, removing the four groups took the
+  vector path from 170.66 to 168.62 instructions per entry against main's 168.46, and each alone part of the way, as
+  their code changed clang's for the passes around them. With the flag (`Tier0Function.x87`) and the long doubles' code
+  out of line ("Long double" above), the 7940HS measures 169.01 and 575.97 instructions per entry against main's 168.46
+  and 574.25: a test of the flag at each use, and clang's code for the shared passes, which moves by about that much with
+  any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
+  are the same bytes as main's.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the

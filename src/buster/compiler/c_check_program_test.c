@@ -34,7 +34,7 @@ static bool check_test_program_function(const Tier0Function* a, const Tier0Funct
                        check_test_program_column(a->calls, b->calls, (uint64_t)a->call_count * sizeof(AbiCall)) &&
                        check_test_program_column(a->argument_locations, b->argument_locations, (uint64_t)a->argument_count * sizeof(AbiLocation)) &&
                        check_test_program_column(a->argument_classes, b->argument_classes, a->argument_count) &&
-                       a->x87_constant_count == b->x87_constant_count &&
+                       a->x87_constant_count == b->x87_constant_count && a->x87 == b->x87 &&
                        check_test_program_column(a->x87_constants, b->x87_constants, (uint64_t)a->x87_constant_count * 2 * sizeof(uint64_t));
     return equal;
 }

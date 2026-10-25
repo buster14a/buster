@@ -509,7 +509,9 @@ What the lowering covers past scalars (#145's programs):
   `--` on one go through its address as on memory, a postfix one keeping the old
   value in a frame object of its own. Its constants are each function's table
   (`x87_constants`), +0.0 at place 0, which truth tests and conversions to
-  `_Bool` compare with. What would hold one of its values in a temporary (a
+  `_Bool` compare with. A function with an entry of the class or a long double
+  result says so (`Tier0Function.x87`), which the lowering notes as it writes
+  each entry. What would hold one of its values in a temporary (a
   statement expression's value or the operands live around it, `?:` without its
   middle operand, a builtin's operand) and the floating classification builtins
   on it are refused by name.

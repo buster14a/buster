@@ -592,6 +592,13 @@ static void tier0_test_x87_program(Tier0TestX87Program* program, const Tier0Test
     tier0_test_x87_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
 }
 
+// Whether a function has long double values (Tier0Function.x87), as its producer knows: an entry of class F80, or its
+// result.
+static bool tier0_test_x87_has(const Tier0Function* function)
+{
+    return memchr(function->classes, BUSTER_TYPED_CLASS_F80, function->count) != 0 || tier0_x87_returns(function);
+}
+
 // The program as Tier 0 takes it: four pointer parameters (the long double inputs, the integers, the floats and the
 // output) in their registers, and its calls.
 static Tier0Function tier0_test_x87_function(const Tier0TestX87Program* program, const Tier0TestX87Abi* abi)
@@ -621,6 +628,7 @@ static Tier0Function tier0_test_x87_function(const Tier0TestX87Program* program,
     function.argument_count = program->argument_count;
     function.x87_constants = program->constants;
     function.x87_constant_count = program->constant_count;
+    function.x87 = tier0_test_x87_has(&function);
     return function;
 }
 
@@ -1156,6 +1164,7 @@ static Tier0Function tier0_test_x87_written_function(const Tier0TestX87Written* 
     function.call_result_objects = written->call_count != 0 ? written->call_result_objects : 0;
     function.x87_constants = written->constants;
     function.x87_constant_count = 1;
+    function.x87 = tier0_test_x87_has(&function);
     return function;
 }
 
@@ -1500,6 +1509,8 @@ static void tier0_test_x87_rules(Tier0TestTally* tally, const Tier0TestX87Abi* a
         { "constants without their column", 0 },
         { "valid: a long double's return", UINT32_MAX },
         { "valid: a call's long double", UINT32_MAX },
+        { "an entry of the class without x87", 0 },
+        { "a long double result without x87", 0 },
     };
     const uint64_t significand = 1ull << 63;
     const uint64_t constants[2] = { significand, 0x3fff };
@@ -1596,6 +1607,19 @@ static void tier0_test_x87_rules(Tier0TestTally* tally, const Tier0TestX87Abi* a
             tier0_test_x87_put(&written, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F80, 0);
             tier0_test_x87_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_F80, 0);
             break;
+        case 15:
+            tier0_test_x87_put(&written, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
+        case 16:
+            // A long double result and no entry of the class: a loop that never returns.
+            signature = BUSTER_TIER0_TEST_X87_K;
+            result = abi->calls[signature].result;
+            tier0_test_x87_local(&written, 0, BUSTER_TYPED_CLASS_VOID);
+            written.parameter_count = 1;
+            tier0_test_x87_put(&written, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
         default:
             tier0_test_x87_written_call(&written, abi, BUSTER_TIER0_TEST_X87_K, one, 1, 0);
             tier0_test_x87_put(&written, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, (uint64_t)(uintptr_t)&tier0_test_x87_mix);
@@ -1615,6 +1639,8 @@ static void tier0_test_x87_rules(Tier0TestTally* tally, const Tier0TestX87Abi* a
         {
             function.x87_constants = 0;
         }
+        // Long double's values in a function that doesn't say it has them, the last two breaks'.
+        function.x87 = tier0_test_x87_has(&function) && b != 15 && b != 16;
         const Tier0Check check = tier0_validate(&function);
         const bool expected = breaks[b].node == UINT32_MAX ? check.error == TIER0_OK : check.error == TIER0_ERROR_INVALID && check.node == breaks[b].node;
         tier0_test_expect(tally, expected, "x87", "%s: tier0_validate says %s at %u (%s)", breaks[b].name, check.error == TIER0_OK ? "valid" : "invalid", check.node,
