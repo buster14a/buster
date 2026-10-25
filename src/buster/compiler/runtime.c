@@ -47,7 +47,8 @@
 // member each loads (Runtime.reference_members); and its COMDAT groups (RuntimeGroup, a range per piece, each with its
 // atoms and its signature's number among the runtime's distinct signatures), whose first in link order the link keeps.
 //
-// main.c includes this file after import.c. Layout, in this order:
+// main.c includes this file after import.c. runtime_libraries_import takes BUSTER_LINKER_ENTRY rather than static:
+// main.c's units compile it in one unit alone (link.c). Layout, in this order:
 //   - API: RuntimeError, RuntimeObject, RuntimeProbe, RuntimeBinding, Runtime and the entry points' prototypes.
 //   - Files: probing and reading.
 //   - The search: GCC's installation, the crt objects and libc's script.
@@ -407,7 +408,7 @@ struct RuntimeLibraries
 // RUNTIME_ERROR_IMPORT for a file that is neither a shared library nor a script the reader takes, or for a script that
 // names another script, an archive or a path that isn't absolute, RUNTIME_ERROR_FILE or RUNTIME_ERROR_MEMORY, with
 // `failed` saying where.
-static __attribute__((unused)) RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names,
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names,
                                                                     uint32_t name_count, const String8* directories, uint32_t directory_count);
 static __attribute__((unused)) void runtime_libraries_release(RuntimeLibraries* libraries);
 // The first library, in link order, that exports `name`: its index plus 1, and the export's index in *export; 0 for none
@@ -2164,7 +2165,7 @@ static bool runtime_libraries_elf(String8 bytes)
     return bytes.length >= SELFMAG && memcmp(bytes.pointer, ELFMAG, SELFMAG) == 0;
 }
 
-static RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names, uint32_t name_count,
+BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libraries, const Runtime* runtime, const String8* names, uint32_t name_count,
                                              const String8* directories, uint32_t directory_count)
 {
     *libraries = (RuntimeLibraries){ 0 };

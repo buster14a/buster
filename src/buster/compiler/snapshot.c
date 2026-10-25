@@ -35,7 +35,8 @@
 //     old one mapped keeps it whole, and two compilers that rebuild it at once write the same bytes, the last rename
 //     winning.
 //
-// main.c includes this file after executable.c, whose hash it uses. Layout, in this order:
+// main.c includes this file after executable.c, whose hash it uses. runtime_open takes BUSTER_LINKER_ENTRY rather than
+// static: main.c's units compile it in one unit alone (link.c). Layout, in this order:
 //   - API: SnapshotStatus, SnapshotResult and the entry points' prototypes.
 //   - The file: its header, regions and columns.
 //   - Writing.
@@ -105,7 +106,7 @@ static __attribute__((unused)) bool snapshot_directory(char* path, uint64_t capa
 // written there, the directory made if it is missing. With no directory (0), imported. A snapshot that can't be written
 // doesn't fail the import. runtime_release frees the runtime either way. runtime_open_static, runtime_open_static_pie
 // and runtime_open_shared do the same for a static executable's runtime, a static PIE's and a shared library's.
-static __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, const char* directory);
+BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, const char* directory);
 static __attribute__((unused)) SnapshotResult runtime_open_static(Runtime* runtime, const char* directory);
 static __attribute__((unused)) SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory);
 static __attribute__((unused)) SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory);
@@ -1100,7 +1101,7 @@ static SnapshotResult runtime_open_as(Runtime* runtime, const char* directory, R
     return result;
 }
 
-static SnapshotResult runtime_open(Runtime* runtime, const char* directory)
+BUSTER_LINKER_ENTRY SnapshotResult runtime_open(Runtime* runtime, const char* directory)
 {
     RuntimeProbe compiler;
     const bool identified = snapshot_compiler(&compiler);

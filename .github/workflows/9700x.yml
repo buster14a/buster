@@ -136,6 +136,7 @@ jobs:
               [checker]='unit:c_checker_benchmark.c'
               [checker-source]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
               [checker-bindings]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
+              [checker-deferred]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
               [backend]='unit:tier0_benchmark.c'
               [unwind]='unwind[a-z_]*|debug[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
               [streaming]='streaming[a-z_]*|unwind[a-z_]*|debug|executable|link[a-z_]*|object_writer[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
@@ -302,8 +303,8 @@ jobs:
 
       - name: Build only the compiler executable, and beside it the external Clang pragma token oracle
         # Without debug information, which nothing here reads: it took a fifth of the build's time (BUSTER_DEBUG_INFO,
-        # build.sh). The build waits for its longest unit with CPUs to spare, so the oracle builds meanwhile, outside
-        # build/, which build.sh makes anew and which must hold the compiler alone.
+        # build.sh). The build runs a compile per core, leaving the cores' other threads to spare, so the oracle builds
+        # meanwhile, outside build/, which build.sh makes anew and which must hold the compiler alone.
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
           bash tools/build-preprocessor-pragma-oracle.sh "$oracle" > "$RUNNER_TEMP/oracle.log" 2>&1 &
@@ -497,6 +498,14 @@ jobs:
           # checks the harness's timeouts, relative paths (as given here) and cross-check rules with a stand-in compiler.
           ./build/compiler test-c-testsuite --self-test
           ./build/compiler test-c-testsuite --cross-check --clang /usr/bin/clang --jobs 4 --subset tests/c-testsuite/subset.txt build/c-testsuite
+          == Check c-testsuite's programs with their bodies read apart on 8 lanes
+          # #113: each program checked by the scalar path, the vector path and the deferred reader, whose result must be
+          # the vector path's column for column, against clang -fsyntax-only.
+          unset CPATH C_INCLUDE_PATH
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --deferred 8 build/c-testsuite/tests/single-exec
+          == Test deferred function bodies against source order
+          # #113's fixtures, each through the deferred reader on 1, 2, 3 and 8 lanes with every binding resolution.
+          ./build/compiler test-checker-deferred
           == Test the parser on the repository's translation units
           # Both paths, which must agree kernel by kernel, and accept each unit build.sh compiles, but main_unit_*.c,
           # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
@@ -615,12 +624,13 @@ jobs:
           unset CPATH C_INCLUDE_PATH
           ./build/compiler test-files --flat /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc
           == Check the frozen SQLite source against Clang
-          # --symbols compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129):
-          # it refuses sqlite3.c, so this run counts the refusal's feature, and the musl run above compares objects.
+          # --deferred 8 also reads its bodies apart on 8 lanes (#113), whose result must be the vector path's. --symbols
+          # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129): it refuses
+          # sqlite3.c, so this run counts the refusal's feature, and the musl run above compares objects.
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --deferred 8 --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
           == Test the direct path's executables
           ./build/compiler test-executable
           == Compare a frozen preprocessor corpus subset with Clang
@@ -1227,6 +1237,30 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only scalar "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
+
+      - name: Benchmark the deferred bodies' reader on frozen SQLite
+        # #113: source order's reader against the deferred one on one lane and on eight, with its position checks apart.
+        # The command and lane 0 run on CPU 2, the other lanes on one CPU of each other core the job may use.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker-deferred,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
+          others="$(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
+              BEGIN {
+                  n = split(allowed, ranges, ",")
+                  for (r = 1; r <= n; r++) {
+                      m = split(ranges[r], ends, "-")
+                      last = m == 2 ? ends[2] : ends[1]
+                      for (c = ends[1]; c <= last; c++) permitted[c] = 1
+                  }
+              }
+              $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ && $1 != 2 { print $1 }
+          ' | head -n 7 | paste -sd, -)"
+          test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          ./build/compiler benchmark-checker-deferred --passes 9 --lanes 8 --cpus "2,$others" "${source[@]}"
 
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
