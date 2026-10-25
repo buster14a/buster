@@ -205,21 +205,29 @@ none of its subset's programs makes a name twice in clang's objects.
   statics `x` of `tested`, whose object must agree with clang's (`tested.x` and
   `tested.x.2` in both) and differ from it once a name in its string table is
   replaced: `tag.2` for the label, `tested.x` for the made `tested.x.2` (the
-  suffix lost) and `tested.x.3` for the label `tested.x.1`.
+  suffix lost) and `tested.x.3` for the label `tested.x.1`. Constant `if`s'
+  fixtures select their dead arms' callees, as Tier 0 lowers them, and their
+  objects are compared under clang's model (`folded_ifs`, below) instead, and
+  run: a chain of `sizeof` conditions, dead arms with a label, with an outer
+  `case` and with their own `switch`, a true condition with an `else`,
+  floating, pointer and side-effecting conditions, and an `else if` chain. And
+  the reasons below on one fixture of each (`c_check_corpus_symbols_test.c`),
+  through `check_corpus_measure` as `--symbols` runs it, must all be
+  explained, and a function clang alone sees renamed must not be.
 - **c-testsuite** (`test-c-testsuite --cross-check`): each program's `-c`
-  object against `clang -O0 -c`'s, functions and objects. All 219 programs the
-  backend compiles agree.
+  object against `clang -O0 -c`'s, functions and objects. All 220 programs
+  agree; the backend compiles every one since it lowers `long double`.
 - **Corpora** (`test-checker-corpus --symbols`): each file the checker accepts,
   its object built as `-c` builds it, against `clang -O0 -c`'s of the file with
   the corpus's options. A file the backend refuses is counted with its feature,
   and `--symbols-minimum N` fails the run when fewer than N files' objects were
   compared. The 9700X job compares eight of the frozen musl `src` directories
   (`math`, `string`, `stdlib`, `fenv`, `legacy`, `process`, `signal` and
-  `multibyte`: 257 files the backend lowers, and every explained difference of
-  musl's, in about 9.5 s) with `--symbols-minimum 257`; `sqlite3.c`, which the
+  `multibyte`: 348 files the backend lowers, and every explained difference of
+  musl's) with `--symbols-minimum 348`; `sqlite3.c`, which the
   backend refuses, compares none.
 
-On corpora, clang -O0 decides two things in its code otherwise than the
+On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
 checked program, never from a name, and fails on any other:
 
@@ -227,33 +235,39 @@ checked program, never from a name, and fails on any other:
 | --- | --- | --- |
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
+| dropped | ours only: a definition that the selection of clang's model doesn't reach, the program with unselected operands counted and a constant `if`'s dead arm left out (`CheckProgramOptions.folded_ifs`) | Doesn't emit the arm that an integer constant condition without side effects never runs, unless a label or a `case` of a `switch` outside it enters it (`CodeGenFunction::EmitIfStmt` and `ContainsLabel`), and so not what only that arm calls. musl's `FORCE_EVAL` calls `fp_force_evalf` and `fp_force_evall` in the arms a `double` never runs. Tier 0 lowers both arms, and the selection counts them. |
 
-clang -O0 also drops a constant `if`'s dead arm and the string literals only it
-refers to (c-testsuite's 00212, 00214 and 00215), which is why the corpora
-compare no strings.
+The model doesn't name string literals, which have no symbols, and a constant
+`if`'s dead arm drops the ones only it refers to too (c-testsuite's 00212, 00214
+and 00215): the corpora compare no strings.
 
 Results on the Zen 4 laptop, with clang 23.1.3 (`--target`'s configuration of
 each corpus as `test-checker-corpus` runs it):
 
-| Corpus | Accepted | Compared | Agreeing | Explained (folded, unselected) | Unexplained | Refused by the backend |
-| --- | --- | --- | --- | --- | --- | --- |
-| c-testsuite (220) | 220 | 219 | 219 | 0 | 0 | 1 (`long double`) |
-| musl 1.2.5 `src` (Zig 0.14.1's copy), 1,524 files, `-std=c99 -ffreestanding` | 1,484 | 455 | 410 | 45 files | 0 | 1,029 |
-| Lua 5.4.8 `src`, `-std=gnu99 -O2` | 33 | 13 | 11 | 2 files (2 folded) | 0 | 20 (`visibility`) |
-| `sqlite3.c` | accepted | 0 | | | | 1 (`__int128`, then conversions between unsigned 64-bit integers and floating types) |
+| Corpus | Accepted | Compared | Explained differences (folded, unselected, dropped) | Unexplained | Refused by the backend |
+| --- | --- | --- | --- | --- | --- |
+| c-testsuite (220) | 220 | 220 | 0 | 0 | 0 |
+| musl 1.2.5 `src` (Zig 0.14.1's copy), 1,524 files, `-std=c99 -ffreestanding` | 1,484 | 546 | 383 (210, 59, 114) | 0 | 937, and 1 the backend fails on |
+| Lua 5.4.8 `src`, `-std=gnu99 -O2` | 33 | 13 | 2 (2, 0, 0) | 0 | 20 (`visibility`) |
+| `sqlite3.c` | accepted | 0 | | | 1 (an `__uint128_t` local: values aligned past 8 bytes) |
 
 The backend's refusals are its features, not the selection's: most of musl's
-are attributes (aliases, weak symbols, visibility), `long double`, parameters
-aligned past 8 bytes and inline assembly.
+are attributes (aliases, weak symbols, visibility, 480), inline assembly (384)
+and `_Complex` (64). Since Tier 0 lowers `long double` (#423), musl's files
+that only refused it are compared, and its `FORCE_EVAL`'s dead arms are the
+dropped differences. The backend fails on `stdio/vfwprintf.c`: an internal
+error lowering it (a last operand of another class than the entry before it),
+which main has too, outside the selection.
 
 On the 9700X, with its frozen corpus (musl 1.2.5 with the headers its Makefile
-generates, clang 23.1.1, `-march=znver5`, a run per 8 of `src`'s directories),
-1,474 of the 1,514 files are accepted, as clang accepts them; 452 are compared,
-with no unexplained difference, and 1,022 refused by the backend. The explained
-differences are all in `math`: 136 folded and 28 unselected. By directory, the
-most compared are `math` (109 of 355 accepted, 5.5 s), `string` (58 of 72,
-1.2 s), `thread` (49 of 131) and `network` (29 of 77); the 9700X job's subset
-takes `math` and seven small directories with many files the backend lowers.
+generates, clang 23.1.1, `-march=znver5`, one run over `src` at `ddf3537c`,
+merged with main's `4f4a0bfa`), 1,484 of the 1,524 files are accepted, as clang
+accepts them; 544 are compared, with no unexplained difference, 939 refused by
+the backend, and 1 the backend fails on, `stdio/vfwprintf.c`, as on the laptop.
+The explained differences are all in the 9700X job's eight directories, which
+give the same counts alone: 210 folded, 59 unselected and 114 dropped. Those
+directories, `math` and seven small ones with many files the backend lowers,
+compare 348 files.
 
 ## What the selection saves
 

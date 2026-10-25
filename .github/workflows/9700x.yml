@@ -418,15 +418,15 @@ jobs:
           ./build/compiler test-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
           == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
           # #129: each source the checker accepts is written as -c writes it, and must define what clang -O0 -c's object
-          # does, but for the two documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
+          # does, but for the three documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
           # feature it names. Its acceptance against clang -fsyntax-only is compared too, as for any corpus. These eight
-          # directories' 257 files that the backend lowers, with every explained difference of musl's (math's), must all
+          # directories' 348 files that the backend lowers, with every explained difference of musl's (math's), must all
           # be compared: a backend that came to refuse them would otherwise pass by comparing none.
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           musl="$corpus/libc/musl"
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 257 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 348 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
           == Check semantic mutants of the frozen SQLite and musl sources against Clang
