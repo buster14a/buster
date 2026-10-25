@@ -1236,6 +1236,11 @@ typedef enum ParseMode
 // GNU attributes seen at a block-item boundary, classified only to resolve declaration/expression ambiguity.
 #define BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE 0x2000000u
 #define BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE 0x4000000u
+// GNU attributes came after a bit-field's width (`int x : 3 __attribute__((packed))`, the member's): more of them, or
+// what ends the member's declarator, may follow, and nothing else. A flag and not a mode of its own, which cost the scalar
+// parser instructions on every token (#430's review): a new mode's values moved the switch's cases, and a second call of
+// parse_scalar_operator made it a function of its own.
+#define BUSTER_PARSE_FRAME_AFTER_WIDTH 0x8000000u
 
 // What a declarator's name is, from the derivation its declarator applies to it first (going out from the name, past
 // groups without a `*`), as clang's Declarator::isFunctionDeclarator decides it: none read yet, not known yet, a
@@ -2311,7 +2316,7 @@ BUSTER_INLINE ParseFrame* parse_scalar_open(ParseScalar* parser, uint32_t i, uin
                                        BUSTER_PARSE_FRAME_AFTER_STAR | BUSTER_PARSE_FRAME_EMPTY_OK | BUSTER_PARSE_FRAME_KR | BUSTER_PARSE_FRAME_SPECIFIED | \
                                        BUSTER_PARSE_FRAME_CONDITIONAL | BUSTER_PARSE_FRAME_NAME_REQUIRED | BUSTER_PARSE_FRAME_NAME_OPTIONAL | \
                                        BUSTER_PARSE_FRAME_ABSTRACT | BUSTER_PARSE_FRAME_AUTO | BUSTER_PARSE_FRAME_TYPELESS | \
-                                       BUSTER_PARSE_FRAME_LATER_DECLARATOR)
+                                       BUSTER_PARSE_FRAME_LATER_DECLARATOR | BUSTER_PARSE_FRAME_AFTER_WIDTH)
 
 // The end of a declaration's `;`, or of an expression statement's, in any frame that holds them.
 static void parse_scalar_terminator(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
@@ -3811,6 +3816,28 @@ BUSTER_INLINE bool parse_kind_starts_initializer_value(uint8_t kind)
 }
 
 // In an expression, after an operand.
+// What the rare flags of an operator's frame refuse, which parse_scalar_operator tests for with one test of both: a
+// postfix operator after `sizeof` or `_Alignof` of a type name or GNU's `&&label` (NO_POSTFIX), and after a bit-field
+// width's attributes anything but another or what ends the member's declarator (AFTER_WIDTH), which ends the member's
+// declaration where clang expects a `;`. Reports it, and returns whether it did.
+static bool parse_scalar_operator_refused(ParseScalar* parser, uint32_t i, ParseFrame* frame, uint32_t flags)
+{
+    const uint8_t kind = parser->kinds[i];
+    const bool postfix = (flags & BUSTER_PARSE_FRAME_NO_POSTFIX) != 0 && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_PERIOD ||
+                                                                         kind == PARSE_KIND_ARROW || kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS);
+    const bool after_width = !postfix && (flags & BUSTER_PARSE_FRAME_AFTER_WIDTH) != 0 &&
+                             !(kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || parse_kind_is_closer(kind));
+    if (postfix)
+    {
+        parse_scalar_error_argument(parser, i, PARSE_MESSAGE_POSTFIX_AFTER_UNARY, BUSTER_PARSE_AT_TOKEN, i);
+    }
+    else if (after_width)
+    {
+        parse_scalar_unexpected(parser, i, frame);
+    }
+    return postfix || after_width;
+}
+
 static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
     const uint8_t kind = parser->kinds[i];
@@ -3826,10 +3853,9 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
                                       (parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_DESIGNATOR ||
                                        parser->frames[parser->frame_count - 2].statement == PARSE_ITEM_ARRAY_DESIGNATOR);
     frame->flags &= ~BUSTER_PARSE_FRAME_NO_POSTFIX;
-    if ((flags & BUSTER_PARSE_FRAME_NO_POSTFIX) && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_ARROW ||
-                                                   kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS))
+    if ((flags & (BUSTER_PARSE_FRAME_NO_POSTFIX | BUSTER_PARSE_FRAME_AFTER_WIDTH)) != 0 && parse_scalar_operator_refused(parser, i, frame, flags))
     {
-        parse_scalar_error_argument(parser, i, PARSE_MESSAGE_POSTFIX_AFTER_UNARY, BUSTER_PARSE_AT_TOKEN, i);
+        // Refused by the frame's rare flags, and reported: parse_scalar_operator_refused's.
     }
     else if ((flags & BUSTER_PARSE_FRAME_ASM) && (frame->argument == 1 || frame->argument == 2) && parser->kinds[(int64_t)i - 1] == PARSE_KIND_STRING &&
              kind != PARSE_KIND_L_PAREN && kind != PARSE_KIND_STRING)
@@ -3921,6 +3947,17 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         // `[[` after an operand is an attribute list, which clang takes nowhere in an expression.
         parse_scalar_error(parser, i, PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
     }
+    else if (kind == PARSE_KIND_ATTRIBUTE && conditional && group == PARSE_ROLE_OPEN_STRUCT)
+    {
+        // GNU attributes after a bit-field's width end it, as clang takes them: the member's, which hang on what ends the
+        // member's declarator (its `,` or `;`), as a tag's attributes hang on what follows them, outside the width's
+        // expression, whose tree stays whole.
+        step->role = PARSE_ROLE_LEAF_RIGHT;
+        frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
+        frame->flags |= BUSTER_PARSE_FRAME_AFTER_WIDTH;
+        frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT;
+        frame->attribute_continuation = PARSE_MODE_OPERATOR;
+    }
     else if (kind == PARSE_KIND_L_SQUARE)
     {
         frame->statement = array_designator ? PARSE_ITEM_DESIGNATOR : frame->statement;
@@ -3975,7 +4012,7 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         {
             // The end of an initializer: the next declarator, or the next parameter.
             frame->mode = step->role == PARSE_ROLE_COMMA ? PARSE_MODE_DECLARATOR : PARSE_MODE_ITEM;
-            frame->flags &= ~(BUSTER_PARSE_FRAME_POINTER | BUSTER_PARSE_FRAME_AFTER_STAR | BUSTER_PARSE_FRAME_CONDITIONAL | BUSTER_PARSE_FRAME_KR);
+            frame->flags &= ~(BUSTER_PARSE_FRAME_POINTER | BUSTER_PARSE_FRAME_AFTER_STAR | BUSTER_PARSE_FRAME_CONDITIONAL | BUSTER_PARSE_FRAME_KR | BUSTER_PARSE_FRAME_AFTER_WIDTH);
             frame->flags |= step->role == PARSE_ROLE_COMMA ? BUSTER_PARSE_FRAME_LATER_DECLARATOR : 0;
             if (step->role == PARSE_ROLE_SEPARATOR)
             {

@@ -357,6 +357,13 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "struct T { int member = 1; };\n", "1:22: expected ';' at end of declaration list", 0 },
     { "union U { int (*callback)(void) = 0; };\n", "1:32: expected ';' at end of declaration list", 0 },
     { "struct V { int x:3 = 1; };\n", "1:19: expected ';' at end of declaration list", 0 },
+    // GNU attributes after a bit-field's width end it: the member's, more of them, then `,` or `;`, or the body's `}` after
+    // the last member (clang's warning). Anything else is a missing `;`, at the token for a `:` (clang's typo for one).
+    { "enum { N = 3 }; struct S { int a : 3 __attribute__((aligned(4))), b : N __attribute__((packed)) __attribute__(()); long : 0 __attribute__((aligned(8)));"
+      " char c : (1 + 2) __attribute__((unused)) };\n", "", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) + 1; };\n", "1:45: expected ';' at end of declaration list", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) : 4; };\n", "1:46: expected ';' at end of declaration list", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) [4]; };\n", "1:45: expected ';' at end of declaration list", 0 },
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },
     { "int f(void) { return 1 }\n", "1:23: expected ';' after return statement", 0 },
