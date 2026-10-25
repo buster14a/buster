@@ -196,10 +196,36 @@ span, the merge and the rest (the phases after the merge); the position checks
 per body too. `--cpus` pins the command to the first CPU, where the parse,
 source order and the top level run, and its lanes to the list.
 
+On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with
+`--cpus 2,0,1,3,4,5,6,7`, the medians of 9 passes, ranges over three processes
+([the record](https://github.com/buster14a/buster-performance/tree/34d55c24d9d74f452c51c9919bca6d48c0316220/docs/measurements/deferred-bodies-113-2026-10-25)
+has the method and the logs), in nanoseconds per token:
+
+| | One lane | Eight lanes |
+| --- | ---: | ---: |
+| the parse | 13.47 to 13.53 | |
+| source order's reader | 105.13 to 105.50 | |
+| the deferred reader | 122.10 to 123.92 | 107.30 to 108.00 |
+| its top level | 40.80 to 41.15 | 41.03 to 41.19 |
+| the bodies' walks (summed over the lanes) | 17.04 to 17.50 | 25.64 to 25.67 |
+| their position checks (summed) | 3.240 to 3.264 | 4.796 to 4.836 |
+| the lanes' span | 21.86 to 22.32 | 6.22 to 6.34 |
+| the merge | 6.81 to 6.89 | 7.10 to 7.20 |
+| the phases after it | 52.44 to 52.82 | 53.05 to 53.29 |
+
+The position checks cost 3.25 ns/token on one lane, 877 to 884 ns a body: 24%
+of the parse and 3.1% of source order's reading. On eight lanes the bodies take
+6.3 ns/token of span, and the reader comes within 2% of source order: what is
+left is sequential, the top level, the merge and the phases after it, 101 of its
+108 ns/token. Before the lanes' arenas took base pages and their indexes room
+for the top level's types alone, eight lanes took 136 ns/token, and their walks
+64 in all: each lane's copies are columns with room for the largest body, and a
+huge page is cleared whole the first time any of it is touched.
+
 ## What is left
 
 The top level, the merge and the phases after it are sequential, so the lanes
-shorten only the bodies' walks. Bodies that do what the merge doesn't take
+shorten only the bodies' walks, which on `sqlite3.c` are a sixth of the reading. Bodies that do what the merge doesn't take
 (above) send their unit to source order. Intrinsic declarations, block-scope
 declarations with linkage and transparency made in a body are the next to
 merge.
