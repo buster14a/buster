@@ -8,7 +8,7 @@
 //
 // Each file is preprocessed once. Each pass then parses it (parse_translation_unit, the vector path), and checks it with
 // check_input, and with check_input_deferred on one lane and on up to --lanes (8), each time into fresh arenas and a fresh
-// table, in turns that rotate which goes first; the deferred runs time their phases (CheckDeferred.timing). The report
+// table, in one of their six orders, in turn; the deferred runs time their phases (CheckDeferred.timing). The report
 // gives the medians of --passes (21) passes in nanoseconds per token: the parse, source order's reading, and each
 // deferred one's whole, its top level's walk, the file scope's history (the environment's index), the bodies' walks
 // (summed over the lanes) and their position checks (each body's heads from the history and its table's view, set and
@@ -120,8 +120,11 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
         parses[pass] = check_source_time() - begin;
         for (uint32_t step = 0; valid && step < 3; step += 1)
         {
-            // Source order, one lane and `lanes` lanes, in turns.
-            const uint32_t way = (pass + step) % 3;
+            // Source order, one lane and `lanes` lanes, in their six orders in turn, so that each follows each of the
+            // others as often: a deferred reading after the deferred reader's own ran up to 3% faster than after source
+            // order's, which three orders that rotate gave the reading on `lanes` twice as often.
+            static const uint8_t orders[6][3] = { { 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }, { 0, 2, 1 }, { 2, 1, 0 }, { 1, 0, 2 } };
+            const uint32_t way = orders[pass % 6][step];
             uint64_t time = 0;
             const uint32_t run_lanes = way == 0 ? 0 : way == 1 ? 1 : lanes;
             valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, every_lane, &deferred, &time);
