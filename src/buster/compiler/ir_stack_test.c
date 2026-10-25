@@ -468,9 +468,10 @@ static void ir_stack_test_faults(IrLowerTestTally* tally, Arena* input, Arena* o
         "function () -> i1 {\nb0:\n  %0 = const.i64 0x0\n  %1 = alloca.ptr %0\n  %2 = stack_save.i64\n  %3 = alloca.ptr %0\n  %4 = icmp.i1 %1, %3 eq\n  %5 = stack_restore.void %2\n  %6 = ret.void %4\n}\n",
         "function () -> i64 {\n  slot $0 size=32 align=16 type=void flags=0x01\nb0:\n  %0 = stack_addr.ptr $0\n  %1 = const.i64 0x49\n  %2 = store.void %0, %1 align=16\n  %3 = stack_save.i64\n  %4 = const.i64 0x10\n  %5 = alloca.ptr %4\n  %6 = store.void %5, %1 align=16\n  %7 = stack_restore.void %3\n  %8 = load.i64 %0 align=16\n  %9 = ret.void %8\n}\n",
         "function () -> i64 {\nb0:\n  %0 = const.i64 0x10\n  %1 = alloca.ptr %0\n  %2 = const.f64 0x3ff8000000000000\n  %3 = store.void %1, %2 align=16\n  %4 = load.f64 %1 align=16\n  %5 = bitcast.i64 %4\n  %6 = ret.void %5\n}\n",
+        "function () -> i64 {\nb0:\n  %0 = const.i64 0x10\n  %1 = alloca.ptr %0\n  %2 = const.i64 0x2a\n  %3 = store.void %1, %2 align=16\n  %4 = const.i64 0x0\n  %5 = alloca.ptr %4\n  %6 = load.i64 %5 align=16\n  %7 = ret.void %6\n}\n",
     };
-    static const InterpreterStatus statuses[] = { INTERPRETER_UNDEFINED, INTERPRETER_MEMORY, INTERPRETER_INVALID, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK };
-    static const uint64_t values[] = { 0, 0, 0, 0, 1, 1, 73, UINT64_C(0x3ff8000000000000) };
+    static const InterpreterStatus statuses[] = { INTERPRETER_UNDEFINED, INTERPRETER_MEMORY, INTERPRETER_INVALID, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK };
+    static const uint64_t values[] = { 0, 0, 0, 0, 1, 1, 73, UINT64_C(0x3ff8000000000000), 42 };
     const uint64_t mark = input->length;
     for (uint32_t c = 0; c < sizeof(sources) / sizeof(sources[0]); c += 1)
     {
@@ -498,6 +499,45 @@ static void ir_stack_test_faults(IrLowerTestTally* tally, Arena* input, Arena* o
         const IrParseResult parsed = ir_parse(source, input, scratch, &result);
         ir_lower_test_expect(tally, parsed.error == IR_PARSE_VERIFY && parsed.check.error == IR_ERROR_TYPE && input->length == mark && memcmp(&result, &preserved, sizeof(result)) == 0, "unsupported dynamic operand width rejected transactionally", c, 0);
     }
+}
+
+static void ir_stack_test_zero_alias(IrLowerTestTally* tally, Arena* output, Arena* twin, Arena* scratch, Arena* execution)
+{
+    // Tier 0 subtracts a rounded zero from rsp: this pointer aliases the preceding live object's start.
+    // Check the exact positive-allocation/store/zero-allocation/load ordering in both interpreter fronts.
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ALLOCA,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ALLOCA,
+        BUSTER_TYPED_LOAD,
+        BUSTER_TYPED_RETURN,
+    };
+    uint8_t classes[sizeof(kinds)];
+    memset(classes, BUSTER_TYPED_CLASS_U64, sizeof(classes));
+    const uint64_t values[] = { 16, 0, 42, 0, 0, 0, 0, 0 };
+    const Tier0Function source = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = sizeof(kinds),
+    };
+    const InterpreterOptions options = ir_stack_test_limits();
+    const InterpreterResult result = interpreter_test_run(&source, execution, &options);
+    ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 42, "typed zero allocation preserves live alias", result.status, result.value.low);
+    const uint64_t output_mark = output->length;
+    const uint64_t twin_mark = twin->length;
+    IrFunction function = { 0 };
+    if (ir_lower_test_lower(tally, &source, IR_I64, 2, output, twin, scratch, &function, 131, 2))
+    {
+        ir_stack_test_execute(tally, &function, 0, 42, INTERPRETER_OK, execution);
+        ir_stack_test_consumers(tally, &function, 0, 42, twin, scratch, execution);
+        ir_stack_test_chain(tally, &function, 0, 42, scratch, execution);
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(twin, twin_mark);
 }
 
 static void ir_lower_test_stack(IrLowerTestTally* tally)
@@ -645,6 +685,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
     ir_stack_test_calls(tally, &output, &twin, &scratch, &execution);
     ir_stack_test_joins(tally, &output, &twin, &scratch, &execution);
     ir_stack_test_faults(tally, &output, &twin, &scratch, &execution);
+    ir_stack_test_zero_alias(tally, &output, &twin, &scratch, &execution);
     if (ir_stack_test_parse(tally, ir_stack_test_loop, &output, &scratch, &function))
     {
         ir_stack_test_execute(tally, &function, 0, 0, INTERPRETER_OK, &execution);
