@@ -1082,9 +1082,10 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --tables src
 
       - name: Benchmark the per-file jobs on the repository's translation units
-        # Without taskset: it pins each lane to an allowed CPU of its own.
+        # With the walk round by round (#262), from the same runs. Without taskset: it pins each lane to an allowed CPU
+        # of its own.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
-        run: ./build/compiler benchmark-files -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+        run: ./build/compiler benchmark-files --rounds -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the per-file jobs on musl, sqlite3.c and the flat C library corpus
         # Where `changes` doesn't rule it out (the module's sources): docs/c-files.md's tables, on the preprocessor

@@ -3749,8 +3749,8 @@ the guard spelled the same, and the walk must do what it did:
   unevenly, names of their own, long names, line splices and UCNs) prepared
   without following includes, 165,562 ids, so that the shared table grows in a
   merge, and a translation unit that includes them all: in parts, split once,
-  and with two lanes working, and in two runs into one cache, which must equal
-  one run on one lane;
+  and with two lanes working (in parts from the run's own counter, and split
+  once), and in two runs into one cache, which must equal one run on one lane;
 - contexts: a guarded header that includes itself through `./` and `sub/..`,
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
@@ -3775,29 +3775,40 @@ fails the test.
 leaves the directory. On the 9700X, `sqlite3.c`, musl 1.2.5's 1,357 sources and
 the C library corpus (`--flat`) pass too, and Lua 5.4.8 did before the ids'
 order and the units' `-E` text and diagnostics were checked.
-The 9700X job's test step runs it, on `src` with `--flat`, and on the
-repository's translation units.
+The 9700X job's test step runs it, on `src` with `--flat`, on the
+repository's translation units and on the preprocessor oracle's frozen corpora
+(#262): musl's 1,355 units with its build's options, `sqlite3.c`, and the C
+library corpus with `--flat`.
 
 ## Per-file jobs benchmark
 
 `./build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N]
-[--spin MS] [--flat] [--bytes map|read|populate] [--read-limit N]
-[--lane-bytes N] [options] path...` fills a cache from the paths (with
-`--flat`, without following their includes) on each lane count of `--lanes`
-(1 to 8), lane i pinned to the i-th CPU of `--cpus` (the allowed CPUs, in
-order), every run from nothing after `--spin` ms (2) of spinning on every lane.
-`--read-limit` sets the largest file the lanes read rather than map (16 KB),
-`--bytes` how lanes map the larger ones (or read them), and `--lane-bytes` a
-round's bytes per working lane (4 MB). It reports medians of `--runs` (21):
+[--spin MS] [--flat] [--rounds] [--bytes map|read|populate] [--read-limit N]
+[--shared-bytes N] [--lane-bytes N] [options] path...` fills a cache from the
+paths (with `--flat`, without following their includes) on each lane count of
+`--lanes` (1 to 8), lane i pinned to the i-th CPU of `--cpus` (the allowed
+CPUs, in order), every run from nothing after `--spin` ms (2) of spinning on
+every lane. `--read-limit` sets the largest file the lanes read rather than map
+(16 KB), `--bytes` how lanes map the larger ones (or read them),
+`--shared-bytes` the fewest bytes of a round that several lanes prepare (4 MB),
+and `--lane-bytes` a round's bytes per working lane past them (1 MB). It
+reports medians of `--runs` (21):
 the run's time, speedup and time to the roots' round, the tokens per second,
 each phase on the lane that spent the most on it (preparing, the merge's
 lookups, exchange, additions and rewrite, the include lines, the searches, the
 work one lane does alone, and the waits), how busy the lanes were, what a run
 did, and without `--flat` the files the walk prepared that no unit entered,
-with the largest. Run it under the 9700X's lock without `taskset`: it pins its
-lanes. `docs/c-files.md` has the numbers for the C library corpus, `sqlite3.c`,
-musl and this repository. The default 9700X job runs it on the repository's
-translation units; like the others, its measurements are informational.
+with the largest. With `--rounds`, it then prints where each lane count's time
+went round by round: each round's files, bytes, working lanes, waves, probes
+and phases on lane 0 and on the other lanes that spent the most and the least
+on them, from a trace the walk keeps only when asked (`FilesRun.trace`). Run it
+under the 9700X's lock without `taskset`: it pins its lanes. `docs/c-files.md`
+has the numbers for the C library corpus, `sqlite3.c`, musl and this
+repository. The default 9700X job runs it on the repository's translation
+units, with `--rounds`, and where a pull request changes `c_files*.c` (the
+`changes` job's `files`), on the frozen corpora too: musl's units, `sqlite3.c`
+with `--rounds` and the C library corpus with `--flat`. Like the others, its
+measurements are informational.
 
 ## Parser tests
 
