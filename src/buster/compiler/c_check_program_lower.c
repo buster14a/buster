@@ -1356,8 +1356,13 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     }
     else
     {
+        // A callee takes a hidden result pointer as aligned to the result's canonical type, an aligned typedef's attribute
+        // left out (clang's ABI info has canonical types; its stores through the pointer may be movaps): the object is
+        // aligned to the more aligned of the two.
+        const uint32_t declared = aggregate_result ? type_alignment_log2(types, result) : 0;
+        const uint32_t canonical = aggregate_result ? type_alignment_log2(types, type_strip_aligned(types, result)) : 0;
         const uint32_t call = writer->call_count++;
-        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), type_alignment_log2(types, result)) : BUSTER_CHECK_NONE;
+        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) : BUSTER_CHECK_NONE;
         writer->call_targets[call] = direct ? writer->program->object_symbols[value.object] : 0;
         writer->call_first[call] = writer->argument_count;
         writer->call_counts[call] = count;

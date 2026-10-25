@@ -481,7 +481,9 @@ What the lowering covers past scalars (#145's programs):
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
   where `abi_assign` puts them; a struct or union result lands in a frame object
   of the call site's own (`call_result_objects`), whose address is the call's
-  value.
+  value. That object is aligned to the result's canonical type at least, an
+  aligned typedef's smaller alignment left out: a callee takes a hidden result
+  pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
   of its size and alignment, which Tier 0's prologue fills. A function that
   returns one in registers returns its bytes' address (`result_size`); one that

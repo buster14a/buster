@@ -103,6 +103,10 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         "unsigned long fp_bits(double d){union{double d;unsigned long u;}x={d};return x.u;}\n"
         "unsigned fp_bitsf(float f){union{float f;unsigned u;}x={f};return x.u;}\n"
         "int set_math_errno(int n){errno=n;return 0;}int get_math_errno(void){return errno;}\n"
+        // A result through a hidden pointer, which clang takes as aligned to the union's 16: w is the pointer's bytes
+        // (clang -O0 returns in place), and a misaligned one shows in the first byte.
+        "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
+        "for(int i=0;i<40;i++)w.c[i]=(char)(n+i);if((unsigned long)&w%16)w.c[0]=99;return w;}\n"
         // Structs of a complex long double, which return in st0 and st1: one returned to the program, and the program's
         // own called through a pointer.
         "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
@@ -823,6 +827,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "long double s=sum(3,v,n,down,2,o.x,-n);long double*q=&table[1];*q-=s/64;long double r=n&1?s:*q;"
         "return (int)(s*16)^(int)(r*8)^(int)(g*2)^(int)(table[(unsigned)n%3]*4)^p.t^(int)(p.a*3);}",
         "long-double-memory-and-calls", clang);
+    // A call's result object, which a hidden pointer passes, aligned to the result's canonical type (16 for a union of a
+    // long double) though an aligned typedef says 1: va_arg's 8-byte object between the calls' objects puts one of them 8
+    // bytes off a multiple of 16 if their alignment were the typedef's. (Clang passes a variable of the typedef's type as
+    // the pointer itself, at the typedef's alignment, so the variables here are of the union's.)
+    check_test_program_source(test,
+        "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
+        "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
+        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
+        "hidden-result-canonical-alignment", clang);
     check_test_program_source(test,
         "struct cx{_Complex long double z;};struct cx external_complex(long double a,long double b);"
         "long double external_complex_apply(struct cx(*f)(long double,long double),long double a);"
