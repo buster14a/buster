@@ -261,8 +261,11 @@ to the writer where it does:
   end.
 
 Relocation types that DWARF doesn't use are refused, naming the object, the
-section and the relocation, and so is a thread-local offset into a debug
-section. A compressed section (`SHF_COMPRESSED` of type `ELFCOMPRESS_ZLIB`, which
+section and the relocation, and so are a thread-local offset into a debug
+section and a 4-byte field's value past its range: `R_X86_64_32`'s unsigned,
+`R_X86_64_DTPOFF32`'s signed, as GNU ld and lld check them. A relocation
+without a symbol is its addend, as GNU ld writes an address's (lld writes its
+tombstone for any relocation without a symbol in a debug section). A compressed section (`SHF_COMPRESSED` of type `ELFCOMPRESS_ZLIB`, which
 GNU as writes for `-g` by default and GCC's and clang's `-gz` ask for)
 contributes its bytes decompressed by `inflate.c` (written from RFCs 1950 and
 1951), at the size and alignment its compression header gives; another
