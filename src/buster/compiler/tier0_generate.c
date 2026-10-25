@@ -278,6 +278,7 @@ static const char* tier0_c_type(uint32_t class)
 {
     static const char* const names[BUSTER_TYPED_CLASSES] = {
         "void", "signed char", "unsigned char", "short", "unsigned short", "int", "unsigned", "long", "unsigned long", "float", "double",
+        "long double",
     };
     return names[class < BUSTER_TYPED_CLASSES ? class : 0];
 }
@@ -3008,7 +3009,7 @@ static TypeId tier0_program_class_type(uint32_t class)
 {
     static const TypeId types[BUSTER_TYPED_CLASSES] = {
         BUSTER_TYPE_VOID, BUSTER_TYPE_SCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_USHORT, BUSTER_TYPE_INT,
-        BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE,
+        BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE,
     };
     return types[class < BUSTER_TYPED_CLASSES ? class : 0];
 }

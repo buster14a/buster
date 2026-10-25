@@ -796,7 +796,10 @@ designs and the compilers already built this way.
   variable-length arrays' allocations and the stack's saved and restored
   positions, which give their function a frame pointer. An optional per-unit
   access column reaches the symbols a unit doesn't define through their GOT
-  slots, and thread-locals by local-exec or initial-exec. The output is
+  slots, and thread-locals by local-exec or initial-exec. Long double's values
+  (class F80) live in a 16-byte frame slot per integer depth, each entry of
+  them deferred: loaded onto the x87, computed and stored back, its locals and
+  parameters objects and its constants an optional column. The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
@@ -4250,7 +4253,20 @@ of both TLS models (`_Thread_local` in C), and functions' addresses through the
 GOT. The native run gives each symbol a GOT slot and the thread-locals a block
 of their own, which FS points at for the entry's call alone. An `access` check
 before the programs compiles every global kind of every class by each access:
-both paths alike, with the access's references, and validation's rule.
+both paths alike, with the access's references, and validation's rule. After
+the programs, the `x87` check (`tier0_x87_test.c`, #136's item 8) compiles long
+double code by both paths into the same records, encoded by both encoders into
+the same bytes and run natively, called from C through function pointers, so
+that clang's code is the oracle of the convention and the x87's arithmetic of
+the values: each break of the class's rules refused at its entry; functions of
+long double parameters and results (on the stack around an integer in a
+register, a struct of one returned in st0 and one received from C into its
+object, long doubles to a variadic C function, one kept across a call); and
+`--count` random programs of statements writing long doubles and what converts
+from them (integers, floats, doubles, compares) from inputs of every class,
+through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
+both ways and calls of C functions, against the check's own stack machine. The
+programs must reach every kind and conversion of the class.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
