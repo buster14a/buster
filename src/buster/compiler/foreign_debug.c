@@ -10,7 +10,7 @@
 //     DWARF) against a debug section's symbol, or a local in one, is that section's place in its output section, plus
 //     the symbol's value and the addend: written now;
 //   - one to code or data the link keeps (a low_pc's or a line program's R_X86_64_64, an ABS32 address, a thread-local's
-//     R_X86_64_DTPOFF32 or _64) is the writer's, by the link's symbol (ExecutableDebugRelocation);
+//     R_X86_64_DTPOFF32 or _64) is the writer's, by the link's symbol (ExecutableDebugSections' columns);
 //   - one to a section that COMDAT selection discarded, or to a symbol the link has none of, gets lld's tombstone: 0,
 //     or 1 in .debug_ranges and .debug_loc, whose lists 0 would end; one without a symbol is its addend.
 // A debug section of a discarded group goes with its group. A compressed one (SHF_COMPRESSED's ELFCOMPRESS_ZLIB, which
@@ -23,7 +23,9 @@
 // A plan, then two passes: the plan (foreign_debug_plan, on the calling thread or lane 0) places each debug section in
 // its output section in input order, and lists the contributions and the relocation sections; the bytes pass copies or
 // decompresses each contribution, and the relocations pass applies each relocation section's, each into its records'
-// own range, which the end compacts in their order (foreign_debug_finish). On the lane path the lanes take each pass's
+// own range, which the end compacts in their order (foreign_debug_finish). A relocation section's relocations go 8 at a
+// time by the vector path (foreign_debug_relocate_vector), which leaves a batch with a rare relocation to the exact
+// path (foreign_debug_relocate), its twin, which Foreign's exact path takes for all of them. On the lane path the lanes take each pass's
 // items costliest first (a section of a program like SQLite takes milliseconds to decompress, and one object's
 // sections are as many streams), with a sync between the passes; the calling thread takes them in order. Either way the
 // same bytes and records come out, and the first failure in the items' order. foreign_link.c includes this file.
@@ -77,7 +79,8 @@ static ImportError foreign_debug_extent(const ForeignObject* input, const Elf64_
     return result;
 }
 
-// A relocation's ExecutableDebugRelocation kind and its field's width, or false for a type debug sections don't take.
+// A relocation's reference kind (EXECUTABLE_DEBUG_ABS64 and the others) and its field's width, or false for a type
+// debug sections don't take.
 static bool foreign_debug_type(uint32_t type, uint8_t* kind, uint32_t* width)
 {
     const bool known = type == R_X86_64_64 || type == R_X86_64_32 || type == R_X86_64_DTPOFF32 || type == R_X86_64_DTPOFF64;
@@ -87,20 +90,62 @@ static bool foreign_debug_type(uint32_t type, uint8_t* kind, uint32_t* width)
     return known;
 }
 
-// The relocations of object `id`'s debug section `section`, whose bytes are at `bytes` in output kind `kind`'s section
-// at `base`: each written now or recorded in `relocations` (from *count), as the file's comment says. `bases` holds
-// each of the object's sections' place in its kind's output section (UINT64_MAX for one that isn't a kept debug
-// section). Returns the first failure.
-static ForeignLinkResult foreign_debug_relocate(const ForeignLink* output, const ForeignObject* input, uint32_t id, uint32_t relocation_section, uint32_t kind,
-                                                uint64_t base, uint8_t* bytes, uint64_t size, const uint64_t* bases, ExecutableDebugRelocation* relocations, uint64_t* count)
+// The records of the references the writer resolves (ExecutableDebugSections' columns), writable, from a relocation
+// section's first.
+typedef struct ForeignDebugRecords ForeignDebugRecords;
+struct ForeignDebugRecords
+{
+    uint32_t* offsets;
+    int64_t* addends;
+    SymbolId* targets;
+    uint8_t* section_kinds;
+    uint8_t* kinds;
+};
+
+// A relocation section's relocations as both paths take them: object `id`'s relocation section `relocation_section`,
+// whose target's bytes are at `bytes` (`size` of them) in output kind `kind`'s section at `base`; `bases` holds each of
+// the object's sections' place in its kind's output section (UINT64_MAX for one that isn't a kept debug section), and
+// the records go to `records` from its start.
+typedef struct ForeignDebugSection ForeignDebugSection;
+struct ForeignDebugSection
+{
+    const ForeignLink* output;
+    const ForeignObject* input;
+    uint32_t id;
+    uint32_t relocation_section;
+    uint32_t kind;
+    uint64_t base;
+    uint8_t* bytes;
+    uint64_t size;
+    const uint64_t* bases;
+    ForeignDebugRecords records;
+};
+
+// A relocation's failure, at relocation `i` of the section.
+static ForeignLinkResult foreign_debug_failure(const ForeignDebugSection* section, ForeignLinkError error, ImportError import, uint64_t i, uint32_t type)
+{
+    const Elf64_Shdr header = import_section_header(&section->input->elf, section->relocation_section);
+    ForeignLinkResult result = { .error = error, .object = section->id };
+    result.import = import_fail(import, header.sh_offset + i * sizeof(Elf64_Rela));
+    result.import.section = section->relocation_section;
+    result.import.relocation = (uint32_t)i;
+    result.import.type = type;
+    return result;
+}
+
+// The exact path of a relocation section's relocations, `first` to `last`: each written now or recorded from record
+// *count, as the file's comment says. Returns the first failure. The vector path's twin, and its path for a batch it
+// leaves (foreign_debug_relocate_vector).
+static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* section, uint64_t first, uint64_t last, uint64_t* count)
 {
     ForeignLinkResult result = { 0 };
-    const Elf64_Shdr header = import_section_header(&input->elf, relocation_section);
+    const ForeignObject* input = section->input;
+    const Elf64_Shdr header = import_section_header(&input->elf, section->relocation_section);
     const String8 entries = import_section_bytes(&input->elf, &header);
-    const uint32_t section_kind = EXECUTABLE_SECTION_DEBUG_INFO + kind;
+    const uint32_t section_kind = EXECUTABLE_SECTION_DEBUG_INFO + section->kind;
     const uint64_t tombstone = section_kind == EXECUTABLE_SECTION_DEBUG_RANGES || section_kind == EXECUTABLE_SECTION_DEBUG_LOC ? 1 : 0;
-    const ImportObject* object = &output->objects[id];
-    for (uint64_t i = 0; result.error == FOREIGN_LINK_ERROR_NONE && i < entries.length / sizeof(Elf64_Rela); i += 1)
+    const ImportObject* object = &section->output->objects[section->id];
+    for (uint64_t i = first; result.error == FOREIGN_LINK_ERROR_NONE && i < last; i += 1)
     {
         Elf64_Rela relocation;
         memcpy(&relocation, entries.pointer + i * sizeof(Elf64_Rela), sizeof(relocation));
@@ -109,7 +154,7 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignLink* output, const
         uint8_t relocation_kind = 0;
         uint32_t width = 0;
         const bool known = type == R_X86_64_NONE || foreign_debug_type(type, &relocation_kind, &width);
-        const bool inside = type == R_X86_64_NONE || (relocation.r_offset <= size && width <= size - relocation.r_offset);
+        const bool inside = type == R_X86_64_NONE || (relocation.r_offset <= section->size && width <= section->size - relocation.r_offset);
         const bool symbolized = index < input->symbols.count;
         Elf64_Sym symbol = { 0 };
         uint32_t target_section = SHN_UNDEF;
@@ -121,17 +166,13 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignLink* output, const
         }
         if (!known || !inside || !indexed)
         {
-            result.error = !known ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_IMPORT;
-            result.object = id;
-            result.import = import_fail(!known ? IMPORT_ERROR_UNSUPPORTED : IMPORT_ERROR_BOUNDS, header.sh_offset + i * sizeof(Elf64_Rela));
-            result.import.section = relocation_section;
-            result.import.relocation = (uint32_t)i;
-            result.import.type = type;
+            result = foreign_debug_failure(section, !known ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_IMPORT, !known ? IMPORT_ERROR_UNSUPPORTED : IMPORT_ERROR_BOUNDS, i,
+                                           type);
         }
         else if (type != R_X86_64_NONE)
         {
             const bool module_offset = relocation_kind == EXECUTABLE_DEBUG_DTPOFF32 || relocation_kind == EXECUTABLE_DEBUG_DTPOFF64;
-            const bool sectioned = index != 0 && target_section < input->elf.section_count && bases[target_section] != UINT64_MAX;
+            const bool sectioned = index != 0 && target_section < input->elf.section_count && section->bases[target_section] != UINT64_MAX;
             const SymbolId target = index != 0 && index < object->symbol_count ? object->symbols[index] : 0;
             uint64_t value = tombstone;
             bool written = true;
@@ -142,35 +183,132 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignLink* output, const
             else if (sectioned && !module_offset)
             {
                 // A place in a debug section: its section's place in its output section, the symbol's and the addend.
-                value = bases[target_section] + symbol.st_value + (uint64_t)relocation.r_addend;
+                value = section->bases[target_section] + symbol.st_value + (uint64_t)relocation.r_addend;
             }
             else if (target != 0)
             {
-                relocations[*count] = (ExecutableDebugRelocation){
-                    .offset = base + relocation.r_offset,
-                    .addend = relocation.r_addend,
-                    .target = target,
-                    .section = (uint8_t)kind,
-                    .kind = relocation_kind,
-                };
+                section->records.offsets[*count] = (uint32_t)(section->base + relocation.r_offset);
+                section->records.addends[*count] = relocation.r_addend;
+                section->records.targets[*count] = target;
+                section->records.section_kinds[*count] = (uint8_t)section->kind;
+                section->records.kinds[*count] = relocation_kind;
                 *count += 1;
                 written = false;
             }
             const bool fits = !written || width == 8 || value <= UINT32_MAX;
             if (written && fits)
             {
-                memcpy(bytes + relocation.r_offset, &value, width);
+                memcpy(section->bytes + relocation.r_offset, &value, width);
             }
             if (!fits || (sectioned && module_offset))
             {
-                result.error = FOREIGN_LINK_ERROR_UNSUPPORTED;
-                result.object = id;
-                result.import = import_fail(IMPORT_ERROR_UNSUPPORTED, header.sh_offset + i * sizeof(Elf64_Rela));
-                result.import.section = relocation_section;
-                result.import.relocation = (uint32_t)i;
-                result.import.type = type;
+                result = foreign_debug_failure(section, FOREIGN_LINK_ERROR_UNSUPPORTED, IMPORT_ERROR_UNSUPPORTED, i, type);
             }
         }
+    }
+    return result;
+}
+
+// The vector path of a relocation section's relocations (foreign_debug_relocate's), 8 at a time: the records
+// de-interleaved into offsets, infos and addends by permutes, then their symbols' st_shndx and st_value, the sections'
+// places and the link's symbols gathered (a gather only where a lane needs it), each value computed, written by
+// scatters and recorded by compresses, in order. A batch takes this path when every relocation in it is a common one:
+// a type DWARF uses (not R_X86_64_NONE), its field within the section, its symbol in the table and not through
+// SHN_XINDEX, a value that fits its field, no thread-local offset into a debug section, and fields one after another
+// without overlapping, as assemblers emit them; any other batch, and the last relocations short of a batch, go to the
+// exact path, which reports a failure where the batch has one. Either way the same bytes and records come out.
+static ForeignLinkResult foreign_debug_relocate_vector(const ForeignDebugSection* section, uint64_t* count)
+{
+    ForeignLinkResult result = { 0 };
+    const ForeignObject* input = section->input;
+    const Elf64_Shdr header = import_section_header(&input->elf, section->relocation_section);
+    const String8 entries = import_section_bytes(&input->elf, &header);
+    const uint64_t total = entries.length / sizeof(Elf64_Rela);
+    const uint32_t section_kind = EXECUTABLE_SECTION_DEBUG_INFO + section->kind;
+    const uint64_t tombstone = section_kind == EXECUTABLE_SECTION_DEBUG_RANGES || section_kind == EXECUTABLE_SECTION_DEBUG_LOC ? 1 : 0;
+    const ImportObject* object = &section->output->objects[section->id];
+    const uint8_t* symbols = (const uint8_t*)input->symbols.entries.pointer;
+    // Lane r of each permute's result is relocation r's offset, info or addend: quadwords 3r, 3r + 1 and 3r + 2 of the
+    // three loads.
+    const __m512i offsets_first = _mm512_set_epi64(0, 0, 15, 12, 9, 6, 3, 0);
+    const __m512i offsets_last = _mm512_set_epi64(13, 10, 5, 4, 3, 2, 1, 0);
+    const __m512i infos_first = _mm512_set_epi64(0, 0, 0, 13, 10, 7, 4, 1);
+    const __m512i infos_last = _mm512_set_epi64(14, 11, 8, 4, 3, 2, 1, 0);
+    const __m512i addends_first = _mm512_set_epi64(0, 0, 0, 14, 11, 8, 5, 2);
+    const __m512i addends_last = _mm512_set_epi64(15, 12, 9, 4, 3, 2, 1, 0);
+    const __m512i next_lane = _mm512_set_epi64(7, 7, 6, 5, 4, 3, 2, 1);
+    const __m512i size = _mm512_set1_epi64((int64_t)section->size);
+    const __m512i base = _mm512_set1_epi64((int64_t)section->base);
+    uint64_t i = 0;
+    // A section without symbols has no batch the vector path takes.
+    for (; result.error == FOREIGN_LINK_ERROR_NONE && symbols != 0 && i + 8 <= total; i += 8)
+    {
+        const uint8_t* at = (const uint8_t*)entries.pointer + i * sizeof(Elf64_Rela);
+        const __m512i first = _mm512_loadu_si512(at);
+        const __m512i middle = _mm512_loadu_si512(at + 64);
+        const __m512i last = _mm512_loadu_si512(at + 128);
+        const __m512i offsets = _mm512_permutex2var_epi64(_mm512_permutex2var_epi64(first, offsets_first, middle), offsets_last, last);
+        const __m512i infos = _mm512_permutex2var_epi64(_mm512_permutex2var_epi64(first, infos_first, middle), infos_last, last);
+        const __m512i addends = _mm512_permutex2var_epi64(_mm512_permutex2var_epi64(first, addends_first, middle), addends_last, last);
+        const __m512i types = _mm512_and_si512(infos, _mm512_set1_epi64(0xffffffff));
+        const __m512i indices = _mm512_srli_epi64(infos, 32);
+        const __mmask8 absolute64 = _mm512_cmpeq_epi64_mask(types, _mm512_set1_epi64(R_X86_64_64));
+        const __mmask8 absolute32 = _mm512_cmpeq_epi64_mask(types, _mm512_set1_epi64(R_X86_64_32));
+        const __mmask8 module64 = _mm512_cmpeq_epi64_mask(types, _mm512_set1_epi64(R_X86_64_DTPOFF64));
+        const __mmask8 module32 = _mm512_cmpeq_epi64_mask(types, _mm512_set1_epi64(R_X86_64_DTPOFF32));
+        const __mmask8 wide = absolute64 | module64;
+        const __m512i widths = _mm512_mask_blend_epi64(wide, _mm512_set1_epi64(4), _mm512_set1_epi64(8));
+        const __mmask8 inside = _mm512_cmple_epu64_mask(offsets, size) & _mm512_cmple_epu64_mask(widths, _mm512_sub_epi64(size, offsets));
+        const __mmask8 symbolized = _mm512_cmplt_epu64_mask(indices, _mm512_set1_epi64(input->symbols.count));
+        const __mmask8 ordered = _mm512_cmple_epu64_mask(_mm512_add_epi64(offsets, widths), _mm512_permutexvar_epi64(next_lane, offsets)) | 0x80;
+        const __mmask8 named = _mm512_test_epi64_mask(indices, indices);
+        bool take = (uint8_t)(absolute64 | absolute32 | module64 | module32) == 0xff && inside == 0xff && symbolized == 0xff && ordered == 0xff;
+        // Each named symbol's st_info, st_other and st_shndx, and its value where its section is a debug section's.
+        const __m512i positions = _mm512_add_epi64(_mm512_slli_epi64(indices, 4), _mm512_slli_epi64(indices, 3));
+        const __m512i heads = take ? _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), named, positions, symbols, 1) : _mm512_setzero_si512();
+        const __m512i shndx = _mm512_srli_epi64(heads, 48);
+        take = take && (_mm512_mask_cmpeq_epi64_mask(named, shndx, _mm512_set1_epi64(SHN_XINDEX)) == 0);
+        const __mmask8 counted = named & _mm512_cmplt_epu64_mask(shndx, _mm512_set1_epi64(input->elf.section_count));
+        const __m512i places = take && counted != 0 ? _mm512_mask_i64gather_epi64(_mm512_set1_epi64(-1), counted, shndx, section->bases, 8) : _mm512_set1_epi64(-1);
+        const __mmask8 sectioned = counted & _mm512_cmpneq_epi64_mask(places, _mm512_set1_epi64(-1));
+        const __mmask8 module = module64 | module32;
+        take = take && (sectioned & module) == 0;
+        const __mmask8 placed = sectioned & (uint8_t)~module;
+        const __m512i values = take && placed != 0 ? _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), placed, positions, symbols + 8, 1) : _mm512_setzero_si512();
+        // The link's symbols, for the references that aren't to a debug section.
+        const __mmask8 linked = named & (uint8_t)~placed & _mm512_cmplt_epu64_mask(indices, _mm512_set1_epi64(object->symbol_count));
+        const __m256i targets = take && linked != 0 ? _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), linked, indices, object->symbols, 4) : _mm256_setzero_si256();
+        const __mmask8 recorded = linked & _mm256_test_epi32_mask(targets, targets);
+        __m512i written = _mm512_set1_epi64((int64_t)tombstone);
+        written = _mm512_mask_mov_epi64(written, (uint8_t)~named, addends);
+        written = _mm512_mask_add_epi64(written, placed, _mm512_add_epi64(places, values), addends);
+        const __mmask8 writes = (uint8_t)~recorded;
+        take = take && _mm512_mask_cmpgt_epu64_mask(writes & (uint8_t)~wide, written, _mm512_set1_epi64(0xffffffff)) == 0;
+        if (!take)
+        {
+            result = foreign_debug_relocate(section, i, i + 8, count);
+        }
+        else
+        {
+            _mm512_mask_i64scatter_epi64(section->bytes, writes & wide, offsets, written, 1);
+            _mm512_mask_i64scatter_epi32(section->bytes, writes & (uint8_t)~wide, offsets, _mm512_cvtepi64_epi32(written), 1);
+            const uint32_t taken = (uint32_t)__builtin_popcount(recorded);
+            const __mmask8 room = (__mmask8)((1u << taken) - 1);
+            const __m512i kinds = _mm512_mask_blend_epi64(absolute32, _mm512_mask_blend_epi64(module32, _mm512_mask_blend_epi64(module64, _mm512_set1_epi64(EXECUTABLE_DEBUG_ABS64),
+                                                                                                                              _mm512_set1_epi64(EXECUTABLE_DEBUG_DTPOFF64)),
+                                                                                              _mm512_set1_epi64(EXECUTABLE_DEBUG_DTPOFF32)),
+                                                          _mm512_set1_epi64(EXECUTABLE_DEBUG_ABS32));
+            _mm256_mask_storeu_epi32(section->records.offsets + *count, room, _mm512_cvtepi64_epi32(_mm512_maskz_compress_epi64(recorded, _mm512_add_epi64(base, offsets))));
+            _mm512_mask_storeu_epi64(section->records.addends + *count, room, _mm512_maskz_compress_epi64(recorded, addends));
+            _mm256_mask_storeu_epi32(section->records.targets + *count, room, _mm256_maskz_compress_epi32(recorded, targets));
+            _mm_mask_storeu_epi8(section->records.section_kinds + *count, room, _mm_set1_epi8((char)section->kind));
+            _mm_mask_storeu_epi8(section->records.kinds + *count, room, _mm512_cvtepi64_epi8(_mm512_maskz_compress_epi64(recorded, kinds)));
+            *count += taken;
+        }
+    }
+    if (result.error == FOREIGN_LINK_ERROR_NONE && i < total)
+    {
+        result = foreign_debug_relocate(section, i, total, count);
     }
     return result;
 }
@@ -217,7 +355,7 @@ struct ForeignDebugPlan
     uint64_t** bases;
     uint8_t* bytes[BUSTER_EXECUTABLE_DEBUG_KINDS];
     uint64_t sizes[BUSTER_EXECUTABLE_DEBUG_KINDS];
-    ExecutableDebugRelocation* records;
+    ForeignDebugRecords records;
     // Each item's failure, which the first in the items' order is reported of.
     ForeignLinkResult* contribution_results;
     ForeignLinkResult* relocation_results;
@@ -330,9 +468,18 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     ForeignDebugCost* costs = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugCost, items) : 0;
     plan->contribution_results = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignLinkResult, (uint64_t)contribution_capacity + 1) : 0;
     plan->relocation_results = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignLinkResult, (uint64_t)relocation_section_capacity + 1) : 0;
-    plan->records = result.error == FOREIGN_LINK_ERROR_NONE && relocation_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableDebugRelocation, relocation_capacity) : 0;
+    const bool records = result.error == FOREIGN_LINK_ERROR_NONE && relocation_capacity != 0;
+    plan->records = (ForeignDebugRecords){
+        .offsets = records ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, relocation_capacity) : 0,
+        .addends = records ? BUSTER_ARENA_PUSH_ARRAY(arena, int64_t, relocation_capacity) : 0,
+        .targets = records ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, relocation_capacity) : 0,
+        .section_kinds = records ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, relocation_capacity) : 0,
+        .kinds = records ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, relocation_capacity) : 0,
+    };
+    const bool recorded = relocation_capacity == 0 || (plan->records.offsets != 0 && plan->records.addends != 0 && plan->records.targets != 0 &&
+                                                       plan->records.section_kinds != 0 && plan->records.kinds != 0);
     const bool allocated = plan->contributions != 0 && plan->relocations != 0 && plan->contribution_order != 0 && plan->relocation_order != 0 && costs != 0 &&
-                           plan->contribution_results != 0 && plan->relocation_results != 0 && (relocation_capacity == 0 || plan->records != 0);
+                           plan->contribution_results != 0 && plan->relocation_results != 0 && recorded;
     result.error = result.error == FOREIGN_LINK_ERROR_NONE && !allocated ? FOREIGN_LINK_ERROR_MEMORY : result.error;
     // The items, in the objects' order.
     uint64_t first = 0;
@@ -422,15 +569,35 @@ static void foreign_debug_contribute(ForeignDebugPlan* plan, const Foreign* fore
     }
 }
 
-// Relocation section `item`'s relocations, into its records' range.
+// Relocation section `item`'s relocations, into its records' range: by the vector path, or by the exact path on
+// Foreign's exact one (FOREIGN_PATH_EXACT).
 static void foreign_debug_relocation_section(ForeignDebugPlan* plan, const ForeignLink* output, const Foreign* foreign, uint32_t item)
 {
     ForeignDebugRelocations* relocations = &plan->relocations[item];
     const ForeignObject* input = &foreign->objects[relocations->object];
+    const uint64_t first = relocations->first;
+    const ForeignDebugSection section = {
+        .output = output,
+        .input = input,
+        .id = relocations->object,
+        .relocation_section = relocations->section,
+        .kind = relocations->kind,
+        .base = relocations->base,
+        .bytes = plan->bytes[relocations->kind] + relocations->base,
+        .size = relocations->size,
+        .bases = plan->bases[relocations->object],
+        .records = {
+            .offsets = plan->records.offsets + first,
+            .addends = plan->records.addends + first,
+            .targets = plan->records.targets + first,
+            .section_kinds = plan->records.section_kinds + first,
+            .kinds = plan->records.kinds + first,
+        },
+    };
+    const Elf64_Shdr header = import_section_header(&input->elf, relocations->section);
     uint64_t count = 0;
-    plan->relocation_results[item] = foreign_debug_relocate(output, input, relocations->object, relocations->section, relocations->kind, relocations->base,
-                                                            plan->bytes[relocations->kind] + relocations->base, relocations->size, plan->bases[relocations->object],
-                                                            plan->records + relocations->first, &count);
+    plan->relocation_results[item] = foreign->path == FOREIGN_PATH_VECTOR ? foreign_debug_relocate_vector(&section, &count) :
+                                                                            foreign_debug_relocate(&section, 0, header.sh_size / sizeof(Elf64_Rela), &count);
     relocations->count = count;
 }
 
@@ -450,20 +617,31 @@ static ForeignLinkResult foreign_debug_first_failure(const ForeignLinkResult* re
 static void foreign_debug_finish(ForeignDebugPlan* plan, ForeignLink* output)
 {
     uint64_t count = 0;
+    const ForeignDebugRecords* records = &plan->records;
     for (uint32_t item = 0; item < plan->relocation_count; item += 1)
     {
         const ForeignDebugRelocations* relocations = &plan->relocations[item];
-        if (count != relocations->first && relocations->count != 0)
+        const uint64_t first = relocations->first;
+        const uint64_t taken = relocations->count;
+        if (count != first && taken != 0)
         {
-            memmove(plan->records + count, plan->records + relocations->first, relocations->count * sizeof(ExecutableDebugRelocation));
+            memmove(records->offsets + count, records->offsets + first, taken * sizeof(*records->offsets));
+            memmove(records->addends + count, records->addends + first, taken * sizeof(*records->addends));
+            memmove(records->targets + count, records->targets + first, taken * sizeof(*records->targets));
+            memmove(records->section_kinds + count, records->section_kinds + first, taken);
+            memmove(records->kinds + count, records->kinds + first, taken);
         }
-        count += relocations->count;
+        count += taken;
     }
     for (uint32_t kind = 0; kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
     {
         output->debug.sections[kind] = (String8){ .pointer = (char*)plan->bytes[kind], .length = plan->sizes[kind] };
     }
-    output->debug.relocations = plan->records;
+    output->debug.offsets = records->offsets;
+    output->debug.addends = records->addends;
+    output->debug.targets = records->targets;
+    output->debug.section_kinds = records->section_kinds;
+    output->debug.kinds = records->kinds;
     output->debug.relocation_count = count;
 }
 

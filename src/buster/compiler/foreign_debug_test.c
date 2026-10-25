@@ -9,11 +9,15 @@
 // tombstones; a link with --gc-sections keeps the DWARF of what it collects the same way; -S leaves the debug sections
 // out. A section of another compression (objcopy's zstd, where binutils has it) and one whose zlib stream is damaged
 // are refused, naming their object and section.
+// The relocation kernels' vector path is checked against its exact twin on each debug relocation section, ending at a
+// PROT_NONE page, with each rare relocation at each of a batch's lanes (foreign_debug_test_kernels).
 // With --cross-check, ld.lld links the same objects: llvm-dwarfdump --verify finds no error in either output, their
 // --statistics agree but for .debug_str's and .debug_line_str's sizes (lld merges their strings), and gdb, stopped in a
 // function of each, gives the same backtrace, arguments and locals but for addresses.
 
 #define BUSTER_FOREIGN_DEBUG_TEST_STATISTICS 192
+// The most relocations a section of the kernels' fixture has (foreign_debug_test_kernels).
+#define BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS 16384
 
 typedef struct ForeignDebugTestSource ForeignDebugTestSource;
 struct ForeignDebugTestSource
@@ -497,6 +501,205 @@ static void foreign_debug_test_refusals(ForeignTestTally* tally, const char* dir
     arena_pop_to(arena, mark);
 }
 
+// One run of a relocation section's kernel for foreign_debug_test_kernels: its bytes, records, count and result.
+typedef struct ForeignDebugTestRun ForeignDebugTestRun;
+struct ForeignDebugTestRun
+{
+    uint8_t* bytes;
+    uint32_t offsets[BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS];
+    int64_t addends[BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS];
+    SymbolId targets[BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS];
+    uint8_t section_kinds[BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS];
+    uint8_t kinds[BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS];
+    uint64_t count;
+    ForeignLinkResult result;
+};
+
+// The kernels' twins on one copy of the object: `file` (`length` bytes, its relocation section `relocation` moved to its
+// end) ending at a PROT_NONE page, its target's bytes copied twice to buffers ending at one, the vector path's run
+// against the exact path's: the same result, bytes and records.
+static bool foreign_debug_test_twins(const uint8_t* file, uint64_t length, uint32_t relocation, const uint8_t* contents, uint64_t size)
+{
+    ImportElf elf = { 0 };
+    ImportSymbols symbols = { 0 };
+    bool same = import_elf(&elf, (String8){ .pointer = (char*)file, .length = length }, ET_REL).error == IMPORT_ERROR_NONE &&
+                import_symbols(&elf, &symbols).error == IMPORT_ERROR_NONE;
+    const Elf64_Shdr header = same ? import_section_header(&elf, relocation) : (Elf64_Shdr){ 0 };
+    ForeignObject input = { .elf = elf, .symbols = symbols };
+    uint32_t kind = 0;
+    same = same && foreign_debug_section(&input, header.sh_info, &kind) && header.sh_size / sizeof(Elf64_Rela) <= BUSTER_FOREIGN_DEBUG_TEST_RELOCATIONS;
+    // Each kept debug section at a place of its own, and a third of the symbols without one in the link.
+    uint64_t bases[256];
+    SymbolId map[4096];
+    same = same && elf.section_count <= BUSTER_ARRAY_LENGTH(bases) && symbols.count <= BUSTER_ARRAY_LENGTH(map);
+    for (uint32_t section = 0; same && section < elf.section_count; section += 1)
+    {
+        uint32_t other = 0;
+        bases[section] = foreign_debug_section(&input, section, &other) ? 0x1000ull * section + 0x30 : UINT64_MAX;
+    }
+    for (uint32_t index = 0; same && index < symbols.count; index += 1)
+    {
+        map[index] = index % 3 == 0 ? 0 : index + 100;
+    }
+    ImportObject object = { .symbols = map, .symbol_count = symbols.count };
+    ForeignLink output = { .objects = &object };
+    static ForeignDebugTestRun runs[2];
+    ForeignTestEdge edges[2] = { 0 };
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        same = foreign_test_edge(&edges[path], size + 1);
+        ForeignDebugTestRun* run = &runs[path];
+        run->bytes = same ? edges[path].end - size : 0;
+        if (same)
+        {
+            memcpy(run->bytes, contents, size);
+            run->count = 0;
+            const ForeignDebugSection section = {
+                .output = &output,
+                .input = &input,
+                .relocation_section = relocation,
+                .kind = kind,
+                .base = 0x48,
+                .bytes = run->bytes,
+                .size = size,
+                .bases = bases,
+                .records = {
+                    .offsets = run->offsets,
+                    .addends = run->addends,
+                    .targets = run->targets,
+                    .section_kinds = run->section_kinds,
+                    .kinds = run->kinds,
+                },
+            };
+            run->result = path == 0 ? foreign_debug_relocate_vector(&section, &run->count) : foreign_debug_relocate(&section, 0, header.sh_size / sizeof(Elf64_Rela), &run->count);
+        }
+    }
+    const ForeignLinkResult* a = &runs[0].result;
+    const ForeignLinkResult* b = &runs[1].result;
+    same = same && a->error == b->error && a->object == b->object && a->import.error == b->import.error && a->import.offset == b->import.offset &&
+           a->import.section == b->import.section && a->import.relocation == b->import.relocation && a->import.type == b->import.type && runs[0].count == runs[1].count &&
+           memcmp(runs[0].bytes, runs[1].bytes, size) == 0;
+    for (uint64_t r = 0; same && r < runs[0].count; r += 1)
+    {
+        same = runs[0].offsets[r] == runs[1].offsets[r] && runs[0].addends[r] == runs[1].addends[r] && runs[0].targets[r] == runs[1].targets[r] &&
+               runs[0].section_kinds[r] == runs[1].section_kinds[r] && runs[0].kinds[r] == runs[1].kinds[r];
+    }
+    foreign_test_edge_release(&edges[0]);
+    foreign_test_edge_release(&edges[1]);
+    return same;
+}
+
+// The relocation kernels' vector path against its exact twin (foreign_debug_relocate_vector, foreign_debug_relocate),
+// on each debug relocation section of an object gcc compiles with -g (a thread-local among its variables), moved to
+// the end of a copy of the object that ends at a PROT_NONE page, where a load past its entries faults: as compiled, cut
+// to each count short of a batch, and with relocation j of the first 24 changed each way a batch leaves to the exact
+// path or that changes what a batch writes: R_X86_64_NONE, a type debug sections don't take (R_X86_64_PC32), a
+// thread-local offset (where its symbol is a debug section's, refused), a field past the section, a symbol past the
+// table, its symbol's section through SHN_XINDEX without the extended table, no symbol, an ABS32 whose value doesn't
+// fit, a field that overlaps the one before or comes before it, a negated addend, and its symbol at a place in its
+// section (a section's symbol, which compilers use, is at 0). Each copy's runs must agree: the same failure, or the
+// same bytes and records.
+static void foreign_debug_test_kernels(ForeignTestTally* tally, const char* directory, Arena* arena)
+{
+    ForeignTestPath source;
+    ForeignTestPath object;
+    snprintf(source, sizeof(source), "%s/%s", directory, foreign_debug_test_sources[1].name);
+    snprintf(object, sizeof(object), "%s/kernels.o", directory);
+    char include[BUSTER_FOREIGN_TEST_PATH_BYTES + 2];
+    snprintf(include, sizeof(include), "-I%s", directory);
+    char* arguments[] = { (char*)"cc", (char*)"-c", (char*)"-g", (char*)"-O2", (char*)"-gz=none", include, source, (char*)"-o", object, 0 };
+    const bool compiled = object_test_run(arguments, "/dev/null", "/dev/null") == 0;
+    foreign_test_expect(tally, compiled, "compile the kernels' fixture", object);
+    const String8 bytes = compiled ? foreign_test_read(arena, object) : (String8){ 0 };
+    ImportElf elf = { 0 };
+    ImportSymbols symbols = { 0 };
+    const bool read = bytes.pointer != 0 && import_elf(&elf, bytes, ET_REL).error == IMPORT_ERROR_NONE && import_symbols(&elf, &symbols).error == IMPORT_ERROR_NONE;
+    foreign_test_expect(tally, read, "read the kernels' fixture", object);
+    ForeignObject input = { .elf = elf, .symbols = symbols };
+    uint32_t sections = 0;
+    uint64_t runs = 0;
+    for (uint32_t relocation = 1; read && relocation < elf.section_count; relocation += 1)
+    {
+        const Elf64_Shdr header = import_section_header(&elf, relocation);
+        uint32_t kind = 0;
+        const bool debug = header.sh_type == SHT_RELA && header.sh_info < elf.section_count && foreign_debug_section(&input, header.sh_info, &kind);
+        const Elf64_Shdr target = debug ? import_section_header(&elf, header.sh_info) : (Elf64_Shdr){ 0 };
+        const String8 contents = debug ? import_section_bytes(&elf, &target) : (String8){ 0 };
+        const uint64_t total = debug ? header.sh_size / sizeof(Elf64_Rela) : 0;
+        // The copy: the object, then the relocations at a multiple of 8, the section's header pointing at them.
+        const uint64_t place = (bytes.length + 7) & ~7ull;
+        Elf64_Rela* entries = debug ? BUSTER_ARENA_PUSH_ARRAY(arena, Elf64_Rela, total + 1) : 0;
+        uint8_t* copy = debug ? arena_push(arena, place + (total + 1) * sizeof(Elf64_Rela), 8) : 0;
+        foreign_test_expect(tally, !debug || (entries != 0 && copy != 0), "room for the kernels' copies", object);
+        sections += entries != 0 && copy != 0 ? 1 : 0;
+        for (uint32_t change = 0; entries != 0 && copy != 0 && change < 13; change += 1)
+        {
+            for (uint64_t j = 0; j < (change == 0 ? 9 : 24) && j < total; j += 1)
+            {
+                memcpy(entries, bytes.pointer + header.sh_offset, total * sizeof(Elf64_Rela));
+                uint64_t count = change == 0 ? total - j : total;
+                Elf64_Rela* changed = &entries[j];
+                const uint32_t index = (uint32_t)ELF64_R_SYM(changed->r_info);
+                const uint32_t type = ELF64_R_TYPE(changed->r_info);
+                uint64_t symbol_entry = 0;
+                uint64_t symbol_value = 0;
+                switch (change)
+                {
+                    case 1: changed->r_info = ELF64_R_INFO(index, R_X86_64_NONE); break;
+                    case 2: changed->r_info = ELF64_R_INFO(index, R_X86_64_PC32); break;
+                    case 3: changed->r_info = ELF64_R_INFO(index, R_X86_64_DTPOFF32); break;
+                    case 4: changed->r_offset = target.sh_size; break;
+                    case 5: changed->r_info = ELF64_R_INFO(symbols.count, type); break;
+                    case 6: symbol_entry = index; break;
+                    case 7: changed->r_info = ELF64_R_INFO(0, type); break;
+                    case 8:
+                        changed->r_info = ELF64_R_INFO(index, R_X86_64_32);
+                        changed->r_addend += 1ll << 32;
+                        break;
+                    case 9: changed->r_offset = j != 0 ? entries[j - 1].r_offset + 2 : changed->r_offset; break;
+                    case 10: changed->r_offset = j != 0 ? entries[j - 1].r_offset - 4 : changed->r_offset; break;
+                    case 11: changed->r_addend = -changed->r_addend - 3; break;
+                    case 12: symbol_value = index; break;
+                    default: break;
+                }
+                memcpy(copy, bytes.pointer, bytes.length);
+                memset(copy + bytes.length, 0, place - bytes.length);
+                memcpy(copy + place, entries, count * sizeof(Elf64_Rela));
+                Elf64_Shdr moved = header;
+                moved.sh_offset = place;
+                moved.sh_size = count * sizeof(Elf64_Rela);
+                memcpy(copy + elf.section_offset + (uint64_t)relocation * sizeof(Elf64_Shdr), &moved, sizeof(moved));
+                if (symbol_entry != 0)
+                {
+                    const uint16_t extended = SHN_XINDEX;
+                    memcpy(copy + import_section_header(&elf, symbols.section).sh_offset + symbol_entry * sizeof(Elf64_Sym) + 6, &extended, sizeof(extended));
+                }
+                if (symbol_value != 0)
+                {
+                    // A symbol at a place in its section, as a section's symbols aren't.
+                    const uint64_t value = 8 + 4 * j;
+                    memcpy(copy + import_section_header(&elf, symbols.section).sh_offset + symbol_value * sizeof(Elf64_Sym) + 8, &value, sizeof(value));
+                }
+                const uint64_t length = place + count * sizeof(Elf64_Rela);
+                ForeignTestEdge edge;
+                bool same = foreign_test_edge(&edge, length);
+                if (same)
+                {
+                    memcpy(edge.end - length, copy, length);
+                    same = foreign_debug_test_twins(edge.end - length, length, relocation, (const uint8_t*)contents.pointer, target.sh_size);
+                }
+                foreign_test_edge_release(&edge);
+                char what[128];
+                snprintf(what, sizeof(what), "the relocation kernels agree: section %u, change %u, relocation %llu", relocation, change, (unsigned long long)j);
+                foreign_test_expect(tally, same, what, object);
+                runs += 1;
+            }
+        }
+    }
+    foreign_test_expect(tally, sections != 0, "the kernels' fixture has debug relocation sections", object);
+    printf("  relocation kernels: %u sections, %llu copies, each the vector path's run against the exact path's\n", sections, (unsigned long long)runs);
+}
+
 static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     ForeignTestTally tally = {
@@ -518,6 +721,7 @@ static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_c
     if (written)
     {
         foreign_debug_test_refusals(&tally, directory, system, arena);
+        foreign_debug_test_kernels(&tally, directory, arena);
     }
     return foreign_test_report(&tally);
 }

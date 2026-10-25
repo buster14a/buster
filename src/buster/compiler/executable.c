@@ -301,28 +301,25 @@ struct ExecutableDebug
 // it from the file (a PIE's at its base of 0: no dynamic relocation reaches a section that isn't loaded); or a
 // thread-local's offset in the TLS segment (DTPOFF32 and DTPOFF64) plus the addend. A reference whose target is 0 is
 // one to discarded code (a section that section GC dropped): it gets lld's tombstone, 0, or 1 in .debug_ranges and
-// .debug_loc, whose lists 0 would end. The bytes are the producer's, writable, and alive through executable_write; the
-// writer takes this or ExecutableDebug, not both.
+// .debug_loc, whose lists 0 would end. The references are columns, which a producer's vector paths fill a batch at a
+// time: each one's field's offset in its section, its addend, its target, its section's kind (the field's section is
+// EXECUTABLE_SECTION_DEBUG_INFO plus it) and its kind (EXECUTABLE_DEBUG_ABS64 and the others). The bytes are the
+// producer's, writable, and alive through executable_write with the columns; the writer takes this or ExecutableDebug,
+// not both.
 #define EXECUTABLE_DEBUG_ABS64 0
 #define EXECUTABLE_DEBUG_ABS32 1
 #define EXECUTABLE_DEBUG_DTPOFF32 2
 #define EXECUTABLE_DEBUG_DTPOFF64 3
 
-typedef struct ExecutableDebugRelocation ExecutableDebugRelocation;
-struct ExecutableDebugRelocation
-{
-    uint64_t offset;
-    int64_t addend;
-    SymbolId target;
-    uint8_t section;
-    uint8_t kind;
-};
-
 typedef struct ExecutableDebugSections ExecutableDebugSections;
 struct ExecutableDebugSections
 {
     String8 sections[BUSTER_EXECUTABLE_DEBUG_KINDS];
-    const ExecutableDebugRelocation* relocations;
+    const uint32_t* offsets;
+    const int64_t* addends;
+    const SymbolId* targets;
+    const uint8_t* section_kinds;
+    const uint8_t* kinds;
     uint64_t relocation_count;
 };
 
@@ -6651,12 +6648,13 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
 }
 
 // Whether a producer's debug sections (ExecutableDebugSections) are ones the writer takes: none with ExecutableDebug,
-// each section's bytes there when it has a length, which DWARF32's offsets reach, and the references' column there when
-// it has references.
+// each section's bytes there when it has a length, which DWARF32's offsets reach, and the references' columns there
+// when it has references.
 static bool executable_debug_sections_valid(const ExecutableOptions* options)
 {
     const ExecutableDebugSections* debug = options->debug_sections;
-    bool valid = debug == 0 || (options->debug == 0 && (debug->relocation_count == 0 || debug->relocations != 0));
+    const bool columns = debug != 0 && debug->offsets != 0 && debug->addends != 0 && debug->targets != 0 && debug->section_kinds != 0 && debug->kinds != 0;
+    bool valid = debug == 0 || (options->debug == 0 && (debug->relocation_count == 0 || columns));
     for (uint32_t kind = 0; valid && debug != 0 && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
     {
         valid = (debug->sections[kind].length == 0 || debug->sections[kind].pointer != 0) && debug->sections[kind].length < 0xfffffff0u;
@@ -6664,21 +6662,23 @@ static bool executable_debug_sections_valid(const ExecutableOptions* options)
     return valid;
 }
 
-// The value a debug section's reference gets (see ExecutableDebugSections), or false if it can't have one: a reference
+// The value debug section reference `r` gets (see ExecutableDebugSections), or false if it can't have one: a reference
 // outside its section, of an unknown kind or to a symbol the link hasn't, an ABS32 or DTPOFF32 whose value doesn't fit
 // 32 bits, or a DTPOFF to a symbol that isn't thread-local.
-static bool executable_debug_value(const Link* link, const ExecutableLayout* layout, const ExecutableDebugSections* debug, const ExecutableDebugRelocation* relocation,
-                                   uint64_t* value)
+static bool executable_debug_value(const Link* link, const ExecutableLayout* layout, const ExecutableDebugSections* debug, uint64_t r, uint64_t* value)
 {
-    const uint8_t kind = relocation->kind;
-    const SymbolId symbol = relocation->target;
+    const uint8_t kind = debug->kinds[r];
+    const SymbolId symbol = debug->targets[r];
+    const uint64_t offset = debug->offsets[r];
+    const int64_t addend = debug->addends[r];
+    const uint8_t section_kind = debug->section_kinds[r];
     const uint64_t width = kind == EXECUTABLE_DEBUG_ABS64 || kind == EXECUTABLE_DEBUG_DTPOFF64 ? 8 : 4;
-    const uint64_t length = relocation->section < BUSTER_EXECUTABLE_DEBUG_KINDS ? debug->sections[relocation->section].length : 0;
-    bool valid = kind <= EXECUTABLE_DEBUG_DTPOFF64 && symbol < link->symbols.count && relocation->offset <= length && width <= length - relocation->offset;
+    const uint64_t length = section_kind < BUSTER_EXECUTABLE_DEBUG_KINDS ? debug->sections[section_kind].length : 0;
+    bool valid = kind <= EXECUTABLE_DEBUG_DTPOFF64 && symbol < link->symbols.count && offset <= length && width <= length - offset;
     const AtomId atom = valid && symbol != 0 ? link->symbols.atom[symbol] : 0;
     const bool tls = atom != 0 && link_class_is_tls(link->atoms.class[atom]);
     const bool module_offset = kind == EXECUTABLE_DEBUG_DTPOFF32 || kind == EXECUTABLE_DEBUG_DTPOFF64;
-    const uint32_t section = EXECUTABLE_SECTION_DEBUG_INFO + relocation->section;
+    const uint32_t section = EXECUTABLE_SECTION_DEBUG_INFO + section_kind;
     uint64_t result = 0;
     if (valid && symbol == 0)
     {
@@ -6688,19 +6688,19 @@ static bool executable_debug_value(const Link* link, const ExecutableLayout* lay
     {
         // A weak thread-local defined nowhere is at offset 0, as GNU ld gives it.
         valid = tls || (atom == 0 && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE);
-        result = (tls ? link->atoms.address[atom] + link->symbols.value[symbol] - layout->sections[EXECUTABLE_SECTION_TDATA].address : 0) + (uint64_t)relocation->addend;
+        result = (tls ? link->atoms.address[atom] + link->symbols.value[symbol] - layout->sections[EXECUTABLE_SECTION_TDATA].address : 0) + (uint64_t)addend;
     }
     else if (valid && atom != 0)
     {
-        result = layout->base + link->atoms.address[atom] + link->symbols.value[symbol] + (uint64_t)relocation->addend;
+        result = layout->base + link->atoms.address[atom] + link->symbols.value[symbol] + (uint64_t)addend;
     }
     else if (valid && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE)
     {
-        result = link->symbols.value[symbol] + (uint64_t)relocation->addend;
+        result = link->symbols.value[symbol] + (uint64_t)addend;
     }
     else if (valid)
     {
-        result = layout->base + (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] + (uint64_t)relocation->addend;
+        result = layout->base + (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] + (uint64_t)addend;
     }
     valid = valid && (width == 8 || result <= UINT32_MAX);
     *value = result;
@@ -6716,16 +6716,15 @@ static void executable_debug_relocations(const Link* link, const ExecutableShare
     const Range64 range = lane_range(debug->relocation_count);
     for (uint64_t r = range.begin; r < range.end; r += 1)
     {
-        const ExecutableDebugRelocation* relocation = &debug->relocations[r];
         uint64_t value = 0;
-        if (executable_debug_value(link, layout, debug, relocation, &value))
+        if (executable_debug_value(link, layout, debug, r, &value))
         {
-            const uint64_t width = relocation->kind == EXECUTABLE_DEBUG_ABS64 || relocation->kind == EXECUTABLE_DEBUG_DTPOFF64 ? 8 : 4;
-            memcpy(shared->section_bytes[EXECUTABLE_SECTION_DEBUG_INFO + relocation->section] + relocation->offset, &value, width);
+            const uint64_t width = debug->kinds[r] == EXECUTABLE_DEBUG_ABS64 || debug->kinds[r] == EXECUTABLE_DEBUG_DTPOFF64 ? 8 : 4;
+            memcpy(shared->section_bytes[EXECUTABLE_SECTION_DEBUG_INFO + debug->section_kinds[r]] + debug->offsets[r], &value, width);
         }
         else
         {
-            executable_lane_fail(error, EXECUTABLE_ERROR_UNSUPPORTED, 0, relocation->target, 0);
+            executable_lane_fail(error, EXECUTABLE_ERROR_UNSUPPORTED, 0, debug->targets[r], 0);
         }
     }
 }
