@@ -84,7 +84,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             CheckProgramCode code = { 0 };
             CheckDataResult emitted_data = { 0 };
             const CheckProgram* program = &selection.program;
-            bool emitted = ready && check_program_emit(&code, program, &parser, &identifiers, selection.data.capacity, path == 0, &output, &bytes, &scratch, NULL, true) &&
+            bool emitted = ready && check_program_emit(&code, program, &parser, &identifiers, selection.data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, true) &&
                            check_data_publish(&selection.data, &types.table, &stream, program->object_symbols, program->object_count, &code.link, 0,
                                               &bytes, &scratch, &emitted_data) && link_check(&code.link) == LINK_ERROR_NONE;
             snprintf(description, sizeof(description), "%s: selected publication matches its supported object obligations", name);

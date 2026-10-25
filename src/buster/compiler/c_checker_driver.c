@@ -435,7 +435,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, verify);
+                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, NULL, verify);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
@@ -590,8 +590,10 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
 // PIE against the system's C runtime, which comes from its snapshot in the cache directory (imported and written there
 // when it is missing or stale) and which binding joins between the program's symbols and its atoms. A binding that finds
 // a piece of the snapshot damaged (BIND_ERROR_SNAPSHOT) discards the snapshot and emits once more from a fresh import.
+// With `debug` (-g), the executable carries DWARF: a unit of the program's functions with their source rows (#395,
+// c_check_debug.c).
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
-                                     Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify,
+                                     Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
                                      const CheckDriverLibraries* libraries, Arena* scratch)
 {
     char cache[PATH_MAX];
@@ -623,6 +625,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         };
         CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
         CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
+        CheckProgramRows rows = { 0 };
+        CheckDebug dwarf = { 0 };
         char name[256] = { 0 };
         valid = opened.error == RUNTIME_ERROR_NONE && imported == RUNTIME_ERROR_NONE && output.base != 0 && bytes.base != 0 && arena.base != 0;
         if (opened.error != RUNTIME_ERROR_NONE)
@@ -637,7 +641,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
-        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, verify))
+        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, debug ? &rows : NULL, verify))
         {
             valid = false;
             again = bind.error == BIND_ERROR_SNAPSHOT;
@@ -648,6 +652,14 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             else if (!again)
             {
                 check_driver_emission_failed(parser, pp, &code);
+            }
+        }
+        if (valid && debug)
+        {
+            valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);
+            if (!valid)
+            {
+                fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
             }
         }
         if (valid)
@@ -736,6 +748,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .path = { .pointer = (char*)output_path, .length = strlen(output_path) },
                     .entry = dynamic_global(&runtime, &bind, "_start"),
                     .dynamic = &dynamic,
+                    .debug = debug ? &dwarf.attach : NULL,
                     .exact = scalar,
                 },
             };
@@ -1144,8 +1157,8 @@ static int run_check_command(int count, char** arguments, bool executable)
                             CheckProgramSelection selected;
                             if (check_program_select(&selected, &program, &data, scalar, &output_arena, &scratch))
                             {
-                                result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types,
-                                                                 output != 0 ? output : "a.out", scalar, verify, &libraries, &scratch) ? 0 : 1;
+                                result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types, output != 0 ? output : "a.out", scalar, verify,
+                                                                 options.predefines.debug || options.predefines.debug_modules, &libraries, &scratch) ? 0 : 1;
                             }
                             else
                             {

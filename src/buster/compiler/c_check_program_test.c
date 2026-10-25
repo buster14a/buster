@@ -222,7 +222,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
                     input.report_count, stream.report_count, initializers.status, data.status, program.status, program.token);
         }
         CheckProgramLowered lower[2] = { 0 };
-        bool lowered = ready && check_program_lower(lower, &program, true, &output, &scratch) && check_program_lower(lower + 1, &program, false, &output, &scratch);
+        bool lowered = ready && check_program_lower(lower, &program, true, false, &output, &scratch) && check_program_lower(lower + 1, &program, false, false, &output, &scratch);
         snprintf(description, sizeof(description), "%s: both unit ABI batches lower to valid Tier0 functions", name);
         check_test_expect(test, lowered, description);
         if (ready && !lowered)
@@ -251,9 +251,27 @@ static void check_test_program_source(CheckTest* test, const char* source, const
             check_test_expect(test, check_test_program_function(lower[0].functions + b, lower[1].functions + b),
                               "complete typed function and ABI locations agree across unit batches");
         }
+        // With the entries' source tokens (#395): the same functions, and each entry's token, alike by both batches, one of
+        // the function's own, from its declaration to its closing brace.
+        CheckProgramLowered sourced[2] = { 0 };
+        const bool sources = lowered && check_program_lower(sourced, &program, true, true, &output, &scratch) &&
+                             check_program_lower(sourced + 1, &program, false, true, &output, &scratch);
+        check_test_expect(test, !lowered || sources, "lowering with the entries' source tokens succeeds as without them");
+        for (uint32_t b = 0; sources && b < program.body_count; b += 1)
+        {
+            const uint32_t count = sourced[0].functions[b].count;
+            const uint32_t closing = parser.tree.parents[program.bodies[b].opening];
+            bool own = check_test_program_function(lower[0].functions + b, sourced[0].functions + b) && count == sourced[1].functions[b].count &&
+                       memcmp(sourced[0].entry_tokens[b], sourced[1].entry_tokens[b], (uint64_t)count * sizeof(uint32_t)) == 0;
+            for (uint32_t e = 0; own && e < count; e += 1)
+            {
+                own = sourced[0].entry_tokens[b][e] >= program.bodies[b].declaration && sourced[0].entry_tokens[b][e] <= closing;
+            }
+            check_test_expect(test, own, "each entry's source token is the function's own, alike by both batches, which change nothing else");
+        }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
-        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, true) &&
+        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, true) &&
                              check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission);
         snprintf(description, sizeof(description), "%s: shared code/data Link emits through real ABI/Tier0/encoder consumers", name);
         check_test_expect(test, emitted, description);
@@ -331,7 +349,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                 CheckProgramLowered lowered = { 0 };
                 const uint64_t mark = output.length;
                 const CheckControl* controls = program.controls;
-                const bool lowered_ok = check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+                const bool lowered_ok = check_program_lower(&lowered, &program, path == 0, false, &output, &scratch);
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
                 if (!lowered_ok)
@@ -349,13 +367,13 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                     check_test_expect(test, !failed_ok && failed.status == CHECK_PROGRAM_RESOURCE && failed.controls == 0 && failed.bodies == 0 &&
                                            empty.length == 17 && scratch.length == 0, "program output exhaustion is atomic and preserves live prefixes");
                     CheckProgramLowered failed_lower = { 0 };
-                    const bool failed_lower_ok = check_program_lower(&failed_lower, &program, path == 0, &empty, &scratch);
+                    const bool failed_lower_ok = check_program_lower(&failed_lower, &program, path == 0, false, &empty, &scratch);
                     check_test_expect(test, !failed_lower_ok && failed_lower.status == CHECK_PROGRAM_RESOURCE && failed_lower.functions == 0 &&
                                            empty.length == 17 && scratch.length == 0, "unit ABI/lowering exhaustion is atomic");
                     CheckProgramCode failed_code = { 0 };
                     const uint64_t emission_mark = output.length;
                     const bool failed_code_ok = check_program_emit(&failed_code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
-                                                                   &output, &empty, &scratch, NULL, true);
+                                                                   &output, &empty, &scratch, NULL, NULL, true);
                     check_test_expect(test, !failed_code_ok && failed_code.status == CHECK_PROGRAM_RESOURCE && failed_code.link.symbols.count == 0 &&
                                            failed_code.lowered.functions == 0 && output.length == emission_mark && empty.length == 17 && scratch.length == 0,
                                       "code byte exhaustion rolls back Link, ABI, atoms and bytes together");
@@ -395,7 +413,7 @@ static void check_test_program_refused(CheckTest* test)
         const CheckProgram program = { .status = CHECK_PROGRAM_INVALID };
         CheckProgramLowered lowered = { 0 };
         const bool ready = output.base != 0 && scratch.base != 0;
-        const bool lowered_ok = ready && check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+        const bool lowered_ok = ready && check_program_lower(&lowered, &program, path == 0, false, &output, &scratch);
         check_test_expect(test, ready && !lowered_ok && lowered.status == CHECK_PROGRAM_INVALID && lowered.functions == 0 && output.length == 0 && scratch.length == 0,
                           "a refused program without its stream or input lowers to nothing");
     }

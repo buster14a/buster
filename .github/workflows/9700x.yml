@@ -71,6 +71,7 @@ jobs:
       ir_lowering: ${{ steps.files.outputs.ir_lowering }}
       ir_optimize: ${{ steps.files.outputs.ir_optimize }}
       checker: ${{ steps.files.outputs.checker }}
+      check_debug: ${{ steps.files.outputs.check_debug }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
       - name: Check out the triggering commit and its parents
@@ -84,7 +85,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker)
+          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker check_debug)
           # The sources each module's conditioned benchmark samples measure, under src/buster/compiler/.
           declare -A sources=(
               [zen5]='x86_zen5[a-z_]*'
@@ -95,6 +96,7 @@ jobs:
               [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_benchmark'
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
               [checker]='c_check[a-z_]*'
+              [check_debug]='c_check_debug[a-z_]*|c_check_program_emit|c_check_program_lower|debug|tier0'
           )
           # The plain benchmarks, each by the name its commands take after benchmark- or measure-, and the sources it
           # measures: `unit:FILE`, the translation unit of its own whose includes it measures, or for one in main.c's
@@ -133,6 +135,7 @@ jobs:
               [checker]='unit:c_checker_benchmark.c'
               [checker-source]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
               [checker-bindings]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
+              [check-debug]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|branch_sizing|calling_convention|debug|foreign_test|lane|link|object_writer|tier0|x86_64_encoder|x86_semantics|x86_target'
               [backend]='unit:tier0_benchmark.c'
               [unwind]='unwind[a-z_]*|debug[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
               [streaming]='streaming[a-z_]*|unwind[a-z_]*|debug|executable|link[a-z_]*|object_writer[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
@@ -388,6 +391,9 @@ jobs:
           ./build/compiler test-checker-driver --executable ./build/compiler
           == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
           ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
+          == Test the C driver's source rows and DWARF
+          # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb.
+          ./build/compiler test-check-debug --cross-check
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins
           ./build/compiler test-builtin-intrinsic-types
@@ -1115,6 +1121,21 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only scalar "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
+
+      - name: Benchmark the C driver's source rows
+        # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g
+        # adds to the emission, after both paths agree.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-debug,')
+        run: |
+          taskset -c 2 ./build/compiler benchmark-check-debug
+
+      - name: Benchmark the C driver's source rows in isolation and after scalar work
+        # Where `changes` doesn't rule it out (c_check_debug*.c, the emission and the lowering, debug.c and tier0.c).
+        if: needs.changes.outputs.check_debug != 'false'
+        run: |
+          taskset -c 2 ./build/compiler benchmark-check-debug --path scalar
+          taskset -c 2 ./build/compiler benchmark-check-debug --path vector
+          taskset -c 2 ./build/compiler benchmark-check-debug --path vector --after-scalar 200
 
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the

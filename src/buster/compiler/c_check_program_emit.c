@@ -45,10 +45,11 @@ struct CheckProgramCode
 };
 
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
-// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND.
+// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND. With
+// `rows`, each source body's raw source rows too (c_check_debug.c), from `output`.
 static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
-                               CheckProgramBinding* binding, bool verify)
+                               CheckProgramBinding* binding, CheckProgramRows* rows, bool verify)
 {
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -63,7 +64,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     }
     if (valid)
     {
-        valid = check_program_lower(&result->lowered, program, scalar, output, scratch);
+        valid = check_program_lower(&result->lowered, program, scalar, rows != NULL, output, scratch);
         if (!valid)
         {
             result->status = result->lowered.status;
@@ -227,6 +228,19 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->token = program->bodies[b].declaration;
         }
     }
+    // The raw rows' room: each body's entries, its prologue's and its epilogue's.
+    const uint64_t row_capacity = result->lowered.entries + 2 * (uint64_t)count;
+    if (rows != NULL)
+    {
+        *rows = (CheckProgramRows){ .capacity = valid && row_capacity <= UINT32_MAX - BUSTER_CHECK_DEBUG_SLACK ? (uint32_t)row_capacity : 0 };
+        rows->offsets = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+        rows->tokens = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+        rows->first = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        rows->counts = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        rows->sizes = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        rows->bodies = rows->capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+        valid = valid && rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0;
+    }
     const CheckProgramHelpers* helpers = &result->lowered.helpers;
     for (uint32_t h = 0; valid && h < helpers->count; h += 1)
     {
@@ -360,6 +374,22 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                                    scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, fixup_ends) :
                                             x86_encode(code->records, code->count, encoded, byte_capacity, 0, fixup_ends);
             valid = length >= 0;
+            if (valid && source_body && rows != NULL)
+            {
+                // Where each entry's code starts, now that the branches are sized: the record count's offset is the end.
+                offsets[code->count] = (uint32_t)length;
+                const uint32_t* tokens = result->lowered.entry_tokens[b];
+                const uint32_t declaration = program->bodies[b].declaration;
+                const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
+                rows->first[b] = rows->count;
+                rows->counts[b] = scalar ? check_debug_rows_scalar(code->entry_records, tokens, code->entry_count, offsets, (uint32_t)length, declaration, closing,
+                                                                    rows->offsets + rows->count, rows->tokens + rows->count) :
+                                           check_debug_rows(code->entry_records, tokens, code->entry_count, offsets, (uint32_t)length, declaration, closing,
+                                                            rows->offsets + rows->count, rows->tokens + rows->count);
+                rows->sizes[b] = (uint32_t)length;
+                rows->bodies[b] = offsets[code->entry_records[0]];
+                rows->count += rows->counts[b];
+            }
             if (valid)
             {
                 const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length;
@@ -395,6 +425,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         arena_pop_to(output, mark);
         arena_pop_to(bytes, byte_mark);
         *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason };
+        if (rows != NULL)
+        {
+            *rows = (CheckProgramRows){ 0 };
+        }
     }
     arena_pop_to(scratch, temporary);
     return valid;

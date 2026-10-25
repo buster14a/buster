@@ -320,7 +320,9 @@ designs and the compilers already built this way.
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`. `./build/compiler parse
+  checking every function's records with `x86_validate`, and `-g` attaching
+  DWARF of its functions' source lines (`c_check_debug.c`, #395; `-c -g`
+  writes no DWARF yet). `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -547,8 +549,20 @@ designs and the compilers already built this way.
   perf; `benchmark-debug` measures validation through address finalization.
   [The debug guide](docs/debug.md) records the contract, units written after
   others (`DebugOutput.bases`), whose four offsets point at their own
-  contributions, and the source-row production still pending; `streaming.c`
-  makes a unit per 256 functions as they compile.
+  contributions, and a function's body's row (`DebugFunction.prologue_end`);
+  `streaming.c` makes a unit per 256 functions as they compile.
+- `src/buster/compiler/c_check_debug.c` is the C driver's `-g` (#395): each
+  typed entry's code start after branch sizing (`Tier0Code.entry_records`) and
+  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`) make
+  `check_program_emit`'s raw rows, the driver maps their tokens to presumed
+  lines as the diagnostics place them, bounded per function by its
+  declaration's and closing brace's places, and keeps a row per change of line
+  in the function's file, and the body's start; each pass a vector path with
+  an exact twin (`--scalar`). `test-check-debug [--cross-check]` checks the
+  twins at `PROT_NONE` pages, the lines against `pp_presumed` on fixtures and
+  generated programs, and with `--cross-check` the executable through
+  `llvm-dwarfdump --verify` and gdb. [The debug guide](docs/debug.md) ("The C
+  driver's `-g`") has the details.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
@@ -797,7 +811,8 @@ designs and the compilers already built this way.
   positions, which give their function a frame pointer. An optional per-unit
   access column reaches the symbols a unit doesn't define through their GOT
   slots, and thread-locals by local-exec or initial-exec. The output is
-  the records with #144's branch columns and `LinkReference`s. `tier0_compile`
+  the records with #144's branch columns, `LinkReference`s and each entry's
+  first record (`entry_records`, for source rows). `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its

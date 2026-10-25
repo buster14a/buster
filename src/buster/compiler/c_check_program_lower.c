@@ -15,6 +15,10 @@ struct CheckProgramLowered
     CheckProgramHelpers helpers;
     SymbolId errno_symbol;
     TypeId errno_pointer_type;
+    // Each function's entries' source tokens (the parser's), when check_program_lower is asked for them: entry e's, the
+    // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
+    // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
+    uint32_t** entry_tokens;
     uint32_t runtime_symbol_count;
     uint32_t count;
     CheckProgramStatus status;
@@ -66,6 +70,8 @@ struct CheckLowerTask
     CheckLowerTaskKind kind;
     uint32_t node;
     TypeId type;
+    // The source token current when the task was pushed, which its entries take (CheckLowerWriter.source).
+    uint32_t source;
     uint64_t value;
     bool address;
     bool initialized;
@@ -98,6 +104,8 @@ struct CheckLowerWriter
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* values;
+    // Each entry's source token (CheckProgramLowered.entry_tokens).
+    uint32_t* tokens;
     uint32_t* labels;
     uint32_t* label_heads;
     uint32_t* stack_parents;
@@ -142,6 +150,10 @@ struct CheckLowerWriter
     uint32_t miscellaneous_count;
     uint32_t floating_count;
     uint32_t token;
+    // The token whose lowering writes the next entries: an expression's node's, a statement's or an initializer part's,
+    // saved with each task pushed and restored when it runs, so that an operation's entry, written after its operands',
+    // takes its own node's token. `token`, which diagnostics name, is the last one set.
+    uint32_t source;
     uint32_t stack_head;
     uint32_t stack_count;
     bool reachable;
@@ -480,9 +492,11 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             {
                 writer->kinds[writer->count] = BUSTER_TYPED_CONST;
                 writer->classes[writer->count] = top;
+                writer->tokens[writer->count] = writer->source;
                 writer->values[writer->count++] = 0;
                 writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
                 writer->classes[writer->count] = top;
+                writer->tokens[writer->count] = writer->source;
                 writer->values[writer->count++] = 0;
             }
         }
@@ -495,6 +509,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             writer->kinds[writer->count] = kind;
             writer->classes[writer->count] = class;
             writer->values[writer->count] = value;
+            writer->tokens[writer->count] = writer->source;
             writer->count += 1;
         }
     }
@@ -504,6 +519,7 @@ static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
 {
     if (writer->depth < writer->capacity)
     {
+        task.source = writer->source;
         writer->tasks[writer->depth++] = task;
     }
     else
@@ -1245,6 +1261,9 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     const CheckStream* stream = writer->program->stream;
     const TypeTable* types = writer->program->types;
     const uint32_t callee = graph->operand0[node];
+    // The call's entries are its callee's line's, as GCC and clang place a call (the call's own node is its closing
+    // parenthesis, which a call across lines ends on).
+    writer->source = graph->tokens[callee];
     CheckValue value = stream->values[callee];
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
     bool mangled = false;
@@ -1795,6 +1814,7 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
             {
                 check_lower_track(writer, writer->kinds[i], writer->classes[i], writer->values[i]);
             }
+            writer->tokens[i] = writer->source;
             writer->count += 1;
         }
         if (labels[result.count] != BUSTER_CHECK_NONE)
@@ -2218,6 +2238,7 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     const TypeId type_b = stream->conversions[node].operands[1].type;
     const uint8_t class = check_lower_value_class(types, value.type);
     writer->token = graph->tokens[node];
+    writer->source = writer->token;
     const uint8_t value_kind = type_kind(types, type_strip_aligned(types, value.type));
     // A function, an array or an aggregate: its value is its address, which nothing loads through.
     const bool aggregate = check_lower_aggregate(types, value.type);
@@ -2676,6 +2697,7 @@ static void check_lower_drain(CheckLowerWriter* writer)
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         const CheckLowerTask task = writer->tasks[--writer->depth];
+        writer->source = task.source;
         if (task.kind == CHECK_LOWER_INSTRUCTION)
         {
             check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
@@ -2881,6 +2903,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
         {
             const CheckInitPart* write = &plan->parts[part];
             writer->token = write->token;
+            writer->source = write->token;
             if (object)
             {
                 check_lower_object_part(writer, control.target, part, local);
@@ -3066,6 +3089,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     const CheckControl control = program->controls[writer->body->first + index];
     check_lower_place(writer, index);
     writer->token = control.token;
+    writer->source = control.token;
     if (control.kind == CHECK_CONTROL_JUMP)
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
@@ -3243,7 +3267,8 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
     return calls;
 }
 
-static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, Arena* output, Arena* scratch)
+// With `sources`, each function's entries' source tokens too (CheckProgramLowered.entry_tokens).
+static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources, Arena* output, Arena* scratch)
 {
     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -3318,6 +3343,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);
+    BUSTER_CHECK_LOWER_COLUMN(tokens, uint32_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(labels, uint32_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(label_heads, uint32_t, track ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(stack_parents, uint32_t, track ? capacity : 1);
@@ -3366,7 +3392,9 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     uint32_t* local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
-    valid = valid && signatures != 0 && incoming != 0 && local_first != 0 && local_next != 0 && (program->body_count == 0 || lowered->functions != 0);
+    lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
+    valid = valid && signatures != 0 && incoming != 0 && local_first != 0 && local_next != 0 && (program->body_count == 0 || lowered->functions != 0) &&
+            (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -3428,6 +3456,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.body = program->bodies + b;
         writer.result = result;
         writer.token = body.declaration;
+        writer.source = body.declaration;
         writer.hidden = BUSTER_CHECK_NONE;
         writer.variadic = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
         writer.save_anchor = BUSTER_CHECK_NONE;
@@ -3577,6 +3606,8 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         const bool falls = writer.track ? writer.reachable || writer.label_heads[body.count] != BUSTER_CHECK_NONE :
                                           writer.count == 0 || writer.kinds[writer.count - 1] != BUSTER_TYPED_RETURN;
         check_lower_place(&writer, body.count);
+        // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer).
+        writer.source = program->parser->tree.parents[body.opening];
         for (uint32_t local = 0; local < writer.local_count; local += 1)
         {
             if (writer.indirect[local] == BUSTER_CHECK_LOWER_VLA_DECLARED)
@@ -3651,6 +3682,19 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
             BUSTER_CHECK_LOWER_COPY(call_result_objects, call_result_objects, uint32_t, writer.call_count);
         }
 #undef BUSTER_CHECK_LOWER_COPY
+        if (sources && lowered->status == CHECK_PROGRAM_OK)
+        {
+            uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)writer.count + 1);
+            if (tokens != 0)
+            {
+                memcpy(tokens, writer.tokens, (uint64_t)writer.count * sizeof(uint32_t));
+                lowered->entry_tokens[b] = tokens;
+            }
+            else
+            {
+                check_lower_fail(&writer, CHECK_PROGRAM_RESOURCE);
+            }
+        }
         // A variadic definition that starts its list has its incoming frame (Tier0Function.incoming_variadic): its own
         // call, which abi_assign gives below.
         incoming[b] = writer.save_anchor != BUSTER_CHECK_NONE;
