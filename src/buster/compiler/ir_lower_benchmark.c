@@ -73,10 +73,10 @@ static bool ir_lower_benchmark_generate(IrLowerBenchmarkCorpus* corpus, const Ti
         .expression_nodes = larger ? 30 : 6,
         .calls = true,
         .loops = true,
-        .floating = true,
+        .floating = !dynamic,
         .pointers = true,
         .defined = true,
-        .objects = objects,
+        .objects = objects && !dynamic,
         .vlas = dynamic,
     };
     const uint32_t programs = larger ? BUSTER_IR_LOWER_BENCHMARK_PROGRAMS : 1;

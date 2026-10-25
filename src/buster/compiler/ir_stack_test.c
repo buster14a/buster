@@ -420,7 +420,7 @@ static void ir_stack_test_calls(IrLowerTestTally* tally, Arena* input, Arena* ou
     arena_pop_to(input, mark);
 }
 
-static void ir_stack_test_faults(IrLowerTestTally* tally, Arena* input, Arena* scratch, Arena* execution)
+static void ir_stack_test_faults(IrLowerTestTally* tally, Arena* input, Arena* output, Arena* scratch, Arena* execution)
 {
     static const char* const sources[] = {
         "function () -> i64 {\nb0:\n  %0 = const.i64 0x10\n  %1 = alloca.ptr %0\n  %2 = load.i64 %1 align=16\n  %3 = ret.void %2\n}\n",
@@ -429,15 +429,23 @@ static void ir_stack_test_faults(IrLowerTestTally* tally, Arena* input, Arena* s
         "function () -> i64 {\nb0:\n  %0 = const.i64 0x0\n  %1 = alloca.ptr %0\n  %2 = ptrtoint.i64 %1\n  %3 = const.i64 0xf\n  %4 = and.i64 %2, %3\n  %5 = ret.void %4\n}\n",
         "function () -> i1 {\nb0:\n  %0 = stack_save.i64\n  %1 = stack_save.i64\n  %2 = stack_restore.void %0\n  %3 = stack_restore.void %1\n  %4 = icmp.i1 %0, %1 eq\n  %5 = ret.void %4\n}\n",
         "function () -> i1 {\nb0:\n  %0 = const.i64 0x0\n  %1 = alloca.ptr %0\n  %2 = stack_save.i64\n  %3 = alloca.ptr %0\n  %4 = icmp.i1 %1, %3 eq\n  %5 = stack_restore.void %2\n  %6 = ret.void %4\n}\n",
+        "function () -> i64 {\n  slot $0 size=32 align=16 type=void flags=0x01\nb0:\n  %0 = stack_addr.ptr $0\n  %1 = const.i64 0x49\n  %2 = store.void %0, %1 align=16\n  %3 = stack_save.i64\n  %4 = const.i64 0x10\n  %5 = alloca.ptr %4\n  %6 = store.void %5, %1 align=16\n  %7 = stack_restore.void %3\n  %8 = load.i64 %0 align=16\n  %9 = ret.void %8\n}\n",
+        "function () -> i64 {\nb0:\n  %0 = const.i64 0x10\n  %1 = alloca.ptr %0\n  %2 = const.f64 0x3ff8000000000000\n  %3 = store.void %1, %2 align=16\n  %4 = load.f64 %1 align=16\n  %5 = bitcast.i64 %4\n  %6 = ret.void %5\n}\n",
     };
-    static const InterpreterStatus statuses[] = { INTERPRETER_UNDEFINED, INTERPRETER_MEMORY, INTERPRETER_INVALID, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK };
+    static const InterpreterStatus statuses[] = { INTERPRETER_UNDEFINED, INTERPRETER_MEMORY, INTERPRETER_INVALID, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_OK };
+    static const uint64_t values[] = { 0, 0, 0, 0, 1, 1, 73, UINT64_C(0x3ff8000000000000) };
     const uint64_t mark = input->length;
     for (uint32_t c = 0; c < sizeof(sources) / sizeof(sources[0]); c += 1)
     {
         IrFunction function = { 0 };
         if (ir_stack_test_parse(tally, sources[c], input, scratch, &function))
         {
-            ir_stack_test_execute(tally, &function, 0, c >= 4 ? 1 : 0, statuses[c], execution);
+            ir_stack_test_execute(tally, &function, 0, values[c], statuses[c], execution);
+            if (c >= 6)
+            {
+                ir_stack_test_consumers(tally, &function, 0, values[c], output, scratch, execution);
+                ir_stack_test_chain(tally, &function, 0, values[c], scratch, execution);
+            }
         }
         arena_pop_to(input, mark);
     }
@@ -558,7 +566,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
     arena_pop_to(&execution, 0);
     ir_stack_test_native_boundary(tally, &output, &twin, &scratch);
     ir_stack_test_calls(tally, &output, &twin, &scratch, &execution);
-    ir_stack_test_faults(tally, &output, &scratch, &execution);
+    ir_stack_test_faults(tally, &output, &twin, &scratch, &execution);
     if (ir_stack_test_parse(tally, ir_stack_test_loop, &output, &scratch, &function))
     {
         ir_stack_test_execute(tally, &function, 0, 0, INTERPRETER_OK, &execution);

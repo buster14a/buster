@@ -641,6 +641,7 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     uint64_t functions_seen = 0;
     uint64_t copies = 0;
     uint64_t objects = 0;
+    uint64_t stack_ops[3] = { 0 };
     for (uint32_t p = 0; ready && p < count; p += 1)
     {
         const uint64_t program_seed = seed + p;
@@ -665,6 +666,10 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
                 for (uint32_t i = 0; i < source->count; i += 1)
                 {
                     copies += source->kinds[i] == BUSTER_TYPED_COPY;
+                    if (tier0_moves_stack(source->kinds[i]))
+                    {
+                        stack_ops[source->kinds[i] - BUSTER_TYPED_ALLOCA] += 1;
+                    }
                 }
                 for (uint32_t l = 0; l < source->local_count; l += 1)
                 {
@@ -718,8 +723,12 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
     }
-    printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies\n", name,
-           functions_seen, entries, instructions, objects, copies);
+    if (options.vlas)
+    {
+        ir_lower_test_expect(tally, stack_ops[0] != 0 && stack_ops[1] != 0 && stack_ops[2] != 0, "generated execution covers all three stack operations", seed, count);
+    }
+    printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies; stack ops=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n", name,
+           functions_seen, entries, instructions, objects, copies, stack_ops[0], stack_ops[1], stack_ops[2]);
     tier0_tables_close(&tables);
     arena_release(&native);
     arena_release(&promoted);
@@ -1746,8 +1755,13 @@ static int run_ir_lower_tests(int argc, char** argv)
         objects.objects = true;
         ir_lower_test_programs(&tally, seed, count, values, "values");
         ir_lower_test_programs(&tally, seed, count, objects, "objects");
-        objects.vlas = true;
-        ir_lower_test_programs(&tally, seed, count, objects, "dynamic stack (shared IR interpreter / Tier 0 native)");
+        // Strict execution keeps undefined-byte checking enabled. Full representation COPY can include uninitialized
+        // struct padding, and the older generator's FP->integer cases include the documented CVTT oracle boundary.
+        // These are independent acceptance gaps, not grounds to weaken the dynamic storage checks.
+        Tier0ProgramOptions dynamic = values;
+        dynamic.vlas = true;
+        dynamic.floating = false;
+        ir_lower_test_programs(&tally, seed, count, dynamic, "dynamic stack (strict shared IR / Tier 0 native)");
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;
     }
