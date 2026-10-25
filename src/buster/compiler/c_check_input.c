@@ -3639,11 +3639,11 @@ static void check_input_complete_uses(CheckInputReader* reader)
 #include "c_check_binding.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
-// (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): check_lazy_system's rule, the expansion location's file and the line notes
-// before it, in one pass. The history runs are walked once, and only a run's first token follows its macro history.
-// A range's notes are walked again only for a location before the note that decided the last one, which tokens in
-// their locations' order (all of a file's but macros' around their arguments) never are.
-static void check_input_system_tokens(CheckInputReader* reader, const Preprocessor* pp, Arena* arena)
+// (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): the system level of each output token's expansion location, its file and the
+// line notes before it. The preprocessor gives every output token's level from the runs its main loop kept
+// (pp_system_levels), or by the expansion history: for --scalar, its twin, and for a unit whose runs can't say
+// (Preprocessor.system_runs_inexact), recording the history first if the unit put it off (pp_history_ensure).
+static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp, Arena* arena)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
@@ -3657,54 +3657,32 @@ static void check_input_system_tokens(CheckInputReader* reader, const Preprocess
     {
         system = pp->line_directives[i].system != BUSTER_PP_USER_FILE;
     }
+    const uint64_t mark = reader->scratch->length;
     uint8_t* tokens = system && pp->output.locations != NULL ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 64) : NULL;
-    reader->output->resource |= system && pp->output.locations != NULL && tokens == NULL;
-    if (tokens != NULL)
+    uint8_t* levels = tokens != NULL ? arena_push_array(reader->scratch, (uint64_t)pp->output.count + 1, sizeof(uint8_t), 64) : NULL;
+    reader->output->resource |= system && pp->output.locations != NULL && levels == NULL;
+    if (levels != NULL)
     {
-        uint32_t run = 0;
-        uint32_t output = 0;
-        uint32_t origin = 0;
-        uint32_t expansion = 0;
-        uint32_t range = BUSTER_PP_NONE;
-        uint32_t note = BUSTER_PP_NONE;
-        uint32_t applied = 0;
-        uint8_t classification = BUSTER_PP_USER_FILE;
+        if (parser->options.scalar || pp->system_runs_inexact)
+        {
+            pp_history_ensure(pp);
+            pp_system_levels_history(pp, levels);
+        }
+        else
+        {
+            pp_system_levels(pp, levels);
+        }
         for (uint32_t token = 0; token < count; token += 1)
         {
             const uint32_t source = parser->tokens.sources[token];
-            run = source < output ? 0 : run;
-            output = source;
-            while (run < pp->history_run_count && pp->history_runs[run].token <= source)
-            {
-                run += 1;
-            }
-            const uint32_t run_origin = run != 0 && source < pp->output.count ? pp->history_runs[run - 1].origin : 0;
-            if (run_origin != 0 && run_origin != origin)
-            {
-                expansion = check_lazy_expansion_location(pp, source, run_origin);
-            }
-            origin = run_origin;
-            const uint32_t location = origin != 0 ? expansion : source < pp->output.count ? pp->output.locations[source] : 0;
-            const bool inside = range < pp->range_count && location >= pp->ranges[range].base && location - pp->ranges[range].base < pp->ranges[range].length;
-            if (!inside || location < applied)
-            {
-                range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
-                classification = range < pp->range_count ? pp->ranges[range].system : BUSTER_PP_USER_FILE;
-                note = range < pp->range_count ? pp->ranges[range].first_line_directive : BUSTER_PP_NONE;
-                applied = range < pp->range_count ? pp->ranges[range].base : 0;
-            }
-            while (note < pp->line_directive_count && pp->line_directives[note].location <= location)
-            {
-                classification = pp->line_directives[note].system;
-                applied = pp->line_directives[note].location;
-                note = pp->line_directives[note].next_in_range;
-            }
-            tokens[token] = range < pp->range_count && (classification == BUSTER_PP_SYSTEM_FILE || classification == BUSTER_PP_EXTERN_C_FILE);
+            const uint8_t level = source < pp->output.count ? levels[source] : BUSTER_PP_USER_FILE;
+            tokens[token] = level == BUSTER_PP_SYSTEM_FILE || level == BUSTER_PP_EXTERN_C_FILE;
         }
         tokens[count] = 0;
         graph->system_tokens = tokens;
         graph->system_token_count = count;
     }
+    arena_pop_to(reader->scratch, mark);
 }
 
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,

@@ -681,6 +681,19 @@ struct PPLineDirective
     uint8_t system;
 };
 
+// Where the output comes from, for the checker's system-header judgment (pp_system_levels): from output token `token`
+// on, the main loop reads range `range` (or BUSTER_PP_NONE) at system level `level` (as PPLineDirective.system), its
+// tokens there at or after `from` (a line note's location, or the range's base). A run starts at an inclusion's start
+// and end and at a line note.
+typedef struct PPSystemRun PPSystemRun;
+struct PPSystemRun
+{
+    uint32_t token;
+    uint32_t range;
+    uint32_t from;
+    uint8_t level;
+};
+
 // The output token at `token` and the ones after it come from the expansion of a macro whose name, at `location`,
 // was read from a file into the output (or none, until the next start): -E's line markers place such a token that
 // starts a line on the line of that name, as clang places a token by its expansion location. A start is recorded where
@@ -1146,6 +1159,13 @@ struct Preprocessor
     uint32_t location_top;
     PPLineDirective* line_directives;
     uint32_t line_directive_count;
+    // The runs of the output by where it comes from (PPSystemRun), in the arena; and whether a run started while an
+    // invocation or an expansion read before it was open, at another level, or the runs' room ran out: then only the
+    // history says where those tokens come from (pp_system_levels_history).
+    PPSystemRun* system_runs;
+    uint32_t system_run_count;
+    uint32_t system_run_capacity;
+    bool system_runs_inexact;
     // The starts of the expansions read from files into the output, by token (PPExpansionStart), and the location of the
     // name of the latest one.
     PPExpansionStart* expansion_starts;
@@ -5196,6 +5216,60 @@ static void pp_read_directive_comment(Preprocessor* pp, PPContext* context, uint
     }
 }
 
+// The output from here on comes from range `range` at system level `level`, its tokens there from location `from` on
+// (PPSystemRun). A run that starts at another level while an invocation is collecting, or an expansion read before it is
+// still being read, would give their tokens a level that isn't theirs, so the runs are then inexact; so are they when the
+// arena has no room for a run.
+static void pp_note_system_run(Preprocessor* pp, uint32_t range, uint32_t from, uint8_t level)
+{
+    const uint32_t count = pp->system_run_count;
+    const uint8_t previous = count != 0 ? pp->system_runs[count - 1].level : BUSTER_PP_USER_FILE;
+    const bool open = pp->invocation_count != 0 || (pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind != BUSTER_PP_CONTEXT_FILE);
+    const bool replaces = count != 0 && pp->system_runs[count - 1].token == pp->output.count;
+    if (!replaces && count == pp->system_run_capacity)
+    {
+        const uint32_t capacity = count != 0 ? count * 2 : 64;
+        PPSystemRun* grown = arena_push(&pp->arena, (uint64_t)capacity * sizeof(PPSystemRun), _Alignof(PPSystemRun));
+        if (grown != 0 && count != 0)
+        {
+            memcpy(grown, pp->system_runs, (uint64_t)count * sizeof(PPSystemRun));
+        }
+        pp->system_runs = grown != 0 ? grown : pp->system_runs;
+        pp->system_run_capacity = grown != 0 ? capacity : pp->system_run_capacity;
+    }
+    const bool room = replaces || count < pp->system_run_capacity;
+    pp->system_runs_inexact |= (open && level != previous) || !room;
+    if (room)
+    {
+        pp->system_runs[replaces ? count - 1 : count] = (PPSystemRun){
+            .token = pp->output.count,
+            .range = range,
+            .from = from,
+            .level = level,
+        };
+        pp->system_run_count = replaces ? count : count + 1;
+    }
+}
+
+// After a file context ended: the output comes from the innermost file context left, at its range's latest line note,
+// or at its start (pp_note_system_run).
+static void pp_note_file_run(Preprocessor* pp)
+{
+    uint32_t c = pp->context_count;
+    while (c != 0 && pp->contexts[c - 1].kind != BUSTER_PP_CONTEXT_FILE)
+    {
+        c -= 1;
+    }
+    if (c != 0)
+    {
+        const uint32_t range = pp->contexts[c - 1].range;
+        const uint32_t note = pp->ranges[range].last_line_directive;
+        const bool noted = note != BUSTER_PP_NONE;
+        pp_note_system_run(pp, range, noted ? pp->line_directives[note].location : pp->ranges[range].base,
+                           noted ? pp->line_directives[note].system : pp->ranges[range].system);
+    }
+}
+
 BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
@@ -5225,6 +5299,10 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
         pp->datas[pp->files[context->file].data].guarded |= context->guard_taken;
     }
     pp->context_count -= 1;
+    if (context->kind == BUSTER_PP_CONTEXT_FILE)
+    {
+        pp_note_file_run(pp);
+    }
     if (context->kind == BUSTER_PP_CONTEXT_FILE && pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind == BUSTER_PP_CONTEXT_FILE)
     {
         // Back after the #include's line.
@@ -10106,6 +10184,7 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
             context->conditional_base = pp->conditional_count;
             pp->file_change_token = pp->output.count;
             pp->file_change_location = pp->ranges[range].base;
+            pp_note_system_run(pp, range, pp->ranges[range].base, pp->ranges[range].system);
             pp->include_depth += pp->context_count > 1;
         }
     }
@@ -11167,6 +11246,7 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
             record->first_line_directive = index;
         }
         record->last_line_directive = index;
+        pp_note_system_run(pp, range, location, pp->line_directives[index].system);
     }
 }
 
@@ -15682,6 +15762,162 @@ static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* byt
     const bool result = pp_preprocess_source(pp, name, bytes, length);
     pp_history_report(pp, result);
     return result && !pp->fatal;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// System headers
+
+// A place in the ranges and their line notes for locations that mostly increase: the range found last, its next line
+// note, the location the level was last set at, and that level (pp_system_level_next).
+typedef struct PPLevelCursor PPLevelCursor;
+struct PPLevelCursor
+{
+    uint32_t range;
+    uint32_t note;
+    uint32_t applied;
+    uint8_t level;
+};
+
+// The system level (BUSTER_PP_USER_FILE, BUSTER_PP_SYSTEM_FILE or BUSTER_PP_EXTERN_C_FILE) at `location`: its range's at
+// its inclusion's start, then its line notes' up to it; a place in no range (0) is a user file's. The cursor starts from
+// where it was when `location` is in its range at or after the last note it applied, and looks the range up otherwise.
+static uint8_t pp_system_level_next(const Preprocessor* pp, PPLevelCursor* cursor, uint32_t location)
+{
+    const PPRange* range = cursor->range < pp->range_count ? &pp->ranges[cursor->range] : 0;
+    const bool inside = range != 0 && location >= range->base && location - range->base < range->length;
+    if (!inside || location < cursor->applied)
+    {
+        cursor->range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+        const bool found = cursor->range < pp->range_count;
+        cursor->level = found ? pp->ranges[cursor->range].system : BUSTER_PP_USER_FILE;
+        cursor->note = found ? pp->ranges[cursor->range].first_line_directive : BUSTER_PP_NONE;
+        cursor->applied = found ? pp->ranges[cursor->range].base : 0;
+    }
+    while (cursor->note < pp->line_directive_count && pp->line_directives[cursor->note].location <= location)
+    {
+        cursor->level = pp->line_directives[cursor->note].system;
+        cursor->applied = pp->line_directives[cursor->note].location;
+        cursor->note = pp->line_directives[cursor->note].next_in_range;
+    }
+    return cursor->range < pp->range_count ? cursor->level : BUSTER_PP_USER_FILE;
+}
+
+// pp_system_level_next for one location.
+static uint8_t pp_system_level_at(const Preprocessor* pp, uint32_t location)
+{
+    PPLevelCursor cursor = {
+        .range = BUSTER_PP_NONE,
+        .note = BUSTER_PP_NONE,
+    };
+    return pp_system_level_next(pp, &cursor, location);
+}
+
+// Expansion location, including argument forwarding and generated tokens, determines where a definition was written: a
+// macro defined in a system header but invoked in ordinary source isn't in a system header. `origin` is output token
+// `token`'s (pp_history_at's): the place is the begin of the outermost expansion it came from, or the anchor of a paste
+// or stringification, or for an argument read from a file, the token's own location. Returns 0 when its history doesn't
+// lead to a location.
+static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    bool valid = token < pp->output.count && pp->output.locations != 0;
+    uint32_t location = valid ? pp->output.locations[token] : 0;
+    const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
+        {
+            valid = index < pp->substitution_count;
+            origin = valid ? pp->substitutions[index].source : 0;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED)
+        {
+            valid = index < pp->generated_count;
+            location = valid ? pp->generated[index].anchor : location;
+            origin = valid ? pp->generated[index].expansion : 0;
+        }
+        else
+        {
+            valid = kind == 0 && index < pp->history_count;
+            location = valid ? pp->history[index].begin : location;
+            origin = valid ? pp->history[index].parent : 0;
+        }
+    }
+    valid &= origin == 0;
+    return valid ? location : 0;
+}
+
+// Every output token's system level, in `levels` (room for pp->output.count), by the expansion history: its expansion
+// location's (pp_expansion_location, followed once per run of one origin), or its own location's for a token no
+// expansion made. The history must be recorded (pp_history_ensure). This is pp_system_levels' twin, and the judgment
+// where the runs can't make it (pp->system_runs_inexact).
+static __attribute__((unused)) void pp_system_levels_history(const Preprocessor* pp, uint8_t* levels)
+{
+    PPLevelCursor cursor = {
+        .range = BUSTER_PP_NONE,
+        .note = BUSTER_PP_NONE,
+    };
+    uint32_t run = 0;
+    uint32_t origin = 0;
+    uint32_t expansion = 0;
+    for (uint32_t i = 0; i < pp->output.count; i += 1)
+    {
+        while (run < pp->history_run_count && pp->history_runs[run].token <= i)
+        {
+            run += 1;
+        }
+        const uint32_t run_origin = run != 0 ? pp->history_runs[run - 1].origin : 0;
+        expansion = run_origin != 0 && run_origin != origin ? pp_expansion_location(pp, i, run_origin) : expansion;
+        origin = run_origin;
+        levels[i] = pp_system_level_next(pp, &cursor, origin != 0 ? expansion : pp->output.locations[i]);
+    }
+}
+
+// Every output token's system level, in `levels` (room for pp->output.count), from the runs the main loop kept
+// (PPSystemRun), without the history. A token a macro made (BUSTER_PP_FROM_MACRO) has its run's: where the main loop read
+// the invocation it came from, which is its expansion location. Another has its own location's, its run's when it is in
+// the run's range at or after the run's start, as the file's text is, and otherwise looked up (pp_system_level_at). 64
+// tokens at a time: one compare finds the tokens a macro made, four the locations in the run's part of its range, and
+// the run's level is stored to all of them. Only for runs the main loop could make exactly (!pp->system_runs_inexact);
+// pp_system_levels_history is the twin.
+static __attribute__((unused)) void pp_system_levels(const Preprocessor* pp, uint8_t* levels)
+{
+    const PPTokens* out = &pp->output;
+    const __m512i made = _mm512_set1_epi8(BUSTER_PP_FROM_MACRO);
+    for (uint32_t r = 0; r <= pp->system_run_count; r += 1)
+    {
+        // The tokens before the first run, then each run's.
+        const PPSystemRun* run = r != 0 ? &pp->system_runs[r - 1] : 0;
+        const uint32_t begin = run != 0 ? run->token : 0;
+        const uint32_t end = r < pp->system_run_count ? pp->system_runs[r].token : out->count;
+        const bool ranged = run != 0 && run->range < pp->range_count;
+        const uint32_t from = ranged ? run->from : 0;
+        const uint32_t span = ranged ? pp->ranges[run->range].base + pp->ranges[run->range].length - from : 0;
+        const __m512i froms = _mm512_set1_epi32((int)from);
+        const __m512i spans = _mm512_set1_epi32((int)span);
+        const __m512i level = _mm512_set1_epi8((char)(run != 0 ? run->level : BUSTER_PP_USER_FILE));
+        for (uint32_t i = begin; i < end; i += 64)
+        {
+            const __mmask64 lanes = _bzhi_u64(~0ull, end - i < 64 ? end - i : 64);
+            const __mmask64 macro = _mm512_mask_test_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, out->flags + i), made);
+            uint64_t inside = 0;
+            for (uint32_t g = 0; g < 4; g += 1)
+            {
+                const __mmask16 group = (__mmask16)(lanes >> (16 * g));
+                const __m512i offsets = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(group, out->locations + i + 16 * g), froms);
+                inside |= (uint64_t)_mm512_mask_cmplt_epu32_mask(group, offsets, spans) << (16 * g);
+            }
+            _mm512_mask_storeu_epi8(levels + i, lanes, level);
+            uint64_t others = lanes & ~macro & ~inside;
+            while (others != 0)
+            {
+                const uint32_t k = (uint32_t)_tzcnt_u64(others);
+                levels[i + k] = pp_system_level_at(pp, out->locations[i + k]);
+                others &= others - 1;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
