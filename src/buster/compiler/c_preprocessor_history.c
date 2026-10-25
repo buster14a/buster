@@ -483,7 +483,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
     scratch_end(scratch);
 }
 
-static __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
 {
     va_list arguments;
     va_start(arguments, format);

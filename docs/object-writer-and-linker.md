@@ -4248,8 +4248,9 @@ barriers inside an operation.
 
 `benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
 output modes of `benchmark-executable` own teams. Each handler starts and
-stops its team in the translation unit that runs the operations: the split
-build's copies of `lane.c` have separate thread-local contexts. The ordinary
+stops its team in the translation unit that runs the operations: the
+benchmarks' units have thread-local contexts of their own, beside the one
+that `main.c`'s units share (`lane.c`). The ordinary
 preprocess/parse command still runs on one lane; the broader frontend work is
 tracked in [#149](https://github.com/buster14a/buster/issues/149).
 

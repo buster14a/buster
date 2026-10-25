@@ -84,6 +84,13 @@
 // CPU architecture dependent includes
 #include <immintrin.h>
 
+// The linkage of the linker's entry points that main.c's units compile in one of them, their home, and call there
+// (main.c), in the modules that build on this file (import.c, runtime.c, bind.c, executable.c, dynamic.c and
+// snapshot.c): a unit of its own, such as a benchmark's, has them static, as every other function there.
+#ifndef BUSTER_LINKER_ENTRY
+#define BUSTER_LINKER_ENTRY static
+#endif
+
 // ---------------------------------------------------------------------------------------------------------------------
 // API
 

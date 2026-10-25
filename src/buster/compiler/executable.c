@@ -144,7 +144,8 @@
 // places the prioritized array atoms and copies the ABI note with the C runtime, opens the output for every lane, and
 // writes the build ID and closes it. The output is byte-identical for every lane count.
 //
-// main.c includes this file after lane.c, x86_64_encoder.c and link.c, and its String8. Layout, in this order:
+// main.c includes this file after lane.c, x86_64_encoder.c and link.c, and its String8. executable_write takes
+// BUSTER_LINKER_ENTRY rather than static: main.c's units compile it in one unit alone (link.c). Layout, in this order:
 //   - API: the base, the chunks, ExecutableSection, ExecutableError, ExecutableWrite, ExecutablePhase,
 //     ExecutableDynamic, ExecutableRuntime, ExecutableOptions, ExecutableResult and executable_write's prototype.
 //   - The chunk hash: ExecutableHash, executable_hash_begin, executable_hash_bytes and executable_hash_end.
@@ -493,7 +494,7 @@ struct ExecutableResult
 // Every lane of the calling thread's group calls it, with the same arguments, and it returns once the file is written
 // and closed, with the same value on every lane: whether it succeeded. Lane 0 fills *result; read it after the call.
 // The link must have passed link_check, and must not change while it runs.
-static __attribute__((unused)) bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result);
+BUSTER_LINKER_ENTRY __attribute__((unused)) bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result);
 
 static uint64_t executable_align(uint64_t value, uint64_t alignment)
 {
@@ -6538,7 +6539,7 @@ static void executable_debug_sections(const Link* link, const ExecutableLayout* 
     }
 }
 
-static bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result)
+BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result)
 {
     const ExecutableSymbols selected = executable_symbol_list(options);
     const bool symbols = options->symbols != 0 || options->debug != 0;

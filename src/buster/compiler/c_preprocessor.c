@@ -51,8 +51,9 @@
 // counts (pp_count_lines), the keyword pass over the output (pp_resolve_keywords_range) and -E's printer
 // (pp_print_vector). docs/c-preprocessor.md ("Data-parallel design, piece by piece") has each one's 9700X comparison.
 //
-// main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c; every function is static. Layout, in
-// this order:
+// main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c; every function is static, but for the
+// entry points that take BUSTER_PREPROCESSOR_ENTRY, which main.c's units compile in one unit alone. Layout, in this
+// order:
 //   - API: PPOptions, PPTokens, the flags and internal kinds, PPStatistics, Preprocessor and the entry points.
 //   - Diagnostics, token stacks, location ranges and scratch spellings.
 //   - Files: PPFileData, PPFile, the file cache's records and paths (FileCache), the directive scan
@@ -92,6 +93,12 @@
 #include <immintrin.h>
 #include "c_builtin_catalog.c"
 #include "buster/compiler/x86_target.c"
+
+// The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
+// unit of its own, such as a benchmark's, has them static, as every other function here.
+#ifndef BUSTER_PREPROCESSOR_ENTRY
+#define BUSTER_PREPROCESSOR_ENTRY static
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -361,9 +368,9 @@ struct PPTokens
 
 typedef struct Preprocessor Preprocessor;
 
-static __attribute__((unused)) bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table);
-static __attribute__((unused)) bool pp_run(Preprocessor* pp, const char* main_path);
-static __attribute__((unused)) bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_run(Preprocessor* pp, const char* main_path);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length);
 static __attribute__((unused)) void pp_release(Preprocessor* pp);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1334,7 +1341,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
 
 // Prints "file:line:column: error: message" to stderr for `location` (0 for none): the presumed file and line, as #line
 // gives them, and the column. PPOptions.quiet only counts it.
-static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
+BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
 {
     if (!pp->options.quiet)
     {
@@ -15073,7 +15080,7 @@ static bool pp_initialize_time(Preprocessor* pp)
     return result;
 }
 
-static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
+BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
 {
     *pp = (Preprocessor){ 0 };
     pp->diagnostic_include_range = BUSTER_PP_NONE;
@@ -15466,7 +15473,7 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
 
 // Preprocesses the main file: the prelude (pp_run_prelude), then the file. The output is pp->output, with keywords'
 // kinds. Returns false if there were errors.
-static bool pp_run(Preprocessor* pp, const char* main_path)
+BUSTER_PREPROCESSOR_ENTRY bool pp_run(Preprocessor* pp, const char* main_path)
 {
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
@@ -15488,7 +15495,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
 
 // pp_run for a main file in memory, `length` bytes at `bytes`, named `name` (which must outlive the run), as clang names
 // its standard input <stdin>: test-preprocessor's fuzz runs give it the text clang reads.
-static bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
+BUSTER_PREPROCESSOR_ENTRY bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length)
 {
     bool result = pp_run_prelude(pp);
     const uint32_t file = result && !pp->fatal ? pp_virtual_file(pp, name, (const char*)bytes, length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
@@ -16706,7 +16713,7 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
 }
 
 // Prints the output as `-E` does: pp_print_vector, or pp_print_scalar for the scalar kernels.
-static bool pp_print(Preprocessor* pp, FILE* stream, bool markers)
+BUSTER_PREPROCESSOR_ENTRY bool pp_print(Preprocessor* pp, FILE* stream, bool markers)
 {
     return pp->vectorized ? pp_print_vector(pp, stream, markers) : pp_print_scalar(pp, stream, markers);
 }
@@ -17040,7 +17047,7 @@ static bool pp_own_option_with_value(const char* argument)
 
 // The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
 // the -o file (or null), `markers` false for -P. Returns false for an argument it doesn't know.
-static bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
+BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
 {
     bool result = true;
     const char** quote = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);

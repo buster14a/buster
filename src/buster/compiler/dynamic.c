@@ -19,7 +19,8 @@
 // startup takes it (dynamic_static_relr), and the static executable's ExecutableRuntime. A shared library's
 // (dynamic_shared_inputs) are a dynamic PIE's without the interpreter or the ABI note, with its soname.
 //
-// main.c includes this file after bind.c and executable.c.
+// main.c includes this file after bind.c and executable.c. dynamic_inputs takes BUSTER_LINKER_ENTRY rather than static:
+// main.c's units compile it in one unit alone (link.c).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -81,7 +82,7 @@ static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic*
 // Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`: the libraries the
 // link names with -l (Bind.libraries), in their order, each needed when a strong reference binds to it; then libc.so.6's,
 // then the loader's, as GCC's driver puts them on the line. False if the arena has no room for them.
-static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, const Runtime* runtime, const Bind* bind, Arena* arena)
+BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, const Runtime* runtime, const Bind* bind, Arena* arena)
 {
     const RuntimeLibraries* named = bind->libraries;
     const uint32_t named_count = named != 0 ? named->count : 0;

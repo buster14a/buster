@@ -330,11 +330,30 @@ designs and the compilers already built this way.
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
   clang emits no static function that only other units' branches reach. A new
-  command's branch names its unit. On the 9700X the units took 3.5 to 7.1 s
-  each (46.7 s in all), where `main.c` as one unit took 28.5 s (#270). The
-  build waits for its largest unit, so keep the units balanced: the types
-  unit, which had grown to hold the checker, took 2.5 times as long as any
-  other until it was split into the types, checker and checker builtins
+  command's branch names its unit. The modules that several units' commands
+  run compile in one unit alone, their home, which the others call (#270): the
+  lexer in the driver's unit, the preprocessor and the parser in the front
+  end's (but for the fragments' unit, which compiles a parser of its own with
+  the fragment sink), and the linker's modules (`import.c`, `runtime.c`,
+  `bind.c`, `dynamic.c`, `executable.c` and `snapshot.c`) in the dynamic PIEs'
+  unit. Their entry points that other units call take the module's macro
+  (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
+  `BUSTER_LINKER_ENTRY`) instead of `static`: `main.c` defines it as nothing
+  in the home, and elsewhere as an inline definition that is never inlined,
+  which clang doesn't emit, so that neither the entry point nor what only it
+  reaches compiles there; a unit without `main.c` (a benchmark's) gets
+  `static`. A command then runs in two units' copies of the code, so a home
+  must share no static variable with its callers' units: `main.c`'s units share
+  one lane context (`lane.c`), and `./build.sh check-call-graph` reports any
+  variable a command reaches in two units ("Call graph check"). A function to
+  home is a module's entry point that several units compile, coarse enough
+  that a call from another unit costs nothing, which keeps its state in its
+  arguments. On the 9700X the checker's unit, the longest, took 27.0 s alone
+  and all of the build's 40.0 s before the homes, which removed 13% of the
+  functions the units compile. The build waits for its largest unit, so keep
+  the units balanced: the
+  types unit, which had grown to hold the checker, took 2.5 times as long as
+  any other until it was split into the types, checker and checker builtins
   units. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
   one function that its optimizer takes superlinear time over.
@@ -347,9 +366,9 @@ designs and the compilers already built this way.
   `BUSTER_DEBUG_INFO=0` builds without `-g`, which took a fifth of the build's
   time; the 9700X job builds so, since nothing there reads it (clang's code
   then differs in a few functions' stack slots). The checker's unit takes
-  longest, and splitting it doesn't help: `check` and the default driver,
-  `test-checker`, and its other commands each reach the whole compiler, so a
-  unit for any one of them took 84 to 88% of its time (clang 18, locally).
+  longest: `check` and the default driver, `test-checker`, and its other
+  commands each reach the whole compiler, and before the homes a unit for any
+  one of them took 84 to 88% of its time (clang 18, locally).
   The executable is linked at a fixed address (`-no-pie`), from the same code:
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
@@ -1092,6 +1111,25 @@ each bounded by its depth argument. The 9700X job runs
 `test-call-graph` and the check after the build; the check, which captures the
 units' IR at once, takes about 2 s.
 
+The same command checks that no command splits a static variable between
+translation units, which the homes of `main.c`'s modules could do (`main.c`:
+a command runs in its own unit's code and in the homes of the modules it
+calls, each with its own copies of the static variables). From each command,
+each function that a unit's `main_command` calls or names, it walks every
+function and variable the command may reach: through calls, into other units
+as they resolve, and through the functions and variables that function bodies
+and variable initializers name (a function passed as a lane group's entry, a
+table of pointers), but not through quoted strings (inline assembly templates,
+section names). A variable that is a unit's own (`internal` or `private`) and
+`global` rather than `constant`, reached in two units' copies by the same name,
+is reported once, at the first command that splits it: `split state:
+unit.ll:command reaches a.ll:name from a.ll:function, and b.ll:name from
+b.ll:function`, and fails the check. A variable that units share (defined in
+one and declared in the others, as `lane.c`'s thread context) is never split.
+A home's function that splits one is one to compile in every unit again, or
+whose module's state its units must share. The summary line counts the split
+variables.
+
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
 on IR of the call forms clang writes and of what must be left out, a
 self-call, a two-function cycle, a cycle with a chord (whose path must be the
@@ -1104,7 +1142,14 @@ strong definition elsewhere, in both orders, replaced weak bodies, two units' co
 allowed by one entry, a cycle grown past its entry with an unused entry, a
 cycle through two units' static functions of the same name that entries naming
 it once mustn't match, malformed IR, and a chain of a million functions and a
-ring of 100,000, deeper than a recursive walk's stack.
+ring of 100,000, deeper than a recursive walk's stack. Then the split-state
+walk: a table that the driver's unit writes and a home reads (split), each
+unit's own state (not), two commands each with its own unit's copy (not),
+copies reached through a function passed as an argument and through a constant
+table of pointers (split, each reported at its own command), a constant and a
+shared variable of one name in both units, and a variable that only an inline
+assembly template, a section's name and a quoted name spell (not), and a static
+function's thread-local static compiled in both units (split).
 
 ## Lexer tests
 
@@ -1758,10 +1803,11 @@ rounds and the random inputs.
 
 The command deliberately starts without a team so it can test both cold
 `lane_run` and explicit `lane_team_start`/`lane_team_stop` lifetimes. Do not
-wrap the main command dispatcher in a team: included copies of `lane.c` have
-separate thread-local contexts. Parallel command handlers own their team in
-the translation unit that runs their operations. An operation's phases stay
-direct calls within its whole-operation lane entry.
+wrap the main command dispatcher in a team: `main.c`'s units share one thread
+context, but the benchmarks' units, which the dispatcher also runs, have
+contexts of their own. Parallel command handlers own their team in the code
+that runs their operations. An operation's phases stay direct calls within its
+whole-operation lane entry.
 
 ## Deterministic output tests
 
