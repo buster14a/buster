@@ -451,10 +451,21 @@ makes its own; with one, the units and lanes that share it read each file once
   the files (`PPOptions.no_guard_skip`). On the 9700X (medians of three runs
   of 21 passes, CPU 2) it saves 0.2%: `sqlite3.c` takes 13.33 ms against
   13.36 ms, with 98 skips, and `main.c` 26.45 ms against 26.50 ms, with 512.
-- **Lines.** `pp_line_of` counts newlines (64 bytes at a time, with
-  popcounts) from a per-file cursor, because the preprocessor asks about later
-  places as it goes (`__LINE__`, diagnostics, line markers). Each file's lines
-  are counted about once.
+- **Lines.** `pp_line_of` counts newlines (64 bytes at a time, with popcounts)
+  from a per-file cursor, because the preprocessor asks about later places as it
+  goes (`__LINE__`, diagnostics, line markers). Each file's lines are counted
+  about once. For a file prepared a window at a time (two windows or more), the
+  lexer read those bytes long before, so `pp_prepare_windows` counts its line
+  ends while each window is in the caches, right after the window's directive
+  scan (`pp_count_page_lines`). It keeps the count before each 4 KB page
+  (`PPFileData.line_pages`), which a unit's data copies from the file cache's
+  record. A `\r\n` counts once, at its `\n`, also where a page or a window ends
+  between the two. The whole 64-byte blocks up to a page's end go by a popcount
+  of their `\n`s, a few instructions each; when one of them has a `\r`, they are
+  counted again exactly, a block at a time (`pp_count_block_lines`), and so is a
+  block that two windows share, in two parts. `pp_line_of` then counts from the
+  cursor when the cursor is on the place's page before the place, and from the
+  page's start otherwise: at most 4 KB per question.
 - **Memory.** Each column of the files' tokens has an arena of its own: kinds,
   starts and values. A file's columns are pushed for the lexer's bound, one
   token per byte, then trimmed to the tokens it has. Before this, the columns
@@ -1567,7 +1578,9 @@ batched lookups, generated-input lifetimes, growth of all eight initial slices,
 and recording-on/off token equality.
 
 `benchmark-preprocessor --history-cost [options] file...` interleaves the same
-vectorized preprocessor with recording enabled and disabled, reversing order
+vectorized preprocessor with recording enabled and with the history deferred
+(`PPOptions.defer_history`, which records none for a unit without diagnostics;
+until 2026-10-25 the control was `PPOptions.no_history`), reversing order
 each pass. It checks an output digest including spelling locations outside the
 timed interval. It reports retained record bytes per unit (mean and maximum)
 and temporary-origin high-water bytes separately. These are used bytes, not
@@ -1651,6 +1664,119 @@ EXCLUSIVE_OWNER=history-musl ~/buster-fast-bench/exclusive.sh \
     -I "$corpus/libc/musl/src/internal" -I "$corpus/musl-generated/obj/include" \
     -I "$corpus/libc/musl/include" "${history_inputs[@]}"
 ```
+
+### Deferred history
+
+A unit whose history only its diagnostics read records none while it runs.
+With `PPOptions.defer_history`, `pp_run` and `pp_run_source` run with recording
+off and their own diagnostics counted but not printed. A unit without
+diagnostics never needs its history. A unit with any is preprocessed again at
+its end, with history, into a preprocessor of its own (in an arena of its own)
+that shares the unit's options, file cache, intern table and time (`__DATE__`,
+`__TIME__`, `__TIMESTAMP__`). That replay prints the diagnostics, notes and
+all, as the unit's own run would have, and the unit takes its history, which
+lives until `pp_release`. `pp_history_ensure` records it the same way, quietly,
+when a reader asks for it later: `pp_diagnose_output` and the parser's
+diagnostics (`parse_print_diagnostics`) call it. The replay must be the run
+again: its result, its errors, warnings and fatal error, and its output, token
+for token. One that isn't (it ran out of memory for its history, say, which an
+empty output wouldn't show), or can't be made, leaves the unit without history;
+a fatal error says so, and `pp_run` and `pp_run_source` return false, as do
+the drivers' statuses (`parse` checks the preprocessor's fatal error after its
+own diagnostics, which may have recorded the history). It takes the files the
+run read from the cache the run filled, as a later unit with that cache does.
+The unit preprocesses nothing more after its run.
+
+`-E`, `parse` and the checker's driver defer the history. The checker judges
+whether a token is in a system header by where its expansion is, as clang
+does, from runs the main loop keeps ("System levels" below); it records the
+history only for `--scalar`, whose judgment is the history's, for a unit whose
+runs can't say, and with `-flazy-system-headers`, which reads every
+declaration's history.
+
+`test-preprocessor` runs every case and file once more as the drivers run it,
+with the vectorized kernels, no expansion starts and the history deferred
+(`pp_test_deferred_history`). The stream, the counts of errors and warnings and
+the printed diagnostics must be the recording run's, byte for byte; once
+`pp_history_ensure` records the history, it must be the recording run's too,
+with nothing more printed. In the fuzz batch, the vectorized run as a compile
+runs it defers its history, which `pp_fuzz_kernels` records through
+`pp_run_source`'s replay and compares with the scalar twins' history.
+`test-parser`'s driver checks fail every reservation of `parse` and of `-E`
+in turn on two files with a warning, whose replays print it: one with code,
+and one of directives alone, whose output is empty, where the replay's history
+grows while it runs. Each failure must end with status 1 and a fatal error.
+
+Measured on the 9700X ([record](https://github.com/buster14a/buster-performance/blob/09c8fc3597bc310da2bea0fbc5ed1d6bde0ac63c/docs/measurements/preprocessor-history-replay-117-2026-10-25/README.md)), main at `7c428ce` against the
+replay's `a964539`. `benchmark-preprocessor --history-cost` on `sqlite3.c` gives
+5.761-5.797 ms of main loop and setup recording the history and 4.983-5.015 ms
+deferring it, 0.78 ms less, with 118.21 against 109.70 instructions per input
+token; on `main.c`, 25.548-25.690 against 21.144-21.207 ms. As whole processes
+(`time-runs` under `ab`), `-E` of `sqlite3.c` takes 19.653-19.707 ms where
+main's took 20.717-20.877, with 797 minor faults where main's had 1,012-1,014,
+and `parse -fsyntax-only` 18.671-18.965 ms where main's took 19.631-20.123.
+Recording the history costs what it did: both builds record the same history,
+and their times agree within two builds' placement noise.
+
+### System levels
+
+clang suppresses some warnings in system headers, judging each token by its
+expansion location: the place of the outermost macro invocation it came from,
+or for a token no macro made, its own. The checker needs that judgment for
+every token of a unit with a system header (`check_input_system_tokens`). The
+expansion history gives it: the walk from a token's origin to the place
+(`pp_expansion_location`), then the level of that place's range and its line
+notes (`pp_system_level_next`). Without the history, the main loop keeps runs of
+where the output comes from (`PPSystemRun`): from an output token on, the range
+it reads, the level there, and the location the range's part starts at. A run
+starts when a file is entered, when one ends, back in the file that included
+it, and at each line note (`#line`, a line marker, `#pragma GCC
+system_header`). A unit has a few hundred.
+
+The main loop reads an invocation in the file it writes the invocation's tokens
+from, so a token a macro made (`BUSTER_PP_FROM_MACRO`) has its run's level.
+Another token has its own location's: its run's when the location is in the
+run's part of its range, as the file's text is, and otherwise looked up.
+`pp_system_levels` does it 64 tokens at a time: a compare finds the tokens a
+macro made, four the locations in the run's part, the run's level is stored to
+all, and the few others are looked up. A run that changes the level while an
+invocation is collecting its arguments, or while an expansion read before the
+run is still being read, would give those tokens the wrong level. That needs a
+line note or a file's end among a macro's arguments, or a `_Pragma("GCC
+system_header")` from an expansion. The main loop then marks the runs inexact
+(`Preprocessor.system_runs_inexact`), and the checker records the history and
+judges by it.
+
+`pp_system_levels_history` keeps the history's judgment, which the checker made
+before the runs, as the twin. `test-preprocessor` compares the two paths on
+every output token of every case and file and of the fuzz batch, after checking
+that both kernels keep the same runs. On the repository's 53 translation units,
+10,194,926 output tokens are at a system level, 3,454,990 of them made by
+macros, and no unit is inexact. `sqlite3.c` has 53,292 at a system level and
+Lua's 34 files 187,066, all judged alike. The cases have one inexact unit, a
+system header that ends while an invocation collects its arguments. Five cases
+written by hand fix the levels of each output token for both paths: a system
+header's macros, pastes and stringifications in a user file and a user macro
+in the header, line markers, an `extern "C"` header's marker, `#pragma GCC
+system_header`, and a line marker among an invocation's arguments, whose runs
+must be inexact. A copy that judges macros' tokens by their own locations, one
+that never marks the runs inexact, one without the runs at a file's end, and
+one without the runs at line notes each fail `test-preprocessor`. The
+checker's corpus comparisons judge with the history on the scalar path and
+with the runs on the vector one, which must give the same tokens.
+
+Measured on the 9700X ([record](https://github.com/buster14a/buster-performance/blob/a9998a456d968efb525551703f7547e84b9e5a88/docs/measurements/preprocessor-system-levels-133-2026-10-25/README.md)) on `sqlite3.c`, which the checker
+accepts without a diagnostic:
+
+- **The checker's whole compile:** `-fsyntax-only` takes 147.310-147.784 ms
+  with the runs and the history deferred. #412's head, which records the
+  history, takes 149.530-149.954 ms. The peak resident set falls by about
+  2 MB, and the minor faults from about 1,780 to 1,415.
+- **`-E` and `parse`, which keep the runs too:** within noise of #412's
+  head, at 19.674-19.801 and 18.657-18.807 ms.
+- **The main loop:** 5.786-5.852 ms with the history recorded, against
+  #412's 5.817-5.865 ms, with 118.16 instructions per input token where
+  #412 has 118.21.
 
 ### Vectorized kernels and their scalar twins
 
@@ -2297,9 +2423,10 @@ of the run on CPU 2 and a counting build's census:
 - **The output columns' page faults: about 0.45 ms.** Each column ends in a 2
   MB huge page that the kernel clears whole: 12.25 MB are cleared for 7.07 MB of
   tokens.
-- **`__LINE__`: 0.1 to 0.35 ms.** `pp_line_of` (3% of the run) counts newlines
-  in bytes that left the caches long before. Counting them per window in
-  `pp_prepare_windows` comes next, agreed with #116.
+- **`__LINE__`: about 0.5 ms, as it turned out.** `pp_line_of` (3% of the run)
+  counted newlines in bytes that left the caches long before: an `-E` run's 218
+  questions about lines read about 7 MB of `sqlite3.c` again from memory. The
+  line pages ("Lines" above) took this away, agreed with #116.
 - **The rest, about 1.5 ms:** directives, object-like expansions, buffer runs
   and the context stack. The system headers' share of the main loop is about
   22%.
@@ -2311,12 +2438,30 @@ What 2 ms would take, each estimated from the numbers above:
 | No history in the main loop; a replay records it when a diagnostic or a consumer first needs it | 0.78 ms | A change to #108's contract |
 | The parser's input read from the file cache for file runs, rather than from the output | 0.5-0.8 ms | A change to the output's contract with the parser (#126, #335) |
 | A leaner expansion engine: compiled bodies, one pass over a macro's items rather than three, no origins per token | about 1.2 ms | Large; inside the preprocessor |
-| Line counts per window | 0.1-0.3 ms | After #408, with #116 |
+| Line counts by page while each window is in the caches | 0.5 ms, measured | Done (#439) |
 | Output columns that don't end in a mostly empty huge page | about 0.1 ms | |
 
 With all of them, about 3.2 ms. The rest needs preprocessing on more cores
 (#149), or another budget. On 2026-10-25 the owner chose to go on, history
 replay first.
+
+History replay is in ("Deferred history"). `-E`, `parse` and the checker's
+driver record no history for a unit without diagnostics, which takes
+`sqlite3.c`'s directive tables and main loop from 6.09-6.12 ms to 5.27-5.31 ms.
+The checker judges system headers' tokens from runs the main loop keeps,
+instead of the history ("System levels"). Its whole compile of `sqlite3.c`
+(`-fsyntax-only`) took 149.6-150.3 ms on main before #412 and takes
+147.3-147.8 ms.
+
+The line pages are in too (#439, [the
+record](https://github.com/buster14a/buster-performance/blob/69c5c334c7bdbd9cb29e9014f3eacda51f7e7ea5/docs/measurements/preprocessor-line-pages-117-2026-10-25/README.md)).
+With the history recorded, as the benchmark records it, `sqlite3.c`'s main loop
+took 5.889-5.926 ms on main and takes 5.380-5.405 ms, and its directive tables,
+which now count the line ends, 0.296-0.299 ms against 0.347-0.368 ms. Their sum
+went from 6.19-6.22 ms to 5.73-5.77 ms. As whole processes, `-E` of `sqlite3.c`
+took 19.86-19.94 ms and takes 19.38-19.47 ms, and `parse` 18.86-18.98 ms against
+18.10-18.38 ms. The instructions barely changed (118.16 and 118.02 per input
+token): what the old count cost was reading the file from memory again.
 
 ## Assembly output spacing
 
@@ -2405,11 +2550,10 @@ spellings alone would miss this change (#272).
 ## Next steps
 
 - **The main loop**, against #117's 2 ms: "The main loop against #117's budget"
-  above has where the time goes and the plan. Next is history replay: the main
-  loop records no history, and `pp_history_ensure` preprocesses the unit again,
-  with history, when a diagnostic or a consumer first needs it. Then the
-  parser's input for file runs from the file cache (to agree with #126's and
-  #335's owners), and a leaner expansion engine. #110's object-macro
+  above has where the time goes and the plan. History replay is in, for `-E`,
+  `parse` and the checker's driver ("Deferred history", "System levels"). Next,
+  the parser's input for file runs from the file cache (to agree with #126's
+  and #335's owners), and a leaner expansion engine. #110's object-macro
   eligibility cache was measured and rejected (see "Object-macro eligibility
   cache experiment" above).
 - **Clearing pages.** In a single run, prefaulting the arenas on another core

@@ -41,7 +41,7 @@
 
 #define BUSTER_TIER0_GENERATE_MAX_FUNCTIONS 64
 #define BUSTER_TIER0_GENERATE_MAX_GLOBALS 64
-#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 12
+#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 32
 #define BUSTER_TIER0_GENERATE_MAX_LOCALS 64
 #define BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS 16
 #define BUSTER_TIER0_GENERATE_EXPRESSION_NODES 128
@@ -196,6 +196,14 @@ struct Tier0ProgramOptions
     // until their scope ends (STACK_SAVE and STACK_RESTORE). A program without them is the same as before they
     // existed, seed for seed.
     bool vlas;
+    // Conversions between U64 and the floating classes. A program without them is the same as before they existed,
+    // seed for seed.
+    bool unsigned_floating;
+    // Values past Tier 0's depth tables (tier0_select_deep's deep slots): now and then a function of 13 to 32
+    // parameters, whose calls' later arguments are evaluated over the earlier ones, and expressions with room for
+    // BUSTER_TIER0_GENERATE_DEEP_ROOM values at once. A program without them is the same as before they existed, seed
+    // for seed.
+    bool deep;
 };
 
 typedef struct Tier0GeneratedFunction Tier0GeneratedFunction;
@@ -271,6 +279,8 @@ struct Tier0Program
     const Tier0Records* records;
     bool overflow;
     bool defined;
+    bool unsigned_floating;
+    bool deep;
 };
 
 // The C name of a class.
@@ -680,10 +690,10 @@ static void tier0_generate_leaf(const Tier0Program* program, const Tier0Scope* s
 }
 
 // A tree of at most `budget` nodes, of `class`, into `tree` (its root is node 0), whose evaluation needs at most `room`
-// slots of the value stack (the expressions a front end writes stay shallow; Tier 0 refuses one deeper than its depth
-// tables, until deep values spill). Top-down from a worklist: each item is a node to fill, with its class and its
-// room; an item becomes a leaf when the budget is spent or by chance, otherwise an operation whose children are new
-// items, a binary operation's right child with one slot less room (its left value waits on the stack).
+// slots of the value stack (the expressions a front end writes stay shallow: within Tier 0's depth tables, but with the
+// `deep` option, past them). Top-down from a worklist: each item is a node to fill, with its class and its room; an
+// item becomes a leaf when the budget is spent or by chance, otherwise an operation whose children are new items, a
+// binary operation's right child with one slot less room (its left value waits on the stack).
 static void tier0_generate_expression(const Tier0Program* program, const Tier0Scope* scope, uint64_t* state, Tier0ExpressionTree* tree, uint32_t class,
                                       uint32_t budget, bool floating, uint32_t room_slots, bool defined)
 {
@@ -741,13 +751,14 @@ static void tier0_generate_expression(const Tier0Program* program, const Tier0Sc
         }
         else if (choice < 52)
         {
-            // A conversion from another class (never between U64 and a floating class, which Tier 0 leaves out).
+            // A conversion from another class, between U64 and a floating class only with the option
+            // (Tier0ProgramOptions.unsigned_floating).
             uint32_t from = tier0_generate_class(state, floating);
-            const bool unsupported = (from == BUSTER_TYPED_CLASS_U64 && is_floating) || (wanted == BUSTER_TYPED_CLASS_U64 && tier0_class_floating(from));
+            const bool unsigned_floating = (from == BUSTER_TYPED_CLASS_U64 && is_floating) || (wanted == BUSTER_TYPED_CLASS_U64 && tier0_class_floating(from));
             // C's defined conversions to an integer from a floating value: of a short's value, into int or long.
             const bool into_wide = wanted == BUSTER_TYPED_CLASS_I32 || wanted == BUSTER_TYPED_CLASS_I64;
             const bool undefined = defined && tier0_class_floating(from) && !tier0_class_floating(wanted) && (!into_wide || tree->count + 2 > budget);
-            if (from != wanted && !unsupported && !undefined)
+            if (from != wanted && (!unsigned_floating || program->unsigned_floating) && !undefined)
             {
                 node->kind = BUSTER_TIER0_EXPRESSION_CONVERT;
                 child_classes[0] = (uint8_t)from;
@@ -1185,16 +1196,18 @@ static void tier0_print_expression(Tier0Program* program, const char* prefix, co
     }
 }
 
-// The stack slots a statement's expression may use: the integer depth table's, less what statements and calls hold.
+// The stack slots a statement's expression may use: the integer depth table's, less what statements and calls hold; and
+// with the `deep` option, past the tables.
 #define BUSTER_TIER0_GENERATE_ROOM 12
+#define BUSTER_TIER0_GENERATE_DEEP_ROOM 40
 
 // An expression of `class` into the stream and the C text, with `held` values already waiting on the stack.
 static void tier0_generate_value_of(Tier0Program* program, Tier0GeneratedFunction* function, const Tier0Scope* scope, uint64_t* state, uint32_t class,
                                     uint32_t budget, bool floating, const char* prefix, uint32_t held)
 {
     Tier0ExpressionTree tree;
-    tier0_generate_expression(program, scope, state, &tree, class, budget, floating, held < BUSTER_TIER0_GENERATE_ROOM ? BUSTER_TIER0_GENERATE_ROOM - held : 1,
-                              program->defined);
+    const uint32_t room = program->deep ? BUSTER_TIER0_GENERATE_DEEP_ROOM : BUSTER_TIER0_GENERATE_ROOM;
+    tier0_generate_expression(program, scope, state, &tree, class, budget, floating, held < room ? room - held : 1, program->defined);
     tier0_emit_expression(program, function, &tree);
     tier0_print_expression(program, prefix, &tree);
 }
@@ -2408,7 +2421,8 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     {
         state.record_temporaries[r] = UINT32_MAX;
     }
-    // The signature: up to 6 parameters mostly, and 7 to 12 one time in five, past the argument registers. With the
+    // The signature: up to 6 parameters mostly, and 7 to 12 one time in five, past the argument registers (with the
+    // `deep` option, 13 to 32 one time in four before that, past the depth tables). With the
     // `indirect` option, now and then an earlier function's, so that a pointer to a function can hold either. With
     // records (but for the entry), now and then a record's result, and parameters that are records, up to
     // BUSTER_TIER0_GENERATE_RECORD_PARAMETERS: objects in the scope. A record returned through a hidden pointer makes
@@ -2419,8 +2433,9 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     const uint32_t model_first = model != 0 ? model->first_local + (model->hidden ? 1u : 0u) : 0;
     const uint32_t parameters = model != 0 ? model->parameter_count - (model->hidden ? 1u : 0u)
                                 : entry   ? 3
-                                : tier0_generate_chance(random, 20) ? 7 + tier0_generate_below(random, 6)
-                                                                    : tier0_generate_below(random, 7);
+                                : options->deep && tier0_generate_chance(random, 25) ? 13 + tier0_generate_below(random, 20)
+                                : tier0_generate_chance(random, 20)                  ? 7 + tier0_generate_below(random, 6)
+                                                                                     : tier0_generate_below(random, 7);
     function->result_class = (uint8_t)(model != 0 ? model->result_class
                                        : entry   ? BUSTER_TYPED_CLASS_U64
                                        : tier0_generate_chance(random, 15) ? BUSTER_TYPED_CLASS_VOID
@@ -2896,6 +2911,8 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
     const uint32_t functions = options.functions < 1 ? 1 : options.functions > BUSTER_TIER0_GENERATE_MAX_FUNCTIONS ? BUSTER_TIER0_GENERATE_MAX_FUNCTIONS : options.functions;
     program->function_count = functions;
     program->defined = options.defined;
+    program->unsigned_floating = options.unsigned_floating;
+    program->deep = options.deep;
     // Every statement can hold a few expressions and a call's arguments.
     const uint64_t per_function = (uint64_t)(options.statements + 16) * (4 * options.expression_nodes + 64) + 512;
     program->entry_capacity = (uint32_t)(per_function * functions);

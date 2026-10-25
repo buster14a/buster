@@ -2509,6 +2509,74 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
+        // it; a prototype's ends with the prototype (#435).
+        {
+            "definition's parameter-list tag in its body",
+            "int f(struct T *p) { struct T *q = p; return q != 0; }\n",
+            false,
+            false
+        },
+        {
+            "body's definition completes its parameter-list tag",
+            "int f(struct T *p) { struct T { int x; }; return p->x; }\n",
+            false,
+            false
+        },
+        {
+            "body's forward declaration keeps its parameter-list tag",
+            "int f(struct T *p) { struct T; struct T *q = p; return q != 0; }\n",
+            false,
+            false
+        },
+        {
+            "inner block's forward declaration hides a parameter-list tag",
+            "int f(struct T *p) { { struct T;\n struct T *q = p; return q != 0; } }\n",
+            true,
+            false
+        },
+        {
+            "parameter-list tags of a bound and a typeof in the body",
+            "int f(int a[sizeof(struct V *)], typeof(struct W *) b, struct V *c) { struct V *v = c; struct W *w = b; return (v != 0) + (w != 0) + a[0]; }\n",
+            false,
+            false
+        },
+        {
+            "body's prototype names its parameter-list tag",
+            "int f(struct T *p) { int g(struct T *q);\n return g(p); }\n",
+            false,
+            false
+        },
+        {
+            "definition's parameter-list tag ends with its body",
+            "int f(struct T *p) { return p != 0; }\nstruct T *t;\nint g(void) { return f(t); }\n",
+            true,
+            false
+        },
+        {
+            "prototype's parameter-list tag ends with it",
+            "void g(struct S *p);\nint f(void) { struct S *q = 0; g(q); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "prototype's parameter-list tag isn't the file scope's",
+            "void g(struct S *p);\nstruct S { int x; };\nint f(void) { struct S s = { 1 }; g(&s); return s.x; }\n",
+            true,
+            false
+        },
+        {
+            "nested prototype's tag ends before the body",
+            "int f(struct T *p, int (*k)(struct U *)) {\n struct U *v = 0; return k(v) + (p != 0); }\n",
+            true,
+            false
+        },
+        {
+            "return type's prototype tag ends before the body",
+            "int (*f(struct T *p))(struct U *u) {\n struct T *q = p;\n struct U *v = 0;\n int (*k)(struct U *) = f(q);\n return k(v); }\n",
+            true,
+            false
+        },
     };
     enum
     {
@@ -2742,6 +2810,8 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_repair_test.c"
 
 static void check_test_source_benchmark(CheckTest* test);
+static void check_test_lowering_source_benchmark(CheckTest* test);
+static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
@@ -2845,6 +2915,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);
             check_test_source_benchmark(&test);
+            check_test_lowering_source_benchmark(&test);
+            check_test_corpus_symbol_reasons(&test, clang);
         }
         check_test_types_close(&types);
     }

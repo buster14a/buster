@@ -244,19 +244,43 @@ typedef enum ExecutableSection
     EXECUTABLE_SECTION_DEBUG_LINE,
     EXECUTABLE_SECTION_DEBUG_ADDR,
     EXECUTABLE_SECTION_DEBUG_RNGLISTS,
+    // The other DWARF sections a foreign object may have (ExecutableDebugSections), after debug.c's five.
+    EXECUTABLE_SECTION_DEBUG_STR_OFFSETS,
+    EXECUTABLE_SECTION_DEBUG_STR,
+    EXECUTABLE_SECTION_DEBUG_LINE_STR,
+    EXECUTABLE_SECTION_DEBUG_LOCLISTS,
+    EXECUTABLE_SECTION_DEBUG_ARANGES,
+    EXECUTABLE_SECTION_DEBUG_RANGES,
+    EXECUTABLE_SECTION_DEBUG_LOC,
+    EXECUTABLE_SECTION_DEBUG_FRAME,
+    EXECUTABLE_SECTION_DEBUG_MACRO,
+    EXECUTABLE_SECTION_DEBUG_MACINFO,
+    EXECUTABLE_SECTION_DEBUG_NAMES,
+    EXECUTABLE_SECTION_DEBUG_TYPES,
+    EXECUTABLE_SECTION_DEBUG_PUBNAMES,
+    EXECUTABLE_SECTION_DEBUG_PUBTYPES,
+    EXECUTABLE_SECTION_DEBUG_GNU_PUBNAMES,
+    EXECUTABLE_SECTION_DEBUG_GNU_PUBTYPES,
     EXECUTABLE_SECTION_SYMTAB,
     EXECUTABLE_SECTION_STRTAB,
     EXECUTABLE_SECTION_COUNT,
 } ExecutableSection;
 
 #define BUSTER_EXECUTABLE_DEBUG_SECTIONS 5
+// The DWARF sections, debug.c's five and the others, EXECUTABLE_SECTION_DEBUG_INFO onwards in that order: an
+// ExecutableDebugSections's kinds.
+#define BUSTER_EXECUTABLE_DEBUG_KINDS (EXECUTABLE_SECTION_SYMTAB - EXECUTABLE_SECTION_DEBUG_INFO)
 
-// One DWARF 5 contribution emitted by debug.c (info, abbrev, line, addr, rnglists in that order). The caller keeps all
-// slices alive and unchanged for executable_write; no padding is required. The writer copies the bytes, then patches
-// function addresses into .debug_addr[8 + 8*i] and .debug_line[line_addresses[i]]. Function ids describe ordinary TEXT
+// DWARF 5 units emitted by debug.c (info, abbrev, line, addr, rnglists in that order): each section's slice holds the
+// units' contributions one after another, in unit order, each unit after the first written at its contributions' places
+// in the slices (DebugOutput.bases), so that its header and DIE point at its own. `functions` and `line_addresses` are
+// the units' functions one unit after another, unit k having unit_functions[k] of them (unit_count 0: one unit of all
+// of them), and each line address is an offset in the whole .debug_line slice. The caller keeps all slices alive and
+// unchanged for executable_write; no padding is required. The writer copies the bytes, then patches each function's
+// address into its unit's .debug_addr contribution (unit k's starts at the earlier units' 8 + 8 * n bytes: function i
+// of it at that plus 8 + 8 * i) and into .debug_line[line_addresses[i]]. Function ids describe ordinary TEXT
 // definitions, not imports, IFUNCs or stubs. These addresses describe the definitions even if ELF interposition changes
-// references to them. The producer must match the emitted function order and sizes to these definitions. Different
-// contributions require section-offset rebasing before they can share this descriptor.
+// references to them. The producer must match the emitted function order and sizes to these definitions.
 typedef struct ExecutableDebug ExecutableDebug;
 struct ExecutableDebug
 {
@@ -264,6 +288,41 @@ struct ExecutableDebug
     const SymbolId* functions;
     const uint32_t* line_addresses;
     uint32_t function_count;
+    const uint32_t* unit_functions;
+    uint32_t unit_count;
+};
+
+// Debug sections a producer built whole, as a foreign link's are (foreign_debug.c, #395): each DWARF section's bytes by
+// kind (section EXECUTABLE_SECTION_DEBUG_INFO + kind, empty for none), its contributions one after another, each
+// section-relative reference among them resolved already, and the references whose values the layout decides, which
+// the writer patches into those bytes in place, whatever their fields held: an address (ABS64, and ABS32 that must fit
+// 32 bits) of a symbol's definition (its atom's place, not a stub's, an absolute symbol's value, or for a symbol
+// without a definition its reference: address 0 for a weak one defined nowhere), plus the addend, as a debugger reads
+// it from the file (a PIE's at its base of 0: no dynamic relocation reaches a section that isn't loaded); or a
+// thread-local's offset in the TLS segment (DTPOFF32, which must fit 32 signed bits, and DTPOFF64) plus the addend. A
+// reference whose target is 0 is one to discarded code (a section that section GC dropped): it gets lld's tombstone
+// (executable_debug_tombstone). The references are columns, which a producer's vector paths fill a batch at a
+// time: each one's field's offset in its section, its addend, its target, its section's kind (the field's section is
+// EXECUTABLE_SECTION_DEBUG_INFO plus it) and its kind (EXECUTABLE_DEBUG_ABS64 and the others). Each section's
+// alignment (`alignments`, 0 or 1 for none, else a power of two to 4096), its contributions' largest, places it in the
+// file and is its sh_addralign, as GNU ld and lld align an output section. The bytes are the producer's, writable, and
+// alive through executable_write with the columns; the writer takes this or ExecutableDebug, not both.
+#define EXECUTABLE_DEBUG_ABS64 0
+#define EXECUTABLE_DEBUG_ABS32 1
+#define EXECUTABLE_DEBUG_DTPOFF32 2
+#define EXECUTABLE_DEBUG_DTPOFF64 3
+
+typedef struct ExecutableDebugSections ExecutableDebugSections;
+struct ExecutableDebugSections
+{
+    String8 sections[BUSTER_EXECUTABLE_DEBUG_KINDS];
+    uint64_t alignments[BUSTER_EXECUTABLE_DEBUG_KINDS];
+    const uint32_t* offsets;
+    const int64_t* addends;
+    const SymbolId* targets;
+    const uint8_t* section_kinds;
+    const uint8_t* kinds;
+    uint64_t relocation_count;
 };
 
 // Optional regular symbol table, independent of DWARF. IDs are strictly increasing and remain valid through writing.
@@ -439,8 +498,10 @@ struct ExecutableOptions
     // For the static runtime, what it has besides: a static executable's that links the C runtime, or with `dynamic`
     // a static PIE's (dynamic.c's dynamic_static_pie_inputs fills both); 0 for one without, and for a dynamic PIE.
     const ExecutableRuntime* runtime;
-    // Optional caller-produced DWARF bytes, finalized with this layout and written outside the loaded segments.
+    // Optional caller-produced DWARF bytes, finalized with this layout and written outside the loaded segments: debug.c's
+    // units, or debug sections a producer built whole (a foreign link's), not both.
     const ExecutableDebug* debug;
+    const ExecutableDebugSections* debug_sections;
     const ExecutableSymbols* symbols;
     // For the tests: a dynamic PIE's passes by their exact twins, scalar, which must write the same file.
     bool exact;
@@ -1329,6 +1390,22 @@ static const char* const executable_section_names[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_DEBUG_LINE] = ".debug_line",
     [EXECUTABLE_SECTION_DEBUG_ADDR] = ".debug_addr",
     [EXECUTABLE_SECTION_DEBUG_RNGLISTS] = ".debug_rnglists",
+    [EXECUTABLE_SECTION_DEBUG_STR_OFFSETS] = ".debug_str_offsets",
+    [EXECUTABLE_SECTION_DEBUG_STR] = ".debug_str",
+    [EXECUTABLE_SECTION_DEBUG_LINE_STR] = ".debug_line_str",
+    [EXECUTABLE_SECTION_DEBUG_LOCLISTS] = ".debug_loclists",
+    [EXECUTABLE_SECTION_DEBUG_ARANGES] = ".debug_aranges",
+    [EXECUTABLE_SECTION_DEBUG_RANGES] = ".debug_ranges",
+    [EXECUTABLE_SECTION_DEBUG_LOC] = ".debug_loc",
+    [EXECUTABLE_SECTION_DEBUG_FRAME] = ".debug_frame",
+    [EXECUTABLE_SECTION_DEBUG_MACRO] = ".debug_macro",
+    [EXECUTABLE_SECTION_DEBUG_MACINFO] = ".debug_macinfo",
+    [EXECUTABLE_SECTION_DEBUG_NAMES] = ".debug_names",
+    [EXECUTABLE_SECTION_DEBUG_TYPES] = ".debug_types",
+    [EXECUTABLE_SECTION_DEBUG_PUBNAMES] = ".debug_pubnames",
+    [EXECUTABLE_SECTION_DEBUG_PUBTYPES] = ".debug_pubtypes",
+    [EXECUTABLE_SECTION_DEBUG_GNU_PUBNAMES] = ".debug_gnu_pubnames",
+    [EXECUTABLE_SECTION_DEBUG_GNU_PUBTYPES] = ".debug_gnu_pubtypes",
     [EXECUTABLE_SECTION_SYMTAB] = ".symtab",
     [EXECUTABLE_SECTION_STRTAB] = ".strtab",
 };
@@ -1366,6 +1443,22 @@ static const uint32_t executable_section_types[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_DEBUG_LINE] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_DEBUG_ADDR] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_DEBUG_RNGLISTS] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_STR_OFFSETS] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_STR] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_LINE_STR] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_LOCLISTS] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_ARANGES] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_RANGES] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_LOC] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_FRAME] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_MACRO] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_MACINFO] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_NAMES] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_TYPES] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_PUBNAMES] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_PUBTYPES] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_GNU_PUBNAMES] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_DEBUG_GNU_PUBTYPES] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_SYMTAB] = SHT_SYMTAB,
     [EXECUTABLE_SECTION_STRTAB] = SHT_STRTAB,
 };
@@ -1751,7 +1844,10 @@ struct ExecutableSegmentLayout
 #define BUSTER_EXECUTABLE_MAX_PROGRAM_HEADERS 12
 // Section headers: the null one, the sections with bytes or memory, and .shstrtab.
 #define BUSTER_EXECUTABLE_MAX_SECTION_HEADERS (EXECUTABLE_SECTION_COUNT + 2)
-#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 368
+// .shstrtab's bytes: room for every section's name with its NUL (594 bytes with its first NUL and its own name, the 50
+// names of executable_section_names; .iplt is shorter than .plt.got, which it replaces), which test-executable checks,
+// and which executable_lay_out refuses a layout past.
+#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 640
 
 // What every lane computes alike from the counts: where the sections, the segments and each bucket go.
 typedef struct ExecutableLayout ExecutableLayout;
@@ -1834,7 +1930,7 @@ struct ExecutableCounts
 // BUSTER_EXECUTABLE_MAX_TLS_BYTES. The atoms are at most BUSTER_EXECUTABLE_MAX_ATOM_BYTES each, so no sum of their
 // sizes wraps.
 static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts* counts, uint32_t lanes, uint64_t got_slots, bool dynamic, bool crt, bool runtime,
-                               const uint64_t* linker_bytes)
+                               const uint64_t* linker_bytes, const uint64_t* linker_alignments)
 {
     *layout = (ExecutableLayout){ 0 };
     layout->dynamic = dynamic;
@@ -2035,7 +2131,8 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     for (uint32_t section = EXECUTABLE_SECTION_DEBUG_INFO; section < EXECUTABLE_SECTION_COUNT; section += 1)
     {
         ExecutableSectionLayout* placed = &layout->sections[section];
-        placed->alignment = section == EXECUTABLE_SECTION_SYMTAB ? 8 : 1;
+        // A producer's debug section at its alignment (ExecutableDebugSections.alignments).
+        placed->alignment = section == EXECUTABLE_SECTION_SYMTAB ? 8 : linker_alignments[section] > 1 ? linker_alignments[section] : 1;
         placed->offset = executable_align(offset, placed->alignment);
         placed->size = section_bytes[section];
         layout->section_piece[section] = placed->size != 0 ? piece : 0;
@@ -2057,7 +2154,7 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     layout->file_size = layout->section_headers_offset + layout->section_header_count * sizeof(Elf64_Shdr);
     layout->piece_count = piece + 2;
     layout->chunk_count = (layout->file_size + BUSTER_EXECUTABLE_CHUNK_BYTES - 1) / BUSTER_EXECUTABLE_CHUNK_BYTES;
-    return layout->base + layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS && tls_fits;
+    return layout->base + layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS && tls_fits && layout->shstrtab_size <= BUSTER_EXECUTABLE_SHSTRTAB_BYTES;
 }
 
 // The file offset of an image offset in a section: sections keep their offset's place in a page.
@@ -2900,6 +2997,8 @@ struct ExecutableDynamicTotals
     bool has_init;
     bool has_fini;
     uint64_t linker_bytes[EXECUTABLE_SECTION_COUNT];
+    // A producer's debug sections' alignments (ExecutableDebugSections.alignments); 0 elsewhere.
+    uint64_t linker_alignments[EXECUTABLE_SECTION_COUNT];
 };
 
 // What the lanes share, which lane 0 allocates from its scratch arena and broadcasts. Each lane writes its own row of
@@ -2947,6 +3046,8 @@ struct ExecutableShared
     bool relr;
     // With the static runtime, the link's __tls_get_addr (ExecutableRuntime.tls_get_addr), or 0.
     SymbolId relaxed;
+    // ExecutableOptions.debug_sections, whose sections' bytes are the pieces of their sections, patched in place.
+    const ExecutableDebugSections* debug_sections;
     uint64_t* ifunc_bits;
     uint64_t* dynamic_bits;
     uint64_t* relative_bits;
@@ -5871,6 +5972,7 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         shared->exact = options->exact;
         shared->runtime = options->runtime != 0;
         shared->ifuncs = shared->runtime || (dynamic != 0 && !dynamic->shared);
+        shared->debug_sections = options->debug_sections;
         shared->crt = dynamic != 0 || shared->runtime;
         shared->scope = dynamic == 0 || shared->runtime ? BUSTER_EXECUTABLE_SCOPE_STATIC : dynamic->shared ? BUSTER_EXECUTABLE_SCOPE_SHARED : BUSTER_EXECUTABLE_SCOPE_IMPORTS;
         shared->relaxed = shared->runtime && options->runtime->tls_get_addr < link->symbols.count ? options->runtime->tls_get_addr : 0;
@@ -5967,7 +6069,13 @@ static bool executable_prepare(Arena* arena, ExecutableShared* shared, const Exe
         const bool own = section != EXECUTABLE_SECTION_BUILD_ID && section != EXECUTABLE_SECTION_GOT && executable_linker_before[section] != BUSTER_LINK_CLASS_COUNT &&
                          (layout->crt || section == EXECUTABLE_SECTION_EH_FRAME_HDR || section >= EXECUTABLE_SECTION_DEBUG_INFO);
         const uint64_t size = layout->sections[section].size;
-        shared->section_bytes[section] = own && size != 0 ? arena_push_array(arena, size, 1, 8) : 0;
+        // A section that ExecutableDebugSections gives is its bytes, which the writer patches in place.
+        const ExecutableDebugSections* debug = shared->debug_sections;
+        const bool given = debug != 0 && section >= EXECUTABLE_SECTION_DEBUG_INFO && section < EXECUTABLE_SECTION_SYMTAB &&
+                           debug->sections[section - EXECUTABLE_SECTION_DEBUG_INFO].length != 0;
+        shared->section_bytes[section] = given                ? (uint8_t*)debug->sections[section - EXECUTABLE_SECTION_DEBUG_INFO].pointer :
+                                         own && size != 0 ? arena_push_array(arena, size, 1, 8) :
+                                                            0;
         result = !own || size == 0 || shared->section_bytes[section] != 0;
     }
     if (result && layout->dynamic)
@@ -6283,8 +6391,17 @@ static bool executable_dynamic_valid(const Link* link, const ExecutableDynamic* 
     return valid;
 }
 
+// A unit's function count (ExecutableDebug.unit_functions, or every function for a descriptor of one unit).
+static uint32_t executable_debug_unit_functions(const ExecutableDebug* debug, uint32_t unit)
+{
+    return debug->unit_count != 0 ? debug->unit_functions[unit] : debug->function_count;
+}
+
 // Descriptor bounds before allocating or copying debug bytes. Format interpretation belongs to debug.c; the writer
-// checks its address slots and symbol definitions, so a malformed descriptor cannot patch headers or escape a slice.
+// checks its address slots and symbol definitions, so a malformed descriptor cannot patch headers or escape a slice:
+// the units' function counts add up to the functions, and each unit's .debug_addr contribution is its header (its
+// unit_length 4 + 8 * n, DWARF 5, 8-byte addresses, no segment selector) and its addresses, the contributions filling
+// the slice.
 static bool executable_debug_valid(const Link* link, const ExecutableDebug* debug)
 {
     bool valid = true;
@@ -6294,8 +6411,27 @@ static bool executable_debug_valid(const Link* link, const ExecutableDebug* debu
         {
             valid &= debug->sections[section].pointer != 0 && debug->sections[section].length != 0 && debug->sections[section].length < 0xfffffff0u;
         }
-        valid &= debug->sections[3].length == 8 + 8ull * debug->function_count &&
-                 (debug->function_count == 0 || (debug->functions != 0 && debug->line_addresses != 0));
+        const uint32_t units = debug->unit_count != 0 ? debug->unit_count : 1;
+        valid &= (debug->function_count == 0 || (debug->functions != 0 && debug->line_addresses != 0)) && (debug->unit_count == 0 || debug->unit_functions != 0);
+        uint64_t functions = 0;
+        uint64_t addr = 0;
+        const String8 addresses = debug->sections[3];
+        for (uint32_t unit = 0; valid && unit < units; unit += 1)
+        {
+            const uint64_t count = executable_debug_unit_functions(debug, unit);
+            uint32_t length = 0;
+            uint16_t version = 0;
+            valid = addr + 8 + 8 * count <= addresses.length;
+            if (valid)
+            {
+                memcpy(&length, addresses.pointer + addr, 4);
+                memcpy(&version, addresses.pointer + addr + 4, 2);
+                valid = length == 4 + 8 * count && version == 5 && addresses.pointer[addr + 6] == 8 && addresses.pointer[addr + 7] == 0;
+            }
+            functions += count;
+            addr += 8 + 8 * count;
+        }
+        valid &= functions == debug->function_count && addr == addresses.length;
         uint64_t previous_end = 0;
         uint64_t names = 1;
         for (uint32_t function = 0; valid && function < debug->function_count; function += 1)
@@ -6519,8 +6655,106 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
     }
 }
 
+// Whether a producer's debug sections (ExecutableDebugSections) are ones the writer takes: none with ExecutableDebug,
+// each section's bytes there when it has a length, which DWARF32's offsets reach, its alignment a power of two to 4096
+// (or 0), and the references' columns there when it has references.
+static bool executable_debug_sections_valid(const ExecutableOptions* options)
+{
+    const ExecutableDebugSections* debug = options->debug_sections;
+    const bool columns = debug != 0 && debug->offsets != 0 && debug->addends != 0 && debug->targets != 0 && debug->section_kinds != 0 && debug->kinds != 0;
+    bool valid = debug == 0 || (options->debug == 0 && (debug->relocation_count == 0 || columns));
+    for (uint32_t kind = 0; valid && debug != 0 && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
+    {
+        const uint64_t alignment = debug->alignments[kind];
+        valid = (debug->sections[kind].length == 0 || debug->sections[kind].pointer != 0) && debug->sections[kind].length < 0xfffffff0u &&
+                (alignment & (alignment - 1)) == 0 && alignment <= 4096;
+    }
+    return valid;
+}
+
+// lld's tombstone for a debug section's reference to discarded code or data (a field of EXECUTABLE_DEBUG_ABS64's kind or
+// another in `section`): all ones in .debug_names, whose name index would read 0 as its first unit's offset (an ABS32's
+// 32 bits, as lld truncates R_X86_64_32's), 1 in .debug_ranges and .debug_loc, whose lists 0 would end, and 0 elsewhere.
+static uint64_t executable_debug_tombstone(uint32_t section, uint8_t kind)
+{
+    const uint64_t tombstone = section == EXECUTABLE_SECTION_DEBUG_NAMES                                          ? UINT64_MAX :
+                               section == EXECUTABLE_SECTION_DEBUG_RANGES || section == EXECUTABLE_SECTION_DEBUG_LOC ? 1 :
+                                                                                                                     0;
+    return kind == EXECUTABLE_DEBUG_ABS32 ? (uint32_t)tombstone : tombstone;
+}
+
+// The value debug section reference `r` gets (see ExecutableDebugSections), or false if it can't have one: a reference
+// outside its section, of an unknown kind or to a symbol the link hasn't, an ABS32 whose value doesn't fit 32 unsigned
+// bits or a DTPOFF32 whose value doesn't fit 32 signed bits (as lld checks R_X86_64_32 and R_X86_64_DTPOFF32), or a
+// DTPOFF to a symbol that isn't thread-local.
+static bool executable_debug_value(const Link* link, const ExecutableLayout* layout, const ExecutableDebugSections* debug, uint64_t r, uint64_t* value)
+{
+    const uint8_t kind = debug->kinds[r];
+    const SymbolId symbol = debug->targets[r];
+    const uint64_t offset = debug->offsets[r];
+    const int64_t addend = debug->addends[r];
+    const uint8_t section_kind = debug->section_kinds[r];
+    const uint64_t width = kind == EXECUTABLE_DEBUG_ABS64 || kind == EXECUTABLE_DEBUG_DTPOFF64 ? 8 : 4;
+    const uint64_t length = section_kind < BUSTER_EXECUTABLE_DEBUG_KINDS ? debug->sections[section_kind].length : 0;
+    bool valid = kind <= EXECUTABLE_DEBUG_DTPOFF64 && symbol < link->symbols.count && offset <= length && width <= length - offset;
+    const AtomId atom = valid && symbol != 0 ? link->symbols.atom[symbol] : 0;
+    const bool tls = atom != 0 && link_class_is_tls(link->atoms.class[atom]);
+    const bool module_offset = kind == EXECUTABLE_DEBUG_DTPOFF32 || kind == EXECUTABLE_DEBUG_DTPOFF64;
+    const uint32_t section = EXECUTABLE_SECTION_DEBUG_INFO + section_kind;
+    uint64_t result = 0;
+    if (valid && symbol == 0)
+    {
+        result = executable_debug_tombstone(section, kind);
+    }
+    else if (valid && module_offset)
+    {
+        // A weak thread-local defined nowhere is at offset 0, as GNU ld gives it.
+        valid = tls || (atom == 0 && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE);
+        result = (tls ? link->atoms.address[atom] + link->symbols.value[symbol] - layout->sections[EXECUTABLE_SECTION_TDATA].address : 0) + (uint64_t)addend;
+    }
+    else if (valid && atom != 0)
+    {
+        result = layout->base + link->atoms.address[atom] + link->symbols.value[symbol] + (uint64_t)addend;
+    }
+    else if (valid && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE)
+    {
+        result = link->symbols.value[symbol] + (uint64_t)addend;
+    }
+    else if (valid)
+    {
+        result = layout->base + (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] + (uint64_t)addend;
+    }
+    const bool fits = kind == EXECUTABLE_DEBUG_DTPOFF32 ? result + UINT64_C(0x80000000) <= UINT32_MAX : result <= UINT32_MAX;
+    valid = valid && (width == 8 || fits);
+    *value = result;
+    return valid;
+}
+
+// The references of a producer's debug sections, this lane's range of them, patched in place into their sections'
+// bytes (the pieces executable_prepare gave them), after the symbols' references are known. A reference that can't have
+// a value fails in `error`, naming its target.
+static void executable_debug_relocations(const Link* link, const ExecutableShared* shared, const ExecutableLayout* layout, ExecutableLaneError* error)
+{
+    const ExecutableDebugSections* debug = shared->debug_sections;
+    const Range64 range = lane_range(debug->relocation_count);
+    for (uint64_t r = range.begin; r < range.end; r += 1)
+    {
+        uint64_t value = 0;
+        if (executable_debug_value(link, layout, debug, r, &value))
+        {
+            const uint64_t width = debug->kinds[r] == EXECUTABLE_DEBUG_ABS64 || debug->kinds[r] == EXECUTABLE_DEBUG_DTPOFF64 ? 8 : 4;
+            memcpy(shared->section_bytes[EXECUTABLE_SECTION_DEBUG_INFO + debug->section_kinds[r]] + debug->offsets[r], &value, width);
+        }
+        else
+        {
+            executable_lane_fail(error, EXECUTABLE_ERROR_UNSUPPORTED, 0, debug->targets[r], 0);
+        }
+    }
+}
+
 // Lane 0 after placement: copy caller bytes before patching, preserving them for another output or another layout.
-// .debug_addr and line sequence addresses are the only final-address operands in this bounded contribution.
+// .debug_addr and line sequence addresses are the only final-address operands in these bounded contributions: each
+// unit's addresses after its .debug_addr contribution's header, its functions' from where the units before it end.
 static void executable_debug_sections(const Link* link, const ExecutableLayout* layout, ExecutableShared* shared, const ExecutableDebug* debug)
 {
     for (uint32_t section = 0; section < BUSTER_EXECUTABLE_DEBUG_SECTIONS; section += 1)
@@ -6529,12 +6763,21 @@ static void executable_debug_sections(const Link* link, const ExecutableLayout* 
     }
     uint8_t* addr = shared->section_bytes[EXECUTABLE_SECTION_DEBUG_ADDR];
     uint8_t* line = shared->section_bytes[EXECUTABLE_SECTION_DEBUG_LINE];
-    for (uint32_t function = 0; function < debug->function_count; function += 1)
+    const uint32_t units = debug->unit_count != 0 ? debug->unit_count : 1;
+    uint32_t function = 0;
+    uint64_t slots = 0;
+    for (uint32_t unit = 0; unit < units; unit += 1)
     {
-        const SymbolId symbol = debug->functions[function];
-        const uint64_t address = layout->base + link->atoms.address[link->symbols.atom[symbol]] + link->symbols.value[symbol];
-        memcpy(addr + 8 + 8ull * function, &address, 8);
-        memcpy(line + debug->line_addresses[function], &address, 8);
+        const uint32_t count = executable_debug_unit_functions(debug, unit);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const SymbolId symbol = debug->functions[function];
+            const uint64_t address = layout->base + link->atoms.address[link->symbols.atom[symbol]] + link->symbols.value[symbol];
+            memcpy(addr + slots + 8 + 8ull * i, &address, 8);
+            memcpy(line + debug->line_addresses[function], &address, 8);
+            function += 1;
+        }
+        slots += 8 + 8ull * count;
     }
 }
 
@@ -6610,7 +6853,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0,
                              shared->dynamic_counts[lane].unknown_version, 0);
     }
-    if (ok && lane == 0 && !executable_debug_valid(link, options->debug))
+    if (ok && lane == 0 && (!executable_debug_valid(link, options->debug) || !executable_debug_sections_valid(options)))
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, 0, 0);
     }
@@ -6718,6 +6961,11 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         totals.linker_bytes[EXECUTABLE_SECTION_DEBUG_INFO + section] = options->debug->sections[section].length;
     }
+    for (uint32_t kind = 0; ok && options->debug_sections != 0 && kind < BUSTER_EXECUTABLE_DEBUG_KINDS; kind += 1)
+    {
+        totals.linker_bytes[EXECUTABLE_SECTION_DEBUG_INFO + kind] = options->debug_sections->sections[kind].length;
+        totals.linker_alignments[EXECUTABLE_SECTION_DEBUG_INFO + kind] = options->debug_sections->alignments[kind];
+    }
     uint64_t symbol_names = 1;
     uint32_t symbol_locals = 0;
     uint32_t symbol_tls_classes = 0;
@@ -6739,7 +6987,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     }
     const bool laid_out =
         ok && executable_lay_out(layout, shared->counts, lanes, got_slots + totals.ifunc_stubs + 2 * totals.tlsgd_pairs + (totals.tlsld ? 2 : 0), dynamic,
-                                 dynamic || runtime, runtime, totals.linker_bytes);
+                                 dynamic || runtime, runtime, totals.linker_bytes, totals.linker_alignments);
     if (laid_out)
     {
         // The IFUNCs' stubs' slots, after the GOT kinds'.
@@ -6840,11 +7088,15 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_debug_sections(link, layout, shared, options->debug);
     }
+    if (ok && options->debug_sections != 0)
+    {
+        executable_debug_relocations(link, shared, layout, executable_error(shared, EXECUTABLE_PHASE_DYNAMIC, lane, lanes));
+    }
     if (ok && symbols)
     {
         executable_symbol_sections(link, layout, shared, &selected, lane);
     }
-    if (dynamic || indexed || runtime || options->debug != 0 || symbols)
+    if (dynamic || indexed || runtime || options->debug != 0 || options->debug_sections != 0 || symbols)
     {
         lane_sync();
     }

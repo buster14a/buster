@@ -291,6 +291,7 @@ struct CheckInputReader
     CheckInputAttributes** attribute_bases;
     CheckInputAttributes* specifier_attributes;
     CheckInputAttributes* declarator_attributes;
+    uint32_t declarator_tags;
     uint8_t specifier_abi_origin;
     uint8_t declarator_abi_origin;
     uint8_t constant_abi_origin;
@@ -302,6 +303,11 @@ struct CheckInputReader
     uint32_t* parameter_seen;
     uint32_t* parameter_previous;
     uint8_t* parameter_shapes;
+    // The tags a definition's parameter list declared, which its body declares again: the first at the body's
+    // opening (written with output->body_declarations there, which says whether it was), and each one's next at its
+    // declaration token.
+    uint32_t* parameter_tags;
+    uint32_t* parameter_tag_next;
     uint32_t* member_seen;
     uint32_t* linked_declarations;
     TypeId* linked_types;
@@ -1307,6 +1313,8 @@ struct CheckDeclaratorPart
     uint32_t parameter_count;
     uint32_t names;
     uint32_t last_name;
+    uint32_t tags;
+    uint32_t last_tag;
     uint64_t extent;
     uint8_t kind;
     uint8_t flags;
@@ -1365,9 +1373,11 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
 
 // Declarator operators are collected outwards from the identifier, then applied in reverse to the base type.
 // Group and prototype-parameter frames share one explicit stack, so neither parentheses nor nested callbacks use
-// the C call stack. A prototype's bindings are restored at its closing parenthesis; its own names are retained only
-// for a possible function body. Parameter-array qualifiers belong to the adjusted pointer object; the function
-// signature contains its unqualified adjusted type. A prototype-only [*] remains distinct until body activation.
+// the C call stack. A prototype's bindings are restored at its closing parenthesis; its own names, and the tags it
+// declared (reader->declarator_tags: not a nested prototype's, which its own parenthesis ended), are retained only
+// for a possible function body, whose scope is theirs too (C11 6.2.1p4). Parameter-array qualifiers belong to the
+// adjusted pointer object; the function signature contains its unqualified adjusted type. A prototype-only [*]
+// remains distinct until body activation.
 static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint32_t* cursor, uint32_t end, uint32_t* name, uint32_t* names)
 {
     const Parser* parser = reader->parser;
@@ -1409,6 +1419,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
     *name = BUSTER_CHECK_NONE;
     *names = BUSTER_CHECK_NONE;
     reader->declarator_attributes = 0;
+    reader->declarator_tags = BUSTER_CHECK_NONE;
     reader->declarator_abi_origin = 0;
     if (valid)
     {
@@ -1487,6 +1498,26 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
             const uint32_t close = parser->tree.parents[function->token];
             if (i == close)
             {
+                // The tags the list declared, in its order: those still active, since a nested prototype's ended at
+                // its own parenthesis.
+                for (uint32_t active = frame->binding_mark; active < reader->bindings.active_count; active += 1)
+                {
+                    const uint32_t event = reader->bindings.active[active];
+                    if (reader->bindings.kind[event] == C_BINDING_TAG_KIND)
+                    {
+                        const uint32_t tag = reader->bindings.declaration[event];
+                        reader->parameter_tag_next[tag] = BUSTER_CHECK_NONE;
+                        if (function->last_tag != BUSTER_CHECK_NONE)
+                        {
+                            reader->parameter_tag_next[function->last_tag] = tag;
+                        }
+                        else
+                        {
+                            function->tags = tag;
+                        }
+                        function->last_tag = tag;
+                    }
+                }
                 valid = c_bindings_restore(&reader->bindings, frame->binding_mark, close);
                 reader->output->resource |= !valid;
                 for (uint32_t parameter = function->names; parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
@@ -1602,6 +1633,8 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     .parameter_last = BUSTER_CHECK_NONE,
                     .names = BUSTER_CHECK_NONE,
                     .last_name = BUSTER_CHECK_NONE,
+                    .tags = BUSTER_CHECK_NONE,
+                    .last_tag = BUSTER_CHECK_NONE,
                     .kind = BUSTER_TYPE_KIND_FUNCTION,
                     .flags = i + 1 != close || parser->language.standard >= 2023 ? BUSTER_TYPE_FLAG_PROTOTYPE : 0,
                 };
@@ -1793,6 +1826,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     *name = frame->name;
                     *names = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_FUNCTION ? parts[first].names : BUSTER_CHECK_NONE;
                     reader->declarator_attributes = frame->attributes;
+                    reader->declarator_tags = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_FUNCTION ? parts[first].tags : BUSTER_CHECK_NONE;
                     reader->declarator_abi_origin = abi_origin;
                     depth -= 1;
                 }
@@ -2297,6 +2331,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         reader->declarator_overloadable = (check_input_overload_flags(common_attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
         reader->declarator_overloadable = false;
+        const uint32_t parameter_tags = reader->declarator_tags;
         CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
         valid &= (common_attributes == 0 && reader->declarator_attributes == 0) || attributes != 0;
         uint8_t abi_origin = reader->declarator_abi_origin;
@@ -2383,6 +2418,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->output->body_declarations[i] = name;
                     reader->function_specifiers[i] = first;
                     reader->parameters[i] = parameters;
+                    reader->parameter_tags[i] = parameter_tags;
                     reader->query_types[i] = type_return(reader->types, type);
                     // A qualified void (const void, which clang only warns about) is void.
                     valid &= check_action_kind(reader->types, reader->query_types[i]) == BUSTER_TYPE_KIND_VOID || type_is_complete(reader->types, reader->query_types[i]);
@@ -2794,6 +2830,16 @@ static void check_input_resolve(CheckInputReader* reader)
                 reader->function_result = reader->query_types[i];
                 reader->function_end = reader->scope_ends[reader->scope_count - 1];
                 reader->function_body = i;
+                // The tags the parameter list declared are in the body's scope too, as its parameters are (C11
+                // 6.2.1p4): declared again in it, with their declarations' tokens, as clang does.
+                const uint32_t first_tag = reader->output->body_declarations[i] != BUSTER_CHECK_NONE ? reader->parameter_tags[i] : BUSTER_CHECK_NONE;
+                for (uint32_t tag = first_tag; tag != BUSTER_CHECK_NONE; tag = reader->parameter_tag_next[tag])
+                {
+                    if (c_bindings_declare(&reader->bindings, C_BINDING_TAG, parser->tokens.names[tag], C_BINDING_TAG_KIND, tag, i, reader->scope_count) == 0)
+                    {
+                        reader->output->resource = true;
+                    }
+                }
                 for (uint32_t p = reader->parameters[i]; p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
                 {
                     if ((reader->parameter_shapes[p] & 2) != 0)
@@ -3822,11 +3868,11 @@ static void check_input_complete_uses(CheckInputReader* reader)
 #include "c_check_binding.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
-// (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): check_lazy_system's rule, the expansion location's file and the line notes
-// before it, in one pass. The history runs are walked once, and only a run's first token follows its macro history.
-// A range's notes are walked again only for a location before the note that decided the last one, which tokens in
-// their locations' order (all of a file's but macros' around their arguments) never are.
-static void check_input_system_tokens(CheckInputReader* reader, const Preprocessor* pp, Arena* arena)
+// (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): the system level of each output token's expansion location, its file and the
+// line notes before it. The preprocessor gives every output token's level from the runs its main loop kept
+// (pp_system_levels), or by the expansion history: for --scalar, its twin, and for a unit whose runs can't say
+// (Preprocessor.system_runs_inexact), recording the history first if the unit put it off (pp_history_ensure).
+static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp, Arena* arena)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
@@ -3840,54 +3886,32 @@ static void check_input_system_tokens(CheckInputReader* reader, const Preprocess
     {
         system = pp->line_directives[i].system != BUSTER_PP_USER_FILE;
     }
+    const uint64_t mark = reader->scratch->length;
     uint8_t* tokens = system && pp->output.locations != NULL ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 64) : NULL;
-    reader->output->resource |= system && pp->output.locations != NULL && tokens == NULL;
-    if (tokens != NULL)
+    uint8_t* levels = tokens != NULL ? arena_push_array(reader->scratch, (uint64_t)pp->output.count + 1, sizeof(uint8_t), 64) : NULL;
+    reader->output->resource |= system && pp->output.locations != NULL && levels == NULL;
+    if (levels != NULL)
     {
-        uint32_t run = 0;
-        uint32_t output = 0;
-        uint32_t origin = 0;
-        uint32_t expansion = 0;
-        uint32_t range = BUSTER_PP_NONE;
-        uint32_t note = BUSTER_PP_NONE;
-        uint32_t applied = 0;
-        uint8_t classification = BUSTER_PP_USER_FILE;
+        if (parser->options.scalar || pp->system_runs_inexact)
+        {
+            pp_history_ensure(pp);
+            pp_system_levels_history(pp, levels);
+        }
+        else
+        {
+            pp_system_levels(pp, levels);
+        }
         for (uint32_t token = 0; token < count; token += 1)
         {
             const uint32_t source = parser->tokens.sources[token];
-            run = source < output ? 0 : run;
-            output = source;
-            while (run < pp->history_run_count && pp->history_runs[run].token <= source)
-            {
-                run += 1;
-            }
-            const uint32_t run_origin = run != 0 && source < pp->output.count ? pp->history_runs[run - 1].origin : 0;
-            if (run_origin != 0 && run_origin != origin)
-            {
-                expansion = check_lazy_expansion_location(pp, source, run_origin);
-            }
-            origin = run_origin;
-            const uint32_t location = origin != 0 ? expansion : source < pp->output.count ? pp->output.locations[source] : 0;
-            const bool inside = range < pp->range_count && location >= pp->ranges[range].base && location - pp->ranges[range].base < pp->ranges[range].length;
-            if (!inside || location < applied)
-            {
-                range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
-                classification = range < pp->range_count ? pp->ranges[range].system : BUSTER_PP_USER_FILE;
-                note = range < pp->range_count ? pp->ranges[range].first_line_directive : BUSTER_PP_NONE;
-                applied = range < pp->range_count ? pp->ranges[range].base : 0;
-            }
-            while (note < pp->line_directive_count && pp->line_directives[note].location <= location)
-            {
-                classification = pp->line_directives[note].system;
-                applied = pp->line_directives[note].location;
-                note = pp->line_directives[note].next_in_range;
-            }
-            tokens[token] = range < pp->range_count && (classification == BUSTER_PP_SYSTEM_FILE || classification == BUSTER_PP_EXTERN_C_FILE);
+            const uint8_t level = source < pp->output.count ? levels[source] : BUSTER_PP_USER_FILE;
+            tokens[token] = level == BUSTER_PP_SYSTEM_FILE || level == BUSTER_PP_EXTERN_C_FILE;
         }
         tokens[count] = 0;
         graph->system_tokens = tokens;
         graph->system_token_count = count;
     }
+    arena_pop_to(reader->scratch, mark);
 }
 
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
@@ -4066,6 +4090,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(activation_next, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(parameter_previous, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(parameter_shapes, uint8_t);
+    BUSTER_CHECK_INPUT_ARRAY(parameter_tags, uint32_t);
+    BUSTER_CHECK_INPUT_ARRAY(parameter_tag_next, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(tag_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(tag_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(enum_values, unsigned __int128);

@@ -7767,7 +7767,7 @@ static ParseKernelResult parse_twins(ParseKernels* kernels, const ParseInput* in
 // Loads past the last token read the padding (BUSTER_PARSE_TOKEN_PADDING), which holds PARSE_KIND_END and zeros, and
 // stores past it write the arrays' slack; the results there are never read.
 
-typedef uint8_t ParseU8x64 __attribute__((ext_vector_type(64)));
+// SIMD kernels use intrinsic types directly.
 
 // Index vectors for _mm512_permutex2var_epi8 and _epi16 that shift lanes up (lane i gets lane i - s of the first
 // source) or down (lane i gets lane i + s), taking the second source's lane 0 where that falls outside the vector.
@@ -12168,8 +12168,13 @@ static void parse_diagnostic_message(const Parser* parser, const Preprocessor* p
 }
 
 // Prints the parse's diagnostics, as clang does: "file:line:column: error: message", then what stopped it, if anything did.
+// Their places come from the expansion history, recorded first if it was deferred (pp_history_ensure).
 static void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
 {
+    if (parser->diagnostic_count != 0)
+    {
+        pp_history_ensure(pp);
+    }
     for (uint32_t d = 0; d < parser->diagnostic_count; d += 1)
     {
         const ParseDiagnostic* diagnostic = &parser->diagnostics[d];
@@ -12223,9 +12228,15 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
         static Preprocessor pp;
         static Parser parser;
         const ParseOptions parse_options = { .scalar = scalar, .tree_only = true };
+        // The history only for diagnostics, which record it when there are any (PPOptions.defer_history).
+        options.defer_history = true;
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table) || !parse_initialize(&parser, &parse_options, options.language))
         {
-            fprintf(stderr, "fatal error: can't reserve memory\n");
+            // The preprocessor's setup says why it failed, when it can (an invalid SOURCE_DATE_EPOCH, say).
+            if (!pp.fatal)
+            {
+                fprintf(stderr, "fatal error: can't reserve memory\n");
+            }
         }
         else
         {
@@ -12235,7 +12246,8 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
             {
                 parse_print_diagnostics(&parser, &pp);
             }
-            result = parsed_unit ? 0 : 1;
+            // The diagnostics' places may have needed the expansion history, whose replay can fail (a fatal error).
+            result = parsed_unit && !pp.fatal ? 0 : 1;
         }
         // What a failed reservation left reserved too.
         parse_release(&parser);

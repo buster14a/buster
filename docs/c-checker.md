@@ -9,9 +9,16 @@ the semantic driver:
 ```sh
 ./build/compiler check [--scalar] [--dump-typed] [--dump-static] [preprocessor options] file.c
 ./build/compiler [--scalar] -fsyntax-only [preprocessor options] file.c
-./build/compiler [--scalar] -c [-o file.o] [preprocessor options] file.c
-./build/compiler [--scalar] [--verify] [-o a.out] [preprocessor options] file.c
+./build/compiler [--scalar] [--lower-all] -c [-o file.o] [preprocessor options] file.c
+./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
+
+`-c` and the direct path lower only the definitions that the unit's roots reach,
+as clang does ([#129](https://github.com/buster14a/buster/issues/129),
+`check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced
+static or inline function gets no code, and an object only such a function
+refers to no data. `--lower-all` lowers every definition that may be emitted,
+referenced or not, a test option for measuring what that saves.
 
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
@@ -137,7 +144,12 @@ composite declaration types, canonical object identities, linkage, storage
 duration, actual and tentative definitions, and each selected initializer node.
 Linked declarations also retain translation-unit identity across closed blocks.
 An out-of-scope prototype constrains later declarations of the same entity but
-does not silently change the type visible to an unprototyped call.
+does not silently change the type visible to an unprototyped call. A
+prototype's parameters, and the tags its list declares, end at its `)`. A
+definition's are declared again at its body's opening, as clang has them, since
+the body's scope is theirs too (C11 6.2.1p4): in
+`int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
+parameter's (#435).
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
@@ -566,6 +578,14 @@ What the lowering covers past scalars (#145's programs):
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
+- **Names.** A block-scope static is named as clang names it,
+  `function.name` (its function's asm label, if it has one, for the
+  function's name; an asm label of the static's own replaces both), and a
+  file-scope compound literal is `.compoundliteral`. A made name that a symbol
+  of the unit has already, made before it or given by the source (an
+  identifier or an asm label), gets `.N`, as LLVM makes one unique in its module
+  (`check_program_emit_made_name`).
+
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: `_Complex`, `__int128`,
 inline assembly and so on. The c-testsuite harness counts such a
@@ -640,7 +660,12 @@ comparison of distinct pointers or of a pointer with an integer, and a
 conditional of either. The warnings clang makes errors by default
 (`-Wint-conversion`, `-Wincompatible-pointer-types` and its function-pointer
 group, `-Wreturn-mismatch`) are errors, but in a system header, where clang
-suppresses them and converts as it would have.
+suppresses them and converts as it would have. A token is in a system header
+when its expansion location is (`check_input_system_tokens`): the preprocessor
+judges every output token from runs its main loop keeps (`pp_system_levels`),
+or with `--scalar` and for a unit whose runs can't say, by the expansion
+history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
+levels" has both.
 Floating results are compared field by field, never by `long double` padding.
 
 ## Corpus comparison and semantic mutations

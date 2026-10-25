@@ -302,10 +302,12 @@ designs and the compilers already built this way.
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
-  [--cross-check] [--keep] DIR` compiles each of c-testsuite's single-exec
-  programs by the direct path, by both paths into the same bytes, and runs it
-  against its expected output; `--cross-check` also links its `-c` object with
-  `cc`. `--self-test` checks the harness with a stand-in compiler.
+  [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's
+  single-exec programs by the direct path, by both paths into the same bytes,
+  and runs it against its expected output; `--cross-check` also links its `-c`
+  object with `cc`, and compares the functions and objects it defines with
+  `clang -O0 -c`'s (#129, `c_lowering_symbols.c`). `--self-test` checks the
+  harness with a stand-in compiler.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
   and runs both. [The c-testsuite guide](docs/c-testsuite.md) has the details.
@@ -319,7 +321,10 @@ designs and the compilers already built this way.
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`. `./build/compiler parse
+  checking every function's records with `x86_validate`, and `--lower-all`
+  lowering every definition, referenced or not (#129's test option; `-c` and
+  the direct path lower only what the unit's roots reach,
+  `check_program_select`). `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -540,14 +545,30 @@ designs and the compilers already built this way.
   version definitions are refused in the existing symbol pass before output.
 - `src/buster/compiler/debug.c` emits bounded DWARF 5 function names, ranges
   and source lines with scalar/vector twins and explicit late address slots.
-  `ExecutableOptions.debug` attaches one contribution at final TEXT addresses,
-  with nonallocated debug sections and a regular function symbol table.
-  `test-debug --cross-check` checks original fixtures with readelf, GDB and
-  perf; `benchmark-debug` measures validation through address finalization.
-  [The debug guide](docs/debug.md) records the contract, units written after
-  others (`DebugOutput.bases`), whose four offsets point at their own
-  contributions, and the source-row production still pending; `streaming.c`
-  makes a unit per 256 functions as they compile.
+  `ExecutableOptions.debug` attaches one unit or several (#395), each written
+  after the others at its bases (`DebugOutput.bases`) and finalized at its
+  functions' TEXT addresses, with nonallocated debug sections and a regular
+  function symbol table; `ExecutableOptions.debug_sections` takes sections a
+  producer built whole instead (`link-foreign`'s), with the references the
+  layout decides as columns the writer patches on its lanes.
+  `test-debug --cross-check` checks original fixtures, as one unit and as two,
+  with readelf, GDB and perf; `benchmark-debug` measures validation through
+  address finalization. [The debug guide](docs/debug.md) records the contract
+  and the source-row production still pending; `streaming.c` makes a unit per
+  256 functions as they compile.
+- `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
+  selected objects' debug sections (#395): concatenated by name in input order
+  (strings not merged), references between debug sections resolved, those to
+  code and data left to the writer, lld's tombstones for discarded code. Its
+  relocation passes take 8 relocations at a time with the exact pass as their
+  twin; `inflate.c` decompresses zlib-compressed sections (RFCs 1950 and 1951;
+  serial within a stream, the streams spread over lanes, the Adler-32 64 bytes
+  at a time). `test-inflate` checks the decompressor against gzip's streams,
+  hand-made errors and every cut and changed byte at `PROT_NONE` pages;
+  `test-foreign --cross-check` (`foreign_debug_test.c`) links gcc's and clang's
+  `-g` fixtures by both paths and on lanes, against lld with
+  `llvm-dwarfdump --verify` and gdb, and checks the relocation kernels' twins.
+  The driver's contract ("Debug information") has the details.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
   from valid Tier 0 records after branch sizing; `unwind.c` emits original
   CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
@@ -678,7 +699,8 @@ designs and the compilers already built this way.
   IFUNC a fixup reaches unless its entry is glibc's startup, recognized by its
   files (the system's `crt1.o` or `rcrt1.o`, by identity, then `libc.a`'s
   `__libc_start_main`), which applies their `IRELATIVE` relocations, or
-  `--startup-applies-irelative` says the program's own does. GC, literal
+  `--startup-applies-irelative` says the program's own does. It keeps the
+  inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
   pooling and CIE pooling are off by default.
   With `--lanes N` past 1 on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
@@ -798,7 +820,12 @@ designs and the compilers already built this way.
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
   them deferred: loaded onto the x87, computed and stored back, its locals and
-  parameters objects and its constants an optional column. The output is
+  parameters objects and its constants an optional column. Values past the
+  depth tables (15 integer, 14 with a frame pointer, and 16 floating ones)
+  live in the frame's deep slots, a slot per depth: the entries whose values
+  cross that line or that use registers past it are deferred, their operands
+  loaded from the slots into the stacks' first registers around their own
+  records (`tier0_select_deep`). The output is
   the records with #144's branch columns and `LinkReference`s. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
@@ -873,9 +900,18 @@ designs and the compilers already built this way.
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
   records macro expansion history in cold records and compressed output runs;
   `pp_diagnose_output` renders a diagnostic for an output-token index.
+  With `PPOptions.defer_history` a unit records none while it runs: its
+  diagnostics, and `pp_history_ensure` for a later reader, record it by
+  preprocessing the unit again (`docs/c-preprocessor.md`, "Deferred history").
+  `-E`, `parse` and the checker's driver defer it (but with `--scalar` and
+  `-flazy-system-headers`). A reader of a unit whose history may be deferred
+  calls `pp_history_ensure` first. `check_input_system_tokens` judges system
+  headers' tokens from runs the main loop keeps (`pp_system_levels`, "System
+  levels"), with the history's judgment (`pp_system_levels_history`) as twin.
   `c_preprocessor_history_test.c` is part of `test-preprocessor`, including its
   Clang diagnostic comparisons. `benchmark-preprocessor --history-cost`
-  compares recording on/off and reports retained and temporary history bytes.
+  compares recording it with deferring it and reports retained and temporary
+  history bytes.
 - `src/buster/compiler/c_files.c` is #150's per-file jobs: files prepared on a
   group of lanes into a `FileCache`, each lane interning into a table of its
   own that a merge (rule 4's exchange) gives the shared table's ids in the
@@ -945,6 +981,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-bind --cross-check
 ./build/compiler benchmark-bind
 ./build/compiler test-executable
+./build/compiler test-inflate
 ./build/compiler test-dynamic --cross-check
 ./build/compiler test-static --cross-check
 ./build/compiler benchmark-executable
@@ -3722,12 +3759,16 @@ the guard spelled the same, and the walk must do what it did:
   unevenly, names of their own, long names, line splices and UCNs) prepared
   without following includes, 165,562 ids, so that the shared table grows in a
   merge, and a translation unit that includes them all: in parts, split once,
-  and with two lanes working, and in two runs into one cache, which must equal
-  one run on one lane;
+  and with two lanes working (in parts from the run's own counter, and split
+  once), and in two runs into one cache, which must equal one run on one lane;
 - contexts: a guarded header that includes itself through `./` and `sub/..`,
   which the walk must take once (an alias of a file in the same context, by
   its directory's device and inode, isn't walked again), and one header in two
   directories (a hard link) whose own `local.h` differ, walked in both;
+- rounds: `benchmark-files --rounds`' trace on walks of a chain of headers,
+  a file a round, of exactly the 16 rounds the trace keeps apart and of 21: it
+  must keep each round, the last kept one with every later one, and snapshots
+  that go forward on every traced lane from the walk's start to its end;
 - dollars: a cache filled with `$` as punctuation (`-fno-dollars-in-identifiers`,
   #281), whose unit must split `aa$bb` into three tokens on every lane count;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
@@ -3748,29 +3789,40 @@ fails the test.
 leaves the directory. On the 9700X, `sqlite3.c`, musl 1.2.5's 1,357 sources and
 the C library corpus (`--flat`) pass too, and Lua 5.4.8 did before the ids'
 order and the units' `-E` text and diagnostics were checked.
-The 9700X job's test step runs it, on `src` with `--flat`, and on the
-repository's translation units.
+The 9700X job's test step runs it, on `src` with `--flat`, on the
+repository's translation units and on the preprocessor oracle's frozen corpora
+(#262): musl's 1,355 units with its build's options, `sqlite3.c`, and the C
+library corpus with `--flat`.
 
 ## Per-file jobs benchmark
 
 `./build/compiler benchmark-files [--lanes LIST] [--cpus LIST] [--runs N]
-[--spin MS] [--flat] [--bytes map|read|populate] [--read-limit N]
-[--lane-bytes N] [options] path...` fills a cache from the paths (with
-`--flat`, without following their includes) on each lane count of `--lanes`
-(1 to 8), lane i pinned to the i-th CPU of `--cpus` (the allowed CPUs, in
-order), every run from nothing after `--spin` ms (2) of spinning on every lane.
-`--read-limit` sets the largest file the lanes read rather than map (16 KB),
-`--bytes` how lanes map the larger ones (or read them), and `--lane-bytes` a
-round's bytes per working lane (4 MB). It reports medians of `--runs` (21):
+[--spin MS] [--flat] [--rounds] [--bytes map|read|populate] [--read-limit N]
+[--shared-bytes N] [--lane-bytes N] [options] path...` fills a cache from the
+paths (with `--flat`, without following their includes) on each lane count of
+`--lanes` (1 to 8), lane i pinned to the i-th CPU of `--cpus` (the allowed
+CPUs, in order), every run from nothing after `--spin` ms (2) of spinning on
+every lane. `--read-limit` sets the largest file the lanes read rather than map
+(16 KB), `--bytes` how lanes map the larger ones (or read them),
+`--shared-bytes` the fewest bytes of a round that several lanes prepare (4 MB),
+and `--lane-bytes` a round's bytes per working lane past them (1 MB). It
+reports medians of `--runs` (21):
 the run's time, speedup and time to the roots' round, the tokens per second,
 each phase on the lane that spent the most on it (preparing, the merge's
 lookups, exchange, additions and rewrite, the include lines, the searches, the
 work one lane does alone, and the waits), how busy the lanes were, what a run
 did, and without `--flat` the files the walk prepared that no unit entered,
-with the largest. Run it under the 9700X's lock without `taskset`: it pins its
-lanes. `docs/c-files.md` has the numbers for the C library corpus, `sqlite3.c`,
-musl and this repository. The default 9700X job runs it on the repository's
-translation units; like the others, its measurements are informational.
+with the largest. With `--rounds`, it then prints where each lane count's time
+went round by round: each round's files, bytes, working lanes, waves, probes
+and phases on lane 0 and on the other lanes that spent the most and the least
+on them, from a trace the walk keeps only when asked (`FilesRun.trace`). Run it
+under the 9700X's lock without `taskset`: it pins its lanes. `docs/c-files.md`
+has the numbers for the C library corpus, `sqlite3.c`, musl and this
+repository. The default 9700X job runs it on the repository's translation
+units, with `--rounds`, and where a pull request changes `c_files*.c` (the
+`changes` job's `files`), on the frozen corpora too: musl's units, `sqlite3.c`
+with `--rounds` and the C library corpus with `--flat`. Like the others, its
+measurements are informational.
 
 ## Parser tests
 
@@ -3815,16 +3867,23 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;
-- the driver, without files: eleven cases' exit statuses and exact messages (a
-  valid, an empty and an invalid file, the last with `--scalar` too, an
+- the driver, without files: seventeen cases' exit statuses and exact messages
+  (a valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past
-  the preprocessor's size limit, no file and an unknown option), 16 runs of
-  each, after which the address space and the descriptors must be as they were;
+  the preprocessor's size limit, no file, an unknown option, GNU's keywords
+  turned off two ways, two errors after a macro's expansion, which the
+  expansion history places and the driver records only for its diagnostics,
+  and a warning with code after it and alone, which the driver prints by
+  preprocessing the unit again), 16 runs of each, after which the address
+  space and the descriptors must be as they were; an invalid
+  `SOURCE_DATE_EPOCH` for `parse` and for `-E`, which must print the
+  preprocessor's setup's fatal error alone;
   then every reservation and mapping of a run on a valid and on an invalid file
-  failed in turn (74 and 75), in children whose address space may grow a page
-  less than a run reached: the last fails, then, a page below the peak that run
-  reached, the one before it, down to the first. Each run must exit with status
-  1 having said why in a fatal error, and leave nothing behind;
+  and on the two warnings' files (whose replays' reservations among them)
+  failed in turn, in children whose address space may grow a page less than a
+  run reached: the last fails, then, a page below the peak that run reached,
+  the one before it, down to the first. Each run must exit with status 1 having
+  said why in a fatal error, and leave nothing behind;
 - files: every `.c` file under each path, preprocessed with -E's options, must
   parse; with `--clang`, the parser must accept exactly what `clang
   -fsyntax-only` with the same options accepts (our side reads clang's
@@ -3923,10 +3982,24 @@ request these columns.
 emission planning with an independent graph oracle and Clang object symbols
 on original, manually modeled C fixtures. `benchmark-lowering` measures
 synthetic graph preparation and vector/scalar selection; use the shared 9700X
-lock and pin timings to CPU 2. [The lowering guide](docs/c-lowering.md) records
-the semantic producer contract and the source/checker/backend integration
-still required for #129. These commands do not establish corpus lowering or
-whole-compiler savings.
+lock and pin timings to CPU 2.
+
+On the source path, `check_program_select` (`c_check_program_select.c`) gives
+the planner the checked program's definitions, roots and evaluated references,
+and `-c` and the direct path lower what it selects. `c_lowering_symbols.c`
+compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
+on fixtures of each kind of definition (functions, objects and string literals),
+`test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
+--symbols` on any corpus. `benchmark-lowering-source [--passes N]
+[preprocessor options] file...` measures what lowering only the referenced
+definitions saves against `--lower-all`, after checking, with each file's
+functions and objects defined, lowered and skipped. A file the checker rejects,
+or that is refused by name (`CHECK_PROGRAM_UNSUPPORTED`,
+`CHECK_DATA_UNSUPPORTED`), is left out; any other failure, a timed run that
+lowers other than its warm-up, and a run that measures no file fail the command
+(`test-checker` checks each, `c_lowering_source_benchmark_test.c`). Run it under
+the 9700X's lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
+contract, the comparisons' results and what `main.c`'s measurement waits on.
 
 ## Type tests
 
@@ -4006,10 +4079,20 @@ others, its measurements are informational.
 
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
-[--seed N] [--keep] [preprocessor options] file-or-directory...` checks each
-file as the driver does and compares it with `clang -fsyntax-only` on the same
-options: acceptance, the first error's presumed file and line, and the scalar
-and vector paths, column by column. `--semantic-mutations N` then checks N
+[--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options]
+file-or-directory...` checks each file as the driver does and compares it with
+`clang -fsyntax-only` on the same options: acceptance, the first error's
+presumed file and line, and the scalar and vector paths, column by column.
+`--symbols` (#129) also writes each accepted file's object as `-c` does and
+compares the functions and objects it defines with `clang -O0 -c`'s, with the
+names the checked source makes; a difference must have one of three documented
+reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
+-O0's objects": folded constants, unselected operands, and a constant `if`'s
+dropped arm, from the model `CheckProgramOptions.folded_ifs`), and a file the
+backend refuses is counted with its feature.
+`--symbols-minimum N` fails the run unless at least N files' objects were
+compared: the 9700X job's test step compares eight of the frozen musl `src`
+directories so, with the count they compare. `--semantic-mutations N` then checks N
 mutants of the units it found no difference in (#133's last "Done when" item,
 `c_check_mutation.c`):
 
@@ -4189,16 +4272,19 @@ informational.
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
 [--cross-count N] [--clang PATH] [--keep]]` (about 0.8 s on the 9700X, and
 2.9 s with `--cross-check`) checks `tier0.c` on programs from
-`tier0_generate.c`, `--count` (300) of each of five shapes: one function of
+`tier0_generate.c`, `--count` (300) of each of six shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
-address-taken locals, objects); larger; and larger with structs and unions
+address-taken locals, objects); larger; larger with structs and unions
 passed and returned by value (#137), from a catalog of records whose parts
 load every way (byte arrays of 1 to 17 bytes, floats and doubles mixed with
 integers both ways round, unions, a member aligned to 16, the empty struct,
 records past 16 bytes), whose programs must reach every kind of part,
 location and result the catalog makes, and functions with a frame pointer
-(variable-length arrays) that pass, take or return records. Their calls pass up to 12
-arguments, past the argument registers, a third of them (in the shapes with
+(variable-length arrays) that pass, take or return records; and larger past
+the depth tables (calls of 13 to 32 arguments, each evaluated over the ones
+before it, and deeper expressions, whose deep entries must be at least 1% of
+the entries). Their calls pass up to 12
+arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
 are local arrays and structs, some `_Alignas(16)`, read, written and pointed
@@ -4214,7 +4300,8 @@ it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
 cycles of every length) run on a register file, the vector path's application
 of chosen forms against the scalar path's on random records, that both paths
-refuse unsupported entries and expressions past the depths alike, and the
+refuse unsupported entries alike and compile up to 240 values at once alike,
+refusing more, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects, values and `VA_LIST`s whose places both paths must give
 alike, aligned, inside the frame and apart; copies: their rules, and a copy of
@@ -4222,12 +4309,17 @@ each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
 pointer, run natively: a probe must see `al` 3, `r11` its own address and the
 call's arguments, after moves that are cycles and that run through `r11`, with
-values saved around the call; and the operands: `tier0_validate` refusing each
+values saved around the call; and deep values (`tier0_deep_test.c`): seven
+functions that fill the depth tables and cross their line with an entry of each
+kind (a dropped value, `?:`, a fused compare and branch, floating values,
+division by a local and by a value and shifts by a register, a frame pointer's
+14, both stacks at once), run natively against the file's model; and the
+operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for
 `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
-depths, and a function that allocates 64 KB and up a thousand times, each in a
+depths (the 15th value in its deep slot), and a function that allocates 64 KB and up a thousand times, each in a
 scope of its own, around calls with stack arguments, run natively; and the
 aggregates at locations written by hand, 13 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
@@ -4280,8 +4372,8 @@ on the same inputs and compares the results and every global (a floating
 one's NaNs alike whatever their bits, as C leaves them), then times both; then
 as many programs of the records shape linked mixed, their even functions Tier
 0's and their odd ones clang's, so that calls pass and return structs and
-unions by value between the two compilers both ways.
-It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
+unions by value between the two compilers both ways, and as many of the deep
+shape. It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
 run times. A shared library generated beside them (GNU as source, which `as`
 and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so
 that the executable's slots for them are the loader's to fill (`GLOB_DAT`, and
