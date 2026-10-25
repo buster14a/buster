@@ -150,7 +150,7 @@ static bool x86_target_test_tier0(const uint8_t* allowed, const char* profile)
             }
         }
     }
-    passed &= ready && functions != 0;
+    passed &= ready && functions != 0 && refused == 0;
     printf("target %s Tier 0: %s (%u templates, %u functions / %llu records, %u explicit depth refusals; exact twins)\n", profile, passed ? "pass" : "FAIL", tier0_template_count, functions, (unsigned long long)records, refused);
     fflush(stdout);
     arena_release(&input);
