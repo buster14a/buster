@@ -318,7 +318,7 @@ static bool x86_target_test_gas(const char* directory)
                 const unsigned long line = number != 0 ? strtoul(number, &after, 10) : 0;
                 const bool placed = line >= 3 && line - 3 < count && after != number && after != 0 && *after == ':';
                 const bool operand_refusal = placed && c != 0 && forms[line - 3] == X86_FORM_PEXTRW_M16_X_IMM8 && strstr(after, "operand type mismatch for") != 0;
-                const bool refusal = placed && (strstr(after, "is not supported on") != 0 || operand_refusal);
+                const bool refusal = placed && (strstr(after, "is not supported on") != 0 || strncmp(after, ": Error: unsupported instruction `", sizeof(": Error: unsupported instruction `") - 1) == 0 || operand_refusal);
                 ready &= refusal;
                 if (refusal)
                 {
