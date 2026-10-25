@@ -1299,6 +1299,8 @@ struct Preprocessor
     uint32_t item_count;
     IdentId* parameters;
     uint32_t parameter_count;
+    // The simple macros' templates (pp_compile_macro), in the runs that write expansions from them: the vectorized
+    // kernels' that record no history. Null in the others.
     PPTemplate* templates;
     uint32_t template_count;
     // Changed by every change of a name's macro (pp_set_macro): the macros' table a template's names were found in.
@@ -5112,11 +5114,11 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         }
     }
     // A simple macro's template: its items are its body's tokens, one each. Only the vectorized kernels write expansions
-    // from templates, in a run that records no history (a deferred unit's): the scalar twins and the history's runs
-    // take pp_emit_simple_write and pp_substitute_simple, their twin. Neither changes during a preprocessor's run, so
-    // the others make none.
-    const bool templated = simple && pp->vectorized && pp->options.no_history && count <= BUSTER_PP_TEMPLATE_TOKENS &&
-                           macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < BUSTER_PP_MAX_TEMPLATES;
+    // from templates, in a run that records no history (a deferred unit's), which alone has their array
+    // (pp_initialize): the scalar twins and the history's runs take pp_emit_simple_write and pp_substitute_simple, their
+    // twin.
+    const bool templated = simple && pp->templates != 0 && count <= BUSTER_PP_TEMPLATE_TOKENS && macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS &&
+                           pp->template_count < BUSTER_PP_MAX_TEMPLATES;
     if (templated)
     {
         PPTemplate* template = &pp->templates[pp->template_count];
@@ -15783,7 +15785,11 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->macros = pp_array_small(pp, &result, BUSTER_PP_MAX_MACROS, sizeof(PPMacro), BUSTER_PP_TABLE_SMALL_BYTES);
     pp->items = pp_array_small(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(PPItem), BUSTER_PP_TABLE_SMALL_BYTES);
     pp->parameters = pp_array(pp, &result, BUSTER_PP_MAX_ITEMS, sizeof(IdentId));
-    pp->templates = pp_array(pp, &result, BUSTER_PP_MAX_TEMPLATES, sizeof(PPTemplate));
+    // About 250 templates of 260 bytes on sqlite3.c and on this compiler's main.c: past pp_array's 64 KB of base
+    // pages, the first huge page cost them 2 MB of clearing.
+    pp->templates = pp->vectorized && pp->options.no_history
+                        ? pp_array_small(pp, &result, BUSTER_PP_MAX_TEMPLATES, sizeof(PPTemplate), BUSTER_PP_TABLE_SMALL_BYTES)
+                        : 0;
     pp->pushed_names = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(IdentId));
     pp->pushed_macros = pp_array(pp, &result, BUSTER_PP_MAX_PUSHED, sizeof(PPMacroId));
     pp->contexts = pp_array(pp, &result, BUSTER_PP_MAX_CONTEXTS, sizeof(PPContext));
