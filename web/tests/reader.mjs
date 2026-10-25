@@ -98,6 +98,7 @@ try
     const population = (value, prefix) => [1, 2, 3].map(pair => ({value: BigInt(value), execution: prefix + pair, pair, case: 'one', correct: true, coverage: 'complete', status: 'ok', machine: 'fixed', corpus: 'fixed', harness: 'fixed', scope: 'whole', configuration: 'fixed', profiled: false}));
     const a = population(10, 'a');
     const b = population(12, 'b');
+    check(comparePopulation(dataset, {...compared, definition: {...compared.definition, metadata: {}}}, 'value', a, b).independentLeft === null, 'Unknown experimental-unit identities do not acquire an independent count');
     check(comparePopulation(dataset, compared, 'value', a, b).classification === 'regression', 'Matched independent pairs expose regression and uncertainty');
     check(comparePopulation(dataset, compared, 'value', a, population(8, 'b')).classification === 'improvement', 'Direction-aware improvement');
     check(comparePopulation(dataset, compared, 'value', population(0, 'a'), b).relative === null, 'Zero baseline has no relative percentage');

@@ -6,7 +6,7 @@ import {element, renderers, specializedViews} from './charts.mjs';
 import {renderProfile} from './profile-view.mjs';
 
 const $ = id => document.getElementById(id);
-const state = {catalog: null, dataset: null, table: null, rows: [], filters: new Map(), page: 0, worker: null, profile: null, request: 0, pending: new Map(), load: 0, tableLoad: 0, rangeLoad: 0, tab: 'history'};
+const state = {catalog: null, dataset: null, table: null, rows: [], filters: new Map(), page: 0, worker: null, profile: null, profileLoad: 0, request: 0, pending: new Map(), load: 0, tableLoad: 0, rangeLoad: 0, tab: 'history'};
 const initial = new URLSearchParams(location.hash.slice(1));
 const measurements = () => Object.keys(state.table?.definition.measurements ?? {});
 const selectedColumn = () => $('metric').value;
@@ -161,7 +161,8 @@ function compare()
     const result = comparePopulation(state.dataset, state.table, selectedColumn(), left, right);
     const parent = $('comparison'); parent.replaceChildren(element('h3', {class: result.eligible ? 'success' : 'ineligible'}, result.classification ?? 'ineligible'));
     const format = value => value ? rationalText(value, 9) : 'unavailable';
-    const entries = [['Baseline descriptive median', format(result.baseline)], ['Candidate descriptive median', format(result.candidate)], ['Effect', format(result.delta)], ['Independent baseline / candidate units', `${result.independentLeft ?? 0} / ${result.independentRight ?? 0}`], ['Excluded rows', result.excluded ?? left.length + right.length], ['Estimator', result.estimator ?? 'No eligible estimator'], ['Uncertainty', result.uncertainty ?? 'Not estimated']];
+    const units = result.independentLeft === null || result.independentLeft === undefined ? `Unavailable; ${result.observationsLeft ?? left.length} / ${result.observationsRight ?? right.length} selected nonmissing rows have no verified independent-unit count` : `${result.independentLeft} / ${result.independentRight}`;
+    const entries = [['Baseline descriptive median', format(result.baseline)], ['Candidate descriptive median', format(result.candidate)], ['Effect', format(result.delta)], ['Independent baseline / candidate units', units], ['Excluded rows', result.excluded ?? left.length + right.length], ['Estimator', result.estimator ?? 'No eligible estimator'], ['Uncertainty', result.uncertainty ?? 'Not estimated']];
     if (result.interval) entries.push(['95% interval', `${format(result.interval[0])} to ${format(result.interval[1])}`]);
     entries.push(['Relative effect', result.relative ? `${format({n: result.relative.n * 100n, d: result.relative.d})}%` : 'Unavailable for zero/negative baseline or ineligible comparison']);
     const table = element('table');
@@ -221,7 +222,7 @@ async function loadDatasetSelection(id, restore = false)
 {
     const entry = state.catalog.datasets.find(item => item.id === id);
     if (!entry) throw new Error('The linked dataset is not in this sealed generation');
-    ++state.load; const generation = state.load;
+    ++state.load; ++state.profileLoad; const generation = state.load;
     state.worker?.terminate(); state.worker = null; state.profile = null; state.table = null; state.dataset = null;
     for (const promise of state.pending.values()) promise.reject(new Error('Dataset selection changed'));
     state.pending.clear(); $('profile-views').replaceChildren(); $('range-controls').hidden = true;
@@ -267,7 +268,7 @@ function requestWorker(type, values)
         state.worker.postMessage(message, type === 'load' ? [values.bytes] : []);
     });
 }
-async function startProfile(profile, bytes, identity, restore)
+async function startProfile(profile, bytes, identity, restore, profileLoad = ++state.profileLoad)
 {
     state.worker?.terminate();
     for (const promise of state.pending.values()) promise.reject(new Error('Profile selection changed'));
@@ -286,6 +287,7 @@ async function startProfile(profile, bytes, identity, restore)
         state.pending.clear();
     };
     const metadata = await requestWorker('load', {bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), sha256: identity});
+    if (profileLoad !== state.profileLoad) return;
     if (restore && initial.get('trace') !== identity) throw new Error('Shared trace identity differs; range was not applied');
     state.profile = {...metadata, id: profile.id, identity};
     $('range-controls').hidden = false;
@@ -294,6 +296,7 @@ async function startProfile(profile, bytes, identity, restore)
     options($('thread'), [['', 'All threads'], ...[...metadata.threads].map(([id, thread]) => [id, `${id} · ${thread.name}`])], restore ? initial.get('tid') : '');
     // Sample task identities can exist without a ProcessTree/ThreadDescriptor.
     const full = await requestWorker('range', {identity, start: metadata.start.toString(), end: metadata.end.toString()});
+    if (profileLoad !== state.profileLoad) return;
     const tids = [...new Set(full.result.samples.map(sample => sample.tid.toString()))];
     const cpus = [...new Set(full.result.samples.filter(sample => sample.cpu !== null).map(sample => sample.cpu.toString()))];
     options($('thread'), [['', 'All threads'], ...tids.map(id => [id, `${id} · ${metadata.threads.get(id)?.name ?? 'name unknown'}`])], restore ? initial.get('tid') : '');
@@ -303,7 +306,7 @@ async function startProfile(profile, bytes, identity, restore)
 }
 async function loadProfile(profile, restore = false)
 {
-    const dataset = state.dataset, generation = state.load;
+    const dataset = state.dataset, generation = state.load, profileLoad = ++state.profileLoad;
     const resource = dataset.resources.get(profile.resource);
     state.worker?.terminate(); state.worker = null; state.profile = null;
     for (const pending of state.pending.values()) pending.reject(new Error('Profile selection changed'));
@@ -312,8 +315,8 @@ async function loadProfile(profile, restore = false)
     let bytes;
     try { bytes = await dataset.resource(profile.resource); }
     catch (error) { $('profile-views').append(element('p', {class: 'notice'}, 'Native resource verification failed. Download/local-open remains available; no profile totals are accepted.')); throw error; }
-    if (dataset !== state.dataset || generation !== state.load) return;
-    await startProfile(profile, bytes, resource.sha256, restore);
+    if (dataset !== state.dataset || generation !== state.load || profileLoad !== state.profileLoad) return;
+    await startProfile(profile, bytes, resource.sha256, restore, profileLoad);
 }
 async function applyRange(start, end)
 {
@@ -395,10 +398,12 @@ async function main()
     $('local-profile').addEventListener('change', () => guard(async () =>
     {
         const file = $('local-profile').files[0];
+        const profileLoad = ++state.profileLoad;
         if (!file || file.size > 64 * 1024 * 1024) throw new Error('Local native trace exceeds the 64 MiB reader budget');
         const bytes = new Uint8Array(await file.arrayBuffer()), identity = await sha256(bytes);
+        if (profileLoad !== state.profileLoad) return;
         $('profile-context').textContent = `${file.name} · local native input; source/execution identity is unknown. A shared link needs this exact file again.`;
-        await startProfile({id: 'local'}, bytes, identity, false);
+        await startProfile({id: 'local'}, bytes, identity, false, profileLoad);
     }));
     await loadDatasetSelection($('dataset').value, true);
     await census();

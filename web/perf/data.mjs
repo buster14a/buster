@@ -332,7 +332,7 @@ export function comparePopulation(dataset, table, column, left, right)
     const b = right.filter(valid);
     const baseline = median(a.map(row => rational(row[column])));
     const candidate = median(b.map(row => rational(row[column])));
-    const result = {baseline, candidate, delta: baseline && candidate ? subtract(candidate, baseline) : null, independentLeft: a.length, independentRight: b.length, excluded: left.length + right.length - a.length - b.length, ...eligibility};
+    const result = {baseline, candidate, delta: baseline && candidate ? subtract(candidate, baseline) : null, observationsLeft: a.length, observationsRight: b.length, independentLeft: null, independentRight: null, excluded: left.length + right.length - a.length - b.length, ...eligibility};
     if (!eligibility.eligible || !baseline || !candidate) return {...result, classification: 'ineligible', uncertainty: 'not estimated'};
     if (result.excluded) return {...result, eligible: false, classification: 'ineligible', reasons: ['Missing, invalid or censored observations; no complete-population inference'], uncertainty: 'not estimated'};
     const contract = eligibility.contract;
