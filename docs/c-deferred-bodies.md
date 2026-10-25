@@ -240,6 +240,20 @@ for the top level's types alone, eight lanes took 136 ns/token, and their walks
 64 in all: each lane's copies are columns with room for the largest body, and a
 huge page is cleared whole the first time any of it is touched.
 
+On small units, a lane's copy of the reader and its wake-up are most of what
+eight lanes cost. Before #432's review, every lane copied the reader before the
+partition, so a unit of one body made eight copies; now the reader runs no more
+lanes than bodies, and a lane copies the reader when it takes its first part.
+On six of c-testsuite's programs on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/b7e0d9fb790b4b4adccbfb483ee91812b5cee1c1/docs/measurements/deferred-lanes-432-2026-10-25)),
+eight lanes' reading of a unit of one body costs what one lane's does: 66% less
+than before on `00001.c` (9 tokens) and 28% less on `00169.c` (3,054 tokens),
+and 8 to 23% less on units of 2 and 5 bodies. `00182.c` (11 bodies) and
+`00204.c` (108), whose bodies keep every lane busy, don't change in a process of
+their own, nor `sqlite3.c`. Where the bodies are small, eight lanes still cost
+more than one (`00213.c`'s five bodies: 365 against 225 ns/token): a lane's copy
+and wake-up outweigh what a small body gives it.
+
 ## What is left
 
 The top level, the merge and the phases after it are sequential, so the lanes
