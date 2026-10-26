@@ -1194,6 +1194,23 @@ static const PPTestCase pp_test_cases[] = {
     { "stringize across a splice and a comment", "#define S(x) #x\nS(a\\\n+b)\nS(a/**/+b)\n", 0, "c17", "\"a+b\"\n\"a +b\"\n", false },
     { "redefinition with other spacing", "#define X(x) x+1\n#define X(x) x + 1\nX(2)\n", 0, "c17", "2 + 1\n", false, 1 },
     { "a disabled macro's last token", "#define foo(x) bar x\nfoo(foo) (2)\n", 0, "c17", "bar foo (2)\n", false },
+    // M's template finds N painted while N's expansion is under way, which it mustn't keep (pp_template_names) for the
+    // M(2) after it, whose N expands.
+    { "a name painted while its macro is disabled, then expanded", "#define N M(1)\n#define M(a) N a\nN\nM(2)\nint x = M(3);\n", 0, "c17",
+      "N 1\nM(1) 2\nint x = M(1) 3;\n", false },
+    // Templates of a few tokens whose names' bodies make their expansions longer than a template writes: past 16 tokens,
+    // exactly 16 and 17 (pp_template_size).
+    { "expansions past a template's tokens",
+      "#define LONG a b c d e f g h i j\n#define M(x) LONG x LONG\n#define SEVEN 1 2 3 4 5 6 7\n#define B16(x) SEVEN x SEVEN x\n#define B17(x) SEVEN x SEVEN x x\nM(1)\nB16(.)\nB17(.)\n",
+      0, "c17", "a b c d e f g h i j 1 a b c d e f g h i j\n1 2 3 4 5 6 7 . 1 2 3 4 5 6 7 .\n1 2 3 4 5 6 7 . 1 2 3 4 5 6 7 . .\n", false },
+    // An empty expansion of a template with a space between its tokens leaves that space before the next token.
+    { "an empty expansion's spaces", "#define E(a,b) a b\n#define F(a) a\n[E(,)] [E(,)x] (F()y)\n", 0, "c17", "[ ] [ x] (y)\n", false },
+    // One template's names found again after each change of the macros' table (Preprocessor.macro_epoch): its direct
+    // object redefined longer, pushed, redefined, popped and undefined, invoked in a file's text and collected.
+    { "a template's names across #define, #undef, push_macro and pop_macro",
+      "#define D 1\n#define F(x) D x\n#define G F(g)\nF(a) G\n#undef D\n#define D 2 3\nF(b) G\n#pragma push_macro(\"D\")\n#undef D\n#define D 4 5 6\nF(c) G\n"
+      "#pragma pop_macro(\"D\")\nF(d) G\n#undef D\nF(e) G\n",
+      0, "c17", "1 a 1 g\n2 3 b 2 3 g\n4 5 6 c 4 5 6 g\n2 3 d 2 3 g\nD e D g\n", false },
     { "an alias's invocation", "#define F(x) x\n#define ALIAS F\nALIAS (7)\n", 0, "c17", "7\n", false },
     { "adjacent tokens don't paste", "#define PLUS +\n+PLUS\n", 0, "c17", "+ +\n", false },
     { "an unused argument isn't expanded", "#define BAD(x,y) x\n#define DROP(x) 0\nDROP(BAD(1))\n", 0, "c17", "0\n", false },
