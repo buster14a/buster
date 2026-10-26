@@ -491,13 +491,14 @@ designs and the compilers already built this way.
   takes what the vector path leaves to it (the design's "Step 5's phases,
   data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
   does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, GCC's
-  `libgcc.a`, which the driver names around `libc.so`, and the `libc.so.6`,
-  `libc_nonshared.a` and loader that `libc.so` names, the loader as needed)
-  and imports them into a link of their own, with what each name
+  `libgcc.a`, which the driver names around `libc.so`, `libgcc_s.so.1`, which
+  it names as needed after each `libgcc.a`, where the system has one, and the
+  `libc.so.6`, `libc_nonshared.a` and loader that `libc.so` names, the loader
+  as needed) and imports them into a link of their own, with what each name
   they refer to binds to (the first part of step 5 of the design's plan), each
   object's records as a piece, and an index and a filter of their global
   names and the libraries' (the loader's version indices numbered after
-  `libc.so.6`'s);
+  `libc.so.6`'s, and `libgcc_s.so.1`'s after both);
   `runtime_import_static` does the same for a static executable's runtime
   (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
   `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
@@ -518,13 +519,15 @@ designs and the compilers already built this way.
   GCC's driver links it, one symbol per global name, and each name of the link
   bound as GNU ld binds it: to the program, the runtime's objects, the linker,
   an export of `libc.so.6` at its version (an import), a member of
-  `libgcc.a` (`__udivti3`) or `libc_nonshared.a` (`atexit`), which joins, or
-  for a weak reference to nothing; with
-  the link's imports and exports listed. A name that only the members which
-  joined refer to and nothing defines is refused, naming the member
+  `libgcc.a` (`__udivti3`) or `libc_nonshared.a` (`atexit`), which joins, an
+  export of `libgcc_s.so.1` (the unwinder: `_Unwind_Resume`,
+  `_Unwind_Backtrace`), which the link then needs, as GCC's driver names it
+  as needed after `libgcc.a` (#489), or for a weak reference to nothing; with
+  the link's imports and exports listed. On a system without
+  `libgcc_s.so.1`, a name that only the members which joined refer to and
+  nothing defines is refused, naming the member
   (`BIND_ERROR_MEMBER_UNDEFINED`): `libgcc.a`'s split-stack `morestack.o`'s
-  unwinder, which GCC's driver takes from `libgcc_s.so.1`, as needed, and the
-  direct path doesn't link. It has a vector path and an exact
+  unwinder. It has a vector path and an exact
   one, its twin, which make the same link. `link_program.c`'s programs leave
   room for it (`link_program_generate_begin`, `_atoms` and `_end`), and the C
   driver's links take room for the crt objects and the members their names
@@ -2288,12 +2291,17 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
   and `GLIBC_ABI_DT_RELR`, the loader with its soname, `__tls_get_addr` at
   `GLIBC_2.3` and `_r_debug` and `__libc_stack_end` at `GLIBC_2.2.5`, its
-  version indices past `libc.so.6`'s, `libgcc.a` then `libc_nonshared.a`,
-  `libc_nonshared.a` with `atexit` in its index, `__udivti3` a member's of
-  `libgcc.a`, and none of `libgcc.a`'s names an export of `libc.so.6` or the
-  loader (binding takes an export before a member, which the driver's order,
-  `libgcc.a` first, agrees with only so), and every reference to each name
-  bound: `main` to the program,
+  version indices past `libc.so.6`'s, `libgcc_s.so.1` with its soname,
+  `_Unwind_Resume` and `__udivti3` at `GCC_3.0`, `_Unwind_Backtrace` at
+  `GCC_3.3` and `__gcc_personality_v0` at `GCC_3.3.1`, its version indices
+  past both libraries' and none of its exports one of theirs (binding takes
+  theirs first, where the driver's order has `libgcc_s.so.1` first),
+  `libgcc.a` then `libc_nonshared.a`, `libc_nonshared.a` with `atexit` in its
+  index, `__udivti3` a member's of `libgcc.a` and `libgcc_s.so.1`'s export
+  after it, `_Unwind_Backtrace` `libgcc_s.so.1`'s alone, and none of
+  `libgcc.a`'s names an export of `libc.so.6` or the loader (binding takes
+  an export before a member, which the driver's order, `libgcc.a` first,
+  agrees with only so), and every reference to each name bound: `main` to the program,
   `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
   `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
   `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
@@ -2332,16 +2340,18 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   readelf's, as the static runtime's are;
 - the shared library's runtime: `runtime_import_shared`, without a start
   object (its piece empty, no ABI note); `crti.o`, `crtbeginS.o`, `crtendS.o`
-  and `crtn.o`; `libgcc.a`, `libc.so.6`, the loader and `libc_nonshared.a`;
-  nothing referring to `main`, which is no global name, and only `libgcc.a`'s
-  members (its split-stack ones) referring to names nothing in the runtime
-  defines; `_init` crti.o's and
+  and `crtn.o`; `libgcc.a`, `libgcc_s.so.1`, `libc.so.6`, the loader and
+  `libc_nonshared.a`; nothing referring to `main`, which is no global name,
+  only `libgcc.a`'s members referring to names nothing in the runtime
+  defines, and `morestack.o`'s `_Unwind_Resume` bound to `libgcc_s.so.1`;
+  `_init` crti.o's and
   `__dso_handle` crtbeginS.o's; the names its linker defines (`_DYNAMIC`
   among them), and no other; and every crt object and member taking the
   vector path.
 
-`--cross-check`, which needs `readelf`, compares `libc.so.6`'s and the
-loader's exports (name, version, type, binding and size) and references with
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s, the
+loader's and `libgcc_s.so.1`'s exports (name, version, type, binding and
+size) and references with
 `readelf -W --dyn-syms`, and every relocation of the crt objects and the
 archives' members, the static runtime's among them, with `readelf -W -r`:
 each one must be a fixup of its kind at its offset (a `GOTPCRELX` or
@@ -2425,9 +2435,11 @@ exports and members:
   libc.so.6 defines (an error), and a weak hidden one (nothing, not an
   import); references to the init and fini arrays' bounds (the linker's);
   references to `__morestack` and to `__splitstack_getcontext`, whose
-  members of `libgcc.a` make `morestack.o` join (refused, naming
-  `_Unwind_Resume` and the member: `BIND_ERROR_MEMBER_UNDEFINED`), and one to
-  `__morestack` beside the program's own unwinder (bound); a
+  members of `libgcc.a` make `morestack.o` join (its `_Unwind_Resume` a
+  strong import of `libgcc_s.so.1`'s, and against the runtime without it,
+  `bind_test_without_gcc_s`, refused, naming `_Unwind_Resume` and the
+  member: `BIND_ERROR_MEMBER_UNDEFINED`), and one to `__morestack` beside the
+  program's own unwinder (bound); a
   local `_init`; a symbol of the program's that it never defines (left to
   `link_check`); and a link without room. Then the rules this system's runtime
   can't reach through the entry points, on binding's own steps: a strong
@@ -2462,8 +2474,9 @@ exports and members:
 - the room (`bind_capacity_needed`), against this runtime and a shared
   library's: for each of the members with a global name that no library
   exports (300), a link of `main` and a strong reference to that name, bound
-  with every member's room, must bind (or be refused for `morestack.o`'s
-  reference to the unwinder) adding no more records, names' bytes and atoms'
+  with every member's room, must bind (or, without `libgcc_s.so.1`, be
+  refused for `morestack.o`'s reference to the unwinder) adding no more
+  records, names' bytes and atoms'
   bytes than `bind_capacity_needed` counts for the name, and that count no
   more than `bind_capacity`'s. Members that join in one round refer to names
   none of them defines yet (`memset`, `__sfp_handle_exceptions`, the decimal
@@ -2559,7 +2572,8 @@ paths, which must make the same link and binding:
   all but the hidden one exports; references to `__tls_get_addr` and
   `puts`, imports of the loader's at `GLIBC_2.3` and of `libc.so.6`'s at
   `GLIBC_2.2.5`; and a reference to `__morestack`, whose member's reference
-  to the unwinder is refused as in a PIE rather than left to the loader;
+  to the unwinder binds to `libgcc_s.so.1`, as in a PIE, rather than being
+  left to the loader (and without `libgcc_s.so.1` is refused);
 - with `--cross-check`, three C libraries that `cc` compiles with `-fPIC`
   (exports of every visibility; imports from `libc.so.6` and the loader,
   general-dynamic TLS with `-mtls-dialect=gnu`, and undefined and weak
@@ -2568,13 +2582,19 @@ paths, which must make the same link and binding:
   must link it, and with lld, whose `.dynsym` must have the imports at their
   versions, the undefined and weak references and the exports binding found,
   and whose `--why-extract` the members that joined;
-- with `--cross-check`, split-stack code: C compiled with `-fsplit-stack` as
-  a library and as a PIE, which binding refuses by both paths, naming
-  `_Unwind_Resume` and `libgcc.a(morestack.o)`, while `cc`'s links of the
-  same objects with GNU ld and with lld need `libgcc_s.so.1`, load into a
-  harness that doesn't (`dlopen` with `RTLD_NOW`) and run; and lld's link of
-  the library with `libgcc.a` and libc but not `libgcc_s.so.1`, which leaves
-  the unwinder to the loader, must fail to load there.
+- with `--cross-check`, split-stack code (`bind_test_split_stack`): C
+  compiled with `-fsplit-stack` (and `-fcf-protection=none`, whose `endbr64`
+  keeps lld from adjusting a split-stack prologue) as a library and as a
+  PIE, which binding binds by both paths alike, `morestack.o` joined and its
+  `_Unwind_Resume` a strong import of `libgcc_s.so.1`'s; the bound links'
+  objects linked by ld.lld and ld.bfd with `libgcc_s.so.1` as needed run,
+  the library in a harness that doesn't need `libgcc_s.so.1` (`dlopen` with
+  `RTLD_NOW`). Against the runtimes without `libgcc_s.so.1` binding refuses
+  both, naming `_Unwind_Resume` and `libgcc.a(morestack.o)`. `cc`'s links of
+  the same objects with GNU ld and with lld need `libgcc_s.so.1`, load into
+  the harness and run; and lld's link of the library with `libgcc.a` and
+  libc but not `libgcc_s.so.1`, which leaves the unwinder to the loader, must
+  fail to load there.
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The 9700X job's test step runs it with
@@ -2808,7 +2828,15 @@ the library's exported symbols and initial-exec TLS, and the corresponding
 dynamic relocations. Compiled fixtures verify that the executable's definitions
 preempt the library's calls, data and pointer tables, and one whose 128-bit
 division, remainder and conversions call seven of `libgcc.a`'s functions, whose
-members join it, checks their results. With `--cross-check`, lld
+members join it, checks their results, and one whose code walks its stack with
+`_Unwind_Backtrace`, which needs `libgcc_s.so.1` where the program that loads
+it doesn't. Then the unwinder (#489, `dynamic_test_libgcc_s`): test-bind's
+split-stack code as a PIE and as a library, and a PIE whose `main` calls
+`_Unwind_Backtrace`, compiled by `cc`, bound with an import of
+`libgcc_s.so.1`'s, written by every lane count with `DT_NEEDED`
+`libgcc_s.so.1` before `libc.so.6` and its version need (the structure's
+rules), and run, the library through a harness that doesn't need
+`libgcc_s.so.1`. With `--cross-check`, lld
 links the same objects with `-shared`; the comparison accounts for its lazy PLT
 slots and our non-lazy GLOB_DAT slots. Local-exec TLS, text relocations, a direct
 address of a preemptible function, and currently general/local-dynamic TLS are

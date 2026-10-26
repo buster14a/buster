@@ -6,9 +6,12 @@
 // docs/object-writer-and-linker.md, "The runtime snapshot") are:
 //   - the program interpreter that GCC's driver names for x86-64 glibc (GLIBC_DYNAMIC_LINKER64 in
 //     gcc/config/i386/linux64.h), which it passes to the linker with -dynamic-linker;
-//   - libc.so.6's soname and its version definitions, but the one of its own name (VER_FLG_BASE), and among them
-//     GLIBC_ABI_DT_RELR, with which the executable's RELATIVE relocations are RELR's; then the loader's, which libc.so's
-//     script names as needed (ld-linux-x86-64.so.2), whose version indices follow libc.so.6's (runtime.c);
+//   - libgcc_s.so.1's soname and its version definitions, but the one of its own name (VER_FLG_BASE), which GCC's
+//     driver names as needed before libc.so, so that GNU ld and lld write its DT_NEEDED first; then libc.so.6's, and
+//     among them GLIBC_ABI_DT_RELR, with which the executable's RELATIVE relocations are RELR's; then the loader's,
+//     which libc.so's script names as needed (ld-linux-x86-64.so.2). The loader's version indices follow libc.so.6's,
+//     and libgcc_s.so.1's both (runtime.c). An as-needed library is the executable's only for a version an import
+//     uses, which the writer finds (ExecutableLibrary.required);
 //   - Scrt1.o's .note.ABI-tag;
 //   - crti.o's _init and _fini, as the link's symbols of those names, for DT_INIT and DT_FINI, as GNU ld and lld find
 //     them by name;
@@ -80,14 +83,16 @@ static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic*
 }
 
 // Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`: the libraries the
-// link names with -l (Bind.libraries), in their order, each needed when a strong reference binds to it; then libc.so.6's,
-// then the loader's, as GCC's driver puts them on the line. False if the arena has no room for them.
+// link names with -l (Bind.libraries), in their order, each needed when a strong reference binds to it; then
+// libgcc_s.so.1's, libc.so.6's and the loader's, as GCC's driver puts them on the line. False if the arena has no room
+// for them.
 BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, const Runtime* runtime, const Bind* bind, Arena* arena)
 {
     const RuntimeLibraries* named = bind->libraries;
     const uint32_t named_count = named != 0 ? named->count : 0;
-    const uint32_t library_count = named_count + 2;
-    uint64_t version_room = (uint64_t)runtime->libc.version_count + runtime->loader.version_count + 1;
+    const ImportLibrary* const libraries[] = { &runtime->gcc_s, &runtime->libc, &runtime->loader };
+    const uint32_t library_count = named_count + BUSTER_ARRAY_LENGTH(libraries);
+    uint64_t version_room = (uint64_t)runtime->gcc_s.version_count + runtime->libc.version_count + runtime->loader.version_count + 1;
     for (uint32_t l = 0; l < named_count; l += 1)
     {
         version_room += named->libraries[l].version_count;
@@ -98,8 +103,8 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynami
     uint16_t relr_version = 0;
     for (uint32_t l = 0; versions != 0 && needed != 0 && l < library_count; l += 1)
     {
-        const bool libc = l == named_count;
-        const ImportLibrary* library = l < named_count ? &named->libraries[l] : libc ? &runtime->libc : &runtime->loader;
+        const ImportLibrary* library = l < named_count ? &named->libraries[l] : libraries[l - named_count];
+        const bool libc = library == &runtime->libc;
         needed[l] = (ExecutableLibrary){
             .name = l < named_count ? runtime_libraries_name(named, l) : library->soname,
             .required = l < named_count ? (bind->libraries_needed & (1u << l)) != 0 : libc,

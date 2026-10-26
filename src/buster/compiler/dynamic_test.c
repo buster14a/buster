@@ -40,10 +40,14 @@
 //     through GOT slots whose word starts with that dynamic symbol's, a pointer at an odd address, which .rela.dyn
 //     holds, and pointers in .data and .rodata to, a load through the GOT of and an ABS32 to an absolute symbol, which
 //     stay its value without a relocation); and lanes short of scratch memory, which must fail the link cleanly.
+//   - libgcc_s.so.1 (#489, dynamic_test_libgcc_s): a PIE whose main walks its stack with _Unwind_Backtrace, and
+//     test-bind's split-stack code as a library, each needing libgcc_s.so.1 before libc.so.6, written and run.
+// Then shared libraries against runtime_import_shared, generated and compiled ones (an "unwinder" one among them,
+// which needs libgcc_s.so.1), and the split-stack library.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, writing, the structure, the variants, unwinding, against lld, the programs and the
-// cases, the exports, the imports, the refusals, and run_dynamic_tests.
+// cases, the exports, the imports, the refusals, shared libraries, libgcc_s.so.1, and run_dynamic_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -383,13 +387,17 @@ static bool dynamic_test_version_needs(const DynamicTestImage* image, char* text
     return result;
 }
 
-// Whether an import of the link's comes from the loader rather than libc.so.6: whether its version is the loader's
-// (runtime.c numbers the two libraries' apart).
-static bool dynamic_test_from_loader(const Runtime* runtime, const Link* link, SymbolId symbol)
+// Whether an import of the link's comes from `library`, the loader or libgcc_s.so.1 rather than libc.so.6: whether its
+// version is the library's (runtime.c numbers the three libraries' apart).
+static bool dynamic_test_from(const ImportLibrary* library, const Link* link, SymbolId symbol)
 {
     const bool import = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
-    return import && import_test_version_name(&runtime->libc, link->symbols.version[symbol]).length == 0 &&
-           import_test_version_name(&runtime->loader, link->symbols.version[symbol]).length != 0;
+    return import && import_test_version_name(library, link->symbols.version[symbol]).length != 0;
+}
+
+static bool dynamic_test_from_loader(const Runtime* runtime, const Link* link, SymbolId symbol)
+{
+    return dynamic_test_from(&runtime->loader, link, symbol);
 }
 
 // The file offset of an address, from the PT_LOAD whose file bytes have it, or UINT64_MAX.
@@ -710,11 +718,13 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
         const bool kind = entry->st_info == (flags & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_TYPE)) && entry->st_other == flags >> 6;
         if (i <= undefined)
         {
-            // An import at its export's version, through .gnu.version_r's entry for its library (libc.so.6, or the
-            // loader); a weak reference to nothing unversioned (0).
+            // An import at its export's version, through .gnu.version_r's entry for its library (libc.so.6, the loader
+            // or libgcc_s.so.1); a weak reference to nothing unversioned (0).
             const bool import = found != 0 && link->symbols.source[found] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
             const String8 expected = import ? import_test_runtime_version_name(runtime, link->symbols.version[found]) : (String8){ 0 };
-            const String8 library = found != 0 && dynamic_test_from_loader(runtime, link, found) ? runtime->loader.soname : runtime->libc.soname;
+            const String8 library = found != 0 && dynamic_test_from_loader(runtime, link, found)          ? runtime->loader.soname
+                                    : found != 0 && dynamic_test_from(&runtime->gcc_s, link, found) ? runtime->gcc_s.soname
+                                                                                                         : runtime->libc.soname;
             String8 version = { 0 };
             String8 file = { 0 };
             const uint16_t number = versym != 0 ? versym[i] : 0;
@@ -1094,8 +1104,9 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
     return relaxed;
 }
 
-// The headers and .dynamic: ET_DYN from _start, PT_INTERP the interpreter, PT_DYNAMIC .dynamic; DT_NEEDED libc.so.6,
-// then the loader exactly when an import is its, as GNU ld and lld take libc.so's AS_NEEDED, and DT_VERNEEDNUM those
+// The headers and .dynamic: ET_DYN from _start, PT_INTERP the interpreter, PT_DYNAMIC .dynamic; DT_NEEDED libgcc_s.so.1
+// exactly when an import is its, libc.so.6, then the loader exactly when an import is its, as GNU ld and lld take
+// libc.so's AS_NEEDED and GCC's driver's -lgcc_s_asneeded, and DT_VERNEEDNUM those
 // with a needed version; and the tags lld writes, each with its section's address or size, DT_INIT and DT_FINI crti.o's
 // functions, and DT_FLAGS_1 PIE. A shared library (bound against RUNTIME_KIND_SHARED) instead has no entry point (0) or
 // PT_INTERP, no DT_FLAGS_1 or DT_DEBUG, its soname in DT_SONAME, and DT_FLAGS DF_STATIC_TLS exactly when it has an
@@ -1149,17 +1160,22 @@ static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, cons
         }
         uint64_t value = 0;
         bool loader = false;
+        bool gcc_s = false;
         for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
         {
             loader = loader || dynamic_test_from_loader(runtime, link, symbol);
+            gcc_s = gcc_s || dynamic_test_from(&runtime->gcc_s, link, symbol);
         }
-        const char* names[3] = { 0 };
+        const char* names[4] = { 0 };
         const uint32_t needed = dynamic_test_needed(image, names, BUSTER_ARRAY_LENGTH(names));
-        const uint32_t libraries = loader ? 2 : 1;
-        const bool libc = needed >= 1 && strcmp(names[0], "libc.so.6") == 0;
-        const bool ld = !loader || (needed >= 2 && runtime->loader.soname.length == strlen(names[1]) &&
-                                    memcmp(names[1], runtime->loader.soname.pointer, runtime->loader.soname.length) == 0);
-        dynamic_test_expect(tally, needed == libraries && libc && ld, "DT_NEEDED libc.so.6, and the loader as needed", index);
+        const uint32_t first = gcc_s ? 1 : 0;
+        const uint32_t libraries = first + (loader ? 2 : 1);
+        const bool unwinder = !gcc_s || (needed >= 1 && runtime->gcc_s.soname.length == strlen(names[0]) &&
+                                         memcmp(names[0], runtime->gcc_s.soname.pointer, runtime->gcc_s.soname.length) == 0);
+        const bool libc = needed >= first + 1 && strcmp(names[first], "libc.so.6") == 0;
+        const bool ld = !loader || (needed >= first + 2 && runtime->loader.soname.length == strlen(names[first + 1]) &&
+                                    memcmp(names[first + 1], runtime->loader.soname.pointer, runtime->loader.soname.length) == 0);
+        dynamic_test_expect(tally, needed == libraries && unwinder && libc && ld, "DT_NEEDED libgcc_s.so.1 as needed, libc.so.6, and the loader as needed", index);
         dynamic_test_expect(tally, library ? !dynamic_test_tag(image, DT_FLAGS_1, &value) : dynamic_test_tag(image, DT_FLAGS_1, &value) && value == DF_1_PIE, "DT_FLAGS_1 PIE",
                             index);
         dynamic_test_expect(tally, dynamic_test_tag(image, DT_DEBUG, &value) == !library, "DT_DEBUG a PIE's", index);
@@ -1923,13 +1939,13 @@ static void dynamic_test_frames(DynamicTestTally* tally, const Link* link, uint3
 // Against lld
 //
 // With --cross-check, the bound link's objects (the object writer's) linked by ld.lld as a PIE, against only
-// libc.so.6 and the loader in GCC's order (bind_test_link_arguments), with --build-id as the design's matched options
-// have it, and what the two files say compared: their segments (the program headers' types in order, their flags, and
-// the PT_LOADs' alignments), their dynamic symbols (name, binding, type, whether defined, version name), the symbols
-// that have a slot the loader fills (GLOB_DAT, TPOFF64, or lld's JUMP_SLOT for a PLT entry, where the stub reads the
-// GOT's slot instead), the R_X86_64_64s with their addends, as many RELATIVE relocations of pointers (those outside the
-// GOT, where lld relaxes some loads that the writer reads through slots), the init and fini arrays' sizes, DT_NEEDED,
-// DT_INIT and DT_FINI.
+// libgcc_s.so.1, libc.so.6 and the loader in GCC's order (bind_test_link_arguments), with --build-id as the design's
+// matched options have it, and what the two files say compared: their segments (the program headers' types in order,
+// their flags, and the PT_LOADs' alignments), their dynamic symbols (name, binding, type, whether defined, version
+// name), the symbols that have a slot the loader fills (GLOB_DAT, TPOFF64, or lld's JUMP_SLOT for a PLT entry, where
+// the stub reads the GOT's slot instead), the R_X86_64_64s with their addends, as many RELATIVE relocations of pointers
+// (those outside the GOT, where lld relaxes some loads that the writer reads through slots), the init and fini arrays'
+// sizes, DT_NEEDED, DT_INIT and DT_FINI.
 
 typedef struct DynamicTestSymbol DynamicTestSymbol;
 struct DynamicTestSymbol
@@ -2256,8 +2272,8 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
             uint64_t value = 0;
             dynamic_test_expect(tally, dynamic_test_tag(&ours, present[t], &value) == dynamic_test_tag(&theirs, present[t], &value), "lld's tags", t);
         }
-        // DT_NEEDED's libraries in order (libc.so.6, and the loader when an import is its), and each one's needed
-        // versions.
+        // DT_NEEDED's libraries in order (libgcc_s.so.1 when an import is its, libc.so.6, and the loader when an import
+        // is its), and each one's needed versions.
         const char* our_needed[4] = { 0 };
         const char* their_needed[4] = { 0 };
         const uint32_t our_needed_count = dynamic_test_needed(&ours, our_needed, BUSTER_ARRAY_LENGTH(our_needed));
@@ -3486,6 +3502,25 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
         .pic = "-fPIC",
     },
     {
+        // The unwinder, libgcc_s.so.1's (#489): a walk of the stack from the library's own code, which the library
+        // needs libgcc_s.so.1 for (its DT_NEEDED entry and version need), as cc -shared links it: the program that
+        // loads it doesn't.
+        .name = "unwinder",
+        .source = "#include <unwind.h>\n"
+                  "static _Unwind_Reason_Code buster_frame(struct _Unwind_Context* context, void* argument)\n"
+                  "{\n"
+                  "    *(int*)argument += _Unwind_GetIP(context) != 0;\n"
+                  "    return _URC_NO_REASON;\n"
+                  "}\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    int frames = 0;\n"
+                  "    _Unwind_Backtrace(buster_frame, &frames);\n"
+                  "    return frames < 2 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+    },
+    {
         // A protected function's address by a lea (PC32): no other object preempts it.
         .name = "protected-lea",
         .source = "__attribute__((visibility(\"protected\"))) int buster_protected(void) { return 3; }\n"
@@ -3832,6 +3867,150 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
     return dynamic_test_report(&tally);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// libgcc_s.so.1
+//
+// Code that needs libgcc_s.so.1 (#489), which GCC's driver names as needed, compiled by cc, imported as the program,
+// bound and written by every lane count, read back by the structure's rules (DT_NEEDED libgcc_s.so.1 before libc.so.6,
+// and its version need, for the imports binding made of its names), and run: against a dynamic PIE's runtime, a program
+// whose main walks its stack with _Unwind_Backtrace, exiting with status 0; against a shared library's, test-bind's
+// split-stack library (bind_test_split_source, whose morestack.o refers to _Unwind_Resume), which its harness
+// (bind_test_split_harness, which doesn't need libgcc_s.so.1) loads with RTLD_NOW and whose split_entry returns 0.
+// test-bind's split-stack PIE binds too, but morestack.o makes generic-morestack.o join, whose thread-locals it reaches
+// by general-dynamic accesses, which the writer relaxes in a static executable and gives GOT pairs in a shared library
+// but doesn't take in a dynamic PIE yet: test-bind links that one's objects with lld and GNU ld. Every import of
+// libgcc_s.so.1's names must be strong, and binding must have made one. With `cross_check`, the bound link's objects as
+// dynamic_test_against_lld compares them.
+
+static const char dynamic_test_backtrace_source[] = "#include <unwind.h>\n"
+                                                    "static _Unwind_Reason_Code buster_frame(struct _Unwind_Context* context, void* argument)\n"
+                                                    "{\n"
+                                                    "    *(int*)argument += _Unwind_GetIP(context) != 0;\n"
+                                                    "    return _URC_NO_REASON;\n"
+                                                    "}\n"
+                                                    "int main(void)\n"
+                                                    "{\n"
+                                                    "    int frames = 0;\n"
+                                                    "    _Unwind_Backtrace(buster_frame, &frames);\n"
+                                                    "    return frames >= 2 ? 0 : 1;\n"
+                                                    "}\n";
+
+static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
+{
+    const bool library = runtime->kind == RUNTIME_KIND_SHARED;
+    DynamicTestTally tally = {
+        .check = library ? "the unwinder, shared libraries" : "the unwinder, PIEs",
+    };
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        bool split;
+    } programs[] = {
+        { "unwinder-backtrace", dynamic_test_backtrace_source, false },
+        { "unwinder-split-library", bind_test_split_source, true },
+    };
+    char harness_source[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char harness[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char out[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char err[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    snprintf(harness_source, sizeof(harness_source), "%s/unwinder-harness.c", directory->path);
+    snprintf(harness, sizeof(harness), "%s/unwinder-harness", directory->path);
+    snprintf(out, sizeof(out), "%s/unwinder.out", directory->path);
+    snprintf(err, sizeof(err), "%s/unwinder.err", directory->path);
+    char* build_harness[] = { "cc", "-O2", "-o", harness, harness_source, 0 };
+    const bool harnessed = !library || (bind_test_write_file(harness_source, bind_test_split_harness, sizeof(bind_test_split_harness) - 1) &&
+                                        object_test_run(build_harness, out, err) == 0);
+    dynamic_test_expect(&tally, harnessed, "cc builds the harness", 0);
+    // libgcc_s.so.1 on this system, without which binding refuses split-stack code (test-bind) and nothing here runs.
+    dynamic_test_expect(&tally, runtime->gcc_s.exports.count != 0, "the runtime has libgcc_s.so.1", 0);
+    // The PIE, then the library.
+    const uint32_t first = library ? 1 : 0;
+    const uint32_t end = library ? BUSTER_ARRAY_LENGTH(programs) : 1;
+    for (uint32_t p = first; harnessed && runtime->gcc_s.exports.count != 0 && p < end; p += 1)
+    {
+        Scratch scratch = scratch_begin(0);
+        char source_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        char object_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        snprintf(source_path, sizeof(source_path), "%s/%s.c", directory->path, programs[p].name);
+        snprintf(object_path, sizeof(object_path), "%s/%s.o", directory->path, programs[p].name);
+        const bool written_source = bind_test_write_file(source_path, programs[p].source, strlen(programs[p].source));
+        // Without -fcf-protection's endbr64, as test-bind compiles split-stack code.
+        char* compile[] = {
+            "cc",
+            "-O2",
+            "-fcf-protection=none",
+            library ? "-fPIC" : "-fPIE",
+            programs[p].split ? "-fsplit-stack" : "-fno-split-stack",
+            "-c",
+            "-o",
+            object_path,
+            source_path,
+            0,
+        };
+        const bool compiled = written_source && object_test_run(compile, out, err) == 0;
+        dynamic_test_expect(&tally, compiled, programs[p].name, p);
+        const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
+        BindTestLink bound;
+        const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
+        const bool bound_ok = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena) && bind_end(&bound.bind, &bound.link) &&
+                              link_check(&bound.link) == LINK_ERROR_NONE;
+        // An import of libgcc_s.so.1's, and each one strong, so that the library is needed.
+        bool needs = false;
+        bool strong = true;
+        for (uint32_t i = 0; bound_ok && i < bound.bind.import_count; i += 1)
+        {
+            const SymbolId symbol = bound.bind.imports[i];
+            const bool unwinder = dynamic_test_from(&runtime->gcc_s, &bound.link, symbol);
+            needs = needs || unwinder;
+            strong = strong && (!unwinder || (bound.link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL);
+        }
+        dynamic_test_expect(&tally, bound_ok && needs && strong, "bound, needing libgcc_s.so.1", p);
+        const String8 path = executable_test_path(directory, programs[p].name, path_bytes);
+        ExecutableResult result = { 0 };
+        String8 file = { 0 };
+        const bool written = bound_ok && dynamic_test_lanes(&tally, &bound.link, &bound.bind, runtime, path, programs[p].name, &result, &file, directory->id_order, scratch.arena);
+        if (written)
+        {
+            dynamic_test_structure(&tally, &bound.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), p);
+        }
+        if (written && cross_check)
+        {
+            dynamic_test_against_lld(&tally, &bound.link, &bound.bind, runtime, 1, file, directory->path, programs[p].name, directory->keep, scratch.arena);
+        }
+        uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
+        uint64_t length = 0;
+        int status = -1;
+        char* arguments[] = { library ? harness : path.pointer, library ? path.pointer : 0, 0 };
+        char* environment[] = { "BUSTER=1", 0 };
+        const bool ran = written && executable_test_run_arguments(arguments, environment, output, &length, &status);
+        const bool exited = ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == 0;
+        dynamic_test_expect(&tally, exited, library ? "the harness loads it and it runs" : "it runs", p);
+        printf("  %s: %llu dynamic symbols, %llu relocations in .rela.dyn: %s\n", programs[p].name, (unsigned long long)result.dynamic_symbols,
+               (unsigned long long)result.relocations, exited ? "ran" : "failed");
+        if (imported)
+        {
+            bind_test_link_end(&bound);
+        }
+        scratch_end(scratch);
+        if (!directory->keep)
+        {
+            unlink(source_path);
+            unlink(object_path);
+            unlink(path.pointer);
+        }
+    }
+    if (!directory->keep)
+    {
+        unlink(harness_source);
+        unlink(harness);
+        unlink(out);
+        unlink(err);
+    }
+    return dynamic_test_report(&tally);
+}
+
 // A runtime that didn't import, named.
 static void dynamic_test_report_import(RuntimeError error, const Runtime* runtime)
 {
@@ -3919,12 +4098,14 @@ static int run_dynamic_tests(int argc, char** argv)
         passed = dynamic_test_imports(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_libraries(&directory, &runtime) && passed;
         passed = dynamic_test_smalls(&directory, &runtime) && passed;
+        passed = dynamic_test_libgcc_s(&directory, &runtime, cross_check) && passed;
         Runtime shared_runtime;
         const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);
         dynamic_test_report_import(shared_imported, &shared_runtime);
         passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared_absolute_call(&directory, &shared_runtime) && passed;
         passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared(&directory, &shared_runtime, seed, (uint32_t)functions, cross_check) && passed;
         passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_shared_compiled(&directory, &shared_runtime, cross_check) && passed;
+        passed = shared_imported == RUNTIME_ERROR_NONE && dynamic_test_libgcc_s(&directory, &shared_runtime, cross_check) && passed;
         if (shared_imported == RUNTIME_ERROR_NONE)
         {
             runtime_release(&shared_runtime);

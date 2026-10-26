@@ -385,41 +385,104 @@ static void check_test_driver_libgcc(CheckTest* test, const char* executable, co
     unlink(outputs[1]);
 }
 
-// Split-stack code in the direct path (#483's review): a program that calls __splitstack_getcontext, whose member of
-// libgcc.a makes morestack.o join, which refers to the unwinder that GCC's driver takes from libgcc_s.so.1, as needed,
-// and the direct path doesn't link. Both paths must refuse it with the one error that names the member and
-// _Unwind_Resume, and write no executable.
+static bool check_test_driver_capture(const char* path, char* captured, size_t capacity);
+static uint8_t* check_test_driver_read_aligned(const char* path, uint64_t* length);
+
+// The unwinder in the direct path (#489): a program whose own code walks its stack with _Unwind_Backtrace, which GCC's
+// driver takes from libgcc_s.so.1, as needed, and so must the direct path: by both paths, it must link without a
+// diagnostic into an executable that names libgcc_s.so.1 (its DT_NEEDED entry and version need), the same bytes by
+// both, and run, printing what it should. And one that calls __splitstack_getcontext, whose member of libgcc.a makes
+// morestack.o join, whose _Unwind_Resume binds to libgcc_s.so.1 now, where #483 refused it, naming morestack.o: binding
+// joins generic-morestack.o too, whose thread-locals it reaches by general-dynamic accesses, which the writer doesn't
+// take in a dynamic PIE yet, so both paths must refuse it with the one error naming that member's fixup, and write no
+// executable.
 static void check_test_driver_split_stack(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char program[] = "extern void __splitstack_getcontext(void* context[10]);\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    void* context[10];\n"
-                                  "    __splitstack_getcontext(context);\n"
-                                  "    return 0;\n"
-                                  "}\n";
-    static const char expected[] = "/libgcc.a(morestack.o): undefined reference to '_Unwind_Resume'; GCC's driver takes it from libgcc_s.so.1, which the direct "
-                                   "path doesn't link\n";
-    char source[256];
-    char output[256];
-    snprintf(source, sizeof(source), "%s/split-stack.c", directory);
-    snprintf(output, sizeof(output), "%s/split-stack", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
-    check_test_expect(test, written, "split-stack program written");
-    for (uint32_t path = 0; written && path < 2; path += 1)
+    static const char split[] = "extern void __splitstack_getcontext(void* context[10]);\n"
+                                "int main(void)\n"
+                                "{\n"
+                                "    void* context[10];\n"
+                                "    __splitstack_getcontext(context);\n"
+                                "    return 0;\n"
+                                "}\n";
+    static const char backtrace[] = "#include <stdio.h>\n"
+                                    "struct _Unwind_Context;\n"
+                                    "typedef int (*Trace)(struct _Unwind_Context* context, void* argument);\n"
+                                    "extern int _Unwind_Backtrace(Trace trace, void* argument);\n"
+                                    "static int count(struct _Unwind_Context* context, void* argument)\n"
+                                    "{\n"
+                                    "    (void)context;\n"
+                                    "    *(int*)argument += 1;\n"
+                                    "    return 0;\n"
+                                    "}\n"
+                                    "int main(void)\n"
+                                    "{\n"
+                                    "    int frames = 0;\n"
+                                    "    _Unwind_Backtrace(count, &frames);\n"
+                                    "    printf(\"%d\\n\", frames > 0);\n"
+                                    "    return 0;\n"
+                                    "}\n";
+    static const struct
     {
-        char* const vector_arguments[] = { (char*)executable, "-o", output, source, NULL };
-        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", output, source, NULL };
-        char* text = NULL;
-        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
-        const size_t length = text != NULL ? strlen(text) : 0;
-        const bool worded = length > sizeof(expected) - 1 && strncmp(text, "error: /", 8) == 0 && strchr(text, '\n') == text + length - 1 &&
-                            strcmp(text + length - (sizeof(expected) - 1), expected) == 0;
-        check_test_expect(test, status == 1 && worded && access(output, F_OK) != 0,
-                          path == 0 ? "split-stack's API refused, naming libgcc.a(morestack.o) and _Unwind_Resume" : "split-stack's API refused, scalar");
-        free(text);
+        const char* name;
+        const char* source;
+        const char* output;
+        bool refused;
+    } programs[] = {
+        { "backtrace", backtrace, "1\n", false },
+        { "split-stack", split, "", true },
+    };
+    static const char refusal[] = "libgcc.a(generic-morestack.o)'s fixup to '";
+    for (uint32_t p = 0; p < sizeof(programs) / sizeof(programs[0]); p += 1)
+    {
+        char source[256];
+        char outputs[2][256];
+        snprintf(source, sizeof(source), "%s/%s.c", directory, programs[p].name);
+        snprintf(outputs[0], sizeof(outputs[0]), "%s/%s", directory, programs[p].name);
+        snprintf(outputs[1], sizeof(outputs[1]), "%s/%s-scalar", directory, programs[p].name);
+        const bool written = parse_test_write(source, programs[p].source, strlen(programs[p].source));
+        check_test_expect(test, written, "unwinder program written");
+        uint8_t* bytes[2] = { NULL, NULL };
+        uint64_t lengths[2] = { 0, 0 };
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-o", outputs[0], source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", outputs[1], source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            const bool quiet = text == NULL || text[0] == 0;
+            if (programs[p].refused)
+            {
+                const size_t length = text != NULL ? strlen(text) : 0;
+                const bool worded = length != 0 && strncmp(text, "error: can't link ", 18) == 0 && strstr(text, refusal) != NULL &&
+                                    strchr(text, '\n') == text + length - 1;
+                check_test_expect(test, status == 1 && worded && access(outputs[path], F_OK) != 0,
+                                  path == 0 ? "split-stack's API bound, then refused by the writer, naming generic-morestack.o's fixup"
+                                            : "split-stack's API refused, scalar");
+            }
+            else if (status != 0 || !quiet)
+            {
+                printf("  %s%s: status %d: %s", programs[p].name, path == 0 ? "" : ", scalar", status, text != NULL ? text : "\n");
+            }
+            bytes[path] = status == 0 ? check_test_driver_read_aligned(outputs[path], &lengths[path]) : NULL;
+            const uint8_t needed[] = "libgcc_s.so.1";
+            const bool named = bytes[path] != NULL && memmem(bytes[path], lengths[path], needed, sizeof(needed)) != NULL;
+            char captured[64];
+            const bool ran = status == 0 && check_test_driver_capture(outputs[path], captured, sizeof(captured)) && strcmp(captured, programs[p].output) == 0;
+            check_test_expect(test, programs[p].refused || (status == 0 && quiet && named && ran),
+                              path == 0 ? "the unwinder's program links, names libgcc_s.so.1 and runs" : "the unwinder's program, scalar");
+            free(text);
+        }
+        check_test_expect(test,
+                          programs[p].refused ||
+                              (bytes[0] != NULL && bytes[1] != NULL && lengths[0] == lengths[1] && memcmp(bytes[0], bytes[1], lengths[0]) == 0),
+                          "the unwinder's program the same by both paths");
+        free(bytes[0]);
+        free(bytes[1]);
+        unlink(source);
+        unlink(outputs[0]);
+        unlink(outputs[1]);
     }
-    unlink(source);
 }
 
 // A file's bytes, read whole into memory aligned to 64 bytes, as a snapshot's view takes them (snapshot_view), which the

@@ -2704,21 +2704,21 @@ round, as it joins `libc_nonshared.a`'s:
   none of the names `libc.so.6` and the loader export, which `test-import`
   checks on the system's files; a system where it did would need the members
   first.
-- **`libgcc_s.so.1`,** which the driver names as needed, isn't linked. Of the
-  names `libgcc.a`'s members refer to that neither it nor libc defines, it has
-  the unwinder's (`_Unwind_Resume`, `__gcc_personality_v0`), which only the
-  split-stack member (`morestack.o`) refers to: split-stack code
-  (`-fsplit-stack`, whose prologues call `__morestack`) and its API
+- **`libgcc_s.so.1`,** which the driver names as needed, wasn't linked by
+  #483. Of the names `libgcc.a`'s members refer to that neither it nor libc
+  defines, it has the unwinder's (`_Unwind_Resume`, `__gcc_personality_v0`),
+  which only the split-stack member (`morestack.o`) refers to: split-stack
+  code (`-fsplit-stack`, whose prologues call `__morestack`) and its API
   (`__splitstack_getcontext`) make it join. A PIE and a shared library that
-  join it are refused alike (`BIND_ERROR_MEMBER_UNDEFINED`: a strong reference
-  to a name nothing defines that only the members which joined refer to,
-  naming the first such member), where the shared library left the names to
-  the loader, as `-shared` leaves a program's own: it would load only beside
-  a library that defines them. GCC's and lld's links of such a library need
-  `libgcc_s.so.1` and load alone; lld's with `libgcc.a` and libc but not
-  `libgcc_s.so.1` doesn't load into a process without it ("undefined symbol:
-  __gcc_personality_v0"). Linking it as needed, its exports a third library
-  of the snapshot's after `libc.so.6` and the loader, is #489.
+  joined it were refused alike (`BIND_ERROR_MEMBER_UNDEFINED`: a strong
+  reference to a name nothing defines that only the members which joined
+  refer to, naming the first such member), where the shared library left the
+  names to the loader, as `-shared` leaves a program's own: it would load
+  only beside a library that defines them. GCC's and lld's links of such a
+  library need `libgcc_s.so.1` and load alone; lld's with `libgcc.a` and libc
+  but not `libgcc_s.so.1` doesn't load into a process without it ("undefined
+  symbol: __gcc_personality_v0"). #489 links it as needed ("`libgcc_s.so.1`
+  as needed", below); the refusal stays for a system without it.
 - **Hidden helpers.** The integer and binary floating helpers are hidden, so a
   shared library exports none of them. Only the decimal floating-point and
   split-stack members define names with default visibility, which GNU ld and
@@ -2794,12 +2794,14 @@ must join exactly their three members (with `--cross-check`, ld.lld's and
 ld.bfd's links of it run, and lld extracts the same members). Its room check
 binds, against a PIE's runtime and a shared library's, a link of each
 member's first name that no library exports, which must bind (or be refused
-for `morestack.o`'s unwinder) within `bind_capacity_needed`'s room for the
-name; its rules refuse references to `__morestack` and
-`__splitstack_getcontext`, and bind one beside the program's own unwinder;
-and with `--cross-check` it refuses C compiled with `-fsplit-stack`, as a
-library and as a PIE, by both paths, where cc's links with GNU ld and lld
-need `libgcc_s.so.1`, load into a harness that doesn't and run.
+for `morestack.o`'s unwinder without `libgcc_s.so.1`) within
+`bind_capacity_needed`'s room for the name; its rules bind references to
+`__morestack` and `__splitstack_getcontext` (refused without
+`libgcc_s.so.1`), and bind one beside the program's own unwinder; and with
+`--cross-check` it binds C compiled with `-fsplit-stack`, as a library and as
+a PIE, by both paths (refused without `libgcc_s.so.1`), where cc's links with
+GNU ld and lld need `libgcc_s.so.1`, load into a harness that doesn't and
+run.
 `test-snapshot` damages a byte of the pieces' records at 123 places of each
 kind's snapshot, and each damaged copy must give a link of every member's
 names the room the whole snapshot gives it. `test-dynamic` writes the libgcc
@@ -2809,9 +2811,101 @@ compiles and links a C program of 128-bit division and conversions by both
 paths into the same bytes, which needs `libc.so.6` alone and prints what the
 test's own code computes, links it again over a snapshot whose `__udivti3`
 member's first atom has an alignment of 2^255 and a size of 2^64 - 1 (which
-must import the runtime again, silently, and leave the first link's snapshot),
-and refuses a call of `__splitstack_getcontext` with the one error and no
-executable.
+must import the runtime again, silently, and leave the first link's snapshot);
+#483 refused a call of `__splitstack_getcontext` with the one error and no
+executable, which #489 changes (below).
+
+#### `libgcc_s.so.1` as needed
+
+GCC's driver names `libgcc_s.so.1` as needed after each `libgcc.a`
+(`-lgcc_s_asneeded`, GCC 16; `--push-state --as-needed -lgcc_s --pop-state`
+before it): the unwinder (`_Unwind_Resume`, `_Unwind_Backtrace`,
+`_Unwind_GetIP`, `__gcc_personality_v0`), which split-stack code's
+`morestack.o` and a program's own code refer to, and a copy of most of
+`libgcc.a`'s functions. Since #489 a dynamic PIE's and a shared library's
+runtimes import it as a third library beside `libc.so.6` and the loader:
+
+- **Finding it.** `runtime_find_gcc_s` looks for `libgcc_s.so.1` in GCC's
+  installation, where `-lgcc_s` finds GCC's `libgcc_s.so` first, then in the
+  library directories, which that script or link names (`GROUP (
+  libgcc_s.so.1 -lgcc )` on Debian and Ubuntu, an absolute path elsewhere).
+  Both paths are probes, so that installing one later leaves the snapshot
+  stale. A system without it has a runtime without it, which refuses a
+  member's reference to the unwinder as #483 did.
+- **Its exports and versions.** `import_library` reads it as it reads
+  `libc.so.6`; its version indices are moved past `libc.so.6`'s and the
+  loader's (`runtime_move_versions`, which the loader's move shares), so that
+  a link's version index names one library's. Its exports are global names
+  numbered after the loader's (`runtime_export_library`), and the snapshot
+  keeps its versions, its exports' versions and types, its path and its
+  soname as it keeps the loader's (format 6).
+- **The order.** The driver's line is `-lgcc -lgcc_s_asneeded -lc -lgcc
+  -lgcc_s_asneeded`: a member of `libgcc.a` comes before `libgcc_s.so.1`,
+  which exports most of the members' names too (`__udivti3`), so binding
+  takes `libgcc_s.so.1`'s export only after the members
+  (`runtime_export_after_members`): for a strong reference that no member
+  defines, and for a weak one, which loads no member. And `libgcc_s.so.1`
+  comes before `libc.so`: it exports none of the names `libc.so.6` and the
+  loader export (`test-import` checks it on the system's files), so that
+  binding theirs first agrees with the line.
+- **As needed.** As GNU ld and lld take `--as-needed`, the link needs it only
+  for a strong reference that binds to it; without one, the weak references
+  to its names are left to nothing, unversioned, as the loader's are
+  (`bind_keep_as_needed`, which the loader's pass shares). A shared library's
+  strong reference to one of its names (its own `_Unwind_Backtrace`, or
+  `morestack.o`'s `_Unwind_Resume`) binds to it too, rather than being left
+  to the loader, so the library loads alone, as `cc -shared`'s does. A
+  definition of one of its names with default visibility is exported, as lld
+  exports it whether or not the library is needed (GNU ld doesn't when it
+  isn't), as the loader's are.
+- **The writer.** `dynamic_inputs` lists it before `libc.so.6` and the
+  loader, as GNU ld and lld write `DT_NEEDED`: a library that a used version
+  selects (`ExecutableLibrary.required` false), so that only a link with an
+  import of its names gets its `DT_NEEDED` entry and its versions'
+  `.gnu.version_r` entries.
+- **Split-stack code in a dynamic PIE.** `morestack.o` binds now, and makes
+  `generic-morestack.o` join, whose thread-locals it reaches by
+  general-dynamic accesses. The writer relaxes those in a static executable
+  and gives them GOT pairs in a shared library, but doesn't take them in a
+  dynamic PIE yet: the C driver refuses such a link at the writer, naming the
+  member's fixup (`libgcc.a(generic-morestack.o)'s fixup to
+  '__morestack_initial_sp'`). Split-stack libraries link and run;
+  `test-bind` links the PIE's bound objects with lld and GNU ld, which relax
+  the accesses to local-exec.
+
+**The cost**, on a 4-core Xeon VM (not the 9700X), against main (7e3782a),
+the two builds' runs alternating: the dynamic runtime's snapshot grew from
+3,145,713 bytes to 3,150,769 (its directory from 278,784 to 283,840: 61 more
+global names, 3,389, the unwinder's and `libgcc_s.so.1`'s names `libgcc.a`
+lacks, and its versions' and exports' columns), with two more probes
+(`libgcc_s.so.1` absent from GCC's installation and found in a library
+directory). `runtime_open` from the snapshot took 26.9 to 30.6 us before and
+28.2 to 31.6 after over four runs each, within the VM's noise; each probe's
+`stat` is about 0.9 us of it. Binding one worker took the same. The C driver
+compiling and linking a hello world, 220 alternating runs each, took a median
+of 9.90 ms before and 9.96 after (p10 9.40 and 9.40), with a peak resident
+set of 28.9 MB and about 1,850 minor faults both ways; its executable is the
+same bytes. The 9700X's run against #483's record is still to be made.
+
+`test-import` checks `libgcc_s.so.1`'s soname, exports, versions past both
+libraries' and its exports apart from theirs, `__udivti3` a member's of
+`libgcc.a` and `libgcc_s.so.1`'s after it, `_Unwind_Backtrace`
+`libgcc_s.so.1`'s, morestack.o's `_Unwind_Resume` bound to it in a shared
+library's runtime, and with `--cross-check` its exports against readelf's.
+`test-snapshot` compares its versions, exports and path through the
+snapshot. `test-bind`'s rules and its split-stack cross-check bind split-stack
+code by both paths, `_Unwind_Resume` a strong import of `libgcc_s.so.1`'s,
+whose bound objects lld and GNU ld link with it as needed into a PIE and a
+library that run, the library in a harness that doesn't need it; and refuse
+it against a copy of the runtime without `libgcc_s.so.1`
+(`bind_test_without_gcc_s`). `test-dynamic` writes a PIE whose `main` calls
+`_Unwind_Backtrace`, the split-stack library and a compiled library whose
+code walks its stack, each with `DT_NEEDED` `libgcc_s.so.1` before
+`libc.so.6` and its version need, compared with lld's links, and runs them;
+and `test-checker-driver` links a program that calls `_Unwind_Backtrace` by
+both paths into the same bytes, which name `libgcc_s.so.1` and run, and
+refuses a call of `__splitstack_getcontext` at the writer, naming
+`generic-morestack.o`'s fixup.
 
 #### The unwind tables
 
