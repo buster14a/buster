@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// clang's loop hints, `#pragma clang loop`, checked as clang 23 checks them (ParsePragma.cpp's HandlePragmaLoopHint, and
-// SemaStmtAttr.cpp's handleLoopHintAttr and CheckForIncompatibleAttributes), against its answers on probes of each rule:
-//   - each option one of ten, with its argument in parentheses: a state's one of its words, a count a positive integer
-//     constant that fits an int (vectorize_width's also `fixed` or `scalable`, alone or after the count). A count here is
-//     an integer literal; another constant expression (an enumerator, `4 + 4`) is left unsupported, not guessed;
-//   - no hint twice in one category, across the pragmas before one loop too: two states or two counts are duplicates;
-//   - no count beside a state that rules it out: unroll's every state, and the others' disable;
-//   - a for, while or do-while loop right after the pragmas, in a function: another statement (a label's too) is an
-//     error at its first token. At file scope clang's error is at the pragma, which it can't parse as a declaration.
-// Tokens after the last option, which clang warns about and ignores, are ignored. Each error is reported on the
-// pragma's line (a conflict on the later pragma's), but a misplaced pragma's at the statement after it. Tier 0 has no
-// loop transformation for the hints to steer, so nothing keeps them.
+// clang's loop hints, `#pragma clang loop`, checked as clang 23 checks them, against its answers on probes of each rule.
+// clang reads one in three steps, and so does this:
+//   - PragmaLoopHintHandler (ParsePragma.cpp) lexes its options: each one of eleven names, with its argument in
+//     parentheses, to the `)` that closes them. A name it doesn't know, a missing `(` and an unclosed argument are
+//     errors, and a token after the options that isn't another one's name drops the pragma, with a warning: no hint;
+//   - HandlePragmaLoopHint reads each argument: a state's one of its words, a count a positive integer constant that
+//     fits an int (vectorize_width's also `fixed` or `scalable`, alone or after the count), with a warning for what
+//     follows the word or the constant expression it reads, which it ignores. An empty argument is an error, and so is
+//     one no expression starts with. A count here is an integer literal, alone or before what an expression can't go on
+//     with; another constant expression (an enumerator, `4 + 4`) is left unsupported, not guessed;
+//   - Sema (SemaStmtAttr.cpp's handleLoopHintAttr and CheckForIncompatibleAttributes) wants a for, while or do-while
+//     loop right after the pragmas, in a function: another statement (a label's too) is an error at its first token,
+//     and at file scope clang's error is at the pragma, which it can't parse as a declaration. No hint may come twice in
+//     one category, across the pragmas before one loop too, nor a count beside a state that rules it out (unroll's
+//     every state, the others' disable).
+// Each error is reported on the pragma's line (a conflict on the later pragma's), but a misplaced pragma's at the
+// statement after it. A count this doesn't evaluate is still a hint of its category, or clang's error: where either is
+// an error (a second hint of the category, a misplaced pragma), so is the answer. Tier 0 has no loop transformation for
+// the hints to steer, so nothing keeps them.
 // clang's other loop hints follow the same rules, as hints of the same categories: `#pragma unroll` (a state), with a
 // count after it alone or in parentheses, `#pragma nounroll` (disable), `#pragma unroll_and_jam` with a count or none,
 // `#pragma nounroll_and_jam` and `#pragma GCC unroll` with a count. Their counts may be 0, which clang takes.
@@ -31,6 +38,7 @@ typedef enum CheckLoopCategory
     CHECK_LOOP_VECTORIZE_PREDICATE,
     CHECK_LOOP_DISTRIBUTE,
     CHECK_LOOP_UNROLL_AND_JAM,
+    CHECK_LOOP_LICM,
     CHECK_LOOP_CATEGORIES,
 } CheckLoopCategory;
 
@@ -53,8 +61,9 @@ static const CheckLoopOption check_loop_options[] =
     { "unroll_count", CHECK_LOOP_UNROLL, 0 },
     { "pipeline", CHECK_LOOP_PIPELINE, BUSTER_CHECK_LOOP_DISABLE },
     { "pipeline_initiation_interval", CHECK_LOOP_PIPELINE, 0 },
-    { "vectorize_predicate", CHECK_LOOP_VECTORIZE_PREDICATE, BUSTER_CHECK_LOOP_ENABLE | BUSTER_CHECK_LOOP_DISABLE },
+    { "vectorize_predicate", CHECK_LOOP_VECTORIZE_PREDICATE, BUSTER_CHECK_LOOP_ENABLE | BUSTER_CHECK_LOOP_DISABLE | BUSTER_CHECK_LOOP_ASSUME_SAFETY },
     { "distribute", CHECK_LOOP_DISTRIBUTE, BUSTER_CHECK_LOOP_ENABLE | BUSTER_CHECK_LOOP_DISABLE },
+    { "licm", CHECK_LOOP_LICM, BUSTER_CHECK_LOOP_DISABLE },
 };
 
 // The hints of the pragmas before one loop so far: each category's state word (0 for none) and whether it has a count.
@@ -116,77 +125,61 @@ static bool check_input_loop_follows(const Parser* parser, uint32_t token)
             (owner >= count || parser->tree.roles[owner] != PARSE_ROLE_TERMINATOR));
 }
 
-// One pragma's options, from `cursor` to its end (`end`, its PRAGMA_END), into the loop's hints: 2 if they're valid, 3
-// for clang's error, 0 for what this leaves unsupported.
-static uint8_t check_input_loop_options(CheckInputReader* reader, uint32_t cursor, uint32_t end, CheckLoopHints* hints)
+// Whether a keyword (its CName) can begin an expression, as a count's first token: sizeof, the alignofs, _Generic,
+// _Countof, true, false, nullptr, the function names, __extension__, __real and __imag, and the builtins clang spells
+// as keywords. A statement's, a declaration's or a type's keyword can't (`#pragma unroll return`, `unroll int`), which
+// clang's ParseConstantExpression diagnoses as an expected expression.
+static bool check_input_loop_keyword_starts(uint32_t name)
 {
-    const PPTokens* output = &reader->pp->output;
-    uint8_t result = cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER ? 2 : 3;
-    while (result == 2 && cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER)
+    bool result = false;
+    switch (name)
     {
-        uint32_t option = 0;
-        while (option < BUSTER_ARRAY_LENGTH(check_loop_options) && !pp_token_is_name(reader->pp, output, cursor, end, check_loop_options[option].name))
-        {
-            option += 1;
-        }
-        const bool known = option < BUSTER_ARRAY_LENGTH(check_loop_options);
-        const uint32_t argument = cursor + 2;
-        result = known && argument < end && output->kinds[cursor + 1] == C_TOKEN_L_PAREN ? 2 : 3;
-        uint32_t close = argument;
-        if (result == 2 && check_loop_options[option].states != 0)
-        {
-            uint8_t word = 0;
-            word = pp_token_is_name(reader->pp, output, argument, end, "enable") ? BUSTER_CHECK_LOOP_ENABLE :
-                   pp_token_is_name(reader->pp, output, argument, end, "disable") ? BUSTER_CHECK_LOOP_DISABLE :
-                   pp_token_is_name(reader->pp, output, argument, end, "assume_safety") ? BUSTER_CHECK_LOOP_ASSUME_SAFETY :
-                   pp_token_is_name(reader->pp, output, argument, end, "full") ? BUSTER_CHECK_LOOP_FULL : 0;
-            const CheckLoopCategory category = check_loop_options[option].category;
-            result = (word & check_loop_options[option].states) != 0 && hints->states[category] == 0 ? 2 : 3;
-            hints->states[category] = word;
-            close = argument + 1;
-        }
-        else if (result == 2)
-        {
-            // vectorize_width's `fixed` or `scalable`, alone or after its count.
-            const bool width = check_loop_options[option].category == CHECK_LOOP_VECTORIZE;
-            const bool scalable = width && (pp_token_is_name(reader->pp, output, argument, end, "fixed") || pp_token_is_name(reader->pp, output, argument, end, "scalable"));
-            result = scalable ? 2 : argument < end ? check_input_loop_count(reader, argument, false) : 3;
-            result = result == 1 ? 2 : result;
-            close = argument + 1;
-            if (result == 2 && !scalable && width && close + 1 < end && output->kinds[close] == C_TOKEN_COMMA)
-            {
-                result = pp_token_is_name(reader->pp, output, close + 1, end, "fixed") || pp_token_is_name(reader->pp, output, close + 1, end, "scalable") ? 2 : 3;
-                close += 2;
-            }
-            else if (result == 2 && !scalable && close < end && output->kinds[close] != C_TOKEN_R_PAREN)
-            {
-                // A literal that an expression goes on from (`4 + 4`): a constant this doesn't evaluate.
-                result = 0;
-            }
-            const CheckLoopCategory category = check_loop_options[option].category;
-            result = result == 2 && hints->counts[category] ? 3 : result;
-            hints->counts[category] = true;
-        }
-        if (result == 2)
-        {
-            result = close < end && output->kinds[close] == C_TOKEN_R_PAREN ? 2 : 3;
-            cursor = close + 1;
-            const CheckLoopCategory category = check_loop_options[option].category;
-            const uint8_t state = hints->states[category];
-            const bool incompatible = hints->counts[category] && state != 0 &&
-                                      (category == CHECK_LOOP_UNROLL || category == CHECK_LOOP_UNROLL_AND_JAM || state == BUSTER_CHECK_LOOP_DISABLE);
-            result = incompatible ? 3 : result;
-        }
+    case C_NAME_SIZEOF:
+    case C_NAME_ALIGNOF_C11:
+    case C_NAME_ALIGNOF:
+    case C_NAME_GNU_ALIGNOF:
+    case C_NAME_GNU_ALIGNOF2:
+    case C_NAME_GENERIC:
+    case C_NAME_COUNTOF:
+    case C_NAME_TRUE:
+    case C_NAME_FALSE:
+    case C_NAME_NULLPTR:
+    case C_NAME_GNU_NULLPTR:
+    case C_NAME_FUNC:
+    case C_NAME_FUNCTION:
+    case C_NAME_PRETTY_FUNCTION:
+    case C_NAME_EXTENSION:
+    case C_NAME_GNU_REAL:
+    case C_NAME_GNU_REAL2:
+    case C_NAME_GNU_IMAG:
+    case C_NAME_GNU_IMAG2:
+    case C_NAME_BUILTIN_OFFSETOF:
+    case C_NAME_BUILTIN_VA_ARG:
+    case C_NAME_BUILTIN_TYPES_COMPATIBLE_P:
+    case C_NAME_BUILTIN_CHOOSE_EXPR:
+    case C_NAME_BUILTIN_CONVERTVECTOR:
+    case C_NAME_BUILTIN_BIT_CAST:
+    case C_NAME_BUILTIN_COLUMN:
+    case C_NAME_BUILTIN_FILE:
+    case C_NAME_BUILTIN_FILE_NAME:
+    case C_NAME_BUILTIN_FUNCTION:
+    case C_NAME_BUILTIN_LINE:
+    case C_NAME_BUILTIN_VECTORELEMENTS:
+        result = true;
+        break;
+    default:
+        break;
     }
     return result;
 }
 
-// Whether a token of kind `kind` can begin an expression (an identifier or keyword, a constant, a literal, a parenthesis
-// or a unary operator, && a label's address), and whether one can go on an expression after an operand (a binary or
-// postfix operator, ?, a subscript, a call, a member).
+// Whether a token of kind `kind` can begin an expression (an identifier, an expression's keyword, a constant, a
+// literal, a parenthesis or a unary operator, && a label's address), and whether one can go on an expression after an
+// operand (a binary or postfix operator, ?, a subscript, a call, a member).
 static bool check_input_loop_starts(uint8_t kind)
 {
-    const bool keyword = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT;
+    const bool keyword = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT &&
+                         check_input_loop_keyword_starts((uint32_t)kind - BUSTER_PP_KIND_KEYWORD + 1);
     const bool result = kind == C_TOKEN_RAW_IDENTIFIER || kind == BUSTER_PP_KIND_INTEGER || keyword ||
                         (kind >= C_TOKEN_NUMERIC_CONSTANT && kind <= C_TOKEN_UTF32_STRING_LITERAL) || kind == C_TOKEN_L_PAREN ||
                         kind == C_TOKEN_AMP || kind == C_TOKEN_AMPAMP || kind == C_TOKEN_STAR || kind == C_TOKEN_PLUS || kind == C_TOKEN_PLUSPLUS ||
@@ -205,71 +198,185 @@ static bool check_input_loop_continues(uint8_t kind)
     return result;
 }
 
-// One of the other loop hints, from `cursor` (after its name) to its end: a state of `category` (`state`, 0 for a count
-// alone) and, where it is `counted` (unroll, unroll_and_jam and GCC unroll, which is unroll), an optional count, as
-// clang's PragmaUnrollHintHandler and ParseLoopHintValue read it: in parentheses, to the one that closes them, or the
-// rest of the line. clang drops a pragma with tokens it takes no count from (nounroll's, and those after a count's
-// parentheses), with a warning: no hint. An unclosed or empty count is an error (`(4`, `()`), and so is one that no
-// expression starts with (`;`); a count that an integer literal starts, alone or before what an expression can't go
-// on with (`4)`, a warning's tokens clang leaves), is the literal's; any other is a constant this doesn't evaluate
-// (`4 + 4`, `-1`, an enumerator). Returns as check_input_loop_options does, with an unreadable count's message in
-// `*message` (clang's), which stays as it was otherwise.
-static uint8_t check_input_loop_unroll(CheckInputReader* reader, uint32_t cursor, uint32_t end, CheckLoopCategory category, uint8_t state, bool counted,
-                                       CheckLoopHints* hints, uint8_t* message)
+// The option the identifier at `token` names: its index in check_loop_options, or the table's length for none.
+static uint32_t check_input_loop_option(CheckInputReader* reader, uint32_t token, uint32_t end)
 {
-    const PPTokens* output = &reader->pp->output;
-    const bool parenthesized = counted && cursor < end && output->kinds[cursor] == C_TOKEN_L_PAREN;
+    uint32_t option = 0;
+    while (option < BUSTER_ARRAY_LENGTH(check_loop_options) && !pp_token_is_name(reader->pp, &reader->pp->output, token, end, check_loop_options[option].name))
+    {
+        option += 1;
+    }
+    return option;
+}
+
+// The `)` that closes an argument starting at `first`, as clang's ParseLoopHintValue finds it: the first that leaves no
+// parenthesis open, or `end` (the pragma's PRAGMA_END) for none.
+static uint32_t check_input_loop_close(const PPTokens* output, uint32_t first, uint32_t end)
+{
     uint32_t close = end;
     uint32_t depth = 1;
-    for (uint32_t t = cursor + 1; parenthesized && close == end && t < end; t += 1)
+    for (uint32_t t = first; close == end && t < end; t += 1)
     {
         depth += output->kinds[t] == C_TOKEN_L_PAREN;
         depth -= output->kinds[t] == C_TOKEN_R_PAREN;
         close = depth == 0 ? t : end;
     }
+    return close;
+}
+
+// The state word the token at `token` is (BUSTER_CHECK_LOOP_*), or 0 for none.
+static uint8_t check_input_loop_word(CheckInputReader* reader, uint32_t token, uint32_t end)
+{
+    const PPTokens* output = &reader->pp->output;
+    return pp_token_is_name(reader->pp, output, token, end, "enable") ? BUSTER_CHECK_LOOP_ENABLE :
+           pp_token_is_name(reader->pp, output, token, end, "disable") ? BUSTER_CHECK_LOOP_DISABLE :
+           pp_token_is_name(reader->pp, output, token, end, "assume_safety") ? BUSTER_CHECK_LOOP_ASSUME_SAFETY :
+           pp_token_is_name(reader->pp, output, token, end, "full") ? BUSTER_CHECK_LOOP_FULL : 0;
+}
+
+// Whether the token at `token` is vectorize_width's `fixed` or `scalable`.
+static bool check_input_loop_scalable(CheckInputReader* reader, uint32_t token, uint32_t end)
+{
+    const PPTokens* output = &reader->pp->output;
+    return pp_token_is_name(reader->pp, output, token, end, "fixed") || pp_token_is_name(reader->pp, output, token, end, "scalable");
+}
+
+// A count's argument, from `first` to `last` (not empty), as clang's ParseConstantExpression reads it, which leaves what
+// follows the expression it reads to a warning: one that an integer literal starts, alone or before what an expression
+// can't go on with (`4)`, `4 x`, `4, x`), is the literal's, 1 if it is valid (`zero` says whether 0 is) and 3 for clang's
+// error otherwise; one that no expression starts with is clang's error (3, with its message in `*message`); and any
+// other is a constant this doesn't evaluate (0: `4 + 4`, `-1`, an enumerator).
+static uint8_t check_input_loop_value(CheckInputReader* reader, uint32_t first, uint32_t last, bool zero, uint8_t* message)
+{
+    const PPTokens* output = &reader->pp->output;
+    const uint8_t kind = output->kinds[first];
+    const bool literal = kind == C_TOKEN_NUMERIC_CONSTANT || kind == BUSTER_PP_KIND_INTEGER;
+    uint8_t result = 0;
+    if (literal && (first + 1 == last || !check_input_loop_continues(output->kinds[first + 1])))
+    {
+        result = check_input_loop_count(reader, first, zero);
+    }
+    else if (!check_input_loop_starts(kind))
+    {
+        result = 3;
+        *message = CHECK_INPUT_LOOP_EXPRESSION;
+    }
+    return result;
+}
+
+// Whether the loop's hints of `category` have a count beside a state that rules it out: unroll's and unroll_and_jam's
+// every state, and the others' disable.
+static bool check_input_loop_incompatible(const CheckLoopHints* hints, CheckLoopCategory category)
+{
+    const uint8_t state = hints->states[category];
+    return hints->counts[category] && state != 0 &&
+           (category == CHECK_LOOP_UNROLL || category == CHECK_LOOP_UNROLL_AND_JAM || state == BUSTER_CHECK_LOOP_DISABLE);
+}
+
+// One `#pragma clang loop`'s options, from `cursor` to its end (`end`, its PRAGMA_END), into the loop's hints, in clang's
+// steps (at the top of this file): 2 for valid hints, 1 for a pragma clang drops, 3 for clang's error, and otherwise 0
+// for what this leaves unsupported. The first error's message, where clang has one of its own for it (an unclosed or
+// empty argument, one no expression starts with), goes in `*message`, which stays as it was otherwise.
+static uint8_t check_input_loop_options(CheckInputReader* reader, uint32_t cursor, uint32_t end, CheckLoopHints* hints, uint8_t* message)
+{
+    const PPTokens* output = &reader->pp->output;
+    // PragmaLoopHintHandler: the options' names and their arguments' parentheses.
+    uint8_t result = cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER ? 2 : 3;
+    uint32_t next = cursor;
+    while (result == 2 && next < end && output->kinds[next] == C_TOKEN_RAW_IDENTIFIER)
+    {
+        const bool known = check_input_loop_option(reader, next, end) < BUSTER_ARRAY_LENGTH(check_loop_options);
+        const bool open = known && next + 1 < end && output->kinds[next + 1] == C_TOKEN_L_PAREN;
+        const uint32_t close = open ? check_input_loop_close(output, next + 2, end) : end;
+        result = close < end ? 2 : 3;
+        *message = open && close == end ? CHECK_INPUT_LOOP_PARENTHESIS : *message;
+        next = close + 1;
+    }
+    result = result == 2 && next < end ? 1 : result;
+    // HandlePragmaLoopHint and Sema: each option's argument, in order, with what the options before it left in `hints`.
+    next = cursor;
+    while (result != 1 && result != 3 && next < end)
+    {
+        const CheckLoopOption* option = &check_loop_options[check_input_loop_option(reader, next, end)];
+        const CheckLoopCategory category = option->category;
+        const uint32_t first = next + 2;
+        const uint32_t close = check_input_loop_close(output, first, end);
+        uint8_t hint = 2;
+        if (first == close)
+        {
+            hint = 3;
+            *message = CHECK_INPUT_LOOP_MISSING;
+        }
+        else if (option->states != 0)
+        {
+            const uint8_t word = check_input_loop_word(reader, first, end);
+            hint = (word & option->states) != 0 && hints->states[category] == 0 ? 2 : 3;
+            hints->states[category] = word;
+        }
+        else
+        {
+            // vectorize_width's `fixed` or `scalable`, alone (what follows it ignored) or after the count.
+            const bool width = category == CHECK_LOOP_VECTORIZE;
+            const bool alone = width && check_input_loop_scalable(reader, first, end);
+            hint = alone ? 1 : check_input_loop_value(reader, first, close, false, message);
+            const bool comma = !alone && hint == 1 && width && first + 1 < close && output->kinds[first + 1] == C_TOKEN_COMMA;
+            hint = comma && !(first + 2 < close && check_input_loop_scalable(reader, first + 2, end)) ? 3 : hint;
+            hint = hint == 1 ? 2 : hint;
+            hint = hint != 3 && hints->counts[category] ? 3 : hint;
+            hints->counts[category] = true;
+        }
+        hint = hint != 3 && check_input_loop_incompatible(hints, category) ? 3 : hint;
+        result = hint == 3 || hint == 0 ? hint : result;
+        next = close + 1;
+    }
+    return result;
+}
+
+// One of the other loop hints, from `cursor` (after its name) to its end: a state of `category` (`state`, 0 for a count
+// alone) and, where it is `counted` (unroll, unroll_and_jam and GCC unroll, which is unroll), an optional count, as
+// clang's PragmaUnrollHintHandler and ParseLoopHintValue read it: in parentheses, to the one that closes them, or the
+// rest of the line. clang drops a pragma with tokens it takes no count from (nounroll's, and those after a count's
+// parentheses), with a warning: no hint. An unclosed or empty count is an error (`(4`, `()`), and the count is read as
+// check_input_loop_value reads one, 0 among the valid ones (`#pragma unroll`'s 0 and 1 are clang's disable, a state,
+// which conflicts with what a count does). Returns as check_input_loop_options does.
+static uint8_t check_input_loop_unroll(CheckInputReader* reader, uint32_t cursor, uint32_t end, CheckLoopCategory category, uint8_t state, bool counted,
+                                       CheckLoopHints* hints, uint8_t* message)
+{
+    const PPTokens* output = &reader->pp->output;
+    const bool parenthesized = counted && cursor < end && output->kinds[cursor] == C_TOKEN_L_PAREN;
+    const uint32_t close = parenthesized ? check_input_loop_close(output, cursor + 1, end) : end;
     const uint32_t first = parenthesized ? cursor + 1 : cursor;
-    const uint32_t last = parenthesized ? close : end;
-    const bool ignored = cursor < end && (!counted || (parenthesized && close + 1 < end));
-    const bool literal = first < last && (output->kinds[first] == C_TOKEN_NUMERIC_CONSTANT || output->kinds[first] == BUSTER_PP_KIND_INTEGER);
-    uint8_t result = 2;
-    if (!ignored && parenthesized && close == end)
+    const bool dropped = cursor < end && (!counted || (parenthesized && close + 1 < end));
+    uint8_t result = 1;
+    if (!dropped && parenthesized && close == end)
     {
         result = 3;
         *message = CHECK_INPUT_LOOP_PARENTHESIS;
     }
-    else if (!ignored && cursor < end && first == last)
+    else if (!dropped && cursor < end && first == close)
     {
         result = 3;
         *message = CHECK_INPUT_LOOP_MISSING;
     }
-    else if (!ignored && literal && (first + 1 == last || !check_input_loop_continues(output->kinds[first + 1])))
+    else if (!dropped && cursor < end)
     {
-        result = check_input_loop_count(reader, first, true);
+        result = check_input_loop_value(reader, first, close, true, message);
         result = result == 1 ? 2 : result;
-        if (result == 2)
-        {
-            result = hints->counts[category] ? 3 : 2;
-            hints->counts[category] = true;
-        }
+        result = result != 3 && hints->counts[category] ? 3 : result;
+        hints->counts[category] = true;
     }
-    else if (!ignored && cursor < end)
-    {
-        result = check_input_loop_starts(output->kinds[first]) ? 0 : 3;
-        *message = result == 3 ? CHECK_INPUT_LOOP_EXPRESSION : *message;
-    }
-    else if (!ignored)
+    else if (!dropped)
     {
         result = hints->states[category] != 0 ? 3 : 2;
         hints->states[category] = state;
     }
-    const bool incompatible = hints->counts[category] && hints->states[category] != 0 &&
-                              (category == CHECK_LOOP_UNROLL || category == CHECK_LOOP_UNROLL_AND_JAM || hints->states[category] == BUSTER_CHECK_LOOP_DISABLE);
-    return result == 2 && !ignored && incompatible ? 3 : result;
+    return result != 1 && result != 3 && check_input_loop_incompatible(hints, category) ? 3 : result;
 }
 
-// Each `#pragma clang loop`'s handled state (2 for valid hints, 3 for clang's error, 0 for unsupported), and for an error
-// its message and the token it is reported at (BUSTER_CHECK_NONE for the pragma's own place), in `messages` and
-// `tokens`, which the caller zeroes and fills with BUSTER_CHECK_NONE. Whether there was memory enough.
+// Each loop hint's handled state (2 for valid hints, 1 for a pragma clang drops, 3 for clang's error, 0 for unsupported),
+// and for an error its message and the token it is reported at (BUSTER_CHECK_NONE for the pragma's own place), in
+// `messages` and `tokens`, which the caller zeroes and fills with BUSTER_CHECK_NONE. A misplaced pragma's hints are an
+// error, those this leaves unsupported too; a dropped one has none. Whether there was memory enough.
 static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled, uint8_t* messages, uint32_t* tokens)
 {
     const Parser* parser = reader->parser;
@@ -310,10 +417,10 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
             const CheckLoopCategory category = jam || nojam ? CHECK_LOOP_UNROLL_AND_JAM : CHECK_LOOP_UNROLL;
             const uint8_t word = nounroll || nojam ? BUSTER_CHECK_LOOP_DISABLE : BUSTER_CHECK_LOOP_ENABLE;
             uint8_t message = CHECK_INPUT_LOOP_HINT;
-            uint8_t state = clang ? check_input_loop_options(reader, source + 4, end, &hints) :
+            uint8_t state = clang ? check_input_loop_options(reader, source + 4, end, &hints, &message) :
                             check_input_loop_unroll(reader, source + (gcc ? 4 : 3), end, category, word, unroll || jam || gcc, &hints, &message);
             messages[pragma] = state == 3 ? message : 0;
-            if (state == 2 && (bodies == 0 || !check_input_loop_follows(parser, token)))
+            if ((state == 2 || state == 0) && (bodies == 0 || !check_input_loop_follows(parser, token)))
             {
                 state = 3;
                 messages[pragma] = bodies == 0 ? CHECK_INPUT_LOOP_HINT : CHECK_INPUT_LOOP_PLACEMENT;

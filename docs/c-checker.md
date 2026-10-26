@@ -140,25 +140,35 @@ visible tag, as clang has it, not a declaration of it alone.)
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:
 
-- **Loop hints** (`c_check_loop_input.c`): `#pragma clang loop` with its ten
-  options, and `#pragma unroll`, `nounroll`, `unroll_and_jam`,
-  `nounroll_and_jam` and `GCC unroll`, as hints of the same categories. A state
-  takes its own words, and a count must be a positive integer constant that
-  fits an `int` (`vectorize_width` also `fixed` or `scalable`). No hint may come
-  twice in one category, across the pragmas before one loop too, nor a count
-  beside a state that rules it out (`unroll`'s every state, the others'
-  `disable`). A `for`, `while` or `do`-`while` loop must follow, in a function.
-  Errors are reported on the pragma's line, but a misplaced one's at the
-  statement after it, as clang reports them. `GCC unroll` is `unroll` (#480's
-  review), whose count may be left out, in parentheses or the rest of the line,
-  as clang's `ParseLoopHintValue` reads it: an empty count (`unroll()`), an
-  unclosed one (`unroll (4`) and one no expression starts with (`unroll ;`) are
-  errors, with clang's messages, and a pragma clang drops, with a warning
-  (`nounroll 4`, `unroll (4) x`), is no hint. A count here is an integer
-  literal, alone or before a token no expression goes on with (`unroll 4)`, as
-  clang reads it): another constant expression (`4 + 4`, `-1`, an enumerator)
-  is refused as unsupported, not guessed. Tier 0 has no loop transformation for
-  the hints to steer, so nothing keeps them.
+- **Loop hints** (`c_check_loop_input.c`): `#pragma clang loop` with its
+  eleven options, and `#pragma unroll`, `nounroll`, `unroll_and_jam`,
+  `nounroll_and_jam` and `GCC unroll`, as hints of the same categories, read in
+  clang's three steps. Its pragma handler lexes the options' names and their
+  arguments in parentheses: an unknown name, a missing `(` and an unclosed
+  argument are errors, and a token after the options that isn't another one's
+  name drops the pragma, with a warning (`unroll_count(4))`), so that nothing
+  in it is placed or checked. Then each argument: a state takes its own words
+  (`licm` only `disable`, `vectorize_predicate` `assume_safety` too), and a
+  count must be a positive integer constant that fits an `int`
+  (`vectorize_width` also `fixed` or `scalable`, alone or after the count).
+  What follows the word or the constant expression clang reads is ignored,
+  with a warning (`vectorize(enable x)`, `vectorize_width(scalable, 4)`); an
+  empty argument is an error, and so is one no expression starts with
+  (`unroll_count(;)`, `unroll return`). Last, no hint may come twice in one
+  category, across the pragmas before one loop too, nor a count beside a state
+  that rules it out (`unroll`'s every state, the others' `disable`), and a
+  `for`, `while` or `do`-`while` loop must follow, in a function. Errors are
+  reported on the pragma's line, but a misplaced one's at the statement after
+  it, as clang reports them. `GCC unroll` is `unroll` (#480's review), whose
+  count may be left out, in parentheses or the rest of the line, as clang's
+  `ParseLoopHintValue` reads it; a pragma clang drops with a warning
+  (`nounroll 4`, `unroll (4) x`) is no hint. A count here is an integer
+  literal, alone or before a token no expression goes on with (`unroll 4)`,
+  `unroll_count(4, x)`, as clang reads them): another constant expression
+  (`4 + 4`, `-1`, an enumerator) is refused as unsupported, not guessed, but
+  where it is an error whatever its value (beside `unroll(full)`, before a
+  statement that isn't a loop) the answer is the error. Tier 0 has no loop
+  transformation for the hints to steer, so nothing keeps them.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.

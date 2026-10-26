@@ -3260,6 +3260,162 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // #480's second review: an empty clang loop count is clang's missing argument, and only an expression's keywords
+        // start a count.
+        {
+            "an empty unroll_count refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty interleave_count refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop interleave_count()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty vectorize_width refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize_width()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty pipeline_initiation_interval refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop pipeline_initiation_interval()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a clang loop count no expression starts with refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(;)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a clang loop count of a statement keyword refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(return)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of a statement keyword refused",
+            "int f(int n) { int s = 0;\n#pragma unroll return\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of a type keyword refused",
+            "int f(int n) { int s = 0;\n#pragma unroll int\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of typeof refused",
+            "int f(int n) { int s = 0;\n#pragma unroll typeof(1)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of sizeof unsupported",
+            "int f(int n) { int s = 0;\n#pragma unroll sizeof(int)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        {
+            "a clang loop count of an enumerator unsupported",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        // clang drops a loop pragma with tokens after its options (or a count's parentheses), with a warning: no hint, so
+        // nothing to place or to check, at file scope too; it ignores what follows the state or the constant expression an
+        // argument starts with, with a warning; licm takes disable, vectorize_predicate assume_safety; and a count this
+        // doesn't evaluate is still a hint of its category, or clang's error.
+        {
+            "loop pragmas clang drops, at file scope and before a statement",
+            "#pragma clang loop unroll(enable) 4\n#pragma nounroll 4\n#pragma unroll (4) x\nint f(int n) { int s = 0;\n"
+            "#pragma clang loop unroll(enable) 4\n#pragma nounroll 4\n#pragma unroll (4) x\n s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "a dropped clang loop pragma's arguments and hints unchecked",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(0) 4\n#pragma clang loop unroll_count() 4\n"
+            "#pragma clang loop unroll_count(4))\n#pragma clang loop unroll(disable)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "what follows a loop hint's argument ignored",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize(enable x) unroll(enable, x)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(scalable, 4) interleave_count(4, x)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(4, scalable x) unroll_count(4 = 5)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(4 x, scalable)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(fixed, 4)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "licm and vectorize_predicate's assume_safety",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(disable) vectorize_predicate(assume_safety)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "licm enabled refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(enable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "licm twice refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(disable) licm(disable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a vectorize_width count without its kind refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize_width(4, x)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator count beside unroll(full) refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) unroll(full)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator width beside vectorize(disable) refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop vectorize(disable) vectorize_width(N)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator count before an invalid state refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) vectorize(bogus)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a misplaced enumerator count refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N)\n s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator unroll count after unroll(enable) refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll(enable)\n#pragma unroll N\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator unroll count at file scope refused",
+            "enum { N = 4 };\n#pragma unroll N\nint x;\n",
+            true,
+            false
+        },
         {
             "incompatible loop hints across pragmas refused",
             "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n#pragma clang loop unroll_count(4)\n while (n--) s += 1; return s; }\n",
