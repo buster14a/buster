@@ -12,10 +12,11 @@
 // 8 KB, in five language modes; sources of up to 96 KB give refinement many blocks of BUSTER_REFINE_BLOCK_TOKENS, which
 // the windows complete at every place. Each windowed preparation's line pages are checked against a count a byte at a
 // time; and sources with __LINE__ around the pages' starts are preprocessed as units (pp_test_window_units), which must
-// count from the pages and give the scalar twins' output.
+// count from the pages and give the scalar twins' output. Files made by hand check the line ends at a query's end
+// (pp_test_line_ends, #441): a "\r\n" counts at its '\n', so a query that ends at the '\n' counts no line end there.
 //
 // Layout: the random sources, the preparations and their comparison, the line pages, lines in units, the line ends' scan
-// (pp_window_has_line_end) against a byte-at-a-time one, and pp_test_windows.
+// (pp_window_has_line_end) against a byte-at-a-time one, line ends at a query's end, and pp_test_windows.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -617,6 +618,205 @@ static uint64_t pp_window_test_line_ends(uint64_t* random, uint64_t* checks)
         munmap(mapping, 2 * page_bytes);
     }
     return failures;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Line ends at a query's end (#441)
+
+// A file of 'x's with line ends placed in it, for pp_test_line_ends.
+typedef struct PPLineEndCase PPLineEndCase;
+struct PPLineEndCase
+{
+    const char* name;
+    uint32_t length;
+    // Each place's byte, and as many places as are used.
+    uint32_t places[6];
+    uint8_t bytes[6];
+    uint32_t count;
+};
+
+// One of pp_test_line_ends' files, at the end of a readable mapping before a PROT_NONE page (a read past the file's
+// length faults), against the line ends counted a byte at a time: "\n", "\r\n" at its '\n', and a '\r' alone. A query
+// that ends at a "\r\n"'s '\n' has the '\r' and not its line end. Checks pp_count_lines from many starts to every end;
+// the line pages counted whole and in two windows cut around each line end (pp_count_page_lines); pp_page_line at every
+// byte; and pp_line_of's lines and columns at every byte, from the cursor (without pages, and on a page) and from the
+// pages. Returns the failures and adds the checks to `checks`.
+static uint64_t pp_line_end_test_case(const PPLineEndCase* line_case, uint8_t* mapping, uint64_t room, uint64_t* checks)
+{
+    uint64_t failures = 0;
+    uint8_t* bytes = mapping + room - line_case->length;
+    memset(bytes, 'x', line_case->length);
+    for (uint32_t p = 0; p < line_case->count; p += 1)
+    {
+        bytes[line_case->places[p]] = line_case->bytes[p];
+    }
+    PPFileData data = { .bytes = bytes, .length = line_case->length };
+    // The line ends before each byte, and each byte's line's start.
+    uint32_t* before = malloc((line_case->length + 1) * sizeof(uint32_t));
+    uint32_t* starts = malloc((line_case->length + 1) * sizeof(uint32_t));
+    const uint32_t page_count = line_case->length / BUSTER_PP_LINE_PAGE_BYTES + 1;
+    uint32_t* pages = malloc(page_count * sizeof(uint32_t));
+    static Preprocessor pp;
+    if (before == 0 || starts == 0 || pages == 0)
+    {
+        failures += 1;
+    }
+    for (uint32_t at = 0, lines = 0, start = 0; failures == 0 && at <= line_case->length; at += 1)
+    {
+        before[at] = lines;
+        starts[at] = start;
+        const bool end = at < line_case->length && (bytes[at] == '\n' || (bytes[at] == '\r' && (at + 1 == line_case->length || bytes[at + 1] != '\n')));
+        lines += end;
+        start = end ? at + 1 : start;
+    }
+    // pp_count_lines from the file's start, from a byte to 130 bytes before the end, and from each place around a line
+    // end; from every start for a short file.
+    for (uint32_t end = 0; failures == 0 && end <= line_case->length; end += 1)
+    {
+        const uint32_t lowest = line_case->length <= 200 || end <= 130 ? 0 : end - 130;
+        for (uint32_t back = 0; back <= end - lowest; back += 1)
+        {
+            const uint32_t begin = end - back;
+            const uint32_t count = pp_count_lines(&data, begin, end);
+            *checks += 1;
+            if (count != before[end] - before[begin] && failures < 4 && !pp_test_quiet)
+            {
+                printf("line ends: %s: pp_count_lines(%u, %u) gives %u, a byte at a time %u\n", line_case->name, begin, end, count, before[end] - before[begin]);
+            }
+            failures += count != before[end] - before[begin];
+        }
+        const uint32_t from_start = pp_count_lines(&data, 0, end);
+        *checks += 1;
+        failures += from_start != before[end];
+        for (uint32_t p = 0; p < line_case->count; p += 1)
+        {
+            for (uint32_t begin = line_case->places[p] > 0 ? line_case->places[p] - 1 : 0; begin <= line_case->places[p] + 2 && begin <= end; begin += 1)
+            {
+                const uint32_t count = pp_count_lines(&data, begin, end);
+                *checks += 1;
+                failures += count != before[end] - before[begin];
+            }
+        }
+    }
+    // The line pages: whole, and in two windows cut at each byte from before a placed line end to past it.
+    for (uint32_t p = 0; failures == 0 && p <= line_case->count; p += 1)
+    {
+        const uint32_t first = p < line_case->count ? (line_case->places[p] > 0 ? line_case->places[p] - 1 : 0) : line_case->length;
+        const uint32_t last = p < line_case->count ? line_case->places[p] + 2 : line_case->length;
+        for (uint32_t cut = first; cut <= last && cut <= line_case->length; cut += 1)
+        {
+            uint32_t lines = 0;
+            memset(pages, 0xff, page_count * sizeof(uint32_t));
+            pages[0] = 0;
+            if (cut > 0)
+            {
+                pp_count_page_lines(&data, 0, cut, pages, &lines);
+            }
+            if (line_case->length > cut)
+            {
+                pp_count_page_lines(&data, cut, line_case->length, pages, &lines);
+            }
+            bool same = lines == before[line_case->length];
+            for (uint32_t page = 0; page < page_count; page += 1)
+            {
+                same &= pages[page] == before[page * BUSTER_PP_LINE_PAGE_BYTES];
+            }
+            *checks += 1;
+            if (!same && failures < 4 && !pp_test_quiet)
+            {
+                printf("line ends: %s: the line pages counted in windows cut at %u differ from a count a byte at a time\n", line_case->name, cut);
+            }
+            failures += !same;
+        }
+    }
+    data.line_pages = pages;
+    for (uint32_t at = 0; failures == 0 && at <= line_case->length; at += 1)
+    {
+        const uint32_t line = pp_page_line(&data, at);
+        *checks += 1;
+        if (line != before[at] + 1 && failures < 4 && !pp_test_quiet)
+        {
+            printf("line ends: %s: pp_page_line(%u) gives line %u, a byte at a time %u\n", line_case->name, at, line, before[at] + 1);
+        }
+        failures += line != before[at] + 1;
+    }
+    // pp_line_of in a range at location 1000, at the bytes within 72 of a placed line end and the file's first and last:
+    // each after a byte 1 to 70 before it (from the cursor, or from the pages when that is on another page), after
+    // itself, and after a byte past it (the cursor reset to the file's start, or the pages); the first query of each
+    // pair from no cursor. (A column walks back over its line a byte at a time, and the lines are long.)
+    PPRange range = { .base = 1000, .length = line_case->length, .file = 0, .bytes = bytes };
+    PPFile file = { .data = 0 };
+    pp.ranges = &range;
+    pp.files = &file;
+    pp.datas = &data;
+    for (uint32_t paged = 0; failures == 0 && paged < 2; paged += 1)
+    {
+        data.line_pages = paged != 0 ? pages : 0;
+        static const int32_t distances[] = { -65, -1, 0, 1, 2, 3, 63, 64, 65, 70 };
+        for (uint32_t at = 0; at <= line_case->length; at += 1)
+        {
+            bool near = at < 2 || at + 2 > line_case->length;
+            for (uint32_t p = 0; p < line_case->count; p += 1)
+            {
+                near |= at + 72 >= line_case->places[p] && at <= line_case->places[p] + 72;
+            }
+            for (uint32_t d = 0; near && d < BUSTER_ARRAY_LENGTH(distances); d += 1)
+            {
+                const int64_t earlier = (int64_t)at - distances[d];
+                const uint32_t from = earlier < 0 ? 0 : earlier > line_case->length ? line_case->length : (uint32_t)earlier;
+                uint32_t column = 0;
+                data.line_cursor = 0;
+                data.line_cursor_line = 0;
+                pp_line_of(&pp, 0, 1000 + from, 0);
+                const uint32_t line = pp_line_of(&pp, 0, 1000 + at, &column);
+                *checks += 1;
+                if ((line != before[at] + 1 || column != at - starts[at] + 1) && failures < 4 && !pp_test_quiet)
+                {
+                    printf("line ends: %s: pp_line_of(%u) after %u%s gives %u:%u, a byte at a time %u:%u\n", line_case->name, at, from, paged != 0 ? " with pages" : "",
+                           line, column, before[at] + 1, at - starts[at] + 1);
+                }
+                failures += line != before[at] + 1 || column != at - starts[at] + 1;
+            }
+        }
+    }
+    free(before);
+    free(starts);
+    free(pages);
+    return failures;
+}
+
+// #441's cases: a "\r\n" in a block, across 64-byte blocks, inside a line page and across pages, a '\r' and a '\n' alone,
+// a '\r' at the file's end, and a "\r\n" across the second page's start.
+static bool pp_test_line_ends(void)
+{
+    static const PPLineEndCase cases[] = {
+        { "CRLF first", 3, { 0, 1 }, { '\r', '\n' }, 2 },
+        { "CRLF in a block", 40, { 10, 11 }, { '\r', '\n' }, 2 },
+        { "CRLF across blocks", 130, { 63, 64 }, { '\r', '\n' }, 2 },
+        { "CRLF across 128", 300, { 127, 128, 190, 191 }, { '\r', '\n', '\r', '\n' }, 4 },
+        { "CRLF in a page", 4200, { 4096, 4097 }, { '\r', '\n' }, 2 },
+        { "CRLF across pages", 4200, { 4095, 4096 }, { '\r', '\n' }, 2 },
+        { "CR and LF alone, CR last", 100, { 20, 30, 99 }, { '\r', '\n', '\r' }, 3 },
+        { "CR last at a block's end", 64, { 10, 11, 63 }, { '\r', '\n', '\r' }, 3 },
+        { "CR last at a page's end", 4096, { 63, 64, 4095 }, { '\r', '\n', '\r' }, 3 },
+        { "LF and CRLF at the second page", 8300, { 4095, 8191, 8192, 8200, 8299 }, { '\n', '\r', '\n', '\r', '\r' }, 5 },
+        { "CR before CR, then LF", 200, { 62, 63, 64, 100, 101 }, { '\r', '\r', '\n', '\n', '\r' }, 5 },
+    };
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t room = (8300 + page_bytes - 1) / page_bytes * page_bytes;
+    uint8_t* mapping = mmap(0, room + page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t failures = mapping == MAP_FAILED || mprotect(mapping + room, page_bytes, PROT_NONE) != 0;
+    uint64_t checks = 0;
+    for (uint32_t c = 0; failures == 0 && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        failures += pp_line_end_test_case(&cases[c], mapping, room, &checks);
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, room + page_bytes);
+    }
+    printf("line ends: %lu of %lu checks fail in %u files\n", (unsigned long)failures, (unsigned long)checks, (uint32_t)BUSTER_ARRAY_LENGTH(cases));
+    return failures == 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

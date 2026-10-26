@@ -465,7 +465,12 @@ makes its own; with one, the units and lanes that share it read each file once
   counted again exactly, a block at a time (`pp_count_block_lines`), and so is a
   block that two windows share, in two parts. `pp_line_of` then counts from the
   cursor when the cursor is on the place's page before the place, and from the
-  page's start otherwise: at most 4 KB per question.
+  page's start otherwise: at most 4 KB per question. A count of the bytes up to
+  a place (`pp_count_lines`) reads the file's byte after its last one, within
+  the file's length: a `\r` there that a `\n` follows ends no line before the
+  `\n`, so that a question about the `\n` itself gets the `\r`'s line, and
+  counts from the cursor and from a page add up alike (#441). Its column walks
+  back to the line's start by the same rule.
 - **Memory.** Each column of the files' tokens has an arena of its own: kinds,
   starts and values. A file's columns are pushed for the lexer's bound, one
   token per byte, then trimmed to the tokens it has. Before this, the columns
