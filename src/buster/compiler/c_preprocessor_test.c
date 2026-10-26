@@ -3563,55 +3563,7 @@ static bool pp_test_file(int argument_count, char** arguments, const char* links
     return result;
 }
 
-// test-preprocessor's files: each of `files` (`file_count` of them) with the options `passed` (`passed_count`), by both
-// kernels, and with `with_clang` against clang with the same options (pp_test_file), but --buster-headers, for which
-// clang gets ours' search (pp_clang_arguments, with its links in `directory`). Adds the files' output tokens to
-// `*tokens`. Returns how many differ: all of them if the options can't be read or clang's search can't be made.
-static uint32_t pp_test_files(int passed_count, char** passed, int file_count, char** files, bool with_clang, const char* directory, uint64_t* tokens)
-{
-    Arena arena = arena_reserve(1ull << 30);
-    PPOptions options;
-    const char* input;
-    const char* output;
-    bool markers;
-    // pp_parse_options wants one input: give it the first file, and use its options for every file.
-    char** with_input = calloc((size_t)passed_count + 2, sizeof(char*));
-    char ours[PATH_MAX];
-    char links[4200];
-    snprintf(links, sizeof(links), "%s/clang-search-XXXXXX", directory);
-    bool linked = false;
-    int clang_count = 0;
-    bool ready = with_input != 0 && file_count != 0;
-    if (ready)
-    {
-        memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
-        with_input[passed_count] = files[0];
-    }
-    ready = ready && pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
-    if (ready)
-    {
-        options.clang_features = true;
-    }
-    char** clang = ready && with_clang ? pp_clang_arguments(&options, passed_count, passed, ours, links, &linked, &clang_count) : 0;
-    ready = ready && (!with_clang || clang != 0);
-    // clang's predefines for the options, which every file's run reads (pp_test_file), once for them all.
-    char predefines[4096];
-    snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
-    ready = ready && (!with_clang || pp_test_clang_predefines(clang, clang_count, predefines));
-    uint32_t result = ready ? 0 : (uint32_t)file_count;
-    for (int i = 0; ready && i < file_count; i += 1)
-    {
-        result += !pp_test_file(clang_count, clang, linked ? links : 0, &options, files[i], with_clang, directory, tokens);
-    }
-    if (linked)
-    {
-        pp_clang_remove_links(links);
-    }
-    free(with_input);
-    free(clang);
-    arena_release(&arena);
-    return result;
-}
+static uint32_t pp_test_files(int passed_count, char** passed, int file_count, char** files, bool with_clang, const char* directory, uint64_t* tokens);
 
 static int pp_test_compare_lines(const void* a, const void* b)
 {
@@ -6103,6 +6055,7 @@ struct PPTestChildCounts
     uint64_t system_inexact;
     uint64_t system_tokens;
     uint64_t system_made;
+    uint64_t tokens;
     char system_inexact_first[256];
     bool result;
 };
@@ -6298,11 +6251,35 @@ static PPTestChildCounts pp_test_case_part(const char* directory, bool with_clan
     return counts;
 }
 
+// Files [first, end) of test-preprocessor's files, as pp_test_files runs them all (pp_test_file, whose clang
+// predefines are in `directory`): how many differ, and what they added to the tokens and the pp_test_system_ counters.
+static PPTestChildCounts pp_test_file_part(int argument_count, char** arguments, const char* links, const PPOptions* options, char** files, uint32_t first,
+                                           uint32_t end, bool with_clang, const char* directory)
+{
+    pp_test_system_units = 0;
+    pp_test_system_inexact = 0;
+    pp_test_system_tokens = 0;
+    pp_test_system_made = 0;
+    pp_test_system_inexact_first[0] = 0;
+    PPTestChildCounts counts = { .result = true };
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        counts.failures += !pp_test_file(argument_count, arguments, links, options, files[i], with_clang, directory, &counts.tokens);
+    }
+    counts.system_units = pp_test_system_units;
+    counts.system_inexact = pp_test_system_inexact;
+    counts.system_tokens = pp_test_system_tokens;
+    counts.system_made = pp_test_system_made;
+    snprintf(counts.system_inexact_first, sizeof(counts.system_inexact_first), "%s", pp_test_system_inexact_first);
+    return counts;
+}
+
 // Checks that run in child processes: which, and what their parts read.
 typedef enum PPTestChildWork
 {
     PP_TEST_CHILD_HEADERS,
     PP_TEST_CHILD_CASES,
+    PP_TEST_CHILD_FILES,
 } PPTestChildWork;
 
 typedef struct PPTestChildren PPTestChildren;
@@ -6315,6 +6292,11 @@ struct PPTestChildren
     const char* links;
     const char* empty;
     bool with_clang;
+    char** arguments;
+    int argument_count;
+    const PPOptions* options;
+    char** files;
+    uint32_t count;
 };
 
 // Part `part` of the work, in `own`, a directory of its own.
@@ -6330,6 +6312,11 @@ static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint
         case PP_TEST_CHILD_CASES:
             counts = pp_test_case_part(own, children->with_clang, (uint32_t)((uint64_t)cases * part / children->parts),
                                        (uint32_t)((uint64_t)cases * (part + 1) / children->parts));
+            break;
+        case PP_TEST_CHILD_FILES:
+            counts = pp_test_file_part(children->argument_count, children->arguments, children->links, children->options, children->files,
+                                       (uint32_t)((uint64_t)children->count * part / children->parts),
+                                       (uint32_t)((uint64_t)children->count * (part + 1) / children->parts), children->with_clang, children->directory);
             break;
     }
     return counts;
@@ -6361,7 +6348,8 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
             {
                 close(fds[0]);
                 char own[4200];
-                snprintf(own, sizeof(own), "%s/%s-%u", children->directory, children->work == PP_TEST_CHILD_HEADERS ? "headers" : "cases", started);
+                static const char* const kinds[] = { "headers", "cases", "files" };
+                snprintf(own, sizeof(own), "%s/%s-%u", children->directory, kinds[children->work], started);
                 PPTestChildCounts counts = { 0 };
                 const bool redirected = dup2(fileno(outputs[started]), STDOUT_FILENO) >= 0 && dup2(fileno(outputs[started]), STDERR_FILENO) >= 0;
                 if (redirected && mkdir(own, 0700) == 0)
@@ -6411,7 +6399,8 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
         }
         if (!received || !exited)
         {
-            printf("test-preprocessor: part %u of %u of the %s didn't run to the end\n", finished, parts, children->work == PP_TEST_CHILD_HEADERS ? "header sets" : "cases");
+            static const char* const works[] = { "header sets", "cases", "files" };
+            printf("test-preprocessor: part %u of %u of the %s didn't run to the end\n", finished, parts, works[children->work]);
         }
         total.sets += counts.sets;
         total.failures += counts.failures;
@@ -6425,9 +6414,77 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
         total.system_inexact += counts.system_inexact;
         total.system_tokens += counts.system_tokens;
         total.system_made += counts.system_made;
+        total.tokens += counts.tokens;
         total.result = total.result && received && exited && counts.result;
     }
     return total;
+}
+
+// test-preprocessor's files: each of `files` (`file_count` of them) with the options `passed` (`passed_count`), by both
+// kernels, and with `with_clang` against clang with the same options (pp_test_file), but --buster-headers, for which
+// clang gets ours' search (pp_clang_arguments, with its links in `directory`). Adds the files' output tokens to
+// `*tokens`. Returns how many differ: all of them if the options can't be read or clang's search can't be made.
+static uint32_t pp_test_files(int passed_count, char** passed, int file_count, char** files, bool with_clang, const char* directory, uint64_t* tokens)
+{
+    Arena arena = arena_reserve(1ull << 30);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    // pp_parse_options wants one input: give it the first file, and use its options for every file.
+    char** with_input = calloc((size_t)passed_count + 2, sizeof(char*));
+    char ours[PATH_MAX];
+    char links[4200];
+    snprintf(links, sizeof(links), "%s/clang-search-XXXXXX", directory);
+    bool linked = false;
+    int clang_count = 0;
+    bool ready = with_input != 0 && file_count != 0;
+    if (ready)
+    {
+        memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
+        with_input[passed_count] = files[0];
+    }
+    ready = ready && pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
+    if (ready)
+    {
+        options.clang_features = true;
+    }
+    char** clang = ready && with_clang ? pp_clang_arguments(&options, passed_count, passed, ours, links, &linked, &clang_count) : 0;
+    ready = ready && (!with_clang || clang != 0);
+    // clang's predefines for the options, which every file's run reads (pp_test_file), once for them all.
+    char predefines[4096];
+    snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
+    ready = ready && (!with_clang || pp_test_clang_predefines(clang, clang_count, predefines));
+    // A part per file (or per range of them, past BUSTER_PP_TEST_CHILDREN files), at most one per CPU at once
+    // (pp_test_children), their output in the files' order.
+    const PPTestChildren children = {
+        .work = PP_TEST_CHILD_FILES,
+        .parts = file_count < BUSTER_PP_TEST_CHILDREN ? (uint32_t)file_count : BUSTER_PP_TEST_CHILDREN,
+        .count = (uint32_t)file_count,
+        .directory = directory,
+        .links = linked ? links : 0,
+        .with_clang = with_clang,
+        .arguments = clang,
+        .argument_count = clang_count,
+        .options = &options,
+        .files = files,
+    };
+    const PPTestChildCounts counts = ready ? pp_test_children(&children) : (PPTestChildCounts){ 0 };
+    pp_test_system_units += counts.system_units;
+    pp_test_system_inexact += counts.system_inexact;
+    pp_test_system_tokens += counts.system_tokens;
+    pp_test_system_made += counts.system_made;
+    snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", counts.system_inexact_first);
+    *tokens += counts.tokens;
+    const uint32_t result = ready ? counts.failures + !counts.result : (uint32_t)file_count;
+    if (linked)
+    {
+        pp_clang_remove_links(links);
+    }
+    free(with_input);
+    free(clang);
+    arena_release(&arena);
+    return result;
 }
 
 static bool pp_test_headers(const char* directory)

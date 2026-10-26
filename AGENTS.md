@@ -3518,9 +3518,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
 - without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
-  the vectorized kernels and their scalar twins. They run in 32 parts, and the
-  header sets below (`--clang`) in 16, each part in a child process with a
-  directory of its own, at most one per CPU at once, the output in their order
+  the vectorized kernels and their scalar twins. They run in 32 parts, the
+  header sets below (`--clang`) in 16 and the files (below) a part each (a
+  range each past 64), each part in a child process with a directory of its
+  own, at most one per CPU at once, the output in their order
   (`pp_test_children`, #465). They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
