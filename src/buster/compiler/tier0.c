@@ -3538,17 +3538,17 @@ static bool tier0_object_parameters(const Tier0Function* function)
 }
 
 // The log2 of the alignment a function's frame needs past 16 bytes, to which the prologue realigns it
-// (Tier0Frame.alignment_log2), or 0 for none: the most its objects in the frame need (not an aggregate parameter's that
-// keeps its incoming bytes, tier0_parameter_in_place, which its caller aligned) and the most its calls' outgoing areas
-// need (AbiCall.stack_alignment_log2, which an argument aligned past 16 raises). Out of line, once per function, before
-// selection, whose integer depths it decides: a function without objects has its calls' alone to read.
+// (Tier0Frame.alignment_log2), or 0 for none: the most its objects need and the most its calls' outgoing areas need
+// (AbiCall.stack_alignment_log2, which an argument aligned past 16 raises). An aggregate parameter that keeps its
+// incoming bytes rather than living in the frame (tier0_parameter_in_place) is aligned to 16 at most, so that every
+// object may count. Out of line, once per function, before selection, whose integer depths it decides; the vector
+// path's twin is tier0_frame_alignment_vector.
 static __attribute__((noinline)) uint32_t tier0_frame_alignment(const Tier0Function* function)
 {
     uint32_t log2 = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
     for (uint32_t l = 0; l < function->local_count && function->local_sizes != 0; l += 1)
     {
-        const bool in_place = l < function->parameter_count && tier0_parameter_in_place(function, l);
-        const uint32_t alignment = tier0_is_object(function, l) && !in_place ? function->local_alignments[l] : 0;
+        const uint32_t alignment = function->local_sizes[l] != 0 ? function->local_alignments[l] : 0;
         log2 = alignment > log2 ? alignment : log2;
     }
     for (uint32_t c = 0; c < function->call_count; c += 1)
@@ -3556,6 +3556,31 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment(const Tier0Funct
         const uint32_t alignment = function->calls[c].stack_alignment_log2;
         log2 = alignment > log2 ? alignment : log2;
     }
+    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : 0;
+}
+
+// tier0_frame_alignment for the vector path: the objects' alignments 16 locals at a time (their bytes loaded under the
+// mask of the locals with sizes) and the calls' 4 at a time (each one's stack_alignment_log2, the low byte of its second
+// dword), as dwords whose most is the answer.
+static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tier0Function* function)
+{
+    _Static_assert(sizeof(AbiCall) == 16 && offsetof(AbiCall, stack_alignment_log2) == 4, "4 calls in 64 bytes, each one's alignment the low byte of its second dword");
+    __m512i most = _mm512_setzero_si512();
+    const uint32_t locals = function->local_sizes != 0 ? function->local_count : 0;
+    for (uint32_t first = 0; first < locals; first += 16)
+    {
+        const __m512i sizes = _mm512_maskz_loadu_epi32((__mmask16)tier0_lanes(first, locals), function->local_sizes + first);
+        const __mmask16 objects = _mm512_test_epi32_mask(sizes, sizes);
+        most = _mm512_max_epu32(most, _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(objects, function->local_alignments + first)));
+    }
+    for (uint32_t first = 0; first < function->call_count; first += 4)
+    {
+        const uint32_t left = function->call_count - first;
+        const __mmask16 alignments = (__mmask16)((left >= 4 ? 0xffffu : (1u << 4 * left) - 1) & 0x2222u);
+        const __m512i calls = _mm512_maskz_loadu_epi32(alignments, function->calls + first);
+        most = _mm512_max_epu32(most, _mm512_and_si512(calls, _mm512_set1_epi32(0xff)));
+    }
+    const uint32_t log2 = _mm512_reduce_max_epu32(most);
     return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : 0;
 }
 
@@ -7315,7 +7340,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     memset(&frame, 0, sizeof(frame));
     Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
     // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
-    frame.alignment_log2 = error == TIER0_OK ? (uint8_t)tier0_frame_alignment(function) : 0;
+    frame.alignment_log2 = error == TIER0_OK ? (uint8_t)(vector ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
     const uint32_t unsupported = error == TIER0_OK ? (vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
     if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
     {

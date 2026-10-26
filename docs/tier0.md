@@ -491,9 +491,12 @@ times clang -O0's (1.16 for the larger shape's), with run times about the same.
 
 An object aligned past 16 bytes, or a call whose outgoing area is (`AbiCall.stack_alignment_log2` past 4: a struct or
 union aligned past 16 on its stack), needs a frame whose rsp is aligned past the 16 bytes the convention keeps.
-`tier0_frame_alignment` finds the most any of them needs, once per function, before selection: the objects that live in
-the frame (an aggregate parameter that keeps its incoming bytes doesn't), and every call's area. Past 16 bytes, the
-frame is realigned to it (`Tier0Frame.alignment_log2`, at most 2^30, the objects' limit):
+`tier0_frame_alignment` finds the most any of them needs, once per function, before selection: every object's (an
+aggregate parameter that keeps its incoming bytes rather than living in the frame is aligned to 16 at most, so it
+changes nothing) and every call's area. The vector path's twin, `tier0_frame_alignment_vector`, reads the objects'
+alignments 16 locals at a time, under the mask of the locals with sizes, and the calls' 4 at a time, each one's byte
+of the 16 an `AbiCall` takes. Past 16 bytes, the frame is realigned to it (`Tier0Frame.alignment_log2`, at most 2^30,
+the objects' limit):
 
 - **The prologue:** rbp pushed and pointed at the push, as a frame pointer's; the callee-saved pushes; the reservation
   (`sub rsp, size`); then `and rsp, -alignment` (imm8 to 128 bytes, imm32 past it). Rounding after the reservation
@@ -526,12 +529,12 @@ which its caller does align its slot to, is copied the same way rather than trus
 arguments may be aligned past 16 (`incoming_variadic`'s stack alignment, which raises its incoming area's); its
 `va_arg` recipes align each argument they read as before.
 
-**At no cost to the rest.** `tier0_frame_alignment` is out of line and reads the objects' alignments (in a function with
-objects) and every call's stack alignment; the selections read the frame's alignment once, outside their loops, and
-the depth count, the frame's registers and the conversions' scratch tops take it after their loops. A function without
-such objects or calls has the frame, the prologue, the epilogue and the code it had before: `sqlite3.c`'s objects and
-c-testsuite's 220 programs' are the same bytes as main's, by both paths. [Measurements](#measurements) has
-`benchmark-backend`'s.
+**At no cost to the rest.** `tier0_frame_alignment` and its twin are out of line and read the objects' alignments (in a
+function with objects) and every call's stack alignment; the selections read the frame's alignment once, outside their
+loops, and the depth count, the frame's registers and the conversions' scratch tops take it after their loops. A
+function without such objects or calls has the frame, the prologue, the epilogue and the code it had before:
+`sqlite3.c`'s objects and c-testsuite's 220 programs' are the same bytes as main's, by both paths.
+[Measurements](#measurements) has `benchmark-backend`'s.
 
 ## Symbols outside the image
 
@@ -815,6 +818,10 @@ Before the programs, checks of their own:
     its alignment (8 but for objects), inside the frame and apart from every other local's bytes. Under an object
     aligned to 16, rsp must be a multiple of 16; with one aligned past it, the frame must be realigned: rbp's push and
     mov, the reservation and `and rsp` by the most any object needs, which the frame publishes.
+- **frame alignment:** `tier0_frame_alignment` and its vector twin against the test's own most, for every count of
+  locals to 40 and of calls to 12: random columns, each ending at a `PROT_NONE` page (a read past one faults), with
+  sizes of 0 among the locals (whatever their alignment's byte), alignments past 16 now and then (any byte, to 255),
+  and calls whose every other byte is random too; then the same without `local_sizes`, the calls' alone.
 - **unsigned floating:** the conversions between U64 and the floating classes (`tier0_emit_u64_convert`), each as a
   function of its parameter, compiled by both paths into the same records, encoded by both encoders and run on 22
   named values under each of MXCSR's four rounding modes: from U64 around 2^53, 2^63 and 2^64, where the halving's kept

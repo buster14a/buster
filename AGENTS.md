@@ -4676,7 +4676,9 @@ objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects, values and `VA_LIST`s whose places both paths must give
 alike, aligned, inside the frame and apart, every other round's realigned for
 objects aligned past 16 (the prologue's `and rsp` by the most they need, which
-the frame publishes); copies: their rules, and a copy of
+the frame publishes); the frame's alignment, `tier0_frame_alignment` and its
+vector twin, on random columns of every count of locals to 40 and of calls to
+12, each ending at a `PROT_NONE` page; copies: their rules, and a copy of
 each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
 pointer, run natively: a probe must see `al` 3, `r11` its own address and the

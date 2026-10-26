@@ -2127,6 +2127,70 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
     arena_release(&arena);
 }
 
+// The frame's alignment, tier0_frame_alignment and its vector twin, against the test's own most: for every count of
+// locals to 40 and of calls to 12, random columns that each end at a PROT_NONE page, so that a read past one faults.
+// Sizes of 0 among the locals (not objects, whatever their alignment byte), alignments past 16 now and then (any byte,
+// up to 255), and calls whose every other byte is random too; then the same without local_sizes, the calls' alone.
+static void tier0_test_frame_alignment(Tier0TestTally* tally, uint64_t seed)
+{
+    uint8_t* pages = mmap(0, 6 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool guarded = pages != MAP_FAILED;
+    for (uint32_t g = 1; g < 6 && guarded; g += 2)
+    {
+        guarded = mprotect(pages + g * BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0;
+    }
+    tier0_test_expect(tally, guarded, "frame alignment", "no pages between PROT_NONE ones");
+    uint64_t random = seed ^ 0x616c69676e6d656eull;
+    for (uint32_t locals = 0; locals <= 40 && guarded; locals += 1)
+    {
+        for (uint32_t calls = 0; calls <= 12; calls += 1)
+        {
+            uint32_t* sizes = (uint32_t*)(pages + BUSTER_TIER0_TEST_PAGE) - locals;
+            uint8_t* alignments = pages + 3 * BUSTER_TIER0_TEST_PAGE - locals;
+            AbiCall* call_column = (AbiCall*)(pages + 5 * BUSTER_TIER0_TEST_PAGE) - calls;
+            uint32_t objects_most = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
+            uint32_t calls_most = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
+            for (uint32_t l = 0; l < locals; l += 1)
+            {
+                sizes[l] = tier0_generate_chance(&random, 30) ? 0 : 1 + tier0_generate_below(&random, 1000);
+                alignments[l] = (uint8_t)(tier0_generate_chance(&random, 90) ? tier0_generate_below(&random, 5) : tier0_generate_below(&random, 256));
+                objects_most = sizes[l] != 0 && alignments[l] > objects_most ? alignments[l] : objects_most;
+            }
+            for (uint32_t c = 0; c < calls; c += 1)
+            {
+                uint8_t bytes[sizeof(AbiCall)];
+                for (uint32_t b = 0; b < sizeof(AbiCall); b += 1)
+                {
+                    bytes[b] = (uint8_t)tier0_generate_below(&random, 256);
+                }
+                memcpy(&call_column[c], bytes, sizeof(AbiCall));
+                call_column[c].stack_alignment_log2 = tier0_generate_chance(&random, 90) ? (uint8_t)tier0_generate_below(&random, 5) : call_column[c].stack_alignment_log2;
+                calls_most = call_column[c].stack_alignment_log2 > calls_most ? call_column[c].stack_alignment_log2 : calls_most;
+            }
+            for (uint32_t with_sizes = 0; with_sizes < 2; with_sizes += 1)
+            {
+                Tier0Function function;
+                memset(&function, 0, sizeof(function));
+                function.local_count = locals;
+                function.local_sizes = with_sizes != 0 ? sizes : 0;
+                function.local_alignments = alignments;
+                function.calls = call_column;
+                function.call_count = calls;
+                const uint32_t most = with_sizes != 0 && objects_most > calls_most ? objects_most : calls_most;
+                const uint32_t expected = most > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? most : 0;
+                const uint32_t scalar = tier0_frame_alignment(&function);
+                const uint32_t vector = tier0_frame_alignment_vector(&function);
+                tier0_test_expect(tally, scalar == expected && vector == expected, "frame alignment", "%u locals (%s), %u calls: 2^%u expected, the paths give %u and %u",
+                                  locals, with_sizes != 0 ? "with sizes" : "no sizes", calls, expected, scalar, vector);
+            }
+        }
+    }
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, 6 * BUSTER_TIER0_TEST_PAGE);
+    }
+}
+
 // A copy's scratch register, its stacks' first free one (an XMM one from 16 bytes, a general one below), must be in
 // the frame's clobbers after either selection, so that no local makes it its home; past the tables, selection says the
 // function is too deep, and the compile takes the values to the deep slots. On copies above every count of integer and
@@ -5205,6 +5269,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_objects(&tally, seed);
                 tier0_test_report("objects", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_frame_alignment(&tally, seed);
+                tier0_test_report("frame alignment", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
