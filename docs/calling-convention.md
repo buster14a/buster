@@ -1431,6 +1431,7 @@ failure.
 **The compiled runs** (#137): two more runs, against clang and against GCC at
 16 bytes, put C that this compiler compiles on our side. Their worlds
 (`AbiTestWorld.compiled`) hold what its C passes: integers of up to 64 bits,
+`__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128 and U128),
 enums, pointers, `float`, `double` and `long double` (#136's item 8), and the
 structs, unions, arrays and aligned typedefs made of them, aligned to 16 at most
 as Tier 0's frame objects are, with flexible array members, bit-fields, packing
@@ -1442,9 +1443,10 @@ bit-fields with attributes after their widths are among their types, as
 clang and GCC write them. Tier 0 holds a call's arguments on its stacks at once (15
 integer and 16 floating values) and copies its aggregates through each stack's
 first free register, and our caller's `r = c_callee(...)` holds `r`'s address
-under the arguments when the result is a struct, a union or a `long double`, so
-a compiled world's signature passes at most 13 integer values (an aggregate is
-its address, and a `long double` takes an integer depth) and 15 floating ones,
+under the arguments when the result is a struct, a union, a `long double` or a
+128-bit integer, so a compiled world's signature passes at most 13 integer
+values (an aggregate is its address, and a `long double` or a 128-bit integer
+takes an integer depth) and 15 floating ones,
 an argument past them becoming one of the other stack's. Our side is C (`abi_test_write_ours`): per signature, a callee
 that stores each parameter's bytes, its unnamed ones read with `va_arg`, and
 returns the result's from the signature's data, and a caller that copies each

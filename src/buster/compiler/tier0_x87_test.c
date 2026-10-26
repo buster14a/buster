@@ -8,8 +8,9 @@
 // the oracle of their values:
 //   - random programs: statements that each write a value into their 16 bytes of an output (a long double; an integer,
 //     a float or a double converted from one; a compare's result), from inputs of every class, through constants,
-//     arithmetic, ?:, DUP, STORE's kept value, conversions both ways and calls of C functions of long double arguments
-//     and results, against this file's own stack machine over the same stream (tier0_test_x87_interpret);
+//     arithmetic, ?:, DUP, STORE's kept value, conversions both ways, calls of C functions of long double arguments
+//     and results, and frame objects (LOCAL, STORE_LOCAL and SET_LOCAL of the class on objects of 16 bytes and more,
+//     aligned to 8 and to 16), against this file's own stack machine over the same stream (tier0_test_x87_interpret);
 //   - functions of long double parameters and results, one returning a struct of a long double (in st0), one calling a C
 //     function that returns such a struct, and one calling a variadic C function with long doubles, called from C;
 //   - the stream's rules for the class, each break refused at its entry.
@@ -20,7 +21,9 @@
 
 #define BUSTER_TIER0_TEST_X87_PROGRAMS 300
 #define BUSTER_TIER0_TEST_X87_STATEMENTS 8
-#define BUSTER_TIER0_TEST_X87_OUTPUTS (2 * BUSTER_TIER0_TEST_X87_STATEMENTS)
+// The programs' frame objects, locals 4 to 7 after their four pointer parameters, which their last outputs copy out.
+#define BUSTER_TIER0_TEST_X87_OBJECTS 4
+#define BUSTER_TIER0_TEST_X87_OUTPUTS (2 * BUSTER_TIER0_TEST_X87_STATEMENTS + BUSTER_TIER0_TEST_X87_OBJECTS)
 #define BUSTER_TIER0_TEST_X87_IN 8
 #define BUSTER_TIER0_TEST_X87_INTS 16
 #define BUSTER_TIER0_TEST_X87_FLOATS 16
@@ -372,14 +375,15 @@ static Tier0TestX87Task tier0_test_x87_expression(uint32_t budget)
     return (Tier0TestX87Task){ .task = BUSTER_TIER0_TEST_X87_TASK_EXPRESSION, .class = BUSTER_TYPED_CLASS_F80, .budget = budget };
 }
 
-// A leaf of a long double: an input, a constant, an integer of any class or a float or a double converted.
+// A leaf of a long double: an input, a constant, an integer of any class or a float or a double converted, or a frame
+// object's value.
 static void tier0_test_x87_leaf(Tier0TestX87Program* program, uint64_t* state)
 {
     static const uint8_t integers[8] = {
         BUSTER_TYPED_CLASS_I8, BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_I16, BUSTER_TYPED_CLASS_U16,
         BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64,
     };
-    const uint32_t choice = tier0_generate_below(state, 8);
+    const uint32_t choice = tier0_generate_below(state, 10);
     if (choice < 3)
     {
         tier0_test_x87_element(program, 0, tier0_generate_below(state, BUSTER_TIER0_TEST_X87_IN), 16);
@@ -395,13 +399,17 @@ static void tier0_test_x87_leaf(Tier0TestX87Program* program, uint64_t* state)
         tier0_test_x87_emit(program, BUSTER_TYPED_LOAD, integers[tier0_generate_below(state, 8)], 0);
         tier0_test_x87_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F80, 0);
     }
-    else
+    else if (choice < 8)
     {
         // Floats at the elements from 8 (in each element's low 4 bytes), doubles below.
         const uint32_t index = tier0_generate_below(state, BUSTER_TIER0_TEST_X87_FLOATS);
         tier0_test_x87_element(program, 2, index, 8);
         tier0_test_x87_emit(program, BUSTER_TYPED_LOAD, index >= 8 ? BUSTER_TYPED_CLASS_F32 : BUSTER_TYPED_CLASS_F64, 0);
         tier0_test_x87_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_F80, 0);
+    }
+    else
+    {
+        tier0_test_x87_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F80, 4 + tier0_generate_below(state, BUSTER_TIER0_TEST_X87_OBJECTS));
     }
 }
 
@@ -474,7 +482,13 @@ static void tier0_test_x87_run_tasks(Tier0TestX87Program* program, const Tier0Te
                 tier0_test_x87_push(program, tasks, tier0_test_x87_entry(BUSTER_TYPED_CONVERT, through, 0));
                 tier0_test_x87_push(program, tasks, tier0_test_x87_expression(budget));
             }
-            else if (choice < 78 && program->patch_count + 2 <= BUSTER_TIER0_TEST_X87_SLOTS && budget >= 4)
+            else if (choice < 68)
+            {
+                // The value stored into a frame object, and kept (STORE_LOCAL).
+                tier0_test_x87_push(program, tasks, tier0_test_x87_entry(BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_F80, 4 + tier0_generate_below(state, BUSTER_TIER0_TEST_X87_OBJECTS)));
+                tier0_test_x87_push(program, tasks, tier0_test_x87_expression(budget));
+            }
+            else if (choice < 80 && program->patch_count + 2 <= BUSTER_TIER0_TEST_X87_SLOTS && budget >= 4)
             {
                 // (a OP b) ? x : y, the arms' value carried by JUMP_VALUE.
                 const uint32_t branch = program->patch_count;
@@ -492,7 +506,7 @@ static void tier0_test_x87_run_tasks(Tier0TestX87Program* program, const Tier0Te
                 tier0_test_x87_push(program, tasks, tier0_test_x87_expression(quarter));
                 tier0_test_x87_push(program, tasks, tier0_test_x87_expression(quarter));
             }
-            else if (choice < 89)
+            else if (choice < 90)
             {
                 // mix(a, b), through its address.
                 const uint32_t call = tier0_test_x87_call(program, abi, BUSTER_TIER0_TEST_X87_MIX);
@@ -516,8 +530,9 @@ static void tier0_test_x87_run_tasks(Tier0TestX87Program* program, const Tier0Te
 }
 
 // A program: its constants (some at least 1, which divide an integer converted to a long double before it converts back,
-// so that the value stays in the integer's range), then each statement into its output slots (2s and 2s + 1, 16 bytes
-// each), then RETURN.
+// so that the value stays in the integer's range), its frame objects given values (a constant's or an input's, by
+// SET_LOCAL), then each statement into its output slots (2s and 2s + 1, 16 bytes each) or a frame object, then each
+// object copied out into its own output slot (after the statements'), then RETURN.
 static void tier0_test_x87_program(Tier0TestX87Program* program, const Tier0TestX87Abi* abi, uint64_t* state)
 {
     memset(program, 0, sizeof(*program));
@@ -532,9 +547,22 @@ static void tier0_test_x87_program(Tier0TestX87Program* program, const Tier0Test
     }
     const uint32_t statements = 1 + tier0_generate_below(state, BUSTER_TIER0_TEST_X87_STATEMENTS);
     Tier0TestX87Tasks tasks;
+    for (uint32_t k = 0; k < BUSTER_TIER0_TEST_X87_OBJECTS; k += 1)
+    {
+        if (tier0_generate_chance(state, 50))
+        {
+            tier0_test_x87_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F80, tier0_generate_below(state, program->constant_count));
+        }
+        else
+        {
+            tier0_test_x87_element(program, 0, tier0_generate_below(state, BUSTER_TIER0_TEST_X87_IN), 16);
+            tier0_test_x87_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_F80, 0);
+        }
+        tier0_test_x87_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_F80, 4 + k);
+    }
     for (uint32_t s = 0; s < statements && !program->overflow; s += 1)
     {
-        const uint32_t root = tier0_generate_below(state, 10);
+        const uint32_t root = tier0_generate_below(state, 11);
         const uint32_t budget = 2 + tier0_generate_below(state, 9);
         tasks.count = 0;
         tier0_test_x87_element(program, 3, 2 * s, 16);
@@ -579,7 +607,7 @@ static void tier0_test_x87_program(Tier0TestX87Program* program, const Tier0Test
             tier0_test_x87_push(program, &tasks, tier0_test_x87_expression(budget));
             program->outputs[2 * s] = (uint8_t)class;
         }
-        else
+        else if (root < 10)
         {
             tier0_test_x87_push(program, &tasks, tier0_test_x87_entry(BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I32, 0));
             tier0_test_x87_push(program, &tasks, tier0_test_x87_entry(BUSTER_TYPED_EQ + tier0_generate_below(state, 6), BUSTER_TYPED_CLASS_I32, 0));
@@ -587,7 +615,22 @@ static void tier0_test_x87_program(Tier0TestX87Program* program, const Tier0Test
             tier0_test_x87_push(program, &tasks, tier0_test_x87_expression(budget / 2 + 1));
             program->outputs[2 * s] = BUSTER_TYPED_CLASS_I32;
         }
+        else
+        {
+            // A frame object's new value (SET_LOCAL), which the statements after it and its own output slot read: the
+            // output's address goes unused.
+            tier0_test_x87_emit(program, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_test_x87_push(program, &tasks, tier0_test_x87_entry(BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_F80, 4 + tier0_generate_below(state, BUSTER_TIER0_TEST_X87_OBJECTS)));
+            tier0_test_x87_push(program, &tasks, tier0_test_x87_expression(budget));
+        }
         tier0_test_x87_run_tasks(program, abi, &tasks, state);
+    }
+    for (uint32_t k = 0; k < BUSTER_TIER0_TEST_X87_OBJECTS; k += 1)
+    {
+        tier0_test_x87_element(program, 3, 2 * BUSTER_TIER0_TEST_X87_STATEMENTS + k, 16);
+        tier0_test_x87_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F80, 4 + k);
+        tier0_test_x87_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_F80, 0);
+        program->outputs[2 * BUSTER_TIER0_TEST_X87_STATEMENTS + k] = BUSTER_TYPED_CLASS_F80;
     }
     tier0_test_x87_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
 }
@@ -600,11 +643,18 @@ static bool tier0_test_x87_has(const Tier0Function* function)
 }
 
 // The program as Tier 0 takes it: four pointer parameters (the long double inputs, the integers, the floats and the
-// output) in their registers, and its calls.
+// output) in their registers, its frame objects (16, 16, 24 and 32 bytes, aligned to 16, 8, 16 and 8) and its calls.
 static Tier0Function tier0_test_x87_function(const Tier0TestX87Program* program, const Tier0TestX87Abi* abi)
 {
-    static const uint8_t local_classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
-    static const uint8_t local_flags[4] = { 0, 0, 0, 0 };
+    static const uint8_t local_classes[4 + BUSTER_TIER0_TEST_X87_OBJECTS] = {
+        BUSTER_TYPED_CLASS_U64,  BUSTER_TYPED_CLASS_U64,  BUSTER_TYPED_CLASS_U64,  BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID,
+    };
+    static const uint8_t local_flags[4 + BUSTER_TIER0_TEST_X87_OBJECTS] = {
+        0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+    };
+    static const uint32_t local_sizes[4 + BUSTER_TIER0_TEST_X87_OBJECTS] = { 0, 0, 0, 0, 16, 16, 24, 32 };
+    static const uint8_t local_alignments[4 + BUSTER_TIER0_TEST_X87_OBJECTS] = { 0, 0, 0, 0, 4, 3, 4, 3 };
     Tier0Function function;
     memset(&function, 0, sizeof(function));
     function.kinds = program->kinds;
@@ -613,7 +663,9 @@ static Tier0Function tier0_test_x87_function(const Tier0TestX87Program* program,
     function.count = program->count;
     function.local_classes = local_classes;
     function.local_flags = local_flags;
-    function.local_count = 4;
+    function.local_sizes = local_sizes;
+    function.local_alignments = local_alignments;
+    function.local_count = 4 + BUSTER_TIER0_TEST_X87_OBJECTS;
     function.parameter_count = 4;
     function.parameters = abi->locations + abi->first[BUSTER_TIER0_TEST_X87_BODY];
     function.result = abi->calls[BUSTER_TIER0_TEST_X87_BODY].result;
@@ -679,6 +731,7 @@ static uint64_t tier0_test_x87_integer(uint32_t class, uint64_t bits)
 // compares by this file's C (the x87's), the calls by calling the functions. Returns whether it ran to its RETURN.
 static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const uint64_t parameters[4])
 {
+    long double objects[BUSTER_TIER0_TEST_X87_OBJECTS] = { 0 };
     Tier0TestX87Value stack[64];
     uint32_t depth = 0;
     uint32_t i = 0;
@@ -696,6 +749,16 @@ static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const u
         {
             stack[depth].f = tier0_test_x87_make(program->constants[2 * value], (uint16_t)program->constants[2 * value + 1]);
             depth += 1;
+        }
+        else if (kind == BUSTER_TYPED_LOCAL && class == BUSTER_TYPED_CLASS_F80)
+        {
+            stack[depth].f = objects[value - 4];
+            depth += 1;
+        }
+        else if (kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+        {
+            objects[value - 4] = stack[depth - 1].f;
+            depth -= kind == BUSTER_TYPED_SET_LOCAL ? 1 : 0;
         }
         else if (kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_LOCAL)
         {
@@ -786,6 +849,10 @@ static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const u
         else if (kind == BUSTER_TYPED_JUMP_VALUE)
         {
             next = (uint32_t)value;
+        }
+        else if (kind == BUSTER_TYPED_DISCARD)
+        {
+            depth -= 1;
         }
         else if (kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_STORE)
         {
@@ -947,12 +1014,23 @@ static bool tier0_test_x87_same_output(uint32_t class, const uint8_t* bytes, con
     return same;
 }
 
-// What the programs reach, which the default count must cover whole: each kind of long double entry (CONST, DUP, NEG,
-// LOAD, STORE, SET, ADD to DIV, each compare, CALL, JUMP_VALUE), and each conversion to it and from it, by the other
-// class (bit 32 + class: to; bit 48 + class: from).
-static uint64_t tier0_test_x87_reached(const Tier0TestX87Program* program)
+// What the programs reach, which the default count must cover whole, in bitmaps of their own so that no bit of one stands
+// for another's: each kind of long double entry (CONST, DUP, NEG, LOAD, STORE, SET, ADD to DIV, each compare, CALL,
+// JUMP_VALUE, and LOCAL, STORE_LOCAL and SET_LOCAL on frame objects), and each conversion to it and from it, by the
+// other class.
+typedef struct Tier0TestX87Reach Tier0TestX87Reach;
+struct Tier0TestX87Reach
 {
-    uint64_t reached = 0;
+    // A bit per kind, below BUSTER_TYPED_KIND_LIMIT.
+    uint64_t kinds;
+    // A bit per class, below BUSTER_TYPED_CLASS_LIMIT: converted to F80, and from it.
+    uint16_t to;
+    uint16_t from;
+};
+
+static Tier0TestX87Reach tier0_test_x87_reached(const Tier0TestX87Program* program)
+{
+    Tier0TestX87Reach reached = { 0 };
     for (uint32_t i = 0; i < program->count; i += 1)
     {
         const uint32_t kind = program->kinds[i];
@@ -961,48 +1039,49 @@ static uint64_t tier0_test_x87_reached(const Tier0TestX87Program* program)
         const bool x87 = class == BUSTER_TYPED_CLASS_F80 || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && operand == BUSTER_TYPED_CLASS_F80);
         if (kind == BUSTER_TYPED_CONVERT && class == BUSTER_TYPED_CLASS_F80)
         {
-            reached |= 1ull << (32 + operand);
+            reached.to |= (uint16_t)(1u << operand);
         }
         else if (kind == BUSTER_TYPED_CONVERT && operand == BUSTER_TYPED_CLASS_F80)
         {
-            reached |= 1ull << (48 + class);
+            reached.from |= (uint16_t)(1u << class);
         }
         else if (x87)
         {
-            reached |= 1ull << kind;
+            reached.kinds |= 1ull << kind;
         }
     }
     return reached;
 }
 
 // Every kind and conversion the programs are meant to reach (tier0_test_x87_reached's bits).
-static uint64_t tier0_test_x87_wanted(void)
+static Tier0TestX87Reach tier0_test_x87_wanted(void)
 {
     static const uint8_t kinds[] = {
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_NEG, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET, BUSTER_TYPED_ADD, BUSTER_TYPED_SUB,
         BUSTER_TYPED_MUL, BUSTER_TYPED_DIV, BUSTER_TYPED_EQ, BUSTER_TYPED_NE, BUSTER_TYPED_LT, BUSTER_TYPED_LE, BUSTER_TYPED_GT, BUSTER_TYPED_GE,
-        BUSTER_TYPED_CALL, BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_CALL, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_SET_LOCAL,
     };
-    uint64_t wanted = 0;
+    Tier0TestX87Reach wanted = { 0 };
     for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
     {
-        wanted |= 1ull << kinds[k];
+        wanted.kinds |= 1ull << kinds[k];
     }
     for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_F64; class += 1)
     {
-        wanted |= 1ull << (32 + class) | 1ull << (48 + class);
+        wanted.to |= (uint16_t)(1u << class);
+        wanted.from |= (uint16_t)(1u << class);
     }
     return wanted;
 }
 
 // Random programs: each generated, compiled and encoded, then run natively on random inputs and by the interpreter on
 // the same ones, every output slot it wrote compared. A depth past Tier 0's tables (deep expressions of many long doubles
-// at once) is counted apart. With the default count, the programs must reach every kind of long double entry and every
-// conversion.
+// at once) is counted apart. With the default count, the programs that compiled, ran and matched must reach every kind
+// of long double entry and every conversion.
 static void tier0_test_x87_programs(Tier0TestTally* tally, const Tier0TestX87Abi* abi, uint64_t seed, uint32_t count, Tier0TestX87Shared* shared,
                                     uint32_t* too_deep, uint64_t* entries)
 {
-    uint64_t reached = 0;
+    Tier0TestX87Reach reached = { 0 };
     Tier0TestX87Program* program = calloc(1, sizeof(Tier0TestX87Program));
     uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
     Arena arena = arena_reserve(1ull << 26);
@@ -1018,7 +1097,6 @@ static void tier0_test_x87_programs(Tier0TestTally* tally, const Tier0TestX87Abi
         {
             continue;
         }
-        reached |= tier0_test_x87_reached(program);
         const Tier0Function function = tier0_test_x87_function(program, abi);
         Tier0Error error = TIER0_OK;
         const uint32_t length = tier0_test_x87_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
@@ -1052,15 +1130,30 @@ static void tier0_test_x87_programs(Tier0TestTally* tally, const Tier0TestX87Abi
         memset(expected, 0xa5, sizeof(expected));
         const uint64_t parameters[4] = { (uint64_t)(uintptr_t)shared->in, (uint64_t)(uintptr_t)shared->ints, (uint64_t)(uintptr_t)shared->floats, (uint64_t)(uintptr_t)expected };
         const bool interpreted = tier0_test_expect(tally, tier0_test_x87_interpret(program, parameters), "x87", "%s: the interpreter can't run it", name);
+        bool same = ran && interpreted;
         for (uint32_t o = 0; o < BUSTER_TIER0_TEST_X87_OUTPUTS && ran && interpreted; o += 1)
         {
-            tier0_test_expect(tally, tier0_test_x87_same_output(program->outputs[o], shared->out + 16 * o, expected + 16 * o), "x87",
-                              "%s: output %u (class %u) differs from the interpreter's", name, o, program->outputs[o]);
+            same = tier0_test_expect(tally, tier0_test_x87_same_output(program->outputs[o], shared->out + 16 * o, expected + 16 * o), "x87",
+                                     "%s: output %u (class %u) differs from the interpreter's", name, o, program->outputs[o]) &&
+                   same;
+        }
+        // Only a program compiled, run and checked counts toward what the programs reach: a refused one (a depth past the
+        // tables) emitted none of its code.
+        if (same)
+        {
+            const Tier0TestX87Reach program_reached = tier0_test_x87_reached(program);
+            reached.kinds |= program_reached.kinds;
+            reached.to |= program_reached.to;
+            reached.from |= program_reached.from;
         }
     }
-    const uint64_t missing = tier0_test_x87_wanted() & ~reached;
-    tier0_test_expect(tally, count < BUSTER_TIER0_TEST_X87_PROGRAMS || missing == 0, "x87",
-                      "the programs don't reach every kind and conversion (tier0_test_x87_reached's bits %#" PRIx64 " missing)", missing);
+    const Tier0TestX87Reach wanted = tier0_test_x87_wanted();
+    const uint64_t missing_kinds = wanted.kinds & ~reached.kinds;
+    const uint32_t missing_to = wanted.to & ~reached.to;
+    const uint32_t missing_from = wanted.from & ~reached.from;
+    tier0_test_expect(tally, count < BUSTER_TIER0_TEST_X87_PROGRAMS || (missing_kinds == 0 && missing_to == 0 && missing_from == 0), "x87",
+                      "the checked programs don't reach every kind and conversion (missing kinds %#" PRIx64 ", conversions to %#x and from %#x)", missing_kinds,
+                      missing_to, missing_from);
     arena_release(&arena);
     free(image);
     free(program);
@@ -1511,6 +1604,9 @@ static void tier0_test_x87_rules(Tier0TestTally* tally, const Tier0TestX87Abi* a
         { "valid: a call's long double", UINT32_MAX },
         { "an entry of the class without x87", 0 },
         { "a long double result without x87", 0 },
+        { "LOCAL of a value local", 0 },
+        { "LOCAL of an object of 8 bytes", 0 },
+        { "valid: LOCAL, STORE_LOCAL and SET_LOCAL of objects of 16 and 24 bytes", UINT32_MAX },
     };
     const uint64_t significand = 1ull << 63;
     const uint64_t constants[2] = { significand, 0x3fff };
@@ -1609,6 +1705,30 @@ static void tier0_test_x87_rules(Tier0TestTally* tally, const Tier0TestX87Abi* a
             break;
         case 15:
             tier0_test_x87_put(&written, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
+        case 17:
+        case 18:
+            // A U64's local, and an object with room for less than the value.
+            tier0_test_x87_local(&written, 0, b == 17 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID);
+            written.local_sizes[0] = b == 17 ? 0 : 8;
+            written.local_alignments[0] = b == 17 ? 0 : 3;
+            tier0_test_x87_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
+        case 19:
+            tier0_test_x87_local(&written, 0, BUSTER_TYPED_CLASS_VOID);
+            tier0_test_x87_local(&written, 1, BUSTER_TYPED_CLASS_VOID);
+            written.local_sizes[1] = 24;
+            written.local_alignments[1] = 3;
+            tier0_test_x87_put(&written, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F80, 0);
+            tier0_test_x87_put(&written, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_F80, 1);
+            tier0_test_x87_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F80, 1);
+            tier0_test_x87_put(&written, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_F80, 0);
             tier0_test_x87_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F80, 0);
             tier0_test_x87_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
             break;
