@@ -1430,11 +1430,12 @@ failure.
 16 bytes, put C that this compiler compiles on our side. Their worlds
 (`AbiTestWorld.compiled`) hold what its C passes: integers of up to 64 bits,
 `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128 and U128),
-enums, pointers, `float`, `double` and `long double` (#136's item 8), and the
-structs, unions, arrays and aligned typedefs made of them, aligned to 16 at most
-as Tier 0's frame objects are, with flexible array members, bit-fields, packing
-and member alignments;
-no `nullptr_t`, `_BitInt`, vector, complex or `_Atomic` type, and none of
+enums, pointers, `float`, `double` and `long double` (#136's item 8),
+`_Complex float`, `double` and `long double` (#133's lowering, as aggregates of
+their two parts), and the structs, unions, arrays and aligned typedefs made of
+them, aligned to 16 at most as Tier 0's frame objects are, with flexible array
+members, bit-fields, packing and member alignments;
+no `nullptr_t`, `_BitInt`, vector, complex integer or `_Atomic` type, and none of
 clang's directed records. C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as

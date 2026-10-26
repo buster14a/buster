@@ -1187,7 +1187,8 @@ path's 11.1.
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
     whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
-  - `_Complex` values, and `va_arg` of them (the scalar classes, long double, and structs and unions have recipes);
+  - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
+    computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");
   - inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table).
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
