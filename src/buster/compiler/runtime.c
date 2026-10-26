@@ -12,7 +12,14 @@
 //     (Debian's multiarch ones, /usr/lib64 and /lib64, then /usr/lib and /lib), crtbeginS.o and crtendS.o GCC's;
 //   - libc.so, found in the same directories: a linker script naming libc.so.6, libc_nonshared.a and, as needed, the
 //     dynamic loader (ld-linux-x86-64.so.2), whose exports a link takes only for a name libc.so.6 doesn't export
-//     (__tls_get_addr, _r_debug, __libc_stack_end), as GNU ld and lld take them, making the loader needed.
+//     (__tls_get_addr, _r_debug, __libc_stack_end), as GNU ld and lld take them, making the loader needed;
+//   - GCC's libgcc.a, which the driver names before libc.so and again after it (-lgcc -lgcc_s_asneeded -lc -lgcc
+//     -lgcc_s_asneeded), and whose members a link needs for the calls compilers make of their own accord: the 128-bit
+//     integers' division and conversions (__udivti3, __floattidf), the complex types' arithmetic (__muldc3). It defines
+//     no name libc.so.6 exports, so that binding a name to libc.so.6's export before a member of libgcc.a's binds it as
+//     the driver's order does. The direct path doesn't link libgcc_s.so.1, which the driver names as needed: of the
+//     names libgcc.a's members refer to that neither it nor libc defines, it has the unwinder's, which only the
+//     split-stack members (morestack.o) refer to.
 // And for `cc -static main.c -o main` (RUNTIME_KIND_STATIC):
 //   - the crt objects crt1.o, crti.o, crtbeginT.o, crtend.o and crtn.o, in the same order and places;
 //   - the archives of the driver's group, --start-group -lgcc -lgcc_eh -latomic_asneeded -lc --end-group, in its order:
@@ -22,8 +29,9 @@
 // crti.o, crtbeginS.o, crtendS.o and crtn.o. rcrt1.o doesn't define _dl_relocate_static_pie, as crt1.o does (an empty
 // one), so libc.a's member that relocates the executable joins, which refers to _DYNAMIC.
 // And for `cc -shared lib.c -o lib.so` (RUNTIME_KIND_SHARED), a dynamic PIE's but its start object: crti.o,
-// crtbeginS.o, crtendS.o and crtn.o, with libc.so's libc.so.6, libc_nonshared.a and loader. The start object's unit and
-// piece are there, empty, so that each object keeps its unit (RuntimeObject), and nothing refers to main.
+// crtbeginS.o, crtendS.o and crtn.o, with libgcc.a and libc.so's libc.so.6, libc_nonshared.a and loader. The start
+// object's unit and piece are there, empty, so that each object keeps its unit (RuntimeObject), and nothing refers to
+// main.
 // Each path probed, found or absent, is recorded with what identifies a found file (st_dev, st_ino, st_size, st_mtim
 // and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system
 // (runtime_probes_current). Among them are the directory GCC's versions were chosen from, whose times change when a
@@ -32,15 +40,15 @@
 //
 // The import (runtime_import, runtime_import_static) reads every file once into the runtime's arena, which the atoms
 // then point into, and fills a link of the runtime's own: the crt objects as units 0 to 4 (RuntimeObject), then each
-// archive's members, in the archives' order (RuntimeArchive), as units after them (Runtime.member_unit on), each
-// object's records a piece. libc.so.6 and the loader become ImportLibraries: their exports with their default
-// versions, their versions and the names they refer to. The loader's version indices are moved past libc.so.6's, so
-// that an index, which a link's symbols hold (LinkSymbols.version), names one library's version. Then it binds each
-// name the runtime refers to (runtime_bind): to a definition in the runtime's own objects (an index of them by name
-// hash, as the libraries' exports have; an absolute symbol is one), to the linker for a name it defines
-// (_GLOBAL_OFFSET_TABLE_, and for a static executable the bounds of its sections and tables, runtime_linker_names), to
-// an export of libc.so.6 or else of the loader, to nothing for a weak reference that none defines, or else to the
-// program (main): RuntimeBinding, by symbol.
+// archive's members, in the archives' order (RuntimeArchive: libgcc.a first in every kind, libc's archive last), as
+// units after them (Runtime.member_unit on), each object's records a piece. libc.so.6 and the loader become
+// ImportLibraries: their exports with their default versions, their versions and the names they refer to. The loader's
+// version indices are moved past libc.so.6's, so that an index, which a link's symbols hold (LinkSymbols.version),
+// names one library's version. Then it binds each name the runtime refers to (runtime_bind): to a definition in the
+// runtime's own objects (an index of them by name hash, as the libraries' exports have; an absolute symbol is one), to
+// the linker for a name it defines (_GLOBAL_OFFSET_TABLE_, and for a static executable the bounds of its sections and
+// tables, runtime_linker_names), to an export of libc.so.6 or else of the loader, to nothing for a weak reference that
+// none defines, or else to the program (main): RuntimeBinding, by symbol.
 //
 // What binding's closure over the members needs (bind.c), from the global names (RuntimeNames): the member whose
 // definition each name has; each piece's strong references to names (Runtime.references, a range per piece), with the
@@ -93,7 +101,7 @@ typedef enum RuntimeError
 // What the runtime is for: the files GCC's driver links around a program's objects (see the orientation comment).
 typedef enum RuntimeKind
 {
-    // A dynamic PIE: Scrt1.o, crti.o, crtbeginS.o, crtendS.o and crtn.o; libc.so.6 and libc_nonshared.a.
+    // A dynamic PIE: Scrt1.o, crti.o, crtbeginS.o, crtendS.o and crtn.o; libgcc.a; libc.so.6 and libc_nonshared.a.
     RUNTIME_KIND_DYNAMIC,
     // A static executable: crt1.o, crti.o, crtbeginT.o, crtend.o and crtn.o; libgcc.a, libgcc_eh.a, libatomic.a and
     // libc.a.
@@ -120,9 +128,9 @@ typedef enum RuntimeObject
 // The most archives a runtime has: a static executable's group has four.
 #define BUSTER_RUNTIME_ARCHIVES 4
 
-// One of the runtime's archives (libc_nonshared.a; libgcc.a, libgcc_eh.a, libatomic.a, libc.a): its path, its bytes as
-// import_archive read them, and its members' place among the runtime's (Runtime.members, whose units and pieces follow
-// the crt objects').
+// One of the runtime's archives (libgcc.a and libc_nonshared.a; libgcc.a, libgcc_eh.a, libatomic.a and libc.a), in the
+// driver's order (libgcc.a first, libc's archive last: runtime_libc_archive): its path, its bytes as import_archive read
+// them, and its members' place among the runtime's (Runtime.members, whose units and pieces follow the crt objects').
 typedef struct RuntimeArchive RuntimeArchive;
 struct RuntimeArchive
 {
@@ -457,6 +465,9 @@ static __attribute__((unused)) uint64_t runtime_name_filter_bits(uint64_t hash);
 static __attribute__((unused)) const uint8_t* runtime_name_bytes(const Runtime* runtime, NameId name);
 static __attribute__((unused)) const uint8_t* runtime_atom_bytes(const Runtime* runtime, AtomId atom);
 static __attribute__((unused)) String8 runtime_member_name(const Runtime* runtime, uint32_t member);
+// libc's archive: libc_nonshared.a for a dynamic PIE and a shared library, libc.a for a static executable and a static
+// PIE. The archives keep the driver's order, in which it comes last.
+static __attribute__((unused)) const RuntimeArchive* runtime_libc_archive(const Runtime* runtime);
 // Whether binding may read a piece of the runtime (a crt object, or RUNTIME_OBJECTS + m for member m): always for one
 // runtime_import made; for one loaded from a snapshot, whether the piece's records and bytes hash as when the snapshot
 // was written (runtime_piece_hash).
@@ -867,9 +878,12 @@ static RuntimeError runtime_search(Runtime* runtime)
         runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
         result = name == 0 || runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
+    // A dynamic PIE's and a shared library's: libgcc.a, the first archive, then libc.so's script, which names the second.
     if (result == RUNTIME_ERROR_NONE && !runtime_kind_is_static(runtime->kind))
     {
-        runtime->libc_script = runtime_find_file(runtime, "libc.so", false);
+        runtime->archives[0].path = runtime_find_file(runtime, "libgcc.a", true);
+        runtime->archive_count = runtime->archives[0].path.length != 0 ? 1 : 0;
+        runtime->libc_script = runtime->archive_count != 0 ? runtime_find_file(runtime, "libc.so", false) : (String8){ 0 };
         result = runtime->libc_script.length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
     else if (result == RUNTIME_ERROR_NONE)
@@ -889,10 +903,13 @@ static RuntimeError runtime_fail_import(Runtime* runtime, String8 path, ImportRe
     return RUNTIME_ERROR_IMPORT;
 }
 
-// Reads libc.so's script: libc.so.6, libc_nonshared.a, and the loader as needed. Each must be an absolute path.
+// Reads libc.so's script: libc.so.6, libc_nonshared.a, and the loader as needed. Each must be an absolute path. The
+// archive follows those the search found (libgcc.a), as libc.so follows -lgcc on the driver's line.
 static RuntimeError runtime_read_script(Runtime* runtime)
 {
     RuntimeError result = RUNTIME_ERROR_NONE;
+    const uint32_t nonshared = runtime->archive_count;
+    bool archived = false;
     const String8 bytes = runtime_read(runtime, runtime->libc_script, &result);
     ImportScript script = { 0 };
     const ImportResult parsed = result == RUNTIME_ERROR_NONE ? import_script(&script, bytes, &runtime->files) : (ImportResult){ 0 };
@@ -916,8 +933,8 @@ static RuntimeError runtime_read_script(Runtime* runtime)
         }
         else if (archive)
         {
-            runtime->archives[0].path = runtime_copy_path(runtime, path);
-            runtime->archive_count = 1;
+            runtime->archives[runtime->archive_count].path = runtime_copy_path(runtime, path);
+            archived = true;
         }
         else if (input->as_needed)
         {
@@ -928,7 +945,8 @@ static RuntimeError runtime_read_script(Runtime* runtime)
             runtime->libc_path = runtime_copy_path(runtime, path);
         }
     }
-    if (result == RUNTIME_ERROR_NONE && (runtime->libc_path.length == 0 || runtime->archive_count == 0 || runtime->archives[0].path.length == 0))
+    runtime->archive_count += archived ? 1 : 0;
+    if (result == RUNTIME_ERROR_NONE && (runtime->libc_path.length == 0 || !archived || runtime->archives[nonshared].path.length == 0))
     {
         result = RUNTIME_ERROR_MISSING;
         snprintf(runtime->failed_file, sizeof(runtime->failed_file), "libc.so.6 or libc_nonshared.a in %.*s", (int)runtime->libc_script.length,
@@ -2381,6 +2399,11 @@ static String8 runtime_member_name(const Runtime* runtime, uint32_t member)
         .length = runtime->members[member].name.length,
     };
     return result;
+}
+
+static const RuntimeArchive* runtime_libc_archive(const Runtime* runtime)
+{
+    return runtime->archive_count != 0 ? &runtime->archives[runtime->archive_count - 1] : 0;
 }
 
 // A run of a piece's bytes that its hash takes: one table's column over the piece's records, or the piece's names' or

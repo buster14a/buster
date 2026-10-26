@@ -1497,18 +1497,20 @@ static void foreign_driver_test_interpreter(ForeignTestTally* tally, const char*
     snprintf(path, sizeof(path), "%s/interpreter-script.ld", directory);
     char text[4 * BUSTER_RUNTIME_PATH_BYTES];
     const RuntimeError expected[] = { RUNTIME_ERROR_NONE, RUNTIME_ERROR_MISSING, RUNTIME_ERROR_MISSING, RUNTIME_ERROR_IMPORT, RUNTIME_ERROR_FILE, RUNTIME_ERROR_MEMORY };
+    // libc.so's archive, which the scripts name as the system's does.
+    const String8 nonshared = runtime_libc_archive(imported)->path;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(expected); i += 1)
     {
         int length = 0;
         if (i == 0 || i == 5)
         {
             length = snprintf(text, sizeof(text), "GROUP ( %.*s %.*s AS_NEEDED ( %.*s ) )\n", (int)imported->libc_path.length, imported->libc_path.pointer,
-                              (int)imported->archives[0].path.length, imported->archives[0].path.pointer, (int)imported->loader_path.length, imported->loader_path.pointer);
+                              (int)nonshared.length, nonshared.pointer, (int)imported->loader_path.length, imported->loader_path.pointer);
         }
         else if (i == 1)
         {
-            length = snprintf(text, sizeof(text), "GROUP ( %.*s %.*s )\n", (int)imported->libc_path.length, imported->libc_path.pointer,
-                              (int)imported->archives[0].path.length, imported->archives[0].path.pointer);
+            length = snprintf(text, sizeof(text), "GROUP ( %.*s %.*s )\n", (int)imported->libc_path.length, imported->libc_path.pointer, (int)nonshared.length,
+                              nonshared.pointer);
         }
         else if (i == 2)
         {

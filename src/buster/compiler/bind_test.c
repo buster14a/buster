@@ -35,15 +35,16 @@
 //     the linkers do.
 //   - A program that calls atexit, which libc_nonshared.a's member defines: bound, it must pass link_check, and the
 //     member must join, defining atexit, with its references bound (__cxa_atexit to libc.so.6, __dso_handle to
-//     crtbeginS.o).
+//     crtbeginS.o). And one that calls __udivti3, __fixunsdfti and __fixdfti, whose members of libgcc.a must join, and
+//     no others, each defining its name hidden; __fixdfti's member calls __fixunsdfti too.
 //   - With --cross-check, which needs ld.lld, ld.bfd, cc and readelf on PATH: each bound program is written as
 //     objects, one per unit, and linked by ld.lld and ld.bfd as a PIE with only libc.so.6 and the loader besides, in
 //     GCC's order, without errors or warnings. It must run and print what its model predicts; the atexit program must
-//     exit with its handler's status, 0, rather than main's, 3. And the same program's own objects linked by cc with
-//     lld must have the imports at their versions, the weak references with default visibility and the exports that
-//     binding found in readelf's .dynsym, and the members that lld's --why-extract lists. Each of the linkers' cases'
-//     own objects, linked by cc with GNU ld and with lld, must link, or fail to, as binding did, and run with the
-//     case's status, as the bound link must.
+//     exit with its handler's status, 0, rather than main's, 3, and the libgcc program with its results' sum, 15. And
+//     the same program's own objects linked by cc with lld must have the imports at their versions, the weak
+//     references with default visibility and the exports that binding found in readelf's .dynsym, and the members that
+//     lld's --why-extract lists, of either archive. Each of the linkers' cases' own objects, linked by cc with GNU ld
+//     and with lld, must link, or fail to, as binding did, and run with the case's status, as the bound link must.
 // Then the same against this system's static runtime (runtime_import_static), by both paths, which must make the same
 // link and join the same members:
 //   - Static programs: test-link's two sets that call libc. The members that join must be those GNU ld's archive scan
@@ -77,8 +78,8 @@
 // status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the programs and their comparisons, the programs' checks, the names, links made by
-// hand, the rules, the atexit program, the cross-check, the linkers' cases, the checks, the static runtimes, and
-// run_bind_tests.
+// hand, the rules, the atexit program, the libgcc program, the cross-check, the linkers' cases, the checks, the static
+// runtimes, and run_bind_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1662,7 +1663,7 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
 // exits with status 0.
 
 #define BUSTER_BIND_TEST_MAIN_STATUS 3
-#define BUSTER_BIND_TEST_MAX_CODE 16
+#define BUSTER_BIND_TEST_MAX_CODE 32
 
 // A TEXT atom of the instructions, in unit 0, defining `symbol`: the references are each instruction's displacement.
 static bool bind_test_code(BindTestLink* test, const X86Instruction* instructions, uint32_t count, const LinkReference* references, uint32_t reference_count, SymbolId symbol)
@@ -1818,6 +1819,226 @@ static bool bind_test_atexit_program(const Runtime* runtime)
     bind_test_atexit(&vector, runtime, BIND_PATH_VECTOR, true);
     bind_test_atexit(&exact, runtime, BIND_PATH_EXACT, true);
     bind_test_atexit_checks(&tally, &vector, runtime);
+    bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
+                     "the paths agree", 0);
+    bind_test_link_end(&vector.test);
+    bind_test_link_end(&exact.test);
+    return bind_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The libgcc program
+//
+// main calls three functions of libgcc.a's, as a compiler's code of 128-bit integers calls them: it divides 100 by 7
+// through __udivti3, converts 3.0 to an unsigned 128-bit integer through __fixunsdfti and -2.0 to a signed one through
+// __fixdfti, and returns 14 + 3 - 2. Its references have source NONE, as the C driver's emission makes them.
+// __fixdfti's member calls __fixunsdfti too, and joins before __fixunsdfti's member, in the same round: its reference
+// meets the program's, which binding must keep for that member's definition rather than take for a reference left to
+// nothing.
+
+#define BUSTER_BIND_TEST_LIBGCC_STATUS 15
+#define BUSTER_BIND_TEST_LIBGCC_CALLS 3
+
+static const char* const bind_test_libgcc_names[BUSTER_BIND_TEST_LIBGCC_CALLS] = {
+    "__udivti3",
+    "__fixunsdfti",
+    "__fixdfti",
+};
+
+typedef struct BindTestLibgcc BindTestLibgcc;
+struct BindTestLibgcc
+{
+    BindTestLink test;
+    SymbolId main;
+    SymbolId calls[BUSTER_BIND_TEST_LIBGCC_CALLS];
+    bool bound;
+};
+
+// As bind_test_atexit: the program's symbols, then the runtime's first objects, its code, and the rest; without
+// `bound`, only the program, for a link of its own objects by cc.
+static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound)
+{
+    BindTestLink* test = &program->test;
+    bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
+    program->main = built ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+    built = program->main != 0;
+    for (uint32_t c = 0; c < BUSTER_BIND_TEST_LIBGCC_CALLS; c += 1)
+    {
+        program->calls[c] = built ? bind_test_symbol(test, bind_test_libgcc_names[c], BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) : 0;
+        built = built && program->calls[c] != 0;
+    }
+    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
+    // main: push rbx (which aligns the stack for the calls); __udivti3 of 100 in rsi:rdi by 7 in rcx:rdx, the quotient's
+    // low half in eax, kept in ebx; __fixunsdfti of 3.0 and __fixdfti of -2.0 in xmm0, each low half in eax added to
+    // ebx; then eax = ebx, pop rbx, ret.
+    const X86Instruction main_code[] = {
+        {
+            .rm = X86_REGISTER_RBX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_PUSH_R64,
+        },
+        {
+            .immediate = 100,
+            .rm = X86_REGISTER_RDI,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .immediate = 0,
+            .rm = X86_REGISTER_RSI,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .immediate = 7,
+            .rm = X86_REGISTER_RDX,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .immediate = 0,
+            .rm = X86_REGISTER_RCX,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP,
+        },
+        {
+            .reg = X86_REGISTER_RBX,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R32_RM32,
+        },
+        // 3.0's bits.
+        {
+            .immediate = 0,
+            .displacement = 0x40080000,
+            .rm = X86_REGISTER_RAX,
+            .form = X86_FORM_MOV_R64_IMM64,
+        },
+        {
+            .reg = 0,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOVQ_X_RM64,
+        },
+        {
+            .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP,
+        },
+        {
+            .reg = X86_REGISTER_RBX,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_ADD_R32_RM32,
+        },
+        // -2.0's bits.
+        {
+            .immediate = 0,
+            .displacement = (int32_t)0xc0000000u,
+            .rm = X86_REGISTER_RAX,
+            .form = X86_FORM_MOV_R64_IMM64,
+        },
+        {
+            .reg = 0,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOVQ_X_RM64,
+        },
+        {
+            .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP,
+        },
+        {
+            .reg = X86_REGISTER_RBX,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_ADD_R32_RM32,
+        },
+        {
+            .reg = X86_REGISTER_RAX,
+            .rm = X86_REGISTER_RBX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R32_RM32,
+        },
+        {
+            .rm = X86_REGISTER_RBX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_POP_R64,
+        },
+        {
+            .form = X86_FORM_RET,
+        },
+    };
+    const LinkReference main_references[] = {
+        {
+            .instruction = 5,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = program->calls[0],
+            .addend = 0,
+        },
+        {
+            .instruction = 9,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = program->calls[1],
+            .addend = 0,
+        },
+        {
+            .instruction = 13,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = program->calls[2],
+            .addend = 0,
+        },
+    };
+    built = built && bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), main_references, BUSTER_ARRAY_LENGTH(main_references), program->main);
+    program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
+}
+
+// The members of libgcc.a that joined must be those the three names have, and no others, each defining its name,
+// hidden, as libgcc.a's helpers are; nothing is imported from libc.so.6 for them.
+static void bind_test_libgcc_checks(BindTestTally* tally, const BindTestLibgcc* program, const Runtime* runtime)
+{
+    const Link* link = &program->test.link;
+    const LinkSymbols* symbols = &link->symbols;
+    const Bind* bind = &program->test.bind;
+    const RuntimeNames* names = &runtime->global_names;
+    const bool archived = runtime->archive_count != 0 && import_test_path_is(runtime->archives[0].path, "libgcc.a");
+    uint32_t joined = 0;
+    for (uint32_t w = 0; w < (runtime->member_count + 63) / 64; w += 1)
+    {
+        joined += (uint32_t)__builtin_popcountll(bind->members_joined[w]);
+    }
+    bind_test_expect(tally, program->bound, "the libgcc program bound", bind->error);
+    bind_test_expect(tally, joined == BUSTER_BIND_TEST_LIBGCC_CALLS, "three members joined", joined);
+    for (uint32_t c = 0; c < BUSTER_BIND_TEST_LIBGCC_CALLS; c += 1)
+    {
+        const char* name = bind_test_libgcc_names[c];
+        const uint32_t length = (uint32_t)strlen(name);
+        const uint32_t entry = runtime_find_global_name(names, (const uint8_t*)name, length, link_hash((const uint8_t*)name, length));
+        const uint32_t member = entry != 0 && names->member[entry - 1] != 0 ? names->member[entry - 1] - 1 : runtime->member_count;
+        const bool libgcc = archived && member < runtime->archives[0].archive.member_count;
+        const SymbolId symbol = program->calls[c];
+        const AtomId atom = symbols->atom[symbol];
+        bool imported = false;
+        for (uint32_t i = 0; i < bind->import_count; i += 1)
+        {
+            imported = imported || bind->imports[i] == symbol;
+        }
+        bind_test_expect(tally, libgcc && (bind->members_joined[member / 64] >> (member % 64) & 1) != 0, "its member of libgcc.a joined", c);
+        bind_test_expect(tally, atom != 0 && link->atoms.unit[atom] == 1 + RUNTIME_OBJECTS + member && symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE &&
+                                    (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_HIDDEN && !imported,
+                         "defined by its member, hidden, not an import", c);
+    }
+}
+
+static bool bind_test_libgcc_program(const Runtime* runtime)
+{
+    BindTestTally tally = {
+        .check = "libgcc",
+    };
+    BindTestLibgcc vector;
+    BindTestLibgcc exact;
+    bind_test_libgcc(&vector, runtime, BIND_PATH_VECTOR, true);
+    bind_test_libgcc(&exact, runtime, BIND_PATH_EXACT, true);
+    bind_test_libgcc_checks(&tally, &vector, runtime);
     bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
                      "the paths agree", 0);
     bind_test_link_end(&vector.test);
@@ -2084,20 +2305,30 @@ static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Run
 }
 
 // The members lld's --why-extract lists (lines of "reference\textracted\tsymbol", the member as archive(member)), each
-// of libc_nonshared.a, against those that joined.
+// of an archive of the runtime's (libgcc.a or libc_nonshared.a), against those that joined.
 static bool bind_test_same_members(String8 text, const Bind* bind, const Runtime* runtime)
 {
     const uint32_t words = (runtime->member_count + 63) / 64;
-    uint64_t extracted[4] = { 0 };
+    uint64_t extracted[64] = { 0 };
     bool result = words <= BUSTER_ARRAY_LENGTH(extracted) && text.pointer != 0;
-    for (uint32_t m = 0; result && m < runtime->member_count; m += 1)
+    for (uint32_t a = 0; result && a < runtime->archive_count; a += 1)
     {
-        char needle[512];
-        const String8 member = runtime_member_name(runtime, m);
-        snprintf(needle, sizeof(needle), "libc_nonshared.a(%.*s)", (int)member.length, member.pointer);
-        if (strstr(text.pointer, needle) != 0)
+        const RuntimeArchive* archive = &runtime->archives[a];
+        uint64_t file = archive->path.length;
+        while (file != 0 && archive->path.pointer[file - 1] != '/')
         {
-            extracted[m / 64] |= 1ull << (m % 64);
+            file -= 1;
+        }
+        for (uint32_t i = 0; i < archive->archive.member_count; i += 1)
+        {
+            const uint32_t m = archive->first_member + i;
+            char needle[512];
+            const String8 member = runtime_member_name(runtime, m);
+            snprintf(needle, sizeof(needle), "%.*s(%.*s)", (int)(archive->path.length - file), archive->path.pointer + file, (int)member.length, member.pointer);
+            if (strstr(text.pointer, needle) != 0)
+            {
+                extracted[m / 64] |= 1ull << (m % 64);
+            }
         }
     }
     for (uint32_t w = 0; result && w < words; w += 1)
@@ -2799,6 +3030,29 @@ static bool bind_test_atexit_cross_check(const Runtime* runtime, const char* dir
     {
         bind_test_link_and_run(&tally, &bound.test.link, &bound.test.bind, runtime, 1, directory, "atexit", (const uint8_t*)"", 0, 0, keep, arena);
         bind_test_against_lld(&tally, &own.test.link, 1, &bound.test.link, &bound.test.bind, runtime, directory, "atexit", keep, arena);
+    }
+    bind_test_link_end(&bound.test);
+    bind_test_link_end(&own.test);
+    return bind_test_report(&tally);
+}
+
+// The libgcc program's: its bound link run by ld.lld's and ld.bfd's links, with the quotient as its status, and its own
+// objects linked by cc with lld, which extracts the same member of libgcc.a.
+static bool bind_test_libgcc_cross_check(const Runtime* runtime, const char* directory, bool keep, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "libgcc, cross-check",
+    };
+    BindTestLibgcc bound;
+    BindTestLibgcc own;
+    bind_test_libgcc(&bound, runtime, BIND_PATH_VECTOR, true);
+    bind_test_libgcc(&own, runtime, BIND_PATH_VECTOR, false);
+    bind_test_expect(&tally, bound.bound && own.bound, "the libgcc program built", 0);
+    if (bound.bound && own.bound)
+    {
+        bind_test_link_and_run(&tally, &bound.test.link, &bound.test.bind, runtime, 1, directory, "libgcc", (const uint8_t*)"", 0, BUSTER_BIND_TEST_LIBGCC_STATUS, keep,
+                               arena);
+        bind_test_against_lld(&tally, &own.test.link, 1, &bound.test.link, &bound.test.bind, runtime, directory, "libgcc", keep, arena);
     }
     bind_test_link_end(&bound.test);
     bind_test_link_end(&own.test);
@@ -4284,9 +4538,11 @@ static int run_bind_tests(int argc, char** argv)
         passed = bind_test_rules(&runtime) && passed;
         passed = bind_test_libraries(&runtime, directory) && passed;
         passed = bind_test_atexit_program(&runtime) && passed;
+        passed = bind_test_libgcc_program(&runtime) && passed;
         if (cross_check)
         {
             passed = bind_test_atexit_cross_check(&runtime, directory, keep, &arena) && passed;
+            passed = bind_test_libgcc_cross_check(&runtime, directory, keep, &arena) && passed;
         }
         passed = bind_test_linker_cases(&runtime, cross_check, directory, keep, &arena) && passed;
         // The static runtime.

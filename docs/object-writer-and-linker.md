@@ -721,7 +721,15 @@ A dynamic PIE on this system needs:
   prologues and epilogues), `crtbeginS.o` (233 bytes) and `crtendS.o`;
 - `libc_nonshared.a` (four members: `atexit`, `at_quick_exit`,
   `pthread_atfork`, `__stack_chk_fail_local`);
-- libgcc and `libgcc_s.so.1` when referenced;
+- GCC's `libgcc.a`, which the driver names before `libc.so` and again after
+  it (`-lgcc -lgcc_s_asneeded -lc -lgcc -lgcc_s_asneeded`): the functions a
+  compiler's code calls of its own accord, such as the 128-bit integers'
+  division and conversions (`__udivti3`, `__floattidf`) and the complex
+  types' arithmetic (`__muldc3`), 298 members in GCC 16's. It defines none of
+  the names `libc.so.6` and the loader export, and its integer and binary
+  floating helpers are hidden. `libgcc_s.so.1`, which the driver names as
+  needed, has the unwinder, which only `libgcc.a`'s split-stack members refer
+  to of what it and libc don't define: the direct path doesn't link it;
 - `libc.so.6` itself: 3,189 dynamic symbols, and version definitions from
   `GLIBC_2.2.5` to `GLIBC_2.44`, `GLIBC_ABI_DT_RELR` among them. It is found
   through `/usr/lib/libc.so`, a linker script naming it,
@@ -736,7 +744,8 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
 
 **Contents:**
 
-- **The crt objects and `libc_nonshared.a`,** imported and laid out together.
+- **The crt objects, `libgcc.a` and `libc_nonshared.a`,** imported and laid
+  out together.
   Their internal references are resolved. What remains are fixups against the
   program and the dynamic sections: `main`, `__libc_start_main@GLIBC_2.34`
   through the GOT, `_init`/`_fini`, `__dso_handle`, the `.init_array` entries
@@ -919,7 +928,7 @@ not, so that one installed into a version's existing directory shows too. The
 import reads each file once into an arena that the atoms point into:
 
 - the crt objects become units 0 to 4, in the driver's order, and each member
-  of `libc_nonshared.a` a unit after them. An object's allocated sections
+  of `libgcc.a` and of `libc_nonshared.a`, in that order, a unit after them. An object's allocated sections
   become atoms of the class lld gives them; `.sframe` (which GCC 16's
   `Scrt1.o` has, and lld 23 copies into the output), notes and `.comment` are
   dropped. `Scrt1.o`'s `.note.ABI-tag` is kept aside for the executable's
@@ -1114,7 +1123,9 @@ against the dynamic runtime with two of GNU ld's and lld's `-shared` rules:
 - **Every definition with default or protected visibility is an export**
   (`bind_shared_exports`), not only those of names a library defines or
   `libc.so.6` refers to. The crt objects' and `libc_nonshared.a`'s global
-  names are all hidden, so the exports are the program's. The vector path
+  names are all hidden, and so are `libgcc.a`'s but for its decimal
+  floating-point and split-stack members', so the exports are the program's
+  (and those members', as GNU ld and lld export them). The vector path
   takes 16 symbols at a time, a mask of their flags', atoms' and sources'
   columns, compressed in a register and stored with a mask of its count; its
   exact twin takes a symbol at a time.
@@ -1323,8 +1334,8 @@ and binds every name before any layout:
   link order. So the runtime's objects join around the program's atoms rather
   than being sorted later: `bind_begin` joins `Scrt1.o`, `crti.o` and
   `crtbeginS.o` after the program's symbols and before its atoms, and
-  `bind_end` the members of `libc_nonshared.a` the link needs, then
-  `crtendS.o` and `crtn.o`, after them. The test programs leave room for this
+  `bind_end` the members of `libgcc.a` and `libc_nonshared.a` the link needs,
+  then `crtendS.o` and `crtn.o`, after them. The test programs leave room for this
   (`link_program_generate_begin`, `_atoms` and `_end`).
 - **One symbol per global name.** A global or weak symbol of the runtime's
   takes the link's symbol of its name, if there is one. So `bind_begin` first
@@ -1369,8 +1380,11 @@ and binds every name before any layout:
   each is looked up: the linker's names (`_GLOBAL_OFFSET_TABLE_` and the init
   and fini arrays' bounds), a crt object after the program, an export of
   `libc.so.6` (an import, with the export's type and version) but only for a
-  reference with default visibility, a member of `libc_nonshared.a` for a
-  strong reference, nothing for a weak one. A hidden, internal or protected
+  reference with default visibility, a member of `libgcc.a` or
+  `libc_nonshared.a` for a strong reference, nothing for a weak one. The
+  driver names `libgcc.a` before `libc.so`, but since it defines none of the
+  names `libc.so.6` exports, an export's binding first binds each name as that
+  order does. A hidden, internal or protected
   reference needs a definition within the executable: GNU ld refuses a strong
   one that only a shared library defines and gives a weak one 0, and lld
   does the same.
