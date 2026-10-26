@@ -465,6 +465,15 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
     const bool bound = bound_imported && bound_loaded;
     snapshot_test_expect(tally, bound, "the program bound against both", index);
     snapshot_test_expect(tally, bound && bind_test_same_links(&a.program.link, &b.program.link) && bind_test_same_binds(&a.bind, &b.bind), "the same link and binding", index);
+    // Against the loaded runtime again, over binding's arena dirtied first (bind_test_dirty): the members' records read
+    // through their own view (#490), and Bind.symbols not cleared.
+    BindTestProgram c;
+    const bool bound_dirty = bind_test_program_dirtied(&c, loaded, options, path, bind_test_dirty_bytes(b.arena.length));
+    snapshot_test_expect(tally,
+                         !bound || (bound_dirty && bind_test_same_links(&b.program.link, &c.program.link) && bind_test_same_binds(&b.bind, &c.bind) &&
+                                    bind_test_kept_pattern(&c.bind, loaded)),
+                         "the loaded runtime's binding over a dirty arena the same", index);
+    bind_test_release(&c);
     char path_a[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     char path_b[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     snapshot_test_path(path_a, directory->path, "imported");
