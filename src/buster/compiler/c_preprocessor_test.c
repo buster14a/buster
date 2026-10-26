@@ -3539,14 +3539,15 @@ static bool pp_test_resource_names(char** text, size_t* length, const char* link
 // One of test-preprocessor's files (pp_test_files): by both kernels, and with `with_clang` against clang with
 // `arguments` (pp_clang_arguments, whose links are in `links`, or null without them), whose predefines ours reads.
 static bool pp_test_file(int argument_count, char** arguments, const char* links, const PPOptions* base, const char* path, bool with_clang, const char* directory,
-                         uint64_t* tokens)
+                         bool predefined, uint64_t* tokens)
 {
     PPOptions options = *base;
     char predefines[4096];
     snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
     size_t length = 0;
-    // pp_test_files wrote clang's predefines for the options, the same for every file, into the directory.
-    char* text = with_clang ? pp_test_clang(arguments, argument_count, path, 0, &length) : 0;
+    // With `predefined`, clang's predefines for the options are in the directory already (pp_test_files writes them once
+    // for its files, which share the options).
+    char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefined ? 0 : predefines, &length) : 0;
     const bool named = text == 0 || links == 0 || pp_test_resource_names(&text, &length, links);
     options.predefines_path = with_clang ? predefines : options.predefines_path;
     uint64_t guards = 0;
@@ -3880,7 +3881,7 @@ static uint32_t pp_test_sets(const char* directory, const char* path, const char
         uint64_t tokens = 0;
         bool passed = pp_parse_options(n + 1, arguments, &options, &arena, &input, &output, &markers);
         options.clang_features = true;
-        passed = passed && pp_test_file(n, arguments, 0, &options, path, true, directory, &tokens);
+        passed = passed && pp_test_file(n, arguments, 0, &options, path, true, directory, false, &tokens);
         if (!passed)
         {
             printf("%s: the answers differ from clang's with %s\n", label, shown);
@@ -4928,7 +4929,7 @@ static bool pp_test_option_set(const char* directory, const char* path, const ch
     uint64_t tokens = 0;
     bool result = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
     options.clang_features = true;
-    result = result && pp_test_file(count, arguments, 0, &options, path, true, directory, &tokens);
+    result = result && pp_test_file(count, arguments, 0, &options, path, true, directory, false, &tokens);
     if (!result)
     {
         printf("feature options: the answers differ from clang's with %s\n", set);
@@ -6251,7 +6252,7 @@ static PPTestChildCounts pp_test_file_part(int argument_count, char** arguments,
     PPTestChildCounts counts = { .result = true };
     for (uint32_t i = first; i < end; i += 1)
     {
-        counts.failures += !pp_test_file(argument_count, arguments, links, options, files[i], with_clang, directory, &counts.tokens);
+        counts.failures += !pp_test_file(argument_count, arguments, links, options, files[i], with_clang, directory, true, &counts.tokens);
     }
     counts.system_units = pp_test_system_units;
     counts.system_inexact = pp_test_system_inexact;
@@ -6309,9 +6310,9 @@ static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint
     return counts;
 }
 
-// The work's parts, at most one per CPU at once (#465): each in a child process with a directory of its own
-// (directory/headers-N or directory/cases-N), its standard output and errors into a file that the parent prints in the parts' order, and its
-// counts through a pipe. Returns their counts added up, with the first part's system_inexact_first that has one.
+// The work's parts, at most one per CPU at once (#465): each in a child process (test_process.c) with a directory of
+// its own (directory/headers-N, cases-N or files-N), its output printed in the parts' order and its counts sent back.
+// Returns their counts added up, with the first part's system_inexact_first that has one.
 static PPTestChildCounts pp_test_children(const PPTestChildren* children)
 {
     const uint32_t cpus = test_process_cpus();
