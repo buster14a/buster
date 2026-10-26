@@ -6,6 +6,13 @@
 // and the declaration's alignment; a packed attribute alone does not establish misalignment. The sparse records
 // survive sizeof/typeof's discarded graph nodes. c_check_packed_diagnostic.c applies consuming conversions later.
 
+typedef struct CheckInputPackedContexts CheckInputPackedContexts;
+struct CheckInputPackedContexts
+{
+    uint8_t* analyzed;
+    uint32_t* selections;
+};
+
 typedef struct CheckInputPackedNames CheckInputPackedNames;
 struct CheckInputPackedNames
 {
@@ -317,7 +324,7 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
     return result;
 }
 
-static void check_input_packed_address(CheckInputReader* reader, uint32_t address, uint32_t* chain, CheckInputPackedNames* names, const uint8_t* analyzed)
+static void check_input_packed_address(CheckInputReader* reader, uint32_t address, uint32_t* chain, CheckInputPackedNames* names, const CheckInputPackedContexts* contexts)
 {
     const Parser* parser = reader->parser;
     TypeTable* types = reader->types;
@@ -389,15 +396,13 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
             bool transparent = true;
             while (transparent && parent < parser->tokens.count)
             {
-                const uint32_t outside = parser->tree.parents[parent];
                 const bool group = (parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP && reader->output->expression_regions[parent] == 0) ||
                                    (parser->tree.roles[parent] == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_EXTENSION);
-                const bool selected = reader->selected_tokens[parent] == current;
-                const bool association = parser->tokens.kinds[parent] == PARSE_KIND_COLON && outside < parser->tokens.count && reader->selected_tokens[outside] == current;
-                transparent = group || selected || association;
+                const uint32_t selection = contexts->selections[current];
+                transparent = group || selection != BUSTER_CHECK_NONE;
                 if (transparent)
                 {
-                    current = association ? outside : parent;
+                    current = selection != BUSTER_CHECK_NONE ? selection : parent;
                     parent = parser->tree.parents[current];
                 }
             }
@@ -424,7 +429,7 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
                 .member_name = member_name,
                 .record_name = record_name,
                 .alignment_log2 = alignment,
-                .implicit_conversions = analyzed[address] != 0,
+                .implicit_conversions = contexts->analyzed[address] != 0,
                 .suppressed = check_input_packed_target(types, target, alignment),
             };
         }
@@ -487,7 +492,7 @@ static void check_input_packed_exclude(uint32_t* events, uint32_t count, uint32_
 // Pending warnings survive unevaluated and unchosen operands, but Clang never performs its implicit-conversion
 // analysis there. Build their lexical intervals once and prefix-scan them; a parent walk per address would be
 // quadratic in a deep expression. Unsigned difference counts wrap deliberately and have a bounded prefix depth.
-static uint8_t* check_input_packed_contexts(CheckInputReader* reader)
+static CheckInputPackedContexts check_input_packed_contexts(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
@@ -545,8 +550,19 @@ static uint8_t* check_input_packed_contexts(CheckInputReader* reader)
                 running += (uint32_t)_mm512_mask_reduce_add_epi32(active, deltas);
             }
         }
+        // The prefix scan has consumed the difference counts. Reuse them for the inverse selection map:
+        // association separators are not expression parents, so a parent walk cannot transparently cross them.
+        memset(events, 0xff, (uint64_t)count * sizeof(uint32_t));
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t selected = reader->selected_tokens[token];
+            if (selected != BUSTER_CHECK_NONE)
+            {
+                events[selected] = token;
+            }
+        }
     }
-    return analyzed;
+    return (CheckInputPackedContexts){ .analyzed = analyzed, .selections = events };
 }
 
 static void check_input_packed_members(CheckInputReader* reader)
@@ -568,7 +584,7 @@ static void check_input_packed_members(CheckInputReader* reader)
         reader->output->packed_members = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputPackedMember, candidates);
         uint32_t* chain = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
         reader->output->resource |= reader->output->packed_members == 0 || chain == 0;
-        const uint8_t* analyzed = !reader->output->resource ? check_input_packed_contexts(reader) : NULL;
+        const CheckInputPackedContexts contexts = !reader->output->resource ? check_input_packed_contexts(reader) : (CheckInputPackedContexts){ 0 };
         const uint32_t end = count < reader->expression_limit ? count : reader->expression_limit;
         CheckInputPackedNames names = { 0 };
         for (uint32_t token = 0; !reader->output->resource && token < end; token += 64)
@@ -578,7 +594,7 @@ static void check_input_packed_members(CheckInputReader* reader)
             while (!reader->output->resource && addresses != 0)
             {
                 const uint32_t address = token + (uint32_t)__builtin_ctzll(addresses);
-                check_input_packed_address(reader, address, chain, &names, analyzed);
+                check_input_packed_address(reader, address, chain, &names, &contexts);
                 addresses &= addresses - 1;
             }
         }
