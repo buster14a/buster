@@ -725,24 +725,27 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
 
 // Legacy fixture callers may compare the partial output of an intentionally rejected case. File-oracle callers
 // inspect PPClangOutput.status instead: a rejection is an explicit skip, a process/I/O failure is a failed run.
+// clang's predefines for `arguments` (clang -dM -E of an empty input), written to `predefines_path`.
+static bool pp_test_clang_predefines(char** arguments, int argument_count, const char* predefines_path)
+{
+    PPClangOutput macros = pp_test_clang_process("clang", arguments, argument_count, "/dev/null", true);
+    bool result = macros.status == PP_CLANG_ACCEPTED;
+    FILE* out = result ? fopen(predefines_path, "w") : 0;
+    result = out != 0 && fwrite(macros.text, 1, macros.length, out) == macros.length;
+    if (out != 0)
+    {
+        result = fclose(out) == 0 && result;
+    }
+    free(macros.text);
+    free(macros.diagnostics);
+    return result;
+}
+
 static char* pp_test_clang(char** arguments, int argument_count, const char* path, const char* predefines_path, size_t* length)
 {
     char* result = 0;
     *length = 0;
-    bool ready = true;
-    if (predefines_path != 0)
-    {
-        PPClangOutput macros = pp_test_clang_process("clang", arguments, argument_count, "/dev/null", true);
-        ready = macros.status == PP_CLANG_ACCEPTED;
-        FILE* out = ready ? fopen(predefines_path, "w") : 0;
-        ready = out != 0 && fwrite(macros.text, 1, macros.length, out) == macros.length;
-        if (out != 0)
-        {
-            ready = fclose(out) == 0 && ready;
-        }
-        free(macros.text);
-        free(macros.diagnostics);
-    }
+    const bool ready = predefines_path == 0 || pp_test_clang_predefines(arguments, argument_count, predefines_path);
     if (ready)
     {
         PPClangOutput output = pp_test_clang_process("clang", arguments, argument_count, path, false);
@@ -3542,7 +3545,8 @@ static bool pp_test_file(int argument_count, char** arguments, const char* links
     char predefines[4096];
     snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
     size_t length = 0;
-    char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefines, &length) : 0;
+    // pp_test_files wrote clang's predefines for the options, the same for every file, into the directory.
+    char* text = with_clang ? pp_test_clang(arguments, argument_count, path, 0, &length) : 0;
     const bool named = text == 0 || links == 0 || pp_test_resource_names(&text, &length, links);
     options.predefines_path = with_clang ? predefines : options.predefines_path;
     uint64_t guards = 0;
@@ -3590,6 +3594,10 @@ static uint32_t pp_test_files(int passed_count, char** passed, int file_count, c
     }
     char** clang = ready && with_clang ? pp_clang_arguments(&options, passed_count, passed, ours, links, &linked, &clang_count) : 0;
     ready = ready && (!with_clang || clang != 0);
+    // clang's predefines for the options, which every file's run reads (pp_test_file), once for them all.
+    char predefines[4096];
+    snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
+    ready = ready && (!with_clang || pp_test_clang_predefines(clang, clang_count, predefines));
     uint32_t result = ready ? 0 : (uint32_t)file_count;
     for (int i = 0; ready && i < file_count; i += 1)
     {
