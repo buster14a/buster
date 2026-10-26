@@ -72,9 +72,10 @@ The executable's main units share the frontend's immutable pair through hidden
 data symbols. Their scalar/vector kernels remain local and read the same aligned
 rows directly. Standalone benchmark and helper inclusions retain static tables;
 sharing adds no initialization, allocation or mutable state.
-The scalar reader's alias guarantee covers only the immutable rows and writable
-output. The public builders still allow target/output overlap; regression tests
-check both paths with the target stored inside the destination.
+The scalar loop's iterations are independent: its source is immutable and each
+writes a different output byte. The public builders still allow target/output
+overlap because they capture the feature word first; regression tests check both
+paths with the target stored inside the destination.
 
 The assembler builds its mnemonic index for one target, excluding ineligible
 forms before either matching path runs. Its syntax subset remains separate:
