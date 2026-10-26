@@ -2687,6 +2687,53 @@ one that exports it, each needed library's reference to `b_func` is refused, nam
 definition too, but not with a global one, nor where neither library is needed; and a library whose `DT_NEEDED` names
 one the link lacks isn't checked.
 
+#### libgcc.a in a dynamic link
+
+A compiler's code calls libgcc's functions of its own accord: the 128-bit
+integers' division, remainder and conversions to and from the floating types,
+which #133's lowering of `__int128` calls as clang -O0 does, and the complex
+types' arithmetic. GCC's driver names `libgcc.a` before `libc.so` and again
+after it (`-lgcc -lgcc_s_asneeded -lc -lgcc -lgcc_s_asneeded`, GCC 16's line
+for a PIE and for `-shared`). So a dynamic PIE's and a shared library's
+runtimes have it as their first archive, before `libc_nonshared.a`, its 298
+members (GCC 16's) units after the crt objects'. Binding joins them round by
+round, as it joins `libc_nonshared.a`'s:
+
+- **The order.** Binding takes an export of `libc.so.6` before a member, where
+  the line has `libgcc.a` first. The two agree because `libgcc.a` defines
+  none of the names `libc.so.6` and the loader export, which `test-import`
+  checks on the system's files; a system where it did would need the members
+  first.
+- **`libgcc_s.so.1`,** which the driver names as needed, isn't linked. Of the
+  names `libgcc.a`'s members refer to that neither it nor libc defines, it has
+  the unwinder's (`_Unwind_Resume`, `__gcc_personality_v0`), which only the
+  split-stack members (`morestack.o`) refer to: a PIE that joins them is
+  refused, naming the first, and a shared library leaves them to the loader.
+- **Hidden helpers.** The integer and binary floating helpers are hidden, so a
+  shared library exports none of them. Only the decimal floating-point and
+  split-stack members define names with default visibility, which GNU ld and
+  lld export too.
+- **A pending member's reference.** Members of `libgcc.a` refer to each other,
+  which `libc_nonshared.a`'s never did. A strong reference whose member
+  binding marked as needed kept source NONE until the member joined, at the
+  end of the round, and a member that joined first with a reference to the
+  same name took it for a reference left to nothing: `__fixdfti`'s member
+  calls `__fixunsdfti`, so a program that called both failed. Such a symbol
+  now has source `RUNTIME_ARCHIVE` (`bind_resolve_symbol`), as one that
+  `crtendS.o` defines when it joins has.
+
+`test-import` checks the archives' order, `__udivti3` a member's of
+`libgcc.a` and its names apart from `libc.so.6`'s and the loader's exports;
+`test-bind`'s libgcc program calls `__udivti3`, `__fixunsdfti` and
+`__fixdfti` through references of source NONE, as the C driver's are, and
+must join exactly their three members (with `--cross-check`, ld.lld's and
+ld.bfd's links of it run, and lld extracts the same members); `test-dynamic`
+writes it as a PIE among its cases, and links a shared library whose code,
+cc's, calls seven of `libgcc.a`'s functions; and `test-checker-driver
+--executable` compiles and links a C program of 128-bit division and
+conversions by both paths into the same bytes, which needs `libc.so.6` alone
+and prints what the test's own code computes.
+
 #### The unwind tables
 
 Step 5 compares the direct path with linkers on outputs of the same features,
