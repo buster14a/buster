@@ -352,12 +352,14 @@ the frame, and `tier0_emit_epilogue` reverses both. `Tier0Code` exports
 instruction records, branch columns, symbolic references, status and each
 typed entry's first record (`entry_records`), which the C driver's `-g` turns
 into byte offsets after branch sizing and source rows ("The C driver's `-g`"
-above). It does not export the frame description or the record ends of the
-saves, stack adjustments and restores. The separate [native unwind adapter](unwind.md) derives
-bounded fixed-frame events from valid, finalized Tier0 instruction records.
-It is opt-in and does not decode emitted bytes or repeat the producer's generic
-validation. Its additional effects/control-flow scan is charged in the
-backend-chain benchmark. The producer itself is unchanged.
+above). It also publishes its frame (`frame_saved`, `frame_size` and
+`frame_pointer`, #395), from which the [native unwind module](unwind.md)'s
+`unwind_tier0_frame` takes the record ends of the saves, stack adjustments and
+restores, and the C driver writes every function's unwind table, by default as
+clang does ("The C driver's unwind tables" there). The module's analyzer, which
+derives bounded fixed-frame events from the records instead, stays an opt-in
+consumer, and the tests' check of the published frame; it does not decode
+emitted bytes or repeat the producer's generic validation.
 
 Main already merges `.eh_frame` and indexes it with `.eh_frame_hdr`, including
 scalar/vector validation and runtime unwind tests. The native unwind module

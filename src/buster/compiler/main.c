@@ -449,6 +449,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_debug_test.c"
+#include "buster/compiler/c_check_unwind_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
 // #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.

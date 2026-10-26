@@ -314,7 +314,8 @@ jobs:
           == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
           ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
           == Test the C driver's source rows and DWARF
-          # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb.
+          # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb; and the unwind tables,
+          # through backtrace() and gdb at every instruction.
           ./build/compiler test-check-debug --cross-check
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins

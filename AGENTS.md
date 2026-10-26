@@ -326,7 +326,11 @@ designs and the compilers already built this way.
   the direct path lower only what the unit's roots reach,
   `check_program_select`), and `-g` attaching DWARF of its functions' source
   lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
-  object (`ObjectOptions.debug`). `./build/compiler parse
+  object (`ObjectOptions.debug`). Either output has its functions' unwind
+  tables when clang's would (by default, unless `-ffreestanding` or
+  `-fno-asynchronous-unwind-tables`: `predefines_unwind_tables`, the
+  [unwind guide](docs/unwind.md)'s "The C driver's unwind tables").
+  `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -610,7 +614,11 @@ designs and the compilers already built this way.
   function, and with `--cross-check` the executable through
   `llvm-dwarfdump --verify` and gdb, and the `-c -g` object, the executable's
   unit relocated, linked by `cc` through GNU ld and lld and by `link-foreign`,
-  the same way.
+  the same way; and the unwind tables (`c_check_unwind_test.c`): a fixture's
+  `backtrace()` through a variable-length array's function, a computed goto's
+  and one with values live across its call, by default and with each option
+  that keeps or drops the tables, by each path, as executables and as objects
+  linked three ways, and gdb's backtrace at every instruction of each function.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -626,15 +634,22 @@ designs and the compilers already built this way.
   `llvm-dwarfdump --verify` and gdb, and checks the relocation kernels' twins.
   The driver's contract ("Debug information") has the details.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
-  from valid Tier 0 records after branch sizing; `unwind.c` emits original
-  CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
-  the producer unchanged and does not repeat generic instruction validation.
-  `test-unwind --cross-check` checks independent frame-state oracles, protected
-  tails and actual Tier 0 code with native GDB/perf consumers. `benchmark-unwind`
-  charges analysis/emission to the existing Tier 0, sizing and encoding chain,
-  including per-function arena cleanup. [The unwind guide](docs/unwind.md)
-  records the trusted private-slot contract, Link fixups and pending target-host
-  qualification. Use the shared 9700X lock per command and CPU 2 for timing.
+  from valid Tier 0 records after branch sizing (`unwind_tier0`, an opt-in
+  consumer that does not repeat generic instruction validation), or reads them
+  from the frame Tier 0 published, with no pass over the body
+  (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
+  refuses); `unwind.c` emits original CIE/FDE contributions with scalar/vector
+  twins, a pair per function or with `UnwindOutput.shared` one CIE for the
+  batch. `check_program_emit` writes the C driver's unwind tables so, one
+  EH_FRAME atom of them after the last function. `test-unwind --cross-check`
+  checks independent frame-state oracles, protected tails, the published
+  frame against the analyzer and actual Tier 0 code, a frame pointer's among
+  it, with native GDB/perf consumers. `benchmark-unwind` charges
+  analysis/emission to the existing Tier 0, sizing and encoding chain,
+  including per-function arena cleanup, and the driver's published frame
+  (`--only published`). [The unwind guide](docs/unwind.md) records the trusted
+  private-slot contract, Link fixups and pending target-host qualification.
+  Use the shared 9700X lock per command and CPU 2 for timing.
 - `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
   units of Tier 0's generated programs, compiled function by function into a
   static executable laid out data first (headers, `.data`, `.text`, then the
@@ -883,9 +898,10 @@ designs and the compilers already built this way.
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`). The output is
-  the records with #144's branch columns, `LinkReference`s and, when asked for
-  (`Tier0Function.entry_records`), each entry's first record, for source
-  rows. `tier0_compile`
+  the records with #144's branch columns, `LinkReference`s, the frame
+  (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
+  tables, and, when asked for (`Tier0Function.entry_records`), each entry's
+  first record, for source rows. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its

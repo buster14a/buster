@@ -700,7 +700,8 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 {
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
                 a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep && a->entry_count == b->entry_count &&
-                (a->entry_records == 0) == (b->entry_records == 0);
+                (a->entry_records == 0) == (b->entry_records == 0) && a->frame_saved == b->frame_saved && a->frame_size == b->frame_size &&
+                a->frame_pointer == b->frame_pointer;
     same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
     same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;

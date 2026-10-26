@@ -296,6 +296,135 @@ static UnwindError unwind_tier0(const Tier0Code* code, const uint32_t* final_off
     return unwind_tier0_build(code, final_offsets, size, output, false);
 }
 
+// Whether a record is a push or a pop (`form`) of `reg`.
+static bool unwind_tier0_stack(const X86Instruction* record, uint32_t form, uint8_t reg)
+{
+    return record->form == form && record->mode == BUSTER_X86_REGISTER_DIRECT && record->rm == reg;
+}
+
+// Whether a frame pointer's function's release, the record before its pops, is Tier 0's: rsp back from rbp, past the
+// `pushes` after rbp's (a lea, or a mov without any).
+static bool unwind_tier0_release(const X86Instruction* record, uint32_t pushes)
+{
+    const bool lea = record->form == X86_FORM_LEA_R64_M && record->reg == X86_REGISTER_RSP && record->rm == X86_REGISTER_RBP &&
+                     record->mode == BUSTER_X86_MEMORY_BASE && record->displacement == -8 * (int32_t)pushes;
+    const bool mov = record->form == X86_FORM_MOV_RM64_R64 && record->reg == X86_REGISTER_RBP && record->rm == X86_REGISTER_RSP &&
+                     record->mode == BUSTER_X86_REGISTER_DIRECT && pushes == 0;
+    return lea || mov;
+}
+
+// The descriptor of a function from the frame its producer published (Tier0Code.frame_saved, frame_size and
+// frame_pointer, #395), with no pass over its body: tier0_emit_prologue's pushes (rbp's and its mov first with a frame
+// pointer) and reservation are the code's first records, and tier0_emit_epilogue's release, pops and ret its last, so
+// that each transition is the end of a record known by its index, which this checks is the instruction it must be. The
+// body keeps the frame, and moves rsp only with a frame pointer, whose CFA is rbp's: unwind_tier0 proves that for the
+// functions it takes (the tests compare the two there), and this takes the producer's word for the others (a frame
+// pointer, a computed goto's indirect jump). Its work is constant per function, which is what makes the C driver's
+// unwind tables cheap enough to have by default; scalar, since no column of many items is there to take in lanes.
+// UNWIND_ERROR_INVALID for code or a frame its records can't be, UNWIND_ERROR_UNSUPPORTED for a prologue or epilogue
+// that isn't the frame's and UNWIND_ERROR_LIMIT past the format's limits, each leaving the descriptor alone.
+static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
+{
+    UnwindError error = UNWIND_OK;
+    const uint32_t saved = code != 0 ? code->frame_saved : 0;
+    const uint32_t pushes = (uint32_t)__builtin_popcount(saved);
+    const bool pointer = code != 0 && code->frame_pointer;
+    const bool reserved = code != 0 && code->frame_size != 0 && !pointer;
+    // The prologue's records, and the epilogue's from its release (a frame pointer's lea or mov, which is no
+    // transition) to its ret.
+    const uint32_t prologue = (pointer ? 2 + pushes + (code->frame_size != 0 ? 1 : 0) : pushes + (reserved ? 1 : 0));
+    const uint32_t epilogue = (pointer ? 1 + pushes + 1 : pushes + (reserved ? 1 : 0)) + 1;
+    if (code == 0 || final_offsets == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 ||
+        (pointer && (saved & 2) != 0) || prologue + epilogue > code->count || size == 0 || final_offsets[0] != 0)
+    {
+        error = UNWIND_ERROR_INVALID;
+    }
+    else if (size > INT32_MAX || code->frame_size > INT32_MAX)
+    {
+        error = UNWIND_ERROR_LIMIT;
+    }
+    UnwindFunction built = {
+        .size = size,
+        .saved = (uint8_t)saved,
+        .pointer = pointer ? 1 : 0,
+        .frame_size = reserved ? code->frame_size : 0,
+    };
+    // Each transition's record, in order; its end is the next record's offset (or the size, for none past the ret).
+    uint32_t events[BUSTER_UNWIND_EVENTS];
+    uint32_t count = 0;
+    const X86Instruction* records = error == UNWIND_OK ? code->records : 0;
+    if (records != 0 && pointer)
+    {
+        error = unwind_tier0_stack(&records[0], X86_FORM_PUSH_R64, X86_REGISTER_RBP) &&
+                records[1].form == X86_FORM_MOV_RM64_R64 && records[1].reg == X86_REGISTER_RSP && records[1].rm == X86_REGISTER_RBP &&
+                records[1].mode == BUSTER_X86_REGISTER_DIRECT ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        events[count++] = 0;
+        events[count++] = 1;
+    }
+    uint32_t at = pointer ? 2 : 0;
+    for (uint32_t r = 0; records != 0 && error == UNWIND_OK && r < BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); r += 1)
+    {
+        if ((saved & (1u << r)) != 0)
+        {
+            error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, unwind_tier0_saved_registers[r]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            events[count++] = at;
+            at += 1;
+        }
+    }
+    uint32_t amount = 0;
+    if (records != 0 && error == UNWIND_OK && code->frame_size != 0)
+    {
+        error = unwind_tier0_adjustment(&records[at], true, &amount) && amount == code->frame_size ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        if (reserved)
+        {
+            events[count++] = at;
+        }
+    }
+    // The epilogue, from its release.
+    at = code != 0 ? code->count - epilogue : 0;
+    if (records != 0 && error == UNWIND_OK && (pointer || reserved))
+    {
+        error = pointer ? (unwind_tier0_release(&records[at], pushes) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
+                        : (unwind_tier0_adjustment(&records[at], false, &amount) && amount == code->frame_size ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED);
+        if (reserved)
+        {
+            events[count++] = at;
+        }
+        at += 1;
+    }
+    for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); records != 0 && error == UNWIND_OK && r > 0; r -= 1)
+    {
+        if ((saved & (1u << (r - 1))) != 0)
+        {
+            error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, unwind_tier0_saved_registers[r - 1]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            events[count++] = at;
+            at += 1;
+        }
+    }
+    if (records != 0 && error == UNWIND_OK && pointer)
+    {
+        error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, X86_REGISTER_RBP) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        events[count++] = at;
+        at += 1;
+    }
+    error = records != 0 && error == UNWIND_OK && !(at == code->count - 1 && records[at].form == X86_FORM_RET) ? UNWIND_ERROR_UNSUPPORTED : error;
+    // The transitions' ends, each after the one before and before the ret's end, as branch sizing's offsets have them.
+    uint32_t previous = 0;
+    for (uint32_t event = 0; error == UNWIND_OK && event < count; event += 1)
+    {
+        const uint32_t end = final_offsets[events[event] + 1];
+        error = end > previous && end < size ? UNWIND_OK : UNWIND_ERROR_INVALID;
+        built.offsets[event] = end;
+        previous = end;
+    }
+    built.event_count = (uint8_t)count;
+    if (error == UNWIND_OK)
+    {
+        *output = built;
+    }
+    return error;
+}
+
 static UnwindError unwind_tier0_scalar(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
 {
     return unwind_tier0_build(code, final_offsets, size, output, true);
