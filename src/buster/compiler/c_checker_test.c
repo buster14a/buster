@@ -1095,7 +1095,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     const CheckLiteral new_ucn = check_literal_character(basic_ucn, sizeof(basic_ucn) - 1, true, false);
     check_test_expect(test, !old_ucn.valid && new_ucn.valid && new_ucn.integer == 65, "basic-character UCNs are accepted only from C23 onward");
     const uint64_t mark = scratch->length;
-    const CheckLiteral floating = check_literal_number((const uint8_t*)"0x1.000002p100f", sizeof("0x1.000002p100f") - 1, scratch);
+    CheckLiteral floating = { 0 };
+    check_literal_number((const uint8_t*)"0x1.000002p100f", sizeof("0x1.000002p100f") - 1, scratch, &floating);
     check_test_expect(test, floating.valid && floating.type == BUSTER_TYPE_FLOAT && floating.floating == 0x1.000002p100L && scratch->length == mark,
                       "a hexadecimal float literal retains its source-format value and releases scratch");
     // _Float16's f16 suffix, with the values clang 23 gives (each checked there with a _Static_assert): midpoints of
@@ -1125,7 +1126,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(halves); i += 1)
     {
-        const CheckLiteral half = check_literal_number((const uint8_t*)halves[i].spelling, (uint32_t)strlen(halves[i].spelling), scratch);
+        CheckLiteral half = { 0 };
+        check_literal_number((const uint8_t*)halves[i].spelling, (uint32_t)strlen(halves[i].spelling), scratch, &half);
         char description[128];
         snprintf(description, sizeof(description), "%s is a _Float16 constant with clang's value", halves[i].spelling);
         check_test_expect(test, half.valid && half.type == BUSTER_TYPE_FLOAT16 && half.floating == halves[i].value && scratch->length == mark, description);
@@ -1138,7 +1140,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(imaginary_halves); i += 1)
     {
-        const CheckLiteral half = check_literal_number((const uint8_t*)imaginary_halves[i], (uint32_t)strlen(imaginary_halves[i]), scratch);
+        CheckLiteral half = { 0 };
+        check_literal_number((const uint8_t*)imaginary_halves[i], (uint32_t)strlen(imaginary_halves[i]), scratch, &half);
         check_test_expect(test, half.valid && half.imaginary && half.type == BUSTER_TYPE_COMPLEX(type_index(BUSTER_TYPE_FLOAT16)) && half.floating == 1.5L,
                           "an imaginary f16 literal, with its i before or after the f16");
     }
@@ -1151,10 +1154,12 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_halves); i += 1)
     {
-        const CheckLiteral half = check_literal_number((const uint8_t*)invalid_halves[i], (uint32_t)strlen(invalid_halves[i]), scratch);
+        CheckLiteral half = { 0 };
+        check_literal_number((const uint8_t*)invalid_halves[i], (uint32_t)strlen(invalid_halves[i]), scratch, &half);
         check_test_expect(test, !half.valid && !half.resource, "a suffix that only starts like f16 is invalid, as clang has it");
     }
-    const CheckLiteral hexadecimal = check_literal_number((const uint8_t*)"0x1f16", sizeof("0x1f16") - 1, scratch);
+    CheckLiteral hexadecimal = { 0 };
+    check_literal_number((const uint8_t*)"0x1f16", sizeof("0x1f16") - 1, scratch, &hexadecimal);
     check_test_expect(test, hexadecimal.valid && hexadecimal.type == BUSTER_TYPE_INT && hexadecimal.integer == 0x1f16, "a hexadecimal integer ending in f16 is an integer");
 }
 

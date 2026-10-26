@@ -1951,7 +1951,8 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         else if (role == PARSE_ROLE_OPERAND && ((kind == PARSE_KIND_NUMBER && !check_input_function_name_token(parser, token)) || kind == PARSE_KIND_CHARACTER))
         {
-            const CheckLiteral literal = check_input_literal(reader, token);
+            CheckLiteral literal;
+            check_input_literal(reader, token, &literal);
             valid = literal.valid;
             input->values[index] = check_literal_value(literal);
             produced = true;
@@ -2581,7 +2582,8 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
         }
         if (operand && ((kind == PARSE_KIND_NUMBER && !check_input_function_name_token(parser, token)) || kind == PARSE_KIND_CHARACTER))
         {
-            const CheckLiteral literal = check_input_literal(reader, token);
+            CheckLiteral literal;
+            check_input_literal(reader, token, &literal);
             valid = literal.valid;
             ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1 };
             values[value_count++] = check_literal_value(literal);
