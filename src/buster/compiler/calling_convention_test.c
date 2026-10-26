@@ -4036,6 +4036,48 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
     return tally.failures == 0;
 }
 
+// The rule GCC's worlds keep for bit-fields (abi_test_world_record): none aligned below its type's alignment, where GCC
+// and clang lay a field out apart. GCC's worlds of the record runs and of the compiled run, from each of 16 seeds and
+// of the cross-check's size, must have none. Clang's worlds from the same seeds, which keep such fields, must have some,
+// or the check would pass whatever GCC's worlds held. No compiler runs: the cross-check's seed may never draw a
+// signature that passes one (#508's seed 14 did), but every GCC world without the rule would hold several.
+static bool abi_test_gcc_bit_fields(uint64_t seed)
+{
+    AbiTestTally tally = { 0 };
+    uint64_t members = 0;
+    // Clang's worlds' bit-fields aligned below their types', then GCC's.
+    uint64_t below[2] = { 0, 0 };
+    for (uint32_t round = 0; round < 16 * 3; round += 1)
+    {
+        AbiTestWorld world;
+        const uint32_t kind = round % 3;
+        if (abi_test_expect(&tally, abi_test_world_open(&world, 8192), "gcc bit-fields", "the world can't be made"))
+        {
+            world.gcc = kind != 0;
+            world.compiled = kind == 2;
+            abi_test_world_build(&world, seed + round / 3, 600);
+            const TypeTable* table = &world.types.test.table;
+            for (uint32_t m = 1; m < table->members.count; m += 1)
+            {
+                // A member's alignment is its log2 + 1, and 0 for none.
+                const uint8_t alignment = table->members.alignment_log2[m];
+                const bool bit_field = (table->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+                below[kind != 0] += bit_field && alignment != 0 && alignment - 1u < type_alignment_log2(table, table->members.type[m]);
+            }
+            members += table->members.count - 1;
+            abi_test_world_close(&world);
+        }
+    }
+    char detail[128];
+    snprintf(detail, sizeof(detail), "GCC's worlds have %" PRIu64 " bit-fields aligned below their types'", below[1]);
+    abi_test_expect(&tally, below[1] == 0, "gcc bit-fields", detail);
+    abi_test_expect(&tally, below[0] != 0, "gcc bit-fields", "clang's worlds have no bit-field aligned below its type's, so GCC's prove nothing");
+    printf("%-34s %10" PRIu64 " members; bit-fields aligned below their types': %" PRIu64 " of clang's, %" PRIu64 " of GCC's\n", "gcc bit-fields", members,
+           below[0], below[1]);
+    abi_test_report("gcc bit-fields", tally);
+    return tally.failures == 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Assignment: random calls over a world's types, by the vector path and by the twin.
 
@@ -7107,6 +7149,7 @@ static int run_calling_convention_tests(int argc, char** argv)
         bool passed = abi_test_merge();
         passed = abi_test_fixtures() && passed;
         passed = abi_test_worlds(seed, (uint32_t)count) && passed;
+        passed = abi_test_gcc_bit_fields(seed) && passed;
         passed = abi_test_assignment(seed, (uint32_t)count) && passed;
         passed = (!cross_check || abi_test_cross_descriptors()) && passed;
         passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, buster, keep)) && passed;

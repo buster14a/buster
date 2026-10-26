@@ -4492,6 +4492,10 @@ its compiled runs) checks
   arrays of large records among the types, which wait in the levels for the
   types their alignment reads), which a world without `_Atomic`s of types of
   no size checks, its levels ordered by the waits alone;
+- GCC's bit-fields: GCC's worlds (the record runs' and the compiled run's)
+  from 16 seeds, which must hold no bit-field aligned below its type's, where
+  GCC and clang lay one out apart, and clang's worlds from the same seeds,
+  which must hold some;
 - assignment: random calls over a world's types, named and variadic, by both
   paths, which must give the same locations and totals, also with the columns
   ending at a `PROT_NONE` page; and calls of 65,542 `long`s and of 32,767 and
