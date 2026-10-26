@@ -264,11 +264,15 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
     else if (c == 10)
     {
         // Past the base's line: 4104 bytes allocated (rounded up to the frame's 4096), their address in local 2, x ^ 3 stored
-        // there; the object's address modulo 4096 and the allocation's modulo 16 (both 0), the object's first word (x)
-        // and the allocation's (x ^ 3); rsp restored, while every place of the frame is r15's.
+        // there; rsp modulo 4096 (0: the allocation keeps the frame's alignment), the object's address modulo 4096 and the
+        // allocation's modulo 16 (both 0), the object's first word (x) and the allocation's (x ^ 3); rsp restored, while
+        // every place of the frame is r15's.
         tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4104);
         tier0_test_deep_add(deep, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
         tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4095);
+        tier0_test_deep_add(deep, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
         tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
         tier0_test_deep_operation(deep, BUSTER_TYPED_XOR, 3);
         tier0_test_deep_add(deep, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
@@ -284,7 +288,7 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         tier0_test_deep_add(deep, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
         tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
         tier0_test_deep_add(deep, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
-        folds += 4;
+        folds += 5;
     }
     else if (c == 8)
     {

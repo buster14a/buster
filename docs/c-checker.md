@@ -538,8 +538,19 @@ it doesn't.
 What the lowering covers past scalars (#145's programs):
 
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
-  of their own size and alignment (up to 16 bytes, 1 GB), reached through
+  of their own size and alignment (up to 1 GB each), reached through
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+  Past 16 bytes' alignment, Tier 0 realigns the function's frame
+  ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **Values aligned past 8 bytes.** A scalar local or parameter whose alignment
+  (its type's, an aligned typedef's, or its declaration's `_Alignas`) passes 8
+  bytes is a frame object of its size and alignment, as a long double's is,
+  which `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of its class read and write
+  (Tier 0's `tier0_value_object`), so that the rest of the lowering reads and
+  writes it as it would a value's local. A parameter's arrives from its
+  register as a struct of it would, or from its 8-byte stack slot, which
+  Tier 0's prologue copies into the object (an aligned typedef passes as its
+  base, so the slot is aligned to 8 alone).
 - **Copies.** Struct and union assignment and initialization are `COPY`s of
   at most 256 bytes each, the source's address kept in a temporary between
   them; a statement's assignment leaves no address to discard, and neither
@@ -564,8 +575,9 @@ What the lowering covers past scalars (#145's programs):
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
-  of a `long double`, in st0) returns its bytes' address too. Those aligned past
-  16 bytes or larger than 64 KB are refused.
+  of a `long double`, in st0) returns its bytes' address too. Those larger than
+  64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
+  stack aligned to it at the call, which realigns the caller's frame.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
@@ -575,7 +587,9 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area.
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  arguments aligned past 16 bytes align the incoming area to them, which
+  Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
   in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
   parameter of it is a frame object of 16 bytes aligned to 16, which `LOCAL`,
@@ -669,10 +683,13 @@ What the lowering covers past scalars (#145's programs):
   `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
   set once where they were declared, times its constant dimensions and its
   element's size, and the same extents give `sizeof` and the strides of
-  pointer arithmetic over a pointer to a variable-length array. An array
-  declared in a `for` statement's clause or directly in a statement
-  expression's block, one aligned past 16 and one initialized (C23's `= {}`)
-  are refused by name. The source reader doesn't yet take a bound whose
+  pointer arithmetic over a pointer to a variable-length array. One aligned past
+  16 bytes (its element's alignment, or its declaration's `_Alignas`) takes its
+  alignment less 16 bytes more, and its address rounds up to its alignment,
+  `(address + alignment - 1) & -alignment`, where clang's code rounds rsp down:
+  `ALLOCA`'s address is a multiple of 16. An array declared in a `for`
+  statement's clause or directly in a statement expression's block, and one
+  initialized (C23's `= {}`), are refused by name. The source reader doesn't yet take a bound whose
   statement expression holds more than expression statements (a declaration,
   an `if` or a jump: `invalid or unsupported declaration`); the control stream
   already puts such a jump out of a block's first array's bounds before the

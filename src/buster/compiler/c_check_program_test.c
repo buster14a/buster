@@ -171,6 +171,10 @@ static const char check_test_program_harness[] =
     // (clang -O0 returns in place), and a misaligned one shows in the first byte.
     "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
     "for(int i=0;i<40;i++)w.c[i]=(char)(n+i);if((unsigned long)&w%16)w.c[0]=99;return w;}\n"
+    // Structs aligned to 32 by value (MEMORY, on a stack aligned to 32 at the call), which clang's callee takes in place:
+    // an outgoing area off its alignment shows in their addresses.
+    "struct external_aligned{_Alignas(32) long a;int b;};int external_aligned_by_value(int k,struct external_aligned x,struct external_aligned y){"
+    "return (int)(x.a+x.b+y.a*3+y.b)+k+(int)((((unsigned long)&x)|((unsigned long)&y))&31)*1000;}\n"
     // Structs of a complex long double, which return in st0 and st1: one returned to the program, and the program's
     // own called through a pointer.
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
@@ -927,12 +931,24 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "for(int i=0;i<count;i++){A64 x=__builtin_va_arg(ap,A64);s+=x.c+x.d*(i+1);}long last=__builtin_va_arg(ap,long);__builtin_va_end(ap);return s+last;}"
         "int tested(int n){A32 f={n,n+1};A64 x={(char)n,n*3L};A64 y={(char)(n+1),n*5L};return (int)(sum(2,f,x,y,(long)n*7)%1000003);}",
         "variadic-named-argument-aligned-past-16", clang);
-    // Parameters of types aligned past 8 bytes: objects of their alignment, from a register's part or an 8-byte stack slot.
+    // Calls whose outgoing areas are aligned to 32 (of clang's callee in the harness, which takes its arguments in place),
+    // from functions with no object aligned past 16, whose frames the calls alone realign: two of frames 16 bytes apart,
+    // so that a frame left unrealigned would put one of their areas off 32. (After a variable-length array, clang's code
+    // rounds the allocation to 16 alone and its call's area may be off 32, where Tier 0's keeps the frame's alignment: a
+    // test of its own, tier0_deep_test.c's base, checks that.)
+    check_test_program_source(test,
+        "struct external_aligned{_Alignas(32) long a;int b;};int external_aligned_by_value(int,struct external_aligned,struct external_aligned);"
+        "struct external_aligned gx,gy;int inner(int n){return external_aligned_by_value(n,gx,gy);}"
+        "int padded(int n){volatile long pad[2]={n,n};return external_aligned_by_value(n+(int)(pad[1]-pad[0]),gx,gy);}"
+        "int tested(int n){gx.a=n;gx.b=n+1;gy.a=n*2;gy.b=n-1;return inner(n)+padded(n+1)*3;}",
+        "calls-aligned-past-16", clang);
+    // Parameters of types aligned past 8 bytes: objects of their alignment, from a register's part or an 8-byte stack slot
+    // (an aligned typedef passes as its base, so a slot is aligned to 8 alone), called at two stack depths 16 bytes apart.
     check_test_program_source(test,
         "typedef int aligned_int __attribute__((aligned(32)));typedef double aligned_double __attribute__((aligned(16)));"
         "long check(aligned_int a,aligned_double b,int c,aligned_int d,long e,long f,long g,aligned_int h){a+=1;h*=2;"
         "return a+(long)b+c+d+e+f+g+h+(long)(((unsigned long)&a&31)|((unsigned long)&b&15)|((unsigned long)&d&31)|((unsigned long)&h&31))*1000;}"
-        "int tested(int n){return (int)check(n,n*2.5,3,n+1,5,6,7,n*9);}",
+        "int tested(int n){int r=(int)check(n,n*2.5,3,n+1,5,6,7,n*9);{char pad[16+(n&1)*16];pad[0]=0;r+=(int)check(n+pad[0],1.5,n,2,3,4,5,n);}return r;}",
         "parameters-aligned-past-8", clang);
     check_test_program_source(test,
         "char a[24]=\"abcdefghijklmnop\";char b[24];int tested(int n){unsigned k=(unsigned)n%12;"
