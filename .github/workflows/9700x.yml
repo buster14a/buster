@@ -429,9 +429,6 @@ jobs:
         # step's bound is its longest one and the tests' 310 s on 8 jobs, about 39 s. A new test goes where its time
         # puts it.
         run: |
-          # TEMPORARY (#465): each test's shell prints its CPU time and its children's when it exits.
-          printf '%s\n' 'trap "echo cpu-times:; times" EXIT' > "$RUNNER_TEMP/cpu-times.sh"
-          export BASH_ENV="$RUNNER_TEMP/cpu-times.sh"
           ./build/compiler parallel --github --timeout 180 <<'TESTS'
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
