@@ -1525,7 +1525,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const CheckInputPackedMember* left = a->input.packed_members + i;
         const CheckInputPackedMember* right = b->input.packed_members + i;
         equal = left->address == right->address && left->token == right->token && left->member == right->member && left->record == right->record &&
-                left->alignment_log2 == right->alignment_log2 && left->suppressed == right->suppressed &&
+                left->alignment_log2 == right->alignment_log2 && left->implicit_conversions == right->implicit_conversions && left->suppressed == right->suppressed &&
                 left->member_name.length == right->member_name.length && left->record_name.length == right->record_name.length &&
                 (left->member_name.length == 0 || memcmp(left->member_name.pointer, right->member_name.pointer, left->member_name.length) == 0) &&
                 (left->record_name.length == 0 || memcmp(left->record_name.pointer, right->record_name.pointer, left->record_name.length) == 0);

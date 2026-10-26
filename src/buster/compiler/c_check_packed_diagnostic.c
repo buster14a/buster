@@ -39,7 +39,6 @@ static bool check_input_packed_finalize(CheckInput* input, const Parser* parser,
         {
             const CheckOp op = graph->ops[node];
             const uint32_t token = graph->tokens[node];
-            const bool extension = op == CHECK_OP_SELECT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_EXTENSION;
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
@@ -54,7 +53,7 @@ static bool check_input_packed_finalize(CheckInput* input, const Parser* parser,
                     // witness. Their target must not flow into a conditional/comma expression inside the cast.
                     const TypeId target = explicit || comparison ? 0 : boolean ? BUSTER_TYPE_BOOL : stream->conversions[node].operands[i].type;
                     uint8_t alignment = check_packed_conversion_alignment(types, stream->values[operand].type, target);
-                    const bool inherit = extension || (op == CHECK_OP_COMMA && i == 1) || (op == CHECK_OP_CONDITIONAL && i != 0);
+                    const bool inherit = op == CHECK_OP_SELECT || (op == CHECK_OP_COMMA && i == 1) || (op == CHECK_OP_CONDITIONAL && i != 0);
                     alignment = inherit && targets[node] < alignment ? targets[node] : alignment;
                     targets[operand] = alignment < targets[operand] ? alignment : targets[operand];
                 }
@@ -78,7 +77,7 @@ static bool check_input_packed_finalize(CheckInput* input, const Parser* parser,
         {
             CheckInputPackedMember* member = input->packed_members + i;
             const uint32_t node = input->token_nodes[member->address];
-            member->suppressed |= node < graph->count && targets[node] <= member->alignment_log2;
+            member->suppressed |= member->implicit_conversions && node < graph->count && targets[node] <= member->alignment_log2;
         }
     }
     arena_pop_to(scratch, mark);

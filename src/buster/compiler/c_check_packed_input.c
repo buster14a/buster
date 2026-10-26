@@ -147,6 +147,14 @@ static void check_input_packed_unwrap(const CheckInputReader* reader, uint32_t* 
             *end -= 1;
             changed = true;
         }
+        else if (*first + 1 < *end && parser->tree.roles[*first + 1] == PARSE_ROLE_OPEN_KEYWORD &&
+                 parser->tree.parents[*first + 1] == *end - 1 && reader->selected_tokens[*end - 1] != BUSTER_CHECK_NONE)
+        {
+            const uint32_t selected = reader->selected_tokens[*end - 1];
+            *first = check_input_first_token(reader, selected);
+            *end = reader->ends[selected] + 1;
+            changed = true;
+        }
     }
 }
 
@@ -308,7 +316,7 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
     return result;
 }
 
-static void check_input_packed_address(CheckInputReader* reader, uint32_t address, uint32_t* chain, CheckInputPackedNames* names)
+static void check_input_packed_address(CheckInputReader* reader, uint32_t address, uint32_t* chain, CheckInputPackedNames* names, const uint8_t* analyzed)
 {
     const Parser* parser = reader->parser;
     TypeTable* types = reader->types;
@@ -375,12 +383,22 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
             const uint32_t member_alignment = type_alignment_log2(types, types->members.type[packed_member]);
             const uint32_t record_alignment = type_alignment_log2(types, types->tags.type[packed_record]);
             const uint8_t alignment = (uint8_t)(member_alignment < record_alignment ? member_alignment : record_alignment);
-            uint32_t parent = parser->tree.parents[address];
-            while (parent < parser->tokens.count &&
-                   ((parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP && reader->output->expression_regions[parent] == 0) ||
-                    (parser->tree.roles[parent] == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_EXTENSION)))
+            uint32_t current = address;
+            uint32_t parent = parser->tree.parents[current];
+            bool transparent = true;
+            while (transparent && parent < parser->tokens.count)
             {
-                parent = parser->tree.parents[parent];
+                const uint32_t outside = parser->tree.parents[parent];
+                const bool group = (parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP && reader->output->expression_regions[parent] == 0) ||
+                                   (parser->tree.roles[parent] == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_EXTENSION);
+                const bool selected = reader->selected_tokens[parent] == current;
+                const bool association = parser->tokens.kinds[parent] == PARSE_KIND_COLON && outside < parser->tokens.count && reader->selected_tokens[outside] == current;
+                transparent = group || selected || association;
+                if (transparent)
+                {
+                    current = association ? outside : parent;
+                    parent = parser->tree.parents[current];
+                }
             }
             TypeId target = parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CAST ? reader->query_types[parent] : 0;
             if (parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CAST && target == 0)
@@ -405,6 +423,7 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
                 .member_name = member_name,
                 .record_name = record_name,
                 .alignment_log2 = alignment,
+                .implicit_conversions = analyzed[address] != 0,
                 .suppressed = check_input_packed_target(types, target, alignment),
             };
         }
@@ -455,6 +474,80 @@ static uint64_t check_input_packed_candidates(const Parser* parser, uint32_t fir
     return result;
 }
 
+static void check_input_packed_exclude(uint32_t* events, uint32_t count, uint32_t first, uint32_t end)
+{
+    if (first < end && end <= count)
+    {
+        events[first] += 1;
+        events[end] -= 1;
+    }
+}
+
+// Pending warnings survive unevaluated and unchosen operands, but Clang never performs its implicit-conversion
+// analysis there. Build their lexical intervals once and prefix-scan them; a parent walk per address would be
+// quadratic in a deep expression. Unsigned difference counts wrap deliberately and have a bounded prefix depth.
+static uint8_t* check_input_packed_contexts(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t* events = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+    uint8_t* analyzed = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
+    const bool valid = events != NULL && analyzed != NULL;
+    reader->output->resource |= !valid;
+    if (valid)
+    {
+        memset(events, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            if (kind == PARSE_KIND_SIZEOF)
+            {
+                check_input_packed_exclude(events, count, token + 1, reader->ends[token] + 1);
+            }
+            else if (kind == PARSE_KIND_TYPEOF && token + 1 < count)
+            {
+                check_input_packed_exclude(events, count, token + 2, parser->tree.parents[token + 1]);
+            }
+            const uint32_t selected = reader->selected_tokens[token];
+            if (selected != BUSTER_CHECK_NONE)
+            {
+                const uint32_t keyword = reader->first_child[token];
+                check_input_packed_exclude(events, count, keyword + 2, check_input_first_token(reader, selected));
+                check_input_packed_exclude(events, count, reader->ends[selected] + 1, token);
+            }
+        }
+        uint32_t running = 0;
+        for (uint32_t first = 0; first < count; first += 16)
+        {
+            const uint32_t width = count - first < 16 ? count - first : 16;
+            if (parser->options.scalar)
+            {
+                for (uint32_t i = 0; i < width; i += 1)
+                {
+                    running += events[first + i];
+                    analyzed[first + i] = running == 0;
+                }
+            }
+            else
+            {
+                const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, width);
+                const __m512i deltas = _mm512_maskz_loadu_epi32(active, events + first);
+                const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+                __m512i sums = deltas;
+                sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_sub_epi32(lanes, _mm512_set1_epi32(1)), sums));
+                sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfffc, _mm512_sub_epi32(lanes, _mm512_set1_epi32(2)), sums));
+                sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfff0, _mm512_sub_epi32(lanes, _mm512_set1_epi32(4)), sums));
+                sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xff00, _mm512_sub_epi32(lanes, _mm512_set1_epi32(8)), sums));
+                sums = _mm512_add_epi32(sums, _mm512_set1_epi32((int)running));
+                const __mmask16 allowed = _mm512_mask_cmpeq_epi32_mask(active, sums, _mm512_setzero_si512());
+                _mm_mask_storeu_epi8(analyzed + first, active, _mm_maskz_set1_epi8(allowed, 1));
+                running += (uint32_t)_mm512_mask_reduce_add_epi32(active, deltas);
+            }
+        }
+    }
+    return analyzed;
+}
+
 static void check_input_packed_members(CheckInputReader* reader)
 {
     const uint32_t count = reader->parser->tokens.count;
@@ -474,6 +567,7 @@ static void check_input_packed_members(CheckInputReader* reader)
         reader->output->packed_members = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputPackedMember, candidates);
         uint32_t* chain = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
         reader->output->resource |= reader->output->packed_members == 0 || chain == 0;
+        const uint8_t* analyzed = !reader->output->resource ? check_input_packed_contexts(reader) : NULL;
         const uint32_t end = count < reader->expression_limit ? count : reader->expression_limit;
         CheckInputPackedNames names = { 0 };
         for (uint32_t token = 0; !reader->output->resource && token < end; token += 64)
@@ -483,7 +577,7 @@ static void check_input_packed_members(CheckInputReader* reader)
             while (!reader->output->resource && addresses != 0)
             {
                 const uint32_t address = token + (uint32_t)__builtin_ctzll(addresses);
-                check_input_packed_address(reader, address, chain, &names);
+                check_input_packed_address(reader, address, chain, &names, analyzed);
                 addresses &= addresses - 1;
             }
         }

@@ -87,6 +87,7 @@ struct CheckInputPackedMember
     String8 member_name;
     String8 record_name;
     uint8_t alignment_log2;
+    bool implicit_conversions;
     bool suppressed;
 };
 #define CHECK_INPUT_FUNCTION_INLINE 0x01u

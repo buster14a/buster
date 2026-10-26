@@ -176,6 +176,14 @@ static void check_test_packed_bounds(CheckTest* test)
         input = (CheckInput){ .packed_member_count = 1, .graph = { .count = 1 } };
         check_test_expect(test, !check_input_packed_finalize(&input, &parser, &types, NULL, &scratch) && input.resource && scratch.length == 0,
                           "packed conversion-context allocation failure is explicit");
+        for (uint32_t limit = 0; limit < 2 * sizeof(uint32_t) + sizeof(uint8_t); limit += 1)
+        {
+            scratch.length = 0;
+            scratch.capacity = limit;
+            input = (CheckInput){ 0 };
+            check_input_packed_contexts(&reader);
+            check_test_expect(test, input.resource, "packed lexical-context handoff refuses every partial allocation");
+        }
         for (uint32_t limit = 0; limit < 4 * sizeof(uint32_t) * types.tags.count; limit += 1)
         {
             scratch.length = 0;
@@ -204,7 +212,7 @@ static void check_test_packed_members(CheckTest* test, const char* clang, const 
         "struct N { struct P p; };\n"
         "struct __attribute__((packed)) O { char c; struct { int x; int y; } n; };\n"
         "struct Plain { char c; int w; };\n"
-        "struct P *get(void); void take(void*); void itake(int*);\n";
+        "struct P *get(void); void take(void*); void itake(int*); void* give(void*);\n";
     const struct
     {
         const char* source;
@@ -256,6 +264,28 @@ static void check_test_packed_members(CheckTest* test, const char* clang, const 
         { "unsigned long f(struct P*p){return sizeof((char*)&p->w);}\n", 0 },
         { "void f(struct P*p){__typeof__(&p->w) v;}\n", 1 },
         { "void f(struct P*p){__typeof__((void*)&p->w) v;}\n", 0 },
+        { "unsigned long f(struct P*p){return sizeof(take(&p->w));}\n", 1 },
+        { "unsigned long f(struct P*p){return __alignof__(give(&p->w));}\n", 1 },
+        { "unsigned long f(struct P*p){return sizeof(__builtin_memcpy(&p->w,0,4));}\n", 1 },
+        { "unsigned long f(struct P*p,int n){return sizeof(int[(take(&p->w),n)]);}\n", 1 },
+        { "void f(struct P*p){__typeof__(give(&p->w)) v;}\n", 1 },
+        { "int f(struct P*p){return _Generic(take(&p->w),default:0);}\n", 1 },
+        { "int f(struct P*p){return __builtin_choose_expr(0,(take(&p->w),1),0);}\n", 1 },
+        { "int f(struct P*p){return __builtin_choose_expr(1,(take(&p->w),1),0);}\n", 0 },
+        { "int f(struct P*p){return _Generic(0,int:0,default:(take(&p->w),1));}\n", 1 },
+        { "int f(struct P*p){return _Generic(0,int:(take(&p->w),1),default:0);}\n", 0 },
+        { "int f(struct P*p){return 0?(take(&p->w),1):0;}\n", 0 },
+        { "int f(struct P*p){return __builtin_constant_p(take(&p->w));}\n", 0 },
+        { "unsigned long f(struct P*p){return __builtin_object_size(give(&p->w),0);}\n", 0 },
+        { "int*f(struct P*p){return &_Generic(0,int:p->w);}\n", 1 },
+        { "int*f(struct P*p){return &__builtin_choose_expr(1,p->w,p->w);}\n", 1 },
+        { "void*f(struct P*p){return _Generic(0,int:&p->w);}\n", 0 },
+        { "void*f(struct P*p){return __builtin_choose_expr(1,&p->w,(int*)0);}\n", 0 },
+        { "char*f(struct P*p){return (char*)_Generic(0,int:&p->w);}\n", 0 },
+        { "char*f(struct P*p){return (char*)__builtin_choose_expr(1,&p->w,(int*)0);}\n", 0 },
+        { "unsigned long f(struct P*p){return sizeof((char*)_Generic(0,int:&p->w));}\n", 0 },
+        { "unsigned long f(struct P*p){return sizeof((char*)__builtin_choose_expr(1,&p->w,(int*)0));}\n", 0 },
+        { "unsigned long f(struct P*p){return sizeof(_Generic(0,int:(take(&p->w),1)));}\n", 1 },
         { "struct F g; int*f(void){return &g.w;}\n", 1 },
         { "struct F g __attribute__((aligned(4))); int*f(void){return &g.w;}\n", 0 },
         { "struct P g __attribute__((aligned(4))); int*f(void){return &g.w;}\n", 1 },

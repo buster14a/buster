@@ -380,7 +380,8 @@ references. These modules contain no copied LLVM implementation or fixtures.
 
 The original packed-member address diagnostic (`c_check_packed_input.c`,
 `c_check_packed_diagnostic.c`) follows behavior described by `SemaChecking.cpp`
-and `SemaExpr.cpp` at `llvmorg-23.1.3`. Its original differential probes in
+and `SemaExpr.cpp`, and the transparent-expression rules in `AST/Expr.cpp`,
+at `llvmorg-23.1.3`. Its original differential probes in
 `c_check_packed_test.c` run Clang externally as a diagnostic oracle. No LLVM
 implementation, diagnostic table or fixture was copied.
 
