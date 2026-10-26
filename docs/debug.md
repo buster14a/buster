@@ -180,7 +180,7 @@ main's executable; with `-g` it took 7.2% more
 
 What `-g` adds to the emission is mostly its copy of the lowering (#456). On
 `benchmark-check-debug --only emit`'s program (2,000 functions, 101,493 typed
-entries, 60,031 raw rows), the emission with the raw rows took 4.41 and 4.76%
+entries, 60,031 raw rows), the emission with the raw rows took 4.76 and 4.41%
 longer than without on the 9700X, in two series of five processes (each the
 median of the processes' changes, every process timing both; the first series'
 times had medians of 6.318 and 6.055 ms), and retired 6.24 million more of its
