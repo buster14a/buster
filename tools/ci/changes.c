@@ -749,11 +749,54 @@ static void changes_scan_names(Text text, const char* prefix, bool dashes, const
     }
 }
 
-// The benchmarks a step's commands run, by the names after `./build/compiler benchmark-` or `measure-`.
+// The rest of the line past the prefix and the spaces after it, or the line itself without the prefix.
+static Text changes_skip(Text line, const char* prefix)
+{
+    bool matched = text_starts_with(line, prefix);
+    size_t skip = matched ? strlen(prefix) : 0;
+    while (matched && skip < line.length && line.data[skip] == ' ')
+    {
+        skip += 1;
+    }
+    Text rest = {
+        .data = line.data + skip,
+        .length = line.length - skip,
+    };
+    return rest;
+}
+
+// The benchmarks a step's commands run: each line that runs `./build/compiler benchmark-NAME` or `measure-NAME`
+// itself, after its indentation, a `run:` and a `taskset -c CPUS`, and that NAME ends with the line or a space. The
+// text of a comment, a string or another command's arguments runs nothing.
 static void changes_step_commands(Text body, TextList* commands)
 {
-    changes_scan_names(body, "./build/compiler benchmark-", true, "", commands);
-    changes_scan_names(body, "./build/compiler measure-", true, "", commands);
+    size_t offset = 0;
+    Text line;
+    while (text_next_line(body, &offset, &line))
+    {
+        Text rest = changes_skip(changes_skip(line, ""), "run:");
+        if (text_starts_with(rest, "taskset -c "))
+        {
+            rest = changes_skip(rest, "taskset -c ");
+            size_t cpus = 0;
+            while (cpus < rest.length && rest.data[cpus] != ' ')
+            {
+                cpus += 1;
+            }
+            rest = changes_skip((Text){ .data = rest.data + cpus, .length = rest.length - cpus }, " ");
+        }
+        const char* prefix = text_starts_with(rest, "./build/compiler benchmark-") ? "./build/compiler benchmark-" : "./build/compiler measure-";
+        if (text_starts_with(rest, prefix))
+        {
+            TextList names = { 0 };
+            changes_scan_names(rest, prefix, true, "", &names);
+            size_t end = strlen(prefix) + (names.count != 0 ? names.items[0].length : 0);
+            if (names.count != 0 && (end == rest.length || rest.data[end] == ' '))
+            {
+                list_append(commands, names.items[0]);
+            }
+        }
+    }
 }
 
 // The outputs a step is gated on, by `needs.changes.outputs.NAME != 'false'`.
@@ -1058,6 +1101,7 @@ struct ChangesTest
 {
     uint32_t checks;
     uint32_t failures;
+    bool quiet;
 };
 
 static void changes_expect(ChangesTest* test, bool condition, const char* what, Text detail)
@@ -1066,7 +1110,10 @@ static void changes_expect(ChangesTest* test, bool condition, const char* what, 
     if (!condition)
     {
         test->failures += 1;
-        fprintf(stderr, "FAIL: %s%s%.*s\n", what, detail.length != 0 ? ": " : "", (int)detail.length, detail.data);
+        if (!test->quiet)
+        {
+            fprintf(stderr, "FAIL: %s%s%.*s\n", what, detail.length != 0 ? ": " : "", (int)detail.length, detail.data);
+        }
     }
 }
 
@@ -1492,15 +1539,61 @@ static void changes_test_workflow(ChangesTest* test, Text workflow, const char* 
         changes_scan_names(step->body, "contains(env.MEASURE, ',", true, ",')", &names);
         TextList commands = { 0 };
         changes_step_commands(step->body, &commands);
-        // A step finds its benchmarks by their literal commands alone: one it ran through a wrapper, or with the
-        // command split over lines, wouldn't run when changed.
+        // A step finds its benchmarks by their command lines alone (changes_step_commands): one it ran through a
+        // wrapper, split over lines, or only spelled in a comment or a string wouldn't run when changed.
         for (uint32_t j = 0; j < names.count; j += 1)
         {
-            changes_expect(test, list_contains(&commands, names.items[j]), text_concat(text_concat(text_c("the step runs ./build/compiler benchmark- or measure-"), names.items[j]), text_c(" literally")).data, step->name);
+            changes_expect(test, list_contains(&commands, names.items[j]), text_concat(text_concat(text_c("the step runs ./build/compiler benchmark- or measure-"), names.items[j]), text_c(" as a command")).data, step->name);
             changes_expect(test, changes_measures(&result, text_terminated(names.items[j])), "the edited step's benchmark runs", step->name);
         }
     }
     changes_expect(test, gated >= 20, "the workflow has its gated steps", (Text){ 0 });
+}
+
+// The workflow with each line that runs the command commented out, and the command echoed instead.
+static Text changes_comment_out(Text workflow, const char* command, uint32_t* count)
+{
+    Text result = {
+        .data = "",
+        .length = 0,
+    };
+    size_t offset = 0;
+    size_t start = 0;
+    Text line;
+    *count = 0;
+    while (text_next_line(workflow, &offset, &line))
+    {
+        Text rest = changes_skip(changes_skip(line, ""), "taskset -c \"$cpu\"");
+        size_t length = strlen(command);
+        bool runs = text_starts_with(rest, command) && (rest.length == length || rest.data[length] == ' ');
+        if (runs)
+        {
+            size_t indent = (size_t)(rest.data - line.data);
+            Text head = {
+                .data = workflow.data + start,
+                .length = (size_t)(line.data - (workflow.data + start)) + indent,
+            };
+            result = text_concat(text_concat(text_concat(result, head), text_c("# ")), rest);
+            result = text_concat(text_concat(text_concat(result, text_c("\n")), (Text){ .data = line.data, .length = indent }), text_c("echo \""));
+            result = text_concat(text_concat(result, rest), text_c("\""));
+            start = (size_t)(line.data + line.length - workflow.data);
+            *count += 1;
+        }
+    }
+    return text_concat(result, (Text){ .data = workflow.data + start, .length = workflow.length - start });
+}
+
+// A benchmark's command commented out and echoed must fail the workflow's checks: the step would no longer run it.
+static void changes_test_mutation(ChangesTest* test, Text workflow, const char* root)
+{
+    uint32_t count = 0;
+    Text mutant = changes_comment_out(workflow, "./build/compiler benchmark-types", &count);
+    changes_expect(test, count == 1 && strstr(text_terminated(mutant), "# ./build/compiler benchmark-types") != NULL, "the mutation comments out benchmark-types' command", (Text){ 0 });
+    ChangesTest mutated = {
+        .quiet = true,
+    };
+    changes_test_workflow(&mutated, mutant, root);
+    changes_expect(test, mutated.failures != 0, "the workflow's checks refuse a benchmark's command commented out", (Text){ 0 });
 }
 
 // Each module's and benchmark's alternatives must name a source that exists, and each unit must be a file: a pattern
@@ -1594,6 +1687,21 @@ static void changes_test_split(ChangesTest* test)
     }
     changes_expect(test, gates.count == 1 && text_equal_c(gates.items[0], "zen5"), "a gate's name with a digit, and not an == gate", (Text){ 0 });
     changes_expect(test, commands.count == 2 && text_equal_c(commands.items[0], "x86-zen5") && text_equal_c(commands.items[1], "x86-zen5"), "a step's commands", (Text){ 0 });
+    // Commands at a line's start, after `run:` and `taskset -c`, and nothing that only spells one.
+    const char* lines =
+        "        run: ./build/compiler benchmark-lanes\n"
+        "        run: taskset -c \"$cpu\" ./build/compiler benchmark-types --seed 1\n"
+        "          ./build/compiler measure-x86-zen5 \\\n"
+        "          # ./build/compiler benchmark-ssa\n"
+        "          echo \"./build/compiler benchmark-ir\"\n"
+        "          run_it ./build/compiler benchmark-dataflow\n"
+        "          \"$compiler\" benchmark-bind\n"
+        "          ./build/compiler benchmark-backend-x\n"
+        "          ./build/compiler benchmark-parser;\n"
+        "          ./build/compiler benchmark-\n";
+    TextList spelled = { 0 };
+    changes_step_commands(text_c(lines), &spelled);
+    changes_expect(test, spelled.count == 4 && text_equal_c(spelled.items[0], "lanes") && text_equal_c(spelled.items[1], "types") && text_equal_c(spelled.items[2], "x86-zen5") && text_equal_c(spelled.items[3], "backend-x"), "the commands lines run, not those comments, strings and arguments spell", (Text){ 0 });
     ChangesSteps none = changes_split_steps((Text){ .data = "", .length = 0 });
     changes_expect(test, none.count == 0, "an empty workflow has no steps", (Text){ 0 });
 }
@@ -1610,6 +1718,7 @@ static int changes_self_test(const char* root)
         changes_test_fixtures(&test, workflow, root);
         changes_test_events(&test, workflow, root);
         changes_test_workflow(&test, workflow, root);
+        changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);
