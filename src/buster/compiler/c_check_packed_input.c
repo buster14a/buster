@@ -140,7 +140,8 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
         for (uint32_t i = closing < parser->tokens.count ? closing + 1 : parser->tokens.count;
              !field && result.length == 0 && i < parser->tokens.count && parser->tokens.kinds[i] != PARSE_KIND_SEMI; i += 1)
         {
-            if (reader->declaration_kinds[i] == C_BINDING_TYPEDEF && type_unqualified(reader->declared_types[i]) == types->tags.type[tag])
+            if (reader->output->declarations[i] == i && reader->declaration_kinds[i] == C_BINDING_TYPEDEF &&
+                type_unqualified(reader->declared_types[i]) == types->tags.type[tag])
             {
                 result = check_input_packed_identifier(reader, parser->tokens.names[i]);
             }
