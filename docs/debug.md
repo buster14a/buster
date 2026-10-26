@@ -178,6 +178,25 @@ emission reserves the raw rows and writes each function's out of line
 main's executable; with `-g` it took 7.2% more
 ([the record](https://github.com/buster14a/buster-performance/tree/fec2430fdab625676f82a1226607b3ca885b1288/docs/measurements/c-driver-dwarf-395-2026-10-25)).
 
+What `-g` adds to the emission is mostly its copy of the lowering (#456). On
+`benchmark-check-debug --only emit`'s program (2,000 functions, 101,493 typed
+entries, 60,031 raw rows), the emission with the raw rows took 4.4 to 4.8%
+longer than without on the 9700X (6.32 against 6.06 ms) and retired 6.24
+million more of its 132.2 million user instructions. The copy that keeps the
+tokens is 5.61 million of them, about 28 for each of the 197,000 tasks the
+lowering pops, which settles the entries and tasks since the pop before and
+picks the next token; the raw rows take 0.54 million, Tier 0's entries' first
+records 0.10 million, and their room nothing measurable. The 1.1 to 1.2% that
+#426 measured with `-g` in a unit of its own compared two lowerings that both
+kept tokens: there the benchmark ran in that unit, whose lowering saved the
+token with every push and set it at every pop, rows or none. Of the cheaper forms tried, reading the settle's
+columns and bounds once (clang read them again after each store through the
+writer) saved 0.33 million instructions, but on the 9700X it left the emission
+with the rows as long and moved the plain loop's code, which then took 0.8%
+longer; doing the work before the pop, or out of line, retired more. The cost
+stays `-g`'s
+([the record](https://github.com/buster14a/buster-performance/tree/6e5eec7b1354d03073684fe52a82ebc1dcd10f2d/docs/measurements/debug-row-emission-456-2026-10-26)).
+
 A function is named by its identifier, at its declaration's line, in the
 file of its declaration (a header's for a function a header defines, a
 `#line`'s name after one); the unit's first file is the translation unit's.
