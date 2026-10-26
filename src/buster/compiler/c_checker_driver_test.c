@@ -550,6 +550,79 @@ static void check_test_driver_damaged_snapshot(CheckTest* test, const char* exec
     unlink(output);
 }
 
+// Complex values' products and quotients in the direct path (#493's review): a program that multiplies and divides
+// _Complex float, double and long double values, a real dividend over a complex divisor among them, which call
+// libgcc.a's __mulsc3, __muldc3, __mulxc3, __divsc3, __divdc3 and __divxc3 (#133's lowering). Linked by both paths into
+// the same bytes, needing libc.so.6 alone (the members join the executable), it must print every part's bits (%a) as
+// this executable, built by clang, computes them.
+static void check_test_driver_complex(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "static volatile double ar = 1.5, ai = -2.25, br = 0.5, bi = 3.0;\n"
+                                  "static volatile float fr = 2.0f, fi = 0.5f;\n"
+                                  "static volatile long double lr = 1.25L, li = -0.75L;\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    _Complex double a = ar + ai * 1.0i, b = br + bi * 1.0i;\n"
+                                  "    _Complex float f = fr + fi * 1.0fi, g = fi - fr * 1.0fi;\n"
+                                  "    _Complex long double l = lr + li * 1.0Li, m = li + lr * 1.0Li;\n"
+                                  "    _Complex double p = a * b, q = a / b, r = ar / b;\n"
+                                  "    _Complex float s = f * g, t = f / g;\n"
+                                  "    _Complex long double u = l * m, v = l / m;\n"
+                                  "    printf(\"%a %a %a %a %a %a %a %a %a %a %La %La %La %La\\n\", __real__ p, __imag__ p, __real__ q, __imag__ q, __real__ r,\n"
+                                  "           __imag__ r, (double)__real__ s, (double)__imag__ s, (double)__real__ t, (double)__imag__ t, __real__ u, __imag__ u,\n"
+                                  "           __real__ v, __imag__ v);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[2][256];
+    snprintf(source, sizeof(source), "%s/complex.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/complex", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/complex-scalar", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "complex program written");
+    char* text = NULL;
+    bool linked = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-o", outputs[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", outputs[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "complex products and quotients link libgcc.a's members" : "complex products and quotients, scalar");
+        linked = linked && status == 0;
+        free(text);
+    }
+    check_test_expect(test, linked && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable of complex products and quotients");
+    char needed[256] = { 0 };
+    check_test_expect(test, linked && check_test_driver_needed(outputs[0], needed, sizeof(needed)) && strcmp(needed, "libc.so.6") == 0,
+                      "the complex helpers in the executable, libc.so.6 needed alone");
+    volatile double ar = 1.5, ai = -2.25, br = 0.5, bi = 3.0;
+    volatile float fr = 2.0f, fi = 0.5f;
+    volatile long double lr = 1.25L, li = -0.75L;
+    const _Complex double a = ar + ai * 1.0i;
+    const _Complex double b = br + bi * 1.0i;
+    const _Complex float f = fr + fi * 1.0fi;
+    const _Complex float g = fi - fr * 1.0fi;
+    const _Complex long double l = lr + li * 1.0Li;
+    const _Complex long double m = li + lr * 1.0Li;
+    const _Complex double p = a * b;
+    const _Complex double q = a / b;
+    const _Complex double r = ar / b;
+    const _Complex float s = f * g;
+    const _Complex float t = f / g;
+    const _Complex long double u = l * m;
+    const _Complex long double v = l / m;
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%a %a %a %a %a %a %a %a %a %a %La %La %La %La\n", __real__ p, __imag__ p, __real__ q, __imag__ q, __real__ r, __imag__ r,
+             (double)__real__ s, (double)__imag__ s, (double)__real__ t, (double)__imag__ t, __real__ u, __imag__ u, __real__ v, __imag__ v);
+    char captured[512];
+    check_test_expect(test, linked && check_test_driver_capture(outputs[0], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the program prints the complex results' bits");
+    unlink(source);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -1745,6 +1818,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
+            check_test_driver_complex(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);
