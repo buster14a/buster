@@ -62,7 +62,8 @@ struct String8
 // The corpus
 
 // Programs of a shape like compiled C's (calls, loops, floating values and pointers), until the corpus holds `entries`
-// entries. Returns false if the paths disagree on a function or memory runs out.
+// entries, without the functions Tier 0 refuses (by both paths alike). Returns false if the paths disagree on a function
+// or memory runs out.
 static bool tier0_benchmark_corpus(Tier0BenchmarkCorpus* corpus, Tier0Tables* tables, Arena* arena, Arena* code_arena, uint64_t seed, uint64_t entries)
 {
     const Tier0ProgramOptions options = {
@@ -75,7 +76,7 @@ static bool tier0_benchmark_corpus(Tier0BenchmarkCorpus* corpus, Tier0Tables* ta
         .pointers = true,
         .defined = false,
     };
-    bool result = tier0_benchmark_reserve(corpus, arena);
+    bool result = tier0_benchmark_reserve(corpus, arena, BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
     for (uint64_t p = 0; result && corpus->entries < entries; p += 1)
     {
         Tier0Program* program = BUSTER_ARENA_PUSH_ARRAY(arena, Tier0Program, 1);
@@ -84,11 +85,12 @@ static bool tier0_benchmark_corpus(Tier0BenchmarkCorpus* corpus, Tier0Tables* ta
                  tier0_program_functions(program, tables, arena, functions);
         for (uint32_t f = 0; result && f < functions->count; f += 1)
         {
-            bool same = true;
-            result = tier0_benchmark_add(corpus, &functions->functions[f], arena, code_arena, &same);
-            if (!same)
+            const Tier0BenchmarkAdd added = tier0_benchmark_add(corpus, &functions->functions[f], arena, code_arena);
+            result = added == TIER0_BENCHMARK_ADDED || added == TIER0_BENCHMARK_REFUSED;
+            if (!result)
             {
-                fprintf(stderr, "benchmark-backend: the paths disagree on program %" PRIu64 "'s function %u\n", seed + p, f);
+                fprintf(stderr, "benchmark-backend: %s program %" PRIu64 "'s function %u\n",
+                        added == TIER0_BENCHMARK_DISAGREE ? "the paths disagree on" : "memory ran out for", seed + p, f);
             }
         }
     }
@@ -152,8 +154,7 @@ int run_backend_benchmark(int argc, char** argv)
         Tier0BenchmarkCorpus corpus;
         if (tier0_benchmark_corpus(&corpus, &tables, &arena, &code_arena, seed, entries))
         {
-            tier0_benchmark_measure(&corpus, &scratch, only, after_scalar, "benchmark-backend");
-            result = 0;
+            result = tier0_benchmark_measure(&corpus, &scratch, only, after_scalar, "benchmark-backend") ? 0 : 1;
         }
         arena_release(&arena);
         arena_release(&code_arena);

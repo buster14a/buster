@@ -4,9 +4,12 @@
 // benchmark-backend-source's outcomes. Original fixtures: files whose functions join the corpus (the referenced ones,
 // as -c lowers them, from one file and from two), one the checker rejects, which is left out, one that doesn't
 // preprocess, which fails the command, and a run left with no function, which fails it too. The backend's refusals by
-// name are injected, as the lowering benchmark's tests inject them: which constructs it refuses changes as it grows.
-// Each case's corpus, counts, exit status and report lines are checked. Include after tier0_source_benchmark.c and
-// c_lowering_source_benchmark_test.c; test-checker calls this through its forward declaration.
+// name are injected, as the lowering benchmark's tests inject them: which constructs it refuses changes as it grows. So
+// are resources that run out (#514's review): the arena the corpus's records are compiled into, the timed runs'
+// scratch, and the corpus's room for functions, full at the second of a file's two and not at its last. Each case's
+// corpus, counts, exit status and report lines are checked. Then tier0_benchmark_add at its corpus's capacity, which
+// must write nothing. Include after tier0_source_benchmark.c and c_lowering_source_benchmark_test.c; test-checker calls
+// this through its forward declaration.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 #define BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 
@@ -16,8 +19,8 @@ struct BackendSourceTestCase
     const char* label;
     // The fixtures it measures, in order, as indices into the fixtures, ended by -1.
     int8_t files[3];
-    // The 1-based index among them of the file whose emission is refused by name, or 0.
-    uint32_t refuse;
+    // The failures injected (BackendSourceFault): a refusal by name, a full corpus, arenas out of room.
+    BackendSourceFault fault;
     uint32_t functions;
     uint64_t measured;
     uint64_t left_out;
@@ -27,9 +30,9 @@ struct BackendSourceTestCase
     const char* report[4];
 };
 
-// Runs the benchmark on `count` of `paths` with `refuse`, its report captured: whether it ran, with the corpus and
-// counts in `source`, the exit status, and the report (malloc'd, the caller's to free).
-static bool backend_source_test_run(char** paths, uint32_t count, uint32_t refuse, BackendSource* source, int* status, char** report)
+// Runs the benchmark on `count` of `paths` with `fault`, its report captured: whether it ran, with the corpus and counts
+// in `source`, the exit status, and the report (malloc'd, the caller's to free).
+static bool backend_source_test_run(char** paths, uint32_t count, BackendSourceFault fault, BackendSource* source, int* status, char** report)
 {
     FILE* capture = tmpfile();
     fflush(stdout);
@@ -39,7 +42,7 @@ static bool backend_source_test_run(char** paths, uint32_t count, uint32_t refus
     bool ran = capture != 0 && saved[0] >= 0 && saved[1] >= 0 && null >= 0 && dup2(fileno(capture), STDOUT_FILENO) >= 0 && dup2(null, STDERR_FILENO) >= 0;
     char* options[] = { "-nostdinc" };
     *source = (BackendSource){ 0 };
-    const bool valid = ran && backend_source_files(source, paths, count, options, BUSTER_ARRAY_LENGTH(options), BUSTER_TIER0_BENCHMARK_VARIANTS, 0, refuse);
+    const bool valid = ran && backend_source_files(source, paths, count, options, BUSTER_ARRAY_LENGTH(options), BUSTER_TIER0_BENCHMARK_VARIANTS, 0, fault);
     *status = backend_source_status(valid, source);
     fflush(stdout);
     fflush(stderr);
@@ -65,6 +68,53 @@ static bool backend_source_test_run(char** paths, uint32_t count, uint32_t refus
     }
     *report = text;
     return ran;
+}
+
+// tier0_benchmark_add at its corpus's capacity (#514's review): a corpus with room for one function takes the first of a
+// generated program's and refuses the second as memory, writing nothing. An entry past `sized`, `offsets` or `ends`
+// would be the next array's first, which must still hold the first function's.
+static void check_test_backend_corpus_capacity(CheckTest* test)
+{
+    Tier0Tables tables;
+    Arena arena = arena_reserve(UINT64_C(1) << 30);
+    Arena code_arena = arena_reserve(UINT64_C(1) << 30);
+    const Tier0ProgramOptions options = {
+        .functions = 2,
+        .statements = 6,
+        .expression_nodes = 6,
+        .calls = true,
+        .loops = true,
+        .floating = false,
+        .pointers = false,
+        .defined = false,
+    };
+    Tier0Program program;
+    Tier0Functions functions;
+    Tier0BenchmarkCorpus corpus;
+    const bool opened = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && tier0_tables_open(&tables);
+    const bool ready = opened && arena.base != 0 && code_arena.base != 0 && tier0_generate_program(&program, &arena, 1, options, "c_") &&
+                       tier0_program_functions(&program, &tables, &arena, &functions) && functions.count >= 2 && tier0_benchmark_reserve(&corpus, &arena, 1);
+    check_test_expect(test, ready, "backend corpus capacity: two generated functions and a corpus with room for one");
+    if (ready)
+    {
+        const Tier0BenchmarkAdd first = tier0_benchmark_add(&corpus, &functions.functions[0], &arena, &code_arena);
+        const Tier0Code code = corpus.codes[0];
+        uint32_t* const offsets = corpus.offsets[0];
+        uint32_t* const ends = corpus.ends[0];
+        uint8_t* const machine = corpus.machine[0];
+        const Tier0BenchmarkAdd second = tier0_benchmark_add(&corpus, &functions.functions[1], &arena, &code_arena);
+        check_test_expect(test, first == TIER0_BENCHMARK_ADDED && second == TIER0_BENCHMARK_MEMORY && corpus.count == 1,
+                          "backend corpus capacity: the first function joins and the second finds the corpus full");
+        check_test_expect(test, corpus.offsets[0] == offsets && corpus.ends[0] == ends && corpus.machine[0] == machine && corpus.codes[0].count == code.count &&
+                                corpus.functions[0] == &functions.functions[0],
+                          "backend corpus capacity: a full corpus's add writes nothing");
+    }
+    if (opened)
+    {
+        tier0_tables_close(&tables);
+    }
+    arena_release(&code_arena);
+    arena_release(&arena);
 }
 
 static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckTest* test)
@@ -117,7 +167,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
         {
             .label = "a refusal by name leaves the file out",
             .files = { 0, 3, -1 },
-            .refuse = 1,
+            .fault = { .refuse = 1 },
             .functions = 2,
             .measured = 1,
             .left_out = 1,
@@ -129,6 +179,41 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .left_out = 1,
             .status = 1,
             .report = { "backend-source: no function was measured\n", " totals files=0 left_out=1 failures=0\n" },
+        },
+        {
+            .label = "a compile that runs out of memory fails the command, its file left out",
+            .files = { 0, 3, -1 },
+            .fault = { .code_bytes = 64 },
+            .failures = 2,
+            .status = 1,
+            .report = { "/0.c failed=\"memory ran out\" function=0 of 2\n", "/3.c failed=\"memory ran out\" function=0 of 2\n",
+                        " totals files=0 left_out=0 failures=2\n" },
+        },
+        {
+            .label = "a corpus full at a file's second function fails the command",
+            .files = { 0, -1 },
+            .fault = { .capacity = 1 },
+            .failures = 1,
+            .status = 1,
+            .report = { "/0.c failed=\"memory ran out\" function=1 of 2\n", " totals files=0 left_out=0 failures=1\n" },
+        },
+        {
+            .label = "a corpus full with a file's last function measures it",
+            .files = { 0, -1 },
+            .fault = { .capacity = 2 },
+            .functions = 2,
+            .measured = 1,
+            .report = { "/0.c functions=2 entries=", "benchmark-backend-source: 2 functions, ", " totals files=1 left_out=0 failures=0\n" },
+        },
+        {
+            .label = "a timed run that runs out of memory fails the command, with no report",
+            .files = { 0, -1 },
+            .fault = { .scratch_bytes = 64 },
+            .functions = 2,
+            .measured = 1,
+            .failures = 1,
+            .status = 1,
+            .report = { "benchmark-backend-source: a function's vector path's compile failed, so its runs measured less than the corpus: no report\n" },
         },
     };
     char directory[] = "/tmp/buster-backend-source-XXXXXX";
@@ -153,7 +238,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
         BackendSource source;
         int status = 0;
         char* report = 0;
-        const bool ran = backend_source_test_run(files, count, item->refuse, &source, &status, &report);
+        const bool ran = backend_source_test_run(files, count, item->fault, &source, &status, &report);
         bool reported = ran;
         for (uint32_t i = 0; reported && i < BUSTER_ARRAY_LENGTH(item->report) && item->report[i] != 0; i += 1)
         {
@@ -183,6 +268,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
     {
         rmdir(directory);
     }
+    check_test_backend_corpus_capacity(test);
 }
 
 #endif

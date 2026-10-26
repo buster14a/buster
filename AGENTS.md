@@ -4785,9 +4785,11 @@ their typed streams, with the symbols' access the emission gave them
 both paths must agree on before the same medians are reported. A file the
 checker rejects, or whose checked program or emission refuses a feature by
 name, is left out with its reason; one that fails otherwise (it doesn't
-preprocess, a resource runs out, the paths disagree on a function) fails the
-command, and so does a run left with no function. `test-checker` checks these
-outcomes (`tier0_source_benchmark_test.c`). Run it under the 9700X's lock with
+preprocess, a resource runs out, a function doesn't join the corpus) fails the
+command, and so does a run left with no function, or a timed run that failed
+on a function (both benchmarks: `tier0_benchmark_measure`). `test-checker`
+checks these outcomes (`tier0_source_benchmark_test.c`), with the resources'
+failures injected, and the corpus's add at its capacity. Run it under the 9700X's lock with
 `taskset -c 2`. The default 9700X job runs it on the frozen `sqlite3.c`, pinned
 to one allowed CPU, where a pull request changes what it measures.
 

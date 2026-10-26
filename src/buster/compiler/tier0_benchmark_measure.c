@@ -82,6 +82,8 @@ struct Tier0BenchmarkReading
     uint64_t cycles;
     uint64_t instructions;
     uint64_t throttle;
+    // A run's functions whose compile, sizing or encoding failed (tier0_benchmark_run): a run with any measured less.
+    uint32_t failures;
 };
 
 static Tier0BenchmarkReading tier0_benchmark_read(Tier0BenchmarkCounters counters)
@@ -129,48 +131,66 @@ struct Tier0BenchmarkCorpus
     uint32_t** ends;
     uint8_t** machine;
     uint32_t count;
+    uint32_t capacity;
     uint64_t entries;
     uint64_t records;
     uint64_t deferred;
     uint64_t bytes;
 };
 
-// An empty corpus with room for BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS functions, from `arena`: false if it has none.
-static bool tier0_benchmark_reserve(Tier0BenchmarkCorpus* corpus, Arena* arena)
+// An empty corpus with room for `capacity` functions (BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS but in the tests), from
+// `arena`: false if it has none.
+static bool tier0_benchmark_reserve(Tier0BenchmarkCorpus* corpus, Arena* arena, uint32_t capacity)
 {
     memset(corpus, 0, sizeof(*corpus));
-    corpus->functions = BUSTER_ARENA_PUSH_ARRAY(arena, const Tier0Function*, BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
-    corpus->codes = BUSTER_ARENA_PUSH_ARRAY(arena, Tier0Code, BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
-    corpus->sized = BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction*, BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
-    corpus->offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t*, BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
-    corpus->ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t*, BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
-    corpus->machine = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t*, BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
+    corpus->capacity = capacity;
+    corpus->functions = BUSTER_ARENA_PUSH_ARRAY(arena, const Tier0Function*, capacity);
+    corpus->codes = BUSTER_ARENA_PUSH_ARRAY(arena, Tier0Code, capacity);
+    corpus->sized = BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction*, capacity);
+    corpus->offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t*, capacity);
+    corpus->ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t*, capacity);
+    corpus->machine = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t*, capacity);
     return corpus->functions != 0 && corpus->codes != 0 && corpus->sized != 0 && corpus->offsets != 0 && corpus->ends != 0 && corpus->machine != 0;
 }
 
-// `function`, compiled by both paths into `code_arena`, joins the corpus with room for its sized records and machine
-// code from `arena`, unless Tier 0 refuses it (by both paths alike), which leaves it out. Returns false if the paths
-// disagree on it (`*same` false), memory runs out or the corpus is full.
-static bool tier0_benchmark_add(Tier0BenchmarkCorpus* corpus, const Tier0Function* function, Arena* arena, Arena* code_arena, bool* same)
+// What tier0_benchmark_add made of a function: it joined the corpus; Tier 0 refused it alike by both paths, with an
+// error other than a resource's; the paths disagree on it; or memory ran out (the corpus is full, an arena has no room,
+// or a path's own TIER0_ERROR_MEMORY), which never leaves a function out unnoticed.
+typedef enum Tier0BenchmarkAdd
 {
-    const Tier0Code scalar = tier0_compile_scalar(function, code_arena);
-    const Tier0Code vector = tier0_compile(function, code_arena);
-    *same = scalar.error == vector.error && scalar.count == vector.count && scalar.branch_count == vector.branch_count &&
-            memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0;
-    bool result = *same;
-    if (result && vector.error == TIER0_OK)
+    TIER0_BENCHMARK_ADDED,
+    TIER0_BENCHMARK_REFUSED,
+    TIER0_BENCHMARK_DISAGREE,
+    TIER0_BENCHMARK_MEMORY,
+} Tier0BenchmarkAdd;
+
+// `function`, compiled by both paths into `code_arena`, joins the corpus with room for its sized records and machine
+// code from `arena`, when both paths give it the same records and the corpus has room. Changes nothing otherwise.
+static Tier0BenchmarkAdd tier0_benchmark_add(Tier0BenchmarkCorpus* corpus, const Tier0Function* function, Arena* arena, Arena* code_arena)
+{
+    const uint32_t index = corpus->count;
+    Tier0BenchmarkAdd result = TIER0_BENCHMARK_MEMORY;
+    if (index < corpus->capacity)
     {
-        const uint32_t index = corpus->count;
-        result = index < BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS;
-        corpus->sized[index] = result ? BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, (uint64_t)vector.count + 1) : 0;
-        corpus->offsets[index] = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)vector.count + 1) : 0;
-        corpus->ends[index] = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(vector.reference_count)) : 0;
-        corpus->machine[index] = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_X86_ENCODER_CAPACITY(vector.count)) : 0;
-        result = result && corpus->sized[index] != 0 && corpus->offsets[index] != 0 && corpus->ends[index] != 0 && corpus->machine[index] != 0;
-        if (result)
+        const Tier0Code scalar = tier0_compile_scalar(function, code_arena);
+        const Tier0Code vector = tier0_compile(function, code_arena);
+        const bool same = scalar.error == vector.error && scalar.count == vector.count && scalar.branch_count == vector.branch_count &&
+                          memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0;
+        const bool memory = scalar.error == TIER0_ERROR_MEMORY || vector.error == TIER0_ERROR_MEMORY;
+        result = memory ? TIER0_BENCHMARK_MEMORY : !same ? TIER0_BENCHMARK_DISAGREE : vector.error != TIER0_OK ? TIER0_BENCHMARK_REFUSED : TIER0_BENCHMARK_ADDED;
+        X86Instruction* sized = result == TIER0_BENCHMARK_ADDED ? BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, (uint64_t)vector.count + 1) : 0;
+        uint32_t* offsets = sized != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)vector.count + 1) : 0;
+        uint32_t* ends = offsets != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(vector.reference_count)) : 0;
+        uint8_t* machine = ends != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_X86_ENCODER_CAPACITY(vector.count)) : 0;
+        result = result == TIER0_BENCHMARK_ADDED && machine == 0 ? TIER0_BENCHMARK_MEMORY : result;
+        if (result == TIER0_BENCHMARK_ADDED)
         {
             corpus->functions[index] = function;
             corpus->codes[index] = vector;
+            corpus->sized[index] = sized;
+            corpus->offsets[index] = offsets;
+            corpus->ends[index] = ends;
+            corpus->machine[index] = machine;
             corpus->count += 1;
             corpus->entries += function->count;
             corpus->records += vector.count;
@@ -196,27 +216,29 @@ static Tier0BenchmarkReading tier0_benchmark_run(uint32_t variant, Tier0Benchmar
     }
     const Tier0BenchmarkReading begin = tier0_benchmark_read(counters);
     uint64_t bytes = 0;
+    uint32_t failures = 0;
     const uint64_t mark = scratch->length;
     for (uint32_t f = 0; f < corpus->count; f += 1)
     {
         const Tier0Code* code = &corpus->codes[f];
         if (variant == BUSTER_TIER0_BENCHMARK_VECTOR)
         {
-            (void)tier0_compile(corpus->functions[f], scratch);
+            failures += tier0_compile(corpus->functions[f], scratch).error != TIER0_OK;
             arena_pop_to(scratch, mark);
         }
         else if (variant == BUSTER_TIER0_BENCHMARK_SCALAR)
         {
-            (void)tier0_compile_scalar(corpus->functions[f], scratch);
+            failures += tier0_compile_scalar(corpus->functions[f], scratch).error != TIER0_OK;
             arena_pop_to(scratch, mark);
         }
         else if (variant == BUSTER_TIER0_BENCHMARK_SIZING)
         {
-            (void)size_branches(corpus->sized[f], code->count, code->branches, code->targets, code->branch_count, corpus->offsets[f]);
+            failures += size_branches(corpus->sized[f], code->count, code->branches, code->targets, code->branch_count, corpus->offsets[f]).error != BRANCH_SIZING_OK;
         }
         else
         {
             const int64_t length = x86_encode(corpus->sized[f], code->count, corpus->machine[f], BUSTER_X86_ENCODER_CAPACITY(code->count), 0, corpus->ends[f]);
+            failures += length <= 0;
             bytes += length > 0 ? (uint64_t)length : 0;
         }
     }
@@ -226,6 +248,7 @@ static Tier0BenchmarkReading tier0_benchmark_run(uint32_t variant, Tier0Benchmar
         .cycles = end.cycles - begin.cycles,
         .instructions = end.instructions - begin.instructions,
         .throttle = end.throttle - begin.throttle,
+        .failures = failures,
     };
     corpus->bytes = variant == BUSTER_TIER0_BENCHMARK_ENCODE ? bytes : corpus->bytes;
     return taken;
@@ -235,24 +258,28 @@ static Tier0BenchmarkReading tier0_benchmark_run(uint32_t variant, Tier0Benchmar
 // compile path runs first (sizing before encoding, which takes the sized records), and prints the report under `name`:
 // the corpus's totals, then each variant's medians per typed entry and per record. `only`, unless it is
 // BUSTER_TIER0_BENCHMARK_VARIANTS, times one variant alone (encoding's sizing untimed), back to back; `after_scalar`
-// runs the scalar path, untimed, for that many ms before each pass of the vector path.
-static void tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch, uint32_t only, uint64_t after_scalar, const char* name)
+// runs the scalar path, untimed, for that many ms before each pass of the vector path. A run in which a function's
+// compile, sizing or encoding failed (`scratch` out of room, for one) measured less than the corpus: the first one,
+// warm-up or timed, ends the measurement, which then prints that instead of a report and returns false.
+static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch, uint32_t only, uint64_t after_scalar, const char* name)
 {
     const Tier0BenchmarkCounters counters = {
         .cycles = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES),
         .instructions = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
         .throttle = tier0_benchmark_counter(PERF_TYPE_RAW, BUSTER_TIER0_BENCHMARK_THROTTLE_EVENT),
     };
-    // A warm-up of each variant (sizing before encoding, which takes the sized records).
-    for (uint32_t v = 0; v < BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
+    // A warm-up of each variant (sizing before encoding, which takes the sized records), and the variant of the first run
+    // that failed, BUSTER_TIER0_BENCHMARK_VARIANTS while none has.
+    uint32_t failed = BUSTER_TIER0_BENCHMARK_VARIANTS;
+    for (uint32_t v = 0; v < BUSTER_TIER0_BENCHMARK_VARIANTS && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
     {
-        (void)tier0_benchmark_run(v, corpus, scratch, counters);
+        failed = tier0_benchmark_run(v, corpus, scratch, counters).failures != 0 ? v : failed;
     }
     double values[BUSTER_TIER0_BENCHMARK_VARIANTS][4][BUSTER_TIER0_BENCHMARK_PASSES];
     memset(values, 0, sizeof(values));
-    for (uint32_t pass = 0; pass < BUSTER_TIER0_BENCHMARK_PASSES; pass += 1)
+    for (uint32_t pass = 0; pass < BUSTER_TIER0_BENCHMARK_PASSES && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; pass += 1)
     {
-        for (uint32_t k = 0; k < BUSTER_TIER0_BENCHMARK_VARIANTS; k += 1)
+        for (uint32_t k = 0; k < BUSTER_TIER0_BENCHMARK_VARIANTS && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; k += 1)
         {
             // The compile paths alternate which runs first; encoding always follows sizing.
             const uint32_t v = k < 2 ? ((pass & 1) != 0 ? 1 - k : k) : k;
@@ -263,36 +290,46 @@ static void tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
             if (v == BUSTER_TIER0_BENCHMARK_VECTOR && after_scalar != 0)
             {
                 const uint64_t until = tier0_benchmark_now() + after_scalar * 1000000ull;
-                while (tier0_benchmark_now() < until)
+                while (tier0_benchmark_now() < until && failed == BUSTER_TIER0_BENCHMARK_VARIANTS)
                 {
-                    (void)tier0_benchmark_run(BUSTER_TIER0_BENCHMARK_SCALAR, corpus, scratch, counters);
+                    failed = tier0_benchmark_run(BUSTER_TIER0_BENCHMARK_SCALAR, corpus, scratch, counters).failures != 0 ? BUSTER_TIER0_BENCHMARK_SCALAR : failed;
                 }
             }
-            const Tier0BenchmarkReading taken = tier0_benchmark_run(v, corpus, scratch, counters);
+            const Tier0BenchmarkReading taken = failed == BUSTER_TIER0_BENCHMARK_VARIANTS ? tier0_benchmark_run(v, corpus, scratch, counters) : (Tier0BenchmarkReading){ 0 };
+            failed = taken.failures != 0 ? v : failed;
             values[v][0][pass] = (double)taken.nanoseconds;
             values[v][1][pass] = (double)taken.cycles;
             values[v][2][pass] = (double)taken.instructions;
             values[v][3][pass] = (double)taken.throttle;
         }
     }
-    printf("%s: %u functions, %" PRIu64 " typed entries, %" PRIu64 " records (%.3f per entry), %" PRIu64 " bytes; %" PRIu64 " entries deferred (%.2f%%)\n", name,
-           corpus->count, corpus->entries, corpus->records, (double)corpus->records / (double)corpus->entries, corpus->bytes, corpus->deferred,
-           100.0 * (double)corpus->deferred / (double)corpus->entries);
-    printf("%-8s %12s %12s %12s %12s %12s %8s %12s\n", "variant", "ns/entry", "cyc/entry", "ins/entry", "ns/record", "cyc/record", "IPC", "thr/record");
-    for (uint32_t v = 0; v < BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
+    if (failed != BUSTER_TIER0_BENCHMARK_VARIANTS)
     {
-        if (only != BUSTER_TIER0_BENCHMARK_VARIANTS && v != only)
+        printf("%s: a function's %s failed, so its runs measured less than the corpus: no report\n", name,
+               failed == BUSTER_TIER0_BENCHMARK_SIZING ? "sizing" : failed == BUSTER_TIER0_BENCHMARK_ENCODE ? "encoding" :
+               failed == BUSTER_TIER0_BENCHMARK_VECTOR ? "vector path's compile" : "scalar path's compile");
+    }
+    else
+    {
+        printf("%s: %u functions, %" PRIu64 " typed entries, %" PRIu64 " records (%.3f per entry), %" PRIu64 " bytes; %" PRIu64 " entries deferred (%.2f%%)\n",
+               name, corpus->count, corpus->entries, corpus->records, (double)corpus->records / (double)corpus->entries, corpus->bytes, corpus->deferred,
+               100.0 * (double)corpus->deferred / (double)corpus->entries);
+        printf("%-8s %12s %12s %12s %12s %12s %8s %12s\n", "variant", "ns/entry", "cyc/entry", "ins/entry", "ns/record", "cyc/record", "IPC", "thr/record");
+        for (uint32_t v = 0; v < BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
         {
-            continue;
+            if (only != BUSTER_TIER0_BENCHMARK_VARIANTS && v != only)
+            {
+                continue;
+            }
+            const double ns = tier0_benchmark_median(values[v][0]);
+            const double cycles = tier0_benchmark_median(values[v][1]);
+            const double instructions = tier0_benchmark_median(values[v][2]);
+            const double throttle = tier0_benchmark_median(values[v][3]);
+            const double e = (double)corpus->entries;
+            const double r = (double)corpus->records;
+            printf("%-8s %12.2f %12.2f %12.2f %12.2f %12.2f %8.2f %12.3f\n", tier0_benchmark_names[v], ns / e, cycles / e, instructions / e, ns / r, cycles / r,
+                   cycles != 0 ? instructions / cycles : 0.0, throttle / r);
         }
-        const double ns = tier0_benchmark_median(values[v][0]);
-        const double cycles = tier0_benchmark_median(values[v][1]);
-        const double instructions = tier0_benchmark_median(values[v][2]);
-        const double throttle = tier0_benchmark_median(values[v][3]);
-        const double e = (double)corpus->entries;
-        const double r = (double)corpus->records;
-        printf("%-8s %12.2f %12.2f %12.2f %12.2f %12.2f %8.2f %12.3f\n", tier0_benchmark_names[v], ns / e, cycles / e, instructions / e, ns / r, cycles / r,
-               cycles != 0 ? instructions / cycles : 0.0, throttle / r);
     }
     const int descriptors[] = { counters.cycles, counters.instructions, counters.throttle };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(descriptors); i += 1)
@@ -302,6 +339,7 @@ static void tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
             close(descriptors[i]);
         }
     }
+    return failed == BUSTER_TIER0_BENCHMARK_VARIANTS;
 }
 
 #endif

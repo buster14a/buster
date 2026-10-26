@@ -16,13 +16,27 @@
 // BUSTER_TIER0_BENCHMARK_PASSES passes per typed entry and per record, and the share of entries the vector path
 // defers. A file the checker rejects, or whose checked program or emission refuses a feature by name
 // (CHECK_PROGRAM_UNSUPPORTED), is left out with the reason. Any other failure fails the benchmark, with the file left
-// out: a file that doesn't preprocess, a resource that runs out, an emission that fails otherwise, and paths that
-// disagree on a function. So does a run with no function to measure. Run it under the 9700X's lock pinned to one CPU
-// (taskset -c 2 ...). It is a benchmark outside the compile path, with no vector path of its own.
+// out: a file that doesn't preprocess, a resource that runs out, an emission that fails otherwise, and a function that
+// doesn't join the corpus (the paths disagree on it, Tier 0 refuses it now, or memory runs out). So does a run with no
+// function to measure, and a measurement whose runs failed on a function (tier0_benchmark_measure). Run it under the
+// 9700X's lock pinned to one CPU (taskset -c 2 ...). It is a benchmark outside the compile path, with no vector path of
+// its own.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_INCLUDED
 #define BUSTER_TIER0_SOURCE_BENCHMARK_INCLUDED
 
 #include "buster/compiler/tier0_benchmark_measure.c"
+
+// Where the tests (tier0_source_benchmark_test.c) make the benchmark fail as the backend and resources would: the file
+// whose emission is refused by name (1-based, 0 for none), the corpus's room for functions, and the bytes of the arena
+// the corpus's records are compiled into and of the timed runs' scratch (0 for the defaults).
+typedef struct BackendSourceFault BackendSourceFault;
+struct BackendSourceFault
+{
+    uint32_t refuse;
+    uint32_t capacity;
+    uint64_t code_bytes;
+    uint64_t scratch_bytes;
+};
 
 // The corpus of the files' functions and its arenas: `lowered` holds every file's emission (the lowered functions,
 // with their symbols' access), `arena` the corpus's columns and room, `code` their records by both paths. Then what the
@@ -96,14 +110,18 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     }
     const bool refused = chosen && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
     const uint32_t count = selected.program.body_count;
+    // Every function the emission compiled must join the corpus: one Tier 0 refuses now, or that the paths disagree
+    // on, or for which memory runs out, fails the file.
     const Tier0BenchmarkCorpus before = source->corpus;
-    bool same = true;
+    Tier0BenchmarkAdd outcome = TIER0_BENCHMARK_ADDED;
     uint32_t b = 0;
     uint8_t* defined = 0;
     bool added = emitted && check_program_access(&code.lowered, &selected.program, &source->lowered, &path.scratch, &defined);
+    outcome = emitted && !added ? TIER0_BENCHMARK_MEMORY : outcome;
     while (added && b < count)
     {
-        added = tier0_benchmark_add(&source->corpus, &code.lowered.functions[b], &source->arena, &source->code, &same);
+        outcome = tier0_benchmark_add(&source->corpus, &code.lowered.functions[b], &source->arena, &source->code);
+        added = outcome == TIER0_BENCHMARK_ADDED;
         b += added ? 1 : 0;
     }
     // A file is measured whole or not at all: one that fails partway takes its functions out again.
@@ -140,11 +158,10 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     }
     else if (valid && !added)
     {
-        printf("backend-source: file=%s failed=\"%s\"\n", file, same ? "memory ran out" : "the paths disagree on a function");
-        if (!same)
-        {
-            printf("backend-source: file=%s function=%u of %u differs between the paths\n", file, b, count);
-        }
+        printf("backend-source: file=%s failed=\"%s\" function=%u of %u\n", file,
+               outcome == TIER0_BENCHMARK_DISAGREE ? "the paths disagree on a function" :
+               outcome == TIER0_BENCHMARK_REFUSED ? "Tier 0 refused a function its emission compiled" : "memory ran out",
+               b, count);
     }
     else if (valid)
     {
@@ -160,20 +177,20 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     return valid;
 }
 
-// Adds each of `files` read with `options` to the corpus (the one at 1-based index `refuse` refused by name, for the
-// tests), then measures it: whether the options could be read and the arenas reserved.
+// Adds each of `files` read with `options` to the corpus, with `fault` injected (zeros for none), then measures it: whether
+// the options could be read and the arenas reserved. A measurement whose runs failed counts as a failure.
 static bool backend_source_files(BackendSource* source, char** files, uint32_t file_count, char** options, uint32_t option_count, uint32_t only,
-                                 uint64_t after_scalar, uint32_t refuse)
+                                 uint64_t after_scalar, BackendSourceFault fault)
 {
-    Arena scratch = arena_reserve(UINT64_C(1) << 32);
+    Arena scratch = arena_reserve(fault.scratch_bytes != 0 ? fault.scratch_bytes : UINT64_C(1) << 32);
     source->lowered = arena_reserve(UINT64_C(1) << 36);
     source->arena = arena_reserve(UINT64_C(1) << 36);
-    source->code = arena_reserve(UINT64_C(1) << 36);
+    source->code = arena_reserve(fault.code_bytes != 0 ? fault.code_bytes : UINT64_C(1) << 36);
     bool valid = scratch.base != 0 && source->lowered.base != 0 && source->arena.base != 0 && source->code.base != 0 &&
-                 tier0_benchmark_reserve(&source->corpus, &source->arena);
+                 tier0_benchmark_reserve(&source->corpus, &source->arena, fault.capacity != 0 ? fault.capacity : BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS);
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
-        valid = backend_source_file(source, files[i], options, option_count, refuse == i + 1);
+        valid = backend_source_file(source, files[i], options, option_count, fault.refuse == i + 1);
         fflush(stdout);
     }
     if (valid && source->corpus.count == 0)
@@ -184,9 +201,9 @@ static bool backend_source_files(BackendSource* source, char** files, uint32_t f
     {
         printf("backend-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failures=%" PRIu64 "\n", source->files, source->left_out, source->failures);
     }
-    if (valid && source->corpus.count != 0)
+    if (valid && source->corpus.count != 0 && !tier0_benchmark_measure(&source->corpus, &scratch, only, after_scalar, "benchmark-backend-source"))
     {
-        tier0_benchmark_measure(&source->corpus, &scratch, only, after_scalar, "benchmark-backend-source");
+        source->failures += 1;
     }
     fflush(stdout);
     arena_release(&source->code);
@@ -245,7 +262,7 @@ static int run_backend_source_benchmark(int count, char** arguments)
     }
     valid = valid && file_count != 0;
     BackendSource source = { 0 };
-    valid = valid && backend_source_files(&source, files, file_count, options, option_count, only, after_scalar, 0);
+    valid = valid && backend_source_files(&source, files, file_count, options, option_count, only, after_scalar, (BackendSourceFault){ 0 });
     if (!valid)
     {
         fprintf(stderr, "usage: compiler benchmark-backend-source [--only vector|scalar|sizing|encode] [--after-scalar MS] [preprocessor options] file...\n");
