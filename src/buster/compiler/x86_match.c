@@ -394,11 +394,24 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
     x86_target_forms(target, index->allowed);
     bool admitted[BUSTER_X86_FORM_LEGACY_MODES];
     uint16_t buckets[BUSTER_X86_FORM_LEGACY_MODES];
+    const X86FormDescription* previous = 0;
+    bool supported = false;
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[f];
         uint8_t roles[4];
-        admitted[f] = index->allowed[f] && x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4;
+        admitted[f] = false;
+        if (index->allowed[f])
+        {
+            // Reuse only identical syntax inputs; keep this key in step with x86_match_supported.
+            // Different spelling pointers recompute, even when their string contents are equal.
+            if (previous == 0 || previous->mnemonic != form->mnemonic || previous->family != form->family || previous->vector_length != form->vector_length || previous->encoding != form->encoding)
+            {
+                supported = x86_match_supported(form);
+                previous = form;
+            }
+            admitted[f] = supported && x86_match_roles(form->syntax, roles) <= 4;
+        }
         if (admitted[f])
         {
             const String8 name = x86_match_canonical((String8){.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)});
@@ -416,11 +429,11 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
     memcpy(cursors, index->begin, sizeof(cursors));
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
-        const X86FormDescription* form = &x86_form_descriptions[f];
-        uint8_t roles[4];
-        const uint32_t count = x86_match_roles(form->syntax, roles);
         if (admitted[f])
         {
+            const X86FormDescription* form = &x86_form_descriptions[f];
+            uint8_t roles[4];
+            const uint32_t count = x86_match_roles(form->syntax, roles);
             const uint32_t at = cursors[buckets[f]]++;
             index->forms[at] = f;
             index->counts[at] = count;

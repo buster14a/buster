@@ -114,6 +114,7 @@ static bool x86_target_test_forms(void)
         { X86_FORM_KMOVD_K_K, 3 },
         { X86_FORM_KMOVQ_K_K, 3 },
         { X86_FORM_AESENC_X_XM128, 4 }, // v4 does not imply the optional crypto extension.
+        { X86_FORM_PCLMULQDQ_X_XM128_IMM8, 4 },
         { X86_FORM_PUSHP_R64, 255 }, // APX is not implied by AVX-512.
         { X86_FORM_ANDN_R64_R64_RM64_EVEX, 255 },
         { X86_FORM_NONE, 255 },

@@ -18,6 +18,9 @@ static bool x86_target_test_matrix(void)
     for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
     {
         const uint64_t row = x86_target_requirements[form];
+        const uint32_t compact = x86_target_compact_requirements[form];
+        const uint64_t restored = (compact & BUSTER_X86_TARGET_COMPACT_LOW) | (uint64_t)((compact >> (X86_FEATURE_AES + 1)) & 1) << X86_FEATURE_PCLMUL | (compact & BUSTER_X86_TARGET_COMPACT_KNOWN ? BUSTER_X86_TARGET_KNOWN : 0);
+        passed &= row == restored;
         passed &= row == 0 || (row & ~(features | BUSTER_X86_TARGET_KNOWN)) == 0;
         passed &= row == 0 || (row & BUSTER_X86_TARGET_KNOWN) != 0;
         known += row != 0;
@@ -54,6 +57,15 @@ static bool x86_target_test_matrix(void)
         while (subset != required);
     }
     static const char* const profiles[] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native" };
+    // Every raw feature bit alone catches projection aliases, particularly BF16's bit at PCLMUL's compact slot.
+    for (uint32_t bit = 0; bit < 64; bit += 1)
+    {
+        const X86Target target = { .features = UINT64_C(1) << bit };
+        x86_target_forms_scalar(&target, scalar);
+        x86_target_forms(&target, vector);
+        passed &= memcmp(scalar, vector, sizeof(scalar)) == 0;
+        configurations += 1;
+    }
     uint64_t random = 180;
     for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(profiles); p += 1)
     {
@@ -66,6 +78,22 @@ static bool x86_target_test_matrix(void)
             x86_target_forms_scalar(&target, scalar);
             x86_target_forms(&target, vector);
             passed &= memcmp(scalar, vector, sizeof(scalar)) == 0;
+            configurations += 1;
+        }
+        // Reserved target bits, including the table's known marker, must not enable or disable a form.
+        // Use the scalar result without those bits as the reference, and a deliberately unaligned output.
+        const uint64_t reserved = ~(features | BUSTER_X86_TARGET_KNOWN);
+        const uint64_t extra[] = { BUSTER_X86_TARGET_KNOWN, reserved, reserved | BUSTER_X86_TARGET_KNOWN };
+        target.features = original;
+        x86_target_forms_scalar(&target, scalar);
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(extra); r += 1)
+        {
+            uint8_t guarded[X86_FORM_COUNT + 2] __attribute__((aligned(64)));
+            memset(guarded, 0xa5, sizeof(guarded));
+            target.features = original | extra[r];
+            x86_target_forms(&target, guarded + 1);
+            passed &= guarded[0] == 0xa5 && guarded[X86_FORM_COUNT + 1] == 0xa5;
+            passed &= memcmp(scalar, guarded + 1, sizeof(scalar)) == 0;
             configurations += 1;
         }
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)

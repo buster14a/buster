@@ -55,9 +55,18 @@ builtin lowering (#148).
 
 Include `x86_target_forms.c` after the encoder and build a byte table with
 `x86_target_forms(&target, allowed)`, where `allowed` has `X86_FORM_COUNT` bytes.
-It visits eight contiguous feature-mask rows at once, using AVX-512 on the host;
+It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on the host;
 `x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
 change to the 16-byte `X86Instruction` or the encoder's templates.
+
+`x86_target_rows.inc` is the single source for both tables. The scalar reference
+keeps all 64 feature bits (66,816 bytes); the vector table projects the currently
+used features into 32 bits (33,408 bytes). Both are constant and cache-line
+aligned. Their combined requirement data is 100,224 bytes; the vector builder
+reads only the compact table, and the output remains 8,352 bytes. Every row has
+an exact round-trip test. An unrepresentable new requirement fails a compile-time
+assertion, so extending the policy outside the projection requires deliberately
+extending that projection. It cannot silently discard an instruction's feature.
 
 The assembler builds its mnemonic index for one target, excluding ineligible
 forms before either matching path runs. Its syntax subset remains separate:
@@ -65,6 +74,9 @@ ISA support does not imply that the frontend understands every encoding. Its
 final resolved records pass `x86_target_validate` at the external-input
 boundary. Tests cover every indexed form, all six profiles, `.S` macro-driven
 instruction choices, option order and independent tuning.
+Initialization reuses syntax results only when the spelling pointer, family,
+vector length and encoding are identical, and computes operand roles only for
+admitted rows. ISA filtering and final record validation still apply per form.
 
 `x86_target_form_allowed` tests a form including its FS/GS and fixup flags.
 `x86_target_validate` checks both ISA eligibility and `x86_validate`'s operands,
@@ -102,7 +114,9 @@ options, all 65,536 encoded form values at six targets, random valid operands
 for every admitted form, scalar/vector table identity and protected page edges.
 They also cover every subset of each distinct requirement mask, each profile
 with each individual feature removed, and first-failure rejection for every
-form at all six profiles. These kernel checks use the requirement table as
+form at all six profiles. Every raw feature bit alone, reserved target bits,
+unaligned output sentinels and every compact-row round trip are checked too.
+These kernel checks use the requirement table as
 their scalar specification; independent named-form expectations and GNU as's
 architecture gate establish instruction legality. The assembler oracle checks
 every classified form at baseline/v2/v3/v4/Zen 5 and with individual features
@@ -141,7 +155,12 @@ Compare several independent processes under the lock; a single interleaved
 run does not establish both power states.
 This is configuration work, not an end-to-end compiler speed claim.
 
-## 9700X measurements
+## Historical 9700X measurements
+
+The following 2026-10-21 results describe the earlier 64-bit vector table.
+The compact-table and matcher follow-up is recorded separately with exact
+revisions and qualification status in
+[the optimization campaign](https://github.com/buster14a/buster-performance/tree/codex/180-isa-policy-20261025/docs/measurements/isa-policy-180-optimization-2026-10-26).
 
 Measured on 2026-10-21 UTC with Clang 23.1.1, `build.sh`'s `-O3 -march=native`
 and CPU 2 of the Ryzen 7 9700X, taking the shared lock separately for each
