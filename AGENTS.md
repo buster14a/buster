@@ -793,8 +793,10 @@ designs and the compilers already built this way.
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
   #87), into the exact path's link; the command runs at most a lane per CPU it
-  may run on, and `--time` reports the lanes and the resolution's, the
-  conversion's and the writer's phases.
+  may run on, on one team of threads it starts once its options are valid
+  and its resolution, conversion and write share (#501), and `--time` reports
+  the lanes, the team's start and the resolution's, the conversion's and the
+  writer's phases.
   [The command contract](docs/foreign-driver.md) has the details. Its tests
   (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
   run through `test-foreign --cross-check`, and `test-foreign-corpus`

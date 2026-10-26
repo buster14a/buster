@@ -4452,9 +4452,11 @@ calling thread keeps its scratch and gets its prior lane context, counter and
 CPU affinity back. Dispatch/completion synchronization is separate from the
 barriers inside an operation.
 
-`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
-output modes of `benchmark-executable` own teams. Each handler starts and
-stops its team in the translation unit that runs the operations: the
+`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link`, the
+output modes of `benchmark-executable` and `link-foreign` own teams:
+`link-foreign`'s resolution, conversion and write share one (#501). Each
+handler starts and stops its team in the translation unit that runs the
+operations: the
 benchmarks' units have thread-local contexts of their own, beside the one
 that `main.c`'s units share (`lane.c`). The ordinary
 preprocess/parse command still runs on one lane; the broader frontend work is
