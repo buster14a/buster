@@ -5970,11 +5970,40 @@ static bool build_mode_template(uint32_t form, X86EncoderMode encoder, X86Templa
 static bool build_mode_templates(X86EncoderMode encoder, X86TemplateEntry* templates)
 {
     bool result = true;
-    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    const uint32_t built_forms = encoder == X86_ENCODER_MODE_64 ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_TEMPLATES;
+    for (uint32_t form = 0; form < built_forms; form += 1)
     {
         result = build_mode_template(form, encoder, &templates[form].template) && result;
         memcpy(templates[form].layout, templates[form].template.layout, sizeof(templates[form].layout));
         memcpy(templates[form].bytes, templates[form].template.bytes, sizeof(templates[form].bytes));
+    }
+    if (encoder == X86_ENCODER_MODE_64)
+    {
+        // FS and GS have identical layouts, checks and fallback decisions: only the optional prefix byte differs.
+        // Copy the whole span, then patch both byte halves. Keep the direct builder for any future layout change.
+        memcpy(templates + BUSTER_X86_FORM_GS, templates + BUSTER_X86_FORM_FS, X86_FORM_COUNT * sizeof(*templates));
+        for (uint32_t row = 0; row < X86_FORM_COUNT; row += 1)
+        {
+            const X86FormDescription* form = &x86_form_descriptions[row];
+            X86TemplateEntry* entry = &templates[BUSTER_X86_FORM_GS + row];
+            uint32_t flags;
+            memcpy(&flags, &entry->template.bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], sizeof(flags));
+            if ((form->rm & BUSTER_X86_OPERAND_MEMORY) && !(flags & BUSTER_X86_TEMPLATE_NO_MEMORY))
+            {
+                const uint32_t prefix = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY && (form->prefixes & 0xff) == 0x9b;
+                if (entry->template.bytes[prefix] == 0x64 && entry->bytes[prefix] == 0x64)
+                {
+                    entry->template.bytes[prefix] = 0x65;
+                    entry->bytes[prefix] = 0x65;
+                }
+                else
+                {
+                    result = build_mode_template(BUSTER_X86_FORM_GS + row, encoder, &entry->template) && result;
+                    memcpy(entry->layout, entry->template.layout, sizeof(entry->layout));
+                    memcpy(entry->bytes, entry->template.bytes, sizeof(entry->bytes));
+                }
+            }
+        }
     }
     memcpy(&templates[BUSTER_X86_FORM_FIXUP], &templates[0], BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry));
     return result;

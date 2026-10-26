@@ -5,6 +5,25 @@
 // every single-feature removal from each profile, and unknown rows even with every feature bit set. The independent
 // named-form expectations and external compiler/assembler checks establish ISA facts; the matrix checks the kernels.
 
+static bool x86_target_test_templates(void)
+{
+    bool passed = x86_encoder_initialize();
+    uint32_t checks = 0;
+    for (uint32_t form = 0; passed && form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    {
+        X86TemplateEntry expected;
+        memset(&expected, 0xa5, sizeof(expected));
+        const bool ready = build_mode_template(form, X86_ENCODER_MODE_64, &expected.template);
+        memcpy(expected.layout, expected.template.layout, sizeof(expected.layout));
+        memcpy(expected.bytes, expected.template.bytes, sizeof(expected.bytes));
+        passed &= ready && memcmp(&expected, &x86_templates[form], sizeof(expected)) == 0;
+        passed &= memcmp(&expected, &x86_templates[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
+        checks += 2;
+    }
+    printf("target complete default templates against direct builder: %s (%u entries, all byte/layout halves and fixups)\n", passed ? "pass" : "FAIL", checks);
+    return passed;
+}
+
 static bool x86_target_test_matrix(void)
 {
     uint8_t scalar[X86_FORM_COUNT];
