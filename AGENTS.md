@@ -1117,9 +1117,11 @@ there at a time, so everything takes one lock:
   which no `*_test.c` matches: tests don't change what the samples measure).
   Keep the pattern to what the samples measure: a module's own decision
   campaign (#336's binding handoff) has a module of its own, not the whole
-  checker's. The same holds for the linkers' baselines and floors, mold's and
-  wild's foreign phases, and the first-party performance readers'
-  qualification (`tools/performance`, `docs/performance`, their pin). A push
+  checker's. A step gated so also runs on the pull request that changes it.
+  The same holds for the linkers' baselines and floors, mold's and wild's
+  foreign phases, and the first-party performance readers' qualification
+  (`tools/performance`, `docs/performance`, `web/perf`, their pin; a change to
+  `docs/performance` alone runs the job for it). A push
   to main runs none of them: its pull request's run measured what it changes,
   and the full set took the job past its 10 minutes. The daily and dispatched
   runs have 25 minutes.
