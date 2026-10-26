@@ -152,7 +152,10 @@ prototype's parameters, and the tags its list declares, end at its `)`. A
 definition's are declared again at its body's opening, as clang has them, since
 the body's scope is theirs too (C11 6.2.1p4): in
 `int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
-parameter's (#435).
+parameter's (#435). A prototype in a constant expression's type name (a
+typeof's, a builtin's operand) ends its tags at its `)` as well, in the
+evaluator's binding walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s
+`struct Z` isn't a later one's (#437).
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from

@@ -2729,6 +2729,50 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // A prototype's tag in a constant expression's type name (a typeof's, a builtin's operand) ends at the
+        // prototype's `)` too (#437).
+        {
+            "typeof's prototype tag in a parameter list ends with the prototype",
+            "int f(typeof(int (*)(struct Z *)) g, struct Z *z) { return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "file-scope typeof's prototype tag ends with the prototype",
+            "typeof(int (*)(struct Z *)) g;\nstruct Z *z;\nint f(void) { return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "block-scope typeof's prototype tag ends with the prototype",
+            "int f(void) {\n typeof(int (*)(struct Z *)) h = 0;\n struct Z *z = 0;\n return h(z); }\n",
+            true,
+            false
+        },
+        {
+            "typeof's prototype tag in a parameter list doesn't reach the body",
+            "int f(typeof(int (*)(struct Z *)) g) {\n struct Z *z = 0;\n return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "typeof's prototype names the visible tag",
+            "struct Z;\ntypeof(int (*)(struct Z *)) g;\nstruct Z *z;\nint f(void) { return g(z); }\n",
+            false,
+            false
+        },
+        {
+            "builtin operands' prototype tags are each their own",
+            "_Static_assert(!__builtin_types_compatible_p(int (*)(struct Y *), int (*)(struct Y *)), \"distinct\");\n",
+            false,
+            false
+        },
+        {
+            "nested prototype's tag in a typeof ends with each prototype",
+            "typeof(int (*)(int (*)(struct Z *), struct Z *)) g;\nint h(struct Z *);\nint f(void) { return g(h, 0); }\n",
+            true,
+            false
+        },
     };
     enum
     {
