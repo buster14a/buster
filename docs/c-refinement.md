@@ -770,6 +770,22 @@ against 0.286-0.295 ms whole.
   earlier: 0.02 ms slower (1.456-1.464 against 1.433-1.441 ms).
 - **Only the columns prefetched**, not the source: the refine phase 4% slower
   in the one round that ran (1.72 against 1.66 ms).
+- **Three slots of 20 bytes** (a 16-byte prefix and the id, #453), so that
+  spellings of up to 15 bytes need no compare with their record (92.0% of
+  `sqlite3.c`'s identifiers and 82.6% of the C library's, against 85.7% and
+  73.3%). Against main on the 9700X, with a control build of the same code in
+  the old layout within 0.9% of main: `refine_tokens_64` 5.75 against 5.53
+  cycles per token on `sqlite3.c` (+4.0%) and 11.31 against 10.98 on the C
+  library (+3.0%), back to back and after scalar work alike, and the
+  preprocessor's refine phase 1.462 against 1.393 ms on `sqlite3.c` (+5.0%) and
+  5.634 against 5.128 on `main.c` (+9.9%), five rounds. A bucket of three slots
+  fills sooner: at the same spellings the table has three quarters of the slots
+  and grows at three quarters of the ids, so that more probes go on to the next
+  bucket's line (`sqlite3.c`'s table, which doesn't grow, has three times as
+  many full buckets), and each probe's key takes a `vpermd`. On the C library
+  the instructions per token went down 1.4% (fewer record compares) and the
+  cycles up
+  ([the record](https://github.com/buster14a/buster-performance/tree/1d32d17ef188138d74660f92a14466884e2bd717/docs/measurements/intern-wide-slots-453-2026-10-26)).
 
 ## Correctness
 
@@ -902,10 +918,6 @@ the 360 files it lists for `main.c` with the compiler's options.
 
 - **The table across translation units** (#152): a process that compiles many
   of them keeps the table and its pages, warm, and pays its first inserts once.
-- **Fewer candidates for 2b.** Three slots of 20 bytes (a 16-byte prefix) would
-  identify spellings of up to 15 bytes by their prefix (92% of `sqlite3.c`'s,
-  83% of the C library's, against 86% and 73%), for two more instructions per
-  probe and a fourth fewer slots per bucket.
 - **Interning from several threads** (#150) is `docs/c-files.md`'s: each lane
   refines into a table of its own, and a merge gives the shared table's ids in
   the order of first occurrences, so that they don't depend on the lanes.
