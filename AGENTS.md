@@ -4526,8 +4526,10 @@ must truncate and leave the control word as it was; and
 `--count` random programs of statements writing long doubles and what converts
 from them (integers, floats, doubles, compares) from inputs of every class,
 through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
-both ways and calls of C functions, against the check's own stack machine. The
-programs must reach every kind and conversion of the class. Then the `int128`
+both ways, calls of C functions and frame objects (`LOCAL`, `STORE_LOCAL` and
+`SET_LOCAL` of the class on objects of 16 bytes and more), against the check's
+own stack machine. The programs that compiled, ran and matched must reach every
+kind and conversion of the class. Then the `int128`
 check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
 U128, against clang's `__int128`: each break of the classes' rules refused at
 its entry; a stack of a memory class's values up to the last 16-byte slot,
@@ -4535,8 +4537,9 @@ which runs, and one past it, which both paths refuse (for long double too);
 functions of 128-bit parameters and results in register pairs and on the
 stack, called from C, and calling C; each class's compares and shifts on every
 pair of ten boundary values, against C's own operators too; and `--count`
-random programs over every kind of the classes, shifts by constant and variable
-counts and conversions to and from the other integers, under live values where
+random programs over every kind of the classes, frame objects as the x87
+check's, shifts by constant and variable counts and conversions to and from the
+other integers, under live values where
 `MUL` saves rax and rdx and a shift rcx. Any error but a random program's depth
 past the slots fails it, and only the entries that ran in the programs both
 paths compiled, that ran and matched the check's stack machine count toward its
