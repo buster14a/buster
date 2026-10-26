@@ -132,11 +132,13 @@ have them (`predefines_unwind_tables`, the rule `__GCC_HAVE_DWARF2_CFI_ASM`
 follows): asynchronous ones by default, unless `-ffreestanding`, the last of
 `-fasynchronous-unwind-tables` and `-fno-asynchronous-unwind-tables` saying
 otherwise; synchronous ones with `-funwind-tables`; and with `-fexceptions`, `-g`
-or `-gmodules`. With debug information alone, clang writes the same call frame
-information to `.debug_frame`, which only debuggers read; the driver writes it
-to `.eh_frame` either way, which debuggers read too, and so does the runtime's
-unwinder (`backtrace()`, a C++ exception or a thread's cancellation passing
-through the function).
+or `-gmodules`. Where clang's tables would be off, the driver's are a superset of
+clang's call frame information: with debug information alone, clang writes it to
+`.debug_frame`, which only debuggers read, and the driver to `.eh_frame`, which
+debuggers read too, and so does the runtime's unwinder (`backtrace()`, a C++
+exception or a thread's cancellation passing through the function); with
+`-fexceptions` alone, clang gives an FDE only to a function that may unwind (one
+that calls), and the driver to every function.
 
 `check_program_emit` (with `unwind`) reads each function's published frame
 after branch sizing, its bodies' then its helpers' (a frame that isn't its
@@ -175,9 +177,10 @@ gets the analyzer's descriptor on every generated function the analyzer takes
 through the GOT and TLS), and on those with variable-length arrays, which have a
 frame pointer and which the analyzer refuses, its prologue's and epilogue's
 records' ends, their bodies leaving RBP alone; then every mask's fixture with
-and without a frame pointer at every kind of reservation, 34 broken prologues,
-epilogues, frames and inputs, refused with the descriptor left alone, and the
-guarded tails.
+and without a frame pointer at every kind of reservation, 34 changes to
+prologues, epilogues, frames and inputs (33 refused with the descriptor left
+alone; a frame pointer's reservation the producer doesn't publish, which its CFA
+doesn't follow, taken), and the guarded tails.
 
 `test-unwind --cross-check` constructs two actual Tier0 functions, including a
 loop with a stack local and all six nonvolatile saves, then again with a leaf
