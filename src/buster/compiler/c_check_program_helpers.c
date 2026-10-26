@@ -52,6 +52,8 @@ struct CheckProgramHelpers
     uint32_t use_count;
     CheckProgramStatus status;
     uint32_t token;
+    // What an UNSUPPORTED status lacks, or NULL.
+    const char* reason;
 };
 
 static uint32_t check_program_helper_key(CBuiltinId id, uint64_t bytes)
@@ -146,8 +148,13 @@ static CheckProgramStatus check_program_helper_atomic(const CheckBuiltinAtomicEf
     const bool load = id == CBUILTIN_ATOMIC_LOAD_N;
     const bool store = id == CBUILTIN_ATOMIC_STORE_N;
     const uint32_t parameters = load ? 2 : store ? 3 : id == CBUILTIN_SYNC_SYNCHRONIZE ? 0 : 1;
-    if (effect->runtime_builtin != id || !effect->compiler_barrier ||
-        effect->evaluated_operands != (UINT32_C(1) << parameters) - 1 || effect->rmw)
+    if (check_builtin_atomic_rmw_rule(id) != NULL && effect->runtime_builtin == id && effect->compiler_barrier)
+    {
+        // The read/modify/write leaves (c_builtin_atomic_rmw_helpers.c) have no planned signature here yet.
+        status = CHECK_PROGRAM_UNSUPPORTED;
+    }
+    else if (effect->runtime_builtin != id || !effect->compiler_barrier ||
+             effect->evaluated_operands != (UINT32_C(1) << parameters) - 1 || effect->rmw)
     {
         status = CHECK_PROGRAM_INVALID;
     }
@@ -309,6 +316,8 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                     else
                     {
                         result->status = check_program_helper_atomic(stream->atomics + atomic, id, &helper);
+                        result->reason = result->status == CHECK_PROGRAM_UNSUPPORTED && check_builtin_atomic_rmw_rule(id) != NULL ?
+                                         "atomic read-modify-write builtins" : NULL;
                     }
                 }
                 if (result->status == CHECK_PROGRAM_OK && !folded)
@@ -416,6 +425,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     {
         const CheckProgramStatus status = result->status;
         const uint32_t token = result->token;
+        const char* reason = result->reason;
         if (output != 0)
         {
             arena_pop_to(output, mark);
@@ -423,6 +433,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
         *result = (CheckProgramHelpers){
             .status = status,
             .token = token,
+            .reason = reason,
         };
     }
     if (scratch != 0)

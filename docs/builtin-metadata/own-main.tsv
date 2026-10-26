@@ -7,10 +7,11 @@
 # input-x86-sha256=821ca469485d5079920df9d695781a8bdad6576739be0d3ad8fb52c6bca91b03
 # input-x86_64-sha256=bc85a6cefc1bb94b25f73a2158cbe3ddc1c3d3ce82c9d170e5ca2becd8818628
 # input-version-sha256=2cf74bd66f8958e1936307158bec163fac911e30f4534bab376dd2dff067d5fd
-# input-names-sha256=60e91257bf6370569f2f1f7df385275e3bea6f8890fb6c2b335e001b51917c2b
-# rows=1506
+# input-names-sha256=553724b3d9830b644788469f3d94ed5695b046027c308b247aef17fc85096eaf
+# rows=1534
 name	type_encoding	attributes	features	header_token	language_token	shard	source_line	source_ordinal	custom_typechecking	constant_evaluable	record_kind	semantic_constraints
 __builtin_add_overflow	b.	ntE		NO_HEADER	ALL_LANGUAGES	generic	4013	126	1	1	table-record	unmodeled
+__builtin_assume	vb	nE		NO_HEADER	ALL_LANGUAGES	generic	4048	161	0	1	table-record	unmodeled
 __builtin_bit_cast				NO_HEADER	UNMODELED	special	0	0	0	0	parser-special-form-gap	unmodeled
 __builtin_bswap16	UsUs	ncE		NO_HEADER	ALL_LANGUAGES	generic	4078	191	0	1	table-record	unmodeled
 __builtin_bswap32	UZiUZi	ncE		NO_HEADER	ALL_LANGUAGES	generic	4079	192	0	1	table-record	unmodeled
@@ -64,6 +65,8 @@ __builtin_ia32_aesenclast512	V8OiV8OiV8Oi	ncV:512:	avx512f,vaes	NO_HEADER	ALL_LA
 __builtin_ia32_aesencwide128kl_u8	UcV2Oi*V2OiC*vC*	nV:128:	kl,widekl	NO_HEADER	ALL_LANGUAGES	x86	4886	73	0	0	table-record	unmodeled
 __builtin_ia32_aesencwide256kl_u8	UcV2Oi*V2OiC*vC*	nV:128:	kl,widekl	NO_HEADER	ALL_LANGUAGES	x86	4887	74	0	0	table-record	unmodeled
 __builtin_ia32_aesimc128	V2OiV2Oi	ncV:128:	aes	NO_HEADER	ALL_LANGUAGES	x86	4888	75	0	0	table-record	unmodeled
+__builtin_ia32_alignd512	V16iV16iV16iIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	4892	79	0	1	table-record	unmodeled
+__builtin_ia32_alignq512	V8OiV8OiV8OiIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	4895	82	0	1	table-record	unmodeled
 __builtin_ia32_aor32	vv*Si	n	raoint	NO_HEADER	ALL_LANGUAGES	x86	4896	83	0	0	table-record	unmodeled
 __builtin_ia32_aor64	vv*SOi	n	raoint	NO_HEADER	ALL_LANGUAGES	x86_64	515	13	0	0	table-record	unmodeled
 __builtin_ia32_axor32	vv*Si	n	raoint	NO_HEADER	ALL_LANGUAGES	x86	4897	84	0	0	table-record	unmodeled
@@ -328,11 +331,15 @@ __builtin_ia32_expandsi128_mask	V4iV4iV4iUc	ncEV:128:	avx512vl	NO_HEADER	ALL_LAN
 __builtin_ia32_expandsi256_mask	V8iV8iV8iUc	ncEV:256:	avx512vl	NO_HEADER	ALL_LANGUAGES	x86	5189	376	0	1	table-record	unmodeled
 __builtin_ia32_expandsi512_mask	V16iV16iV16iUs	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5190	377	0	1	table-record	unmodeled
 __builtin_ia32_extracti32x4_mask	V4iV16iIiV4iUc	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5199	386	0	1	table-record	unmodeled
+__builtin_ia32_extracti64x4_mask	V4OiV8OiIiV4OiUc	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5203	390	0	1	table-record	unmodeled
 __builtin_ia32_extrq	V2OiV2OiV16c	ncV:128:	sse4a	NO_HEADER	ALL_LANGUAGES	x86	5204	391	0	0	table-record	unmodeled
 __builtin_ia32_fxrstor	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86	5234	421	0	0	table-record	unmodeled
 __builtin_ia32_fxrstor64	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86_64	533	31	0	0	table-record	unmodeled
 __builtin_ia32_fxsave	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86	5235	422	0	0	table-record	unmodeled
 __builtin_ia32_fxsave64	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86_64	534	32	0	0	table-record	unmodeled
+__builtin_ia32_gatherdiv8di	V8OiV8OivC*V8OiUcIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5261	448	0	0	table-record	unmodeled
+__builtin_ia32_gathersiv16si	V16iV16ivC*V16iUsIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5275	462	0	0	table-record	unmodeled
+__builtin_ia32_gathersiv8di	V8OiV8OivC*V8iUcIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5273	460	0	0	table-record	unmodeled
 __builtin_ia32_getexppd128_mask	V2dV2dV2dUc	ncV:128:	avx512vl	NO_HEADER	ALL_LANGUAGES	x86	5276	463	0	0	table-record	unmodeled
 __builtin_ia32_getexppd256_mask	V4dV4dV4dUc	ncV:256:	avx512vl	NO_HEADER	ALL_LANGUAGES	x86	5277	464	0	0	table-record	unmodeled
 __builtin_ia32_getexppd512_mask	V8dV8dV8dUcIi	ncV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5278	465	0	0	table-record	unmodeled
@@ -355,6 +362,8 @@ __builtin_ia32_hsubps	V4fV4fV4f	ncEV:128:	sse3	NO_HEADER	ALL_LANGUAGES	x86	5306	
 __builtin_ia32_hsubps256	V8fV8fV8f	ncEV:256:	avx	NO_HEADER	ALL_LANGUAGES	x86	5307	494	0	1	table-record	unmodeled
 __builtin_ia32_incsspd	vUi	n	shstk	NO_HEADER	ALL_LANGUAGES	x86	5308	495	0	0	table-record	unmodeled
 __builtin_ia32_incsspq	vUOi	n	shstk	NO_HEADER	ALL_LANGUAGES	x86_64	535	33	0	0	table-record	unmodeled
+__builtin_ia32_insert128i256	V4OiV4OiV2OiIi	ncEV:256:	avx2	NO_HEADER	ALL_LANGUAGES	x86	5309	496	0	1	table-record	unmodeled
+__builtin_ia32_inserti32x4	V16iV16iV4iIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5316	503	0	1	table-record	unmodeled
 __builtin_ia32_inserti64x4	V8OiV8OiV4OiIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5321	508	0	1	table-record	unmodeled
 __builtin_ia32_insertq	V2OiV2OiV2Oi	ncV:128:	sse4a	NO_HEADER	ALL_LANGUAGES	x86	5323	510	0	0	table-record	unmodeled
 __builtin_ia32_invpcid	vUiv*	nc	invpcid	NO_HEADER	ALL_LANGUAGES	x86	5325	512	0	0	table-record	unmodeled
@@ -390,6 +399,8 @@ __builtin_ia32_kortestzdi	iUOiUOi	ncE	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	5354	
 __builtin_ia32_kortestzhi	iUsUs	ncE	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5355	542	0	1	table-record	unmodeled
 __builtin_ia32_kortestzqi	iUcUc	ncE	avx512dq	NO_HEADER	ALL_LANGUAGES	x86	5356	543	0	1	table-record	unmodeled
 __builtin_ia32_kortestzsi	iUiUi	ncE	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	5357	544	0	1	table-record	unmodeled
+__builtin_ia32_kshiftlidi	UOiUOiIUi	ncE	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	5358	545	0	1	table-record	unmodeled
+__builtin_ia32_kshiftlihi	UsUsIUi	ncE	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5359	546	0	1	table-record	unmodeled
 __builtin_ia32_ktestcdi	iUOiUOi	ncE	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	5366	553	0	1	table-record	unmodeled
 __builtin_ia32_ktestchi	iUsUs	ncE	avx512dq	NO_HEADER	ALL_LANGUAGES	x86	5367	554	0	1	table-record	unmodeled
 __builtin_ia32_ktestcqi	iUcUc	ncE	avx512dq	NO_HEADER	ALL_LANGUAGES	x86	5368	555	0	1	table-record	unmodeled
@@ -529,6 +540,7 @@ __builtin_ia32_packusdw512	V32sV16iV16i	ncEV:512:	avx512bw	NO_HEADER	ALL_LANGUAG
 __builtin_ia32_packuswb128	V16cV8sV8s	ncEV:128:	sse2	NO_HEADER	ALL_LANGUAGES	x86	5511	698	0	1	table-record	unmodeled
 __builtin_ia32_packuswb256	V32cV16sV16s	ncEV:256:	avx2	NO_HEADER	ALL_LANGUAGES	x86	5512	699	0	1	table-record	unmodeled
 __builtin_ia32_packuswb512	V64cV32sV32s	ncEV:512:	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	5513	700	0	1	table-record	unmodeled
+__builtin_ia32_pause	v	n		NO_HEADER	ALL_LANGUAGES	x86	5517	704	0	0	table-record	unmodeled
 __builtin_ia32_pavgb128	V16UcV16UcV16Uc	ncEV:128:	sse2	NO_HEADER	ALL_LANGUAGES	x86	5518	705	0	1	table-record	unmodeled
 __builtin_ia32_pavgb256	V32UcV32UcV32Uc	ncEV:256:	avx2	NO_HEADER	ALL_LANGUAGES	x86	5519	706	0	1	table-record	unmodeled
 __builtin_ia32_pavgb512	V64UcV64UcV64Uc	ncEV:512:	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	5520	707	0	1	table-record	unmodeled
@@ -699,6 +711,7 @@ __builtin_ia32_pmuludq256	V4OiV8iV8i	ncEV:256:	avx2	NO_HEADER	ALL_LANGUAGES	x86	
 __builtin_ia32_pmuludq512	V8OiV16iV16i	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5709	896	0	1	table-record	unmodeled
 __builtin_ia32_prefetchi	vvC*Ui	nc	prefetchi	NO_HEADER	ALL_LANGUAGES	x86_64	546	44	0	0	table-record	unmodeled
 __builtin_ia32_prefetchrs	vvC*	nc	movrs	NO_HEADER	ALL_LANGUAGES	x86	5710	897	0	0	table-record	unmodeled
+__builtin_ia32_prold512	V16iV16iIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5713	900	0	1	table-record	unmodeled
 __builtin_ia32_prord512	V16iV16iIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5719	906	0	1	table-record	unmodeled
 __builtin_ia32_psadbw128	V2OiV16UcV16Uc	ncEV:128:	sse2	NO_HEADER	ALL_LANGUAGES	x86	5723	910	0	1	table-record	unmodeled
 __builtin_ia32_psadbw256	V4OiV32UcV32Uc	ncEV:256:	avx2	NO_HEADER	ALL_LANGUAGES	x86	5724	911	0	1	table-record	unmodeled
@@ -889,6 +902,9 @@ __builtin_ia32_scalefps512_mask	V16fV16fV16fV16fUsIi	ncV:512:	avx512f	NO_HEADER	
 __builtin_ia32_scalefsd_round_mask	V2dV2dV2dV2dUcIi	ncV:128:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5961	1148	0	0	table-record	unmodeled
 __builtin_ia32_scalefsh_round_mask	V8xV8xV8xV8xUcIi	ncV:128:	avx512fp16	NO_HEADER	ALL_LANGUAGES	x86	5962	1149	0	0	table-record	unmodeled
 __builtin_ia32_scalefss_round_mask	V4fV4fV4fV4fUcIi	ncV:128:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5963	1150	0	0	table-record	unmodeled
+__builtin_ia32_scatterdiv16si	vv*UcV8OiV8iIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5975	1162	0	0	table-record	unmodeled
+__builtin_ia32_scatterdiv8di	vv*UcV8OiV8OiIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5971	1158	0	0	table-record	unmodeled
+__builtin_ia32_scattersiv16si	vv*UsV16iV16iIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5987	1174	0	0	table-record	unmodeled
 __builtin_ia32_selectb_128	V16cUsV16cV16c	ncEV:128:	avx512bw,avx512vl	NO_HEADER	ALL_LANGUAGES	x86	5988	1175	0	1	table-record	unmodeled
 __builtin_ia32_selectb_256	V32cUiV32cV32c	ncEV:256:	avx512bw,avx512vl	NO_HEADER	ALL_LANGUAGES	x86	5989	1176	0	1	table-record	unmodeled
 __builtin_ia32_selectb_512	V64cUOiV64cV64c	ncEV:512:	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	5990	1177	0	1	table-record	unmodeled
@@ -926,6 +942,7 @@ __builtin_ia32_sha1nexte	V4iV4iV4i	ncV:128:	sha	NO_HEADER	ALL_LANGUAGES	x86	6021
 __builtin_ia32_sha256msg1	V4iV4iV4i	ncV:128:	sha	NO_HEADER	ALL_LANGUAGES	x86	6023	1210	0	0	table-record	unmodeled
 __builtin_ia32_sha256msg2	V4iV4iV4i	ncV:128:	sha	NO_HEADER	ALL_LANGUAGES	x86	6024	1211	0	0	table-record	unmodeled
 __builtin_ia32_sha256rnds2	V4iV4iV4iV4i	ncV:128:	sha	NO_HEADER	ALL_LANGUAGES	x86	6025	1212	0	0	table-record	unmodeled
+__builtin_ia32_shuf_i32x4	V16iV16iV16iIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	6030	1217	0	1	table-record	unmodeled
 __builtin_ia32_shuf_i64x2	V8OiV8OiV8OiIi	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	6032	1219	0	1	table-record	unmodeled
 __builtin_ia32_slwpcb	v*	n	lwp	NO_HEADER	ALL_LANGUAGES	x86	6040	1227	0	0	table-record	unmodeled
 __builtin_ia32_sqrtsd_round_mask	V2dV2dV2dV2dUcIi	ncV:128:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	6044	1231	0	0	table-record	unmodeled
@@ -994,8 +1011,13 @@ __builtin_ia32_tpause	UcUiUiUi	n	waitpkg	NO_HEADER	ALL_LANGUAGES	x86	6083	1270	0
 __builtin_ia32_tzcnt_u16	UsUs	ncE		NO_HEADER	ALL_LANGUAGES	x86	6084	1271	0	1	table-record	unmodeled
 __builtin_ia32_tzcnt_u32	UiUi	ncE		NO_HEADER	ALL_LANGUAGES	x86	6085	1272	0	1	table-record	unmodeled
 __builtin_ia32_tzcnt_u64	UOiUOi	ncE		NO_HEADER	ALL_LANGUAGES	x86_64	618	116	0	1	table-record	unmodeled
+__builtin_ia32_ucmpb128_mask	UsV16cV16cIiUs	ncEV:128:	avx512vl,avx512bw	NO_HEADER	ALL_LANGUAGES	x86	6086	1273	0	1	table-record	unmodeled
+__builtin_ia32_ucmpb256_mask	UiV32cV32cIiUi	ncEV:256:	avx512vl,avx512bw	NO_HEADER	ALL_LANGUAGES	x86	6087	1274	0	1	table-record	unmodeled
 __builtin_ia32_ucmpb512_mask	UOiV64cV64cIiUOi	ncEV:512:	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	6088	1275	0	1	table-record	unmodeled
+__builtin_ia32_ucmpd256_mask	UcV8iV8iIiUc	ncEV:256:	avx512vl	NO_HEADER	ALL_LANGUAGES	x86	6090	1277	0	1	table-record	unmodeled
+__builtin_ia32_ucmpd512_mask	UsV16iV16iIiUs	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	6091	1278	0	1	table-record	unmodeled
 __builtin_ia32_ucmpq512_mask	UcV8OiV8OiIiUc	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	6094	1281	0	1	table-record	unmodeled
+__builtin_ia32_ucmpw512_mask	UiV32sV32sIiUi	ncEV:512:	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	6097	1284	0	1	table-record	unmodeled
 __builtin_ia32_ucomieq	iV4fV4f	cnV:128:	sse	NO_HEADER	ALL_LANGUAGES	x86	6098	1285	0	0	table-record	unmodeled
 __builtin_ia32_ucomige	iV4fV4f	cnV:128:	sse	NO_HEADER	ALL_LANGUAGES	x86	6099	1286	0	0	table-record	unmodeled
 __builtin_ia32_ucomigt	iV4fV4f	cnV:128:	sse	NO_HEADER	ALL_LANGUAGES	x86	6100	1287	0	0	table-record	unmodeled
@@ -1192,7 +1214,10 @@ __builtin_ia32_vcvtw2ph512_mask	V32xV32sV32xUiIi	ncV:512:	avx512fp16	NO_HEADER	A
 __builtin_ia32_vdpphps128	V4fV4fV8xV8x	ncV:128:	avx10.2	NO_HEADER	ALL_LANGUAGES	x86	6345	1532	0	0	table-record	unmodeled
 __builtin_ia32_vdpphps256	V8fV8fV16xV16x	ncV:256:	avx10.2	NO_HEADER	ALL_LANGUAGES	x86	6346	1533	0	0	table-record	unmodeled
 __builtin_ia32_vdpphps512	V16fV16fV32xV32x	ncV:512:	avx10.2	NO_HEADER	ALL_LANGUAGES	x86	6347	1534	0	0	table-record	unmodeled
+__builtin_ia32_vec_ext_v16qi	cV16cIi	ncEV:128:	sse4.1	NO_HEADER	ALL_LANGUAGES	x86	6355	1542	0	1	table-record	unmodeled
 __builtin_ia32_vec_ext_v4di	OiV4OiIi	ncEV:256:	avx	NO_HEADER	ALL_LANGUAGES	x86_64	639	137	0	1	table-record	unmodeled
+__builtin_ia32_vec_ext_v4si	iV4iIi	ncEV:128:	sse2	NO_HEADER	ALL_LANGUAGES	x86	6351	1538	0	1	table-record	unmodeled
+__builtin_ia32_vec_set_v4si	V4iV4iiIi	ncEV:128:	sse4.1	NO_HEADER	ALL_LANGUAGES	x86	6358	1545	0	1	table-record	unmodeled
 __builtin_ia32_vextractf128_pd256	V2dV4dIi	ncEV:256:	avx	NO_HEADER	ALL_LANGUAGES	x86	6364	1551	0	1	table-record	unmodeled
 __builtin_ia32_vextractf128_ps256	V4fV8fIi	ncEV:256:	avx	NO_HEADER	ALL_LANGUAGES	x86	6365	1552	0	1	table-record	unmodeled
 __builtin_ia32_vextractf128_si256	V4iV8iIi	ncEV:256:	avx	NO_HEADER	ALL_LANGUAGES	x86	6366	1553	0	1	table-record	unmodeled
@@ -1475,6 +1500,7 @@ __builtin_ia32_wrussd	vUiv*	n	shstk	NO_HEADER	ALL_LANGUAGES	x86	6714	1901	0	0	ta
 __builtin_ia32_wrussq	vUOiv*	n	shstk	NO_HEADER	ALL_LANGUAGES	x86_64	660	158	0	0	table-record	unmodeled
 __builtin_ia32_xbegin	i	n	rtm	NO_HEADER	ALL_LANGUAGES	x86	6716	1903	0	0	table-record	unmodeled
 __builtin_ia32_xend	v	n	rtm	NO_HEADER	ALL_LANGUAGES	x86	6717	1904	0	0	table-record	unmodeled
+__builtin_ia32_xgetbv	UOiUi	n	xsave	NO_HEADER	ALL_LANGUAGES	x86	6718	1905	0	0	table-record	unmodeled
 __builtin_ia32_xresldtrk	v	n	tsxldtrk	NO_HEADER	ALL_LANGUAGES	x86	6719	1906	0	0	table-record	unmodeled
 __builtin_ia32_xrstor	vv*UOi	n	xsave	NO_HEADER	ALL_LANGUAGES	x86	6720	1907	0	0	table-record	unmodeled
 __builtin_ia32_xrstor64	vv*UOi	n	xsave	NO_HEADER	ALL_LANGUAGES	x86_64	661	159	0	0	table-record	unmodeled
@@ -1514,5 +1540,7 @@ __builtin_rotateright64	UWiUWiUWi	ncE		NO_HEADER	ALL_LANGUAGES	generic	5089	1202
 __builtin_rotateright8	UcUcUc	ncE		NO_HEADER	ALL_LANGUAGES	generic	5086	1199	0	1	table-record	unmodeled
 __builtin_shufflevector	v.	nctE		NO_HEADER	ALL_LANGUAGES	generic	5144	1257	1	1	table-record	unmodeled
 __builtin_sub_overflow	b.	ntE		NO_HEADER	ALL_LANGUAGES	generic	5362	1475	1	1	table-record	unmodeled
+__builtin_unpredictable	LiLi	nc		NO_HEADER	ALL_LANGUAGES	generic	5522	1635	0	0	table-record	unmodeled
 __builtin_unreachable	v	nr		NO_HEADER	ALL_LANGUAGES	generic	5523	1636	0	0	table-record	unmodeled
 __builtin_va_list				NO_HEADER	UNMODELED	special	0	0	0	0	predefined-type-gap	unmodeled
+__rdtsc	UOi			NO_HEADER	ALL_LANGUAGES	x86	4828	19	0	0	table-record	unmodeled

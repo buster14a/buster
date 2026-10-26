@@ -265,14 +265,27 @@ static void check_builtin_test_constraints(CheckBuiltinTest* test, TypeTable* ta
     CheckBuiltinResult result = check_builtin_test_action(test, table, action);
     check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INTEGER_REQUIRED && result.action.diagnostic_operand == 0,
                               "generic overflow rejects floating input instead of converting it");
+    // Operands and destinations of 65 to 128 bits are runtime actions with their store, never folded by the 64-bit
+    // fold, even when constant; wider ones are unsupported.
     action.operands[0] = check_test_integer(BUSTER_TYPE_UINT128, (unsigned __int128)1 << 100);
     result = check_builtin_test_action(test, table, action);
-    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_UNSUPPORTED && result.fold_status == CBUILTIN_UNSUPPORTED && !result.store,
-                              "wide overflow input rejects explicitly before descriptor truncation");
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == BUSTER_CHECK_BUILTIN_NOT_CONSTANT && result.store &&
+                                  result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.store_value.constant_kind == CHECK_CONSTANT_NONE,
+                              "wide overflow input is a runtime action, not truncated into the fold");
     action.operands[0] = check_test_integer(BUSTER_TYPE_INT, 1);
     action.operands[2].type = type_pointer(table, type_bit_int(table, 65, true));
     result = check_builtin_test_action(test, table, action);
-    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_UNSUPPORTED && !result.store, "wide overflow destination is unsupported");
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == BUSTER_CHECK_BUILTIN_NOT_CONSTANT && result.store,
+                              "wide overflow destination is a runtime action");
+    action.operands[2].type = type_pointer(table, BUSTER_TYPE_INT128);
+    result = check_builtin_test_action(test, table, action);
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == BUSTER_CHECK_BUILTIN_NOT_CONSTANT && result.store &&
+                                  result.store_value.type == BUSTER_TYPE_INT128,
+                              "__int128 overflow destination is a runtime action");
+    action.operands[2].type = type_pointer(table, type_bit_int(table, 129, true));
+    result = check_builtin_test_action(test, table, action);
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_UNSUPPORTED && result.action.diagnostic_operand == 2 && !result.store,
+                              "overflow destination past 128 bits is unsupported");
     action.operands[2].type = type_pointer(table, BUSTER_TYPE_INT);
     for (uint32_t count = 0; count <= 4; count += 1)
     {

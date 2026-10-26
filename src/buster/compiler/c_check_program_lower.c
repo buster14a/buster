@@ -3827,6 +3827,7 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     {
         lowered->status = lowered->helpers.status;
         lowered->token = lowered->helpers.token;
+        lowered->reason = lowered->helpers.reason;
         valid = false;
     }
     const uint32_t errno_calls = valid ? check_lower_runtime_symbols(lowered, program) : 0;

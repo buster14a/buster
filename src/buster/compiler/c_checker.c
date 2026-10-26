@@ -611,7 +611,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
         op = CHECK_OP_BUILTIN_QUERY;
     }
     else if (id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N || id == CBUILTIN_SYNC_SYNCHRONIZE ||
-             id == CBUILTIN_ATOMIC_THREAD_FENCE || id == CBUILTIN_ATOMIC_SIGNAL_FENCE)
+             id == CBUILTIN_ATOMIC_THREAD_FENCE || id == CBUILTIN_ATOMIC_SIGNAL_FENCE || check_builtin_atomic_rmw_rule(id) != NULL)
     {
         op = CHECK_OP_BUILTIN_ATOMIC;
     }
@@ -1007,7 +1007,7 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
         .typed_call = *result,
         .reachability = call->reachability,
         // Exact constraint-scope attestation is supplied by the frozen catalogue adapter below.
-        .name_in_scope = builtin_intrinsic_own_main_x86_in_scope(call->info->name, call->info->name_length),
+        .name_in_scope = builtin_intrinsic_own_main_prototype_in_scope(call->info->name, call->info->name_length),
         .constant_evaluated_context = call->constant_evaluated_context,
         .runtime_diagnostic_suppressed = call->runtime_diagnostic_suppressed,
     };
@@ -1200,7 +1200,22 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_known = witness != NULL && witness->alignment_known,
         };
         CheckBuiltinAtomicResult checked;
-        check_builtin_atomic(types, &input, &checked, 1);
+        if (check_builtin_atomic_rmw_rule(input.id) != NULL)
+        {
+            // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what
+            // the effect records.
+            const CheckBuiltinAtomicRmwAction rmw = {
+                .source = input,
+                .order_ice_arguments = check_builtin_atomic_rmw_order_ice(input.id, action->arguments, action->argument_count),
+            };
+            CheckBuiltinAtomicRmwResult full;
+            check_builtin_atomic_rmw(types, &rmw, &full, 1);
+            checked = full.atomic;
+        }
+        else
+        {
+            check_builtin_atomic(types, &input, &checked, 1);
+        }
         *result = checked.action;
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 6; i += 1)
