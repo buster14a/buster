@@ -106,7 +106,14 @@ The admitted families are:
   `add/sub/mul/div` on `ps/pd`, `xorps/xorpd/pxor/paddd/psubd`;
 - the corresponding VEX forms and `vzeroupper`; 512-bit AVX-512F packed float
   arithmetic/moves, `vpaddd/vpsubd/vpxord/vmovdqa32/vmovdqu32`, with destination
-  masks/zeroing and supported `{1to8}`/`{1to16}` memory broadcasts.
+  masks/zeroing and supported `{1to8}`/`{1to16}` memory broadcasts;
+- the processor-state instructions C's inline assembly uses (#147): `cpuid`,
+  `xgetbv`, `xchg`, `bswap`, the x87's `fnstcw/fldcw/fnstsw/fnclex`,
+  `stmxcsr/ldmxcsr`, and SSE2's `pcmpeqd` in its legacy forms. An `xchg` takes
+  its memory operand first in Intel order, as the catalogue has it. The operand
+  grammar has no accumulator role, so `fnstsw` takes memory, not `%ax`, and an
+  `xchg` of the accumulator with another register takes the two-byte form,
+  where GNU as takes the one-byte one.
 
 Only forms covered by the frontend's operand-role grammar are admitted.
 Missing families, rounding/SAE, explicit instruction-prefix syntax, far
@@ -196,6 +203,31 @@ The default x86-64 initial CFA/return-address rules can be suppressed by `simple
 `return_column`, `signal_frame` and `.cfi_sections .eh_frame` are supported.
 Personality/LSDA augmentation, `.debug_frame`/SFrame output and procedures that
 cross sections are diagnosed. Unsupported CFI is never silently discarded.
+
+## Code inside another function
+
+`asm_assemble_code(source, index, options, output, scratch)` assembles a source
+whose records another function holds: C's inline assembly, after the
+lowering substitutes its operands ([the inline assembly guide](c-inline-assembly.md)).
+It returns `AsmCode`:
+
+- the instructions' records, in order;
+- each branch to the source's own label as branch sizing's columns: a rel8 at
+  displacement 0, its target the label's next record or the count for the end;
+- each symbolic field as a reference by name, with its field, kind and addend,
+  the record marked `BUSTER_X86_FORM_FIXUP`.
+
+It takes instructions, labels and the syntax directives, and refuses:
+
+- every other directive: the code has no sections, data or symbols of its own;
+- its own labels, but as a `jmp`'s or `jcc`'s target without an addend;
+- undefined local labels.
+
+Lexing, parsing and matching are `asm_assemble`'s, by `AsmOptions.vectorized`'s
+path. The parser's tables come from `scratch`, which is as it was after. The
+result comes from `output`, which a failure leaves as it was too.
+`test-assembler` checks it by both paths, which must give the same records,
+columns, references and diagnostics.
 
 ## Data-parallel design and scalar twin
 
