@@ -59,7 +59,7 @@ It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on 
 `x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
 change to the 16-byte `X86Instruction` or the encoder's templates.
 
-`x86_target_rows.inc` is the single source for both tables. The scalar reference
+`x86_target_rows.c` is the single source for both tables. The scalar reference
 keeps all 64 feature bits (66,816 bytes); the vector table projects the currently
 used features into 32 bits (33,408 bytes). Both are constant and cache-line
 aligned. Their combined requirement data is 100,224 bytes; the vector builder

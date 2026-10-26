@@ -20,20 +20,20 @@ _Static_assert(X86_FEATURE_AES + 1 < 31 && X86_FEATURE_PCLMUL > X86_FEATURE_AES,
 
 #define BUSTER_X86_TARGET_REQUIREMENT(name, required) [X86_FORM_##name] = (required),
 static const uint64_t x86_target_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
-#include "buster/compiler/x86_target_rows.inc"
+#include "buster/compiler/x86_target_rows.c"
 };
 #undef BUSTER_X86_TARGET_REQUIREMENT
 
 #define BUSTER_X86_TARGET_REQUIREMENT(name, required) [X86_FORM_##name] = BUSTER_X86_TARGET_COMPACT(required),
 static const uint32_t x86_target_compact_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
-#include "buster/compiler/x86_target_rows.inc"
+#include "buster/compiler/x86_target_rows.c"
 };
 #undef BUSTER_X86_TARGET_REQUIREMENT
 
 // Extending the canonical policy outside the projection must fail at build time, never silently drop a feature.
 // Update the projection deliberately before adding such a row; the exhaustive tests also check every round trip.
 #define BUSTER_X86_TARGET_REQUIREMENT(name, required) _Static_assert(((required) & ~BUSTER_X86_TARGET_COMPACT_FEATURES) == 0, "target requirement cannot be compacted: " #name);
-#include "buster/compiler/x86_target_rows.inc"
+#include "buster/compiler/x86_target_rows.c"
 #undef BUSTER_X86_TARGET_REQUIREMENT
 _Static_assert(sizeof(x86_target_compact_requirements) == X86_FORM_COUNT * sizeof(uint32_t), "one compact requirement per form");
 _Static_assert(__alignof__(x86_target_requirements) >= 64 && __alignof__(x86_target_compact_requirements) >= 64, "target requirement table cache-line alignment");
