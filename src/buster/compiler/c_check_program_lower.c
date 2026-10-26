@@ -2879,13 +2879,15 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             check_lower_task_source(writer, task);
         }
+        // The tasks' work is inlined into each copy, as clang inlines it into a loop it compiles once: with a call in each
+        // copy it left six of them out of line, and a compile without -g took 2% more cycles (#426).
         if (task.kind == CHECK_LOWER_INSTRUCTION)
         {
             check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
         }
         else if (task.kind == CHECK_LOWER_CONVERSION)
         {
-            check_lower_conversion(writer, task.node, task.type);
+            [[clang::always_inline]] check_lower_conversion(writer, task.node, task.type);
         }
         else if (task.kind == CHECK_LOWER_LABEL)
         {
@@ -2905,7 +2907,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT || task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
         {
-            check_lower_floating_emit(writer, task);
+            [[clang::always_inline]] check_lower_floating_emit(writer, task);
         }
         else if (task.kind == CHECK_LOWER_CONSTANT)
         {
@@ -2921,11 +2923,11 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (task.kind == CHECK_LOWER_TERMINATE)
         {
-            check_lower_terminate(writer);
+            [[clang::always_inline]] check_lower_terminate(writer);
         }
         else if (task.kind == CHECK_LOWER_COPY)
         {
-            check_lower_copy(writer, task.value, task.address);
+            [[clang::always_inline]] check_lower_copy(writer, task.value, task.address);
         }
         else if (task.kind == CHECK_LOWER_FILL)
         {
@@ -2942,7 +2944,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (task.kind == CHECK_LOWER_BIT_STORE)
         {
-            check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+            [[clang::always_inline]] check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
         }
         else if (task.kind == CHECK_LOWER_VARARGS)
         {
@@ -2954,7 +2956,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else
         {
-            check_lower_expand(writer, task);
+            [[clang::always_inline]] check_lower_expand(writer, task);
         }
     }
 }
