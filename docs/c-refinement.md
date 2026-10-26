@@ -232,8 +232,10 @@ An identifier's lookup key is its spelling after translation phases 1 and 2:
 trigraphs (when enabled) and line splices are removed, and each UCN becomes the
 UTF-8 of its code point, as clang interns it. So `fo\<newline>o` is `foo`, and
 `é`, `é` and `\U000000E9` are one identifier. A named UCN (`\N{...}`)
-stays as written, because the table has no character names (an open question in
-#116).
+stays as written, without its line splices, because the table has no character
+names (an open question in #116). The preprocessor refuses an identifier with
+one, so no identifier spelled that way reaches the compiler (#452, and
+"Not yet" in [the preprocessor's design](c-preprocessor.md)).
 
 Differences from #116's sketch, each deliberate:
 
