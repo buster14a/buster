@@ -642,6 +642,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 #include "c_check_program_select_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
+#include "c_check_program_asm_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -1472,9 +1473,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                 "vla-bound-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
-                                "typed-asm-operands-and-machine-boundary", true, false, 1, 0);
-    check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                "typed-asm-goto-target", true, false, 0, 0);
+                                "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
+    check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                       "typed-asm-goto-target", true, false, 0, 0, "asm goto");
     check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
                                 "file-assembly-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test,
@@ -1519,6 +1520,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "overlapping-case-ranges", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch(n){default:return 1;default:return 2;}}", "duplicate-default", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch((double)n){case 1:return 1;}return 0;}", "noninteger-switch", false, false, 0, 0);
+    check_test_program_asm(test, clang);
     check_test_program_build_release();
 }
 

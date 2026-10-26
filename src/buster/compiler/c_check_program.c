@@ -1901,6 +1901,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 
 #include "c_check_program_select.c"
 #include "c_check_program_helpers.c"
+#include "c_check_program_asm.c"
 #include "c_check_program_lower.c"
 #include "c_check_debug.c"
 #include "c_check_program_emit.c"
