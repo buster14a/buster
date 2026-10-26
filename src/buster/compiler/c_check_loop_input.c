@@ -514,10 +514,11 @@ static uint32_t check_input_loop_statement_end(const CheckInputReader* reader, u
 }
 
 // Earlier completion wins. Nested statements can end together; the inner one's attributes are processed first.
+// A trailing hint before a closing brace consumes no statement and must not displace the preceding completion.
 static void check_input_loop_first(CheckInputLoopDiagnostic* first, const CheckInputLoopDiagnostic* next)
 {
     if (next->pragma != 0 && (first->pragma == 0 || next->position < first->position ||
-        (next->position == first->position && next->statement > first->statement)))
+        (next->position == first->position && next->statement > first->statement && next->statement < next->position)))
     {
         *first = *next;
     }
