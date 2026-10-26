@@ -994,6 +994,7 @@ static bool lane_team_run(LaneTeam* team, uint32_t count, void (*entry)(void* ar
     const long affinity_bytes = result && cpus != 0 ? syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) : 0;
     const bool saved = affinity_bytes > 0;
     const bool singleton = count == 1 && saved && lane_affinity_is_cpu(affinity, affinity_bytes, cpus[0]);
+    const uint32_t original_cpu = singleton ? cpus[0] : 0;
     result = result && (cpus == 0 || (saved && (singleton || lane_pin(cpus[0]))));
     if (result)
     {
@@ -1031,7 +1032,7 @@ static bool lane_team_run(LaneTeam* team, uint32_t count, void (*entry)(void* ar
         // A callback may change its affinity. The original mask is this known singleton: restore it if it changed,
         // or if the second query fails, without another buffer or a query on the multi-lane path.
         const long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity);
-        result = (lane_affinity_is_cpu(affinity, bytes, cpus[0]) || lane_pin(cpus[0])) && result;
+        result = (lane_affinity_is_cpu(affinity, bytes, original_cpu) || lane_pin(original_cpu)) && result;
     }
     else if (saved)
     {

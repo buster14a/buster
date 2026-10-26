@@ -1376,6 +1376,7 @@ typedef struct LaneTestRepin LaneTestRepin;
 struct LaneTestRepin
 {
     uint32_t cpu;
+    uint32_t* requested;
     bool refuse_query;
     bool passed;
 };
@@ -1384,15 +1385,20 @@ static void lane_test_team_repin(void* argument)
 {
     LaneTestRepin* test = argument;
     test->passed = lane_index() == 0 && lane_count() == 1 && lane_take(17) == 0 && lane_pin(test->cpu);
+    if (test->requested != 0)
+    {
+        *test->requested = test->cpu;
+    }
     test->passed = (!test->refuse_query || lane_test_refuse_syscall(SYS_sched_getaffinity)) && test->passed;
 }
 
 // The first child refuses all affinity writes during an already-pinned operation. The others repin from inside the
-// callback, with the final query allowed or refused: both must return to the caller's known singleton CPU.
+// callback, with the final query allowed or refused, or with the caller-owned CPU list changed: every case must
+// return to the caller's original singleton CPU.
 static uint64_t lane_test_team_singleton(uint32_t cpu, uint32_t other)
 {
     uint64_t failures = 0;
-    for (uint32_t mode = 0; mode < 3; mode += 1)
+    for (uint32_t mode = 0; mode < 4; mode += 1)
     {
         fflush(stdout);
         const pid_t child = fork();
@@ -1411,8 +1417,9 @@ static uint64_t lane_test_team_singleton(uint32_t cpu, uint32_t other)
             {
                 const Lane previous = thread_context.lane;
                 thread_context.taken = 47;
-                LaneTestRepin test = { .cpu = other, .refuse_query = mode == 2 };
-                passed = lane_run(1, lane_test_team_repin, &test, &cpu) && test.passed && thread_context.taken == 47 &&
+                uint32_t requested = cpu;
+                LaneTestRepin test = { .cpu = other, .requested = mode == 3 ? &requested : 0, .refuse_query = mode == 2 };
+                passed = lane_run(1, lane_test_team_repin, &test, &requested) && test.passed && thread_context.taken == 47 &&
                          thread_context.lane.index == previous.index && thread_context.lane.count == previous.count &&
                          thread_context.lane.group == previous.group;
                 uint32_t current = UINT32_MAX;
@@ -1429,7 +1436,7 @@ static uint64_t lane_test_team_singleton(uint32_t cpu, uint32_t other)
         const bool waited = child > 0 && waitpid(child, &status, 0) == child;
         failures += waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
     }
-    printf("already-pinned teams: 3 affinity cases, %lu wrong\n", (unsigned long)failures);
+    printf("already-pinned teams: 4 affinity cases, %lu wrong\n", (unsigned long)failures);
     return failures;
 }
 
