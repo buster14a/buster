@@ -4533,12 +4533,14 @@ U128, against clang's `__int128`: each break of the classes' rules refused at
 its entry; a stack of a memory class's values up to the last 16-byte slot,
 which runs, and one past it, which both paths refuse (for long double too);
 functions of 128-bit parameters and results in register pairs and on the
-stack, called from C, and calling C; and `--count` random programs over every
-kind of the classes, shifts by constant and variable counts and conversions to
-and from the other integers, under live values where `MUL` saves rax and rdx
-and a shift rcx. Only the programs both paths compiled, that ran and matched
-the check's stack machine count toward its coverage, which must reach every
-kind, conversion and save.
+stack, called from C, and calling C; each class's compares and shifts on every
+pair of ten boundary values, against C's own operators too; and `--count`
+random programs over every kind of the classes, shifts by constant and variable
+counts and conversions to and from the other integers, under live values where
+`MUL` saves rax and rdx and a shift rcx. Any error but a random program's depth
+past the slots fails it, and only the programs both paths compiled, that ran
+and matched the check's stack machine count toward its coverage, which must
+reach each class's every kind, conversion and save.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines

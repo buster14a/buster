@@ -285,7 +285,7 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
 (#137's X87 results). Its class is F80 (`BUSTER_TYPED_CLASS_F80`), whose values Tier 0 keeps in memory:
 
 - **A value** takes an integer depth, as an address does, and lives in that depth's 16-byte slot of the frame
-  (`Tier0Frame.x87_area`: a slot per integer depth after the fixed slots, in a function with long double values). An entry
+  (`Tier0Frame.memory_area`: a slot per integer depth after the fixed slots, in a function with long double values). An entry
   loads its operands from their slots onto the x87 stack, computes, and stores its result into its slot, leaving the x87
   stack empty, so that nothing lives there across entries, calls or joins. Every F80 entry is deferred: emitted by
   `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a time, as calls are.
@@ -856,6 +856,9 @@ Before the programs, checks of their own:
   - **rules:** each break of the classes' rules (above) refused at its entry by `tier0_validate`;
   - **slots:** a stack of a memory class's values up to the last slot, which runs, and one past it, which both paths
     refuse, for the 128-bit integers and for long double;
+  - **boundaries:** for each class, its six compares, `SHR` by 0, 1, 63, 64, 65 and 127, and `SHR` and `SHL` by variable
+    counts, on every pair of ten boundary values (0, 1, -1, the extremes, 2^63, 2^64 and their neighbours), against the
+    check's stack machine and against C's own operators;
   - **functions** of 128-bit parameters and results, in register pairs and on the stack (where no pair is left), called
     from C on boundary values, and functions that call C functions of them;
   - **programs:** 300 random functions (`--count`) of statements that each write a value into 16 bytes of an output (a
@@ -863,8 +866,12 @@ Before the programs, checks of their own:
     constants (low halves past a sign-extended imm32 among them), arithmetic, shifts by constant and variable counts,
     `?:`, `DUP`, `STORE`'s kept value and conversions both ways, under live values at the depths where `MUL` saves rax
     and rdx and a shift rcx, against the check's own stack machine over the stream. A program counts toward the
-    coverage only once both paths compiled it, it ran and every output matched: those must reach every kind, every
-    conversion to and from the classes and each of the saves, in bitmaps of their own.
+    coverage only once both paths compiled it, it ran and every output matched: those must reach, for each class apart
+    (their signed and unsigned code differs), every kind, every conversion to and from it and each of the saves, in
+    bitmaps of their own.
+
+  Every function must compile: an error of both paths alike fails the check, but a depth past the slots in a random
+  program, which is counted.
 - **access:** `tier0_validate` must refuse a global entry whose symbol is past the access column, and an access past
   the last, and take the last. Then GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant,
   and GLOBAL_ADDRESS, of every class, by each access. Both paths must compile each alike to valid records with one
@@ -1056,7 +1063,10 @@ larger shape's are.
   - and on the 128-bit integers (#464, under Intel SDE): `add` for `adc` in `ADD`'s high half: 18 of the int128
     check's; the saves of rax and rcx left out: 185. And on its coverage (#464's review): a program refused for its
     depth counted toward it, or `JUMP_VALUE` sharing its bit with a conversion from I64, let the check pass without
-    them; with the fixes, leaving out the programs that save rcx, or not recording `JUMP_VALUE`, fails it.
+    them; with the fixes, leaving out the programs that save rcx, or not recording `JUMP_VALUE`, fails it. And `sar 62`
+    for `sar 63` in a signed `SHR`'s fill fails the boundaries of I128 alone; not counting I128's `SHR` fails its
+    coverage; and an arena too small for every 50th program fails the check, where both paths refusing a function alike
+    had passed it.
 - **Every stream source against the operands' rule:** a scratch build validated every function each compile path
   took, besides the validations the sources make, and printed every refusal. The sources were:
   - the generator's programs, with and without the cross-check;
