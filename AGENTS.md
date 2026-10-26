@@ -4236,7 +4236,9 @@ and by the lanes' rule, its reader copied only by lanes that take a part. Six
 fixtures of bodies of known tokens must take the rule's lanes on each side of
 its steps. Each that merges must give source order's result again with its
 merge failing after the replay, and count as a resource failure with its
-state's allocation failing; timed, one lane must wait for no other and eight
+state's allocation failing; timed, one lane must wait for no other, preserve
+its lane/counter/running state and affinity inside a live team on distinct
+CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 `test-checker-corpus --deferred N
@@ -4247,7 +4249,10 @@ left to source order by reason. `./build/compiler benchmark-checker-deferred
 times source order's reader against the deferred one on one lane and on up to
 N, with the parse, the top level, the bodies' walks, their position checks, the
 lanes' span and the merge apart, and what a lane costs: its copy of the reader,
-`lane_run`'s dispatch and the other lanes' wake-up. Its passes take the six
+the launcher's dispatch and the other lanes' wake-up. One active lane uses
+the existing `lane_run_cold(1, ..., NULL)`, which starts no worker, makes no
+affinity calls and isolates the reading without changing generic team validation;
+multiple lanes retain `lane_run` and their CPU list. Its passes take the six
 orders of its three readings in turn, so `--passes` is a multiple of six (24).
 `--every-lane` runs every lane the bodies can take, whatever
 their tokens; `--cpus` pins the command to the first
