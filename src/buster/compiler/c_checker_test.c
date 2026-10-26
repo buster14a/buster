@@ -2773,6 +2773,38 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        {
+            "register parameter's prototype tag ends with the prototype",
+            "_Static_assert(!__builtin_types_compatible_p(int (*)(register struct S *), int (*)(struct S *)), \"distinct\");\n",
+            false,
+            false
+        },
+        // A C23 attribute's operand is read raw (#437's review): a list whose parameter starts with `register` or an
+        // attribute is a prototype there too, its tag ended at its `)`.
+        {
+            "raw register parameter's prototype tag ends with the prototype",
+            "[[gnu::aligned(sizeof(int (*)(register struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
+            "raw attributed parameter's prototype tag ends with the prototype",
+            "[[gnu::aligned(sizeof(int (*)(__attribute__((unused)) struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
+            "raw function type of a register parameter",
+            "[[gnu::aligned(sizeof(int (register struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
     };
     enum
     {

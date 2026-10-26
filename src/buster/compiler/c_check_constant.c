@@ -557,6 +557,7 @@ static bool check_constant_range_value(CheckConstantInput* input, uint32_t first
 }
 
 static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t token);
+static bool check_constant_raw_parameters(CheckConstantInput* input, uint32_t open, uint32_t close);
 
 static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uint32_t end)
 {
@@ -637,8 +638,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 frame->name = i++;
             }
             else if (i < frame->end && parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP &&
-                     (!input->raw || (i + 1 < frame->end && parser->tokens.kinds[i + 1] != PARSE_KIND_R_PAREN &&
-                      parser->tokens.kinds[i + 1] != PARSE_KIND_ELLIPSIS && !check_constant_raw_type_start(input, i + 1))))
+                     (!input->raw || (i + 1 < frame->end && !check_constant_raw_parameters(input, i, parser->tree.parents[i]))))
             {
                 const uint32_t close = parser->tree.parents[i];
                 valid = close > i && close < frame->end;
@@ -2896,6 +2896,17 @@ static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t to
     return type;
 }
 
+// A raw `(` in a type name holds a parameter list when what it holds starts as a parameter declaration may, as
+// check_constant_specifiers reads one: nothing, `...`, or specifiers after any attributes, `register` among them.
+static bool check_constant_raw_parameters(CheckConstantInput* input, uint32_t open, uint32_t close)
+{
+    const Parser* parser = input->reader->parser;
+    const uint32_t first = check_input_skip_attributes(parser, open + 1, close);
+    const uint8_t kind = first < close ? parser->tokens.kinds[first] : PARSE_KIND_R_PAREN;
+    return first >= close || kind == PARSE_KIND_ELLIPSIS || (kind == PARSE_KIND_STORAGE && parser->tokens.names[first] == C_NAME_REGISTER) ||
+           check_constant_raw_type_start(input, first);
+}
+
 static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
 {
     CheckInputReader* reader = input->reader;
@@ -2939,10 +2950,9 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
         {
             const uint32_t close = parser->tree.parents[token];
             valid = close > token && close < input->end;
-            // A list in a type name: check_constant_type's reading of a raw `(` that follows a declarator's part.
+            // A list in a type name, as check_constant_type reads a raw `(`.
             const bool prototype = valid && input->syntax[index] && token > input->first && parser->tokens.kinds[token - 1] != PARSE_KIND_TYPEOF &&
-                                   parser->tokens.kinds[token - 1] != PARSE_KIND_ATOMIC &&
-                                   (token + 1 == close || parser->tokens.kinds[token + 1] == PARSE_KIND_ELLIPSIS || check_constant_raw_type_start(input, token + 1));
+                                   parser->tokens.kinds[token - 1] != PARSE_KIND_ATOMIC && check_constant_raw_parameters(input, token, close);
             if (prototype)
             {
                 check_constant_prototype_open(input, token);
