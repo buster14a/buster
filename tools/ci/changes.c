@@ -873,8 +873,10 @@ static bool changes_heredoc_ends(Text line, Text word, size_t block)
 
 // Where a line of a script leaves the shell's quoting: outside quotes (0), in single quotes (1), double quotes (2),
 // ANSI-C quotes (3) or backquotes (4), from where the line before left it; the parentheses open outside quotes, its
-// `(`s less its `)`s added to *depth; and whether the line ends in a backslash outside quotes, which joins the next
-// line to its command. A comment, from a `#` that starts a word outside quotes, is read no further.
+// `(`s less its `)`s added to *depth, which stays below 0 once a `)` closes none (a `case` pattern's, whose matching
+// isn't read: a later `(` mustn't seem to close it, so the script's lines after it count nothing); and whether the
+// line ends in a backslash outside quotes, which joins the next line to its command. A comment, from a `#` that starts
+// a word outside quotes, is read no further.
 static uint32_t changes_shell_line(Text line, uint32_t quote, int64_t* depth, bool* continued)
 {
     bool comment = false;
@@ -892,7 +894,8 @@ static uint32_t changes_shell_line(Text line, uint32_t quote, int64_t* depth, bo
         opened = c == '$' && i + 1 < line.length && line.data[i + 1] == '\'' ? 3 : opened;
         bool closes = (quote == 1 && c == '\'') || (quote == 2 && c == '"') || (quote == 3 && c == '\'') || (quote == 4 && c == '`');
         bool bare = quote == 0 && !escape && !comment;
-        *depth += bare && c == '(' ? 1 : bare && c == ')' ? -1 : 0;
+        int64_t step = bare && c == '(' ? 1 : bare && c == ')' ? -1 : 0;
+        *depth = *depth < 0 ? *depth : *depth + step;
         uint32_t next = bare ? opened : quote;
         next = quote != 0 && !escape && closes ? 0 : next;
         i += escape || (quote == 0 && opened == 3) ? 2 : 1;
@@ -912,7 +915,8 @@ static uint32_t changes_shell_line(Text line, uint32_t quote, int64_t* depth, bo
 // starts here-documents are their bodies, up to the line of each one's word as the shell reads it, the indentation of
 // the block's first line removed, and the block's rest when one never ends. Lines inside parentheses are an array's
 // elements, but also a subshell's or a command substitution's commands, which count no more: a benchmark goes on a
-// line of its own. The shell's control flow isn't read: a command in a function never called, or after `if false`,
+// line of its own, and not after a `case` pattern's unmatched `)`, past which nothing counts. The shell's control flow
+// isn't read: a command in a function never called, or after `if false`,
 // counts as run. So the commands of the tests' list, which `parallel` reads from one, aren't the step's: a benchmark a
 // MEASURE name gates runs in a step of its own, pinned.
 static void changes_step_commands(Text body, TextList* commands)
@@ -1793,6 +1797,7 @@ static void changes_test_mutation(ChangesTest* test, Text workflow, const char* 
         "cat <<'EOF'\n  EOF\n%\nEOF",
         "echo \"\n%\n\"",
         "args=(\n  %\n)\necho \"${args[@]}\"",
+        "case yes in\n  yes)\n    args=(\n      %\n    )\n    echo \"${args[@]}\"\n    ;;\nesac",
     };
     for (uint32_t i = 0; i < sizeof(templates) / sizeof(templates[0]); i += 1)
     {
@@ -1804,6 +1809,14 @@ static void changes_test_mutation(ChangesTest* test, Text workflow, const char* 
         };
         changes_test_workflow(&mutated, mutant, root);
         changes_expect(test, mutated.failures != 0, "the workflow's checks refuse a benchmark's command that runs nothing", text_c(templates[i]));
+        ChangesSteps steps = changes_split_steps(mutant);
+        const ChangesStep* step = changes_find_step(&steps, text_c("Benchmark-the-C-type-table"));
+        TextList commands = { 0 };
+        if (step != NULL)
+        {
+            changes_step_commands(step->body, &commands);
+        }
+        changes_expect(test, step != NULL && !list_contains(&commands, text_c("types")), "the mutated step runs no benchmark-types", text_c(templates[i]));
     }
     // And the step's script replaced: the command in an `env:` value, or folded into an `echo`'s arguments.
     const char* scripts[] = {
@@ -2020,6 +2033,24 @@ static void changes_test_split(ChangesTest* test)
         "          ) )\n"
         "          f() { echo \"(\"; }; y=$((1 + (2)))\n"
         "          ./build/compiler benchmark-types\n";
+    // A `case` pattern's `)` closes no parenthesis: the array after it must not seem to close it, so nothing after it
+    // counts (#471's review).
+    const char* patterns =
+        "      - name: Fixture\n"
+        "        run: |\n"
+        "          ./build/compiler benchmark-lanes\n"
+        "          case yes in\n"
+        "            yes)\n"
+        "              args=(\n"
+        "                ./build/compiler benchmark-types\n"
+        "              )\n"
+        "              printf '%s\\n' \"${args[@]}\"\n"
+        "              ;;\n"
+        "          esac\n"
+        "          ./build/compiler benchmark-ssa\n";
+    TextList cases = { 0 };
+    changes_step_commands(text_c(patterns), &cases);
+    changes_expect(test, cases.count == 1 && text_equal_c(cases.items[0], "lanes"), "nothing after a case pattern's unmatched parenthesis", (Text){ 0 });
     TextList arguments = { 0 };
     changes_step_commands(text_c(quoted), &arguments);
     changes_expect(test, arguments.count == 2 && text_equal_c(arguments.items[0], "lanes") && text_equal_c(arguments.items[1], "types"), "the lines the shell starts commands on, not quoted or joined ones", (Text){ 0 });
