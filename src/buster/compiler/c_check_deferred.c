@@ -745,18 +745,6 @@ static void check_deferred_lane(void* argument)
     }
 }
 
-// The saved Lane otherwise adds 16 bytes to check_input_run's frame on the 9700X, including source-order readings.
-// Keep that context on the one-lane path alone, outside the common reader's frame.
-static __attribute__((noinline)) void check_deferred_one_lane(CheckDeferredRun* run)
-{
-    const Lane previous = lane_alone();
-    const uint64_t taken = thread_context.taken;
-    thread_context.taken = 0;
-    check_deferred_lane(run);
-    thread_context.taken = taken;
-    lane_restore(previous);
-}
-
 // A part's map of ids into one of the walk's tables: the top level's ids below `top_count` go through `top`, a body's own
 // (from top_count) to `base` and on.
 static uint32_t check_deferred_id(const uint32_t* top, uint32_t top_count, uint32_t base, uint32_t id)
@@ -1219,7 +1207,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     return valid;
 }
 
-static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
+// This phase runs only for deferred input. Keep its merge and context state outside source order's common reader.
+static __attribute__((noinline)) void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
     deferred->top.changes = 0;
@@ -1296,7 +1285,12 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         if (active == 1)
         {
             // No team or affinity work for the calling thread alone. Keep a caller's lane and unfinished take intact.
-            check_deferred_one_lane(&run);
+            const Lane previous = lane_alone();
+            const uint64_t taken = thread_context.taken;
+            thread_context.taken = 0;
+            check_deferred_lane(&run);
+            thread_context.taken = taken;
+            lane_restore(previous);
         }
         else
         {
