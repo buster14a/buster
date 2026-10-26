@@ -149,10 +149,16 @@ does, each rule checked against clang's answers on probes of it:
   beside a state that rules it out (`unroll`'s every state, the others'
   `disable`). A `for`, `while` or `do`-`while` loop must follow, in a function.
   Errors are reported on the pragma's line, but a misplaced one's at the
-  statement after it, as clang reports them. A count here is a literal: another
-  constant expression (`4 + 4`, an enumerator) is refused as unsupported, not
-  guessed. Tier 0 has no loop transformation for the hints to steer, so nothing
-  keeps them.
+  statement after it, as clang reports them. `GCC unroll` is `unroll` (#480's
+  review), whose count may be left out, in parentheses or the rest of the line,
+  as clang's `ParseLoopHintValue` reads it: an empty count (`unroll()`), an
+  unclosed one (`unroll (4`) and one no expression starts with (`unroll ;`) are
+  errors, with clang's messages, and a pragma clang drops, with a warning
+  (`nounroll 4`, `unroll (4) x`), is no hint. A count here is an integer
+  literal, alone or before a token no expression goes on with (`unroll 4)`, as
+  clang reads it): another constant expression (`4 + 4`, `-1`, an enumerator)
+  is refused as unsupported, not guessed. Tier 0 has no loop transformation for
+  the hints to steer, so nothing keeps them.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.

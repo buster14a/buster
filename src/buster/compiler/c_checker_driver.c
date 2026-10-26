@@ -63,6 +63,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_INCOMPLETE_OBJECT: result = "object has incomplete type"; break;
         case CHECK_INPUT_LOOP_HINT: result = "invalid '#pragma clang loop' directive"; break;
         case CHECK_INPUT_LOOP_PLACEMENT: result = "expected a for, while, or do-while loop to follow '#pragma clang loop'"; break;
+        case CHECK_INPUT_LOOP_MISSING: result = "missing argument; expected an integer value"; break;
+        case CHECK_INPUT_LOOP_EXPRESSION: result = "expected expression"; break;
+        case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
     }
     return result;
 }

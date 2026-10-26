@@ -181,32 +181,90 @@ static uint8_t check_input_loop_options(CheckInputReader* reader, uint32_t curso
     return result;
 }
 
+// Whether a token of kind `kind` can begin an expression (an identifier or keyword, a constant, a literal, a parenthesis
+// or a unary operator, && a label's address), and whether one can go on an expression after an operand (a binary or
+// postfix operator, ?, a subscript, a call, a member).
+static bool check_input_loop_starts(uint8_t kind)
+{
+    const bool keyword = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT;
+    const bool result = kind == C_TOKEN_RAW_IDENTIFIER || kind == BUSTER_PP_KIND_INTEGER || keyword ||
+                        (kind >= C_TOKEN_NUMERIC_CONSTANT && kind <= C_TOKEN_UTF32_STRING_LITERAL) || kind == C_TOKEN_L_PAREN ||
+                        kind == C_TOKEN_AMP || kind == C_TOKEN_AMPAMP || kind == C_TOKEN_STAR || kind == C_TOKEN_PLUS || kind == C_TOKEN_PLUSPLUS ||
+                        kind == C_TOKEN_MINUS || kind == C_TOKEN_MINUSMINUS || kind == C_TOKEN_TILDE || kind == C_TOKEN_EXCLAIM;
+    return result;
+}
+
+static bool check_input_loop_continues(uint8_t kind)
+{
+    const bool result = kind == C_TOKEN_L_SQUARE || kind == C_TOKEN_L_PAREN || kind == C_TOKEN_PERIOD || kind == C_TOKEN_ARROW ||
+                        kind == C_TOKEN_AMP || kind == C_TOKEN_AMPAMP || kind == C_TOKEN_STAR || kind == C_TOKEN_PLUS || kind == C_TOKEN_PLUSPLUS ||
+                        kind == C_TOKEN_MINUS || kind == C_TOKEN_MINUSMINUS || kind == C_TOKEN_EXCLAIMEQUAL || kind == C_TOKEN_SLASH ||
+                        kind == C_TOKEN_PERCENT || kind == C_TOKEN_LESS || kind == C_TOKEN_LESSLESS || kind == C_TOKEN_LESSEQUAL ||
+                        kind == C_TOKEN_GREATER || kind == C_TOKEN_GREATERGREATER || kind == C_TOKEN_GREATEREQUAL || kind == C_TOKEN_CARET ||
+                        kind == C_TOKEN_PIPE || kind == C_TOKEN_PIPEPIPE || kind == C_TOKEN_QUESTION || kind == C_TOKEN_EQUALEQUAL;
+    return result;
+}
+
 // One of the other loop hints, from `cursor` (after its name) to its end: a state of `category` (`state`, 0 for a count
-// alone) and an optional count, alone or in parentheses (`counted`: whether it may have one; GCC unroll's must). Returns
-// as check_input_loop_options does.
+// alone) and, where it is `counted` (unroll, unroll_and_jam and GCC unroll, which is unroll), an optional count, as
+// clang's PragmaUnrollHintHandler and ParseLoopHintValue read it: in parentheses, to the one that closes them, or the
+// rest of the line. clang drops a pragma with tokens it takes no count from (nounroll's, and those after a count's
+// parentheses), with a warning: no hint. An unclosed or empty count is an error (`(4`, `()`), and so is one that no
+// expression starts with (`;`); a count that an integer literal starts, alone or before what an expression can't go
+// on with (`4)`, a warning's tokens clang leaves), is the literal's; any other is a constant this doesn't evaluate
+// (`4 + 4`, `-1`, an enumerator). Returns as check_input_loop_options does, with an unreadable count's message in
+// `*message` (clang's), which stays as it was otherwise.
 static uint8_t check_input_loop_unroll(CheckInputReader* reader, uint32_t cursor, uint32_t end, CheckLoopCategory category, uint8_t state, bool counted,
-                                       bool required, CheckLoopHints* hints)
+                                       CheckLoopHints* hints, uint8_t* message)
 {
     const PPTokens* output = &reader->pp->output;
-    const bool parenthesized = counted && cursor + 2 < end && output->kinds[cursor] == C_TOKEN_L_PAREN;
-    const uint32_t literal = parenthesized ? cursor + 1 : cursor;
-    const bool present = counted && literal < end && (output->kinds[literal] == C_TOKEN_NUMERIC_CONSTANT || output->kinds[literal] == BUSTER_PP_KIND_INTEGER);
-    uint8_t result = present ? check_input_loop_count(reader, literal, true) : (counted && literal < end) || required ? 0 : 1;
-    result = result == 1 && present && parenthesized && output->kinds[literal + 1] != C_TOKEN_R_PAREN ? 0 : result;
-    result = result == 1 ? 2 : result;
-    if (result == 2 && present)
+    const bool parenthesized = counted && cursor < end && output->kinds[cursor] == C_TOKEN_L_PAREN;
+    uint32_t close = end;
+    uint32_t depth = 1;
+    for (uint32_t t = cursor + 1; parenthesized && close == end && t < end; t += 1)
     {
-        result = hints->counts[category] ? 3 : 2;
-        hints->counts[category] = true;
+        depth += output->kinds[t] == C_TOKEN_L_PAREN;
+        depth -= output->kinds[t] == C_TOKEN_R_PAREN;
+        close = depth == 0 ? t : end;
     }
-    else if (result == 2)
+    const uint32_t first = parenthesized ? cursor + 1 : cursor;
+    const uint32_t last = parenthesized ? close : end;
+    const bool ignored = cursor < end && (!counted || (parenthesized && close + 1 < end));
+    const bool literal = first < last && (output->kinds[first] == C_TOKEN_NUMERIC_CONSTANT || output->kinds[first] == BUSTER_PP_KIND_INTEGER);
+    uint8_t result = 2;
+    if (!ignored && parenthesized && close == end)
+    {
+        result = 3;
+        *message = CHECK_INPUT_LOOP_PARENTHESIS;
+    }
+    else if (!ignored && cursor < end && first == last)
+    {
+        result = 3;
+        *message = CHECK_INPUT_LOOP_MISSING;
+    }
+    else if (!ignored && literal && (first + 1 == last || !check_input_loop_continues(output->kinds[first + 1])))
+    {
+        result = check_input_loop_count(reader, first, true);
+        result = result == 1 ? 2 : result;
+        if (result == 2)
+        {
+            result = hints->counts[category] ? 3 : 2;
+            hints->counts[category] = true;
+        }
+    }
+    else if (!ignored && cursor < end)
+    {
+        result = check_input_loop_starts(output->kinds[first]) ? 0 : 3;
+        *message = result == 3 ? CHECK_INPUT_LOOP_EXPRESSION : *message;
+    }
+    else if (!ignored)
     {
         result = hints->states[category] != 0 ? 3 : 2;
         hints->states[category] = state;
     }
     const bool incompatible = hints->counts[category] && hints->states[category] != 0 &&
                               (category == CHECK_LOOP_UNROLL || category == CHECK_LOOP_UNROLL_AND_JAM || hints->states[category] == BUSTER_CHECK_LOOP_DISABLE);
-    return result == 2 && incompatible ? 3 : result;
+    return result == 2 && !ignored && incompatible ? 3 : result;
 }
 
 // Each `#pragma clang loop`'s handled state (2 for valid hints, 3 for clang's error, 0 for unsupported), and for an error
@@ -251,9 +309,10 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
             }
             const CheckLoopCategory category = jam || nojam ? CHECK_LOOP_UNROLL_AND_JAM : CHECK_LOOP_UNROLL;
             const uint8_t word = nounroll || nojam ? BUSTER_CHECK_LOOP_DISABLE : BUSTER_CHECK_LOOP_ENABLE;
+            uint8_t message = CHECK_INPUT_LOOP_HINT;
             uint8_t state = clang ? check_input_loop_options(reader, source + 4, end, &hints) :
-                            check_input_loop_unroll(reader, source + (gcc ? 4 : 3), end, category, word, unroll || jam || gcc, gcc, &hints);
-            messages[pragma] = state == 3 ? CHECK_INPUT_LOOP_HINT : 0;
+                            check_input_loop_unroll(reader, source + (gcc ? 4 : 3), end, category, word, unroll || jam || gcc, &hints, &message);
+            messages[pragma] = state == 3 ? message : 0;
             if (state == 2 && (bodies == 0 || !check_input_loop_follows(parser, token)))
             {
                 state = 3;

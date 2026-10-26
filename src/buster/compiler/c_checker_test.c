@@ -1941,7 +1941,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         char description[320];
         snprintf(description, sizeof(description), "%s: %s expected, %s from %s path, first line %u (clang %u)", fixture->name,
                  fixture->rejected ? "reject" : "accept", rejected[p] ? "reject" : "accept", p == 0 ? "scalar" : "vector", lines[p], clang->line);
-        check_test_expect(test, rejected[p] == fixture->rejected && (!fixture->unsupported || unsupported[p]), description);
+        // A refusal is the fixture's kind: an unsupported construct for an unsupported fixture, and otherwise an error.
+        check_test_expect(test, rejected[p] == fixture->rejected && (!fixture->rejected || fixture->unsupported == unsupported[p]), description);
         if (!fixture->unsupported && !fixture->extension)
         {
             check_test_expect(test, rejected[p] == clang->rejected && (!rejected[p] || lines[p] == clang->line), description);
@@ -3199,6 +3200,63 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         {
             "incompatible unroll hints refused",
             "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(enable) unroll_count(4)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        // #480's review: GCC unroll is clang's unroll, whose count may be left out; a count clang can't read is an error
+        // (an empty one, an unclosed one, one no expression starts with), not a constant this doesn't evaluate; and the
+        // pragmas clang drops (a count's tokens after nounroll, or after a count's parentheses) are no hint.
+        {
+            "GCC unroll without a count",
+            "int g(int n)\n{\n    int s = 0;\n#pragma GCC unroll\n    for (int i = 0; i < n; i += 1)\n    {\n        s += i;\n    }\n    return s;\n}\n",
+            false,
+            false
+        },
+        {
+            "an unroll count in empty parentheses refused",
+            "int f(int n) { int s = 0;\n#pragma unroll()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a GCC unroll count in empty parentheses refused",
+            "int f(int n) { int s = 0;\n#pragma GCC unroll ( )\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count no expression starts with refused",
+            "int f(int n) { int s = 0;\n#pragma unroll ;\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unclosed unroll_and_jam count refused",
+            "int f(int n) { int s = 0;\n#pragma unroll_and_jam (4\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count's expression unsupported",
+            "int f(int n) { int s = 0;\n#pragma unroll (4 + 4)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        {
+            "the unroll pragmas clang drops, and one it reads a literal from",
+            "int f(int n) { int s = 0;\n#pragma nounroll 4\n#pragma unroll 4\n while (n--) s += 1;\n#pragma unroll (4) x\n#pragma unroll 8\n while (n--) s += 1;\n#pragma unroll 4)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "an unroll count clang reads a literal from, twice, refused",
+            "int f(int n) { int s = 0;\n#pragma unroll 4)\n#pragma unroll 8\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "GCC unroll beside unroll refused",
+            "int f(int n) { int s = 0;\n#pragma unroll\n#pragma GCC unroll\n while (n--) s += 1; return s; }\n",
             true,
             false
         },

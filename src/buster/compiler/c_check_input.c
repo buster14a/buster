@@ -20,6 +20,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_INCOMPLETE_OBJECT,
     CHECK_INPUT_LOOP_HINT,
     CHECK_INPUT_LOOP_PLACEMENT,
+    // An unroll pragma's count that clang can't read: empty, starting with no expression, unclosed.
+    CHECK_INPUT_LOOP_MISSING,
+    CHECK_INPUT_LOOP_EXPRESSION,
+    CHECK_INPUT_LOOP_PARENTHESIS,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -36,6 +40,9 @@ static const char* const check_input_messages[] =
     "object has incomplete type",
     "invalid loop hint pragma",
     "loop hint pragma not followed by a loop",
+    "unroll pragma's count missing",
+    "unroll pragma's count not an expression",
+    "unroll pragma's count unclosed",
 };
 
 // The type/action tables currently describe one C LP64 model: signed plain char, 32-bit wchar_t, x87 long double
