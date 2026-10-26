@@ -138,9 +138,29 @@ static bool predefines_test_words(PredefinesTestJobs* jobs, PredefinesTestJob* j
     return result;
 }
 
+// The first job in [first, job) with `job`'s arguments, or `job` if none has them.
+static uint32_t predefines_test_same_job(const PredefinesTestJobs* jobs, uint32_t first, uint32_t job)
+{
+    const PredefinesTestJob* wanted = &jobs->jobs[job];
+    uint32_t result = job;
+    for (uint32_t i = first; result == job && i < job; i += 1)
+    {
+        const PredefinesTestJob* other = &jobs->jobs[i];
+        bool same = other->argument_count == wanted->argument_count;
+        for (uint32_t a = 0; same && a < wanted->argument_count; a += 1)
+        {
+            same = strcmp(other->arguments[a], wanted->arguments[a]) == 0;
+        }
+        result = same ? i : job;
+    }
+    return result;
+}
+
 // Runs jobs [first, count) as `clang ARGUMENTS`, BUSTER_PREDEFINES_TEST_PARALLEL at a time, each one's standard output
 // into a file of `directory` and then into memory, and its standard error to /dev/null. CPATH and C_INCLUDE_PATH are
-// left out of their environment. Returns false if a process can't start.
+// left out of their environment. A job with the arguments of an earlier one in the range takes its status and output
+// rather than run clang again (#465): the files the jobs read don't change while they run. Returns false if a process
+// can't start.
 static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, const char* directory)
 {
     // The environment without CPATH and C_INCLUDE_PATH.
@@ -151,7 +171,8 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
     }
     char** environment = calloc((size_t)variables + 1, sizeof(char*));
     pid_t* pids = calloc(jobs->count + 1, sizeof(pid_t));
-    bool result = environment != 0 && pids != 0;
+    uint32_t* sources = calloc(jobs->count + 1, sizeof(uint32_t));
+    bool result = environment != 0 && pids != 0 && sources != 0;
     uint32_t kept = 0;
     for (uint32_t i = 0; result && i < variables; i += 1)
     {
@@ -167,26 +188,31 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
     {
         while (result && next < jobs->count && running < BUSTER_PREDEFINES_TEST_PARALLEL)
         {
-            PredefinesTestJob* job = &jobs->jobs[next];
-            char path[4200];
-            snprintf(path, sizeof(path), "%s/clang-%u.out", directory, next);
-            const char* argv[BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS + 2];
-            argv[0] = "clang";
-            for (uint32_t a = 0; a < job->argument_count; a += 1)
+            // A job with an earlier one's arguments runs no clang: it takes that one's output below.
+            sources[next] = predefines_test_same_job(jobs, first, next);
+            if (sources[next] == next)
             {
-                argv[a + 1] = job->arguments[a];
+                PredefinesTestJob* job = &jobs->jobs[next];
+                char path[4200];
+                snprintf(path, sizeof(path), "%s/clang-%u.out", directory, next);
+                const char* argv[BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS + 2];
+                argv[0] = "clang";
+                for (uint32_t a = 0; a < job->argument_count; a += 1)
+                {
+                    argv[a + 1] = job->arguments[a];
+                }
+                argv[job->argument_count + 1] = 0;
+                posix_spawn_file_actions_t actions;
+                posix_spawn_file_actions_init(&actions);
+                posix_spawn_file_actions_addopen(&actions, 1, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
+                pid_t pid;
+                result = posix_spawnp(&pid, "clang", &actions, 0, (char* const*)argv, environment) == 0;
+                posix_spawn_file_actions_destroy(&actions);
+                pids[next] = result ? pid : 0;
+                running += result;
             }
-            argv[job->argument_count + 1] = 0;
-            posix_spawn_file_actions_t actions;
-            posix_spawn_file_actions_init(&actions);
-            posix_spawn_file_actions_addopen(&actions, 1, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
-            pid_t pid;
-            result = posix_spawnp(&pid, "clang", &actions, 0, (char* const*)argv, environment) == 0;
-            posix_spawn_file_actions_destroy(&actions);
-            pids[next] = result ? pid : 0;
             next += 1;
-            running += result;
         }
         if (running > 0)
         {
@@ -206,33 +232,50 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
     }
     for (uint32_t i = first; result && i < jobs->count; i += 1)
     {
-        char path[4200];
-        snprintf(path, sizeof(path), "%s/clang-%u.out", directory, i);
-        FILE* file = fopen(path, "r");
-        char* text = 0;
-        size_t length = 0;
-        FILE* collected = open_memstream(&text, &length);
-        char chunk[1 << 16];
-        size_t n;
-        while (file != 0 && collected != 0 && (n = fread(chunk, 1, sizeof(chunk), file)) > 0)
+        if (sources[i] != i)
         {
-            fwrite(chunk, 1, n, collected);
+            const PredefinesTestJob* source = &jobs->jobs[sources[i]];
+            char* copy = malloc(source->length + 1);
+            result = copy != 0;
+            if (result)
+            {
+                memcpy(copy, source->output, source->length + 1);
+                jobs->jobs[i].output = copy;
+                jobs->jobs[i].length = source->length;
+                jobs->jobs[i].status = source->status;
+            }
         }
-        if (file != 0)
+        else
         {
-            fclose(file);
+            char path[4200];
+            snprintf(path, sizeof(path), "%s/clang-%u.out", directory, i);
+            FILE* file = fopen(path, "r");
+            char* text = 0;
+            size_t length = 0;
+            FILE* collected = open_memstream(&text, &length);
+            char chunk[1 << 16];
+            size_t n;
+            while (file != 0 && collected != 0 && (n = fread(chunk, 1, sizeof(chunk), file)) > 0)
+            {
+                fwrite(chunk, 1, n, collected);
+            }
+            if (file != 0)
+            {
+                fclose(file);
+            }
+            if (collected != 0)
+            {
+                fclose(collected);
+            }
+            jobs->jobs[i].output = text;
+            jobs->jobs[i].length = length;
+            result = text != 0;
+            unlink(path);
         }
-        if (collected != 0)
-        {
-            fclose(collected);
-        }
-        jobs->jobs[i].output = text;
-        jobs->jobs[i].length = length;
-        result = text != 0;
-        unlink(path);
     }
     free(environment);
     free(pids);
+    free(sources);
     return result;
 }
 

@@ -253,10 +253,10 @@ jobs:
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the preprocessor's cases against clang
-          # --clang also preprocesses each case with clang -E and compares the tokens. Two workers share the fuzz
-          # batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of this, the longest test, at the
-          # qualification runs' 3 ms of a thread per case.
-          ./build/compiler test-preprocessor --clang --jobs 2
+          # --clang also preprocesses each case with clang -E and compares the tokens. Four workers share the fuzz
+          # batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of threads in all at the
+          # qualification runs' 3 ms per case; the cases and header sets run in parts, a process per CPU (#465).
+          ./build/compiler test-preprocessor --clang --jobs 4
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang

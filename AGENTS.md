@@ -1486,18 +1486,21 @@ drops the rest of the report rather than wait for its reader. A report that
 can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
 stops the run, and its commands are killed.
 
-The 9700X job's test step ("Run the tests at once") runs every test through it,
-with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
-A test goes in its list as a heading and the step's commands, in the order of
-the tests' times in the job, the longest first, so that they start first: put a
-new one where its time puts it, and give independent commands a heading each
-rather than one between them. One that needs the machine to itself doesn't
-belong there. On the 9700X its tests' times in the job come to 310 s, and the
-step's bound through the runner is the longest one's and the sum's over 8 jobs,
-about 39 s; with the longest started among the last, the step took 64 s, and
-with them first but the checker's four commands as one heading, 50 s, as they
-slow each other (that heading took 33 to 37 s started late, 50 s started with
-the others). To run the list as the job does (on the 9700X, under its lock, as
+The 9700X job's test step ("Run the tests within the host budget") runs every
+test through it, with `--timeout 180`, before the benchmarks, which run one at
+a time and pinned. It runs one command at a time (`--jobs 1`) on CPUs 0 to 7
+(`taskset`), since tests such as test-lanes and test-files start lanes of their
+own and the call-graph check starts compiler captures: together, their CPU and
+memory budgets multiply. Each command uses those CPUs itself. When the runner
+ran 8 commands at once, the step was bound by the machine's CPU rather than by
+its longest test (#465: its tests took 622 s of CPU, their times in the job
+404 s, in a step of 52.5 s), so what shortens it is less work: the clang
+processes the tests start as oracles are most of it.
+The runner sets `BUSTER_PARALLEL_JOBS` to `--jobs` for its commands, and a test
+that runs processes of its own (`test_process_cpus`: test-preprocessor's parts,
+`parse_test_clang`'s clang processes) runs its CPUs divided by it at once,
+rounded up, so that the commands' processes together come to about one per CPU
+(#468's review). To run the list as the job does (on the 9700X, under its lock, as
 one run):
 
 ```sh
@@ -3634,7 +3637,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
 - without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
-  the vectorized kernels and their scalar twins. They must give the same stream
+  the vectorized kernels and their scalar twins. They run in 32 parts, the
+  header sets below (`--clang`) in 16 and the files (below) a part each (a
+  range each past 64), each part in a child process with a directory of its
+  own, at most `test_process_cpus()` at once, the output in their order
+  (`pp_test_children`, #465). They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
   cases are of our own:
