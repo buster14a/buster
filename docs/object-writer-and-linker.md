@@ -2776,7 +2776,7 @@ took 2.349 ms against 2.329 (+0.9%), its peak resident set 31,768 KB against
 2.433 ms and 33,844 KB. The direct path couldn't link a 128-bit integer's
 division or a complex product without `libgcc.a` at all, so the constant is the
 price of linking them; laying the crt objects' records out apart from the
-members' would take back most of `bind_begin`'s part.
+members' should take back most of `bind_begin`'s part (#490).
 
 `test-import` checks the archives' order, `__udivti3` a member's of
 `libgcc.a` and its names apart from `libc.so.6`'s and the loader's exports;
