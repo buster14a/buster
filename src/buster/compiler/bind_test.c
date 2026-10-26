@@ -5025,14 +5025,22 @@ static bool bind_test_split_stack(const Runtime* runtime, const Runtime* shared_
     bind_test_expect(&tally, compiled, "split.c and the harness compiled by cc", 0);
     if (compiled)
     {
-        bind_test_split_bind(&tally, shared_runtime, paths[LIBRARY_OBJECT], "the library bound, needing libgcc_s.so.1", "split-bound.so", paths[HARNESS], directory, keep,
-                             arena);
-        bind_test_split_bind(&tally, runtime, paths[PIE_OBJECT], "the PIE bound, needing libgcc_s.so.1", "split-bound", 0, directory, keep, arena);
+        // On a system without libgcc_s.so.1 the runtimes are already without it: binding refuses both, and cc's links,
+        // which need it, aren't made.
+        const bool unwinder = runtime->gcc_s.exports.count != 0 && shared_runtime->gcc_s.exports.count != 0;
+        if (!unwinder)
+        {
+            printf("  split-stack code: this system has no libgcc_s.so.1, so binding must refuse it\n");
+        }
+        bind_test_split_bind(&tally, shared_runtime, paths[LIBRARY_OBJECT], unwinder ? "the library bound, needing libgcc_s.so.1" : "the library refused without libgcc_s.so.1",
+                             "split-bound.so", paths[HARNESS], directory, keep, arena);
+        bind_test_split_bind(&tally, runtime, paths[PIE_OBJECT], unwinder ? "the PIE bound, needing libgcc_s.so.1" : "the PIE refused without libgcc_s.so.1", "split-bound", 0,
+                             directory, keep, arena);
         Runtime without_shared;
         Runtime without;
         const uint64_t stripped_length = arena->length;
-        const bool stripped = bind_test_without_gcc_s(&without_shared, shared_runtime, arena) && bind_test_without_gcc_s(&without, runtime, arena);
-        bind_test_expect(&tally, stripped, "the runtimes without libgcc_s.so.1", 0);
+        const bool stripped = unwinder && bind_test_without_gcc_s(&without_shared, shared_runtime, arena) && bind_test_without_gcc_s(&without, runtime, arena);
+        bind_test_expect(&tally, !unwinder || stripped, "the runtimes without libgcc_s.so.1", 0);
         if (stripped)
         {
             bind_test_split_bind(&tally, &without_shared, paths[LIBRARY_OBJECT], "the library refused without libgcc_s.so.1", 0, 0, directory, keep, arena);
@@ -5044,7 +5052,7 @@ static bool bind_test_split_stack(const Runtime* runtime, const Runtime* shared_
             "-fuse-ld=bfd",
             "-fuse-ld=lld",
         };
-        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fuses); f += 1)
+        for (uint32_t f = 0; unwinder && f < BUSTER_ARRAY_LENGTH(fuses); f += 1)
         {
             char* library = paths[f == 0 ? BFD_LIBRARY : LLD_LIBRARY];
             char* pie = paths[f == 0 ? BFD_PIE : LLD_PIE];

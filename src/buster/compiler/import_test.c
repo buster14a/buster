@@ -2833,46 +2833,58 @@ static bool import_test_names(const Link* link, String8 bytes, const ImportObjec
 static void import_test_cross_check_relocations(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
 static bool import_test_path_is(String8 path, const char* name);
 
+// libgcc_s.so.1 in a dynamic PIE's or a shared library's runtime (#489): its soname, the unwinder's exports at their
+// default versions, its version indices past libc.so.6's and the loader's, and none of its exports one of theirs, as
+// binding's order needs (bind.c): the driver names it before libc.so, and binding takes libc.so.6's exports first. On a
+// system without it (runtime_find_gcc_s found none), the runtime's library must be empty instead. Whether it has one.
+static bool import_test_runtime_gcc_s(ImportTestTally* tally, const Runtime* runtime)
+{
+    const ImportLibrary* gcc_s = &runtime->gcc_s;
+    const bool present = runtime->gcc_s_path.length != 0;
+    if (!present)
+    {
+        printf("  %s: this system has no libgcc_s.so.1, so the runtime has none\n", tally->check);
+        import_test_expect(tally, gcc_s->soname.length == 0 && gcc_s->version_count == 0 && gcc_s->exports.count == 0 && runtime->gcc_s_bytes.length == 0,
+                           "without libgcc_s.so.1, an empty library", 0);
+    }
+    else
+    {
+        import_test_expect(tally, import_test_path_is(runtime->gcc_s_path, "libgcc_s.so.1") && import_equal(gcc_s->soname, "libgcc_s.so.1"),
+                           "libgcc_s.so.1's path and soname", 0);
+        import_test_expect(tally, import_test_exported(gcc_s, "_Unwind_Resume", "GCC_3.0") && import_test_exported(gcc_s, "_Unwind_Backtrace", "GCC_3.3") &&
+                                      import_test_exported(gcc_s, "__gcc_personality_v0", "GCC_3.3.1") && import_test_exported(gcc_s, "__udivti3", "GCC_3.0"),
+                           "_Unwind_Resume and __udivti3 at GCC_3.0, _Unwind_Backtrace at GCC_3.3, __gcc_personality_v0 at GCC_3.3.1", 0);
+        uint16_t below = 0;
+        uint16_t smallest = UINT16_MAX;
+        for (uint32_t v = 0; v < runtime->libc.version_count; v += 1)
+        {
+            below = runtime->libc.versions[v].index > below ? runtime->libc.versions[v].index : below;
+        }
+        for (uint32_t v = 0; v < runtime->loader.version_count; v += 1)
+        {
+            below = runtime->loader.versions[v].index > below ? runtime->loader.versions[v].index : below;
+        }
+        for (uint32_t v = 0; v < gcc_s->version_count; v += 1)
+        {
+            smallest = gcc_s->versions[v].index < smallest ? gcc_s->versions[v].index : smallest;
+        }
+        import_test_expect(tally, gcc_s->version_count != 0 && smallest > below, "libgcc_s.so.1's version indices past libc.so.6's and the loader's", smallest);
+        uint32_t shared = 0;
+        for (uint32_t e = 0; e < gcc_s->exports.count; e += 1)
+        {
+            const uint8_t* name = gcc_s->exports.name[e];
+            const uint32_t length = gcc_s->exports.length[e];
+            const uint64_t hash = gcc_s->exports.hash[e];
+            shared += import_library_find(&runtime->libc, name, length, hash) != 0 || import_library_find(&runtime->loader, name, length, hash) != 0 ? 1 : 0;
+        }
+        import_test_expect(tally, gcc_s->exports.count != 0 && shared == 0, "libgcc_s.so.1's exports none of libc.so.6's or the loader's", shared);
+    }
+    return present;
+}
+
 // The names the linker of the runtime's kind defines among its global names, each marked the linker's, whether or not
 // the runtime refers to it, and no other name marked: by runtime_linker_names' kinds, for a static PIE _DYNAMIC but not
 // the IRELATIVE relocations' bounds, which a static executable's linker defines.
-// libgcc_s.so.1 in a dynamic PIE's or a shared library's runtime (#489): its soname, the unwinder's exports at their
-// default versions, its version indices past libc.so.6's and the loader's, and none of its exports one of theirs, as
-// binding's order needs (bind.c): the driver names it before libc.so, and binding takes libc.so.6's exports first.
-static void import_test_runtime_gcc_s(ImportTestTally* tally, const Runtime* runtime)
-{
-    const ImportLibrary* gcc_s = &runtime->gcc_s;
-    import_test_expect(tally, import_test_path_is(runtime->gcc_s_path, "libgcc_s.so.1") && import_equal(gcc_s->soname, "libgcc_s.so.1"), "libgcc_s.so.1's path and soname",
-                       0);
-    import_test_expect(tally, import_test_exported(gcc_s, "_Unwind_Resume", "GCC_3.0") && import_test_exported(gcc_s, "_Unwind_Backtrace", "GCC_3.3") &&
-                                  import_test_exported(gcc_s, "__gcc_personality_v0", "GCC_3.3.1") && import_test_exported(gcc_s, "__udivti3", "GCC_3.0"),
-                       "_Unwind_Resume and __udivti3 at GCC_3.0, _Unwind_Backtrace at GCC_3.3, __gcc_personality_v0 at GCC_3.3.1", 0);
-    uint16_t below = 0;
-    uint16_t smallest = UINT16_MAX;
-    for (uint32_t v = 0; v < runtime->libc.version_count; v += 1)
-    {
-        below = runtime->libc.versions[v].index > below ? runtime->libc.versions[v].index : below;
-    }
-    for (uint32_t v = 0; v < runtime->loader.version_count; v += 1)
-    {
-        below = runtime->loader.versions[v].index > below ? runtime->loader.versions[v].index : below;
-    }
-    for (uint32_t v = 0; v < gcc_s->version_count; v += 1)
-    {
-        smallest = gcc_s->versions[v].index < smallest ? gcc_s->versions[v].index : smallest;
-    }
-    import_test_expect(tally, gcc_s->version_count != 0 && smallest > below, "libgcc_s.so.1's version indices past libc.so.6's and the loader's", smallest);
-    uint32_t shared = 0;
-    for (uint32_t e = 0; e < gcc_s->exports.count; e += 1)
-    {
-        const uint8_t* name = gcc_s->exports.name[e];
-        const uint32_t length = gcc_s->exports.length[e];
-        const uint64_t hash = gcc_s->exports.hash[e];
-        shared += import_library_find(&runtime->libc, name, length, hash) != 0 || import_library_find(&runtime->loader, name, length, hash) != 0 ? 1 : 0;
-    }
-    import_test_expect(tally, gcc_s->exports.count != 0 && shared == 0, "libgcc_s.so.1's exports none of libc.so.6's or the loader's", shared);
-}
-
 static void import_test_linker_names(ImportTestTally* tally, const Runtime* runtime)
 {
     const RuntimeNames* global_names = &runtime->global_names;
@@ -2973,7 +2985,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         import_test_expect(&tally, runtime.loader.version_count != 0 && loader_smallest > libc_largest, "the loader's version indices past libc.so.6's", loader_smallest);
         // libgcc_s.so.1's exports at their default versions, its version indices moved past the loader's, and none of
         // its names libc.so.6's or the loader's exports, so that its place among them on the line doesn't matter.
-        import_test_runtime_gcc_s(&tally, &runtime);
+        const bool gcc_s = import_test_runtime_gcc_s(&tally, &runtime);
         // The archives in the driver's order, libgcc.a before libc.so's libc_nonshared.a, libc's (runtime_libc_archive), each
         // one's members one after another.
         const RuntimeArchive* libc_archive = runtime_libc_archive(&runtime);
@@ -3120,10 +3132,12 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         const uint32_t udivti3_name = runtime_find_global_name(global_names, (const uint8_t*)"__udivti3", 9, link_hash((const uint8_t*)"__udivti3", 9));
         const uint32_t libgcc_members = archived ? runtime.archives[0].archive.member_count : 0;
         const uint32_t udivti3_export = udivti3_name != 0 ? global_names->export[udivti3_name - 1] : 0;
+        const bool udivti3_exported = gcc_s ? udivti3_export != 0 && runtime_export_after_members(&runtime, udivti3_export - 1) &&
+                                                  runtime_export_library(&runtime, udivti3_export - 1, &export_index) == &runtime.gcc_s
+                                            : udivti3_export == 0;
         import_test_expect(&tally, udivti3_name != 0 && global_names->member[udivti3_name - 1] != 0 && global_names->member[udivti3_name - 1] - 1 < libgcc_members &&
-                                       udivti3_export != 0 && runtime_export_after_members(&runtime, udivti3_export - 1) &&
-                                       runtime_export_library(&runtime, udivti3_export - 1, &export_index) == &runtime.gcc_s,
-                           "__udivti3: a member's of libgcc.a, and libgcc_s.so.1's after it", 0);
+                                       udivti3_exported,
+                           "__udivti3: a member's of libgcc.a, and libgcc_s.so.1's after it (no export without it)", 0);
         uint32_t libgcc_names = 0;
         bool apart = true;
         for (uint32_t e = 0; e < global_names->count; e += 1)
@@ -3133,12 +3147,14 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             apart = apart && (!libgcc || global_names->export[e] == 0 || runtime_export_after_members(&runtime, global_names->export[e] - 1));
         }
         import_test_expect(&tally, libgcc_names != 0 && apart, "libgcc.a's names none of libc.so.6's or the loader's exports", libgcc_names);
-        // A name only libgcc_s.so.1 exports: its export, numbered after the loader's.
+        // A name only libgcc_s.so.1 exports: its export, numbered after the loader's; no global name without it.
         const uint32_t backtrace = runtime_find_global_name(global_names, (const uint8_t*)"_Unwind_Backtrace", 17, link_hash((const uint8_t*)"_Unwind_Backtrace", 17));
         const bool gcc_s_export = backtrace != 0 && global_names->export[backtrace - 1] > runtime.libc.exports.count + runtime.loader.exports.count &&
                                   runtime_export_library(&runtime, global_names->export[backtrace - 1] - 1, &export_index) == &runtime.gcc_s &&
                                   import_test_name_is(runtime.gcc_s.exports.name[export_index], runtime.gcc_s.exports.length[export_index], "_Unwind_Backtrace");
-        import_test_expect(&tally, backtrace != 0 && global_names->definition[backtrace - 1] == 0 && global_names->member[backtrace - 1] == 0 && gcc_s_export,
+        import_test_expect(&tally,
+                           gcc_s ? backtrace != 0 && global_names->definition[backtrace - 1] == 0 && global_names->member[backtrace - 1] == 0 && gcc_s_export
+                                 : backtrace == 0,
                            "_Unwind_Backtrace: libgcc_s.so.1's", 0);
         // Each name the linker defines, whether or not the runtime refers to it (only _GLOBAL_OFFSET_TABLE_ does), and no
         // other name.
@@ -3159,7 +3175,10 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         // The vector paths read libc.so.6, each crt object and each member, as the exact paths do.
         import_test_library_paths(&tally, runtime.libc_bytes, IMPORT_TEST_VECTOR, "libc.so.6", arena);
         import_test_library_paths(&tally, runtime.loader_bytes, IMPORT_TEST_VECTOR, "the loader", arena);
-        import_test_library_paths(&tally, runtime.gcc_s_bytes, IMPORT_TEST_VECTOR, "libgcc_s.so.1", arena);
+        if (gcc_s)
+        {
+            import_test_library_paths(&tally, runtime.gcc_s_bytes, IMPORT_TEST_VECTOR, "libgcc_s.so.1", arena);
+        }
         for (uint32_t a = 0; a < runtime.archive_count; a += 1)
         {
             import_test_archive_paths(&tally, runtime.archives[a].bytes, IMPORT_TEST_VECTOR, a == 0 ? "libgcc.a" : "libc_nonshared.a", arena);
@@ -3879,7 +3898,10 @@ static void import_test_cross_check(ImportTestTally* tally, const Runtime* runti
     const uint64_t length = arena->length;
     import_test_cross_check_library(tally, &runtime->libc, runtime->libc_path, "libc.so.6", arena);
     import_test_cross_check_library(tally, &runtime->loader, runtime->loader_path, "the loader", arena);
-    import_test_cross_check_library(tally, &runtime->gcc_s, runtime->gcc_s_path, "libgcc_s.so.1", arena);
+    if (runtime->gcc_s_path.length != 0)
+    {
+        import_test_cross_check_library(tally, &runtime->gcc_s, runtime->gcc_s_path, "libgcc_s.so.1", arena);
+    }
     import_test_cross_check_relocations(tally, runtime, arena);
     arena_pop_to(arena, length);
 }
@@ -4017,7 +4039,7 @@ static bool import_test_shared_runtime(Arena* arena)
         import_test_expect(&tally, import_equal(runtime.libc.soname, "libc.so.6") && import_equal(runtime.loader.soname, "ld-linux-x86-64.so.2") && runtime.archive_count == 2 &&
                                        import_test_path_is(runtime.archives[0].path, "libgcc.a") && import_test_path_is(runtime_libc_archive(&runtime)->path, "libc_nonshared.a"),
                            "libgcc.a, libc.so.6, the loader and libc_nonshared.a", runtime.archive_count);
-        import_test_runtime_gcc_s(&tally, &runtime);
+        const bool gcc_s = import_test_runtime_gcc_s(&tally, &runtime);
         const RuntimeNames* names = &runtime.global_names;
         const Link* link = &runtime.link;
         const uint32_t main_entry = runtime_find_global_name(names, (const uint8_t*)"main", 4, link_hash((const uint8_t*)"main", 4));
@@ -4039,10 +4061,13 @@ static bool import_test_shared_runtime(Arena* arena)
             const NameId name = link->symbols.name[symbol];
             const RuntimeBinding binding = runtime.bindings[symbol];
             uint32_t index = 0;
+            // libgcc_s.so.1's, or without it the program's to define.
+            const bool bound = gcc_s ? binding.kind == RUNTIME_BINDING_SHARED && runtime_export_library(&runtime, binding.export, &index) == &runtime.gcc_s
+                                     : binding.kind == RUNTIME_BINDING_PROGRAM;
             unwinder = unwinder || (link->symbols.atom[symbol] == 0 && name != 0 && import_test_name_is(runtime_name_bytes(&runtime, name), link->names.length[name], "_Unwind_Resume") &&
-                                    binding.kind == RUNTIME_BINDING_SHARED && runtime_export_library(&runtime, binding.export, &index) == &runtime.gcc_s);
+                                    bound);
         }
-        import_test_expect(&tally, unwinder, "morestack.o's _Unwind_Resume bound to libgcc_s.so.1", 0);
+        import_test_expect(&tally, unwinder, "morestack.o's _Unwind_Resume bound to libgcc_s.so.1 (to the program without it)", 0);
         const uint32_t init = runtime_find_global_name(names, (const uint8_t*)"_init", 5, link_hash((const uint8_t*)"_init", 5));
         const uint32_t dso = runtime_find_global_name(names, (const uint8_t*)"__dso_handle", 12, link_hash((const uint8_t*)"__dso_handle", 12));
         const SymbolId init_symbol = init != 0 ? names->definition[init - 1] : 0;

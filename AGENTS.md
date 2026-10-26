@@ -2858,12 +2858,16 @@ division, remainder and conversions call seven of `libgcc.a`'s functions, whose
 members join it, checks their results, and one whose code walks its stack with
 `_Unwind_Backtrace`, which needs `libgcc_s.so.1` where the program that loads
 it doesn't. Then the unwinder (#489, `dynamic_test_libgcc_s`): test-bind's
-split-stack code as a PIE and as a library, and a PIE whose `main` calls
+split-stack code as a library, and a PIE whose `main` calls
 `_Unwind_Backtrace`, compiled by `cc`, bound with an import of
 `libgcc_s.so.1`'s, written by every lane count with `DT_NEEDED`
 `libgcc_s.so.1` before `libc.so.6` and its version need (the structure's
 rules), and run, the library through a harness that doesn't need
-`libgcc_s.so.1`. With `--cross-check`, lld
+`libgcc_s.so.1`. On a system without `libgcc_s.so.1`, binding must refuse
+both instead (the library's as `BIND_ERROR_MEMBER_UNDEFINED`), and the
+compiled library that walks its stack is left out; test-import, test-bind
+and test-checker-driver assert the same fallback (`cc
+-print-file-name=libgcc_s.so.1` tells the driver's test). With `--cross-check`, lld
 links the same objects with `-shared`; the comparison accounts for its lazy PLT
 slots and our non-lazy GLOB_DAT slots. Local-exec TLS, text relocations, a direct
 address of a preemptible function, and currently general/local-dynamic TLS are

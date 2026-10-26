@@ -3424,7 +3424,8 @@ static bool dynamic_test_shared(const ExecutableTestDirectory* directory, const 
 // The C libraries the compiled check builds, each with a buster_check that the program calls with its own buster_helper
 // and buster_data, which preempt the library's: their checks fail by a count. Each compiled with `pic` (-fPIC, or the
 // code a shared library refuses) and `option`; `refused` if a shared library can't relocate it, and `lld_refuses` if
-// lld's -shared refuses it too.
+// lld's -shared refuses it too; `unwinder` if it needs libgcc_s.so.1, without which this system can't load it, so that
+// it is left out there (dynamic_test_shared_next).
 typedef struct DynamicTestSharedSource DynamicTestSharedSource;
 struct DynamicTestSharedSource
 {
@@ -3436,6 +3437,7 @@ struct DynamicTestSharedSource
     uint32_t tls_variables;
     bool refused;
     bool lld_refuses;
+    bool unwinder;
 };
 
 static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
@@ -3519,6 +3521,7 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
                   "    return frames < 2 || helper() != 2 || *data != 9;\n"
                   "}\n",
         .pic = "-fPIC",
+        .unwinder = true,
     },
     {
         // A protected function's address by a lea (PC32): no other object preempts it.
@@ -3733,6 +3736,19 @@ static bool dynamic_test_checks_hold(const char* program, const char* library)
 // loaded by the program (dynamic_test_shared_program, which cc builds with -rdynamic), whose checks of preemption must
 // hold. With `cross_check`, lld links the same object with cc -shared, whose library must pass the same checks, and the
 // bound link's objects as dynamic_test_against_lld compares.
+// The first of dynamic_test_shared_sources from `s` that this system can load: one that needs libgcc_s.so.1 only where
+// `runtime` has it.
+static uint32_t dynamic_test_shared_next(uint32_t s, const Runtime* runtime)
+{
+    uint32_t next = s;
+    while (next < BUSTER_ARRAY_LENGTH(dynamic_test_shared_sources) && dynamic_test_shared_sources[next].unwinder && runtime->gcc_s.exports.count == 0)
+    {
+        printf("  shared-%s: left out, as this system has no libgcc_s.so.1\n", dynamic_test_shared_sources[next].name);
+        next += 1;
+    }
+    return next;
+}
+
 static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
 {
     DynamicTestTally tally = {
@@ -3755,7 +3771,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
     char* build[] = { "cc", "-O1", "-rdynamic", "-o", program, program_source, 0 };
     const bool built = program_written && object_test_run(build, out, err) == 0;
     dynamic_test_expect(&tally, built, "cc builds the program that loads the libraries", 0);
-    for (uint32_t s = 0; built && s < BUSTER_ARRAY_LENGTH(dynamic_test_shared_sources); s += 1)
+    for (uint32_t s = dynamic_test_shared_next(0, runtime); built && s < BUSTER_ARRAY_LENGTH(dynamic_test_shared_sources); s = dynamic_test_shared_next(s + 1, runtime))
     {
         const DynamicTestSharedSource* library = &dynamic_test_shared_sources[s];
         Scratch scratch = scratch_begin(0);
@@ -3922,12 +3938,18 @@ static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, cons
     const bool harnessed = !library || (bind_test_write_file(harness_source, bind_test_split_harness, sizeof(bind_test_split_harness) - 1) &&
                                         object_test_run(build_harness, out, err) == 0);
     dynamic_test_expect(&tally, harnessed, "cc builds the harness", 0);
-    // libgcc_s.so.1 on this system, without which binding refuses split-stack code (test-bind) and nothing here runs.
-    dynamic_test_expect(&tally, runtime->gcc_s.exports.count != 0, "the runtime has libgcc_s.so.1", 0);
+    // Without libgcc_s.so.1 on this system, binding must refuse both: the PIE's unwinder (_Unwind_GetIP or
+    // _Unwind_Backtrace) as a name nothing defines, and the library's split-stack code as morestack.o's reference to _Unwind_Resume
+    // (BIND_ERROR_MEMBER_UNDEFINED, bind_test_split_refused).
+    const bool unwinder = runtime->gcc_s.exports.count != 0;
+    if (!unwinder)
+    {
+        printf("  %s: this system has no libgcc_s.so.1, so binding must refuse its code\n", tally.check);
+    }
     // The PIE, then the library.
     const uint32_t first = library ? 1 : 0;
     const uint32_t end = library ? BUSTER_ARRAY_LENGTH(programs) : 1;
-    for (uint32_t p = first; harnessed && runtime->gcc_s.exports.count != 0 && p < end; p += 1)
+    for (uint32_t p = first; harnessed && p < end; p += 1)
     {
         Scratch scratch = scratch_begin(0);
         char source_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
@@ -3954,8 +3976,18 @@ static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, cons
         const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
         BindTestLink bound;
         const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
-        const bool bound_ok = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena) && bind_end(&bound.bind, &bound.link) &&
-                              link_check(&bound.link) == LINK_ERROR_NONE;
+        const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena);
+        const bool ended = begun && bind_end(&bound.bind, &bound.link);
+        const bool bound_ok = unwinder && ended && link_check(&bound.link) == LINK_ERROR_NONE;
+        if (!unwinder)
+        {
+            const bool refused = imported && !ended &&
+                                 (programs[p].split ? bind_test_split_refused(&bound.bind, &bound.link, runtime)
+                                                    : bound.bind.error == BIND_ERROR_UNDEFINED && (bind_test_named(&bound.link, bound.bind.name, "_Unwind_Backtrace") ||
+                                                                                                    bind_test_named(&bound.link, bound.bind.name, "_Unwind_GetIP")));
+            dynamic_test_expect(&tally, refused, "refused without libgcc_s.so.1", p);
+            printf("  %s: %s\n", programs[p].name, refused ? "refused without libgcc_s.so.1" : "failed");
+        }
         // An import of libgcc_s.so.1's, and each one strong, so that the library is needed.
         bool needs = false;
         bool strong = true;
@@ -3966,7 +3998,7 @@ static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, cons
             needs = needs || unwinder;
             strong = strong && (!unwinder || (bound.link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL);
         }
-        dynamic_test_expect(&tally, bound_ok && needs && strong, "bound, needing libgcc_s.so.1", p);
+        dynamic_test_expect(&tally, !unwinder || (bound_ok && needs && strong), "bound, needing libgcc_s.so.1", p);
         const String8 path = executable_test_path(directory, programs[p].name, path_bytes);
         ExecutableResult result = { 0 };
         String8 file = { 0 };
@@ -3986,9 +4018,12 @@ static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, cons
         char* environment[] = { "BUSTER=1", 0 };
         const bool ran = written && executable_test_run_arguments(arguments, environment, output, &length, &status);
         const bool exited = ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == 0;
-        dynamic_test_expect(&tally, exited, library ? "the harness loads it and it runs" : "it runs", p);
-        printf("  %s: %llu dynamic symbols, %llu relocations in .rela.dyn: %s\n", programs[p].name, (unsigned long long)result.dynamic_symbols,
-               (unsigned long long)result.relocations, exited ? "ran" : "failed");
+        if (unwinder)
+        {
+            dynamic_test_expect(&tally, exited, library ? "the harness loads it and it runs" : "it runs", p);
+            printf("  %s: %llu dynamic symbols, %llu relocations in .rela.dyn: %s\n", programs[p].name, (unsigned long long)result.dynamic_symbols,
+                   (unsigned long long)result.relocations, exited ? "ran" : "failed");
+        }
         if (imported)
         {
             bind_test_link_end(&bound);

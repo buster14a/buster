@@ -395,7 +395,11 @@ static uint8_t* check_test_driver_read_aligned(const char* path, uint64_t* lengt
 // morestack.o join, whose _Unwind_Resume binds to libgcc_s.so.1 now, where #483 refused it, naming morestack.o: binding
 // joins generic-morestack.o too, whose thread-locals it reaches by general-dynamic accesses, which the writer doesn't
 // take in a dynamic PIE yet, so both paths must refuse it with the one error naming that member's fixup, and write no
-// executable.
+// executable. On a system without libgcc_s.so.1 (check_test_driver_has_gcc_s), binding refuses both instead: the
+// backtrace's name as undefined, and morestack.o's _Unwind_Resume naming the member and saying the system has no
+// libgcc_s.so.1.
+static bool check_test_driver_has_gcc_s(void);
+
 static void check_test_driver_split_stack(CheckTest* test, const char* executable, const char* directory)
 {
     static const char split[] = "extern void __splitstack_getcontext(void* context[10]);\n"
@@ -428,11 +432,19 @@ static void check_test_driver_split_stack(CheckTest* test, const char* executabl
         const char* source;
         const char* output;
         bool refused;
+        // The refusal's first line, and a part of it, with libgcc_s.so.1 and without it (0 for linking).
+        const char* refusal;
+        const char* unwinder_refusal;
     } programs[] = {
-        { "backtrace", backtrace, "1\n", false },
-        { "split-stack", split, "", true },
+        { "backtrace", backtrace, "1\n", false, 0, "error: undefined reference to '_Unwind_Backtrace'\n" },
+        { "split-stack", split, "", true, "libgcc.a(generic-morestack.o)'s fixup to '",
+          "(morestack.o): undefined reference to '_Unwind_Resume'; GCC's driver takes it from libgcc_s.so.1, which this system doesn't have\n" },
     };
-    static const char refusal[] = "libgcc.a(generic-morestack.o)'s fixup to '";
+    const bool unwinder = check_test_driver_has_gcc_s();
+    if (!unwinder)
+    {
+        printf("  the unwinder: this system has no libgcc_s.so.1, so both programs must be refused\n");
+    }
     for (uint32_t p = 0; p < sizeof(programs) / sizeof(programs[0]); p += 1)
     {
         char source[256];
@@ -451,10 +463,18 @@ static void check_test_driver_split_stack(CheckTest* test, const char* executabl
             char* text = NULL;
             const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
             const bool quiet = text == NULL || text[0] == 0;
-            if (programs[p].refused)
+            const bool refused = programs[p].refused || !unwinder;
+            if (!unwinder)
             {
                 const size_t length = text != NULL ? strlen(text) : 0;
-                const bool worded = length != 0 && strncmp(text, "error: can't link ", 18) == 0 && strstr(text, refusal) != NULL &&
+                const bool worded = length != 0 && strstr(text, programs[p].unwinder_refusal) != NULL && strchr(text, '\n') == text + length - 1;
+                check_test_expect(test, status == 1 && worded && access(outputs[path], F_OK) != 0,
+                                  path == 0 ? "the unwinder's program refused without libgcc_s.so.1" : "the unwinder's program refused, scalar");
+            }
+            else if (programs[p].refused)
+            {
+                const size_t length = text != NULL ? strlen(text) : 0;
+                const bool worded = length != 0 && strncmp(text, "error: can't link ", 18) == 0 && strstr(text, programs[p].refusal) != NULL &&
                                     strchr(text, '\n') == text + length - 1;
                 check_test_expect(test, status == 1 && worded && access(outputs[path], F_OK) != 0,
                                   path == 0 ? "split-stack's API bound, then refused by the writer, naming generic-morestack.o's fixup"
@@ -469,12 +489,12 @@ static void check_test_driver_split_stack(CheckTest* test, const char* executabl
             const bool named = bytes[path] != NULL && memmem(bytes[path], lengths[path], needed, sizeof(needed)) != NULL;
             char captured[64];
             const bool ran = status == 0 && check_test_driver_capture(outputs[path], captured, sizeof(captured)) && strcmp(captured, programs[p].output) == 0;
-            check_test_expect(test, programs[p].refused || (status == 0 && quiet && named && ran),
+            check_test_expect(test, refused || (status == 0 && quiet && named && ran),
                               path == 0 ? "the unwinder's program links, names libgcc_s.so.1 and runs" : "the unwinder's program, scalar");
             free(text);
         }
         check_test_expect(test,
-                          programs[p].refused ||
+                          programs[p].refused || !unwinder ||
                               (bytes[0] != NULL && bytes[1] != NULL && lengths[0] == lengths[1] && memcmp(bytes[0], bytes[1], lengths[0]) == 0),
                           "the unwinder's program the same by both paths");
         free(bytes[0]);
@@ -483,6 +503,22 @@ static void check_test_driver_split_stack(CheckTest* test, const char* executabl
         unlink(outputs[0]);
         unlink(outputs[1]);
     }
+}
+
+// Whether this system has libgcc_s.so.1 where GCC's driver finds it: cc -print-file-name names its path, or the name
+// alone when it finds none.
+static bool check_test_driver_has_gcc_s(void)
+{
+    FILE* output = popen("cc -print-file-name=libgcc_s.so.1", "r");
+    char path[4096] = { 0 };
+    const bool read = output != NULL && fgets(path, sizeof(path), output) != NULL;
+    if (output != NULL)
+    {
+        pclose(output);
+    }
+    const size_t length = read ? strcspn(path, "\n") : 0;
+    path[length] = 0;
+    return length != 0 && path[0] == '/' && access(path, F_OK) == 0;
 }
 
 // A file's bytes, read whole into memory aligned to 64 bytes, as a snapshot's view takes them (snapshot_view), which the
