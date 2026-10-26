@@ -4142,10 +4142,12 @@ static void check_lower_table_index(CheckLowerWriter* writer, const CheckLowerTa
 
 // Jump table `table`'s dispatch, at its switch's first CASE control, the switch's value in `local` of class `class`: to
 // the default (or the switch's end) when the index (check_lower_table_index) is past the table's last entry, and
-// otherwise to the table's address plus the entry's 32-bit offset of its label from it, as clang -O0's code goes.
+// otherwise to the table's address plus the entry's 32-bit offset of its label from it, as clang -O0's code goes. Its
+// entries are the switch statement's, for -g's rows, as clang's code is.
 static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table, uint32_t local, uint8_t class)
 {
     CheckLowerTable* item = writer->output->tables + table;
+    check_lower_source(writer, writer->table_switch);
     const uint8_t index_class = class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
     check_lower_table_index(writer, item, local, class, index_class);
     check_lower_emit(writer, BUSTER_TYPED_CONST, index_class, (uint64_t)item->count - 1);
