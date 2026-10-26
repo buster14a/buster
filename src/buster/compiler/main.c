@@ -70,6 +70,13 @@
 #endif
 #define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
 
+// Share pure template construction, not the caller's encoder storage or readiness. Legacy properties stay local.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
+#define BUSTER_X86_TEMPLATE_ENTRY
+#else
+#define BUSTER_X86_TEMPLATE_ENTRY BUSTER_ELSEWHERE
+#endif
+
 // The ISA requirement tables are immutable and need no initialization. Share their frontend copy without sharing
 // encoder storage or adding calls/loads to the local table-building kernels. Standalone inclusions stay static.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)

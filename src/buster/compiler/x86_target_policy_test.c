@@ -7,20 +7,57 @@
 
 static bool x86_target_test_templates(void)
 {
-    bool passed = x86_encoder_initialize();
+    const size_t span = BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry);
+    const size_t extent = (BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES) * sizeof(X86TemplateEntry);
+    uint8_t* storage = malloc(extent + 129);
+    bool passed = storage != 0;
     uint32_t checks = 0;
-    for (uint32_t form = 0; passed && form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    const X86EncoderMode modes[] = { X86_ENCODER_MODE_64, X86_ENCODER_MODE_ADDRESS32, X86_ENCODER_MODE_APX };
+    for (uint32_t mode = 0; passed && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
-        X86TemplateEntry expected;
-        memset(&expected, 0xa5, sizeof(expected));
-        const bool ready = build_mode_template(form, X86_ENCODER_MODE_64, &expected.template);
-        memcpy(expected.layout, expected.template.layout, sizeof(expected.layout));
-        memcpy(expected.bytes, expected.template.bytes, sizeof(expected.bytes));
-        passed &= ready && memcmp(&expected, &x86_templates[form], sizeof(expected)) == 0;
-        passed &= memcmp(&expected, &x86_templates[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
-        checks += 2;
+        const X86EncoderMode encoder = modes[mode];
+        passed &= encoder == X86_ENCODER_MODE_64 ? x86_encoder_initialize() :
+                  encoder == X86_ENCODER_MODE_ADDRESS32 ? x86_encoder_initialize_address32() : x86_encoder_initialize_apx();
+        const X86TemplateEntry* actual = x86_mode_templates(encoder);
+        // A deliberately unaligned, dirty destination checks the shared constructor's complete writes and bounds.
+        memset(storage, 0xa5, extent + 129);
+        X86TemplateEntry* copied = (X86TemplateEntry*)(storage + 65);
+        passed &= x86_build_nonlegacy_templates(encoder, copied);
+        for (uint32_t form = 0; passed && form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+        {
+            X86TemplateEntry expected;
+            memset(&expected, 0xa5, sizeof(expected));
+            const bool ready = build_mode_template(form, encoder, &expected.template);
+            memcpy(expected.layout, expected.template.layout, sizeof(expected.layout));
+            memcpy(expected.bytes, expected.template.bytes, sizeof(expected.bytes));
+            passed &= ready && memcmp(&expected, &actual[form], sizeof(expected)) == 0;
+            passed &= memcmp(&expected, &actual[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
+            passed &= memcmp(&expected, &copied[form], sizeof(expected)) == 0;
+            passed &= memcmp(&expected, &copied[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
+            checks += 4;
+        }
+        for (size_t i = 0; i < 65; i += 1)
+        {
+            passed &= storage[i] == 0xa5;
+        }
+        for (size_t i = 65 + extent; i < extent + 129; i += 1)
+        {
+            passed &= storage[i] == 0xa5;
+        }
+        for (size_t i = 65 + span; i < 65 + BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry); i += 1)
+        {
+            passed &= storage[i] == 0xa5;
+        }
     }
-    printf("target complete default templates against direct builder: %s (%u entries, all byte/layout halves and fixups)\n", passed ? "pass" : "FAIL", checks);
+    X86TemplateEntry rejected;
+    memset(&rejected, 0xa5, sizeof(rejected));
+    const X86TemplateEntry original = rejected;
+    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_32, &rejected);
+    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_16, &rejected);
+    passed &= !x86_build_nonlegacy_templates((X86EncoderMode)UINT32_MAX, &rejected);
+    passed &= memcmp(&original, &rejected, sizeof(original)) == 0;
+    free(storage);
+    printf("target complete native-mode templates against direct builder: %s (%u entries, all byte/layout halves and fixups; dirty unaligned destinations and refusal guards)\n", passed ? "pass" : "FAIL", checks);
     return passed;
 }
 
