@@ -80,6 +80,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <immintrin.h>
 
@@ -5556,11 +5557,14 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
 // stay unmapped.
 #define BUSTER_X86_TEMPLATE_PADDING 1
-// The two live 64-bit template spans are separated by the 2 MiB fixup bias. Align their backing array to that
-// boundary so Linux's transparent huge pages do not add a first-touch page when another unit's size changes.
-static X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
-    __attribute__((aligned(1u << 21)));
-static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
+// Keep each live span inside a fixed-size region, independent of the executable's other tables. On hosts using
+// transparent huge pages this can reduce first-touch work. Allocate only in units that actually initialize it.
+#define BUSTER_X86_TEMPLATE_ALIGNMENT ((size_t)BUSTER_X86_FORM_FIXUP * sizeof(X86TemplateEntry))
+#define BUSTER_X86_TEMPLATE_STORAGE_BYTES ((BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING) * sizeof(X86TemplateEntry))
+#define BUSTER_X86_TEMPLATE_ALLOCATION_BYTES ((BUSTER_X86_TEMPLATE_STORAGE_BYTES + BUSTER_X86_TEMPLATE_ALIGNMENT - 1) / BUSTER_X86_TEMPLATE_ALIGNMENT * BUSTER_X86_TEMPLATE_ALIGNMENT)
+_Static_assert((BUSTER_X86_TEMPLATE_ALIGNMENT & (BUSTER_X86_TEMPLATE_ALIGNMENT - 1)) == 0, "template alignment is a power of two");
+_Static_assert(BUSTER_X86_TEMPLATE_STORAGE_BYTES <= BUSTER_X86_TEMPLATE_ALLOCATION_BYTES, "allocation covers templates and padding");
+static X86TemplateEntry* x86_templates;
 static bool x86_encoder_initialized;
 // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
 static X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
@@ -5984,7 +5988,19 @@ static bool build_mode_templates(X86EncoderMode encoder, X86TemplateEntry* templ
 
 static bool x86_encoder_initialize(void)
 {
-    x86_encoder_initialized = build_mode_templates(X86_ENCODER_MODE_64, x86_templates);
+    bool result = true;
+    if (x86_templates == 0)
+    {
+        X86TemplateEntry* storage = aligned_alloc(BUSTER_X86_TEMPLATE_ALIGNMENT, BUSTER_X86_TEMPLATE_ALLOCATION_BYTES);
+        result = storage != 0;
+        if (result)
+        {
+            memset(storage, 0, BUSTER_X86_TEMPLATE_PADDING * sizeof(X86TemplateEntry));
+            memset(&storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES], 0, BUSTER_X86_TEMPLATE_PADDING * sizeof(X86TemplateEntry));
+            x86_templates = storage + BUSTER_X86_TEMPLATE_PADDING;
+        }
+    }
+    x86_encoder_initialized = result && build_mode_templates(X86_ENCODER_MODE_64, x86_templates);
     return x86_encoder_initialized;
 }
 
