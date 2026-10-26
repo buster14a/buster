@@ -1156,6 +1156,9 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
         { "conflict before a later statement's syntax error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n    int x = ;\n}\n", true },
         { "placement before a later statement's syntax error", "void f(int n) {\n#pragma nounroll\n    n = 1;\n    int x = ;\n}\n", true },
         { "synthetic closure does not complete the annotated loop", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { n = 1;\n" },
+        { "a following pragma argument comes after completed-loop Sema", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma unroll ()\n    while (n--) {}\n}\n", true },
+        { "a following pragma handler runs in the loop's lookahead", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma clang loop bogus(4)\n    while (n--) {}\n}\n", false, true },
+        { "a following unclosed pragma runs in the loop's lookahead", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma unroll (4\n    while (n--) {}\n}\n", true, true },
         { "pragma expansion retains the conflict's invocation", "void f(int n) {\n_Pragma(\"clang loop unroll_count(4)\")\n_Pragma(\"clang loop unroll(full)\")\n    while (n--) {}\n}\n", true },
     };
     const char* arguments[] = { "-std=gnu17", "-w" };

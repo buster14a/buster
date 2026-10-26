@@ -27,6 +27,8 @@
 #define BUSTER_CHECK_LOOP_DISABLE 2u
 #define BUSTER_CHECK_LOOP_ASSUME_SAFETY 4u
 #define BUSTER_CHECK_LOOP_FULL 8u
+// A pragma-handler error can be emitted while lexing the lookahead after the previous statement, before its Sema.
+#define BUSTER_CHECK_LOOP_HANDLER_ERROR 4u
 
 struct CheckInputLoopDiagnostic
 {
@@ -380,7 +382,8 @@ static void check_input_loop_add(CheckLoopHints* hints, CheckLoopCategory catego
 }
 
 // One `#pragma clang loop`'s options, from `cursor` to its end (`end`, its PRAGMA_END), into the loop's hints, in clang's
-// steps (at the top of this file): 2 for valid hints, 1 for a pragma clang drops, 3 for clang's error, and otherwise 0
+// steps (at the top of this file): 2 for valid hints, 1 for a pragma clang drops, 3 for an argument error, 4 for a
+// pragma-handler error, and otherwise 0
 // for what this leaves unsupported. The first error's message, where clang has one of its own for it (an unclosed or
 // empty argument, one no expression starts with), goes in `*message`, which stays as it was otherwise.
 static uint8_t check_input_loop_options(CheckInputReader* reader, uint32_t cursor, uint32_t end, CheckLoopHints* hints, uint8_t* message, const CheckInputLoopDiagnostic* at)
@@ -399,6 +402,7 @@ static uint8_t check_input_loop_options(CheckInputReader* reader, uint32_t curso
         next = close + 1;
     }
     result = result == 2 && next < end ? 1 : result;
+    const bool handler_error = result == 3;
     // Parse every argument before publishing a Sema conflict: even a later argument error precedes the statement.
     next = cursor;
     while (result != 1 && result != 3 && next < end)
@@ -439,7 +443,7 @@ static uint8_t check_input_loop_options(CheckInputReader* reader, uint32_t curso
         result = hint == 3 || hint == 0 ? hint : result;
         next = close + 1;
     }
-    return result;
+    return handler_error ? BUSTER_CHECK_LOOP_HANDLER_ERROR : result;
 }
 
 // One of the other loop hints, from `cursor` (after its name) to its end: a state of `category` (`state`, 0 for a count
@@ -461,7 +465,7 @@ static uint8_t check_input_loop_unroll(CheckInputReader* reader, uint32_t cursor
     CheckLoopHint record = { .source = at->source, .pragma_kind = (uint8_t)pragma_kind };
     if (!dropped && parenthesized && close == end)
     {
-        result = 3;
+        result = BUSTER_CHECK_LOOP_HANDLER_ERROR;
         *message = CHECK_INPUT_LOOP_PARENTHESIS;
     }
     else if (!dropped && cursor < end && first == close)
@@ -519,7 +523,8 @@ static void check_input_loop_first(CheckInputLoopDiagnostic* first, const CheckI
     }
 }
 
-// Each loop hint's handled state (2 for valid hints, 1 for a pragma clang drops, 3 for an argument error, 0 for
+// Each loop hint's handled state (2 for valid hints, 1 for a pragma clang drops, 3 for an argument error, 4 for a
+// pragma-handler error, 0 for
 // unsupported), and an argument error's message in `messages`. The caller zeroes both arrays and `delayed`; the
 // earliest completed statement's placement/conflict goes in `delayed`. A dropped pragma has no hints.
 // In a function's body, clang checks each pragma's count expressions before it reads the next
@@ -583,7 +588,7 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
             uint8_t message = CHECK_INPUT_LOOP_HINT;
             uint8_t state = clang ? check_input_loop_options(reader, source + 4, end, &hints, &message, &at) :
                             check_input_loop_unroll(reader, source + (gcc ? 4 : 3), end, category, word, unroll || jam || gcc, &hints, &message, &at, pragma_kind);
-            messages[pragma] = state == 3 ? message : 0;
+            messages[pragma] = state >= 3 ? message : 0;
             if ((state == 2 || state == 0) && bodies == 0)
             {
                 state = 3;

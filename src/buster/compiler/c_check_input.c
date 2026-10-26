@@ -4666,6 +4666,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
+                bool handler_error = false;
                 for (uint32_t pragma = 0; prepared && pragma < parser->tokens.pragma_count; pragma += 1)
                 {
                     while (input->pack_pragmas != 0 && pack < input->pack_pragmas->count && input->pack_pragmas->records[pack].pragma < pragma)
@@ -4673,13 +4674,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         pack += 1;
                     }
                     const uint32_t position = parser->tokens.pragma_positions[pragma];
-                    if ((handled[pragma] == 0 || handled[pragma] == 3) &&
+                    if ((handled[pragma] == 0 || handled[pragma] >= 3) &&
                         (input->deferred_tokens == 0 || deferred != 0 || input->deferred_tokens[position] == 0))
                     {
                         reader.resolve_limit = parser->tokens.pragma_positions[pragma];
                         reader.resolve_pragma = pragma;
-                        reader.resolve_message = handled[pragma] != 3 ? CHECK_INPUT_UNSUPPORTED :
+                        reader.resolve_message = handled[pragma] < 3 ? CHECK_INPUT_UNSUPPORTED :
                                                  loop_messages[pragma] != 0 ? (CheckInputMessage)loop_messages[pragma] : CHECK_INPUT_DECLARATION;
+                        handler_error = handled[pragma] == BUSTER_CHECK_LOOP_HANDLER_ERROR;
                         if (input->pack_pragmas != 0 && pack < input->pack_pragmas->count && input->pack_pragmas->records[pack].pragma == pragma)
                         {
                             reader.resolve_diagnostic_token = input->pack_pragmas->records[pack].diagnostic_token;
@@ -4687,7 +4689,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         break;
                     }
                 }
-                if (prepared && delayed.pragma != 0 && delayed.position <= reader.resolve_limit)
+                // The next pragma's handler can run in the current statement's lookahead. Its argument parser runs
+                // only with the next statement; those errors follow a conflict at the same insertion position.
+                if (prepared && delayed.pragma != 0 && (delayed.position < reader.resolve_limit ||
+                    (delayed.position == reader.resolve_limit && !handler_error)))
                 {
                     input->loop_diagnostic = BUSTER_ARENA_PUSH_ARRAY(arena, CheckInputLoopDiagnostic, 1);
                     input->resource |= input->loop_diagnostic == 0;
