@@ -255,8 +255,8 @@ struct Bind
     const RuntimeLibraries* libraries;
     uint32_t libraries_needed;
     // The libraries the driver names as needed that a needed named library's strong reference needs, a bit each
-    // (BUSTER_BIND_NEEDS_LOADER, BUSTER_BIND_NEEDS_GCC_S): a reference to a name of theirs that the library's own
-    // DT_NEEDED doesn't cover, nor the executable's definition satisfy, as GNU ld's --as-needed counts it
+    // (BUSTER_BIND_NEEDS_LOADER, BUSTER_BIND_NEEDS_GCC_S): a reference to a name of theirs that no DT_NEEDED entry of a
+    // library the program loads covers, nor the executable's definition satisfies, as GNU ld's --as-needed counts it
     // (bind_needed_libraries), from bind_keep_libraries on. bind_keep_as_needed keeps such a library whatever the
     // program's own references, and dynamic_inputs makes it required.
     uint32_t runtime_needed;
@@ -1445,6 +1445,28 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
     return fits;
 }
 
+// The libraries the program loads, a bit each: the `needed` ones, and the named libraries their DT_NEEDED entries name,
+// which the loader loads for them, to the closure.
+static uint32_t bind_libraries_loaded(const RuntimeLibraries* libraries, uint32_t needed)
+{
+    uint32_t loaded = needed;
+    uint32_t added = needed;
+    while (added != 0)
+    {
+        uint32_t next = 0;
+        for (uint32_t l = 0; l < libraries->count; l += 1)
+        {
+            for (uint32_t m = 0; (added & (1u << l)) != 0 && m < libraries->count; m += 1)
+            {
+                next |= runtime_libraries_lists(libraries, l, m) ? 1u << m : 0;
+            }
+        }
+        added = next & ~loaded;
+        loaded |= added;
+    }
+    return loaded;
+}
+
 // The version needs of the libraries the program loads, checked as glibc's loader checks them when it loads them
 // (dl-version.c's _dl_check_map_versions), #398's review: the `needed` libraries, and the named libraries their
 // DT_NEEDED entries name, which the loader loads for them. Each auxiliary entry of a library's .gnu.version_r requires
@@ -1461,21 +1483,7 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
 static void bind_library_versions(Bind* bind, uint32_t needed)
 {
     const RuntimeLibraries* libraries = bind->libraries;
-    uint32_t loaded = needed;
-    uint32_t added = needed;
-    while (added != 0)
-    {
-        uint32_t next = 0;
-        for (uint32_t l = 0; l < libraries->count; l += 1)
-        {
-            for (uint32_t m = 0; (added & (1u << l)) != 0 && m < libraries->count; m += 1)
-            {
-                next |= runtime_libraries_lists(libraries, l, m) ? 1u << m : 0;
-            }
-        }
-        added = next & ~loaded;
-        loaded |= added;
-    }
+    const uint32_t loaded = bind_libraries_loaded(libraries, needed);
     for (uint32_t l = 0; bind->error == BIND_ERROR_NONE && l < libraries->count; l += 1)
     {
         const RuntimeVersionNeeds* needs = &libraries->needs[l];
@@ -1494,6 +1502,23 @@ static void bind_library_versions(Bind* bind, uint32_t needed)
     }
 }
 
+// The loader and libgcc_s.so.1, a bit each (BUSTER_BIND_NEEDS_LOADER, BUSTER_BIND_NEEDS_GCC_S), that a DT_NEEDED entry
+// of a library the program loads (bind_libraries_loaded, from the `needed` libraries) names, so that the loader loads it
+// for that library: GNU ld's --as-needed keeps neither for another needed library's reference then (#511's review).
+static uint32_t bind_runtime_covered(const Bind* bind, uint32_t needed)
+{
+    const RuntimeLibraries* libraries = bind->libraries;
+    const uint32_t loaded = bind_libraries_loaded(libraries, needed);
+    uint32_t covered = 0;
+    for (uint32_t l = 0; l < libraries->count; l += 1)
+    {
+        const bool in = (loaded & (1u << l)) != 0;
+        covered |= in && runtime_libraries_lists_name(libraries, l, bind->runtime->loader.soname) ? BUSTER_BIND_NEEDS_LOADER : 0;
+        covered |= in && runtime_libraries_lists_name(libraries, l, bind->runtime->gcc_s.soname) ? BUSTER_BIND_NEEDS_GCC_S : 0;
+    }
+    return covered;
+}
+
 // The libraries the link names with -l that it needs, from Bind.libraries_needed, the ones the program's strong
 // references bind to. GNU ld's --as-needed counts a needed library's strong references too: a library is needed for one
 // that it satisfies, the first named library that exports the name, unless the referring library's own DT_NEEDED names
@@ -1503,8 +1528,8 @@ static void bind_library_versions(Bind* bind, uint32_t needed)
 // link works. The references of libc.so.6 and the loader, which come after every named library on the line, count
 // against none. A needed library's strong reference to a name of the loader's or libgcc_s.so.1's, which the driver names
 // as needed, makes that library needed too (Bind.runtime_needed), as GNU ld keeps it, unless the referring library's
-// own DT_NEEDED names it or the executable's definition satisfies the reference: lld drops it, and the program fails to
-// load. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
+// own DT_NEEDED names it, or another's that the program loads does (bind_runtime_covered), or the executable's
+// definition satisfies the reference: lld drops it, and the program fails to load. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
 // loader, libgcc_s.so.1 nor the executable, is an error (BIND_ERROR_LIBRARY_UNDEFINED), as GNU ld and lld refuse it
 // (--no-allow-shlib-undefined), where the program would fail to load (#398's review). Then the version needs of the
 // libraries the program loads (bind_library_versions).
@@ -1585,6 +1610,8 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
                 bind_fail(bind, BIND_ERROR_LIBRARY_UNDEFINED, 0);
             }
         }
+        // But not one that a library the program loads already names in its DT_NEEDED, so that the loader loads it.
+        bind->runtime_needed &= ~bind_runtime_covered(bind, needed);
         scratch_end(scratch);
     }
     bind->libraries_needed = needed;
