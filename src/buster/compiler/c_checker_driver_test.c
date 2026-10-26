@@ -316,6 +316,73 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     unlink(plain_output);
 }
 
+// libgcc.a in the direct path's executables (#136): a program whose 128-bit integers' division, remainder and
+// conversions to and from double and long double call libgcc.a's functions (#133's lowering), __fixdfti among them,
+// whose member calls __fixunsdfti, which the program calls too. Linked by both paths into the same bytes, needing
+// libc.so.6 alone (the members join the executable), it must print what this executable computes of the same
+// expressions.
+static void check_test_driver_libgcc(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "static volatile unsigned __int128 dividend = ((unsigned __int128)1 << 100) + 12345;\n"
+                                  "static volatile unsigned __int128 divisor = 1000003;\n"
+                                  "static volatile __int128 negative = -((__int128)1 << 90) - 7;\n"
+                                  "static volatile double value = 1e30;\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    unsigned __int128 q = dividend / divisor, r = dividend % divisor;\n"
+                                  "    __int128 s = negative / 77, t = negative % 77;\n"
+                                  "    unsigned __int128 back = (unsigned __int128)value;\n"
+                                  "    __int128 signed_back = (__int128)-value;\n"
+                                  "    printf(\"%llx %llx %llx %lld %.17g %.17g %.21Lg\\n\", (unsigned long long)(q >> 64), (unsigned long long)q,\n"
+                                  "           (unsigned long long)r, (long long)t, (double)back, (double)signed_back, (long double)s);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[2][256];
+    snprintf(source, sizeof(source), "%s/libgcc.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/libgcc", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/libgcc-scalar", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "libgcc program written");
+    char* text = NULL;
+    bool linked = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-o", outputs[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", outputs[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "128-bit division and conversions link libgcc.a's members" : "libgcc.a's members, scalar");
+        linked = linked && status == 0;
+        free(text);
+    }
+    check_test_expect(test, linked && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable with libgcc.a's members");
+    char needed[256] = { 0 };
+    check_test_expect(test, linked && check_test_driver_needed(outputs[0], needed, sizeof(needed)) && strcmp(needed, "libc.so.6") == 0,
+                      "libgcc.a's members in the executable, libc.so.6 needed alone");
+    volatile unsigned __int128 dividend = ((unsigned __int128)1 << 100) + 12345;
+    volatile unsigned __int128 divisor = 1000003;
+    volatile __int128 negative = -((__int128)1 << 90) - 7;
+    volatile double value = 1e30;
+    const unsigned __int128 q = dividend / divisor;
+    const unsigned __int128 r = dividend % divisor;
+    const __int128 s = negative / 77;
+    const __int128 t = negative % 77;
+    const unsigned __int128 back = (unsigned __int128)value;
+    const __int128 signed_back = (__int128)-value;
+    char expected[256];
+    snprintf(expected, sizeof(expected), "%llx %llx %llx %lld %.17g %.17g %.21Lg\n", (unsigned long long)(q >> 64), (unsigned long long)q, (unsigned long long)r,
+             (long long)t, (double)back, (double)signed_back, (long double)s);
+    char captured[256] = { 0 };
+    FILE* output = linked ? popen(outputs[0], "r") : NULL;
+    const size_t got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
+    const int closed = output != NULL ? pclose(output) : -1;
+    check_test_expect(test, closed == 0 && got == strlen(expected) && memcmp(captured, expected, got) == 0, "the program prints the 128-bit results");
+    unlink(source);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -1510,6 +1577,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (executable != NULL)
         {
             check_test_driver_libraries(&test, executable, directory);
+            check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
