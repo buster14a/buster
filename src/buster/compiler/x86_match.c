@@ -756,9 +756,9 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                     memory_width = form->operand_bytes;
                 }
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-                // The indexed builder has already crossed the complete x86_validate boundary. The scalar API
-                // would run that same validation a second time merely to get this length.
-                const int64_t length = vectorized ? encode_one(&instruction, bytes, X86_ENCODER_MODE_64) : x86_encode_scalar(&instruction, 1, bytes, sizeof(bytes), 0, 0);
+                // Both candidate builders have crossed the complete x86_validate boundary. The scalar API would
+                // repeat that validation merely to get this length; no record changes between the two boundaries.
+                const uint32_t length = encode_one(&instruction, bytes, X86_ENCODER_MODE_64);
                 if (length > 0 && (!result.found || length < result.length))
                 {
                     result.instruction = instruction;

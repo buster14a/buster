@@ -576,6 +576,7 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
         (__int128)UINT64_MAX + 1,
         (__int128)INT64_MIN - 1,
     };
+    uint32_t length_checks = 0;
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[f];
@@ -654,9 +655,20 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                 const X86Match vector = x86_match(test->index, &request, true);
                 const bool same = scalar.found == vector.found && scalar.ambiguous == vector.ambiguous && (!scalar.found || (scalar.length == vector.length && memcmp(&scalar.instruction, &vector.instruction, sizeof(X86Instruction)) == 0));
                 asm_test_check(test, same, "catalogue matcher scalar/vector operands and selected bytes", form->mnemonic);
+                if (scalar.found)
+                {
+                    uint8_t checked[BUSTER_X86_ENCODER_CAPACITY(1)];
+                    uint8_t direct[BUSTER_X86_ENCODER_CAPACITY(1)];
+                    const int64_t checked_length = x86_encode_scalar(&scalar.instruction, 1, checked, sizeof(checked), 0, 0);
+                    const uint32_t direct_length = encode_one(&scalar.instruction, direct, X86_ENCODER_MODE_64);
+                    const bool identical = checked_length > 0 && checked_length == scalar.length && direct_length == scalar.length && direct_length <= BUSTER_X86_MAX_INSTRUCTION_BYTES && memcmp(checked, direct, direct_length) == 0;
+                    asm_test_check(test, identical, "validated matcher length and bytes against checked scalar encoder", form->mnemonic);
+                    length_checks += 1;
+                }
             }
         }
     }
+    asm_test_check(test, length_checks != 0, "catalogue matcher checked-length coverage", "supported forms");
 }
 
 static void asm_test_targets(AsmTest* test)

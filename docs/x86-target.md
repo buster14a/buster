@@ -139,6 +139,12 @@ Its macro and preprocessor fixtures call the frontend's shared entry, keeping
 those private test helpers with the preprocessor's implementation rather than
 emitting another copy in the backend.
 
+Both matcher paths validate a candidate before encoding it to choose the
+shortest instruction. The scalar matcher does not repeat that same validation
+inside a length-only call. Catalogue tests compare its length and every emitted
+byte with the checked scalar encoder, alongside malformed operands and ISA
+rejection checks.
+
 `test-x86-target` also replays the existing Tier 1 selector and native-emission
 fixtures at baseline/v3/v4, with both covers and both allocation paths. Its
 policy-owned Tier 0 consumer checks every compiled template and generated
