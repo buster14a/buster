@@ -4686,8 +4686,9 @@ from them (integers, floats, doubles, compares) from inputs of every class,
 through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
 both ways, calls of C functions and frame objects (`LOCAL`, `STORE_LOCAL` and
 `SET_LOCAL` of the class on objects of 16 bytes and more), against the check's
-own stack machine. The programs that compiled, ran and matched must reach every
-kind and conversion of the class. Then the `int128`
+own stack machine. The programs that compiled, ran and matched must execute every
+kind and conversion of the class and both arms of a `?:`. Any refusal except a
+random program's excess depth fails the check. Then the `int128`
 check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
 U128, against clang's `__int128`: each break of the classes' rules refused at
 its entry; a stack of a memory class's values up to the last 16-byte slot,
