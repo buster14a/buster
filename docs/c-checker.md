@@ -163,7 +163,11 @@ second definition of a tag only warns in clang, which makes it a tag of its own
 that its name doesn't name, and the checker does the same. A tag that a
 declarator's array bound names or defines outside a parameter list is the
 declarator's scope's: `int a[sizeof(struct V { int x; })]; struct V v;` is
-valid. A definition in a `typeof` is still refused, there as anywhere.
+valid. A prototype in a constant expression's type name (a typeof's, a
+builtin's operand) ends its tags at its `)` as well, in the evaluator's binding
+walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s `struct Z` isn't
+a later one's (#437). A definition in a `typeof` is still refused, there as
+anywhere.
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
