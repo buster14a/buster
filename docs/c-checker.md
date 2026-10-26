@@ -202,6 +202,13 @@ does, each rule checked against clang's answers on probes of it:
   clang would report. At the same completion position, an error from the next
   pragma's handler precedes the current hints (the parser lexes that lookahead
   before Sema); an error parsing that next pragma's argument follows them.
+  The rejected prefix still runs the scalar/vector control walk: duplicate
+  labels and completed switch constraints inside the statement precede the
+  hint. It collects the function-scoped names of forward labels from the tree,
+  while deferring undefined-label and jump-scope obligations until function
+  completion. Unfinished label references have canonical diagnostic-only
+  identities for typing `&&name`; these can never be published or emitted.
+  The ordinary control walk is specialized without the prefix checks.
   Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing

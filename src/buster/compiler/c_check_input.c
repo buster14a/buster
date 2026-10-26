@@ -360,6 +360,7 @@ struct CheckInputReader
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
+    uint32_t resolve_position;
     CheckInputMessage resolve_message;
     uint32_t expression_limit;
     uint32_t fragment_end;
@@ -412,7 +413,8 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
 static void check_input_pragma_report(CheckInputReader* reader)
 {
     const uint32_t before = reader->output->report_count;
-    const uint32_t token = reader->resolve_diagnostic_token != BUSTER_CHECK_NONE ? reader->resolve_diagnostic_token : reader->resolve_limit;
+    const uint32_t token = reader->resolve_position != BUSTER_CHECK_NONE ? reader->resolve_position :
+                           reader->resolve_diagnostic_token != BUSTER_CHECK_NONE ? reader->resolve_diagnostic_token : reader->resolve_limit;
     check_input_report(reader, token, reader->resolve_message);
     if (reader->output->report_count != before && reader->resolve_diagnostic_token == BUSTER_CHECK_NONE)
     {
@@ -4290,6 +4292,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .resolve_limit = count + 1,
         .resolve_pragma = BUSTER_CHECK_NONE,
         .resolve_diagnostic_token = BUSTER_CHECK_NONE,
+        .resolve_position = BUSTER_CHECK_NONE,
         .resolve_message = CHECK_INPUT_UNSUPPORTED,
         .expression_limit = count,
         .fragment_end = original_end,
@@ -4682,6 +4685,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         reader.resolve_message = handled[pragma] < 3 ? CHECK_INPUT_UNSUPPORTED :
                                                  loop_messages[pragma] != 0 ? (CheckInputMessage)loop_messages[pragma] : CHECK_INPUT_DECLARATION;
                         handler_error = handled[pragma] == BUSTER_CHECK_LOOP_HANDLER_ERROR;
+                        if (handler_error && position != 0)
+                        {
+                            const uint8_t previous = parser->tree.roles[position - 1];
+                            const bool completed = previous == PARSE_ROLE_TERMINATOR || previous == PARSE_ROLE_CLOSE_BLOCK || previous == PARSE_ROLE_CLOSE_BODY;
+                            reader.resolve_position = completed ? position - 1 : BUSTER_CHECK_NONE;
+                        }
                         if (input->pack_pragmas != 0 && pack < input->pack_pragmas->count && input->pack_pragmas->records[pack].pragma == pragma)
                         {
                             reader.resolve_diagnostic_token = input->pack_pragmas->records[pack].diagnostic_token;
@@ -4702,6 +4711,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         reader.resolve_limit = delayed.position;
                         reader.resolve_pragma = delayed.pragma - 1;
                         reader.resolve_diagnostic_token = BUSTER_CHECK_NONE;
+                        reader.resolve_position = BUSTER_CHECK_NONE;
                         reader.resolve_message = delayed.message;
                     }
                 }
@@ -4729,6 +4739,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             if (input->report_count == 0 && !input->resource)
             {
                 check_input_controls(&reader);
+            }
+            else if (!input->resource && input->report_count == 1 && input->reports[0].pragma != 0)
+            {
+                const uint32_t position = input->reports[0].token < reader.expression_limit ? input->reports[0].token : reader.expression_limit;
+                check_input_controls_prefix(&reader, position);
             }
         }
         if (!input->resource && reader.bindings.valid)

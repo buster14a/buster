@@ -40,6 +40,7 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "loop-conflict", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) {} }\n", false },
     { "loop-conflict-type-error", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) { *n = 1; } }\n", false },
     { "loop-placement", "void f(int n) {\n#pragma unroll\n n = 1; }\n", false },
+    { "loop-conflict-control-error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n while(n--) { L:; L:; } }\n", false },
     // The issue's three: a later declaration and a later completion aren't seen by an earlier body, and an
     // initializer's enumerator is.
     { "later-declaration", "int f(void) { return later; }\nint later = 7;\n", true },

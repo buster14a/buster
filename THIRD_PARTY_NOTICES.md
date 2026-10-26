@@ -374,6 +374,9 @@ Loop-hint diagnostic ordering, directive names and locations in
 `c_check_loop_input.c` use original probes checked against Clang 23.1.4 and
 `clang/lib/Sema/SemaStmtAttr.cpp` at `llvmorg-23.1.3` as behavior references.
 No LLVM implementation or test fixtures were copied.
+The diagnostic-only control prefix and `&&label` typing also use original
+Clang probes and `SemaExpr.cpp` at that tag as behavior references, with no
+implementation copied.
 
 Wide-enum completion follows observed Clang behavior and the rules in
 `clang/lib/Sema/SemaDecl.cpp` at `llvmorg-23.1.1`. Diagnostic warning-group

@@ -1124,8 +1124,8 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
         const char* name;
         const char* source;
         bool exact_message;
-        // Argument diagnostics retain their existing column; these cases check precedence over a delayed conflict.
-        bool argument_error;
+        // Existing argument/control columns stay as they were; these cases check first-error line precedence.
+        bool line_only;
     } fixtures[] =
     {
         { "conflict after a body name error", "void f(int n) {\n#pragma clang loop unroll_count(4)\n#pragma clang loop unroll(full)\n    while (n--) { undeclared_x = 1; }\n}\n" },
@@ -1160,6 +1160,16 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
         { "a following pragma handler runs in the loop's lookahead", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma clang loop bogus(4)\n    while (n--) {}\n}\n", false, true },
         { "a following unclosed pragma runs in the loop's lookahead", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma unroll (4\n    while (n--) {}\n}\n", true, true },
         { "a trailing empty annotation is not a nested statement", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma unroll\n}\n", true },
+        { "duplicate labels precede a loop conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {\n        same:;\n        same:;\n    }\n}\n", false, true },
+        { "duplicate case values precede a loop conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { switch (n) {\n        case 0: break;\n        case 0: break;\n    } }\n}\n", false, true },
+        { "duplicate defaults precede loop placement", "void f(int n) {\n#pragma unroll\n    switch (n) {\n        default: break;\n        default: break;\n    }\n}\n", false, true },
+        { "a later duplicate label follows the loop conflict", "void f(int n) {\n    same:;\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n    same:;\n}\n", true },
+        { "an undefined goto is an end-of-function obligation", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { goto missing; }\n}\n", true },
+        { "a forward label address stays typed before loop placement", "void f(int n) {\n#pragma unroll\n    { void *p = &&later; }\n    later:;\n}\n", true },
+        { "an undefined label address waits for function completion", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { void *p = &&missing; }\n}\n", true },
+        { "a body type error after a pending label address precedes the hint", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { void *p = &&missing;\n        *n = 1;\n    }\n}\n" },
+        { "nested switch errors precede a later pragma handler", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { switch (n) {\n        case 0: break;\n        case 0: break;\n    } }\n#pragma clang loop bogus(4)\n    while (n--) {}\n}\n", false, true },
+        { "lookahead handler precedes completion of its direct switch", "void f(int n) {\n#pragma unroll\n    switch (n) {\n        case 0: break;\n        case 0: break;\n    }\n#pragma clang loop bogus(4)\n    while (n--) {}\n}\n", false, true },
         { "pragma expansion retains the conflict's invocation", "void f(int n) {\n_Pragma(\"clang loop unroll_count(4)\")\n_Pragma(\"clang loop unroll(full)\")\n    while (n--) {}\n}\n", true },
     };
     const char* arguments[] = { "-std=gnu17", "-w" };
@@ -1182,7 +1192,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
             const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, true, lazy, &checked, &warnings);
             snprintf(description, sizeof(description), "%s, route %u: first error %u:%u, clang %u:%u", fixtures[i].name, route,
                      checked.line, checked.column, oracle.line, oracle.column);
-            check_test_expect(test, ran && checked.rejected && checked.line == oracle.line && (fixtures[i].argument_error || checked.column == oracle.column), description);
+            check_test_expect(test, ran && checked.rejected && checked.line == oracle.line && (fixtures[i].line_only || checked.column == oracle.column), description);
             snprintf(description, sizeof(description), "%s: first diagnostic text matches clang", fixtures[i].name);
             check_test_expect(test, !fixtures[i].exact_message || strcmp(checked.message, oracle.message) == 0, description);
             check_test_expect(test, access(object, F_OK) != 0, "a rejected annotated statement writes no object");
