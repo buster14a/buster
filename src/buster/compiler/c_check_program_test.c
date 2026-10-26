@@ -639,6 +639,59 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
     check_test_program_boundary_reason(test, source, name, accepted, machine, references, initializations, NULL);
 }
 
+// The jump tables the lowering makes of `source`'s switches (#136's item 7), by both paths: `tables` of them, with
+// `entries` entries in all, as clang -O0's rule gives them (check_lower_switch_table).
+static void check_test_program_tables(CheckTest* test, const char* source, const char* name, uint32_t tables, uint32_t entries)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                              pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "jump table source preprocessing");
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        CheckAsms asms = { 0 };
+        CheckProgram program = { 0 };
+        CheckProgramLowered lowered = { 0 };
+        const bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+                           parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                           check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                           check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
+                           check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
+                           check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
+        const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0 };
+        const bool lowered_ok = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) &&
+                                check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+        uint32_t total = 0;
+        for (uint32_t t = 0; lowered_ok && t < lowered.table_count; t += 1)
+        {
+            total += lowered.tables[t].count;
+        }
+        char description[256];
+        snprintf(description, sizeof(description), "%s: %u jump tables of %u entries by the %s path (clang -O0's rule: %u of %u)", name,
+                 lowered_ok ? lowered.table_count : 0, total, path == 0 ? "scalar" : "vector", tables, entries);
+        check_test_expect(test, lowered_ok && lowered.table_count == tables && total == entries, description);
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 #include "c_check_program_select_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
@@ -723,6 +776,79 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){int x=7;switch(n++){case -2 ... 0:x=1;break;case 1:x=2;case 2:x+=4;break;default:x=9;}return x*10+n;}",
         "switch-range-and-fallthrough", clang);
+    // Jump tables (#136's item 7), each switch swept past its cases on both sides: holes, defaults in the middle and
+    // none, fallthrough, GNU ranges, negative and unsigned values at their types' ends, nested tables, and in loops.
+    check_test_program_source(test,
+        "static int dense(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 11;case 5:return 13;case 7:return 17;default:return -1;}}"
+        "static int nodefault(int x){int r=7;switch(x){case 1:r=1;break;case 2:r=2;break;case 3:r=3;break;case 4:r=4;break;}return r;}"
+        "int tested(int n){unsigned s=0;for(int i=-6;i<14;i++){s=s*3+(unsigned)dense(i+n);s=s*5+(unsigned)nodefault(i-n);}return (int)s;}",
+        "switch-table-dense", clang);
+    check_test_program_source(test,
+        "static int ranged(int x){int r=0;switch(x){case -7 ... -5:r+=1;case -4:r+=2;break;default:r+=100;case -1:r+=4;break;"
+        "case 0 ... 2:r+=8;break;case 4:r+=16;case 5:r+=32;break;}return r;}"
+        "int tested(int n){unsigned s=0;for(int i=-10;i<10;i++)s=s*7+(unsigned)ranged(i+n-5);return (int)s;}",
+        "switch-table-ranges", clang);
+    check_test_program_source(test,
+        "static int top(unsigned x){switch(x){case 4294967290u:return 1;case 4294967291u:return 2;case 4294967292u:return 3;"
+        "case 4294967294u:return 4;case 4294967295u:return 5;default:return 0;}}"
+        "static int utop(unsigned long long x){switch(x){case 18446744073709551610ull:return 1;case 18446744073709551611ull:return 2;"
+        "case 18446744073709551613ull:return 3;case 18446744073709551614ull:return 4;case 18446744073709551615ull:return 5;default:return 0;}}"
+        "int tested(int n){unsigned s=0;for(int i=-8;i<8;i++){s=s*5+(unsigned)top((unsigned)(i+n-12));s=s*7+(unsigned)utop((unsigned long long)(long long)(i+n-12));}"
+        "return (int)s;}",
+        "switch-table-unsigned-ends", clang);
+    check_test_program_source(test,
+        "static int wide(long x){switch(x){case -9223372036854775807L-1:return 1;case -9223372036854775807L:return 2;case -9223372036854775806L:return 3;"
+        "case -9223372036854775805L:return 4;case -9223372036854775803L:return 5;default:return 6;}}"
+        "static int high(long x){switch(x){case 9223372036854775803L:return 1;case 9223372036854775804L:return 2;case 9223372036854775805L:return 3;"
+        "case 9223372036854775806L:return 4;case 9223372036854775807L:return 5;default:return 6;}}"
+        "int tested(int n){unsigned s=0;for(int i=0;i<10;i++){s=s*7+(unsigned)wide((-9223372036854775807L-1)+(long)(i+n+3));"
+        "s=s*7+(unsigned)high(9223372036854775807L-(long)(i+n+3));s=s*7+(unsigned)wide((long)(i+n));}return (int)s;}",
+        "switch-table-long-ends", clang);
+    check_test_program_source(test,
+        "static int nested(int a,int b){int r=0;switch(a){case 0:switch(b){case 0:r=1;break;case 1:r=2;break;case 2:r=3;break;case 3:r=4;break;default:r=5;}break;"
+        "case 1:r=10;break;case 2:r=20;case 3:r+=30;break;default:r=-1;}return r;}"
+        "int tested(int n){unsigned s=0;for(int i=0;i<30;i++){if(i%7==6)continue;switch(i%5){case 0:s+=1;break;case 1:s*=3;"
+        "case 2:s+=(unsigned)nested(i%4,(i+n)%6);break;case 3:if(i>20)break;s^=0x55;break;case 4:s+=(unsigned)n;break;}}return (int)s;}",
+        "switch-table-nested-loop", clang);
+    check_test_program_source(test,
+        "enum color{red,green,blue,cyan,magenta,yellow};"
+        "static int named(enum color c){switch(c){case red:return 1;case green:return 2;case blue:return 3;case cyan:return 4;case yellow:return 6;default:return 0;}}"
+        "static int chars(char c){switch(c){case 'a':return 1;case 'b':return 2;case 'c':return 3;case 'e':return 5;case 'f':return 6;default:return 0;}}"
+        "int tested(int n){unsigned s=0;for(int i=-3;i<9;i++)s=s*11+(unsigned)named((enum color)(i+n))+(unsigned)chars((char)('a'+i+n));return (int)s;}",
+        "switch-table-enum-char", clang);
+    // A table of 300 values with holes, every seventh value the default's.
+    char big[16384];
+    int length = snprintf(big, sizeof(big), "static int big(int x){switch(x){");
+    for (int k = 0; k < 300 && length > 0 && (size_t)length < sizeof(big); k += 1)
+    {
+        length += k % 7 == 3 ? 0 : snprintf(big + length, sizeof(big) - (size_t)length, "case %d:return %d;", k, (k * k) % 1000 + 1);
+    }
+    length += length > 0 && (size_t)length < sizeof(big) ?
+              snprintf(big + length, sizeof(big) - (size_t)length,
+                       "default:return -7;}}int tested(int n){unsigned s=0;for(int i=-5;i<305;i++)s=s*31+(unsigned)big(i+n);return (int)s;}") : 0;
+    check_test_expect(test, length > 0 && (size_t)length < sizeof(big), "the 300-value switch's source fits");
+    check_test_program_source(test, big, "switch-table-300", clang);
+    check_test_program_tables(test, big, "switch-table-300-tables", 1, 300);
+    // The rule's edges: four clusters or more, a tenth of the range, cases at one place one cluster (`case 1: case 2:`, as
+    // LLVM's one block), classes of 32 and 64 bits, ranges of BUSTER_CHECK_LOWER_MAX_TABLE values at most.
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 11;case 5:return 13;"
+                                    "case 7:return 17;default:return -1;}}", "switch-tables-dense", 1, 8);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;default:return -1;}}", "switch-tables-three", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 13:return 5;case 26:return 7;case 39:return 9;default:return -1;}}",
+                              "switch-tables-tenth", 1, 40);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 14:return 5;case 28:return 7;case 42:return 9;default:return -1;}}",
+                              "switch-tables-sparse", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 1:case 2:case 3:case 4:return 1;default:return 0;}}", "switch-tables-one-place", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 1:case 2:return 1;case 3:case 4:return 2;case 5:return 3;case 6:return 4;case 7:return 5;default:return 0;}}",
+                              "switch-tables-shared-places", 1, 7);
+    check_test_program_tables(test, "int f(__int128 x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 11;default:return -1;}}",
+                              "switch-tables-int128", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0 ... 70000:return 1;case 70001:return 2;case 70002:return 3;case 70003:return 4;default:return 0;}}",
+                              "switch-tables-past-the-most", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0 ... 65531:return 1;case 65532:return 2;case 65533:return 3;case 65534:return 4;"
+                                    "case 65535:return 5;default:return 0;}}", "switch-tables-the-most", 1, 65536);
+    check_test_program_tables(test, "int f(int a,int b){int r=0;switch(a){case 0:switch(b){case 0:r=1;break;case 1:r=2;break;case 2:r=3;break;case 3:r=4;break;"
+                                    "default:r=5;}break;case 1:r=10;break;case 2:r=20;case 3:r+=30;break;default:r=-1;}return r;}", "switch-tables-nested", 2, 8);
     check_test_program_source(test,
         "int tested(int n){int x=1;switch(n){case 3 ... 1:x=7;break;case 2:x=5;break;default:x=9;}return x;}",
         "empty-gnu-case-range-is-warning-only", clang);

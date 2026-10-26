@@ -286,7 +286,9 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
     // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
     // helpers are the unit's, and the C runtime's errno function isn't; libgcc's functions are linked into the image.
-    const uint32_t access_count = program->symbol_count + result->lowered.helpers.count + result->lowered.runtime_symbol_count + 1;
+    // The jump tables' symbols and their labels' come after the runtime's functions', and are the unit's own: direct.
+    const uint32_t access_count = program->symbol_count + result->lowered.helpers.count + result->lowered.runtime_symbol_count +
+                                  result->lowered.table_count + result->lowered.case_symbol_count + 1;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
     valid = valid && access != 0 && defined != 0;
@@ -395,11 +397,18 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
     const uint64_t frames = unwind ? (uint64_t)count + helpers->count : 0;
-    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms + (frames != 0 ? 1 : 0);
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames;
+    // The jump tables: an atom each, a fixup per entry, and their symbols and their labels'.
+    uint64_t table_entries = 0;
+    for (uint32_t t = 0; t < result->lowered.table_count; t += 1)
+    {
+        table_entries += result->lowered.tables[t].count;
+    }
+    const uint64_t switch_symbols = (uint64_t)result->lowered.table_count + result->lowered.case_symbol_count;
+    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms + (frames != 0 ? 1 : 0) + result->lowered.table_count;
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
-    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.symbols;
-    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.names;
+    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + runtime.symbols;
+    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + runtime.names;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -543,6 +552,17 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) ==
                                  result->lowered.runtime_symbols[runtime];
     }
+    // The jump tables' symbols, then their labels' (CheckProgramLowered.case_symbol_base): local, with names a source
+    // can't spell and #129's comparison with clang's objects leaves out, as it does clang's .LJTI and .LBB labels.
+    for (uint32_t k = 0; valid && k < switch_symbols; k += 1)
+    {
+        const bool table = k < result->lowered.table_count;
+        char spelling[48];
+        const int length = snprintf(spelling, sizeof(spelling), table ? ".Lbuster_switch_%u" : ".Lbuster_case_%u", table ? k : k - result->lowered.table_count);
+        const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        const uint8_t flags = BUSTER_LINK_SYMBOL_LOCAL | (table ? BUSTER_LINK_SYMBOL_OBJECT : BUSTER_LINK_SYMBOL_NOTYPE);
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == result->lowered.case_symbol_base + k;
+    }
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -558,6 +578,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     for (uint32_t k = 0; valid && binding != NULL && k < result->lowered.label_symbol_count; k += 1)
     {
         result->link.symbols.source[result->lowered.label_symbols[k]] = BUSTER_LINK_SOURCE_PROGRAM;
+    }
+    for (uint32_t t = 0; valid && binding != NULL && t < result->lowered.table_count; t += 1)
+    {
+        result->link.symbols.source[result->lowered.case_symbol_base + t] = BUSTER_LINK_SOURCE_PROGRAM;
     }
     if (valid && binding != NULL && !bind_begin(binding->bind, &result->link, binding->runtime, binding->path, bytes, 1, binding->arena))
     {
@@ -675,6 +699,25 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         {
             const SymbolId symbol = f < count ? program->object_symbols[program->bodies[f].object] : helpers->items[f - count].symbol;
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
+        }
+    }
+    // Each jump table, in .rodata: an entry per value, its label's offset from the table, which a PC32 fixup gives
+    // (S + A - P, P the entry's place, A its offset in the table), as clang's .long .LBB - .LJTI entries are.
+    for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
+    {
+        const CheckLowerTable* table = result->lowered.tables + t;
+        const uint64_t size = (uint64_t)table->count * 4;
+        uint8_t* data = arena_push(bytes, size, 4);
+        const AtomId atom = data != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, 2, size, (uint8_t*)memset(data, 0, size), 0) : 0;
+        const SymbolId symbol = result->lowered.case_symbol_base + t;
+        valid = atom != 0 && link_define_symbol(&result->link, symbol, atom, 0, size);
+        for (uint32_t i = 0; valid && i < table->count; i += 1)
+        {
+            valid = link_add_fixup(&result->link, atom, i * 4, BUSTER_LINK_FIXUP_PC32, result->lowered.label_symbols[table->entries[i]], (int64_t)i * 4) != 0;
+        }
+        if (valid)
+        {
+            result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
         }
     }
     if (!valid)
