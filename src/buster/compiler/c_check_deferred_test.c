@@ -303,14 +303,22 @@ static void check_deferred_timed_context(void* argument)
         const Lane previous = thread_context.lane;
         const uint64_t taken = thread_context.taken;
         const bool running = thread_context.running;
+        const uint32_t pinned_cpu = test->team->cpus[0];
         const uint32_t cpu = UINT32_MAX;
         thread_context.taken = 3;
         check_corpus_deferred_cpus = &cpu;
         check_corpus_measure(test->path, test->options, false, true, &test->outcome);
         check_corpus_deferred_cpus = 0;
+        uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+        bool affinity = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
+        for (uint32_t word = 0; word < BUSTER_LANE_CPU_MASK_WORDS; word += 1)
+        {
+            const uint64_t expected = word == pinned_cpu / 64 ? 1ull << (pinned_cpu % 64) : 0;
+            affinity = mask[word] == expected && affinity;
+        }
         test->restored = thread_context.lane.index == previous.index && thread_context.lane.count == previous.count &&
                          thread_context.lane.group == previous.group && thread_context.taken == 3 &&
-                         running && thread_context.running == running && thread_context.team == test->team;
+                         running && thread_context.running == running && thread_context.team == test->team && affinity;
         thread_context.taken = taken;
         thread_context.running = running;
         lane_restore(previous);
@@ -335,11 +343,20 @@ static bool check_deferred_timed_team(const char* path, const PPOptions* options
     {
         cpu += 1;
     }
-    bool result = saved && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64;
+    uint32_t other = cpu + 1;
+    while (saved && other < BUSTER_LANE_CPU_MASK_WORDS * 64 && (before[other / 64] & (1ull << (other % 64))) == 0)
+    {
+        other += 1;
+    }
+    bool result = saved && other < BUSTER_LANE_CPU_MASK_WORDS * 64;
+    if (!result)
+    {
+        fprintf(stderr, "test-checker-deferred: the live-team context check requires two distinct allowed CPUs\n");
+    }
     if (result)
     {
         LaneTeam team = { 0 };
-        const uint32_t cpus[] = { cpu, cpu };
+        const uint32_t cpus[] = { cpu, other };
         CheckDeferredTimedContext test = { .path = path, .options = options, .team = &team };
         const bool started = lane_team_start(&team, 2, cpus);
         result = started && lane_run(2, check_deferred_timed_context, &test, cpus) && test.restored;
