@@ -391,6 +391,11 @@ designs and the compilers already built this way.
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
   process.
+  `./build.sh shifts DIRECTORY SOURCE SHIFT...` also links the same objects
+  into `DIRECTORY/compiler-SHIFT` for each SHIFT, with that many bytes of
+  padding in `.text` before SOURCE's code, for `time-runs` to compare builds
+  over their code's placements (#509, "Comparing two versions" in
+  `docs/profiling.md`).
 - `C_TOKENIZER_NO_DIGIT_SEPARATORS` makes both lexer paths end pp-numbers
   before `'`; the preprocessor sets it in modes before C23, including file
   caches, scratch text and pastes. The standalone lexer's default keeps C23
@@ -1455,13 +1460,21 @@ must be exactly the expected one:
 - `time-runs`: shell commands that log their order, which must be the
   warm-ups' then each run's rotated one, statuses kept as the first warm-up's
   (0 and 3), one that changes after it (a failure per run), and an executable
-  that can't start.
+  that can't start; copies (#509) of scripts given as two builds of two
+  placements, which log their tags and paths: the slots' order, placement by
+  placement and build by build, then copy by copy, the copies' names, and
+  nothing left after the run, nor after a copy that fails; and the builds'
+  comparison on values worked out by hand, with placements and copies,
+  without either, and with placements that don't pair.
 
 The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
 ARGUMENT... [-- ARGUMENT...]...`, `time-runs [--runs N] [--warmups N]
-[--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list
-ARGUMENT...]...` (whole processes of this executable in rotated order, with
-their wall time, rusage, peak resident set and page faults; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
+[--after-scalar MS] [--copies N] [--directory PATH] [--executable PATH |
+--build NAME PATH]... --list ARGUMENT... [--list ARGUMENT...]...` (whole
+processes of this executable, or of each build's placements, from fresh
+copies with `--copies`, in rotated order, with their wall time, rusage, peak
+resident set, page faults and user cycles and instructions, and the builds
+compared over their placements and copies; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
 [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
 FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
 ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the

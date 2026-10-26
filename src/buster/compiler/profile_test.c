@@ -24,7 +24,11 @@
 //   - a program: clang's assembly of a program that prints __func__ of a static function with spills, labeled,
 //     assembled and run, must print what the original prints (clang on PATH);
 //   - ab: the rotating order, then runs of programs that succeed, fail and don't exist, with two argument lists, and
-//     through a lock (env) pinned to an allowed CPU, with every heading and failure in the output.
+//     through a lock (env) pinned to an allowed CPU, with every heading and failure in the output;
+//   - time-runs: shell commands that log their order, statuses kept and changed, and an executable that can't start;
+//     copies of scripts (two builds of two placements) that log their tags and paths, in the slots' order, removed
+//     afterwards, and a copy that fails; and the builds' comparison on values made by hand, with placements and
+//     copies, without either, and with placements that don't pair.
 //
 // The exit status is 1 if a case fails.
 
@@ -637,8 +641,17 @@ static void profile_test_time_runs(ProfileTest* test)
     const uint64_t starts[] = { 0, 2, 4 };
     const uint64_t counts[] = { 2, 2, 2 };
     const int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    const char* executables[] = { "/bin/sh" };
+    const char* const names[] = { "sh" };
+    const uint64_t builds[] = { 0 };
+    const uint64_t placements[] = { 0 };
     ProfileTimeRuns t = {
-        .executable = "/bin/sh",
+        .executables = executables,
+        .builds = builds,
+        .placements = placements,
+        .executable_count = 1,
+        .build_names = names,
+        .build_count = 1,
         .arguments = arguments,
         .starts = starts,
         .counts = counts,
@@ -654,7 +667,7 @@ static void profile_test_time_runs(ProfileTest* test)
     t.starts = starts + 2;
     t.list_count = 1;
     ok = ok && profile_time_runs(&test->arena, &t) == 3;
-    t.executable = "/nonexistent/compiler";
+    executables[0] = "/nonexistent/compiler";
     ok = ok && profile_time_runs(&test->arena, &t) == 4;
     if (null != -1)
     {
@@ -668,6 +681,161 @@ static void profile_test_time_runs(ProfileTest* test)
         test->failures += 1;
         printf("  time-runs: FAILED\n");
     }
+}
+
+// time-runs' copies (#509): two builds of two placements each, given out of the slots' order, run from two copies each
+// for two runs after a warm-up. Each executable is a script that logs its tag, its path after the copies' directory
+// (in the test's directory, where any other path stays whole) and its argument, so the log must be the slots' order:
+// placement by placement, each build's in turn, then each copy, rotating by run. The copies must be gone afterwards,
+// and so must they after a copy that fails, which fails the command once without running anything.
+static void profile_test_time_copies(ProfileTest* test)
+{
+    test->cases += 1;
+    char directory[] = "/tmp/buster-time-copies-XXXXXX";
+    bool ok = mkdtemp(directory) != 0;
+    const char* const tags[] = { "a0", "a1", "b0", "b1" };
+    char scripts[4][96];
+    for (uint64_t i = 0; ok && i < 4; i += 1)
+    {
+        snprintf(scripts[i], sizeof(scripts[i]), "%s/%s", directory, tags[i]);
+        char text[512];
+        const int length = snprintf(text, sizeof(text), "#!/bin/sh\necho \"%s ${0#%s/buster-time-runs-*/} $1\" >> %s/log\n", tags[i], directory, directory);
+        const int fd = open(scripts[i], O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0700);
+        ok = fd != -1 && write(fd, text, (size_t)length) == length;
+        ok = fd != -1 && close(fd) == 0 && ok;
+    }
+    // In the slots' order: a0, b0, a1, b1.
+    const char* const executables[] = { scripts[0], scripts[2], scripts[1], scripts[3] };
+    const char* const names[] = { "a", "b" };
+    const uint64_t builds[] = { 0, 1, 0, 1 };
+    const uint64_t placements[] = { 0, 0, 1, 1 };
+    char* arguments[] = { "x" };
+    const uint64_t starts[] = { 0 };
+    const uint64_t counts[] = { 1 };
+    const int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    ProfileTimeRuns t = {
+        .executables = executables,
+        .builds = builds,
+        .placements = placements,
+        .executable_count = 4,
+        .build_names = names,
+        .build_count = 2,
+        .copies = 2,
+        .directory = directory,
+        .arguments = arguments,
+        .starts = starts,
+        .counts = counts,
+        .list_count = 1,
+        .runs = 2,
+        .warmups = 1,
+        .output = null,
+    };
+    ok = ok && null != -1 && profile_time_runs(&test->arena, &t) == 0;
+    char log[96];
+    snprintf(log, sizeof(log), "%s/log", directory);
+    const String8 text = ok ? profile_read_file(&test->arena, log) : (String8){ 0 };
+    // The warm-up and the first run in slot order, the second from slot 1.
+    const char* expected = "a0 000-000 x\nb0 001-000 x\na1 002-000 x\nb1 003-000 x\na0 000-001 x\nb0 001-001 x\na1 002-001 x\nb1 003-001 x\n"
+                           "a0 000-000 x\nb0 001-000 x\na1 002-000 x\nb1 003-000 x\na0 000-001 x\nb0 001-001 x\na1 002-001 x\nb1 003-001 x\n"
+                           "b0 001-000 x\na1 002-000 x\nb1 003-000 x\na0 000-001 x\nb0 001-001 x\na1 002-001 x\nb1 003-001 x\na0 000-000 x\n";
+    ok = ok && profile_equal(text, profile_test_string(expected));
+    unlink(log);
+    // A copy of an executable that doesn't exist.
+    const char* const missing[] = { scripts[0], "/nonexistent/compiler" };
+    t.executables = missing;
+    t.executable_count = 2;
+    t.placements = placements;
+    ok = ok && profile_time_runs(&test->arena, &t) == 1 && access(log, F_OK) != 0;
+    for (uint64_t i = 0; i < 4; i += 1)
+    {
+        unlink(scripts[i]);
+    }
+    // Only the copies' directories could be left: rmdir fails on a directory that isn't empty.
+    ok = ok && rmdir(directory) == 0;
+    if (null != -1)
+    {
+        close(null);
+    }
+    if (!ok)
+    {
+        test->failures += 1;
+        printf("  time-runs' copies: FAILED (%s)\n", directory);
+    }
+    test->arena.length = 0;
+}
+
+// profile_time_compare on values made by hand, against reports worked out by hand: two builds of two placements, run
+// from two copies three times each, whose medians, spreads and ranges each come from other values; the second list
+// of two builds without copies or placements; and builds whose placements don't pair, of one run each.
+static void profile_test_time_compare(ProfileTest* test)
+{
+    const char* const names[] = { "main", "mine", "odd" };
+    const char* const executables[] = { "e0", "e1", "e2", "e3" };
+    const uint64_t builds[] = { 0, 1, 0, 1 };
+    const uint64_t placements[] = { 0, 0, 1, 1 };
+    ProfileTimeRuns t = {
+        .executables = executables,
+        .builds = builds,
+        .placements = placements,
+        .executable_count = 4,
+        .build_names = names,
+        .build_count = 2,
+        .copies = 2,
+        .list_count = 1,
+        .runs = 3,
+    };
+    // values[r * 8 + c * 4 + e]: each unit's runs are its median less 1, its median, and its median plus 2.
+    const uint64_t unit_medians[2][4] = {
+        { 1000, 1010, 1020, 1030 },
+        { 1004, 1012, 1018, 1026 },
+    };
+    uint64_t values[24];
+    for (uint64_t c = 0; c < 2; c += 1)
+    {
+        for (uint64_t e = 0; e < 4; e += 1)
+        {
+            values[0 * 8 + c * 4 + e] = unit_medians[c][e] + 2;
+            values[1 * 8 + c * 4 + e] = unit_medians[c][e] - 1;
+            values[2 * 8 + c * 4 + e] = unit_medians[c][e];
+        }
+    }
+    bool ok = profile_time_compare(&test->arena, &test->report, &t, values, 0, "cycles", 1);
+    profile_test_check(test, "time-runs' comparison over placements and copies", ok, true, profile_report_text(&test->report),
+                       "list 1, cycles:\n"
+                       "  main: 12 runs, median 1017.000; placements 1003.000, 1020.000 (spread 1.69%); copies within 0.40%\n"
+                       "  mine: 12 runs, median 1025.000; placements 1012.000, 1029.000 (spread 1.68%); copies within 0.39%; against main +0.79% "
+                       "(over shifts +0.88% to +0.90%; over shifts and copies +0.59% to +1.20%)\n");
+
+    // Two lists of one placement each and no copies: values[r * 4 + l * 2 + e], list 1's never read.
+    const uint64_t one_placements[] = { 0, 0 };
+    const uint64_t list_values[12] = { 9, 9, 200, 210, 9, 9, 201, 209, 9, 9, 199, 212 };
+    t.placements = one_placements;
+    t.executable_count = 2;
+    t.copies = 0;
+    t.list_count = 2;
+    ok = profile_time_compare(&test->arena, &test->report, &t, list_values, 1, "wall", 1);
+    profile_test_check(test, "time-runs' comparison of one placement", ok, true, profile_report_text(&test->report),
+                       "list 2, wall:\n"
+                       "  main: 3 runs, median 200.000\n"
+                       "  mine: 3 runs, median 210.000; against main +5.00%\n");
+
+    // main and mine with copies alone, and odd at two placements, which don't pair with main's one: values[c * 4 + e].
+    const uint64_t odd_builds[] = { 0, 1, 2, 2 };
+    const uint64_t odd_placements[] = { 0, 0, 0, 1 };
+    const uint64_t odd_values[8] = { 100, 104, 110, 120, 102, 101, 110, 121 };
+    t.builds = odd_builds;
+    t.placements = odd_placements;
+    t.executable_count = 4;
+    t.build_count = 3;
+    t.copies = 2;
+    t.list_count = 1;
+    t.runs = 1;
+    ok = profile_time_compare(&test->arena, &test->report, &t, odd_values, 0, "user cycles (thousands)", 1000);
+    profile_test_check(test, "time-runs' comparison of unpaired placements", ok, true, profile_report_text(&test->report),
+                       "list 1, user cycles (thousands):\n"
+                       "  main: 2 runs, median 0.102; copies within 2.00%\n"
+                       "  mine: 2 runs, median 0.104; copies within 2.97%; against main +1.96% (over copies -0.98% to +4.00%)\n"
+                       "  odd: 4 runs, median 0.120; placements 0.110, 0.121 (spread 10.00%); copies within 0.83%; against main +17.65%\n");
 }
 
 // Runs argv with its output into `output` (a path), and returns whether it exited with status 0.
@@ -854,6 +1022,8 @@ static int run_profile_tests(int argc, char** argv)
         profile_test_entry_program(&test);
         profile_test_ab(&test);
         profile_test_time_runs(&test);
+        profile_test_time_copies(&test);
+        profile_test_time_compare(&test);
         printf("test-profile: %llu checks, %llu failed\n", (unsigned long long)test.cases, (unsigned long long)test.failures);
         result = test.failures == 0 ? 0 : 1;
         arena_release(&test.report.arena);
