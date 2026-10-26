@@ -853,7 +853,9 @@ the source size plus the emitted names.
 `c_check_packed_diagnostic.c` cancels a pending warning when a source conversion
 permits the culprit's reduced alignment, including integer and incomplete-pointer
 casts. It follows conditional arms and a comma expression's right operand in
-their consuming context. A cast to `void` does not cancel it. Builtin lowering
+their implicit consuming context. An explicit cast cancels only a directly
+addressed member; its target does not flow into conditional/comma operands.
+A cast to `void` does not cancel it. Builtin lowering
 conversions are distinguished from source conversions: `__builtin_assume_aligned`
 retains its warning while the ordinary pointer parameters of `__builtin_memcpy`
 can cancel it. The existing diagnostic pragma history controls suppression and

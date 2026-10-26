@@ -7,10 +7,10 @@
 // implicit-conversion analysis. Explicit casts are boundaries and sizeof/typeof retain their source witnesses.
 // Scratch has graph.count logical bytes, no padding; source records and graph/stream identities remain stable.
 
-static uint8_t check_packed_conversion_alignment(const TypeTable* types, TypeId from, TypeId to, bool explicit)
+static uint8_t check_packed_conversion_alignment(const TypeTable* types, TypeId from, TypeId to)
 {
     uint8_t result = UINT8_MAX;
-    if (to != 0 && (explicit || to != from))
+    if (to != 0 && to != from)
     {
         if (check_action_is_integer(types, to))
         {
@@ -50,8 +50,10 @@ static bool check_input_packed_finalize(CheckInput* input, const Parser* parser,
                     const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
                     const bool boolean = op == CHECK_OP_CONDITION || op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ||
                                          (op == CHECK_OP_CONDITIONAL && i == 0);
-                    const TypeId target = explicit && i == 0 ? graph->types[node] : boolean ? BUSTER_TYPE_BOOL : comparison ? 0 : stream->conversions[node].operands[i].type;
-                    uint8_t alignment = check_packed_conversion_alignment(types, stream->values[operand].type, target, explicit);
+                    // Explicit casts cancel only a directly addressed member, already handled by the source
+                    // witness. Their target must not flow into a conditional/comma expression inside the cast.
+                    const TypeId target = explicit || comparison ? 0 : boolean ? BUSTER_TYPE_BOOL : stream->conversions[node].operands[i].type;
+                    uint8_t alignment = check_packed_conversion_alignment(types, stream->values[operand].type, target);
                     const bool inherit = extension || (op == CHECK_OP_COMMA && i == 1) || (op == CHECK_OP_CONDITIONAL && i != 0);
                     alignment = inherit && targets[node] < alignment ? targets[node] : alignment;
                     targets[operand] = alignment < targets[operand] ? alignment : targets[operand];
@@ -67,7 +69,7 @@ static bool check_input_packed_finalize(CheckInput* input, const Parser* parser,
                     // type in its AST. Our lowering conversion to void * is not a source implicit conversion.
                     const bool generic_pointer = op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_ASSUME_ALIGNED && i == 0;
                     const TypeId target = generic_pointer ? 0 : stream->argument_conversions[begin + i].type;
-                    const uint8_t alignment = check_packed_conversion_alignment(types, stream->values[operand].type, target, false);
+                    const uint8_t alignment = check_packed_conversion_alignment(types, stream->values[operand].type, target);
                     targets[operand] = alignment < targets[operand] ? alignment : targets[operand];
                 }
             }
