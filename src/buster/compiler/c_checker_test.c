@@ -3339,6 +3339,59 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
 
+// The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
+// builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
+// that take a record and that don't, at random places.
+static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* test)
+{
+    static const uint16_t recorded[] = {
+        CBUILTIN_HUGE_VAL,
+        CBUILTIN_FLT_ROUNDS,
+        CBUILTIN_CONSTANT_P,
+        CBUILTIN_OBJECT_SIZE,
+        CBUILTIN_ATOMIC_LOAD_N,
+        CBUILTIN_ATOMIC_FETCH_ADD,
+        CBUILTIN_ATOMIC_MAX_FETCH,
+        CBUILTIN_SYNC_LOCK_RELEASE,
+        CBUILTIN_SHUFFLEVECTOR,
+    };
+    static const uint16_t unrecorded[] = {
+        CBUILTIN_BSWAP16,
+        CBUILTIN_ADD_OVERFLOW,
+        CBUILTIN_UMULL_OVERFLOW,
+        CBUILTIN_EXPECT,
+        CBUILTIN_MEMCPY,
+        CBUILTIN_BIT_CAST,
+        CBUILTIN_ELEMENTWISE_ABS,
+    };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "guarded builtin column allocation");
+    for (uint32_t count = 0; ready && count <= 200; count += 1)
+    {
+        uint16_t* builtins = (uint16_t*)(mapping + page) - count;
+        uint32_t expected = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t draw = check_test_random(test) % 16;
+            const uint32_t pick = check_test_random(test);
+            builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
+            expected += draw < 2;
+        }
+        const uint32_t vector = check_input_builtin_capacity(builtins, count, false);
+        const uint32_t scalar = check_input_builtin_capacity(builtins, count, true);
+        char description[160];
+        snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
+                 vector, scalar, expected);
+        check_test_expect(test, vector == expected && scalar == expected, description);
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page);
+    }
+}
+
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
@@ -3413,6 +3466,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_target_options(&test);
             check_test_bindings(&test);
             check_test_builtin_graph(&test, &types.table, clang);
+            check_test_builtin_capacity(&test);
             check_test_varargs_graph(&test, &types.table);
             check_test_special_graph(&test, &types.table, clang);
             check_test_builtin_vector_graph(&test, &types.table, clang);
