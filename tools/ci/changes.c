@@ -749,11 +749,228 @@ static void changes_scan_names(Text text, const char* prefix, bool dashes, const
     }
 }
 
-// The benchmarks a step's commands run, by the names after `./build/compiler benchmark-` or `measure-`.
+// The rest of the line past the prefix and the spaces after it, or the line itself without the prefix.
+static Text changes_skip(Text line, const char* prefix)
+{
+    bool matched = text_starts_with(line, prefix);
+    size_t skip = matched ? strlen(prefix) : 0;
+    while (matched && skip < line.length && line.data[skip] == ' ')
+    {
+        skip += 1;
+    }
+    Text rest = {
+        .data = line.data + skip,
+        .length = line.length - skip,
+    };
+    return rest;
+}
+
+// The count of spaces the line starts with.
+static size_t changes_indent(Text line)
+{
+    size_t indent = 0;
+    while (indent < line.length && line.data[indent] == ' ')
+    {
+        indent += 1;
+    }
+    return indent;
+}
+
+// The words that end the here-documents the line starts, in order: each `<<WORD`, `<<-WORD`, `<<'WORD'` or
+// `<<"WORD"`, but not a here-string's `<<<`, `<<-`'s as `-WORD`. A `<<` in a string or a comment counts too, which can
+// only leave a command out of the step's.
+static void changes_heredocs(Text line, TextList* words)
+{
+    size_t i = 0;
+    while (i + 2 <= line.length)
+    {
+        bool starts = line.data[i] == '<' && line.data[i + 1] == '<' && (i + 2 == line.length || line.data[i + 2] != '<');
+        bool string = line.data[i] == '<' && line.data[i + 1] == '<' && !starts;
+        if (starts)
+        {
+            size_t at = i + 2;
+            bool tabs = at < line.length && line.data[at] == '-';
+            at += tabs ? 1 : 0;
+            while (at < line.length && line.data[at] == ' ')
+            {
+                at += 1;
+            }
+            at += at < line.length && (line.data[at] == '\'' || line.data[at] == '"') ? 1 : 0;
+            size_t start = at;
+            bool more = true;
+            while (at < line.length && more)
+            {
+                char c = line.data[at];
+                more = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+                at += more ? 1 : 0;
+            }
+            if (at > start)
+            {
+                Text word = {
+                    .data = line.data + start,
+                    .length = at - start,
+                };
+                list_append(words, tabs ? text_concat(text_c("-"), word) : word);
+            }
+            i = at;
+        }
+        else
+        {
+            i += string ? 3 : 1;
+        }
+    }
+}
+
+// The benchmark the line runs, if it runs one: `./build/compiler benchmark-NAME` or `measure-NAME` after the line's
+// indentation, a `run:` and a `taskset -c CPUS`, with NAME ending the line or followed by a space.
+static void changes_step_line(Text line, TextList* commands)
+{
+    Text rest = changes_skip(changes_skip(line, ""), "run:");
+    if (text_starts_with(rest, "taskset -c "))
+    {
+        rest = changes_skip(rest, "taskset -c ");
+        size_t cpus = 0;
+        while (cpus < rest.length && rest.data[cpus] != ' ')
+        {
+            cpus += 1;
+        }
+        rest = changes_skip((Text){ .data = rest.data + cpus, .length = rest.length - cpus }, " ");
+    }
+    const char* prefix = text_starts_with(rest, "./build/compiler benchmark-") ? "./build/compiler benchmark-" : "./build/compiler measure-";
+    if (text_starts_with(rest, prefix))
+    {
+        TextList names = { 0 };
+        changes_scan_names(rest, prefix, true, "", &names);
+        size_t end = strlen(prefix) + (names.count != 0 ? names.items[0].length : 0);
+        if (names.count != 0 && (end == rest.length || rest.data[end] == ' '))
+        {
+            list_append(commands, names.items[0]);
+        }
+    }
+}
+
+// Whether the line ends the here-document of the word: as the shell reads it, after the YAML block's indentation,
+// the word alone, after tabs for `<<-`'s. Spaces the shell would see before it, or after it, make it the body's.
+static bool changes_heredoc_ends(Text line, Text word, size_t block)
+{
+    bool tabs = word.length != 0 && word.data[0] == '-';
+    Text bare = {
+        .data = word.data + (tabs ? 1 : 0),
+        .length = word.length - (tabs ? 1 : 0),
+    };
+    bool indented = block != SIZE_MAX && line.length >= block && changes_indent(line) >= block;
+    size_t at = indented ? block : 0;
+    while (indented && tabs && at < line.length && line.data[at] == '\t')
+    {
+        at += 1;
+    }
+    Text rest = {
+        .data = line.data + at,
+        .length = line.length - at,
+    };
+    return indented && text_equal(rest, bare);
+}
+
+// Where a line of a script leaves the shell's quoting: outside quotes (0), in single quotes (1), double quotes (2),
+// ANSI-C quotes (3) or backquotes (4), from where the line before left it; the parentheses open outside quotes, its
+// `(`s less its `)`s added to *depth, which stays below 0 once a `)` closes none (a `case` pattern's, whose matching
+// isn't read: a later `(` mustn't seem to close it, so the script's lines after it count nothing); and whether the
+// line ends in a backslash outside quotes, which joins the next line to its command. A comment, from a `#` that starts
+// a word outside quotes, is read no further.
+static uint32_t changes_shell_line(Text line, uint32_t quote, int64_t* depth, bool* continued)
+{
+    bool comment = false;
+    *continued = false;
+    size_t i = 0;
+    while (i < line.length && !comment)
+    {
+        char c = line.data[i];
+        char before = i != 0 ? line.data[i - 1] : ' ';
+        bool escape = c == '\\' && quote != 1;
+        *continued = escape && quote == 0 && i + 1 == line.length;
+        bool word = before == ' ' || before == '\t' || before == ';' || before == '&' || before == '|' || before == '(' || before == ')';
+        comment = quote == 0 && c == '#' && word;
+        uint32_t opened = c == '\'' ? 1 : c == '"' ? 2 : c == '`' ? 4 : 0;
+        opened = c == '$' && i + 1 < line.length && line.data[i + 1] == '\'' ? 3 : opened;
+        bool closes = (quote == 1 && c == '\'') || (quote == 2 && c == '"') || (quote == 3 && c == '\'') || (quote == 4 && c == '`');
+        bool bare = quote == 0 && !escape && !comment;
+        int64_t step = bare && c == '(' ? 1 : bare && c == ')' ? -1 : 0;
+        *depth = *depth < 0 ? *depth : *depth + step;
+        uint32_t next = bare ? opened : quote;
+        next = quote != 0 && !escape && closes ? 0 : next;
+        i += escape || (quote == 0 && opened == 3) ? 2 : 1;
+        quote = next;
+    }
+    return quote;
+}
+
+// The benchmarks a step's commands run, read from its `run:` key alone (at the step's keys' indentation, two past its
+// `- name:` line's): the key's own line when it holds a plain scalar, whose continuation lines YAML folds into it, and
+// each line of a `run: |` block, to the next line no more indented than the keys. A folded block (`run: >`) and other
+// keys' values (`env:`, `with:`) run nothing here. A line runs `./build/compiler benchmark-NAME` or `measure-NAME`
+// itself, after its indentation, a `run:` and a `taskset -c CPUS`, with NAME ending the line or followed by a space.
+// The text of a comment, a string, another command's arguments or a here-document's body runs nothing: a line counts
+// only where the shell starts a command there, outside quotes that lines before it opened, outside parentheses they
+// left open, and not joined to the line before by a backslash (changes_shell_line); and the lines after one that
+// starts here-documents are their bodies, up to the line of each one's word as the shell reads it, the indentation of
+// the block's first line removed, and the block's rest when one never ends. Lines inside parentheses are an array's
+// elements, but also a subshell's or a command substitution's commands, which count no more: a benchmark goes on a
+// line of its own, and not after a `case` pattern's unmatched `)`, past which nothing counts. The shell's control flow
+// isn't read: a command in a function never called, or after `if false`,
+// counts as run. So the commands of the tests' list, which `parallel` reads from one, aren't the step's: a benchmark a
+// MEASURE name gates runs in a step of its own, pinned.
 static void changes_step_commands(Text body, TextList* commands)
 {
-    changes_scan_names(body, "./build/compiler benchmark-", true, "", commands);
-    changes_scan_names(body, "./build/compiler measure-", true, "", commands);
+    size_t offset = 0;
+    Text line;
+    TextList heredocs = { 0 };
+    uint32_t ended = 0;
+    size_t block = SIZE_MAX;
+    size_t keys = SIZE_MAX;
+    bool literal = false;
+    uint32_t quote = 0;
+    int64_t depth = 0;
+    bool continued = false;
+    while (text_next_line(body, &offset, &line))
+    {
+        size_t indent = changes_indent(line);
+        bool blank = indent == line.length;
+        keys = keys == SIZE_MAX && !blank ? indent + 2 : keys;
+        bool key = !blank && indent <= keys;
+        literal = literal && !key;
+        block = literal && !blank && block == SIZE_MAX ? indent : block;
+        Text value = changes_skip(changes_skip(line, ""), "run:");
+        bool run = key && indent == keys && text_starts_with(changes_skip(line, ""), "run:");
+        if (literal && ended < heredocs.count)
+        {
+            ended += changes_heredoc_ends(line, heredocs.items[ended], block) ? 1 : 0;
+        }
+        else if (literal)
+        {
+            bool starts = quote == 0 && depth == 0 && !continued;
+            changes_heredocs(line, &heredocs);
+            if (starts)
+            {
+                changes_step_line(line, commands);
+            }
+            quote = changes_shell_line(line, quote, &depth, &continued);
+        }
+        else if (run)
+        {
+            literal = text_equal_c(value, "|") || text_equal_c(value, "|-") || text_equal_c(value, "|+");
+            block = SIZE_MAX;
+            heredocs = (TextList){ 0 };
+            ended = 0;
+            quote = 0;
+            depth = 0;
+            continued = false;
+            bool plain = value.length != 0 && value.data[0] != '|' && value.data[0] != '>';
+            if (plain)
+            {
+                changes_step_line(line, commands);
+            }
+        }
+    }
 }
 
 // The outputs a step is gated on, by `needs.changes.outputs.NAME != 'false'`.
@@ -1058,6 +1275,7 @@ struct ChangesTest
 {
     uint32_t checks;
     uint32_t failures;
+    bool quiet;
 };
 
 static void changes_expect(ChangesTest* test, bool condition, const char* what, Text detail)
@@ -1066,7 +1284,10 @@ static void changes_expect(ChangesTest* test, bool condition, const char* what, 
     if (!condition)
     {
         test->failures += 1;
-        fprintf(stderr, "FAIL: %s%s%.*s\n", what, detail.length != 0 ? ": " : "", (int)detail.length, detail.data);
+        if (!test->quiet)
+        {
+            fprintf(stderr, "FAIL: %s%s%.*s\n", what, detail.length != 0 ? ": " : "", (int)detail.length, detail.data);
+        }
     }
 }
 
@@ -1492,15 +1713,126 @@ static void changes_test_workflow(ChangesTest* test, Text workflow, const char* 
         changes_scan_names(step->body, "contains(env.MEASURE, ',", true, ",')", &names);
         TextList commands = { 0 };
         changes_step_commands(step->body, &commands);
+        // A step finds its benchmarks by their command lines alone (changes_step_commands): one it ran through a
+        // wrapper, split over lines, or only spelled in a comment or a string wouldn't run when changed.
         for (uint32_t j = 0; j < names.count; j += 1)
         {
-            if (list_contains(&commands, names.items[j]))
-            {
-                changes_expect(test, changes_measures(&result, text_terminated(names.items[j])), "the edited step's benchmark runs", step->name);
-            }
+            changes_expect(test, list_contains(&commands, names.items[j]), text_concat(text_concat(text_c("the step runs ./build/compiler benchmark- or measure-"), names.items[j]), text_c(" as a command")).data, step->name);
+            changes_expect(test, changes_measures(&result, text_terminated(names.items[j])), "the edited step's benchmark runs", step->name);
         }
     }
     changes_expect(test, gated >= 20, "the workflow has its gated steps", (Text){ 0 });
+}
+
+// The workflow with each line that runs the command replaced by the template's lines, at its indentation, each `%`
+// the command.
+static Text changes_replace_command(Text workflow, const char* command, const char* template, uint32_t* count)
+{
+    Text result = {
+        .data = "",
+        .length = 0,
+    };
+    size_t offset = 0;
+    size_t start = 0;
+    Text line;
+    *count = 0;
+    while (text_next_line(workflow, &offset, &line))
+    {
+        Text rest = changes_skip(changes_skip(line, ""), "taskset -c \"$cpu\"");
+        size_t length = strlen(command);
+        bool runs = text_starts_with(rest, command) && (rest.length == length || rest.data[length] == ' ');
+        if (runs)
+        {
+            size_t indent = (size_t)(rest.data - line.data);
+            Text head = {
+                .data = workflow.data + start,
+                .length = (size_t)(line.data - (workflow.data + start)) + indent,
+            };
+            result = text_concat(result, head);
+            for (const char* c = template; *c != 0; c += 1)
+            {
+                Text piece = *c == '%' ? rest : (Text){ .data = c, .length = 1 };
+                result = text_concat(result, piece);
+                result = *c == '\n' ? text_concat(result, (Text){ .data = line.data, .length = indent }) : result;
+            }
+            start = (size_t)(line.data + line.length - workflow.data);
+            *count += 1;
+        }
+    }
+    return text_concat(result, (Text){ .data = workflow.data + start, .length = workflow.length - start });
+}
+
+// The workflow with the step of this name's text from its `run:` key to the end of the command's line replaced, or
+// nothing when the step, the key or the command isn't there.
+static Text changes_replace_run(Text workflow, const char* name, const char* command, const char* replacement)
+{
+    const char* text = text_terminated(workflow);
+    const char* step = strstr(text, name);
+    const char* run = step != NULL ? strstr(step, "        run: |\n") : NULL;
+    const char* found = run != NULL ? strstr(run, command) : NULL;
+    const char* end = found != NULL ? strchr(found, '\n') : NULL;
+    Text result = { 0 };
+    if (end != NULL)
+    {
+        Text before = {
+            .data = text,
+            .length = (size_t)(run - text),
+        };
+        Text after = {
+            .data = end + 1,
+            .length = workflow.length - (size_t)(end + 1 - text),
+        };
+        result = text_concat(text_concat(before, text_c(replacement)), after);
+    }
+    return result;
+}
+
+// A benchmark's command made text that runs nothing (commented out and echoed, or a here-document's body) must fail
+// the workflow's checks: the step would no longer run it.
+static void changes_test_mutation(ChangesTest* test, Text workflow, const char* root)
+{
+    const char* templates[] = {
+        "# %\necho \"%\"",
+        "cat <<'EOF'\n%\nEOF",
+        "cat <<'EOF'\n  EOF\n%\nEOF",
+        "echo \"\n%\n\"",
+        "args=(\n  %\n)\necho \"${args[@]}\"",
+        "case yes in\n  yes)\n    args=(\n      %\n    )\n    echo \"${args[@]}\"\n    ;;\nesac",
+    };
+    for (uint32_t i = 0; i < sizeof(templates) / sizeof(templates[0]); i += 1)
+    {
+        uint32_t count = 0;
+        Text mutant = changes_replace_command(workflow, "./build/compiler benchmark-types", templates[i], &count);
+        changes_expect(test, count == 1 && strstr(text_terminated(mutant), "./build/compiler benchmark-types\n") != NULL, "the mutation replaces benchmark-types' command", text_c(templates[i]));
+        ChangesTest mutated = {
+            .quiet = true,
+        };
+        changes_test_workflow(&mutated, mutant, root);
+        changes_expect(test, mutated.failures != 0, "the workflow's checks refuse a benchmark's command that runs nothing", text_c(templates[i]));
+        ChangesSteps steps = changes_split_steps(mutant);
+        const ChangesStep* step = changes_find_step(&steps, text_c("Benchmark-the-C-type-table"));
+        TextList commands = { 0 };
+        if (step != NULL)
+        {
+            changes_step_commands(step->body, &commands);
+        }
+        changes_expect(test, step != NULL && !list_contains(&commands, text_c("types")), "the mutated step runs no benchmark-types", text_c(templates[i]));
+    }
+    // And the step's script replaced: the command in an `env:` value, or folded into an `echo`'s arguments.
+    const char* scripts[] = {
+        "        env:\n          NOTE: |\n            ./build/compiler benchmark-types\n        run: echo \"benchmark disabled\"\n",
+        "        run: >-\n          echo benchmark-disabled\n          ./build/compiler benchmark-types\n",
+    };
+    for (uint32_t i = 0; i < sizeof(scripts) / sizeof(scripts[0]); i += 1)
+    {
+        Text mutant = changes_replace_run(workflow, "      - name: Benchmark the C type table\n", "./build/compiler benchmark-types", scripts[i]);
+        changes_expect(test, mutant.length != 0, "the mutation replaces benchmark-types' step's script", text_c(scripts[i]));
+        ChangesTest mutated = {
+            .quiet = true,
+        };
+        changes_test_workflow(&mutated, mutant.length != 0 ? mutant : workflow, root);
+        changes_expect(test, mutant.length != 0 && mutated.failures != 0, "the workflow's checks refuse a benchmark that only a YAML value spells", text_c(scripts[i]));
+    }
 }
 
 // Each module's and benchmark's alternatives must name a source that exists, and each unit must be a file: a pattern
@@ -1594,6 +1926,137 @@ static void changes_test_split(ChangesTest* test)
     }
     changes_expect(test, gates.count == 1 && text_equal_c(gates.items[0], "zen5"), "a gate's name with a digit, and not an == gate", (Text){ 0 });
     changes_expect(test, commands.count == 2 && text_equal_c(commands.items[0], "x86-zen5") && text_equal_c(commands.items[1], "x86-zen5"), "a step's commands", (Text){ 0 });
+    // Commands at a line's start, after `run:` and `taskset -c`, and nothing that only spells one: a here-document's
+    // body ends at its word alone after the block's indentation (and tabs, for `<<-`), not at one indented further.
+    const char* lines =
+        "      - name: Fixture\n"
+        "        run: ./build/compiler benchmark-lanes\n"
+        "        run: taskset -c \"$cpu\" ./build/compiler benchmark-types --seed 1\n"
+        "        run: |\n"
+        "          ./build/compiler measure-x86-zen5 \\\n"
+        "          # ./build/compiler benchmark-ssa\n"
+        "          echo \"./build/compiler benchmark-ir\"\n"
+        "          run_it ./build/compiler benchmark-dataflow\n"
+        "          \"$compiler\" benchmark-bind\n"
+        "          ./build/compiler benchmark-backend-x\n"
+        "          ./build/compiler benchmark-parser;\n"
+        "          ./build/compiler benchmark-\n"
+        "          cat <<'EOF'\n"
+        "          ./build/compiler benchmark-ssa\n"
+        "          EOF\n"
+        "          test \"$(tr ',' '\\n' <<< \"$cpus\" | wc -l)\" -ge 8\n"
+        "          ./build/compiler measure-tier1-model\n"
+        "          cat <<'EOF'\n"
+        "            EOF\n"
+        "          ./build/compiler benchmark-types\n"
+        "          EOF \n"
+        "          ./build/compiler benchmark-types\n"
+        "          EOF\n"
+        "          ./build/compiler parallel <<-TESTS && cat << \"MORE\"\n"
+        "          \t./build/compiler benchmark-ir\n"
+        "          \tTESTS\n"
+        "          ./build/compiler benchmark-dataflow\n"
+        "           MORE\n"
+        "          \tMORE\n"
+        "          ./build/compiler benchmark-ssa\n"
+        "          MORE\n"
+        "\n"
+        "          ./build/compiler benchmark-bind <<EOF\n"
+        "          ./build/compiler benchmark-lexer\n";
+    TextList spelled = { 0 };
+    changes_step_commands(text_c(lines), &spelled);
+    const char* expected[] = { "lanes", "types", "x86-zen5", "backend-x", "tier1-model", "bind" };
+    bool same = spelled.count == sizeof(expected) / sizeof(expected[0]);
+    for (uint32_t i = 0; i < spelled.count && same; i += 1)
+    {
+        same = text_equal_c(spelled.items[i], expected[i]);
+    }
+    changes_expect(test, same, "the commands lines run, not those comments, strings, arguments and here-documents spell", (Text){ 0 });
+    // A here-document outside a `run: |` block, whose lines the shell reads joined, never ends.
+    const char* plain =
+        "      - name: Fixture\n"
+        "        run: cat <<EOF\n"
+        "          EOF\n"
+        "          ./build/compiler benchmark-ssa\n";
+    TextList unended = { 0 };
+    changes_step_commands(text_c(plain), &unended);
+    changes_expect(test, unended.count == 0, "a here-document outside a block runs to the step's end", (Text){ 0 });
+    // Only the `run:` key's script runs: not another key's value, a nested `run:`, or the lines a folded block joins.
+    const char* values =
+        "      - name: Fixture\n"
+        "        env:\n"
+        "          NOTE: |\n"
+        "            ./build/compiler benchmark-types\n"
+        "          run: ./build/compiler benchmark-ssa\n"
+        "        with:\n"
+        "          run: |\n"
+        "            ./build/compiler benchmark-ir\n"
+        "        run: >-\n"
+        "          echo benchmark-disabled\n"
+        "          ./build/compiler benchmark-types\n"
+        "        run: |2\n"
+        "          ./build/compiler benchmark-bind\n"
+        "        run: |\n"
+        "\n"
+        "          ./build/compiler benchmark-lanes\n"
+        "        env:\n"
+        "          NOTE: |\n"
+        "            ./build/compiler benchmark-dataflow\n";
+    // Lines in quotes that lines before them opened, or joined to the line before, are arguments, not commands.
+    const char* quoted =
+        "      - name: Fixture\n"
+        "        run: |\n"
+        "          echo \"\n"
+        "          ./build/compiler benchmark-types\n"
+        "          \"\n"
+        "          echo 'it'\"'\"'s\n"
+        "          ./build/compiler benchmark-ssa\n"
+        "          '\n"
+        "          echo $'a\\'\n"
+        "          ./build/compiler benchmark-ir\n"
+        "          '\n"
+        "          x=`\n"
+        "          ./build/compiler benchmark-dataflow\n"
+        "          `\n"
+        "          echo done \\\n"
+        "          ./build/compiler benchmark-bind\n"
+        "          echo \"a \\\" # b\"; echo it\\'s # don't\n"
+        "          ./build/compiler benchmark-lanes\n"
+        "          echo 'a\\\n"
+        "          ./build/compiler benchmark-backend\n"
+        "          '\n"
+        "          args=(\n"
+        "            ./build/compiler benchmark-ir\n"
+        "          )\n"
+        "          x=$( (\n"
+        "          ./build/compiler benchmark-dataflow\n"
+        "          ) )\n"
+        "          f() { echo \"(\"; }; y=$((1 + (2)))\n"
+        "          ./build/compiler benchmark-types\n";
+    // A `case` pattern's `)` closes no parenthesis: the array after it must not seem to close it, so nothing after it
+    // counts (#471's review).
+    const char* patterns =
+        "      - name: Fixture\n"
+        "        run: |\n"
+        "          ./build/compiler benchmark-lanes\n"
+        "          case yes in\n"
+        "            yes)\n"
+        "              args=(\n"
+        "                ./build/compiler benchmark-types\n"
+        "              )\n"
+        "              printf '%s\\n' \"${args[@]}\"\n"
+        "              ;;\n"
+        "          esac\n"
+        "          ./build/compiler benchmark-ssa\n";
+    TextList cases = { 0 };
+    changes_step_commands(text_c(patterns), &cases);
+    changes_expect(test, cases.count == 1 && text_equal_c(cases.items[0], "lanes"), "nothing after a case pattern's unmatched parenthesis", (Text){ 0 });
+    TextList arguments = { 0 };
+    changes_step_commands(text_c(quoted), &arguments);
+    changes_expect(test, arguments.count == 2 && text_equal_c(arguments.items[0], "lanes") && text_equal_c(arguments.items[1], "types"), "the lines the shell starts commands on, not quoted or joined ones", (Text){ 0 });
+    TextList scripts = { 0 };
+    changes_step_commands(text_c(values), &scripts);
+    changes_expect(test, scripts.count == 1 && text_equal_c(scripts.items[0], "lanes"), "the run key's script alone, to the next key", (Text){ 0 });
     ChangesSteps none = changes_split_steps((Text){ .data = "", .length = 0 });
     changes_expect(test, none.count == 0, "an empty workflow has no steps", (Text){ 0 });
 }
@@ -1610,6 +2073,7 @@ static int changes_self_test(const char* root)
         changes_test_fixtures(&test, workflow, root);
         changes_test_events(&test, workflow, root);
         changes_test_workflow(&test, workflow, root);
+        changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);
