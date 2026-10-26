@@ -78,6 +78,16 @@ The noise sets which comparison to use.
   on the same CPU, the state a compiler starts in after lighter work; `--executable PATH` times another program. A
   process whose exit status isn't its list's first warm-up's fails the command. Compare the five rounds' medians:
   their spread is the noise.
+- **Short runs on many lanes: the reference twice, and a balanced order.** A run of a few milliseconds on the cores
+  that only CPU 2's performance governor keeps fast runs at the clock they woke into, which what ran before it decides.
+  `link-foreign`'s 2,000-worker dynamic PIE on eight lanes took 2.2 to 2.8 ms (p10 to p90) with the same
+  instructions, and each round's median of 41 runs of main moved by −4% to +8% against another label of the same
+  executable in the same round (#446). Three rounds of #424's A/B read +4.4% for its head; 16 rounds that mostly ran
+  main first, after 3 s of one-thread links, then the head and main's second label, read +1.9% and +1.6% for those
+  two over all their runs, and 24 rounds in which each of the three took each place equally, within ±0.4% for both
+  ([the record](https://github.com/buster14a/buster-performance/tree/a770051e1c638cd7f094485646158faf4ebd48cd/docs/measurements/link-foreign-small-446-2026-10-26)).
+  Time the reference twice in the same rounds, rotate the order so that each takes each place equally, and read a
+  change against the reference's own difference.
 
 ## Counting in the process
 
