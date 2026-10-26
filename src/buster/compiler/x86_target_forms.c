@@ -52,14 +52,20 @@ static uint32_t x86_target_compact_features(uint64_t features)
 }
 
 
-static void x86_target_forms_scalar(const X86Target* target, uint8_t* allowed)
+// The immutable requirement rows cannot overlap writable output. Scope that alias guarantee to this reader so
+// target and output may still overlap: the wrapper captures the feature word before writing any output byte.
+BUSTER_INLINE void x86_target_forms_scalar_rows(uint64_t available, const uint64_t* restrict requirements, uint8_t* allowed)
 {
-    const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
     for (uint32_t i = 0; i < X86_FORM_COUNT; i += 1)
     {
-        const uint64_t required = x86_target_requirements[i];
+        const uint64_t required = requirements[i];
         allowed[i] = required != 0 && (required & ~available) == 0;
     }
+}
+
+static void x86_target_forms_scalar(const X86Target* target, uint8_t* allowed)
+{
+    x86_target_forms_scalar_rows(target->features | BUSTER_X86_TARGET_KNOWN, x86_target_requirements, allowed);
 }
 
 // Sixteen contiguous 32-bit rows per iteration: no gathers, scratch allocation or speculative tail loads.

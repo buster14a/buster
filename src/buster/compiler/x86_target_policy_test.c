@@ -138,7 +138,18 @@ static bool x86_target_test_matrix(void)
         passed &= (vector[form] != 0) == (x86_target_requirements[form] != 0);
         passed &= form < BUSTER_X86_FORM_LEGACY_MODES || vector[form] == 0;
     }
-    printf("target feature matrix: %s (%u configurations, %u classified / %u forms, first-failure negatives at six profiles)\n", passed ? "pass" : "FAIL", configurations, known, X86_FORM_COUNT);
+    union
+    {
+        X86Target target;
+        uint8_t allowed[X86_FORM_COUNT];
+    } overlap;
+    overlap.target = all;
+    x86_target_forms_scalar(&overlap.target, overlap.allowed);
+    passed &= memcmp(overlap.allowed, vector, sizeof(vector)) == 0;
+    overlap.target = all;
+    x86_target_forms(&overlap.target, overlap.allowed);
+    passed &= memcmp(overlap.allowed, vector, sizeof(vector)) == 0;
+    printf("target feature matrix: %s (%u configurations, %u classified / %u forms, first-failure negatives at six profiles; overlapping target/output)\n", passed ? "pass" : "FAIL", configurations, known, X86_FORM_COUNT);
     return passed;
 }
 
