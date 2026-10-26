@@ -75,9 +75,6 @@ struct CheckLowerTask
     CheckLowerTaskKind kind;
     uint32_t node;
     TypeId type;
-    // The source token current when the task was pushed, which its entries take (CheckLowerWriter.source). An
-    // expression's task has none: check_lower_expand sets its node's.
-    uint32_t source;
     uint64_t value;
     bool address;
     bool initialized;
@@ -110,8 +107,12 @@ struct CheckLowerWriter
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* values;
-    // Each entry's source token (CheckProgramLowered.entry_tokens), when `sources` asks for them.
+    // Each entry's source token (CheckProgramLowered.entry_tokens), when `sources` asks for them: the entries before
+    // `filled` have theirs, and the ones after it take `source` when it next changes (check_lower_settle).
     uint32_t* tokens;
+    // With `sources`, the token each task was pushed under, for the tasks before `settled`; the ones after it were pushed
+    // under `source`.
+    uint32_t* task_sources;
     uint32_t* labels;
     uint32_t* label_heads;
     uint32_t* stack_parents;
@@ -156,11 +157,13 @@ struct CheckLowerWriter
     uint32_t miscellaneous_count;
     uint32_t floating_count;
     uint32_t token;
-    // The token whose lowering writes the next entries: an expression's node's, a statement's or an initializer part's,
-    // saved with each task pushed (but an expression's, which sets its own) and restored when it runs, so that an
-    // operation's entry, written after its operands', takes its own node's token. `token`, which diagnostics name, is the
-    // last one set.
+    // With `sources`, the token whose lowering writes the next entries: an expression's node's, a statement's, a call's
+    // callee's or an initializer part's, and for any other task the one it was pushed under, so that an operation's entry,
+    // written after its operands', takes its own node's token (check_lower_drain_sources). `filled` and `settled` count
+    // the entries and the tasks that have theirs (check_lower_settle).
     uint32_t source;
+    uint32_t filled;
+    uint32_t settled;
     uint32_t stack_head;
     uint32_t stack_count;
     bool reachable;
@@ -495,19 +498,37 @@ static void check_lower_place(CheckLowerWriter* writer, uint32_t label)
     }
 }
 
-// Entry `index`'s source token, when the lowering keeps them (`sources`, check_program_lower_sources).
-static void check_lower_token(CheckLowerWriter* writer, uint32_t index)
+// Before the token changes (CheckLowerWriter.source), the entries written and the tasks pushed since it last changed
+// take it, so that no entry or push spends anything on the tokens.
+static inline __attribute__((always_inline)) void check_lower_settle(CheckLowerWriter* writer)
+{
+    for (uint32_t e = writer->filled; e < writer->count; e += 1)
+    {
+        writer->tokens[e] = writer->source;
+    }
+    writer->filled = writer->count;
+    for (uint32_t t = writer->settled; t < writer->depth; t += 1)
+    {
+        writer->task_sources[t] = writer->source;
+    }
+    writer->settled = writer->depth;
+}
+
+// The token whose lowering writes the next entries (CheckLowerWriter.source). Out of line, as only -g reaches it.
+static __attribute__((noinline)) void check_lower_change_source(CheckLowerWriter* writer, uint32_t token)
+{
+    check_lower_settle(writer);
+    writer->source = token;
+}
+
+// The token whose lowering writes the next entries, where a call or an initializer part sets it in the middle of a task,
+// and at a function's start and end: a lowering without the tokens (`sources`) only tests the flag.
+static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
 {
     if (writer->sources)
     {
-        writer->tokens[index] = writer->source;
+        check_lower_change_source(writer, token);
     }
-}
-
-// The token whose lowering writes the next entries (CheckLowerWriter.source).
-static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
-{
-    writer->source = token;
 }
 
 static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
@@ -539,11 +560,9 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             {
                 writer->kinds[writer->count] = BUSTER_TYPED_CONST;
                 writer->classes[writer->count] = top;
-                check_lower_token(writer, writer->count);
                 writer->values[writer->count++] = 0;
                 writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
                 writer->classes[writer->count] = top;
-                check_lower_token(writer, writer->count);
                 writer->values[writer->count++] = 0;
                 writer->x87 |= top == BUSTER_TYPED_CLASS_F80;
             }
@@ -558,7 +577,6 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             writer->kinds[writer->count] = kind;
             writer->classes[writer->count] = class;
             writer->values[writer->count] = value;
-            check_lower_token(writer, writer->count);
             writer->count += 1;
         }
     }
@@ -568,12 +586,6 @@ static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
 {
     if (writer->depth < writer->capacity)
     {
-        // An expression's task saves no token: check_lower_expand sets its node's when it runs. A push's kind is a
-        // constant, so that this costs an expression's push nothing.
-        if (task.kind != CHECK_LOWER_EXPRESSION)
-        {
-            task.source = writer->source;
-        }
         writer->tasks[writer->depth++] = task;
     }
     else
@@ -1942,7 +1954,6 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
             {
                 check_lower_track(writer, writer->kinds[i], writer->classes[i], writer->values[i]);
             }
-            check_lower_token(writer, i);
             writer->x87 |= writer->classes[i] == BUSTER_TYPED_CLASS_F80;
             writer->count += 1;
         }
@@ -2372,7 +2383,6 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     const TypeId type_b = stream->conversions[node].operands[1].type;
     const uint8_t class = check_lower_value_class(types, value.type);
     writer->token = graph->tokens[node];
-    check_lower_source(writer, writer->token);
     const uint8_t value_kind = type_kind(types, type_strip_aligned(types, value.type));
     // A function, an array or an aggregate: its value is its address, which nothing loads through.
     const bool aggregate = check_lower_aggregate(types, value.type);
@@ -2843,95 +2853,121 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     }
 }
 
-static void check_lower_drain(CheckLowerWriter* writer)
+// The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
+// own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
+// it last changed).
+static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    const CheckProgram* program = writer->program;
+    const uint32_t index = writer->depth;
+    const uint32_t token = task.kind == CHECK_LOWER_EXPRESSION ? program->input->graph.tokens[task.node] :
+                           task.kind == CHECK_LOWER_CONTROL ? program->controls[writer->body->first + task.node].token :
+                           index < writer->settled ? writer->task_sources[index] : writer->source;
+    writer->settled = index < writer->settled ? index : writer->settled;
+    check_lower_settle(writer);
+    writer->source = token;
+}
+
+// The tasks' loop, as check_lower_drain and check_lower_drain_sources compile it: with `sources`, each task's token set
+// before it runs (check_lower_task_source). A constant in each, so that the plain loop does none of it.
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources)
 {
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         const CheckLowerTask task = writer->tasks[--writer->depth];
-        if (task.kind == CHECK_LOWER_EXPRESSION)
+        if (sources)
         {
-            // Its entries take its node's token, which check_lower_expand sets: none was saved with it.
-            check_lower_expand(writer, task);
+            check_lower_task_source(writer, task);
+        }
+        if (task.kind == CHECK_LOWER_INSTRUCTION)
+        {
+            check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
+        }
+        else if (task.kind == CHECK_LOWER_CONVERSION)
+        {
+            check_lower_conversion(writer, task.node, task.type);
+        }
+        else if (task.kind == CHECK_LOWER_LABEL)
+        {
+            check_lower_place(writer, task.node);
+        }
+        else if (task.kind == CHECK_LOWER_CONTROL)
+        {
+            check_lower_control(writer, task.node);
+        }
+        else if (task.kind == CHECK_LOWER_BUILTIN)
+        {
+            check_lower_builtin_emit(writer, task);
+        }
+        else if (task.kind == CHECK_LOWER_BUILTIN_MISC)
+        {
+            check_lower_miscellaneous_emit(writer, task);
+        }
+        else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT || task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
+        {
+            check_lower_floating_emit(writer, task);
+        }
+        else if (task.kind == CHECK_LOWER_CONSTANT)
+        {
+            check_lower_constant(writer, writer->program->stream->values + task.node);
+        }
+        else if (task.kind == CHECK_LOWER_ADDRESS)
+        {
+            check_lower_address(writer, task.node, (int64_t)task.value);
+        }
+        else if (task.kind == CHECK_LOWER_QUERY)
+        {
+            check_lower_constant(writer, &writer->program->stream->queries[task.node].runtime_value);
+        }
+        else if (task.kind == CHECK_LOWER_TERMINATE)
+        {
+            check_lower_terminate(writer);
+        }
+        else if (task.kind == CHECK_LOWER_COPY)
+        {
+            check_lower_copy(writer, task.value, task.address);
+        }
+        else if (task.kind == CHECK_LOWER_FILL)
+        {
+            check_lower_fill(writer, writer->program->initializers->plans[task.node].parts + task.type, (uint32_t)task.value);
+        }
+        else if (task.kind == CHECK_LOWER_CLEAR)
+        {
+            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = task.type };
+            check_lower_fill(writer, &clear, (uint32_t)task.value);
+        }
+        else if (task.kind == CHECK_LOWER_BIT_READ)
+        {
+            check_lower_bit_read(writer, task.type);
+        }
+        else if (task.kind == CHECK_LOWER_BIT_STORE)
+        {
+            check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+        }
+        else if (task.kind == CHECK_LOWER_VARARGS)
+        {
+            check_lower_varargs_emit(writer, task);
+        }
+        else if (task.kind == CHECK_LOWER_SIZE)
+        {
+            check_lower_vla_size(writer, task.type, BUSTER_TYPED_CLASS_I64);
         }
         else
         {
-            // Every other task's entries take the token current when it was pushed.
-            check_lower_source(writer, task.source);
-            if (task.kind == CHECK_LOWER_INSTRUCTION)
-            {
-                check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
-            }
-            else if (task.kind == CHECK_LOWER_CONVERSION)
-            {
-                check_lower_conversion(writer, task.node, task.type);
-            }
-            else if (task.kind == CHECK_LOWER_LABEL)
-            {
-                check_lower_place(writer, task.node);
-            }
-            else if (task.kind == CHECK_LOWER_CONTROL)
-            {
-                check_lower_control(writer, task.node);
-            }
-            else if (task.kind == CHECK_LOWER_BUILTIN)
-            {
-                check_lower_builtin_emit(writer, task);
-            }
-            else if (task.kind == CHECK_LOWER_BUILTIN_MISC)
-            {
-                check_lower_miscellaneous_emit(writer, task);
-            }
-            else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT || task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
-            {
-                check_lower_floating_emit(writer, task);
-            }
-            else if (task.kind == CHECK_LOWER_CONSTANT)
-            {
-                check_lower_constant(writer, writer->program->stream->values + task.node);
-            }
-            else if (task.kind == CHECK_LOWER_ADDRESS)
-            {
-                check_lower_address(writer, task.node, (int64_t)task.value);
-            }
-            else if (task.kind == CHECK_LOWER_QUERY)
-            {
-                check_lower_constant(writer, &writer->program->stream->queries[task.node].runtime_value);
-            }
-            else if (task.kind == CHECK_LOWER_TERMINATE)
-            {
-                check_lower_terminate(writer);
-            }
-            else if (task.kind == CHECK_LOWER_COPY)
-            {
-                check_lower_copy(writer, task.value, task.address);
-            }
-            else if (task.kind == CHECK_LOWER_FILL)
-            {
-                check_lower_fill(writer, writer->program->initializers->plans[task.node].parts + task.type, (uint32_t)task.value);
-            }
-            else if (task.kind == CHECK_LOWER_CLEAR)
-            {
-                const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = task.type };
-                check_lower_fill(writer, &clear, (uint32_t)task.value);
-            }
-            else if (task.kind == CHECK_LOWER_BIT_READ)
-            {
-                check_lower_bit_read(writer, task.type);
-            }
-            else if (task.kind == CHECK_LOWER_BIT_STORE)
-            {
-                check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
-            }
-            else if (task.kind == CHECK_LOWER_VARARGS)
-            {
-                check_lower_varargs_emit(writer, task);
-            }
-            else if (task.kind == CHECK_LOWER_SIZE)
-            {
-                check_lower_vla_size(writer, task.type, BUSTER_TYPED_CLASS_I64);
-            }
+            check_lower_expand(writer, task);
         }
     }
+}
+
+static void check_lower_drain(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, false);
+}
+
+// The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
+static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, true);
 }
 
 // An initializer's value, converted to its part's type: its expression, or the object an overloaded function's
@@ -3245,7 +3281,6 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     const CheckControl control = program->controls[writer->body->first + index];
     check_lower_place(writer, index);
     writer->token = control.token;
-    check_lower_source(writer, control.token);
     if (control.kind == CHECK_CONTROL_JUMP)
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
@@ -3529,6 +3564,7 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(tokens, uint32_t, sources ? capacity : 1);
+    BUSTER_CHECK_LOWER_COLUMN(task_sources, uint32_t, sources ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(labels, uint32_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(label_heads, uint32_t, track ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(stack_parents, uint32_t, track ? capacity : 1);
@@ -3636,6 +3672,11 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
         writer.count = 0;
         writer.label_entry_count = 0;
         writer.depth = 0;
+        if (sources)
+        {
+            writer.filled = 0;
+            writer.settled = 0;
+        }
         writer.local_count = 0;
         writer.call_count = 0;
         writer.argument_count = 0;
@@ -3806,8 +3847,20 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
         }
         for (uint32_t i = 0; i < body.entry_count && lowered->status == CHECK_PROGRAM_OK; i += 1)
         {
+            if (sources)
+            {
+                // A statement's entries are its token's (check_lower_task_source sets a nested one's).
+                check_lower_change_source(&writer, program->controls[body.first + i].token);
+            }
             check_lower_control(&writer, i);
-            check_lower_drain(&writer);
+            if (sources)
+            {
+                check_lower_drain_sources(&writer);
+            }
+            else
+            {
+                check_lower_drain(&writer);
+            }
         }
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
         const bool falls = writer.track ? writer.reachable || writer.label_heads[body.count] != BUSTER_CHECK_NONE :
@@ -3837,7 +3890,14 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
         else if (aggregate_result && falls)
         {
             check_lower_return_aggregate(&writer, BUSTER_CHECK_NONE);
-            check_lower_drain(&writer);
+            if (sources)
+            {
+                check_lower_drain_sources(&writer);
+            }
+            else
+            {
+                check_lower_drain(&writer);
+            }
         }
         for (uint32_t i = 0; i < writer.count && lowered->status == CHECK_PROGRAM_OK; i += 1)
         {
@@ -3912,6 +3972,8 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
 #undef BUSTER_CHECK_LOWER_COPY
         if (sources && lowered->status == CHECK_PROGRAM_OK)
         {
+            // The last entries' token, the closing brace's.
+            check_lower_settle(&writer);
             uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)writer.count + 1);
             if (tokens != 0)
             {

@@ -19,7 +19,7 @@
 //   lines where nothing moves them, both paths' units and sections the same bytes, and the fixtures' functions with
 //   the lines their statements are on, in their files, and none of a macro's definition or a blank line. Each program's
 //   functions lowered with the entries' source tokens and without them, by both unit ABI batches: the same typed
-//   functions, each entry's token alike by both batches and the function's own.
+//   functions, each entry's token alike by both batches and the function's own, and each call's its callee's.
 // - A unit whose selection keeps no function: emitted with source rows into an empty set, a unit of no functions, by
 //   both paths alike; with --cross-check, linked with -g against a shared library holding its main (cc), into an
 //   executable that runs, whose DWARF llvm-dwarfdump --verify takes.
@@ -451,7 +451,8 @@ static void check_debug_test_compile(CheckDebugTestUnit* unit, Preprocessor* pp,
 
 // The lowering with the entries' source tokens (check_program_lower_sources) against the one without them: each of the
 // compiled program's functions lowered with them and without them, by both unit ABI batches, the same typed function,
-// and each entry's token alike by both batches and one of the function's own, from its declaration to its closing brace.
+// each entry's token alike by both batches and one of the function's own, from its declaration to its closing brace,
+// and each call's its callee's.
 static void check_debug_test_lowering(CheckDebugTestTally* tally, CheckDebugTestUnit* unit, const Parser* parser, const char* what)
 {
     const CheckProgram* program = &unit->selected.program;
@@ -473,6 +474,16 @@ static void check_debug_test_lowering(CheckDebugTestTally* tally, CheckDebugTest
             own = sourced[0].entry_tokens[b][e] >= program->bodies[b].declaration && sourced[0].entry_tokens[b][e] <= closing;
         }
         check_debug_test_expect(tally, own, "each entry's source token is the function's own, alike by both batches, which change nothing else", what);
+        // A call's entry takes its callee's token, the name before its arguments' parenthesis (check_lower_call), not the
+        // last argument's, whose lowering runs before the call's task (CheckLowerWriter.task_sources).
+        bool calls = own;
+        for (uint32_t e = 0; calls && e < count; e += 1)
+        {
+            const uint32_t token = sourced[0].entry_tokens[b][e];
+            calls = sourced[0].functions[b].kinds[e] != BUSTER_TYPED_CALL || (token + 1 < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                                                                               parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN);
+        }
+        check_debug_test_expect(tally, calls, "each call's entry takes its callee's token", what);
     }
     arena_pop_to(&unit->output, mark);
 }
