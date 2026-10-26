@@ -4365,13 +4365,13 @@ and a callee per signature as `X86Instruction` records through `x86_encode`,
 and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Two compiled runs
 (#137), against clang and against GCC at 16 bytes, put this compiler on our
-side: a world of what its C passes (integers to 64 bits, enums, pointers,
-`float`, `double`, `long double` and the records, arrays and aligned typedefs of
-them, aligned to 16 at most, with C23's enums of a fixed underlying type,
-structs whose only named member is a flexible array member and bit-fields'
-attributes after their widths), and
-signatures within Tier 0's depths (13 integer arguments, long doubles among them,
-and 15 floating ones); our
+side: a world of what its C passes (integers to 64 bits, `__int128` and
+`unsigned __int128`, enums, pointers, `float`, `double`, `long double` and the
+records, arrays and aligned typedefs of them, aligned to 16 at most, with C23's
+enums of a fixed underlying type, structs whose only named member is a
+flexible array member and bit-fields' attributes after their widths), and
+signatures within Tier 0's depths (13 integer arguments, long doubles and
+128-bit integers among them, and 15 floating ones); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the
