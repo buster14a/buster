@@ -564,18 +564,43 @@ What the lowering covers past scalars (#145's programs):
   `va_arg` of a `long double` reads its 16 bytes in the overflow area.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
   in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
-  parameter of it is a frame object of 16 bytes aligned to 16, and every object
-  of it, a global's too, is read with `LOAD` from its address and written with
-  `STORE` or `SET` through it, the address evaluated first. `x op= v`, `++` and
-  `--` on one go through its address as on memory, a postfix one keeping the old
-  value in a frame object of its own. Its constants are each function's table
+  parameter of it is a frame object of 16 bytes aligned to 16, which `LOCAL`,
+  `STORE_LOCAL` and `SET_LOCAL` of the class read and write, and a global of it
+  is read with `LOAD` from its address and written with `STORE` or `SET`
+  through it, the address evaluated first; so are other objects' (`*p`,
+  `a[i]`, `s.m`). `x op= v`, `++` and `--` on a global or through a pointer go
+  through its address as on memory. Its constants are each function's table
   (`x87_constants`), +0.0 at place 0, which truth tests and conversions to
   `_Bool` compare with. A function with an entry of the class or a long double
   result says so (`Tier0Function.x87`), which the lowering notes as it writes
-  each entry. What would hold one of its values in a temporary (a
-  statement expression's value or the operands live around it, `?:` without its
-  middle operand, a builtin's operand) and the floating classification builtins
-  on it are refused by name.
+  each entry. A temporary of the class (a statement expression's value or the
+  operands live around it, `?:` without its middle operand, a postfix one's old
+  value) is a frame object of its own (`check_lower_temporary`).
+  The builtins of its operands and the floating classification builtins on it
+  are refused by name.
+- **The 128-bit integers.** `__int128` and `unsigned __int128` are Tier 0's
+  I128 and U128 ([the Tier 0 guide](tier0.md#128-bit-integers-136)), memory
+  classes as long double's is (`check_lower_memory_class`): their locals,
+  parameters and temporaries are frame objects, and their globals are read and
+  written through their addresses. A constant is one `CONST` where its high
+  half is its low half's sign or zero extension, else its high half shifted by
+  64 and ORed with its low half. The convention passes one as two INTEGER
+  eightbytes, which Tier 0 takes as a 16-byte object: an argument's value is set
+  into a frame object of its own and passed by its address (`argument_sizes`
+  16), a call's result comes back into its result object, which `LOCAL` reads,
+  and a function returns one from a frame object of its own by its address
+  (`result_size` 16). `va_arg` of one takes the path of a struct of two
+  eightbytes, its value loaded from their address. Its division and remainder
+  (`__divti3`, `__udivti3`, `__modti3`, `__umodti3`) and its conversions to and
+  from `float`, `double` and `long double` (`__floattisf` to `__fixunsxfti`) are
+  calls of libgcc's, as clang -O0 makes them: their operands set into frame
+  objects of their own and passed by their addresses. Those functions' symbols,
+  and `__errno_location`'s, are the runtime's (`CheckProgramLowered.runtime_symbols`):
+  the unit's own declaration's where its program has one with linkage, else
+  one of the lowering's own after the helpers' (`check_lower_runtime`). A shift
+  by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
+  and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
+  and a builtin of 128-bit operands are refused by name.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -640,7 +665,7 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `_Complex`, `__int128`,
+`error: unsupported: FEATURE`, naming the feature: `_Complex`, `_BitInt`,
 inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
