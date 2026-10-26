@@ -90,8 +90,28 @@ The default 64-bit encoder initializer reuses FS templates for GS: their layouts
 checks and fallback choices are identical, with only the optional segment byte
 changing. It checks that byte before patching both template halves and uses the
 direct builder if the expected location changes. Existing storage and encoding
-loops are unchanged. The target test compares every raw template, including
-unavailable/fallback rows and fixup copies, with the unchanged direct builder.
+loops are unchanged.
+
+Main units share the pure `x86_build_nonlegacy_templates` constructor in the X86
+home. The caller supplies its immutable form descriptions and keeps its own
+template storage and readiness flags. Descriptions and output must be disjoint.
+The constructor accepts only default
+64-bit, address32 and APX modes and reads no legacy-mode state; legacy properties
+and initialization stay local. Standalone inclusions keep static descriptions
+and construction. The output contract requires space for
+`BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES` entries, permits unaligned
+storage and leaves the intervening gap untouched. Unsupported modes fail without
+writing; an invalid catalogue can leave partial output.
+
+The target test compares 200,448 complete entries, including unavailable rows,
+fallbacks, segment variants and fixup copies, with private per-form construction.
+It uses a separate descriptor copy, including an isolated opcode change that
+must affect construction without changing the global catalogue. It poisons an
+unaligned output and checks its prefix, suffix and intervening gap, plus unchanged
+output after unsupported-mode rejection with a null descriptor pointer. These comparisons check
+bulk construction and layout; both builders use the same pure form-construction
+body. A separate frozen before/after comparison checks all five encoder modes'
+complete bytes against the implementation before the refactor.
 
 `x86_target_form_allowed` tests a form including its FS/GS and fixup flags.
 `x86_target_validate` checks both ISA eligibility and `x86_validate`'s operands,

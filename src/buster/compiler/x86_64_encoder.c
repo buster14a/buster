@@ -4895,15 +4895,8 @@ struct X86FormDescription
     { mnemonic, opcode, prefixes, opcode_bytes, BUSTER_X86_ENCODING_##encoding, immediate, 0, w, BUSTER_X86_OPERAND_##reg, \
       BUSTER_X86_OPERAND_##rm, operand_bytes, X86_SYNTAX_##syntax, BUSTER_X86_FAMILY_##family, length, BUSTER_X86_OPERAND_##vvvv, \
       BUSTER_X86_EVEX_##evex, disp8_scale },
-#ifdef BUSTER_X86_FORM_DATA_ELSEWHERE
-extern const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] __attribute__((visibility("hidden")));
-#else
-#ifndef BUSTER_X86_FORM_DATA
-#define BUSTER_X86_FORM_DATA static
-#endif
-BUSTER_X86_FORM_DATA const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUSTER_X86_FORM_DESCRIPTION,
+static const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUSTER_X86_FORM_DESCRIPTION,
                                                                                             BUSTER_X86_VECTOR_FORM_DESCRIPTION) };
-#endif
 #undef BUSTER_X86_VECTOR_FORM_DESCRIPTION
 #undef BUSTER_X86_FORM_DESCRIPTION
 
@@ -4942,14 +4935,19 @@ static uint32_t x86_form_segment(uint32_t form)
 }
 
 // The form table's row of a form, with or without a segment override (and with or without the fixup flag).
-static const X86FormDescription* x86_form_description(uint32_t form)
+BUSTER_INLINE uint32_t x86_form_row(uint32_t form)
 {
     uint32_t row = form & BUSTER_X86_FORM_NUMBER;
     if (BUSTER_UNLIKELY(row >= BUSTER_X86_FORM_FS))
     {
         row -= row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_FS;
     }
-    return &x86_form_descriptions[row];
+    return row;
+}
+
+static const X86FormDescription* x86_form_description(uint32_t form)
+{
+    return &x86_form_descriptions[x86_form_row(form)];
 }
 
 // The fields of a marked instruction that a fixup patches: X86Instruction's displacement (a memory operand's, or a
@@ -5959,11 +5957,11 @@ static __attribute__((unused)) bool build_template(const X86FormDescription* for
 // and LWP's forms with a segment override and APX's map 4 forms), x86_encode's template of the form without them, which
 // takes no memory operand, and with a segment override, no operand at all (see x86_form_lacks_room). Returns false if
 // not even that fits (a broken form table).
-static bool build_mode_template_properties(uint32_t form, X86EncoderMode encoder, const uint8_t* legacy_properties, X86Template* template)
+static bool build_mode_template_properties(uint32_t form, X86EncoderMode encoder, const X86FormDescription* descriptions, const uint8_t* legacy_properties, X86Template* template)
 {
-    const X86FormDescription* description = x86_form_description(form);
+    const uint32_t row = x86_form_row(form);
+    const X86FormDescription* description = &descriptions[row];
     const uint32_t segment = x86_form_segment(form);
-    const uint32_t row = (uint32_t)(description - x86_form_descriptions);
     const bool legacy = x86_mode_is_legacy(encoder);
     const uint8_t properties = legacy ? legacy_properties[row] : 0;
     const uint8_t in_mode = encoder == X86_ENCODER_MODE_16 ? BUSTER_X86_LEGACY_IN_16 : BUSTER_X86_LEGACY_IN_32;
@@ -5988,18 +5986,18 @@ static bool build_mode_template_properties(uint32_t form, X86EncoderMode encoder
 
 static __attribute__((unused)) bool build_mode_template(uint32_t form, X86EncoderMode encoder, X86Template* template)
 {
-    return build_mode_template_properties(form, encoder, x86_form_legacy, template);
+    return build_mode_template_properties(form, encoder, x86_form_descriptions, x86_form_legacy, template);
 }
 
 // Builds every form's template for the mode in `templates`, with its halves again the other way around, and the marked
 // forms' copies of them.
-static bool build_mode_templates_properties(X86EncoderMode encoder, X86TemplateEntry* templates, const uint8_t* legacy_properties)
+static bool build_mode_templates_properties(X86EncoderMode encoder, const X86FormDescription* descriptions, X86TemplateEntry* templates, const uint8_t* legacy_properties)
 {
     bool result = true;
     const uint32_t built_forms = encoder == X86_ENCODER_MODE_64 ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_TEMPLATES;
     for (uint32_t form = 0; form < built_forms; form += 1)
     {
-        result = build_mode_template_properties(form, encoder, legacy_properties, &templates[form].template) && result;
+        result = build_mode_template_properties(form, encoder, descriptions, legacy_properties, &templates[form].template) && result;
         memcpy(templates[form].layout, templates[form].template.layout, sizeof(templates[form].layout));
         memcpy(templates[form].bytes, templates[form].template.bytes, sizeof(templates[form].bytes));
     }
@@ -6010,7 +6008,7 @@ static bool build_mode_templates_properties(X86EncoderMode encoder, X86TemplateE
         memcpy(templates + BUSTER_X86_FORM_GS, templates + BUSTER_X86_FORM_FS, X86_FORM_COUNT * sizeof(*templates));
         for (uint32_t row = 0; row < X86_FORM_COUNT; row += 1)
         {
-            const X86FormDescription* form = &x86_form_descriptions[row];
+            const X86FormDescription* form = &descriptions[row];
             X86TemplateEntry* entry = &templates[BUSTER_X86_FORM_GS + row];
             uint32_t flags;
             memcpy(&flags, &entry->template.bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], sizeof(flags));
@@ -6024,7 +6022,7 @@ static bool build_mode_templates_properties(X86EncoderMode encoder, X86TemplateE
                 }
                 else
                 {
-                    result = build_mode_template_properties(BUSTER_X86_FORM_GS + row, encoder, legacy_properties, &entry->template) && result;
+                    result = build_mode_template_properties(BUSTER_X86_FORM_GS + row, encoder, descriptions, legacy_properties, &entry->template) && result;
                     memcpy(entry->layout, entry->template.layout, sizeof(entry->layout));
                     memcpy(entry->bytes, entry->template.bytes, sizeof(entry->bytes));
                 }
@@ -6039,23 +6037,23 @@ static bool build_mode_templates_properties(X86EncoderMode encoder, X86TemplateE
 #define BUSTER_X86_TEMPLATE_ENTRY static
 #endif
 
-// This entry uses only immutable form descriptions and caller-owned output. It never reads legacy state in its home.
-// The three 64-bit-mode entry points share it across main units; standalone inclusions retain a static copy.
+// This entry reads the caller's immutable X86_FORM_COUNT descriptions, disjoint from its output, and no home state.
+// The three 64-bit-mode entry points share code across main units; standalone inclusions retain a static copy.
 // Output holds BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES entries, with no alignment requirement; the intervening
 // gap is untouched. An unsupported mode returns false without writing. A broken form table may leave partial output.
-BUSTER_X86_TEMPLATE_ENTRY bool x86_build_nonlegacy_templates(X86EncoderMode encoder, X86TemplateEntry* templates)
+BUSTER_X86_TEMPLATE_ENTRY bool x86_build_nonlegacy_templates(X86EncoderMode encoder, const X86FormDescription* restrict descriptions, X86TemplateEntry* restrict templates)
 {
     bool result = false;
     if (encoder == X86_ENCODER_MODE_64 || encoder == X86_ENCODER_MODE_ADDRESS32 || encoder == X86_ENCODER_MODE_APX)
     {
-        result = build_mode_templates_properties(encoder, templates, 0);
+        result = build_mode_templates_properties(encoder, descriptions, templates, 0);
     }
     return result;
 }
 
 static bool x86_encoder_initialize(void)
 {
-    x86_encoder_initialized = x86_build_nonlegacy_templates(X86_ENCODER_MODE_64, x86_templates);
+    x86_encoder_initialized = x86_build_nonlegacy_templates(X86_ENCODER_MODE_64, x86_form_descriptions, x86_templates);
     return x86_encoder_initialized;
 }
 
@@ -6063,13 +6061,13 @@ static bool x86_encoder_initialize(void)
 // would otherwise make the table read-only zeros, megabytes of the executable file.
 __attribute__((used)) static bool x86_encoder_initialize_address32(void)
 {
-    x86_encoder_initialized_address32 = x86_build_nonlegacy_templates(X86_ENCODER_MODE_ADDRESS32, x86_templates_address32);
+    x86_encoder_initialized_address32 = x86_build_nonlegacy_templates(X86_ENCODER_MODE_ADDRESS32, x86_form_descriptions, x86_templates_address32);
     return x86_encoder_initialized_address32;
 }
 
 static bool x86_encoder_initialize_apx(void)
 {
-    x86_encoder_initialized_apx = x86_build_nonlegacy_templates(X86_ENCODER_MODE_APX, x86_templates_apx);
+    x86_encoder_initialized_apx = x86_build_nonlegacy_templates(X86_ENCODER_MODE_APX, x86_form_descriptions, x86_templates_apx);
     return x86_encoder_initialized_apx;
 }
 
@@ -6078,8 +6076,8 @@ static bool x86_encoder_initialize_apx(void)
 static bool x86_encoder_initialize_legacy(void)
 {
     build_legacy_properties();
-    x86_encoder_initialized_legacy = build_mode_templates_properties(X86_ENCODER_MODE_32, x86_templates_32, x86_form_legacy) &&
-                                       build_mode_templates_properties(X86_ENCODER_MODE_16, x86_templates_16, x86_form_legacy);
+    x86_encoder_initialized_legacy = build_mode_templates_properties(X86_ENCODER_MODE_32, x86_form_descriptions, x86_templates_32, x86_form_legacy) &&
+                                       build_mode_templates_properties(X86_ENCODER_MODE_16, x86_form_descriptions, x86_templates_16, x86_form_legacy);
     return x86_encoder_initialized_legacy;
 }
 

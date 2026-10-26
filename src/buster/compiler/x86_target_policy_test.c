@@ -10,7 +10,12 @@ static bool x86_target_test_templates(void)
     const size_t span = BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry);
     const size_t extent = (BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES) * sizeof(X86TemplateEntry);
     uint8_t* storage = malloc(extent + 129);
-    bool passed = storage != 0 && x86_encoder_initialize();
+    X86FormDescription* descriptions = malloc(sizeof(x86_form_descriptions));
+    bool passed = storage != 0 && descriptions != 0 && x86_encoder_initialize();
+    if (passed)
+    {
+        memcpy(descriptions, x86_form_descriptions, sizeof(x86_form_descriptions));
+    }
     uint32_t checks = 0;
     const X86EncoderMode modes[] = { X86_ENCODER_MODE_64, X86_ENCODER_MODE_ADDRESS32, X86_ENCODER_MODE_APX };
     for (uint32_t mode = 0; passed && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -19,7 +24,7 @@ static bool x86_target_test_templates(void)
         // A deliberately unaligned, dirty destination checks the shared constructor's complete writes and bounds.
         memset(storage, 0xa5, extent + 129);
         X86TemplateEntry* copied = (X86TemplateEntry*)(storage + 65);
-        passed &= x86_build_nonlegacy_templates(encoder, copied);
+        passed &= x86_build_nonlegacy_templates(encoder, descriptions, copied);
         for (uint32_t form = 0; passed && form < BUSTER_X86_FORM_TEMPLATES; form += 1)
         {
             X86TemplateEntry expected;
@@ -37,6 +42,16 @@ static bool x86_target_test_templates(void)
                 checks += 2;
             }
         }
+        if (passed && encoder == X86_ENCODER_MODE_64)
+        {
+            // An isolated opcode change proves that the shared home uses the supplied table, not its own copy.
+            descriptions[X86_FORM_NOP].opcode = 0x91;
+            passed &= x86_build_nonlegacy_templates(encoder, descriptions, copied);
+            passed &= copied[X86_FORM_NOP].template.bytes[0] == 0x91 && copied[X86_FORM_NOP].bytes[0] == 0x91;
+            passed &= copied[BUSTER_X86_FORM_FIXUP + X86_FORM_NOP].template.bytes[0] == 0x91 && copied[BUSTER_X86_FORM_FIXUP + X86_FORM_NOP].bytes[0] == 0x91;
+            passed &= x86_form_descriptions[X86_FORM_NOP].opcode == 0x90;
+            descriptions[X86_FORM_NOP].opcode = x86_form_descriptions[X86_FORM_NOP].opcode;
+        }
         for (size_t i = 0; i < 65; i += 1)
         {
             passed &= storage[i] == 0xa5;
@@ -53,12 +68,13 @@ static bool x86_target_test_templates(void)
     X86TemplateEntry rejected;
     memset(&rejected, 0xa5, sizeof(rejected));
     const X86TemplateEntry original = rejected;
-    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_32, &rejected);
-    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_16, &rejected);
-    passed &= !x86_build_nonlegacy_templates((X86EncoderMode)UINT32_MAX, &rejected);
+    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_32, 0, &rejected);
+    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_16, 0, &rejected);
+    passed &= !x86_build_nonlegacy_templates((X86EncoderMode)UINT32_MAX, 0, &rejected);
     passed &= memcmp(&original, &rejected, sizeof(original)) == 0;
     free(storage);
-    printf("target complete native-mode templates against direct builder: %s (%u entries, all byte/layout halves and fixups; dirty unaligned destinations and refusal guards)\n", passed ? "pass" : "FAIL", checks);
+    free(descriptions);
+    printf("target complete native-mode templates against direct builder: %s (%u entries, all byte/layout halves and fixups; caller descriptions, dirty unaligned destinations and refusal guards)\n", passed ? "pass" : "FAIL", checks);
     return passed;
 }
 
