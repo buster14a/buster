@@ -47,6 +47,13 @@ struct TestProcess
     pid_t pid;
 };
 
+// `cpus` divided among `jobs` commands, rounded up, at least 1 for any `cpus` and `jobs` past 0 (#468's review: a
+// ceiling of (cpus + jobs - 1) / jobs wraps to 0 when jobs is near UINT32_MAX).
+static uint32_t test_process_share(uint32_t cpus, uint32_t jobs)
+{
+    return 1 + (cpus - 1) / jobs;
+}
+
 // The processes a test may run at once (at least 1): the CPUs this process may run on, divided among the commands
 // that the parallel runner runs at once (BUSTER_PARALLEL_JOBS, which it sets for them; #468's review), rounded up, so
 // that the commands' processes together come to about one per CPU rather than one per CPU each.
@@ -63,8 +70,7 @@ static uint32_t test_process_cpus(void)
     char* end = 0;
     const unsigned long long value = text != 0 ? strtoull(text, &end, 10) : 0;
     const uint32_t jobs = end != 0 && end != text && *end == 0 && value != 0 && value <= UINT32_MAX ? (uint32_t)value : 1;
-    const uint32_t cpus = count != 0 ? count : 1;
-    return (cpus + jobs - 1) / jobs;
+    return test_process_share(count != 0 ? count : 1, jobs);
 }
 
 // A file in memory for a process's output (memfd_create, closed on exec: a descriptor that dup2 gives a process's
@@ -171,8 +177,8 @@ static bool test_process_finish(TestProcess* process, void* result, size_t size)
 // The calls' own checks (#465's review): a part whose output and result all come back; one that can't write its
 // output (its standard output closed), which must send no result; a parent that can't write a part's output (into
 // /dev/full), whose part must still send its result; and a part that exits without one, whose result is zeros. Each
-// case must have started its part and made both of the parent's streams, so that it fails the way it names. Prints a
-// line and returns the failures.
+// case must have started its part and made both of the parent's streams, so that it fails the way it names. Then
+// test_process_share at its bounds. Prints a line and returns the failures.
 static uint32_t test_process_test(void)
 {
     uint32_t failures = 0;
@@ -229,7 +235,28 @@ static uint32_t test_process_test(void)
         free(output_text);
         free(errors_text);
     }
-    printf("test processes: %u of 4 cases fail (output, a part's output lost, the parent's lost, a failed part)\n", failures);
+    // The share's bounds: one CPU, as many jobs as CPUs and more, and the most jobs --jobs and BUSTER_PARALLEL_JOBS take.
+    const uint32_t shares[][3] = {
+        { 1, 1, 1 },
+        { 16, 1, 16 },
+        { 16, 8, 2 },
+        { 15, 8, 2 },
+        { 16, 16, 1 },
+        { 16, 17, 1 },
+        { 16, UINT32_MAX, 1 },
+        { UINT32_MAX, 1, UINT32_MAX },
+        { UINT32_MAX, UINT32_MAX, 1 },
+    };
+    for (uint32_t i = 0; i < sizeof(shares) / sizeof(shares[0]); i += 1)
+    {
+        const uint32_t share = test_process_share(shares[i][0], shares[i][1]);
+        if (share != shares[i][2])
+        {
+            printf("test processes: %u CPUs among %u jobs gave %u, not %u\n", shares[i][0], shares[i][1], share, shares[i][2]);
+        }
+        failures += share != shares[i][2];
+    }
+    printf("test processes: %u of 13 cases fail (output, a part's output lost, the parent's lost, a failed part, 9 shares)\n", failures);
     return failures;
 }
 
