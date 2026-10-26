@@ -164,10 +164,15 @@ that its name doesn't name, and the checker does the same. A tag that a
 declarator's array bound names or defines outside a parameter list is the
 declarator's scope's: `int a[sizeof(struct V { int x; })]; struct V v;` is
 valid. A prototype in a constant expression's type name (a typeof's, a
-builtin's operand) ends its tags at its `)` as well, in the evaluator's binding
+builtin's operand, a bound's `sizeof`) is a scope a level deeper as well, which
+ends its tags and enumeration constants at its `)`, in the evaluator's binding
 walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s `struct Z` isn't
-a later one's (#437). A definition in a `typeof` is still refused, there as
-anywhere.
+a later one's (#437), and in `int f(int K, int a[sizeof(void (*)(enum E { K }))])`
+the inner `K` is that prototype's alone. A bound's definitions are read beside
+its statement expressions, before or after them; one inside a statement
+expression is refused with its bound, as a statement expression that holds a
+declaration is ("Variable-length arrays" below). A definition in a `typeof` is
+still refused, there as anywhere.
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from

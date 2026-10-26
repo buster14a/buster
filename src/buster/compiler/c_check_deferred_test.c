@@ -118,6 +118,11 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "parameter-list-constant-its-body-doesnt-name", "enum { K = 5 };\nint f(enum E { K = 1 } e) { return e; }\nint g(void) { return K; }\n", true },
     { "prototype-list-constant-ends-with-it", "void g(enum E { K = 7 } e);\nint f(void) { int K = 3; return K; }\n", true },
     { "definition-in-an-array-bound", "int a[sizeof(struct V { int x; })];\nint f(void) { struct V v = { 2 }; return v.x; }\n", true },
+    // A definition in a prototype that a parameter's bound holds ends at that prototype's `)`, and one in a body's
+    // bound after a statement expression is read before the walk reaches the expression (#460's review).
+    { "bound-prototype-constant-isnt-the-bodys", "int K = 3;\nint f(int a[sizeof(void (*)(enum E { K = 7 }))]) { return K; }\nint g(void) { return K; }\n", true },
+    { "body-bound-definition-after-a-statement-expression",
+      "int f(int m) { int a[({ m; }) + sizeof(struct S { int x; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\nint g(void) { return 2; }\n", true },
 };
 
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);

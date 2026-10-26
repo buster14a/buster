@@ -149,7 +149,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 50 fixtures, 44 of the
+- `./build/compiler test-checker-deferred [--keep]`: 52 fixtures, 46 of the
   issue's cases and 6 of the lanes' rule, each written to a file and checked as
   `test-checker-corpus` checks one: on the scalar path, the vector path, and the
   vector path with every body read apart, on 1, 2, 3 and 8 lanes through the

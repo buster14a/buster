@@ -2115,6 +2115,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
 {
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
+    const uint32_t prototype_depth = reader->prototype_depth;
     uint32_t open = check_input_tag_body(parser, token, end);
     bool valid = open < end && parser->tokens.kinds[open] == PARSE_KIND_L_BRACE;
     const uint32_t close = valid ? parser->tree.parents[open] : open;
@@ -2404,7 +2405,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             }
         }
     }
-    // A definition that failed: its frames' runs end, the innermost first, each restoring what it declared.
+    // A definition that failed: its frames' runs end, the innermost first, each restoring what it declared, and the
+    // prototype lists an enumerator's value left open (check_constant_prototype_open) close with it.
     for (uint32_t level = depth; !valid && level-- > 0;)
     {
         if (frames[level].member_run != 0)
@@ -2416,6 +2418,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             check_input_declarator_end(reader, frames[level].member_run, &cursor, &name, &parameters);
         }
     }
+    reader->prototype_depth = valid ? reader->prototype_depth : prototype_depth;
     if (!valid && reader->output->report_count == 0)
     {
         check_input_report(reader, failed_token, CHECK_INPUT_DECLARATION);
@@ -2934,7 +2937,13 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         while (reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
         {
             reader->scope_count -= 1;
-            if (!c_bindings_restore(&reader->bindings, reader->scope_marks[reader->scope_count], i))
+            // A scope that declared nothing has nothing to end, and its restore is left out where the stream, which
+            // takes its events in source order, has one past the scope's end already: a definition in a bound after
+            // a statement expression, which the declarator read before the walk reached the expression's block
+            // (`[({ n; }) + sizeof(struct S { int x; })]`, check_input_vla_bound).
+            const bool empty = c_bindings_mark(&reader->bindings) == reader->scope_marks[reader->scope_count];
+            const bool ahead = reader->bindings.count != reader->bindings.base && reader->bindings.point[reader->bindings.count - 1] > i;
+            if (!(empty && ahead) && !c_bindings_restore(&reader->bindings, reader->scope_marks[reader->scope_count], i))
             {
                 reader->output->resource = true;
             }

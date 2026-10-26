@@ -2935,6 +2935,81 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // A definition in a prototype that a bound's type name holds is that prototype's, a scope a level deeper which
+        // ends at its `)`, and a bound's definitions are read beside its statement expressions, before or after them
+        // (#460's review).
+        {
+            "bound's nested prototype's constant ends before the body",
+            "int f(int a[sizeof(void (*)(enum E { K = 7 }))]) {\n return K; }\n",
+            true,
+            false
+        },
+        {
+            "bound's nested prototype's definition isn't the body's",
+            "int g(int a[sizeof(void (*)(struct S { int x; }))]) {\n struct S s = { 1 }; return s.x; }\n",
+            true,
+            false
+        },
+        {
+            "bound's nested prototype's constant doesn't conflict with a parameter",
+            "int f(int K, int a[sizeof(void (*)(enum E { K = 7 }))]) { return K; }\n",
+            false,
+            false
+        },
+        {
+            "bound's nested prototype's definition doesn't complete the list's tag",
+            "int g(struct S *p, int a[sizeof(void (*)(struct S { int x; }))]) {\n return p->x; }\n",
+            true,
+            false
+        },
+        {
+            "bound's nested prototype's definition beside the list's",
+            "int g(struct S { int y; } *p, int a[sizeof(void (*)(struct S { int x; }))]) { return p->y; }\n",
+            false,
+            false
+        },
+        {
+            "enumerator value's nested prototype's constant doesn't conflict",
+            "enum X { K = 2, A = sizeof(void (*)(enum E { K = 1 })) };\n_Static_assert(K == 2, \"outer\");\n",
+            false,
+            false
+        },
+        {
+            "file-scope bound's nested prototype's definition ends with it",
+            "int a[sizeof(void (*)(struct S { int x; }))];\nstruct S s;\n",
+            true,
+            false
+        },
+        {
+            "member bound's nested prototype's definition ends with it",
+            "struct T { int a[sizeof(void (*)(struct S { int x; }))]; };\nstruct S s;\n",
+            true,
+            false
+        },
+        {
+            "nested prototype's constant in its own later bound",
+            "int f(int a[sizeof(void (*)(enum E { K = 7 }, int b[K]))]) { return 0; }\n",
+            false,
+            false
+        },
+        {
+            "bound's definition before a statement expression",
+            "int f(void) { int a[sizeof(struct S { int x; }) + ({ 1; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\n",
+            false,
+            false
+        },
+        {
+            "bound's definition after a statement expression",
+            "int f(void) { int a[({ 1; }) + sizeof(struct S { int x; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\n",
+            false,
+            false
+        },
+        {
+            "bound's definition between statement expressions",
+            "int f(int m) { int a[({ m; }) + sizeof(struct S { int x; }) + ({ m + 1; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\n",
+            false,
+            false
+        },
     };
     enum
     {

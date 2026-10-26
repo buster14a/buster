@@ -57,24 +57,35 @@ static bool check_input_vla_force_constant(const CheckInputReader* reader, uint3
     return force;
 }
 
-// Whether a bound defines a struct, union or enum that the reader hasn't read yet outside a statement expression, whose
-// declarations are the walk's (check_input_region_prepare).
+// Whether a bound defines a struct, union or enum that the reader hasn't read yet, each outside the bound's statement
+// expressions (`[sizeof(struct S { int x; }) + ({ n; })]`). One inside a statement expression is a declaration of its
+// block, which is the walk's (check_input_region_prepare) and which a bound doesn't take yet (docs/c-checker.md,
+// "Variable-length arrays"): its bound is read as before, without a job.
 static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const Parser* parser = reader->parser;
-    bool defines = false;
-    bool region = false;
+    bool outside = false;
+    bool inside = false;
+    uint32_t region_end = first;
     for (uint32_t token = first; token < end; token += 1)
     {
         const uint8_t kind = parser->tokens.kinds[token];
-        region |= parser->tree.roles[token] == PARSE_ROLE_OPEN_BLOCK;
+        // A statement expression, `(` and `{`, to its `)`, as check_constant_source_regions finds one.
+        if (parser->tree.roles[token] == PARSE_ROLE_OPEN_GROUP && token + 1 < end && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_BLOCK &&
+            parser->tree.parents[token] < end)
+        {
+            const uint32_t after = parser->tree.parents[token] + 1;
+            region_end = after > region_end ? after : region_end;
+        }
         if ((kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) && reader->tag_types[token] == 0)
         {
             const uint32_t body = check_input_tag_body(parser, token, end);
-            defines |= body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE;
+            const bool definition = body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE;
+            inside |= definition && token < region_end;
+            outside |= definition && token >= region_end;
         }
     }
-    return defines && !region;
+    return outside && !inside;
 }
 
 // The bound from `first` to `end` (its `]`) of the array declarator that `open` opens. One that defines a struct, union
