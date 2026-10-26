@@ -872,13 +872,46 @@ struct PPTemplate
     uint32_t epoch;
     uint16_t parameter_mask;
     uint16_t spaces; // Bit j: item j's BUSTER_PP_ITEM_SPACE.
-    uint16_t names; // The body's identifiers (the positions pp_emit_simple_names looks at).
+    uint16_t names; // The body's identifiers (the positions pp_emit_simple_names looks at), but the operands of ##.
     uint16_t painted; // Of those, the names of macros that don't expand.
     uint16_t expanding; // And those whose bodies go straight in (pp_direct_object).
+    // A macro with ## and # (pp_compile_macro): its ## items, the first operand of each chain of pastes (an operand,
+    // then ## and an operand as many times as it goes on), and its # items, each chain and # making one token or none in
+    // an invocation (pp_template_operators). A # item's parameter is in `parameters`.
+    uint16_t pastes;
+    uint16_t chains;
+    uint16_t strings;
     uint8_t count;
     // Whether every name of a macro is painted or goes straight in (pp_emit_simple_names' result, without its conditions
     // on the run).
     bool direct;
+};
+
+// The most bytes the spellings of a template's chains of pastes take in one invocation (PPOperators.joined).
+#define BUSTER_PP_TEMPLATE_JOINED_BYTES 256
+
+// What one invocation of a template with ## and # makes (pp_template_operators, then pp_template_make): a token in the
+// lane of each chain's first item that has one and of each # (`made`), with its kind, its flags but the leading space
+// (which pp_template_write gives it), its value and its location, those of a paste once pp_template_make has made
+// it. A chain whose operands give it two tokens or more pastes them (`pasted`): their spellings are joined in `joined`
+// from `begins` at its lane, each operand's ending at `ends` at its item, so that each paste's spelling is a prefix,
+// as pp_substitute's pastes go from left to right.
+typedef struct PPOperators PPOperators;
+struct PPOperators
+{
+    uint32_t values[BUSTER_PP_TEMPLATE_TOKENS];
+    uint32_t locations[BUSTER_PP_TEMPLATE_TOKENS];
+    uint8_t kinds[BUSTER_PP_TEMPLATE_TOKENS];
+    uint8_t flags[BUSTER_PP_TEMPLATE_TOKENS];
+    uint16_t begins[BUSTER_PP_TEMPLATE_TOKENS];
+    uint16_t ends[BUSTER_PP_TEMPLATE_TOKENS];
+    uint16_t made;
+    uint16_t pasted;
+    uint16_t operands; // The chains' operands that give a token.
+    uint16_t painted; // The made names of macros that don't expand, painted when the expansion goes straight in.
+    bool rescan; // Whether a made name is of a macro that expands: then the main loop reads the expansion again.
+    uint32_t size; // The expansion's tokens, without what names that go straight in add.
+    uint8_t joined[BUSTER_PP_TEMPLATE_JOINED_BYTES];
 };
 
 // The kinds of context.
@@ -5113,16 +5146,42 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             named += 1;
         }
     }
+    // A macro with ## and # but no __VA_OPT__ (in_order) has a template too when each ## has a body token or a parameter
+    // on either side, but not the variadic parameter on its right (GNU's `, ## __VA_ARGS__`, which pp_substitute reads
+    // its own way). Its chains of pastes and its #s make their tokens in each invocation (pp_template_operators).
+    uint32_t pastes = 0;
+    uint32_t chains = 0;
+    uint32_t strings = 0;
+    bool operators = in_order && !simple && count <= BUSTER_PP_TEMPLATE_TOKENS;
+    for (uint32_t i = 0; operators && i < count; i += 1)
+    {
+        const uint8_t kind = items[i].kind;
+        operators = kind == PP_ITEM_TOKEN || kind == PP_ITEM_PARAMETER || kind == PP_ITEM_STRINGIZE || kind == PP_ITEM_PASTE;
+        if (kind == PP_ITEM_PASTE)
+        {
+            const bool inside = i > 0 && i + 1 < count;
+            const uint8_t left = inside ? items[i - 1].kind : PP_ITEM_PASTE;
+            const uint8_t right = inside ? items[i + 1].kind : PP_ITEM_PASTE;
+            operators = (left == PP_ITEM_TOKEN || left == PP_ITEM_PARAMETER) && (right == PP_ITEM_TOKEN || right == PP_ITEM_PARAMETER) &&
+                        !(variadic && right == PP_ITEM_PARAMETER && items[i + 1].parameter == macro->parameter_count - 1u);
+            // A chain starts at the operand before a ## that has no ## before it.
+            chains |= inside && (i < 2 || !((pastes >> (i - 2)) & 1)) ? 1u << (i - 1) : 0;
+            pastes |= 1u << i;
+        }
+        strings |= kind == PP_ITEM_STRINGIZE ? 1u << i : 0;
+    }
     // A simple macro's template: its items are its body's tokens, one each. Only the vectorized kernels write expansions
     // from templates, in a run that records no history (a deferred unit's), which alone has their array
     // (pp_initialize): the scalar twins and the history's runs take pp_emit_simple_write and pp_substitute_simple, their
-    // twin.
-    const bool templated = simple && pp->templates != 0 && count <= BUSTER_PP_TEMPLATE_TOKENS && macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS &&
-                           pp->template_count < BUSTER_PP_MAX_TEMPLATES;
+    // twin, or for a macro with ## and # the invocation stack and pp_substitute.
+    const bool templated = (simple || operators) && pp->templates != 0 && count <= BUSTER_PP_TEMPLATE_TOKENS &&
+                           macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < BUSTER_PP_MAX_TEMPLATES;
     if (templated)
     {
         PPTemplate* template = &pp->templates[pp->template_count];
-        *template = (PPTemplate){ .count = (uint8_t)count };
+        *template = (PPTemplate){ .count = (uint8_t)count, .pastes = (uint16_t)pastes, .chains = (uint16_t)chains, .strings = (uint16_t)strings };
+        // The operands of ##: a chain's token is its pastes' (or its one operand's that has a token).
+        const uint32_t chained = pastes | (pastes << 1) | (pastes >> 1);
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t t = items[i].token;
@@ -5131,10 +5190,10 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             template->flags[i] = (uint8_t)(BUSTER_PP_FROM_MACRO | (pp_file_space(data, t) ? BUSTER_PP_SPACE : 0));
             template->values[i] = kind == C_TOKEN_RAW_IDENTIFIER ? data->values[t] : macro->base + data->values[t];
             template->locations[i] = macro->base + data->starts[t];
-            template->parameters[i] = items[i].kind == PP_ITEM_PARAMETER ? (uint8_t)items[i].parameter : 0;
+            template->parameters[i] = items[i].kind == PP_ITEM_PARAMETER || items[i].kind == PP_ITEM_STRINGIZE ? (uint8_t)items[i].parameter : 0;
             template->parameter_mask |= (uint16_t)(items[i].kind == PP_ITEM_PARAMETER ? 1u << i : 0);
             template->spaces |= (uint16_t)((items[i].flags & BUSTER_PP_ITEM_SPACE) ? 1u << i : 0);
-            template->names |= (uint16_t)(items[i].kind == PP_ITEM_TOKEN && kind == C_TOKEN_RAW_IDENTIFIER ? 1u << i : 0);
+            template->names |= (uint16_t)(items[i].kind == PP_ITEM_TOKEN && kind == C_TOKEN_RAW_IDENTIFIER && !((chained >> i) & 1) ? 1u << i : 0);
         }
         pp->template_count += 1;
     }
@@ -8405,6 +8464,232 @@ BUSTER_INLINE uint32_t pp_template_size(const Preprocessor* pp, const PPTemplate
         size += argument->raw_end - argument->raw_begin;
     }
     return size < UINT32_MAX / 2 ? (uint32_t)size : UINT32_MAX / 2;
+}
+
+// Item j of a template with ## and # in an invocation, as pp_substitute reads an operand of ##: a body token
+// (pp_body_token's), or a parameter's argument as written, with its first token (pp_stack_token's of pp->arguments, or
+// pp_file_token's of a file context's text, `file` read in the range at `file_base`). The first `given` records are
+// the invocation's; a variadic argument past them was omitted, and is empty. Returns how many tokens the item has.
+BUSTER_INLINE uint32_t pp_template_operand(const Preprocessor* pp, const PPTemplate* template, uint32_t j, const PPArgument* records, uint32_t given,
+                                           const PPFileData* file, uint32_t file_base, PPToken* token)
+{
+    uint32_t result = 1;
+    if (((template->parameter_mask >> j) & 1) != 0)
+    {
+        const uint32_t parameter = template->parameters[j];
+        const PPArgument argument = parameter < given ? records[parameter] : (PPArgument){ 0 };
+        result = argument.raw_end - argument.raw_begin;
+        if (result != 0)
+        {
+            *token = file != 0 ? pp_file_token(file, file_base, argument.raw_begin) : pp_stack_token(&pp->arguments, argument.raw_begin);
+        }
+    }
+    else
+    {
+        *token = (PPToken){
+            .kind = template->kinds[j],
+            .flags = (uint8_t)((((template->spaces >> j) & 1) != 0 ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO),
+            .value = template->values[j],
+            .location = template->locations[j],
+        };
+    }
+    return result;
+}
+
+// A name an invocation of a template with ## and # makes, in lane j, if it is a macro's: one that expands (but the
+// invoked macro, which the rescan of its expansion has disabled) makes the main loop read the expansion again, and any
+// other is painted where the expansion goes straight in, as that rescan would paint it.
+BUSTER_INLINE void pp_template_name(const Preprocessor* pp, PPMacroId id, IdentId value, uint32_t j, PPOperators* operators)
+{
+    if (value != 0 && pp_is_macro_vector(pp, value))
+    {
+        const PPMacroId named = pp->macro_of[value];
+        const bool expands = named != id && pp->macros[named].disabled == 0;
+        operators->rescan |= expands;
+        operators->painted |= (uint16_t)(expands ? 0 : 1u << j);
+    }
+}
+
+// Whether `length` bytes are ASCII letters, digits and '_', which an identifier or a pp-number may join.
+BUSTER_INLINE bool pp_template_spelled(const uint8_t* bytes, uint32_t length)
+{
+    const __mmask64 valid = _bzhi_u64(~0ull, length < 64 ? length : 64);
+    const __m512i c = _mm512_maskz_loadu_epi8(valid, bytes);
+    const __mmask64 letters = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(_mm512_or_si512(c, _mm512_set1_epi8(0x20)), _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
+    const __mmask64 digits = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(c, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
+    const __mmask64 underscores = _mm512_cmpeq_epi8_mask(c, _mm512_set1_epi8('_'));
+    return length <= 64 && ((letters | digits | underscores) & valid) == valid;
+}
+
+// Whether an invocation of a template with ## and # takes the templates' path (pp_template_make, then
+// pp_template_write), and what it makes, changing nothing: each # a string, from its argument in pp->arguments (`file`
+// null); and each chain of pastes the token of its one operand with a token, or, where two operands or more have one,
+// the token pp_paste makes of them one after another, when they are identifiers and numbers spelled in at most 64
+// ASCII letters, digits and '_', an identifier or a number first: each paste then makes an identifier (pp_paste's own
+// test) or a number (one pp-number). An argument next to ## has at most one token. A chain's token takes the leading
+// space pending at its first operand (pp_template_write gives it), and its first token's other flags: as
+// pp_append_tokens places an argument's, as pp_substitute moves a token past an empty operand before it, or, from a
+// paste, the line start of what it was pasted onto. Notes the expansion's size, and the names made of macros that
+// expand and that don't (pp_template_name).
+static bool pp_template_operators(const Preprocessor* pp, PPMacroId id, const PPTemplate* template, const PPArgument* records, uint32_t given,
+                                  const PPFileData* file, uint32_t file_base, PPOperators* operators)
+{
+    bool result = file == 0 || template->strings == 0;
+    uint32_t size = 0;
+    uint32_t joined = 0;
+    operators->made = 0;
+    operators->pasted = 0;
+    operators->operands = 0;
+    operators->painted = 0;
+    operators->rescan = false;
+    for (uint32_t j = 0; result && j < template->count;)
+    {
+        const uint32_t bit = 1u << j;
+        if ((template->chains & bit) != 0)
+        {
+            // The chain's operands: its first item, and the item after each ## that follows.
+            uint32_t last = j;
+            while (((template->pastes >> (last + 1)) & 1) != 0)
+            {
+                last += 2;
+            }
+            PPToken tokens[BUSTER_PP_TEMPLATE_TOKENS / 2];
+            uint32_t items[BUSTER_PP_TEMPLATE_TOKENS / 2];
+            uint32_t count = 0;
+            for (uint32_t k = j; result && k <= last; k += 2)
+            {
+                const uint32_t length = pp_template_operand(pp, template, k, records, given, file, file_base, &tokens[count]);
+                result = length <= 1;
+                items[count] = k;
+                operators->operands |= (uint16_t)(length == 1 ? 1u << k : 0);
+                count += length == 1;
+            }
+            const PPToken first = tokens[0];
+            const bool name = count != 0 && first.kind == C_TOKEN_RAW_IDENTIFIER;
+            if (result && count == 1)
+            {
+                // Placed as the chain's first item (an argument's token as pp_append_tokens places it, or a body token),
+                // or moved past the empty operands before it.
+                const bool argument = ((template->parameter_mask >> items[0]) & 1) != 0;
+                const uint8_t placed = argument ? (uint8_t)(first.flags & ~(BUSTER_PP_START_OF_LINE | BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE)) : 0;
+                const uint8_t moved = (uint8_t)(first.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE));
+                operators->kinds[j] = first.kind;
+                operators->flags[j] = (uint8_t)((items[0] == j ? placed : moved) | BUSTER_PP_FROM_MACRO);
+                operators->values[j] = first.value;
+                operators->locations[j] = first.location;
+                if (name && !(first.flags & BUSTER_PP_NO_EXPAND))
+                {
+                    pp_template_name(pp, id, first.value, j, operators);
+                }
+            }
+            else if (result && count >= 2)
+            {
+                // The operands' spellings, joined.
+                const uint32_t begin = joined;
+                for (uint32_t k = 0; result && k < count; k += 1)
+                {
+                    const PPToken token = tokens[k];
+                    const bool number = token.kind == C_TOKEN_NUMERIC_CONSTANT || token.kind == BUSTER_PP_KIND_INTEGER;
+                    result = (token.kind == C_TOKEN_RAW_IDENTIFIER || number) && (token.kind != C_TOKEN_NUMERIC_CONSTANT || token.value - token.location <= 64);
+                    uint8_t buffer[64];
+                    const uint8_t* spelling = buffer;
+                    const uint32_t length = result ? pp_spelling((Preprocessor*)pp, token.kind, token.value, token.location, buffer, &spelling) : 0;
+                    result = result && joined + length <= BUSTER_PP_TEMPLATE_JOINED_BYTES && pp_template_spelled(spelling, length);
+                    if (result)
+                    {
+                        memcpy(operators->joined + joined, spelling, length);
+                        joined += length;
+                        operators->ends[items[k]] = (uint16_t)joined;
+                    }
+                }
+                // pp_paste's token: its flags are the first token's leading space and line start as it was placed or moved.
+                const bool moved = items[0] != j;
+                operators->kinds[j] = name ? C_TOKEN_RAW_IDENTIFIER : C_TOKEN_NUMERIC_CONSTANT;
+                operators->flags[j] = (uint8_t)((moved ? first.flags & BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+                operators->locations[j] = first.location;
+                operators->begins[j] = (uint16_t)begin;
+                operators->pasted |= (uint16_t)bit;
+                if (result && name)
+                {
+                    pp_template_name(pp, id, intern_find(pp->table, operators->joined + begin, joined - begin), j, operators);
+                }
+            }
+            operators->made |= (uint16_t)(count != 0 ? bit : 0);
+            size += count != 0;
+            j = last + 1;
+        }
+        else if ((template->strings & bit) != 0)
+        {
+            operators->kinds[j] = C_TOKEN_STRING_LITERAL;
+            operators->flags[j] = BUSTER_PP_FROM_MACRO;
+            operators->made |= (uint16_t)bit;
+            size += 1;
+            j += 1;
+        }
+        else if ((template->parameter_mask & bit) != 0)
+        {
+            const uint32_t parameter = template->parameters[j];
+            size += parameter < given ? records[parameter].raw_end - records[parameter].raw_begin : 0;
+            j += 1;
+        }
+        else
+        {
+            size += 1;
+            j += 1;
+        }
+    }
+    operators->size = size;
+    return result;
+}
+
+// Makes what pp_template_operators found an invocation of a template with ## and # makes, in the order of its items,
+// as pp_substitute makes them: each # its string (pp_stringize, of its argument in pp->arguments), and each paste of a
+// chain, after its first operand with a token, its spelling (the chain's joined spellings to the end of its right
+// operand's) in the scratch text and, for a name, in the table, with the error a poisoned name gets and the
+// statistics, as pp_paste makes it.
+static void pp_template_make(Preprocessor* pp, const PPTemplate* template, const PPArgument* records, uint32_t given, PPOperators* operators)
+{
+    for (uint32_t bits = operators->pasted | (template->strings & operators->made); bits != 0; bits &= bits - 1)
+    {
+        const uint32_t j = (uint32_t)__builtin_ctz(bits);
+        if (((template->strings >> j) & 1) != 0)
+        {
+            const uint32_t parameter = template->parameters[j];
+            const uint32_t empty = pp->arguments.count;
+            const uint32_t begin = parameter < given ? records[parameter].raw_begin : empty;
+            const uint32_t end = parameter < given ? records[parameter].raw_end : empty;
+            const PPToken string = pp_stringize(pp, &pp->arguments, begin, end, 0, template->locations[j]);
+            operators->values[j] = string.value;
+            operators->locations[j] = string.location;
+        }
+        else
+        {
+            const bool name = operators->kinds[j] == C_TOKEN_RAW_IDENTIFIER;
+            const uint8_t* bytes = operators->joined + operators->begins[j];
+            uint32_t left = operators->locations[j];
+            uint32_t value = 0;
+            // The chain's operands with a token after its first one: a paste each.
+            uint32_t operands = operators->operands & ~_bzhi_u32(~0u, j);
+            operands &= operands - 1;
+            for (uint32_t k = j + 1; k < template->count && ((template->pastes >> k) & 1) != 0; k += 2)
+            {
+                if (((operands >> (k + 1)) & 1) != 0)
+                {
+                    const uint32_t length = operators->ends[k + 1] - operators->begins[j];
+                    pp->statistics.pastes += pp->options.timing;
+                    const uint32_t location = pp_scratch(pp, bytes, length);
+                    value = name ? intern_find_or_add(pp->table, bytes, length) : location + length;
+                    if (name)
+                    {
+                        pp_check_poison(pp, value, left);
+                    }
+                    left = location;
+                }
+            }
+            operators->values[j] = value;
+            operators->locations[j] = left;
+        }
+    }
 }
 
 // A simple invocation's expansion of at most BUSTER_PP_TEMPLATE_TOKENS tokens from its macro's template, built in
