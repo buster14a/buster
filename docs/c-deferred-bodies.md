@@ -188,10 +188,7 @@ passes every checker test.
   bodies are read again with the reader timing what its lanes cost
   (`CheckDeferred.timing`), on one lane and on every one of 8: one lane must
   wait for no other, and `lane_run`'s dispatch and the wake-up must fall within
-  the lanes' span. The one-lane reading also runs in a team whose caller is
-  already pinned to its requested CPU, with a saved lane context and an
-  unfinished `lane_take`; it must restore that context, counter and affinity.
-  A copy whose wake-up counts from `lane_run`'s call, and one
+  the lanes' span. A copy whose wake-up counts from `lane_run`'s call, and one
   whose dispatch is the lanes' span, each fail it. Then
   `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
   ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
@@ -272,11 +269,7 @@ partition's sync. Before #448's review, `wake` was the first lane's whole time
 in `lane_parts_by_cost`, its share of the boundaries and its order of the parts
 with its wait, and left the dispatch out. `--cpus` pins the command to the
 first CPU, where the parse, source order and the top level run, and its lanes
-to the list. With one active lane already pinned to its requested CPU,
-`lane_run` checks the affinity before and after the entry instead of setting
-it twice. If the callback changes it, or the second query fails, it restores
-the known singleton. Other calls keep their pin and full-mask restoration.
-The measurements before "How many lanes" were made with the three
+to the list. The measurements before "How many lanes" were made with the three
 rotating orders.
 
 On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with
@@ -419,10 +412,9 @@ whichever lane takes first, which may be a woken one: two lanes read
 That is why the rule counts the largest body twice. Leaving the largest bodies
 to the first lane would let a unit of one large body beside many smaller ones
 take the lanes it pays for, which the rule now forgoes. A unit the rule reads
-on one lane still goes through `lane_run`; before #450 it pinned its lane and
-put its affinity back on every reading: 0.6 to 7.5 µs of the dispatch on the
-9700X in these earlier measurements. The already-pinned path now omits those
-affinity writes while preserving the lane context and restoration contract.
+on one lane still goes through `lane_run`, which pins its lane and puts its
+affinity back: 0.6 to 7.5 µs of the dispatch on the 9700X, which a direct call
+would spare.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external

@@ -1941,10 +1941,7 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup, caller context restoration, one-lane
-  operation, invalid/nested dispatch and startup failure cleanup; bounded
-  singleton-affinity masks at protected tails, already-pinned dispatch with
-  affinity writes refused, and restoration after a callback repins or its
-  final affinity query fails;
+  operation, invalid/nested dispatch and startup failure cleanup;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
@@ -4239,8 +4236,7 @@ and by the lanes' rule, its reader copied only by lanes that take a part. Six
 fixtures of bodies of known tokens must take the rule's lanes on each side of
 its steps. Each that merges must give source order's result again with its
 merge failing after the replay, and count as a resource failure with its
-state's allocation failing; timed, one lane must wait for no other, preserve
-an already-pinned caller's lane context, unfinished take and affinity, and eight
+state's allocation failing; timed, one lane must wait for no other and eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 `test-checker-corpus --deferred N

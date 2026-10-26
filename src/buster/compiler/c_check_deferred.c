@@ -1280,7 +1280,8 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
     const uint32_t active = paid < most ? (uint32_t)paid : most;
     const uint64_t lanes_begin = deferred->timing ? check_deferred_now() : 0;
-    const bool ran = !valid || deferred->body_count == 0 || lane_run(active, check_deferred_lane, &run, deferred->cpus);
+    const bool ran = !valid || deferred->body_count == 0 ||
+                     (active == 1 ? lane_run_cold(1, check_deferred_lane, &run, 0) : lane_run(active, check_deferred_lane, &run, deferred->cpus));
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;

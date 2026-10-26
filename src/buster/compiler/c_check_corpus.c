@@ -628,8 +628,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay; with
 // check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; with
 // check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); and with
-// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing), and with
-// check_corpus_deferred_cpus, dispatches on a team's supplied CPUs.
+// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing).
 static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_every_lane = true;
@@ -637,7 +636,6 @@ static bool check_corpus_deferred_fail_merge;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_timing;
-static const uint32_t* check_corpus_deferred_cpus;
 
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
@@ -706,7 +704,6 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
                     path->deferred->hold_lanes = check_corpus_deferred_hold_lanes;
                     path->deferred->timing = check_corpus_deferred_timing;
-                    path->deferred->cpus = check_corpus_deferred_cpus;
                 }
                 path->adapted = path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
                                                                                 &path->scratch, path->deferred_lanes, path->deferred_bindings);
@@ -2028,7 +2025,7 @@ struct CheckCorpusOutcome
     uint64_t binding_fallback_uses;
     // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, their tokens and the
     // largest one's, the lanes they ran on and those that copied its reader, and whether it gave the vector path's result
-    // exactly; and with check_corpus_deferred_timing, the lanes' span, the call's dispatch and the other lanes' wake-up
+    // exactly; and with check_corpus_deferred_timing, the lanes' span, lane_run's dispatch and the other lanes' wake-up
     // (CheckDeferred's), in nanoseconds.
     bool deferred;
     bool deferred_equal;

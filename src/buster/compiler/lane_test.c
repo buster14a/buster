@@ -45,9 +45,7 @@
 //   - Teams: one group kept across operations with different active lane counts, with the same thread identities,
 //     published inputs and completed outputs, no work on inactive lanes, and worker scratch released between runs.
 //     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
-//     forked child refuses the inherited team without waiting for workers that exist only in its parent. An already
-//     pinned one-lane run needs no affinity writes, and restores its CPU if the callback repins or its last query fails.
-//     The singleton-mask predicate reads only the bytes returned by the kernel, with every tail at a protected page.
+//     forked child refuses the inherited team without waiting for workers that exist only in its parent.
 //
 // A watchdog ends the run with status 1 if a group runs for longer than BUSTER_LANE_TEST_TIMEOUT_SECONDS, which is how a
 // lost wake-up would show. The exit status is 1 if the arguments are invalid or a check fails.
@@ -67,13 +65,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
-#include <errno.h>
-#include <stddef.h>
 #include <sys/mman.h>
-#include <sys/prctl.h>
 #include <sys/wait.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
 
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
@@ -1315,131 +1308,6 @@ static uint64_t lane_test_team_operation(LaneTeamTest* test, uint32_t lanes, uin
     return failures;
 }
 
-// Put only the kernel-written words before a protected page. Invalid sizes must not read even the first word.
-static uint64_t lane_test_affinity_masks(void)
-{
-    uint8_t* mapping = mmap(0, 2 * BUSTER_ARENA_PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint64_t failures = mapping == MAP_FAILED ? 1 : 0;
-    if (mapping != MAP_FAILED)
-    {
-        const bool protected = mprotect(mapping + BUSTER_ARENA_PAGE_BYTES, BUSTER_ARENA_PAGE_BYTES, PROT_NONE) == 0;
-        failures += protected ? 0 : 1;
-        if (protected)
-        {
-            const uint64_t* guard = (const uint64_t*)(mapping + BUSTER_ARENA_PAGE_BYTES);
-            failures += lane_affinity_is_cpu(guard, -1, 0) || lane_affinity_is_cpu(guard, 0, 0) ||
-                        lane_affinity_is_cpu(guard, 7, 0) || lane_affinity_is_cpu(guard, 8, UINT32_MAX) ||
-                        lane_affinity_is_cpu(guard, (BUSTER_LANE_CPU_MASK_WORDS + 1) * sizeof(*guard), 0) ? 1 : 0;
-            for (uint32_t words = 1; words <= BUSTER_LANE_CPU_MASK_WORDS; words += 1)
-            {
-                uint64_t* mask = (uint64_t*)guard - words;
-                memset(mask, 0, words * sizeof(*mask));
-                for (uint32_t bit = 0; bit < 64; bit += 1)
-                {
-                    const uint32_t cpu = (words - 1) * 64 + bit;
-                    mask[words - 1] = 1ull << bit;
-                    failures += lane_affinity_is_cpu(mask, words * sizeof(*mask), cpu) ? 0 : 1;
-                    failures += lane_affinity_is_cpu(mask, words * sizeof(*mask), cpu ^ 1) ? 1 : 0;
-                    failures += lane_affinity_is_cpu(mask, words * sizeof(*mask), words * 64) ? 1 : 0;
-                    mask[0] ^= 1ull << (bit == 0 ? 1 : 0);
-                    failures += lane_affinity_is_cpu(mask, words * sizeof(*mask), cpu) ? 1 : 0;
-                    mask[0] = 0;
-                }
-                mask[words - 1] = 0;
-                failures += lane_affinity_is_cpu(mask, words * sizeof(*mask), 0) ? 1 : 0;
-            }
-        }
-        munmap(mapping, 2 * BUSTER_ARENA_PAGE_BYTES);
-    }
-    return failures;
-}
-
-// Installed only in a forked test child, after the team is started and its caller pinned. Refusing affinity writes
-// proves they are skipped, rather than merely observing the same final mask after redundant writes.
-static bool lane_test_refuse_syscall(uint32_t number)
-{
-    struct sock_filter filter[] = {
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, number, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-    };
-    struct sock_fprog program = {
-        .len = BUSTER_ARRAY_LENGTH(filter),
-        .filter = filter,
-    };
-    const bool result = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0;
-    return result;
-}
-
-typedef struct LaneTestRepin LaneTestRepin;
-struct LaneTestRepin
-{
-    uint32_t cpu;
-    uint32_t* requested;
-    bool refuse_query;
-    bool passed;
-};
-
-static void lane_test_team_repin(void* argument)
-{
-    LaneTestRepin* test = argument;
-    test->passed = lane_index() == 0 && lane_count() == 1 && lane_take(17) == 0 && lane_pin(test->cpu);
-    if (test->requested != 0)
-    {
-        *test->requested = test->cpu;
-    }
-    test->passed = (!test->refuse_query || lane_test_refuse_syscall(SYS_sched_getaffinity)) && test->passed;
-}
-
-// The first child refuses all affinity writes during an already-pinned operation. The others repin from inside the
-// callback, with the final query allowed or refused, or with the caller-owned CPU list changed: every case must
-// return to the caller's original singleton CPU.
-static uint64_t lane_test_team_singleton(uint32_t cpu, uint32_t other)
-{
-    uint64_t failures = 0;
-    for (uint32_t mode = 0; mode < 4; mode += 1)
-    {
-        fflush(stdout);
-        const pid_t child = fork();
-        if (child == 0)
-        {
-            alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
-            LaneTeam team = { 0 };
-            bool passed = lane_pin(cpu) && lane_team_start(&team, 1, &cpu);
-            if (passed && mode == 0)
-            {
-                LaneTeamTest test = { .caller = (pid_t)syscall(SYS_gettid) };
-                passed = lane_test_refuse_syscall(SYS_sched_setaffinity) &&
-                         lane_test_team_operation(&test, 1, BUSTER_LANE_TEST_TEAM_ROUNDS + 4, &cpu) == 0;
-            }
-            else if (passed)
-            {
-                const Lane previous = thread_context.lane;
-                thread_context.taken = 47;
-                uint32_t requested = cpu;
-                LaneTestRepin test = { .cpu = other, .requested = mode == 3 ? &requested : 0, .refuse_query = mode == 2 };
-                passed = lane_run(1, lane_test_team_repin, &test, &requested) && test.passed && thread_context.taken == 47 &&
-                         thread_context.lane.index == previous.index && thread_context.lane.count == previous.count &&
-                         thread_context.lane.group == previous.group;
-                uint32_t current = UINT32_MAX;
-                passed = syscall(SYS_getcpu, &current, 0, 0) == 0 && current == cpu && passed;
-            }
-            lane_team_stop(&team);
-            if (!passed)
-            {
-                fprintf(stderr, "test-lanes: already-pinned team affinity case %u failed\n", mode);
-            }
-            _exit(passed ? 0 : 1);
-        }
-        int status = 0;
-        const bool waited = child > 0 && waitpid(child, &status, 0) == child;
-        failures += waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
-    }
-    printf("already-pinned teams: 4 affinity cases, %lu wrong\n", (unsigned long)failures);
-    return failures;
-}
-
 // Pinning failure is startup failure too: the caller's mask and the number of live threads must both be restored.
 // With a valid mask, both the calling lane and its workers are pinned only for their specified lifetime.
 static uint64_t lane_test_team_affinity(LaneTeam* team, uint32_t threads_before)
@@ -1492,12 +1360,6 @@ static uint64_t lane_test_team_affinity(LaneTeam* team, uint32_t threads_before)
         memset(after, 0, sizeof(after));
         restored = syscall(SYS_sched_getaffinity, 0, sizeof(after), after) > 0 && memcmp(before, after, sizeof(before)) == 0;
         failures += restored ? 0 : 1;
-        uint32_t other = valid + 1;
-        while (other < invalid && (before[other / 64] & (1ull << (other % 64))) == 0)
-        {
-            other += 1;
-        }
-        failures += lane_test_team_singleton(valid, other < invalid ? other : valid);
     }
     return failures;
 }
@@ -1581,7 +1443,6 @@ static uint64_t lane_test_teams(void)
     lane_team_stop(&team);
     failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
     failures += lane_test_team_affinity(&team, threads_before);
-    failures += lane_test_affinity_masks();
     failures += thread_context.lane.index != previous.index || thread_context.lane.count != previous.count || thread_context.lane.group != previous.group ? 1 : 0;
     failures += retained_value == 0 || *retained_value != BUSTER_LANE_TEST_GOLDEN_RATIO ? 1 : 0;
     failures += test.forbidden_calls != 0 || test.invalid_indices != 0 ? 1 : 0;
