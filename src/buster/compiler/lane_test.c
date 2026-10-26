@@ -39,9 +39,10 @@
 //     output, the lanes take parts and count their bytes, and after a sync each lane places the parts it took by the
 //     prefix sums of every part's bytes and fills them. One lane comes late to each input's loop, by turns long enough to
 //     sleep and only briefly. Lane 0 then checks that the output is byte-identical to the sequential reference's, that
-//     every part was taken once, that the boundaries are range_part_by_cost's, and that every lane got the same order,
-//     by decreasing bit width of cost and then by index. The loops follow each other with a sync between them, as the
-//     counter must reset itself.
+//     every part was taken once, that the boundaries are range_part_by_cost's, and that every lane got the same order:
+//     the costliest part first (the first of them on a tie), then the others by decreasing bit width of cost and then
+//     by index (one input's costs grow within one bucket, so that its costliest part is its bucket's last). The loops
+//     follow each other with a sync between them, as the counter must reset itself.
 //   - Teams: one group kept across operations with different active lane counts, with the same thread identities,
 //     published inputs and completed outputs, no work on inactive lanes, and worker scratch released between runs.
 //     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
@@ -157,6 +158,10 @@ static const LaneTestPartInput lane_test_part_inputs[] = {
         .count = 100000,
         .pattern = 3,
     },
+    {
+        .count = 100,
+        .pattern = 7,
+    },
 };
 
 #define BUSTER_LANE_TEST_PART_INPUT_COUNT (sizeof(lane_test_part_inputs) / sizeof(lane_test_part_inputs[0]))
@@ -264,6 +269,8 @@ static uint64_t lane_test_cost(uint64_t* state, uint32_t pattern, uint64_t i)
         case 4: result = i * i; break;
         // So large that the boundary's arithmetic needs more than 64 bits: the total approaches 2^63.
         case 5: result = (1ull << 52) + lane_test_random(state) % (1ull << 52); break;
+        // One bucket, growing: the costliest part is the last of its bucket, and goes first.
+        case 7: result = (1ull << 20) + i; break;
         // No cost at all, which lane_range_by_cost splits as lane_range does.
         default: result = 0; break;
     }
@@ -757,12 +764,17 @@ static uint64_t lane_test_exchange(LaneTest* test)
     return failures;
 }
 
-// The parts check's bucket of a part: the leading zeros of its cost, 64 without one.
-static uint32_t lane_test_cost_bucket(const uint64_t* cost_prefix, const uint64_t* boundaries, uint64_t part)
+// The parts check's cost of a part, and its bucket: the leading zeros of its cost, 64 without one.
+static uint64_t lane_test_part_cost(const uint64_t* cost_prefix, const uint64_t* boundaries, uint64_t part)
 {
     const uint64_t begin = boundaries[part];
     const uint64_t end = boundaries[part + 1];
-    const uint64_t cost = end == begin ? 0 : cost_prefix[end - 1] - (begin == 0 ? 0 : cost_prefix[begin - 1]);
+    return end == begin ? 0 : cost_prefix[end - 1] - (begin == 0 ? 0 : cost_prefix[begin - 1]);
+}
+
+static uint32_t lane_test_cost_bucket(const uint64_t* cost_prefix, const uint64_t* boundaries, uint64_t part)
+{
+    const uint64_t cost = lane_test_part_cost(cost_prefix, boundaries, part);
     return cost == 0 ? 64 : (uint32_t)__builtin_clzll(cost);
 }
 
@@ -786,15 +798,19 @@ static uint64_t lane_test_check_part_loop(LaneTest* test, const uint64_t* cost_p
         failures += test->part_boundaries[part] != range_part_by_cost(cost_prefix, count, part, parts).begin ? 1 : 0;
     }
     failures += test->part_boundaries[parts] != count ? 1 : 0;
-    // The order: parts that exist, by bucket, then by index; and the same for every lane.
+    // The order: parts that exist, the costliest first (the first of them on a tie), then the others by bucket, then by
+    // index; and the same for every lane.
     const uint32_t* order = test->part_orders[0];
     bool in_range = true;
+    uint64_t costliest = 0;
     for (uint64_t taken_index = 0; taken_index < parts; taken_index += 1)
     {
         in_range = in_range && order[taken_index] < parts;
+        const uint64_t cost = lane_test_part_cost(cost_prefix, test->part_boundaries, taken_index);
+        costliest = cost > lane_test_part_cost(cost_prefix, test->part_boundaries, costliest) ? taken_index : costliest;
     }
-    failures += in_range ? 0 : 1;
-    for (uint64_t taken_index = 1; in_range && taken_index < parts; taken_index += 1)
+    failures += in_range && (parts == 0 || order[0] == costliest) ? 0 : 1;
+    for (uint64_t taken_index = 2; in_range && taken_index < parts; taken_index += 1)
     {
         const uint32_t previous = lane_test_cost_bucket(cost_prefix, test->part_boundaries, order[taken_index - 1]);
         const uint32_t current = lane_test_cost_bucket(cost_prefix, test->part_boundaries, order[taken_index]);
