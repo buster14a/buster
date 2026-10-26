@@ -1137,7 +1137,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     valid = valid && check_program(&model, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&kept, &model, &data, false, &path->output_arena, &path->scratch);
     const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, &output, &bytes,
-                                                     &path->scratch, NULL, true);
+                                                     &path->scratch, NULL, NULL, true);
     const bool published = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
                                                          selected.program.object_count, &code.link, 0, &bytes, &path->scratch, &emission);
     const bool unsupported = valid && ((!lowered && code.status == CHECK_PROGRAM_UNSUPPORTED) || (lowered && !published && emission.status == CHECK_DATA_UNSUPPORTED));

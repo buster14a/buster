@@ -321,10 +321,11 @@ designs and the compilers already built this way.
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`, and `--lower-all`
+  checking every function's records with `x86_validate`, `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
-  `check_program_select`). `./build/compiler parse
+  `check_program_select`), and `-g` attaching DWARF of its functions' source
+  lines (`c_check_debug.c`, #395; `-c -g` writes no DWARF yet). `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -581,8 +582,26 @@ designs and the compilers already built this way.
   `test-debug --cross-check` checks original fixtures, as one unit and as two,
   with readelf, GDB and perf; `benchmark-debug` measures validation through
   address finalization. [The debug guide](docs/debug.md) records the contract
-  and the source-row production still pending; `streaming.c` makes a unit per
-  256 functions as they compile.
+  and a function's body's row (`DebugFunction.prologue_end`); `streaming.c`
+  makes a unit per 256 functions as they compile.
+- `src/buster/compiler/c_check_debug.c` is the C driver's `-g` (#395): each
+  typed entry's code start after branch sizing (`Tier0Code.entry_records`) and
+  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`) make
+  `check_program_emit`'s raw rows, the driver maps their tokens to presumed
+  lines as the diagnostics place them, bounded per function by its
+  declaration's and closing brace's places, and keeps a row per change of line
+  in the function's file, and the body's start; each pass a vector path with
+  an exact twin (`--scalar`). The lowering and its loop over tasks are
+  compiled twice, without the tokens (`check_program_lower`,
+  `check_lower_drain`) and with them (`check_program_lower_sources`,
+  `check_lower_drain_sources`), so that a compile without `-g` runs the code
+  it ran before.
+  `test-check-debug [--cross-check]` checks the twins at `PROT_NONE` pages,
+  the lines against `pp_presumed` on fixtures (a computed goto among them)
+  and generated programs, that lowering with the tokens changes no typed
+  function, and with `--cross-check` the executable through
+  `llvm-dwarfdump --verify` and gdb.
+  [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
   (strings not merged), references between debug sections resolved, those to
@@ -853,7 +872,9 @@ designs and the compilers already built this way.
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`). The output is
-  the records with #144's branch columns and `LinkReference`s. `tier0_compile`
+  the records with #144's branch columns, `LinkReference`s and, when asked for
+  (`Tier0Function.entry_records`), each entry's first record, for source
+  rows. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
@@ -1043,6 +1064,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
 ./build/compiler benchmark-backend
+./build/compiler test-check-debug --cross-check
+./build/compiler benchmark-check-debug
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir

@@ -32,6 +32,10 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
+  - each typed entry's first record (`Tier0Code.entry_records`, the epilogue's after the last), when the producer asks
+    for it (`Tier0Function.entry_records`; a compile without it allocates and copies nothing for it), which with branch
+    sizing's offsets says where each entry's code starts: the C driver's source rows for `-g` (#395,
+    `c_check_debug.c`);
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
@@ -658,7 +662,9 @@ six shapes: one function of integers, integers and calls, everything, larger, la
 (#137), and larger past the depth tables, 300 each by default. Each program:
 
 1. Every function must pass `tier0_validate`.
-2. Both paths must compile it to the same records, branch columns and references.
+2. Both paths must compile it to the same records, branch columns, references and entries' first records, which must
+   ascend within the records; and a compile without the entries' first records must make the same code and none of
+   them.
 3. The records must pass `x86_validate` and the branch columns `branch_sizing_validate`.
 4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs, which an alarm stops
    after 10 s (a frame laid out wrong can make code loop). The result and every global's bytes must equal what the
@@ -1140,6 +1146,7 @@ actual current producer is `tier0_generate` and the tests' manually built
 | Template/hole blocks → expanded records → `x86_choose_forms` | Implemented direct 16-byte record emission. Scalar twin constructs fields independently; immediate shortening must preserve value and live flags. |
 | Final records/branch columns → `size_branches` → `x86_encode` | Implemented generated-program path. Branch indices/targets stay in record coordinates until sizing; fixup markings/references retain record order. |
 | Encoded bytes/fixup ends + `LinkReference` → `link_add_code_fixups` | Implemented object/executable test path; symbol identity/addends are carried, not rediscovered from instruction bytes. |
+| Entries' first records + branch sizing's offsets → source rows | Implemented for the C driver's `-g` (#395): `Tier0Code.entry_records` are the measured positions both paths emit from, which `check_program_emit` turns into byte offsets after sizing and `c_check_debug.c` into DWARF rows. |
 
 A logical batch is one complete function; kernels classify 64 entries and
 read u64 values eight at a time with bounded masks. Input columns need natural
