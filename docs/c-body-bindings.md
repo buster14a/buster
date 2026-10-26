@@ -16,10 +16,11 @@ Spans are independent jobs. Each stores the original event range, its undo-base,
 use/declaration counts and source-order slot. `c_body_bindings_span` is a one-off
 convenience that scans the preceding prefix for a single body.
 
-The producer reactivates parameters, the tags their list declared, and labels
-at the opening body. Preceding file activations give the difference between
-original and private undo marks. Exit restores may occur at the closing token
-or immediately afterward, or be omitted when empty. A final translation-unit cleanup stays outside the slice.
+The producer reactivates parameters, the tags and enumeration constants their
+list declared, and labels at the opening body. Preceding file activations give
+the difference between original and private undo marks. Exit restores may
+occur at the closing token or immediately afterward, or be omitted when empty.
+A final translation-unit cleanup stays outside the slice.
 The function's own file declaration at `OPEN_BODY` remains in the private view,
 with its historical type identity; an earlier activation uses the file index.
 Nested function definitions are rejected by the current validated parser.
