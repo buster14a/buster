@@ -39,6 +39,11 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
     for it (`Tier0Function.entry_records`; a compile without it allocates and copies nothing for it), which with branch
     sizing's offsets says where each entry's code starts: the C driver's source rows for `-g` (#395,
     `c_check_debug.c`);
+  - the frame (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`: the callee-saved registers the prologue
+    pushed, in `tier0_callee_saved`'s order, the bytes it reserved below them and whether it pushed rbp first and
+    pointed it at the push), which `unwind_tier0_frame` reads with the prologue's and epilogue's records for the C
+    driver's unwind tables (#395, [the unwind guide](unwind.md)): the prologue is the code's first records and the
+    epilogue's release, pops and ret its last;
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
@@ -1231,6 +1236,7 @@ actual current producer is `tier0_generate` and the tests' manually built
 | Final records/branch columns → `size_branches` → `x86_encode` | Implemented generated-program path. Branch indices/targets stay in record coordinates until sizing; fixup markings/references retain record order. |
 | Encoded bytes/fixup ends + `LinkReference` → `link_add_code_fixups` | Implemented object/executable test path; symbol identity/addends are carried, not rediscovered from instruction bytes. |
 | Entries' first records + branch sizing's offsets → source rows | Implemented for the C driver's `-g` (#395): `Tier0Code.entry_records` are the measured positions both paths emit from, which `check_program_emit` turns into byte offsets after sizing and `c_check_debug.c` into DWARF rows. |
+| Published frame + branch sizing's offsets → unwind tables | Implemented for the C driver (#395): `unwind_tier0_frame` takes each transition's end from the frame's records, and `check_program_emit` writes the functions' FDEs with one CIE. |
 
 A logical batch is one complete function; kernels classify 64 entries and
 read u64 values eight at a time with bounded masks. Input columns need natural
