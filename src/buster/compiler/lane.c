@@ -37,8 +37,8 @@
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
 // in, and the last one advances the group's generation word with lane_publish while the others wait for it in
 // lane_wait. A waiting lane spins for BUSTER_LANE_SPINS pauses, waits in mwaitx for the word's line to be written for up
-// to BUSTER_LANE_MWAITX_TICKS, and then sleeps on the word with a futex, setting its bit 0 first so that the lane that
-// advances it knows to wake the sleepers: a sync at which no lane slept makes no system call.
+// to BUSTER_LANE_WAIT_NANOSECONDS (lane_wait_ticks), and then sleeps on the word with a futex, setting its bit 0 first
+// so that the lane that advances it knows to wake the sleepers: a sync at which no lane slept makes no system call.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -49,6 +49,7 @@
 // OS-dependent includes
 #include <pthread.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <linux/futex.h>
@@ -224,6 +225,11 @@ struct ThreadContext
     uint64_t sleeps;
     // lane_take's counter while the thread is a lane of one.
     uint64_t taken;
+    // lane_wait's budget in TSC ticks once the thread has measured its TSC's rate, or 0, and the TSC's and
+    // CLOCK_MONOTONIC's readings at its first wait past the spins, which it measures the rate from (lane_wait_ticks).
+    uint64_t wait_ticks;
+    uint64_t wait_origin_ticks;
+    uint64_t wait_origin_nanoseconds;
 };
 
 // main.c's units share one context, the driver's unit's, since a command's code runs in more than one of them (main.c:
@@ -297,13 +303,19 @@ static void scratch_release(void)
 // waits in mwaitx: 1.5 µs, far longer than a sync at which every lane arrives at once takes (35 to 200 ns with 2 to 8
 // lanes), so such a sync never waits in mwaitx.
 #define BUSTER_LANE_SPINS 128
-// How long a lane then waits in mwaitx before it sleeps on a futex, in TSC ticks: 1 ms at the 9700X's 3.79 GHz. Woken
-// from mwaitx, a lane there leaves 0.2 to 0.3 µs after the word changes, against 10 to 14 µs from the futex, and a core
-// waiting either way draws about 2 W, half what a spinning one does. What a long wait costs comes after it: a core that
-// waited longer than 0.6 ms on the futex, or 1.5 ms in mwaitx, has its clock halved and loses 25 to 50% of the next
-// millisecond's work (docs/object-writer-and-linker.md, "Lanes"). Past 1 ms the lane sleeps, since the waits that slow
-// it down do so whichever way it waits, and on the futex its core can go into its deepest idle state, at 0.07 W.
-#define BUSTER_LANE_MWAITX_TICKS 3800000
+// How long a lane then waits in mwaitx before it sleeps on a futex: 1 ms. Woken from mwaitx, a lane there leaves 0.2 to
+// 0.3 µs after the word changes, against 10 to 14 µs from the futex, and a core waiting either way draws about 2 W, half
+// what a spinning one does. What a long wait costs comes after it: a core that waited longer than 0.6 ms on the futex,
+// or 1.5 ms in mwaitx, has its clock halved and loses 25 to 50% of the next millisecond's work
+// (docs/object-writer-and-linker.md, "Lanes"). Past 1 ms the lane sleeps, since the waits that slow it down do so
+// whichever way it waits, and on the futex its core can go into its deepest idle state, at 0.07 W.
+#define BUSTER_LANE_WAIT_NANOSECONDS 1000000ull
+// The same in TSC ticks at the 9700X's 3.79 GHz, which a thread waits until it has measured its own TSC's rate: the
+// TSC runs at a rate of each CPU's own, so that another CPU's 1 ms is another number of ticks.
+#define BUSTER_LANE_MWAITX_TICKS 3800000ull
+// How far apart in time a thread's two readings of the TSC and CLOCK_MONOTONIC must be for their ratio to give the
+// rate: 10 ms, over which the gap between the two clocks' reads (tens of nanoseconds) is an error of 10^-5.
+#define BUSTER_LANE_WAIT_CALIBRATION_NANOSECONDS 10000000ull
 // mwaitx's arguments: bit 1 of its extensions enables its timer, and its hint asks for C1, which on the 9700X wakes as
 // fast as C0's (0xf0) and draws a little less.
 #define BUSTER_LANE_MWAITX_TIMER 2u
@@ -411,6 +423,37 @@ static uint32_t lane_count(void)
     return thread_context.lane.count;
 }
 
+// lane_wait's budget past the spins in TSC ticks, given the TSC read at the wait's start: BUSTER_LANE_WAIT_NANOSECONDS
+// at this CPU's TSC rate. A thread measures the rate against CLOCK_MONOTONIC from its first such wait to the first one
+// at least BUSTER_LANE_WAIT_CALIBRATION_NANOSECONDS later, waiting the 9700X's BUSTER_LANE_MWAITX_TICKS until then: a
+// read of the clock (vDSO, about 20 ns) per wait that has spun 1.5 µs already, and none once measured. The budget is
+// kept within mwaitx's 32-bit timer.
+static uint64_t lane_wait_ticks(uint64_t now)
+{
+    uint64_t result = thread_context.wait_ticks;
+    if (result == 0)
+    {
+        result = BUSTER_LANE_MWAITX_TICKS;
+        struct timespec time;
+        clock_gettime(CLOCK_MONOTONIC, &time);
+        const uint64_t nanoseconds = (uint64_t)time.tv_sec * 1000000000ull + (uint64_t)time.tv_nsec;
+        if (thread_context.wait_origin_nanoseconds == 0)
+        {
+            thread_context.wait_origin_ticks = now;
+            thread_context.wait_origin_nanoseconds = nanoseconds;
+        }
+        else if (nanoseconds - thread_context.wait_origin_nanoseconds >= BUSTER_LANE_WAIT_CALIBRATION_NANOSECONDS)
+        {
+            const uint64_t elapsed = nanoseconds - thread_context.wait_origin_nanoseconds;
+            const unsigned __int128 ticks = (unsigned __int128)(now - thread_context.wait_origin_ticks) * BUSTER_LANE_WAIT_NANOSECONDS;
+            const unsigned __int128 measured = ticks / elapsed;
+            result = measured == 0 ? 1 : measured > UINT32_MAX ? UINT32_MAX : (uint64_t)measured;
+            thread_context.wait_ticks = result;
+        }
+    }
+    return result;
+}
+
 // Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first, then waits in
 // mwaitx; then sets bit 0, so that whoever changes the word wakes it, and sleeps on a futex while the word is unchanged.
 static uint32_t lane_wait(uint32_t* word, uint32_t value)
@@ -425,8 +468,9 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
     if ((current & ~1u) == value)
     {
         const uint64_t begin = __rdtsc();
+        const uint64_t budget = lane_wait_ticks(begin);
         uint64_t waited = 0;
-        while ((current & ~1u) == value && waited < BUSTER_LANE_MWAITX_TICKS)
+        while ((current & ~1u) == value && waited < budget)
         {
 #if defined(__MWAITX__)
             // The monitor is armed before the read, so a write after the read ends the wait. The wait also ends on an
@@ -435,7 +479,7 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
             current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
             if ((current & ~1u) == value)
             {
-                _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, (uint32_t)(BUSTER_LANE_MWAITX_TICKS - waited));
+                _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, (uint32_t)(budget - waited));
                 current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
             }
 #else

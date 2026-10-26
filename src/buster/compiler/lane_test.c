@@ -73,7 +73,7 @@
 #define BUSTER_LANE_TEST_MAX_RANGE 1000
 #define BUSTER_LANE_TEST_COST_PATTERNS 7
 // Syncs: rounds by default, and a late lane once every BUSTER_LANE_TEST_STALL_INTERVAL rounds. Its delay is in turn far
-// past the BUSTER_LANE_MWAITX_TICKS (1 ms on the 9700X) that the lanes waiting for it spend in mwaitx before they sleep,
+// past the BUSTER_LANE_WAIT_NANOSECONDS (1 ms) that the lanes waiting for it spend in mwaitx before they sleep,
 // and well within them.
 #define BUSTER_LANE_TEST_DEFAULT_ROUNDS 10000
 #define BUSTER_LANE_TEST_STALL_INTERVAL 1000

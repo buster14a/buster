@@ -59,7 +59,7 @@
 #define BUSTER_LANE_BENCHMARK_PASSES 21
 // The pthread barrier's passes have rounds / BUSTER_LANE_BENCHMARK_PTHREAD_SHARE rounds.
 #define BUSTER_LANE_BENCHMARK_PTHREAD_SHARE 16
-// How late lane 0 comes to the wake passes' syncs: well within the BUSTER_LANE_MWAITX_TICKS (1 ms on the 9700X) that
+// How late lane 0 comes to the wake passes' syncs: well within the BUSTER_LANE_WAIT_NANOSECONDS (1 ms) that
 // the other lanes wait in mwaitx, and well past them, once they sleep on the futex.
 #define BUSTER_LANE_BENCHMARK_MWAITX_LATE_NANOSECONDS 200000
 #define BUSTER_LANE_BENCHMARK_FUTEX_LATE_NANOSECONDS 3000000
