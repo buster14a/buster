@@ -301,21 +301,19 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Build only the compiler executable, and beside it the external Clang pragma token oracle
+      - name: Build the external Clang pragma token oracle and the compiler executable
         # Without debug information, which nothing here reads: it took a fifth of the build's time (BUSTER_DEBUG_INFO,
-        # build.sh). The build runs a compile per core, leaving the cores' other threads to spare, so the oracle builds
-        # meanwhile, outside build/, which build.sh makes anew and which must hold the compiler alone.
+        # build.sh). Run the builds serially in CPUs 0-7, including their linkers, leaving the other online CPUs for
+        # supporting processes. The oracle stays outside build/, which build.sh makes anew and which must hold the compiler alone.
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
-          bash tools/build-preprocessor-pragma-oracle.sh "$oracle" > "$RUNNER_TEMP/oracle.log" 2>&1 &
-          building=$!
-          BUSTER_DEBUG_INFO=0 ./build.sh
-          test -x build/compiler
-          test "$(find build -type f -executable | wc -l)" -eq 1
           status=0
-          wait "$building" || status=$?
+          taskset -c 0-7 bash tools/build-preprocessor-pragma-oracle.sh "$oracle" > "$RUNNER_TEMP/oracle.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/oracle.log"
           test "$status" -eq 0
+          BUSTER_DEBUG_INFO=0 taskset -c 0-7 ./build.sh
+          test -x build/compiler
+          test "$(find build -type f -executable | wc -l)" -eq 1
           printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
 
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
@@ -392,10 +390,11 @@ jobs:
       - name: Run the tests within the host budget
         # One test command at a time: suites such as test-lanes and test-files start lanes of their own, and the
         # call-graph check starts compiler captures. Running those commands together multiplies their CPU and memory
-        # budgets. Keep each command's own parallelism and its existing 180 s timeout; the shared host lock also
+        # budgets. Inherit the CPUs 0-7 pool for every descendant, with each command's existing 180 s timeout and own parallelism;
+        # the shared host lock also
         # excludes benchmarks and other CI jobs for this job.
         run: |
-          ./build/compiler parallel --jobs 1 --github --timeout 180 <<'TESTS'
+          taskset -c 0-7 ./build/compiler parallel --jobs 1 --github --timeout 180 <<'TESTS'
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the preprocessor's cases against clang
