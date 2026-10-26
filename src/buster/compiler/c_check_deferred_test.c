@@ -30,6 +30,8 @@ struct CheckDeferredFixture
     const char* source;
     // Whether the unit is merged (false: it does what only source order can merge).
     bool merged;
+    // The fixture's -std= option, -std=gnu17 when 0.
+    char* standard;
 };
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
@@ -109,6 +111,23 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // top level made: source order's, whose completion everything after the body sees. And one that only uses it.
     { "parameter-list-tag-completed-in-its-body", "int f(struct T *p) { struct T { int x; }; return p->x; }\nint g(void) { return 2; }\n", false },
     { "parameter-list-tag-used-in-its-body", "int f(struct T *p) { struct T *q = p; return q != 0; }\nint g(void) { return 2; }\n", true },
+    // C23's enums with a fixed underlying type in bodies, beside plain enums, structs and unions. A body's tags take the
+    // indices after the top level's, as the tags of the bodies its lane read before it did, and none may keep another's
+    // fixed base (lanes once shared the top level's enum_fixed). Both orders, many bodies, and a file-scope one shadowed.
+    { "fixed-enum-then-plain-enum", "int f(void) { enum E : int { A = 1 }; return A; }\nint g(void) { enum F { B = 2 }; return (int)sizeof(enum F) + B; }\n", true,
+      "-std=gnu23" },
+    { "plain-enum-then-fixed-enum", "int f(void) { enum F { B = 2 }; return B; }\nint g(void) { enum E : long { A = 1 }; return (int)sizeof(enum E) + A; }\n", true,
+      "-std=gnu23" },
+    { "fixed-enums-in-many-bodies",
+      "int f0(void) { enum E0 : char { A0 = 1 }; return A0; }\nint f1(void) { enum E1 { B1 = 2 }; return (int)sizeof(enum E1) + B1; }\n"
+      "int f2(void) { enum E2 : long long { A2 = 3 }; return (int)sizeof(enum E2) + A2; }\n"
+      "int f3(void) { struct S3 { int x; } s = { 4 }; return s.x + (int)sizeof(struct S3); }\n"
+      "int f4(void) { enum E4 : short; enum E4 : short { A4 = 5 }; return (int)sizeof(enum E4) + A4; }\n"
+      "int f5(void) { enum E5 { B5 = 6 } e = B5; return e; }\nint f6(void) { union U6 { int i; char c; } u = { 7 }; return u.i + (int)sizeof(union U6); }\n"
+      "int f7(void) { enum E7 : unsigned { A7 = 8 }; enum F7 { B7 = 9 }; return A7 + B7 + (int)sizeof(enum F7); }\n", true, "-std=gnu23" },
+    { "fixed-enum-at-file-scope-and-in-a-body",
+      "enum T : unsigned char { X = 1 };\nint f(void) { enum T t = X; return t + (int)sizeof t; }\n"
+      "int g(void) { enum T : short { Y = 2 }; return Y + (int)sizeof(enum T); }\nint h(void) { enum T u = X; return u; }\n", true, "-std=gnu23" },
 };
 
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);
@@ -285,7 +304,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         char path[256];
         snprintf(path, sizeof(path), "%s/%s.c", directory, name);
         valid = parse_test_write(path, source, strlen(source));
-        char* options_text[2] = { "-std=gnu17", path };
+        char* options_text[2] = { f < listed && check_deferred_fixtures[f].standard != 0 ? check_deferred_fixtures[f].standard : "-std=gnu17", path };
         PPOptions options;
         const char* input = 0;
         const char* output = 0;
