@@ -6203,19 +6203,6 @@ static PPTestChildCounts pp_test_header_set(const char* directory, const char* o
     return counts;
 }
 
-// The CPUs this process may run on (at least 1).
-static uint32_t pp_test_cpus(void)
-{
-    uint64_t mask[16] = { 0 };
-    const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
-    uint32_t count = 0;
-    for (uint32_t i = 0; known && i < BUSTER_ARRAY_LENGTH(mask); i += 1)
-    {
-        count += (uint32_t)__builtin_popcountll(mask[i]);
-    }
-    return count != 0 ? count : 1;
-}
-
 #define BUSTER_PP_TEST_HEADER_SETS (2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes))
 #define BUSTER_PP_TEST_CHILDREN 64
 // The parts the cases run in: several per CPU, so that parts of slow cases don't leave the others idle.
@@ -6327,32 +6314,23 @@ static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint
 // counts through a pipe. Returns their counts added up, with the first part's system_inexact_first that has one.
 static PPTestChildCounts pp_test_children(const PPTestChildren* children)
 {
-    const uint32_t cpus = pp_test_cpus();
+    const uint32_t cpus = test_process_cpus();
     const uint32_t parts = children->parts < BUSTER_PP_TEST_CHILDREN ? children->parts : BUSTER_PP_TEST_CHILDREN;
-    const uint32_t processes = cpus < parts ? cpus : parts;
-    FILE* outputs[BUSTER_PP_TEST_CHILDREN] = { 0 };
-    int pipes[BUSTER_PP_TEST_CHILDREN];
-    pid_t children_pids[BUSTER_PP_TEST_CHILDREN];
+    const uint32_t running = cpus < parts ? cpus : parts;
+    TestProcess processes[BUSTER_PP_TEST_CHILDREN];
     PPTestChildCounts total = { .result = parts == children->parts };
     uint32_t started = 0;
     for (uint32_t finished = 0; finished < parts; finished += 1)
     {
-        while (started < parts && started - finished < processes)
+        while (started < parts && started - finished < running)
         {
-            int fds[2] = { -1, -1 };
-            fflush(stdout);
-            fflush(stderr);
-            outputs[started] = tmpfile();
-            children_pids[started] = outputs[started] != 0 && pipe(fds) == 0 ? fork() : -1;
-            if (children_pids[started] == 0)
+            if (test_process_start(&processes[started]))
             {
-                close(fds[0]);
                 char own[4200];
                 static const char* const kinds[] = { "headers", "cases", "files" };
                 snprintf(own, sizeof(own), "%s/%s-%u", children->directory, kinds[children->work], started);
                 PPTestChildCounts counts = { 0 };
-                const bool redirected = dup2(fileno(outputs[started]), STDOUT_FILENO) >= 0 && dup2(fileno(outputs[started]), STDERR_FILENO) >= 0;
-                if (redirected && mkdir(own, 0700) == 0)
+                if (mkdir(own, 0700) == 0)
                 {
                     counts = pp_test_child_part(children, started, own);
                     if (rmdir(own) != 0)
@@ -6361,43 +6339,17 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
                         counts.result = false;
                     }
                 }
-                else if (redirected)
+                else
                 {
                     printf("test-preprocessor: can't make %s\n", own);
                 }
-                fflush(stdout);
-                fflush(stderr);
-                const bool sent = write(fds[1], &counts, sizeof(counts)) == (ssize_t)sizeof(counts);
-                _exit(sent ? 0 : 1);
+                test_process_exit(&processes[started], &counts, sizeof(counts));
             }
-            if (fds[1] >= 0)
-            {
-                close(fds[1]);
-            }
-            pipes[started] = fds[0];
             started += 1;
         }
-        PPTestChildCounts counts = { 0 };
-        int status = 0;
-        const bool received = children_pids[finished] > 0 && read(pipes[finished], &counts, sizeof(counts)) == (ssize_t)sizeof(counts);
-        const bool exited = children_pids[finished] > 0 && waitpid(children_pids[finished], &status, 0) == children_pids[finished] && WIFEXITED(status) &&
-                            WEXITSTATUS(status) == 0;
-        if (pipes[finished] >= 0)
-        {
-            close(pipes[finished]);
-        }
-        char chunk[1 << 16];
-        size_t length = 0;
-        const bool rewound = outputs[finished] != 0 && fseek(outputs[finished], 0, SEEK_SET) == 0;
-        while (rewound && (length = fread(chunk, 1, sizeof(chunk), outputs[finished])) > 0)
-        {
-            fwrite(chunk, 1, length, stdout);
-        }
-        if (outputs[finished] != 0)
-        {
-            fclose(outputs[finished]);
-        }
-        if (!received || !exited)
+        PPTestChildCounts counts;
+        const bool ran = test_process_finish(&processes[finished], &counts, sizeof(counts));
+        if (!ran)
         {
             static const char* const works[] = { "header sets", "cases", "files" };
             printf("test-preprocessor: part %u of %u of the %s didn't run to the end\n", finished, parts, works[children->work]);
@@ -6415,7 +6367,7 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
         total.system_tokens += counts.system_tokens;
         total.system_made += counts.system_made;
         total.tokens += counts.tokens;
-        total.result = total.result && received && exited && counts.result;
+        total.result = total.result && ran && counts.result;
     }
     return total;
 }

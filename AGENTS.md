@@ -4000,7 +4000,8 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   its own), which the vector path must build without its fallback;
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
-  `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
+  `;`, at every block alignment (in 32 parts at once, each a child process:
+  `test_process.c`, #465), and nine kinds of nesting 100,000 levels deep
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;
