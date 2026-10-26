@@ -174,7 +174,12 @@ passes every checker test.
   right after the replay (`CheckDeferred.fail_after_replay`), which must give
   source order's result; and with the allocation of the reader's state failing
   (`check_corpus_deferred_fail_state`), which must count as a resource failure
-  (`test-checker-corpus`'s `resources`), not as a result that differs. Then
+  (`test-checker-corpus`'s `resources`), not as a result that differs. The 400
+  bodies are read again with the reader timing what its lanes cost
+  (`CheckDeferred.timing`), on one lane and on every one of 8: one lane must
+  wait for no other, and `lane_run`'s dispatch and the wake-up must fall within
+  the lanes' span. A copy whose wake-up counts from `lane_run`'s call, and one
+  whose dispatch is the lanes' span, each fail it. Then
   `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
   ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
   refused without a write past the room, and so are malformed lists.
@@ -227,11 +232,14 @@ c-testsuite, SQLite and Lua.
 `./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
 LIST] [--every-lane] [preprocessor options] file...` preprocesses each file
 once, then per pass parses it and checks it by source order's `check_input` and
-by the deferred reader on one lane and on up to `--lanes` (8), in each of
-their six orders in turn, so that each reading follows each other as often (a
-deferred reading ran up to 3% faster after the deferred reader's own than after
-source order's, and in the three orders that rotated before, the reading on
-`--lanes` came after the one on one lane twice as often). It reports the
+by the deferred reader on one lane and on up to `--lanes` (8), in their six
+orders, one a pass in turn: in any six passes in a row, each reading comes
+first, after the parse, twice, and after each other reading twice, so
+`--passes` is a multiple of six, 24 by default. A deferred reading ran up to 3%
+faster after the deferred reader's own than after source order's. The three
+orders that rotated before put the reading on `--lanes` after the one on one
+lane in two passes of three, and the six in 21 passes, as #448's review
+counted, put it there 8 times and after source order's 6. It reports the
 bodies, their tokens and the largest body's, and medians
 in nanoseconds per token: the parse; source order's reading; and each deferred
 reading's whole, its top level, the history's index, the bodies' walks and
@@ -240,10 +248,16 @@ the rest (the phases after the merge); the position checks per body too, the
 lanes the bodies ran on (`active`: as many as the rule gives them, or with
 `--every-lane` every lane they can take) and those that copied the reader
 (`copies`); and what a lane costs, in nanoseconds: a copy of the reader
-(`copy`), and the first lane's wait at the partition for every lane to start
-(`wake`). `--cpus` pins the command to the first CPU, where the parse, source
-order and the top level run, and its lanes to the list. The measurements
-before "How many lanes" were made with the three rotating orders.
+(`copy`); `lane_run`'s dispatch, from its call to the first lane's arrival at
+the partition (`dispatch`: the first lane's pinning and the others' wake
+calls); and the others' wake-up, from the first lane's arrival there to the
+last one's (`wake`, none on one lane), which is the first lane's wait at the
+partition's sync. Before #448's review, `wake` was the first lane's whole time
+in `lane_parts_by_cost`, its share of the boundaries and its order of the parts
+with its wait, and left the dispatch out. `--cpus` pins the command to the
+first CPU, where the parse, source order and the top level run, and its lanes
+to the list. The measurements before "How many lanes" were made with the three
+rotating orders.
 
 On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with
 `--cpus 2,0,1,3,4,5,6,7`, the medians of 9 passes, ranges over three processes
@@ -293,14 +307,27 @@ share of the bodies' walks can pay for. On the 9700X, with `--cpus
 process of its own, the reader on 2 to 8 lanes against one lane, on 35 units:
 six of c-testsuite's programs, the frozen `sqlite3.c`, and 28 synthetic units
 of 2 to 70 bodies after `stdio.h`, `stdlib.h` and `string.h`, after thirty of
-the C library's headers or after none ([the record](https://github.com/buster14a/buster-performance/tree/f0166f78e5abfea32ab92af3ee030d5cf1d2c358/docs/measurements/deferred-lane-rule-113-2026-10-25)):
+the C library's headers or after none ([the record](https://github.com/buster14a/buster-performance/tree/8f57e7f6bf92fd7a9420079fc09c73a4a8985264/docs/measurements/deferred-lane-rule-113-2026-10-25)):
 
 - **A lane's copy** takes 30 to 70 µs when one lane makes it after the three
   headers (95 to 110 µs after thirty, 350 µs on `sqlite3.c`), 50 to 120 µs on
   average when two lanes copy at once, and 175 to 295 µs when eight do (360 to
   405 µs, and 845 µs).
-- **The wake-up:** the first lane waits 13 to 28 µs at the partition for the
-  others to start in most runs, and 2 to 3 µs in the rest.
+- **The wake-up:** `lane_run`'s dispatch, from its call to the first lane's
+  arrival at the partition, takes 0.6 to 7.5 µs on one lane, where it pins the
+  first lane (more after a larger unit), and 1.1 to 10.7 µs on two lanes and
+  3.0 to 15.1 µs on eight, where it wakes the others too. The first lane then
+  waits at the partition for the last of the others: 15 to 24 µs on two lanes
+  (2 µs on the two units whose readings take under a millisecond, in five
+  rounds of their six) and 13 to 21 µs on eight. `lane_run` wakes the others
+  before the first lane enters, so on eight lanes their wake-up runs partly
+  during the dispatch: the last lane arrives 16 to 36 µs after `lane_run`'s
+  call on eight lanes, and 18 to 35 µs on two (3 µs on those two units). Before
+  #448's review, the wait's figure was the first lane's whole time in
+  `lane_parts_by_cost`, which counts the partition's own work too: 0.1 to 0.5
+  µs on one lane, which waits for no one, and on eight lanes within 1 µs of the
+  wait on the synthetic units but 6.7 µs above it on `sqlite3.c`'s 2,608
+  bodies (the record's log 9: six units, three rounds, each run a process).
 - **A woken lane's walk** of a body token takes 1.8 to 2 times the first
   lane's (15 ns on the synthetic units). The first lane's CPU, 2, has the
   performance governor and energy preference; the others, powersave and
@@ -371,7 +398,10 @@ whichever lane takes first, which may be a woken one: two lanes read
 `00200.c`, a body of 20,420 tokens beside one of 30, 19% slower than one did.
 That is why the rule counts the largest body twice. Leaving the largest bodies
 to the first lane would let a unit of one large body beside many smaller ones
-take the lanes it pays for, which the rule now forgoes.
+take the lanes it pays for, which the rule now forgoes. A unit the rule reads
+on one lane still goes through `lane_run`, which pins its lane and puts its
+affinity back: 0.6 to 7.5 µs of the dispatch on the 9700X, which a direct call
+would spare.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external
