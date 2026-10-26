@@ -364,7 +364,11 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     check_test_program_source_char(test, source, name, clang, false);
 }
 
-static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
+// A program fixture checked and lowered by both paths: accepted or not, lowered or refused, with the references and
+// initializations it keeps; and, for a refusal with `reason`, the feature the refusal names
+// (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
+static void check_test_program_boundary_reason(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
+                                               uint32_t initializations, const char* reason)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -420,6 +424,8 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                 const bool lowered_ok = check_program_lower(&lowered, &program, path == 0, &output, &scratch);
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
+                snprintf(description, sizeof(description), "%s: the refusal names its feature", name);
+                check_test_expect(test, reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0), description);
                 if (!lowered_ok)
                 {
                     check_test_expect(test, output.length == mark && lowered.functions == 0 && lowered.count == 0 && program.controls == controls && program.status == CHECK_PROGRAM_OK,
@@ -464,6 +470,11 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
+{
+    check_test_program_boundary_reason(test, source, name, accepted, machine, references, initializations, NULL);
 }
 
 #include "c_check_program_select_test.c"
@@ -1318,8 +1329,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, false, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
-    // GNU's complex integer types aren't lowered.
-    check_test_program_boundary(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1);
+    // The complex types check_lower_complex doesn't take are refused by what they need: GNU's complex integer types,
+    // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
+    // C; __float128 is its spelling).
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
+                                       "complex types other than _Complex float, double and long double");
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
+                                       "complex types other than _Complex float, double and long double");
     // The 128-bit integers: lowered, but _BitInt(128) and a bit-field of them spread over more than 8 bytes.
     check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, false, 0, 1);

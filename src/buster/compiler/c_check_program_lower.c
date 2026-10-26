@@ -410,7 +410,10 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     }
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
-        feature = "complex integer types";
+        // One check_lower_complex doesn't take: GNU's complex integer types, or a complex type of another floating
+        // type (_Complex _Float128, _Complex _Float16).
+        const TypeId element = type_unqualified(type_strip_aligned(types, type_element(types, base)));
+        feature = type_kind(types, element) == BUSTER_TYPE_KIND_INTEGER ? "complex integer types" : "complex types other than _Complex float, double and long double";
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
@@ -4631,6 +4634,11 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
                 {
                     // A memory class's value is a frame object too (check_lower_memory_class), aligned to 16.
                     local = check_lower_object(&writer, type_size(types, local_type), alignment);
+                }
+                else if (!type_kind_is_array(kind) && check_lower_class(types, local_type) == UINT8_MAX)
+                {
+                    // A type no class holds and that isn't an object's: what its values need (check_lower_type_feature).
+                    check_lower_unsupported(&writer, check_lower_type_feature(types, local_type));
                 }
                 else if (type_kind_is_array(kind) || alignment > 3)
                 {
