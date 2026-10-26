@@ -271,9 +271,9 @@ static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint3
 static uint32_t parse_test_clang_processes(uint32_t count)
 {
     uint64_t mask[16] = { 0 };
-    const long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask);
+    const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
     uint32_t cpus = 0;
-    for (long i = 0; i < bytes / (long)sizeof(mask[0]); i += 1)
+    for (uint32_t i = 0; known && i < BUSTER_ARRAY_LENGTH(mask); i += 1)
     {
         cpus += (uint32_t)__builtin_popcountll(mask[i]);
     }
