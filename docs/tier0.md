@@ -1161,13 +1161,30 @@ path's 11.1.
   any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
   are the same bytes as main's.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
-  The vector path is still about 2.3 times that; the budget is not met.
+  On the generated programs the vector path's cycles per entry are about 2.3 times that. On `sqlite3.c` (below) the
+  three stages take 41 to 42 cycles per output token, 1.3 times the budget: it is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
   vector path's time:
   - emission 21%, fusion and depths (P0 to P4) 16%, selection 13% (the slot gather the largest part), measuring 10%;
   - the call emitter and its count 14% together, for the 3.6% of entries that are deferred;
   - the immediates' choice (`x86_choose_forms`) and applying it 11%;
   - the homes, the frame, the prologue and the per-function setup 15%.
+
+**On `sqlite3.c`** (`benchmark-backend-source`, [record](https://github.com/buster14a/buster-performance/tree/9a5bad45a0e39305ee4f426f98b171a105d0f659/docs/measurements/backend-source-136-2026-10-26)):
+the functions `-c` lowers of the frozen SQLite 3.53.2 amalgamation, with the 9700X job's options. That is 2,602
+functions, 400,995 typed entries and 366,044 records (0.91 per entry, against the generated programs' 1.15), with
+3.49% of the entries deferred. The 9700X, CPU 2, medians of 21 passes, the range over three processes:
+
+| Variant | ns per entry | Cycles per entry | Instructions per entry | Cycles per record | IPC |
+| --- | --- | --- | --- | --- | --- |
+| Vector path | 11.4–11.7 | 63.1–64.7 | 152.7 | 69.1–70.9 | 2.36–2.42 |
+| Scalar path | 30.8–30.9 | 170.9–171.3 | 526.7 | 187.2–187.7 | 3.07–3.08 |
+| `size_branches` | 0.94–0.95 | 5.2 | 11.1 | 5.7 | 2.1 |
+| `x86_encode` | 0.70–0.72 | 3.9–4.0 | 14.2 | 4.3–4.4 | 3.6 |
+
+- The vector path takes 62.6 cycles per entry alone, and 63.5 after 200 ms of the scalar path.
+- Real code costs less per entry than the generator's (79.6 cycles there): it makes fewer records per entry.
+- The three stages take about 5.3 ms for the file, 41 to 42 cycles for each of its 706,237 output tokens.
 
 **Generated code against clang -O0** (the cross-check's 60 programs for each of seeds 1, 2, 3, 5, 7 and 11, on the
 9700X, each run alone under its lock and pinned to CPU 2):
