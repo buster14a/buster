@@ -199,6 +199,23 @@ static void check_test_intrinsic_input_fixture(CheckTest* test, const CheckIntri
             check_test_expect(test, initialized && output.intrinsic_declaration_capacity == expected_declarations &&
                               output.intrinsic_call_capacity == expected_calls,
                               "deduplicated sizing matches an independent per-operand catalog scan");
+            for (uint32_t limit = 0; limit < 2; limit += 1)
+            {
+                Arena bounded = scratch;
+                bounded.length = 0;
+                bounded.capacity = limit == 0 ? 0 : (uint64_t)identifiers.count * sizeof(uint32_t) - 1;
+                Arena isolated = arena;
+                const uint64_t mark = isolated.length;
+                CheckInput bounded_output = { 0 };
+                CheckInputReader bounded_reader = { .output = &bounded_output, .parser = &parser, .pp = &pp,
+                                                   .arena = &isolated, .scratch = &bounded };
+                const bool bounded_ok = check_input_intrinsic_initialize(&bounded_reader);
+                check_test_expect(test, bounded_ok == (expected_declarations == 0) && bounded_output.resource == (expected_declarations != 0) &&
+                                  bounded_reader.intrinsic_names == 0 && bounded_output.intrinsic_ids == 0 &&
+                                  bounded_output.intrinsic_declarations == 0 && bounded_output.intrinsic_calls == 0 &&
+                                  bounded.length == 0 && isolated.length == mark,
+                                  "insufficient scratch preserves no-hit success and rolls back an intrinsic hit");
+            }
             uint32_t prepared = 0;
             uint32_t failed = 0;
             uint32_t first_argument_call = BUSTER_CHECK_NONE;
@@ -408,7 +425,7 @@ static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* tes
         },
         {
             "ordinary source needs no intrinsic storage",
-            "int f(int x){return x+1;}\n",
+            "int f(int a,int b,int c,int d,int e,int g,int h,int i,int j){return a+b+c+d+e+g+h+i+j+a+b+c;}\n",
             0, 0, 0, { 0 }, false,
         },
         {

@@ -83,6 +83,7 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
     uint32_t declarations = 0;
     uint32_t calls = 0;
     bool valid = true;
+    bool without_cache = false;
     for (uint32_t token = 0; valid && token <= parser->tokens.count; token += 1)
     {
         if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
@@ -90,21 +91,37 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
         {
             // #113's deferred bodies are read after this pass, which sizes the tables for them too, as source order does.
             const uint32_t name = parser->tokens.names[token];
-            if (cache == 0)
+            if (cache == 0 && !without_cache)
             {
                 cache = arena_push_array(reader->scratch, table->count, sizeof(uint32_t), 64);
-                valid = cache != 0;
-                if (valid)
+                without_cache = cache == 0;
+                if (!without_cache)
                 {
                     memset(cache, 0xff, (uint64_t)table->count * sizeof(uint32_t));
                 }
             }
-            if (valid && cache[name] == UINT32_MAX)
+            bool first = !without_cache && cache[name] == UINT32_MAX;
+            if (without_cache)
+            {
+                // With no scratch, keep exact deduplication by searching earlier eligible operands. This slow path
+                // needs no storage; an exact hit still fails as before because its tables require the cache.
+                first = true;
+                for (uint32_t earlier = 0; first && earlier < token; earlier += 1)
+                {
+                    first = parser->tokens.kinds[earlier] != PARSE_KIND_IDENTIFIER || parser->tree.roles[earlier] != PARSE_ROLE_OPERAND ||
+                            (output->deferred_tokens != 0 && reader->deferred == 0 && output->deferred_tokens[earlier]) ||
+                            parser->tokens.names[earlier] != name;
+                }
+            }
+            if (first)
             {
                 const InternSpan span = table->spans[name];
                 names[lanes] = (BuiltinIntrinsicName){ (const char*)table->records + span.offset, span.length };
                 names_in_batch[lanes] = name;
-                cache[name] = 0;
+                if (!without_cache)
+                {
+                    cache[name] = 0;
+                }
                 lanes += 1;
             }
         }
@@ -115,8 +132,12 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
             {
                 if (infos[lane] != 0)
                 {
-                    cache[names_in_batch[lane]] = UINT32_C(0x80000000) | (uint32_t)(infos[lane] - builtin_intrinsic_infos);
-                    declarations += 1;
+                    valid = !without_cache;
+                    if (valid)
+                    {
+                        cache[names_in_batch[lane]] = UINT32_C(0x80000000) | (uint32_t)(infos[lane] - builtin_intrinsic_infos);
+                        declarations += 1;
+                    }
                 }
             }
             lanes = 0;
