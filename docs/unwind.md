@@ -150,15 +150,26 @@ with a relocation per function.
 
 `test-check-debug --cross-check` (`c_check_unwind_test.c`) runs a fixture whose
 function counts the frames above it with glibc's `backtrace()`, from `main`,
-from a function with a variable-length array that a computed goto's label calls,
-and from one with values live across the call: by default and with
-`-funwind-tables` or `-g` after `-fno-asynchronous-unwind-tables`, the
-unwinder walks through every function to libc's start (by each path, the same
-bytes); with `-fno-asynchronous-unwind-tables` alone, it stops at the first.
-The object has one CIE and an FDE per function, each relocated, and walks alike
-linked by GNU ld, lld and `link-foreign`; without tables, it has no `.eh_frame`.
-GDB's backtrace at every instruction of each function, stepping over calls,
-gives the function and its callers.
+from a function with a variable-length array that each of a computed goto's
+labels calls, and from one with values live across the call (called with a
+positive and a negative argument, so that both arms of its last `?:` run): by
+default and with `-funwind-tables` or `-g` after
+`-fno-asynchronous-unwind-tables`, the unwinder walks through every function to
+libc's start (by each path, the same bytes); with
+`-fno-asynchronous-unwind-tables` alone, it stops at the first. The object has
+one CIE and an FDE per function, each relocated, and walks alike linked by GNU
+ld, lld and `link-foreign`; without tables, it has no `.eh_frame`. The options'
+rule is checked on objects against clang's of the same fixture with the same
+options (those, `-ffreestanding` and `-fasynchronous-unwind-tables` after it,
+`-fexceptions`, each order of `-fasynchronous-unwind-tables` and
+`-fno-asynchronous-unwind-tables`, and `-fno-unwind-tables` after
+`-funwind-tables` with the asynchronous tables on and off): clang's object has
+an FDE per function exactly where ours has, in `.debug_frame` for `-g` alone.
+Every function of the fixture calls, so `-fexceptions`'s FDEs are every
+function's in clang's object too. GDB's backtrace at every instruction each
+function runs, stepping over calls through as many of its calls as its paths
+need, gives the function and its callers, and the steps must reach every
+instruction of GDB's disassembly of the function.
 
 ## Checks and measurements
 

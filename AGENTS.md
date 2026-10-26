@@ -619,7 +619,9 @@ designs and the compilers already built this way.
   `backtrace()` through a variable-length array's function, a computed goto's
   and one with values live across its call, by default and with each option
   that keeps or drops the tables, by each path, as executables and as objects
-  linked three ways, and gdb's backtrace at every instruction of each function.
+  linked three ways; the options' rule against clang's objects of the fixture;
+  and gdb's backtrace at every instruction of each function, whose steps must
+  reach every instruction of gdb's disassembly of it.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
