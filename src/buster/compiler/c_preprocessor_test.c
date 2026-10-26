@@ -1380,6 +1380,25 @@ static const PPTestCase pp_test_cases[] = {
     { .name = "invalid raw syntax is ordinary text with raw disabled", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-fno-raw-string-literals", .expected = "R \"bad space\"\n" },
     { .name = "invalid raw syntax with forced C89 raw literals", .source = "R\"bad space\"\n", .standard = "c89", .options = "-fraw-string-literals", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
     { .name = "invalid raw syntax in assembly", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-x assembler-with-cpp", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
+    // Named UCNs (#452) are refused where the lexer reads one in a token, as an invalid raw string literal's delimiter is
+    // diagnosed (pp_test_named_ucns has their places), and never in a skipped group, a literal or a comment, whose text
+    // clang's -E keeps as written.
+    { .name = "named UCNs in skipped groups, literals and comments",
+      .source = "#if 0\nint \\N{LATIN SMALL LETTER E WITH ACUTE};\n#define BAD \\N{DIGIT ZERO}\n#endif\n/* \\N{LATIN SMALL LETTER E WITH ACUTE} */ // \\N{DIGIT ZERO}\n"
+                "\"\\N{LATIN SMALL LETTER E WITH ACUTE}\" '\\N{DIGIT ZERO}' kept\n",
+      .standard = "gnu17", .expected = "\"\\N{LATIN SMALL LETTER E WITH ACUTE}\" '\\N{DIGIT ZERO}' kept\n" },
+    { .name = "a named UCN in an identifier", .source = "int \\N{LATIN SMALL LETTER E WITH ACUTE} = 1;\nint f(void) { return \\u00e9; }\n", .standard = "gnu17",
+      .expected = "", .fails = true, .errors = 1 },
+    { .name = "a named UCN in a macro diagnoses once", .source = "#define E \\N{LATIN SMALL LETTER E WITH ACUTE}\nE E\n", .standard = "gnu17", .expected = "",
+      .fails = true, .errors = 1 },
+    { .name = "a named UCN in an unused macro argument", .source = "#define DROP(x) kept\nDROP(a\\N{GREEK SMALL LETTER ALPHA})\n", .standard = "gnu17",
+      .expected = "", .fails = true, .errors = 1 },
+    { .name = "a named UCN in #if", .source = "#if \\N{GREEK SMALL LETTER ALPHA} || 1\nkept\n#endif\n", .standard = "gnu17", .expected = "", .fails = true,
+      .errors = 1 },
+    { .name = "named UCNs a line splice splits", .source = "a\\\\\nN{GREEK SMALL LETTER ALPHA} b\\N{GREEK\\\n SMALL LETTER ALPHA} 1\\N{DIGIT ONE}\n",
+      .standard = "gnu17", .expected = "", .fails = true, .errors = 3 },
+    { .name = "names no character has", .source = "a\\N{greek small letter alpha} \\N{NOT A NAME}\n", .standard = "gnu17", .expected = "", .fails = true,
+      .errors = 2 },
     { .name = "opaque raw-looking query with no lexical overlap", .source = "#define HI __has_include\n#if HI(<R\"bad\"x>)\nbad\n#endif\nafter\n", .standard = "gnu17", .expected = "after\n" },
     { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
     { "raw strings resume after an opaque direct header", "#include <R\"(x> R\"(a\nb)\"\nafter\n", 0, "gnu17", "header\nafter\n", false, 1, "-I%d", pp_test_files_opaque_raw },
@@ -4144,6 +4163,216 @@ static bool pp_test_raw_query_capacity(const char* directory, bool with_clang)
     return result;
 }
 
+// #452's refusal of named universal character names (\N{...}): a case for pp_test_named_ucns, with the places
+// ("line:column" each, in order) of the errors it must give.
+typedef struct PPNamedUcnCase PPNamedUcnCase;
+struct PPNamedUcnCase
+{
+    const char* name;
+    const char* source;
+    const char* standard;
+    const char* places;
+};
+
+// Appends the places (as line << 32 | column, `shift` columns to the left) of the diagnostics of `text` whose line holds
+// `message` to `places`, which has room for `capacity` and holds `*count`. Returns false if one has no place or no room.
+static bool pp_test_named_places(const char* text, const char* message, uint32_t shift, uint64_t* places, uint32_t capacity, uint32_t* count)
+{
+    bool result = true;
+    for (const char* at = text != 0 ? text : ""; result && *at != 0;)
+    {
+        const char* end = strchr(at, '\n');
+        const size_t length = end != 0 ? (size_t)(end - at) : strlen(at);
+        char line[1024];
+        const size_t kept = length < sizeof(line) - 1 ? length : sizeof(line) - 1;
+        memcpy(line, at, kept);
+        line[kept] = 0;
+        if (strstr(line, message) != 0)
+        {
+            uint32_t row = 0;
+            uint32_t column = 0;
+            result = sscanf(line, "%*[^:]:%u:%u:", &row, &column) == 2 && column > shift && *count < capacity;
+            if (result)
+            {
+                places[*count] = (uint64_t)row << 32 | (column - shift);
+                *count += 1;
+            }
+        }
+        at = end != 0 ? end + 1 : at + length;
+    }
+    return result;
+}
+
+// Sorts `count` places and drops their repeats: the number left.
+static uint32_t pp_test_named_unique(uint64_t* places, uint32_t count)
+{
+    for (uint32_t i = 1; i < count; i += 1)
+    {
+        const uint64_t place = places[i];
+        uint32_t j = i;
+        while (j > 0 && places[j - 1] > place)
+        {
+            places[j] = places[j - 1];
+            j -= 1;
+        }
+        places[j] = place;
+    }
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        if (result == 0 || places[result - 1] != places[i])
+        {
+            places[result] = places[i];
+            result += 1;
+        }
+    }
+    return result;
+}
+
+// Named UCNs, which buster refuses where the lexer reads one in a token (#452): each is an error at its backslash, as
+// many as there are, by both kernels, wherever clang's lexer reads it as it reads a raw string literal's delimiter (in
+// active text, a directive's line, a macro's definition once and an unused argument, and not in a skipped group, a
+// literal or a comment); with or without line splices, in an identifier, a pp-number and an unknown token, beside \u, \U
+// and UTF-8 spellings of the same character, which are no error. With `with_clang`, clang must put a diagnostic at each
+// of those places and no other: its -pedantic warning that a named UCN is its extension, for a name Unicode has, or its
+// error that a name is none, at the name, three columns after the backslash of the \N{ the cases write without splices.
+// clang accepts a name Unicode has where buster refuses it, so the -E texts are never compared.
+static bool pp_test_named_ucns(const char* directory, bool with_clang)
+{
+    static const PPNamedUcnCase cases[] = {
+        {
+            .name = "a named UCN beside the character's other spellings",
+            .source = "int \\N{LATIN SMALL LETTER E WITH ACUTE} = 1;\nint f(void) { return \xC3\xA9; }\nint g(void) { return \\u00e9 + \\U000000E9 + \\u{e9}; }\n",
+            .standard = "gnu17",
+            .places = "1:5",
+        },
+        {
+            .name = "named UCNs in tokens, directives and macros",
+            .source = "x\\N{GREEK SMALL LETTER ALPHA}y\n"
+                      "1\\N{DIGIT ONE}\n"
+                      "\\N{GREEK SMALL LETTER ALPHA}\n"
+                      "x\\\\\nN{GREEK SMALL LETTER ALPHA}\n"
+                      "z\\N{GREEK SMALL\\\n LETTER ALPHA}\n"
+                      "#define A \\N{GREEK SMALL LETTER ALPHA}\n"
+                      "A A\n"
+                      "#define DROP(x) kept\n"
+                      "DROP(\\N{GREEK SMALL LETTER ALPHA})\n"
+                      "#if \\N{GREEK SMALL LETTER ALPHA}\n"
+                      "#elif \\N{GREEK SMALL LETTER ALPHA}\n"
+                      "#endif\n"
+                      "#if 0\n"
+                      "\\N{GREEK SMALL LETTER ALPHA}\n"
+                      "#endif\n"
+                      "\"\\N{GREEK SMALL LETTER ALPHA}\" '\\N{DIGIT ZERO}' /* \\N{GREEK SMALL LETTER ALPHA} */ // \\N{DIGIT ZERO}\n",
+            .standard = "gnu17",
+            .places = "1:2 2:2 3:1 4:2 6:2 8:11 11:6 12:5 13:7",
+        },
+        {
+            .name = "a named UCN whose backslash is a trigraph",
+            .source = "x?" "?/N{GREEK SMALL LETTER ALPHA} ?" "?/N{DIGIT ZERO}\n",
+            .standard = "c17",
+            .places = "1:2 1:33",
+        },
+        {
+            .name = "names Unicode doesn't have",
+            .source = "\\N{LATIN SMALL LETTER NOT A THING}\na\\N{latin small letter a}\n",
+            .standard = "gnu17",
+            .places = "1:1 2:2",
+        },
+    };
+    uint32_t failures = 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const PPTestCase test = { .name = cases[c].name, .source = cases[c].source, .standard = cases[c].standard, .expected = "" };
+        char path[4096];
+        bool result = pp_test_write_case(&test, directory, path, sizeof(path));
+        char text[16384];
+        char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+        const int argument_count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
+        uint64_t wanted[32];
+        uint32_t wanted_count = 0;
+        for (const char* at = cases[c].places; result && *at != 0;)
+        {
+            uint32_t row = 0;
+            uint32_t column = 0;
+            int used = 0;
+            result = sscanf(at, " %u:%u%n", &row, &column, &used) == 2 && wanted_count < BUSTER_ARRAY_LENGTH(wanted);
+            if (result)
+            {
+                wanted[wanted_count] = (uint64_t)row << 32 | column;
+                wanted_count += 1;
+                at += used;
+            }
+        }
+        for (uint32_t k = 0; result && k < 2; k += 1)
+        {
+            Arena arena = arena_reserve(1ull << 20);
+            PPOptions options;
+            const char* input;
+            const char* output;
+            bool markers;
+            result = pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+            char* diagnostics = 0;
+            size_t length = 0;
+            FILE* stream = result ? open_memstream(&diagnostics, &length) : 0;
+            options.scalar = k == 1;
+            options.diagnostics = stream;
+            static InternTable table;
+            static Preprocessor pp;
+            const bool ready = stream != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+            const bool ran = ready && pp_run(&pp, path);
+            const uint32_t errors = ready ? pp.errors : 0;
+            if (ready)
+            {
+                pp_release(&pp);
+                intern_release(&table);
+            }
+            result = stream != 0 && fclose(stream) == 0 && ready && !ran;
+            uint64_t places[32];
+            uint32_t count = 0;
+            result = result && pp_test_named_places(diagnostics, "error: \\N{...} escapes are not supported", 0, places, BUSTER_ARRAY_LENGTH(places), &count);
+            // Every error is one of these, each once and in order.
+            result = result && errors == count && count == wanted_count && memcmp(places, wanted, count * sizeof(uint64_t)) == 0;
+            if (!result)
+            {
+                printf("named UCNs: %s (%s kernels): %u errors, not the %u places written for it:\n%s", cases[c].name, k == 0 ? "vectorized" : "scalar",
+                       errors, wanted_count, diagnostics != 0 ? diagnostics : "");
+            }
+            free(diagnostics);
+            arena_release(&arena);
+        }
+        if (result && with_clang)
+        {
+            char* clang_arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 3];
+            for (int i = 0; i < argument_count; i += 1)
+            {
+                clang_arguments[i] = arguments[i];
+            }
+            clang_arguments[argument_count] = "-pedantic";
+            clang_arguments[argument_count + 1] = "-fno-caret-diagnostics";
+            PPClangOutput clang = pp_test_clang_process("clang", clang_arguments, argument_count + 2, path, false);
+            uint64_t places[64];
+            uint32_t count = 0;
+            result = clang.status != PP_CLANG_ERROR &&
+                     pp_test_named_places(clang.diagnostics, "warning: named escape sequences are a Clang extension", 0, places, BUSTER_ARRAY_LENGTH(places), &count) &&
+                     pp_test_named_places(clang.diagnostics, "is not a valid Unicode character name", 3, places, BUSTER_ARRAY_LENGTH(places), &count);
+            count = result ? pp_test_named_unique(places, count) : 0;
+            result = result && count == wanted_count && memcmp(places, wanted, count * sizeof(uint64_t)) == 0;
+            if (!result)
+            {
+                printf("named UCNs: %s: clang's diagnostics aren't at the %u places written for it:\n%s", cases[c].name, wanted_count,
+                       clang.diagnostics != 0 ? clang.diagnostics : "");
+            }
+            free(clang.text);
+            free(clang.diagnostics);
+        }
+        failures += !result;
+        pp_test_remove_case(&test, directory);
+    }
+    printf("named UCNs: %u of %lu cases fail%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(cases), with_clang ? " (Clang oracle)" : "");
+    return failures == 0;
+}
+
 // The count limit is gone, but real allocation/index exhaustion and an unchanged mask still fail closed. Restore
 // injected capacities before release; no failed repair may publish a new data index or overwrite a canonical view.
 static bool pp_test_raw_recovery_failures(void)
@@ -6516,6 +6745,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_raw_query_views(directory);
         passed_all &= pp_test_raw_query_capacity(directory, with_clang);
         passed_all &= pp_test_raw_recovery_failures();
+        passed_all &= pp_test_named_ucns(directory, with_clang);
         passed_all &= pp_test_prelude_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)

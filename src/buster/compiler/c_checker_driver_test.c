@@ -1062,6 +1062,55 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
     unlink(header);
 }
 
+// Named universal character names (\N{...}), which clang reads as its extension in C and buster refuses alike in an
+// identifier, in #if's character constants and in the checker's literals (#452): each source clang accepts must be
+// rejected, first at the named UCN's place (its backslash, or its literal's start), by both paths and by the default C
+// route when `executable` is given, without writing an object.
+static void check_test_driver_named_ucns(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        uint32_t line;
+        uint32_t column;
+    } fixtures[] = {
+        { "a named UCN in an identifier", "int \\N{LATIN SMALL LETTER E WITH ACUTE} = 1;\nint f(void) { return \xC3\xA9 + \\u00e9; }\n", 1, 5 },
+        { "a named UCN in a later identifier", "int \xC3\xA9 = 1;\nint f(void)\n{\n    return \\N{LATIN SMALL LETTER E WITH ACUTE};\n}\n", 4, 12 },
+        { "a named UCN in #if's character constant", "#if '\\N{DIGIT ZERO}' == 48\nint zero;\n#endif\n", 1, 5 },
+        { "a named UCN in a string literal", "const char *s = \"\\N{LATIN SMALL LETTER E WITH ACUTE}\";\n", 1, 17 },
+        { "a named UCN in a character constant", "int c = '\\N{DIGIT ZERO}';\n", 1, 9 },
+    };
+    const char* clang_arguments[] = { "-std=gnu17", "-w" };
+    const uint32_t routes = executable != NULL ? 4 : 2;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[384];
+        snprintf(source, sizeof(source), "%s/named-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/named-%u.o", directory, i);
+        CheckCorpusOracle oracle = { 0 };
+        const bool oracle_ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                                  check_corpus_clang_file(clang, clang_arguments, 2, source, &oracle);
+        snprintf(description, sizeof(description), "%s: clang accepts it", fixtures[i].name);
+        check_test_expect(test, oracle_ready && !oracle.rejected, description);
+        for (uint32_t route = 0; oracle_ready && route < routes; route += 1)
+        {
+            unlink(object);
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ready = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, false, lazy, &checked, &warnings);
+            snprintf(description, sizeof(description), "%s, %s %s: error at %u:%u, wanted at %u:%u", fixtures[i].name, route >= 2 ? "default CLI" : "direct",
+                     (route & 1) != 0 ? "scalar" : "vector", checked.line, checked.column, fixtures[i].line, fixtures[i].column);
+            check_test_expect(test, ready && checked.rejected && checked.line == fixtures[i].line && checked.column == fixtures[i].column, description);
+            check_test_expect(test, access(object, F_OK) != 0, "a refused named UCN writes no object");
+        }
+        unlink(object);
+        unlink(source);
+    }
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     CheckTest test = { 0 };
@@ -1454,6 +1503,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary)
     {
         check_test_driver_lazy(&test, clang, executable, directory);
+        check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
         if (executable != NULL)
         {
             check_test_driver_libraries(&test, executable, directory);

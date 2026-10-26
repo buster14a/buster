@@ -684,6 +684,10 @@ The test command fails if the oracle cannot run. It covers:
   Clang object bytes and relocations, guarded batches and transaction rollback,
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
+- Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
+  alike in identifiers and `#if`'s character constants (the preprocessor's
+  errors) and in literals (`invalid or unsupported literal`), at their places
+  (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
 
 Where clang accepts a constraint violation with a warning, the checker accepts
 it with clang's warning, as the semantic mutants require: an assignment that

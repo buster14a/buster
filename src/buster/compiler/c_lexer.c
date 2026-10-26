@@ -306,7 +306,8 @@
 //   - Digraphs have the kind of the punctuator they stand for (`<:` is `C_TOKEN_L_SQUARE`), like clang.
 //   - Header names aren't recognized: after `#include`, re-lex the `<...>` form from the source starting at the `<`.
 //   - A named universal character name `\N{...}` is accepted in an identifier if the name is written in capital
-//     letters, digits, spaces and hyphens; clang also checks that the name exists.
+//     letters, digits, spaces and hyphens; clang also checks that the name exists. The preprocessor refuses every named
+//     UCN its tokens have, at its backslash (#452): buster has no table of Unicode's character names to read one with.
 //
 // Requires Clang and AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ plus BMI2 (e.g. -march=znver4, znver5 or tigerlake).
 

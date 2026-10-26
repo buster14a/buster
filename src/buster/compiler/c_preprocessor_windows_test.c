@@ -88,10 +88,13 @@ static const char* const pp_window_test_literals[] = {
     "0", "42", "0x1fUL", "1e+5", "1.5f", ".5", "1'000", "0b1010", "'a'", "'\\n'", "u8'a'", "L'x'", "\"text\"", "\"a\\\"b\"", "u8\"s\"",
     "u\"s\"", "U\"s\"", "L\"wide\"", "\"open", "'open", "R\"(raw)\"", "LR\"d(raw)d\"", "u8R\"x(raw)x\"", "R\"(two\nlines)\"",
     "R\"delim(a ) b )delim\"", "R\"bad delimiter(x)bad delimiter\"",
+    // Named UCNs (#452), whose errors are raw errors too: in an identifier, a pp-number, an unknown token, after a line
+    // splice, as a trigraph and in a literal.
+    "x\\N{GREEK SMALL LETTER ALPHA}", "1\\N{DIGIT ONE}", "\\N{lower case}", "a\\\\\nN{DIGIT ZERO}", "?" "?/N{DIGIT ZERO}", "\"\\N{DIGIT ZERO}\"",
 };
 
 static const char* const pp_window_test_gaps[] = {
-    " ", " ", " ", "\t", "\n", "\n", "\r\n", "\\\n", "\\  \n", "\\\r\n", "/* c */", "// line\n", "/* a\nb\r\nc */", "/* *\\\n/", "\n\n\n",
+    " ", " ", " ", "\t", "\n", "\n", "\r\n", "\\\n", "\\  \n", "\\\r\n", "/* c */", "// line\n", "/* a\nb\r\nc */", "/* *\\\n/", "\n\n\n", "/* \\N{DIGIT ZERO} */",
 };
 
 static const char* const pp_window_test_lines[] = {

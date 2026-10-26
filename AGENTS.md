@@ -805,7 +805,8 @@ designs and the compilers already built this way.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
-  check the driver and inline assembly against Clang; `test-checker-corpus`
+  check the driver and inline assembly against Clang (but for named UCNs,
+  which clang accepts and the driver refuses at their places, #452); `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
@@ -3409,9 +3410,10 @@ identifier must get the same id and every token the same leading-space bit, on:
 - 300,000 random spellings that grow the table three times;
 - growth after 1, 4, 15, 16, 31, 32, 63 or 64 new names, with preceding-batch
   repeats and long common-prefix names, then the same input again;
-- 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
-  and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
-  misalignments from a cache line;
+- 30 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
+  and trigraphs; comments; UCNs; named UCNs, which stay as written, apart from
+  the `\u`, `\U` and UTF-8 spellings of their characters (#452); identifiers of
+  62 to 65 bytes), each at all 64 misalignments from a cache line;
 - identifiers of every length from 1 to 130 bytes with a line splice (four
   spellings, one a trigraph's) at every position inside, or a UCN at every
   position, each followed by the same identifier written plainly: 50,570
@@ -3487,6 +3489,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     diagnostic/location comparisons; contextual recovery beyond 8/64/256
     repairs with earlier macro snapshots retained, and failure injection for
     allocation, data-index exhaustion and an unchanged recovery mask (#285);
+  - named UCNs (`\N{...}`, #452), refused where the lexer reads one in a token
+    (an identifier, a pp-number or an unknown token): in active text, a macro's
+    definition once and an unused argument, `#if` and `#elif` lines, after line
+    splices and as a trigraph, beside `\u`, `\U` and UTF-8 spellings, and with
+    names no character has; and no error in a skipped group, a literal or a
+    comment, whose `-E` text is clang's;
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
@@ -3508,6 +3516,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
+  `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
+  its error, three columns before it;
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that

@@ -438,12 +438,19 @@ typedef enum PPDirectiveKind
 // the file: `once`, the line cursor, and `prepared`, which says the unit has copied the record's prepared fields (a
 // copy's other fields are the record's).
 typedef struct PPFileData PPFileData;
+// PPRawError's kind for a named universal character name (\N{...}) that the lexer read in an identifier, a pp-number or
+// an unknown token. buster refuses it there, as pp_parse_ucn refuses one in a character constant and the checker one in
+// a literal: reading it needs Unicode's table of character names, which buster doesn't have (#452). clang reads it, as
+// an extension in C.
+#define BUSTER_PP_NAMED_UCN_ERROR 0x80
+
 typedef struct PPRawError PPRawError;
 struct PPRawError
 {
     uint32_t token;
     uint32_t offset;
-    CRawStringError kind;
+    // A CRawStringError, or BUSTER_PP_NAMED_UCN_ERROR.
+    uint8_t kind;
 };
 
 struct PPFileData
@@ -464,7 +471,8 @@ struct PPFileData
     // predefines, the command line), which isn't in the cache.
     uint32_t record;
     uint32_t token_count;
-    // Sorted exceptional UNKNOWN tokens; emission waits until their source context is known.
+    // The exceptional tokens the lexer reads with an error (an invalid raw string literal's UNKNOWN token, or a token with
+    // a named UCN), sorted by token; emission waits until their source context is known.
     PPRawError* raw_errors;
     uint32_t raw_error_count;
     // The lexer's kinds and starts, refinement's values (in place of the ends) and leading-space bits.
@@ -2684,6 +2692,188 @@ static bool pp_record_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileD
     return result;
 }
 
+// Where a file's named universal character names (\N{...}) can be: the candidates pp_scan_named_ucns counts
+// (pp_named_ucn_candidates), and the first's and the last's byte.
+typedef struct PPNamedUcnScan PPNamedUcnScan;
+struct PPNamedUcnScan
+{
+    uint32_t count;
+    uint64_t first;
+    uint64_t last;
+};
+
+// The candidates for a named UCN's backslash among bytes [b, end) of a source of `length` bytes, at most 64 of them, as
+// bits: a backslash (or with trigraphs a '/', the last byte of ??/) followed by 'N', by a line splice's backslash and a
+// blank or a line break, or with trigraphs by a '?' (a ??/ that splices the line). A named UCN's backslash is always one,
+// since its N follows it after any line splices; pp_named_ucn_at decides which of them are. No byte past `length` is
+// read: the loads are masked. The vector path and its scalar twin give the same bits.
+BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t length, uint64_t b, uint64_t end, bool trigraphs, bool vectorized)
+{
+    const uint32_t count = end - b < 64 ? (uint32_t)(end - b) : 64;
+    uint64_t result = 0;
+    if (vectorized)
+    {
+        const __mmask64 next_valid = length > b + 1 ? _bzhi_u64(~0ull, length - (b + 1) < 64 ? (uint32_t)(length - (b + 1)) : 64) : 0;
+        const __mmask64 after_valid = length > b + 2 ? _bzhi_u64(~0ull, length - (b + 2) < 64 ? (uint32_t)(length - (b + 2)) : 64) : 0;
+        const __m512i bytes_0 = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, count), bytes + b);
+        const __m512i bytes_1 = _mm512_maskz_loadu_epi8(next_valid, bytes + b + 1);
+        const __m512i bytes_2 = _mm512_maskz_loadu_epi8(after_valid, bytes + b + 2);
+        const __mmask64 slash = _mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('\\')) | (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('/')) : 0);
+        // A blank or a line break: ' ', or '\t' to '\r'.
+        const __mmask64 blank = _mm512_cmpeq_epi8_mask(bytes_2, _mm512_set1_epi8(' ')) |
+                                _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes_2, _mm512_set1_epi8('\t')), _mm512_set1_epi8('\r' - '\t'));
+        const __mmask64 next = _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('N')) | (_mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('\\')) & blank) |
+                               (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('?')) : 0);
+        result = slash & next;
+    }
+    else
+    {
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            const uint64_t i = b + k;
+            const uint8_t next = i + 1 < length ? bytes[i + 1] : 0;
+            const uint8_t after = i + 2 < length ? bytes[i + 2] : 0;
+            const bool slash = bytes[i] == '\\' || (trigraphs && bytes[i] == '/');
+            const bool blank = after == ' ' || (after >= '\t' && after <= '\r');
+            const bool candidate = slash && (next == 'N' || (next == '\\' && blank) || (trigraphs && next == '?'));
+            result |= (uint64_t)candidate << k;
+        }
+    }
+    return result;
+}
+
+// Adds the candidates among bytes [begin, end) of a source of `length` bytes (pp_named_ucn_candidates) to `scan`. The
+// preparation runs it on bytes it has just lexed, which are still in the caches; most files have no candidate.
+static void pp_scan_named_ucns(const uint8_t* bytes, uint64_t length, uint64_t begin, uint64_t end, bool trigraphs, bool vectorized, PPNamedUcnScan* scan)
+{
+    for (uint64_t b = begin; b < end; b += 64)
+    {
+        const uint64_t bits = pp_named_ucn_candidates(bytes, length, b, end, trigraphs, vectorized);
+        if (BUSTER_UNLIKELY(bits != 0))
+        {
+            scan->first = scan->count == 0 ? b + (uint64_t)__builtin_ctzll(bits) : scan->first;
+            scan->last = b + 63 - (uint64_t)__builtin_clzll(bits);
+            scan->count += (uint32_t)__builtin_popcountll(bits);
+        }
+    }
+}
+
+// Is candidate byte `i` of a file (pp_named_ucn_candidates) the backslash (or the end of ??/) of a named UCN that the
+// lexer read in an identifier, a pp-number or an unknown token? Then `token` is that token and `position` the UCN's first
+// byte. A UCN in a literal or a comment is in none: #if refuses one in a character constant when it reads it
+// (pp_parse_ucn), and the checker one in a literal. Within a token, a named UCN is one whenever its name is written with
+// capital letters, digits, spaces and hyphens (read_ucn: buster doesn't know which names Unicode has), and an unknown token
+// of its own otherwise, which clang refuses too, as no character's name.
+static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint64_t i, uint32_t* token, uint64_t* position)
+{
+    // As pp_file_lexer reads the file.
+    const ScalarLexer lexer = {
+        .source = data->bytes,
+        .length = data->length,
+        .trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
+        .cplusplus = false,
+    };
+    const bool trigraph = data->bytes[i] == '/';
+    const uint64_t start = trigraph && i >= 2 ? i - 2 : i;
+    bool result = !trigraph || (lexer.trigraphs && i >= 2 && data->bytes[i - 1] == '?' && data->bytes[i - 2] == '?');
+    uint64_t size = 0;
+    uint64_t at = 0;
+    result = result && get_char(&lexer, start, &size, &at) == '\\' && at == start;
+    uint64_t kind_size = 0;
+    result = result && peek_char(&lexer, start + size, &kind_size) == 'N';
+    uint64_t end = 0;
+    uint32_t code_point = 0;
+    result = result && read_ucn(&lexer, start, &end, &code_point);
+    // The token it may be in: the last that starts at it or before it.
+    uint32_t low = 0;
+    uint32_t high = result ? data->token_count : 0;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = data->starts[middle] <= start;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    result = result && low != 0;
+    const uint32_t t = low != 0 ? low - 1 : 0;
+    const uint8_t kind = result ? data->kinds[t] & 0x7F : C_TOKEN_KIND_COUNT;
+    if (kind == C_TOKEN_UNKNOWN)
+    {
+        // An unknown token holds a UCN only when it is one (its name isn't written as read_ucn takes one).
+        result = data->starts[t] == start;
+    }
+    else if (kind == C_TOKEN_RAW_IDENTIFIER)
+    {
+        // Its end, which its id may have replaced already.
+        result = start < refine_identifier_end(data->bytes, data->length, data->starts[t], refine_flags);
+    }
+    else if (kind == C_TOKEN_NUMERIC_CONSTANT)
+    {
+        result = start < data->values[t];
+    }
+    else
+    {
+        result = false;
+    }
+    *token = t;
+    *position = start;
+    return result;
+}
+
+// Adds an error of kind BUSTER_PP_NAMED_UCN_ERROR to the file's raw errors for each named UCN in an identifier, a
+// pp-number or an unknown token (pp_named_ucn_at), at its backslash, as clang places its -pedantic warning that a named
+// UCN is its extension, and those after pp_record_raw_errors's, in the arena they were just pushed to: the token
+// order the readers' search takes. Only a file with a candidate (`scan`, pp_scan_named_ucns) reads its bytes again, from
+// the first candidate to the last. Returns false if the arena has no room.
+static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileData* data, const PPNamedUcnScan* scan)
+{
+    bool result = true;
+    if (BUSTER_UNLIKELY(scan->count != 0))
+    {
+        const uint64_t mark = arena->length;
+        const uint32_t raw_count = data->raw_error_count;
+        PPRawError* errors = arena_push_array(arena, (uint64_t)raw_count + scan->count, sizeof(PPRawError), _Alignof(PPRawError));
+        result = errors != 0;
+        const bool trigraphs = (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
+        uint32_t named = 0;
+        for (uint64_t b = scan->first; result && b <= scan->last; b += 64)
+        {
+            for (uint64_t bits = pp_named_ucn_candidates(data->bytes, data->length, b, scan->last + 1, trigraphs, prepare->vectorized); bits != 0; bits &= bits - 1)
+            {
+                uint32_t token = 0;
+                uint64_t position = 0;
+                if (pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position))
+                {
+                    errors[raw_count + named] = (PPRawError){ .token = token, .offset = (uint32_t)position, .kind = BUSTER_PP_NAMED_UCN_ERROR };
+                    named += 1;
+                }
+            }
+        }
+        if (result && named != 0)
+        {
+            // The raw string errors and these merged by token, in place: the next one written is never past the next of
+            // these to read.
+            uint32_t raw = 0;
+            uint32_t ucn = 0;
+            for (uint32_t k = 0; k < raw_count + named; k += 1)
+            {
+                const bool take_raw = raw < raw_count && (ucn == named || data->raw_errors[raw].token <= errors[raw_count + ucn].token);
+                errors[k] = take_raw ? data->raw_errors[raw] : errors[raw_count + ucn];
+                raw += take_raw;
+                ucn += !take_raw;
+            }
+            data->raw_errors = errors;
+            data->raw_error_count = raw_count + named;
+            arena_pop_to(arena, (uint64_t)((uint8_t*)errors - arena->base) + (uint64_t)data->raw_error_count * sizeof(PPRawError));
+        }
+        else if (result)
+        {
+            arena_pop_to(arena, mark);
+        }
+    }
+    return result;
+}
+
 // pp_prepare_into for the whole file at once: lexed, then refined, then indexed.
 static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
 {
@@ -2734,7 +2924,11 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
         data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
-        bool refined = data->space != 0 && pp_record_raw_errors(prepare, arena, data, pp_count_raw_candidates(prepare, data->kinds, data->token_count));
+        // The named UCNs' candidates (pp_scan_named_ucns), while the bytes just lexed are in the caches.
+        PPNamedUcnScan named = { 0 };
+        pp_scan_named_ucns(data->bytes, data->length, 0, data->length, (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0, prepare->vectorized, &named);
+        bool refined = data->space != 0 && pp_record_raw_errors(prepare, arena, data, pp_count_raw_candidates(prepare, data->kinds, data->token_count)) &&
+                       pp_record_named_ucns(prepare, arena, data, &named);
         if (refined && prepare->vectorized)
         {
             refined = refine_tokens(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values, data->space,
@@ -2913,6 +3107,9 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     uint64_t refined = 0;
     uint64_t counted = 0;
     uint32_t unknowns = 0;
+    // The named UCNs' candidates among the bytes before `named_scanned` (pp_scan_named_ucns).
+    PPNamedUcnScan named = { 0 };
+    uint64_t named_scanned = 0;
     uint32_t directives = 0;
     bool last = false;
     while (result == PP_PREPARE_DONE && !last)
@@ -2960,6 +3157,12 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         // The raw string errors' candidates (pp_record_raw_errors), counted while the window's kinds are in the caches.
         unknowns += result == PP_PREPARE_DONE ? pp_count_raw_candidates(prepare, data->kinds + counted, count - counted) : 0;
         counted = count;
+        // And the named UCNs' candidates among the bytes of the window's kept lines, while they are.
+        if (result == PP_PREPARE_DONE && at > named_scanned)
+        {
+            pp_scan_named_ucns(data->bytes, length, named_scanned, at, (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0, prepare->vectorized, &named);
+            named_scanned = at;
+        }
         const uint64_t complete = last ? count : count - count % BUSTER_REFINE_BLOCK_TOKENS;
         const uint64_t begin = refined;
         if (result == PP_PREPARE_DONE && complete > refined)
@@ -3007,7 +3210,8 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
             memcpy(data->space, space, words * sizeof(uint64_t));
             memset(data->space + words, 0, (count / 64 + 2 - words) * sizeof(uint64_t));
         }
-        result = data->space != 0 && pp_record_raw_errors(prepare, arena, data, unknowns) ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+        result = data->space != 0 && pp_record_raw_errors(prepare, arena, data, unknowns) && pp_record_named_ucns(prepare, arena, data, &named) ? PP_PREPARE_DONE
+                                                                                                                                         : PP_PREPARE_NO_MEMORY;
     }
     if (ticks != 0)
     {
@@ -5364,6 +5568,9 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     pp->unterminated += 1;
                     break;
                 }
+                case BUSTER_PP_NAMED_UCN_ERROR:
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "\\N{...} escapes are not supported");
+                    break;
                 case C_RAW_STRING_OK:
                     break;
             }
