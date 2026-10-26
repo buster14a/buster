@@ -274,8 +274,9 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
         const uint32_t token = parser->tokens.pragma_positions[i];
         uint32_t end = source;
         const bool complex = check_input_fp_name(&reader, source + 3, "CX_LIMITED_RANGE");
+        const bool contract = check_input_fp_name(&reader, source + 3, "FP_CONTRACT");
         if (token < before_token && check_input_fp_name(&reader, source + 2, "STDC") &&
-            (complex || check_input_fp_name(&reader, source + 3, "FENV_ACCESS")) && parse_pragma_at(&pp->output, source, &end))
+            (complex || contract || check_input_fp_name(&reader, source + 3, "FENV_ACCESS")) && parse_pragma_at(&pp->output, source, &end))
         {
             const bool recognized = check_input_fp_name(&reader, source + 4, "ON") || check_input_fp_name(&reader, source + 4, "OFF") ||
                                     check_input_fp_name(&reader, source + 4, "DEFAULT");
@@ -290,7 +291,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
                     .source_begin = source,
                     .source_end = end + 1,
                     .token = token,
-                    .kind = complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : CHECK_FP_PRAGMA_FENV_ACCESS,
+                    .kind = complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : contract ? CHECK_FP_PRAGMA_FP_CONTRACT : CHECK_FP_PRAGMA_FENV_ACCESS,
                     .warnings = impossible ? CHECK_FP_PRAGMA_INVALID_PLACEMENT : CHECK_FP_PRAGMA_UNKNOWN_STATE,
                 };
             }

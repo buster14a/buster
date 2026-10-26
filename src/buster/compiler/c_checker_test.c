@@ -2805,6 +2805,228 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             2023
         },
+        {
+            "unsigned one-bit _BitInt",
+            "unsigned _BitInt(1) a = 1;\n_BitInt(1) unsigned b;\ntypedef unsigned _BitInt(1) B1;\nB1 c;\nint f(void) { unsigned _BitInt(1) d = 1; return d + (int)sizeof d + (int)sizeof(unsigned _BitInt(1)); }\n",
+            false,
+            false
+        },
+        {
+            "signed one-bit _BitInt refused",
+            "int a;\n_BitInt(1) x;\n",
+            true,
+            false
+        },
+        {
+            "a typedef of an unsigned _BitInt keeps it unsigned",
+            "typedef unsigned _BitInt(8) U8;\nU8 x = 255;\n_Static_assert((U8)-1 > 0, \"unsigned\");\ntypedef _BitInt(8) S8;\n_Static_assert((S8)-1 < 0, \"signed\");\nint f(void) { U8 y = 200; return y > 100; }\n",
+            false,
+            false
+        },
+        {
+            "no_builtin on definitions",
+            "__attribute__((no_builtin(\"memset\"))) void f(void) {}\n__attribute__((no_builtin)) void g(void) {}\n__attribute__((no_builtin(\"memset\", \"memcpy\"))) void h(void) {}\n__attribute__((no_builtin(\"not_a_builtin\"))) void k(void) {}\nint x __attribute__((no_builtin(\"memset\")));\n",
+            false,
+            false
+        },
+        {
+            "no_builtin on a declaration refused",
+            "int a;\n__attribute__((no_builtin(\"memset\"))) void f(void);\n",
+            true,
+            false
+        },
+        {
+            "no_builtin with a number refused",
+            "int a;\n__attribute__((no_builtin(1))) void f(void) {}\n",
+            true,
+            false
+        },
+        {
+            "FP_CONTRACT at file scope and a compound's start",
+            "#pragma STDC FP_CONTRACT OFF\ndouble f(double a, double b) {\n#pragma STDC FP_CONTRACT ON\n return a * b + 1; }\n#pragma STDC FP_CONTRACT DEFAULT\ndouble g(double a) { if (a) {\n#pragma STDC FP_CONTRACT OFF\n return a; } return 0; }\n#pragma STDC FP_CONTRACT MAYBE\ndouble x;\n",
+            false,
+            false
+        },
+        {
+            "FP_CONTRACT inside a compound refused",
+            "double f(double a, double b) { double c = a * b;\n#pragma STDC FP_CONTRACT ON\n return c + 1; }\n",
+            true,
+            false
+        },
+        {
+            "loop hints before each kind of loop",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable) interleave(disable)\n for (int i = 0; i < n; i += 1) s += p[i];\n#pragma clang loop unroll(disable)\n while (n--) s += 1;\n#pragma clang loop unroll(full)\n do s += 1; while (s < 9);\n if (n)\n#pragma clang loop vectorize(assume_safety) interleave(assume_safety)\n while (n--) s += 1;\n#pragma clang loop vectorize(disable)\n#pragma clang loop interleave(disable)\n for (;;) break;\n return s; }\n",
+            false,
+            false
+        },
+        {
+            "loop hint counts and widths",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize_width(4) unroll_count(8) interleave_count(2)\n while (n--) s += 1;\n#pragma clang loop vectorize_width(4, scalable) pipeline(disable)\n while (n--) s += 1;\n#pragma clang loop vectorize_width(fixed) vectorize_predicate(enable) distribute(enable) pipeline_initiation_interval(3)\n while (n--) s += 1;\n#pragma clang loop unroll_count(0x10) vectorize_predicate(enable) vectorize(disable)\n while (n--) s += 1;\n#pragma clang loop unroll(disable) vectorize(disable),\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "the unroll pragmas",
+            "int f(int* p, int n) { int s = 0;\n#pragma unroll\n while (n--) s += 1;\n#pragma unroll 4\n while (n--) s += 1;\n#pragma unroll(4)\n while (n--) s += 1;\n#pragma nounroll\n while (n--) s += 1;\n#pragma unroll_and_jam 2\n while (n--) s += 1;\n#pragma nounroll_and_jam\n while (n--) s += 1;\n#pragma GCC unroll 4\n while (n--) s += 1;\n#pragma unroll 0\n while (n--) s += 1;\n#pragma nounroll 4\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "a loop hint before another statement refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable)\n s = 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint before a block refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable)\n { for (int i = 0; i < n; i += 1) s += p[i]; } return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint before a labeled loop refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n L: for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint after a do-while refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n do s += 1; while (--n);\n#pragma clang loop unroll(disable)\n return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint before a closing brace refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n}\n",
+            true,
+            false
+        },
+        {
+            "an unroll pragma before another statement refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma unroll\n s = 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint at file scope refused",
+            "#pragma clang loop vectorize(disable)\nint x;\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's invalid argument refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(maybe)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's invalid option refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorise(enable)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint without an option refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint without parentheses refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize enable\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint left open refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's zero count refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll_count(0)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's count past int refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop interleave_count(2147483648)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's floating count refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop interleave_count(1.5)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "duplicate loop hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable) unroll(enable)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "duplicate loop hints across pragmas refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop distribute(enable)\n#pragma clang loop distribute(disable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "duplicate loop hint counts refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize_width(4, fixed) vectorize_width(8)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll pragma beside a loop hint refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma unroll\n#pragma clang loop unroll(disable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "incompatible loop hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable) vectorize_width(4)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "incompatible unroll hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(enable) unroll_count(4)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "incompatible loop hints across pragmas refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n#pragma clang loop unroll_count(4)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "incompatible pipeline hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop pipeline(disable) pipeline_initiation_interval(3)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's constant expression unsupported",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll_count(4 + 4)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        {
+            "an inferred array of compound literals, calls and conditionals",
+            "struct L { unsigned i; unsigned t; };\nstruct L g(int);\nunsigned f(int s, unsigned a, struct L x) {\n const struct L r[] = { s ? (struct L){ 0, a } : x, (struct L){ .i = 1, .t = a }, g(s), (x), s ? x : (struct L){ 4, a }, { 2, 3 } };\n _Static_assert(sizeof r == 6 * sizeof(struct L), \"six elements\");\n return r[0].t; }\n",
+            false,
+            false
+        },
+        {
+            "an inferred array with braces elided",
+            "struct L { unsigned i; unsigned t; };\nunsigned f(unsigned a) {\n const struct L r[] = { a, a + 1, 2, 3 };\n _Static_assert(sizeof r == 2 * sizeof(struct L), \"two elements\");\n return r[1].t; }\n",
+            false,
+            false
+        },
     };
     enum
     {

@@ -1106,6 +1106,67 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
     }
 }
 
+// The type of the expression from `begin` to `end` that an inferring walk (check_initializer_infer_array, before the
+// expressions are checked) reads from the tree, at the expression's root, the one token whose parent is outside it: an
+// identifier's declared type, a compound literal's (at its opening parenthesis), the third operand's of a ?:, a
+// parenthesized expression's, and a call's result where it calls a function by its name. 0 for another expression,
+// which the caller leaves to the last typed token in it. A compound literal's own tokens (a member's value) don't count:
+// `(struct L){ .target = n }` is a struct L, not n's type. Each step narrows the range, so the walk ends.
+static TypeId check_init_root_type(const CheckInitWalker* walker, uint32_t begin, uint32_t end)
+{
+    const Parser* parser = walker->parser;
+    const TypeId* types = walker->expression_types;
+    TypeId result = 0;
+    bool descending = types != 0 && begin < end && end <= parser->tokens.count;
+    while (descending)
+    {
+        uint32_t root = BUSTER_CHECK_NONE;
+        uint32_t roots = 0;
+        for (uint32_t token = begin; token < end; token += 1)
+        {
+            const uint32_t parent = parser->tree.parents[token];
+            const bool outside = parent < begin || parent >= end;
+            root = outside ? token : root;
+            roots += outside;
+        }
+        const uint8_t role = roots == 1 ? parser->tree.roles[root] : PARSE_ROLE_NONE;
+        descending = false;
+        if (role == PARSE_ROLE_OPERAND && parser->tokens.kinds[root] == PARSE_KIND_IDENTIFIER)
+        {
+            result = types[root];
+        }
+        else if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+        {
+            // Its `(`, whose `)` is the body's child.
+            for (uint32_t token = begin; token < root && result == 0; token += 1)
+            {
+                const uint32_t close = parser->tree.parents[token];
+                result = parser->tree.roles[token] == PARSE_ROLE_OPEN_COMPOUND && close < root && parser->tree.parents[close] == root ? types[token] : 0;
+            }
+        }
+        else if (role == PARSE_ROLE_CLOSE_TERNARY && root + 1 < end)
+        {
+            begin = root + 1;
+            descending = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_GROUP && parser->tree.roles[begin] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[begin] == root && begin + 1 < root)
+        {
+            end = root;
+            begin += 1;
+            descending = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_CALL && begin + 1 < root && parser->tree.roles[begin] == PARSE_ROLE_OPERAND &&
+                 parser->tokens.kinds[begin] == PARSE_KIND_IDENTIFIER && parser->tree.roles[begin + 1] == PARSE_ROLE_OPEN_CALL &&
+                 parser->tree.parents[begin + 1] == root)
+        {
+            TypeId callee = types[begin] != 0 ? type_strip_aligned(walker->types, types[begin]) : 0;
+            callee = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(walker->types, type_element(walker->types, callee)) : callee;
+            result = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_FUNCTION ? type_return(walker->types, callee) : 0;
+        }
+    }
+    return result;
+}
+
 static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t begin, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
@@ -1119,7 +1180,9 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
     if (!whole && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
     {
         TypeId source = node != BUSTER_CHECK_NONE ? walker->stream->values[node].type : 0;
-        if (walker->infer && walker->expression_types != 0)
+        const TypeId root = walker->infer ? check_init_root_type(walker, begin, end) : 0;
+        source = root != 0 ? root : source;
+        if (walker->infer && walker->expression_types != 0 && root == 0)
         {
             for (uint32_t token = begin; token < end; token += 1)
             {

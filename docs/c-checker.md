@@ -135,6 +135,40 @@ applies after the base completed it, is refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
+What this compiler's own `main.c` needed (#129) the checker takes as clang 23
+does, each rule checked against clang's answers on probes of it:
+
+- **Loop hints** (`c_check_loop_input.c`): `#pragma clang loop` with its ten
+  options, and `#pragma unroll`, `nounroll`, `unroll_and_jam`,
+  `nounroll_and_jam` and `GCC unroll`, as hints of the same categories. A state
+  takes its own words, and a count must be a positive integer constant that
+  fits an `int` (`vectorize_width` also `fixed` or `scalable`). No hint may come
+  twice in one category, across the pragmas before one loop too, nor a count
+  beside a state that rules it out (`unroll`'s every state, the others'
+  `disable`). A `for`, `while` or `do`-`while` loop must follow, in a function.
+  Errors are reported on the pragma's line, but a misplaced one's at the
+  statement after it, as clang reports them. A count here is a literal: another
+  constant expression (`4 + 4`, an enumerator) is refused as unsupported, not
+  guessed. Tier 0 has no loop transformation for the hints to steer, so nothing
+  keeps them.
+- **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
+  or a compound statement's start. Its state changes nothing, since nothing
+  here contracts `a * b + c` into a fused operation.
+- **`no_builtin`**, on a function's definition only: on another declaration of
+  a function it is an error, and on anything else it is ignored, as clang has
+  it.
+- **`unsigned _BitInt(1)`:** the declaration's specifiers read a `_BitInt`'s
+  width alone, so that their own `unsigned` decides its signedness. A typedef
+  of an unsigned `_BitInt` stays unsigned where it is used, which main didn't
+  have (`U8` of `typedef unsigned _BitInt(8) U8` was signed).
+- **An array of unknown size with struct elements:** the reader infers its size
+  before expressions have types, so whether an element initializes a whole
+  struct, or starts brace elision, comes from the tree: the element's root's
+  type, from an identifier's declaration, a compound literal's type, a `?:`'s
+  third operand, a parenthesized expression or a call of a function by its name.
+  It came from the last typed token in the element, and so a compound literal
+  with a member's value, `(struct L){ .target = n }`, read as `n`'s type.
+
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
 records declare/use/restore events as it elaborates, and each use's event
