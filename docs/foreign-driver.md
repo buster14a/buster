@@ -34,8 +34,9 @@ may run on: lanes past those share CPUs, and each of their syncs waits for a
 lane the scheduler has set aside. On more than one lane the command starts its
 threads once, a team (`lane_team_start`, "The command owns the threads" in the
 linker's design), as soon as its options are valid; the three stages run on
-them in turn, the threads sleeping between them, and the release stops them
-(#501). A link whose threads can't start fails before its resolution.
+them in turn, the threads sleeping between them and keeping their scratch
+arenas from one to the next (`lane_team_keep_scratch`), and the release stops
+them (#501). A link whose threads can't start fails before its resolution.
 `--time` reports, on standard
 error after the link, each stage's wall time (the arguments, the team's start,
 the interpreter's
