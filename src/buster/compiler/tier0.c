@@ -6890,7 +6890,9 @@ static void tier0_arrive(Tier0Validator* validator, uint64_t* hashes, uint8_t* s
     }
 }
 
-static Tier0Check tier0_validate(const Tier0Function* function)
+// tier0_validate's body, for a caller that inlines it whatever the function's other callers make clang decide
+// (check_program_lower_body's two copies, #426).
+static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(const Tier0Function* function)
 {
     Tier0Validator validator;
     memset(&validator, 0, sizeof(validator));
@@ -7354,6 +7356,11 @@ static Tier0Check tier0_validate(const Tier0Function* function)
     }
     scratch_end(scratch);
     return validator.check;
+}
+
+static Tier0Check tier0_validate(const Tier0Function* function)
+{
+    return tier0_validate_inline(function);
 }
 
 

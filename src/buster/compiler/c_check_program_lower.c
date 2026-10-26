@@ -879,7 +879,8 @@ static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t
 // `keep` (an assignment's value): one COPY, or COPYs of up to BUSTER_TIER0_MAX_COPY_BYTES each, the source's address
 // in a temporary between them. A kept destination's address goes in a temporary too, pushed again after the last COPY:
 // its consumer's class is read from the entry before it (tier0_validate), which a COPY, of class VOID, can't give.
-static void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
 {
     if (size == 0)
     {
@@ -1143,7 +1144,8 @@ static void check_lower_bit_read(CheckLowerWriter* writer, uint32_t packed)
 // The value on top of the stack, in the field's class, stored into the bit-field whose first byte's address local
 // `address` holds: its low `width` bits kept in a temporary; the unit read, the field's bits cleared and the value's
 // put in their place; the unit written back by its pieces. The value as the field now reads it stays unless `discard`.
-static void check_lower_bit_store(CheckLowerWriter* writer, uint32_t packed, uint32_t address, bool discard)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLowerWriter* writer, uint32_t packed, uint32_t address, bool discard)
 {
     const CheckLowerBitField field = check_lower_bit_unpack(packed);
     const uint32_t bytes = (field.shift + field.width + 7) / 8;
@@ -1262,7 +1264,8 @@ static void check_lower_truth(CheckLowerWriter* writer, TypeId type, bool negate
     }
 }
 
-static void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
 {
     const TypeTable* types = writer->program->types;
     const uint8_t source = check_lower_value_class(types, from);
@@ -1631,7 +1634,8 @@ static void check_lower_math(CheckLowerWriter* writer, uint32_t node, const Chec
     }
 }
 
-static void check_lower_terminate(CheckLowerWriter* writer)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_terminate(CheckLowerWriter* writer)
 {
     // Tier0 has ordinary calls and jumps. A terminal native helper traps; this self edge also prevents its
     // typed CFG from reaching the continuation. The validator checks unreachable expressions from an empty
@@ -2139,7 +2143,8 @@ static void check_lower_floating_recipe(CheckLowerWriter* writer, const CBuiltin
     check_lower_builtin_finish(writer, &buffer, result, type);
 }
 
-static void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CBuiltinFloatLowerCall* call = writer->floating + task.node;
     const uint8_t class = (uint8_t)call->argument_class;
@@ -2368,7 +2373,8 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
     }
 }
 
-static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -2879,15 +2885,15 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             check_lower_task_source(writer, task);
         }
-        // The tasks' work is inlined into each copy, as clang inlines it into a loop it compiles once: with a call in each
-        // copy it left six of them out of line, and a compile without -g took 2% more cycles (#426).
+        // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
+        // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
         if (task.kind == CHECK_LOWER_INSTRUCTION)
         {
             check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
         }
         else if (task.kind == CHECK_LOWER_CONVERSION)
         {
-            [[clang::always_inline]] check_lower_conversion(writer, task.node, task.type);
+            check_lower_conversion(writer, task.node, task.type);
         }
         else if (task.kind == CHECK_LOWER_LABEL)
         {
@@ -2907,7 +2913,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT || task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
         {
-            [[clang::always_inline]] check_lower_floating_emit(writer, task);
+            check_lower_floating_emit(writer, task);
         }
         else if (task.kind == CHECK_LOWER_CONSTANT)
         {
@@ -2923,11 +2929,11 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (task.kind == CHECK_LOWER_TERMINATE)
         {
-            [[clang::always_inline]] check_lower_terminate(writer);
+            check_lower_terminate(writer);
         }
         else if (task.kind == CHECK_LOWER_COPY)
         {
-            [[clang::always_inline]] check_lower_copy(writer, task.value, task.address);
+            check_lower_copy(writer, task.value, task.address);
         }
         else if (task.kind == CHECK_LOWER_FILL)
         {
@@ -2944,7 +2950,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (task.kind == CHECK_LOWER_BIT_STORE)
         {
-            [[clang::always_inline]] check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+            check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
         }
         else if (task.kind == CHECK_LOWER_VARARGS)
         {
@@ -2956,7 +2962,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else
         {
-            [[clang::always_inline]] check_lower_expand(writer, task);
+            check_lower_expand(writer, task);
         }
     }
 }
@@ -4068,13 +4074,9 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
                     function->parameters = parameters;
                 }
             }
-            // Inlined as it was when the lowering was compiled once: with a call in each copy, clang left it out of line,
-            // which took 0.2 million more instructions on a 31,000-line program (#426).
-            Tier0Check check = { .error = TIER0_OK };
-            if (lowered->status == CHECK_PROGRAM_OK)
-            {
-                [[clang::always_inline]] check = tier0_validate(function);
-            }
+            // Inlined as clang inlined tier0_validate when the lowering was compiled once: with a call in each copy, it left
+            // it out of line, which took up to 0.5 million more instructions on a 31,000-line program (#426).
+            const Tier0Check check = lowered->status == CHECK_PROGRAM_OK ? tier0_validate_inline(function) : (Tier0Check){ .error = TIER0_OK };
             if (check.error != TIER0_OK)
             {
                 lowered->status = CHECK_PROGRAM_INVALID;
