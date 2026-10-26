@@ -68,9 +68,8 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// after STACK_RESTORE must be lowered (or refused) here before tier0_validate
-// accepts it.
-_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_STACK_RESTORE + 1, "ir_lower.c lowers or refuses every typed kind");
+// after JUMP_INDIRECT must be lowered (or refused, as JUMP_INDIRECT is) here before tier0_validate accepts it.
+_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_JUMP_INDIRECT + 1, "ir_lower.c lowers or refuses every typed kind");
 
 static bool ir_typed_control(uint8_t kind)
 {
@@ -628,6 +627,13 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
         else if (kind == BUSTER_TYPED_CALL && (input->call_targets[value] == 0 || input->call_targets[value] >= symbol_count))
         {
             check.error = IR_ERROR_OPERAND;
+            check.instruction = i;
+        }
+        else if (kind == BUSTER_TYPED_JUMP_INDIRECT)
+        {
+            // An indirect jump to a label (#133), which this adapter doesn't lower yet and the plan and the emitter
+            // would take for a binary operation.
+            check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
         else if (input->classes[i] == BUSTER_TYPED_CLASS_F80)

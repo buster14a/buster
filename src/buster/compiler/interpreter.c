@@ -875,8 +875,9 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : function->classes[i];
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
-        // Validate the dispatch domain before classifying effects; long double has no InterpreterValue.
-        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || class >= BUSTER_TYPED_CLASS_F80)
+        // Validate the dispatch domain before classifying effects; long double has no InterpreterValue, and an indirect jump
+        // (#133) goes to a label's address, which an interpreted function has no code at.
+        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_JUMP_INDIRECT || class >= BUSTER_TYPED_CLASS_F80)
         {
             result->status = INTERPRETER_INVALID;
             break;

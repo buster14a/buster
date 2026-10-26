@@ -94,6 +94,88 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     }
 }
 
+// GNU C's labels as values: whether a goto is a computed one, goto *expression (the `*` after it its child, whose child is
+// the whole expression: the parser's PARSE_MODE_GOTO), and whether a token is an address of a label, &&name (a `&&`
+// prefix, of the name after it).
+static bool check_input_indirect_goto(const Parser* parser, uint32_t token)
+{
+    const uint32_t star = token + 1;
+    return parser->tokens.kinds[token] == PARSE_KIND_GOTO && star < parser->tokens.count && parser->tree.parents[star] == token &&
+           parser->tree.roles[star] == PARSE_ROLE_RETURN && parser->tokens.kinds[star] == PARSE_KIND_STAR;
+}
+
+static bool check_input_label_address(const Parser* parser, uint32_t token)
+{
+    return parser->tree.roles[token] == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_AMPAMP;
+}
+
+// The label of `body` spelled `name` in check_input_controls' table (`capacity` slots), or BUSTER_CHECK_NONE.
+static uint32_t check_input_find_label(const CheckInputReader* reader, const uint32_t* labels, uint64_t capacity, uint32_t body, uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    uint32_t result = BUSTER_CHECK_NONE;
+    uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + body) & (capacity - 1);
+    while (result == BUSTER_CHECK_NONE && labels[slot] != 0)
+    {
+        const uint32_t target = labels[slot] - 1;
+        const uint32_t target_name = reader->first_child[target];
+        result = reader->output->declaration_bodies[target] == body && parser->tokens.names[target_name] == name ? target : BUSTER_CHECK_NONE;
+        slot = (slot + 1) & (capacity - 1);
+    }
+    return result;
+}
+
+// The computed gotos of each function with one, as clang's JumpScopeChecker takes them: a function without an address of
+// a label refuses its first, and every one must be inside each statement expression that holds a label whose address the
+// function takes, since it may go to any of them. Those regions are nested intervals, so the labels' innermost ones
+// intersect in one, (low, high), which each goto must be in. (check_input_vla_finish does the same for the scopes of
+// variable-length arrays.)
+static void check_input_indirect_gotos(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t opening = 0; opening < count; opening += 1)
+    {
+        const bool deferred = reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[opening] != 0;
+        const uint32_t closing = parser->tree.parents[opening];
+        if (!deferred && parser->tree.roles[opening] == PARSE_ROLE_OPEN_BODY && closing < count && closing < reader->fragment_end)
+        {
+            uint32_t low = 0;
+            uint32_t high = UINT32_MAX;
+            uint32_t first = BUSTER_CHECK_NONE;
+            bool addressed = false;
+            for (uint32_t token = opening + 1; token < closing; token += 1)
+            {
+                const uint32_t label = check_input_label_address(parser, token) ? reader->output->label_targets[token] : BUSTER_CHECK_NONE;
+                addressed |= label != BUSTER_CHECK_NONE;
+                for (uint32_t ancestor = label; ancestor < count; ancestor = parser->tree.parents[ancestor])
+                {
+                    const uint32_t selected = reader->output->expression_regions[ancestor];
+                    if (selected != 0)
+                    {
+                        const CheckInputRegion* region = &reader->output->regions[selected - 1];
+                        low = region->opening > low ? region->opening : low;
+                        high = region->closing < high ? region->closing : high;
+                    }
+                }
+                first = first == BUSTER_CHECK_NONE && check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 ? token : first;
+            }
+            if (first != BUSTER_CHECK_NONE && !addressed)
+            {
+                check_input_report(reader, first, CHECK_INPUT_DECLARATION);
+            }
+            for (uint32_t token = first; addressed && token < closing; token += 1)
+            {
+                if (check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 && (token <= low || token >= high))
+                {
+                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                }
+            }
+            opening = closing;
+        }
+    }
+}
+
 static void check_input_controls(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -154,7 +236,7 @@ static void check_input_controls(CheckInputReader* reader)
                     labels[slot] = token + 1;
                 }
             }
-            else if (kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0)
+            else if ((kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0) || check_input_label_address(parser, token))
             {
                 reader->output->declaration_bodies[token] = body;
             }
@@ -188,36 +270,34 @@ static void check_input_controls(CheckInputReader* reader)
             {
                 continue;
             }
-            if (parser->tokens.kinds[token] == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0)
+            const bool indirect = check_input_indirect_goto(parser, token);
+            if (parser->tokens.kinds[token] == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0 && indirect)
             {
+                // goto *expression: its labels are every one whose address its function takes (check_input_indirect_gotos).
+                reader->indirect_gotos += 1;
+            }
+            else if ((parser->tokens.kinds[token] == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0) || check_input_label_address(parser, token))
+            {
+                // A goto's label, or the label whose address &&name is: the same function's (clang names a missing one at
+                // its name, and an address of a label outside a function too).
+                const bool address = parser->tokens.kinds[token] != PARSE_KIND_GOTO;
                 const uint32_t body = reader->output->declaration_bodies[token];
                 const uint32_t operand = reader->first_child[token];
-                bool found = false;
-                if (body != BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER)
+                const uint32_t target = body != BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
+                                        check_input_find_label(reader, labels, capacity, body, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
+                if (target != BUSTER_CHECK_NONE)
                 {
-                    const uint32_t name = parser->tokens.names[operand];
-                    uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + body) & (capacity - 1);
-                    while (!found && labels[slot] != 0)
+                    reader->output->label_targets[token] = target;
+                    if (!address && !check_input_region_transfer(reader, token, target))
                     {
-                        const uint32_t target = labels[slot] - 1;
-                        const uint32_t target_name = reader->first_child[target];
-                        found = reader->output->declaration_bodies[target] == body && parser->tokens.names[target_name] == name;
-                        if (found)
-                        {
-                            reader->output->label_targets[token] = target;
-                            if (!check_input_region_transfer(reader, token, target))
-                            {
-                                check_input_report(reader, token, CHECK_INPUT_DECLARATION);
-                            }
-                        }
-                        slot = (slot + 1) & (capacity - 1);
+                        check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                     }
                 }
                 const bool unfinished = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY &&
                                         parser->tree.parents[body] >= reader->fragment_end;
-                if (!found && !unfinished)
+                if (target == BUSTER_CHECK_NONE && !unfinished)
                 {
-                    check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+                    check_input_report(reader, address && operand < count ? operand : token, CHECK_INPUT_UNDECLARED);
                 }
             }
             else if (parser->tokens.kinds[token] == PARSE_KIND_SEMI && reader->output->attributes[token] != 0)
@@ -234,6 +314,10 @@ static void check_input_controls(CheckInputReader* reader)
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }
             }
+        }
+        if (reader->indirect_gotos != 0)
+        {
+            check_input_indirect_gotos(reader);
         }
     }
     arena_pop_to(reader->scratch, mark);

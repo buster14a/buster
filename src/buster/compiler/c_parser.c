@@ -4417,8 +4417,10 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
                     }
                     else if (kind == PARSE_KIND_STAR)
                     {
-                        // GNU's computed goto.
-                        step.role = PARSE_ROLE_PREFIX;
+                        // GNU's computed goto, goto *expression: the `*` is the goto's delimiter, not a prefix, and takes the
+                        // whole expression after it as `return` does (a comma's and an assignment's too), so that it is the
+                        // goto's child and the expression its own.
+                        step.role = PARSE_ROLE_RETURN;
                         frame->mode = PARSE_MODE_OPERAND;
                     }
                     else
@@ -5589,6 +5591,14 @@ static uint8_t parse_tag_keyword(const ParseKernels* kernels, uint32_t token)
     return result;
 }
 
+// A unary operator's role where no operand ends before it: a prefix's, but after goto `return`'s, the role of a computed
+// goto's `*`, which takes the whole expression after it (the scalar parser's PARSE_MODE_GOTO; any other operator there is
+// an error, which the checks flag).
+static uint8_t parse_unary_role(uint8_t previous)
+{
+    return previous == PARSE_KIND_GOTO ? PARSE_ROLE_RETURN : PARSE_ROLE_PREFIX;
+}
+
 // The role of token `i` from the rules, given the roles before it. Sets *flag if the rules can't be sure.
 static uint8_t parse_role_rule(ParseKernels* kernels, uint32_t i, bool typed, bool* flag)
 {
@@ -5725,13 +5735,13 @@ static uint8_t parse_role_rule(ParseKernels* kernels, uint32_t i, bool typed, bo
                 // In a parameter list (a cast candidate may turn out to be one), else a range.
                 result = group == PARSE_ROLE_OPEN_CALL || group == PARSE_ROLE_OPEN_FUNCTION || group == PARSE_ROLE_OPEN_CAST ? PARSE_ROLE_OPERAND : PARSE_ROLE_RANGE;
                 break;
-            case PARSE_KIND_STAR: result = operand ? PARSE_ROLE_MULTIPLICATIVE : PARSE_ROLE_PREFIX; break;
-            case PARSE_KIND_AMP: result = operand ? PARSE_ROLE_BITWISE_AND : PARSE_ROLE_PREFIX; break;
+            case PARSE_KIND_STAR: result = operand ? PARSE_ROLE_MULTIPLICATIVE : parse_unary_role(previous); break;
+            case PARSE_KIND_AMP: result = operand ? PARSE_ROLE_BITWISE_AND : parse_unary_role(previous); break;
             case PARSE_KIND_PLUS:
-            case PARSE_KIND_MINUS: result = operand ? PARSE_ROLE_ADDITIVE : PARSE_ROLE_PREFIX; break;
-            case PARSE_KIND_AMPAMP: result = operand ? PARSE_ROLE_LOGICAL_AND : PARSE_ROLE_PREFIX; break;
+            case PARSE_KIND_MINUS: result = operand ? PARSE_ROLE_ADDITIVE : parse_unary_role(previous); break;
+            case PARSE_KIND_AMPAMP: result = operand ? PARSE_ROLE_LOGICAL_AND : parse_unary_role(previous); break;
             case PARSE_KIND_PLUSPLUS:
-            case PARSE_KIND_MINUSMINUS: result = operand ? PARSE_ROLE_POSTFIX : PARSE_ROLE_PREFIX; break;
+            case PARSE_KIND_MINUSMINUS: result = operand ? PARSE_ROLE_POSTFIX : parse_unary_role(previous); break;
             case PARSE_KIND_EXCLAIM:
             case PARSE_KIND_TILDE: result = PARSE_ROLE_PREFIX; break;
             case PARSE_KIND_PERIOD:
@@ -7056,7 +7066,12 @@ static uint8_t parse_check_class(uint8_t role, uint8_t vkind, uint32_t name, boo
     }
     else if (role == PARSE_ROLE_RETURN)
     {
-        result = vkind == PARSE_KIND_GOTO ? PARSE_CLASS_GOTO : vkind == PARSE_KIND_BREAK || vkind == PARSE_KIND_CONTINUE ? PARSE_CLASS_JUMP : PARSE_ROLE_RETURN;
+        // A computed goto's `*` is checked as a prefix `*` is: an operand must follow it. Another unary operator after goto,
+        // which K2 gives the same role (parse_unary_role), keeps `return`'s class, which nothing lets follow goto: an error.
+        result = vkind == PARSE_KIND_GOTO                                    ? PARSE_CLASS_GOTO
+                 : vkind == PARSE_KIND_BREAK || vkind == PARSE_KIND_CONTINUE ? PARSE_CLASS_JUMP
+                 : vkind == PARSE_KIND_STAR                                  ? PARSE_CLASS_STAR
+                                                                             : PARSE_ROLE_RETURN;
     }
     else if (role == PARSE_ROLE_OPEN_CASE)
     {
@@ -8750,7 +8765,8 @@ static void parse_role_statics_avx512(ParseKernels* kernels, uint32_t start, uin
         const __mmask64 member = parse_equal8(vk_previous, PARSE_KIND_PERIOD) | parse_equal8(vk_previous, PARSE_KIND_ARROW);
         const __mmask64 tag_keyword = parse_equal8(vk_previous, PARSE_KIND_STRUCT) | parse_equal8(vk_previous, PARSE_KIND_ENUM);
         const __m512i tag_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(PARSE_ROLE_TAG), parse_equal8(vk_next, PARSE_KIND_L_BRACE), _mm512_set1_epi8(PARSE_ROLE_LEAF_RIGHT));
-        const __mmask64 type_goto = class_type_name & parse_equal8(vk_previous, PARSE_KIND_GOTO);
+        const __mmask64 after_goto = parse_equal8(vk_previous, PARSE_KIND_GOTO);
+        const __mmask64 type_goto = class_type_name & after_goto;
         base = _mm512_mask_mov_epi8(base, names & tag_keyword, tag_role);
         base = _mm512_mask_mov_epi8(base, names & member, _mm512_set1_epi8(PARSE_ROLE_MEMBER));
         base = _mm512_mask_mov_epi8(base, type_goto, _mm512_set1_epi8(PARSE_ROLE_OPERAND));
@@ -8778,7 +8794,9 @@ static void parse_role_statics_avx512(ParseKernels* kernels, uint32_t start, uin
         const __m512i next_bits = parse_table8(t->vkind_bits, vk_next);
         base = _mm512_mask_mov_epi8(base, parse_equal8(cls, PARSE_RULE_CLASS_EXTENSION) & ~_mm512_test_epi8_mask(next_bits, _mm512_set1_epi8(BUSTER_PARSE_VKIND_STARTS_DECLARATION)),
                                     _mm512_set1_epi8(PARSE_ROLE_PREFIX));
-        base = _mm512_mask_mov_epi8(base, class_unary, _mm512_set1_epi8(PARSE_ROLE_PREFIX));
+        // After goto, the unary operators' role is `return`'s: a computed goto's `*` takes the whole expression after it.
+        const __m512i unary_role = _mm512_mask_blend_epi8(after_goto, _mm512_set1_epi8(PARSE_ROLE_PREFIX), _mm512_set1_epi8(PARSE_ROLE_RETURN));
+        base = _mm512_mask_mov_epi8(base, class_unary, unary_role);
         alternative = _mm512_mask_mov_epi8(alternative, class_unary, parse_table8(t->binary, vk));
         rules = _mm512_mask_mov_epi8(rules, class_unary, _mm512_set1_epi8(BUSTER_PARSE_RULE_OPERAND));
         // `(` by the keyword before it, or an attribute's list; else a cast's before a type, and by the token before (rules):

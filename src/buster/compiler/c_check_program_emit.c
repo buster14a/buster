@@ -446,6 +446,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
+        else if (object != 0 && object - 1 < parser->tokens.count && parser->tree.roles[object - 1] == PARSE_ROLE_LABEL)
+        {
+            // A label whose address the program takes (GNU C's &&label): a place in its function's code, defined below.
+            char spelling[48];
+            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", object);
+            name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+            flags = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE;
+        }
         else
         {
             result->status = CHECK_PROGRAM_INVALID;
@@ -481,6 +489,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
         }
     }
+    for (uint32_t k = 0; valid && binding != NULL && k < result->lowered.label_symbol_count; k += 1)
+    {
+        result->link.symbols.source[result->lowered.label_symbols[k]] = BUSTER_LINK_SOURCE_PROGRAM;
+    }
     if (valid && binding != NULL && !bind_begin(binding->bind, &result->link, binding->runtime, binding->path, bytes, 1, binding->arena))
     {
         const NameId name = binding->bind->name;
@@ -493,6 +505,8 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         result->reason = "binding against the C runtime failed";
         valid = false;
     }
+    // The labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols).
+    uint32_t labels = 0;
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
@@ -544,6 +558,17 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                 const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, (uint64_t)length, encoded, 0);
                 valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, 0, (uint64_t)length) &&
                         link_add_code_fixups(&result->link, atom, code->records, code->count, fixup_ends, code->reference_count, code->references, code->reference_count);
+                // Each label at its first record's offset, after branch sizing: the program's definition.
+                for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)
+                {
+                    valid = labels < result->lowered.label_symbol_count && code->label_records[k] < code->count &&
+                            link_define_symbol(&result->link, result->lowered.label_symbols[labels], atom, offsets[code->label_records[k]], 0);
+                    if (valid)
+                    {
+                        result->link.symbols.source[result->lowered.label_symbols[labels]] = BUSTER_LINK_SOURCE_PROGRAM;
+                    }
+                    labels += 1;
+                }
                 if (valid)
                 {
                     result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;

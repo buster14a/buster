@@ -344,6 +344,9 @@ struct CheckInputReader
     CheckInputMessage resolve_message;
     uint32_t expression_limit;
     uint32_t fragment_end;
+    // GNU C's computed gotos (goto *expression) in the unit, which check_input_controls counts: only a unit with one has
+    // its functions' labels' scopes checked against them.
+    uint32_t indirect_gotos;
     uint32_t predefined_names[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
     TypeId predefined_types[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
     uint32_t builtin_member_names[10];
@@ -2788,8 +2791,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         const uint8_t role = parser->tree.roles[i];
         const uint8_t kind = parser->tokens.kinds[i];
         const uint32_t parent = parser->tree.parents[i];
+        // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes.
         const bool label_name = role == PARSE_ROLE_OPERAND && parent < parser->tokens.count &&
-                                (parser->tree.roles[parent] == PARSE_ROLE_LABEL || parser->tokens.kinds[parent] == PARSE_KIND_GOTO);
+                                (parser->tree.roles[parent] == PARSE_ROLE_LABEL || parser->tokens.kinds[parent] == PARSE_KIND_GOTO ||
+                                 (parser->tree.roles[parent] == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_AMPAMP));
         reader->ignored[i] |= label_name || role == PARSE_ROLE_LABEL || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_SWITCH || role == PARSE_ROLE_OPEN_CASE;
         if (!reader->ignored[i] && role == PARSE_ROLE_OPEN_GROUP && i + 1 < parser->tokens.count && parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_BLOCK)
         {
@@ -3436,6 +3441,35 @@ static void check_input_expressions(CheckInputReader* reader)
                     };
                 }
             }
+        }
+        else if (check_input_label_address(parser, token))
+        {
+            // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the label's own
+            // object, its token plus one, which no declaration has.
+            const uint32_t label = reader->output->label_targets[token];
+            const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
+            supported = label < parser->tokens.count && pointer != 0 && count == 0;
+            node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
+            if (node != BUSTER_CHECK_NONE)
+            {
+                graph->leaves[node] = (CheckValue)
+                {
+                    .type = pointer,
+                    .category = CHECK_RVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = label + 1,
+                };
+            }
+        }
+        else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
+                 check_input_indirect_goto(parser, parser->tree.parents[token]))
+        {
+            // goto *expression: the whole expression after the `*` converted to const void * as if by assignment (clang's).
+            supported = count == 1;
+            op = CHECK_OP_CONVERT;
+            reader->query_types[token] = check_input_type_result(reader, type_pointer(reader->types, type_qualify(reader->types, BUSTER_TYPE_VOID, BUSTER_TYPE_CONST)));
+            supported &= reader->query_types[token] != 0;
         }
         else if (role == PARSE_ROLE_PREFIX)
         {
