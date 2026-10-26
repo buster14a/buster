@@ -659,11 +659,17 @@ static int run_foreign_link(int argc, char** argv)
     const uint32_t cpus = foreign_driver_cpus();
     driver.lanes = driver.lanes < cpus ? driver.lanes : cpus;
     ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = foreign_driver_now();
-    // The command's lanes, which every stage's lane_run then takes (see the file's comment); one lane needs none.
-    LaneTeam team = { 0 };
+    // The command's lanes, which every stage's lane_run then takes (see the file's comment). One lane needs none, nor
+    // the team's room, 34 KB that the stack would otherwise zero, which the arena gives only to more.
+    LaneTeam* team = 0;
     if (succeeded && !driver.help && driver.lanes > 1)
     {
-        succeeded = lane_team_start(&team, driver.lanes, 0);
+        team = BUSTER_ARENA_PUSH_ARRAY(&arena, LaneTeam, 1);
+        if (team != 0)
+        {
+            *team = (LaneTeam){ 0 };
+        }
+        succeeded = team != 0 && lane_team_start(team, driver.lanes, 0);
         if (!succeeded)
         {
             fprintf(stderr, "link-foreign: cannot start linker workers\n");
@@ -814,7 +820,7 @@ static int run_foreign_link(int argc, char** argv)
     // The resolution's lane states, which foreign_release frees, give their phases' times first.
     uint64_t resolve[FOREIGN_PHASES];
     foreign_driver_resolve_phases(&foreign, resolve);
-    lane_team_stop(&team);
+    lane_team_stop(team);
     foreign_release(&foreign);
     runtime_release(&runtime);
     arena_release(&names);
