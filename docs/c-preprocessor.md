@@ -2526,7 +2526,7 @@ cleared whole, 2 MB per run. They take base pages now.
 
 Its second step is templates for `##` and `#` ("Templates with `##` and `#`"
 in "The main loop", #473, [the
-record](https://github.com/buster14a/buster-performance/blob/f16d287cec2512ea15e3010c196f9add9ac4b4ee/docs/measurements/preprocessor-paste-templates-117-2026-10-26/README.md)).
+record](https://github.com/buster14a/buster-performance/blob/c2429b4d2624b6378944e97c60ba1f0d9002774d/docs/measurements/preprocessor-paste-templates-117-2026-10-26/README.md)).
 On `sqlite3.c`, 3,522 of the 7,051 invocations that went through the
 invocation stack take them; of the 3,529 left, 3,490 have arguments expanded
 first (math.h's declarations). Against main at `dd982df`, with the history
@@ -2550,7 +2550,12 @@ bytes rather than 260). `-fsyntax-only` takes 0.2-0.5 ms more
 1.7 million and its user cycles rise by 0.4%, in checker code that is the same
 in both binaries but starts at other places in its cache lines. On the PR's
 first head, shifting the checker's unit 32 bytes back to main's offsets took
-about 60% of that difference back.
+about 60% of that difference back. A change to the checker alone (an integer
+literal's result written in place, which takes 0.8 million instructions out of
+main) makes `-fsyntax-only` as much slower as the templates do ([the record's
+addendum](https://github.com/buster14a/buster-performance/blob/c2429b4d2624b6378944e97c60ba1f0d9002774d/docs/measurements/preprocessor-paste-templates-117-2026-10-26/README.md#addendum-what-the-checkers-slowdown-is)):
+the whole compile moves by about 0.3% with any change that moves the
+checker's code.
 
 The budget is 2 ms; `sqlite3.c`'s directive tables and main loop take about
 4.77 ms. The next piece is the arguments expanded before substitution, and the
