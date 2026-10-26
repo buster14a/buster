@@ -796,8 +796,18 @@ kind, which the loader checks: the other kind's file at its name is stale.
     piece's hash, the global names with their index and filter, the exports,
     and the pieces' references and COMDAT groups;
   - **the pieces' records,** of which a link reads those of the pieces it
-    joins: the link's columns, the bindings and the symbols' global names,
-    then the data, the names run and each piece's atoms' bytes.
+    joins. Every link joins the crt objects, and most join no member, so
+    their records come first and together (#490, format 6): each column
+    binding reads (the link's and the symbols' global names) over the crt
+    objects' records, from each table's record 0; then the data, the crt
+    objects' names, every piece's atoms' bytes and the members' names; then
+    the same columns over the members' records; then the columns nothing
+    reads of a loaded runtime (the atoms' addresses, the symbols' GOT slots,
+    dynamic indices, versions and references, and the bindings), whole. A
+    loaded runtime's `link` points at the crt objects' regions, and its
+    `member_link` at the members', placed so that the runtime's ids index
+    both; binding reads each piece through `runtime_piece_link` and each
+    symbol through `runtime_symbol_link`.
 
   The dynamic runtime's is 198 KB on the 9700X: 2,685 global names with their
   index and filter, and `libc.so.6`'s 2,630 exports and the loader's 38. The
@@ -2800,7 +2810,7 @@ name; its rules refuse references to `__morestack` and
 and with `--cross-check` it refuses C compiled with `-fsplit-stack`, as a
 library and as a PIE, by both paths, where cc's links with GNU ld and lld
 need `libgcc_s.so.1`, load into a harness that doesn't and run.
-`test-snapshot` damages a byte of the pieces' records at 123 places of each
+`test-snapshot` damages a byte of the pieces' records at 171 places of each
 kind's snapshot, and each damaged copy must give a link of every member's
 names the room the whole snapshot gives it. `test-dynamic` writes the libgcc
 program as a PIE among its cases, and links a shared library whose code, cc's,

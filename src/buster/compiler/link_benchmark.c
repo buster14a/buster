@@ -27,7 +27,9 @@
 //     sum; every run must write the warm-up's file again (its build ID). Its work: the bytes written, the fixups
 //     applied, the names looked up (the program's global names, each once in the runtime's), and over the warm-ups the
 //     page faults (getrusage) and how much the peak resident set grew (VmHWM, which writing 5 to /proc/self/clear_refs
-//     resets). The floor is one pwrite of the output's bytes over it.
+//     resets), and the first timed run's page faults in runtime_open and in bind_begin, whose arrays the warm-up has
+//     touched: the snapshot's mapping's, which each run maps afresh (#490). The floor is one pwrite of the output's bytes
+//     over it.
 //   - The objects: each unit's, as -c writes them, by object_prepare and object_write_units on the same lanes, over the
 //     files of the run before, with their bytes, symbols and relocations.
 //   - Each linker of --linkers (ld.bfd, ld.lld, mold, wild and link-foreign by default) links the objects with the appendix's
@@ -644,6 +646,9 @@ struct LinkBenchmarkDirect
     uint32_t begin_runs;
     uint32_t end_runs;
     uint64_t faults;
+    // The first timed run's page faults in runtime_open and in bind_begin.
+    uint64_t open_faults;
+    uint64_t begin_faults;
     uint64_t growth;
     bool growth_known;
     // The program's global names, which bind_begin looks up, and the bound link's fixups; and the atoms and symbols of the
@@ -706,12 +711,22 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
         const LinkBenchmarkCost cost = run == 0 ? link_benchmark_cost_begin() : (LinkBenchmarkCost){ 0 };
         Runtime runtime;
         Bind bind = { 0 };
+        // The first timed run counts each part's page faults, outside its time.
+        const bool counted = run == 1;
+        const uint64_t faulted = counted ? link_benchmark_faults() : 0;
         const uint64_t start = executable_now();
         const SnapshotResult opened = link_benchmark_open(&runtime, direct->cache, direct->kind);
         const uint64_t opened_at = executable_now();
+        const uint64_t opened_faults = counted ? link_benchmark_faults() : 0;
         const bool loaded = opened.status == SNAPSHOT_STATUS_LOADED;
+        const uint64_t begun_at = counted ? executable_now() : opened_at;
         result = loaded && bind_begin(&bind, link, &runtime, BIND_PATH_VECTOR, &program->bytes, units, direct->arena);
         const uint64_t end = executable_now();
+        if (counted)
+        {
+            direct->open_faults = opened_faults - faulted;
+            direct->begin_faults = link_benchmark_faults() - opened_faults;
+        }
         direct->damaged = direct->damaged || bind.error == BIND_ERROR_SNAPSHOT;
         if (run == 0)
         {
@@ -720,7 +735,7 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
         else
         {
             direct->times[LINK_BENCHMARK_PART_OPEN][run - 1] = opened_at - start;
-            direct->times[LINK_BENCHMARK_PART_BEGIN][run - 1] = end - opened_at;
+            direct->times[LINK_BENCHMARK_PART_BEGIN][run - 1] = end - begun_at;
         }
         direct->problem = !loaded ? "the runtime didn't load from its snapshot" : !result ? "bind_begin failed" : 0;
         runtime_release(&runtime);
@@ -960,8 +975,9 @@ static bool link_benchmark_direct_attempt(const LinkBenchmarkSettings* settings,
         }
         printf(")\n");
         printf("  %-24s %12.1f us: one pwrite of the output in place\n", "floor", link_benchmark_floor_median(path, written->file_size, direct->end_runs));
-        printf("  %-24s %llu bytes written, %llu fixups applied, %u names looked up, %llu page faults, ", "work", (unsigned long long)written->file_size,
-               (unsigned long long)direct->fixups, direct->globals, (unsigned long long)direct->faults);
+        printf("  %-24s %llu bytes written, %llu fixups applied, %u names looked up, %llu page faults (a run's open %llu, begin %llu), ", "work",
+               (unsigned long long)written->file_size, (unsigned long long)direct->fixups, direct->globals, (unsigned long long)direct->faults,
+               (unsigned long long)direct->open_faults, (unsigned long long)direct->begin_faults);
         if (direct->growth_known)
         {
             printf("%.2f MB more resident\n", (double)direct->growth / 1e6);

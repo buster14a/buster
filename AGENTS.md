@@ -2996,9 +2996,12 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
 - round trip: the imported runtime written as a snapshot and loaded back must
   have the import's records, every one that binding and a dynamic PIE read
   (the names' and atoms' bytes and the members' names through the loaded
-  runtime's deltas), every piece current, and the loaded runtime must use the
-  file's mapping and no arena; so must it after another snapshot was renamed
-  over the file it maps. Then the same for the static runtime
+  runtime's deltas, each record through the link that holds it), every piece
+  current, every slice of a crt object that binding reads within one span of
+  at most 16 KB after the directory and no member's there (#490), and the
+  loaded runtime must use the file's mapping and no arena; so must it after
+  another snapshot was renamed over the file it maps. Then the same for the
+  static runtime
   (`runtime_import_static`), with its kind, its archives, its members'
   references (with the members they load) and COMDAT groups and its global
   names' members, for the static PIE's (`runtime_import_static_pie`), and
@@ -3033,16 +3036,18 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   PIE's: 1,600 damaged copies (cut short, one byte longer, a byte of the
   directory changed at sampled offsets and in every byte of the header), each
   made in place over the snapshot and repaired after its load, must be
-  invalid, and so must 10 whose header was changed and then rehashed
+  invalid, and so must 12 whose header was changed and then rehashed
   (another version or magic, a region misaligned, running or starting past
-  the end or of the wrong size, counts out of range, the directory ending
-  before its last region), which only the header's own checks catch;
+  the end or of the wrong size, counts out of range, more crt objects'
+  records than a table has, the members' names placed before the crt
+  objects' end, the directory ending before its last region), which only the
+  header's own checks catch;
   `runtime_open` must replace them with the kind's runtime; a directory and
   a FIFO at the snapshot's path must neither block a link (run in a child
   under an alarm) nor fail it, the FIFO replaced and the directory left with
   nothing beside it;
 - damaged pieces, of each kind's snapshot: a byte of the pieces' records
-  changed at 123 offsets (at each 1/61 of them, and the first and last of
+  changed at 171 offsets (at each 1/61 of them, and the first and last of
   each of their regions), each copy of which must load with every piece
   current but the one whose records hold the byte, by the test's own reading
   of the layout (none for a byte of padding or of a column no piece's hash
@@ -3115,8 +3120,10 @@ by the direct path and by each linker, and reports medians:
   snapshot damaged (`BIND_ERROR_SNAPSHOT`) throws the measurement away: the
   snapshot is discarded and written again, outside any measurement, and the
   program measured again from the start, once. Then its work: the bytes
-  written, the fixups applied, the names looked up, and over the warm-ups the
-  page faults and how much the peak resident set grew; and the floor, one
+  written, the fixups applied, the names looked up, over the warm-ups the
+  page faults and how much the peak resident set grew, and a timed run's page
+  faults in `runtime_open` and in `bind_begin` (the snapshot's mapping's,
+  #490); and the floor, one
   `pwrite` of the output;
 - the objects, each unit's as `-c` writes them, on the same lanes;
 - each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold`, `wild` and `link-foreign`) linking
