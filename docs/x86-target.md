@@ -134,6 +134,11 @@ Those cases remain denied by the policy and covered by independent F|VL
 minimal-feature negatives; they are counted separately from external assembler
 comparisons. If a later assembler rejects them, they follow the normal comparison.
 
+`test-x86-target` runs in the backend unit with its encoder and selector state.
+Its macro and preprocessor fixtures call the frontend's shared entry, keeping
+those private test helpers with the preprocessor's implementation rather than
+emitting another copy in the backend.
+
 `test-x86-target` also replays the existing Tier 1 selector and native-emission
 fixtures at baseline/v3/v4, with both covers and both allocation paths. Its
 policy-owned Tier 0 consumer checks every compiled template and generated

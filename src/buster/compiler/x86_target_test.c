@@ -308,6 +308,15 @@ static bool x86_target_test_preprocessor(const char* directory)
     return passed;
 }
 
+// Keep these fixtures with the preprocessor's home. Calling its private test helpers from the backend would emit
+// another complete preprocessor there; the policy command and its mutable encoder/selector state stay in BACKEND.
+BUSTER_HOME_FRONTEND bool run_x86_target_preprocessor_tests(const char* directory)
+{
+    bool passed = x86_target_test_compiler_macros();
+    passed &= x86_target_test_preprocessor(directory);
+    return passed;
+}
+
 static int run_x86_target_tests(void)
 {
     bool passed = x86_target_test_cpuid();
@@ -316,12 +325,11 @@ static int run_x86_target_tests(void)
     passed &= x86_target_test_matrix();
     passed &= x86_target_test_fma_masks();
     passed &= x86_target_test_pages();
-    passed &= x86_target_test_compiler_macros();
     passed &= run_x86_target_selection_tests();
     char directory[] = "/tmp/buster-target-XXXXXX";
     if (mkdtemp(directory) != 0)
     {
-        passed &= x86_target_test_preprocessor(directory);
+        passed &= run_x86_target_preprocessor_tests(directory);
         passed &= x86_target_test_gas(directory);
         char path[4096];
         snprintf(path, sizeof(path), "%s/case.c", directory);
