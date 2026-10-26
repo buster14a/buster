@@ -4004,7 +4004,13 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
                     function->parameters = parameters;
                 }
             }
-            const Tier0Check check = lowered->status == CHECK_PROGRAM_OK ? tier0_validate(function) : (Tier0Check){ .error = TIER0_OK };
+            // Inlined as it was when the lowering was compiled once: with a call in each copy, clang left it out of line,
+            // which took 0.2 million more instructions on a 31,000-line program (#426).
+            Tier0Check check = { .error = TIER0_OK };
+            if (lowered->status == CHECK_PROGRAM_OK)
+            {
+                [[clang::always_inline]] check = tier0_validate(function);
+            }
             if (check.error != TIER0_OK)
             {
                 lowered->status = CHECK_PROGRAM_INVALID;
