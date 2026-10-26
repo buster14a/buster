@@ -632,7 +632,9 @@ designs and the compilers already built this way.
   that keeps or drops the tables, by each path, as executables and as objects
   linked three ways; the options' rule against clang's objects of the fixture;
   and gdb's backtrace at every instruction of each function, whose steps must
-  reach every instruction of gdb's disassembly of it.
+  reach every instruction of gdb's disassembly of it; and a `SIGILL` handler's
+  `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
+  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret).
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
