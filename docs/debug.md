@@ -180,9 +180,11 @@ main's executable; with `-g` it took 7.2% more
 
 What `-g` adds to the emission is mostly its copy of the lowering (#456). On
 `benchmark-check-debug --only emit`'s program (2,000 functions, 101,493 typed
-entries, 60,031 raw rows), the emission with the raw rows took 4.4 to 4.8%
-longer than without on the 9700X (6.32 against 6.06 ms) and retired 6.24
-million more of its 132.2 million user instructions. The copy that keeps the
+entries, 60,031 raw rows), the emission with the raw rows took 4.41 and 4.76%
+longer than without on the 9700X, in two series of five processes (each the
+median of the processes' changes, every process timing both; the first series'
+times had medians of 6.318 and 6.055 ms), and retired 6.24 million more of its
+132.2 million user instructions. The copy that keeps the
 tokens is 5.61 million of them, about 28 for each of the 197,000 tasks the
 lowering pops, which settles the entries and tasks since the pop before and
 picks the next token; the raw rows take 0.54 million, Tier 0's entries' first
