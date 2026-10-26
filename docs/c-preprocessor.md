@@ -892,8 +892,10 @@ clang 23's resource headers give, and carry the project's license
   headers' `<float.h>` define `FLT_EVAL_METHOD` with it.
 
 `test-preprocessor --clang` checks them against clang's: 11 headers, 8 language
-modes, hosted and freestanding, 176 sets in all. For each set, clang
-preprocesses the header with its own set and with ours
+modes, hosted and freestanding, 176 sets in all. Each mode and hosting's sets
+(`pp_test_header_set`) run in a child process with a directory of its own, at
+most one per CPU at once, their output printed in the sets' order (#465). For
+each set, clang preprocesses the header with its own set and with ours
 (`-nobuiltininc -isystem`), and:
 
 - the two must define the same macros. Guards and helpers reserved to the
@@ -2242,7 +2244,8 @@ full-corpus reproduction and frozen CI subset.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
-  from the same macros. clang has no `--buster-headers`, so it gets ours'
+  from the same macros; the files share their options, so clang makes them once
+  for all of them (`pp_test_clang_predefines`). clang has no `--buster-headers`, so it gets ours'
   whole search instead of the directories' options (`pp_clang_arguments`):
   after `-nobuiltininc`, each directory ours keeps, with its option (`-iquote`,
   `-I`, `-isystem` or `-idirafter`), and in clang's resource directory's place

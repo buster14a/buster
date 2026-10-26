@@ -691,6 +691,20 @@ The test command fails if the oracle cannot run. It covers:
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
   (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
+- Executable programs (`c_check_program_test.c`): each source's checked
+  object, from both paths, linked with clang's build of the same source (its
+  oracle, each global renamed `oracle_NAME`) and a harness that runs both on
+  the same inputs. The harness is compiled once per run and each oracle once
+  per distinct text, with `-c` and the flags of the one-step build they
+  replaced, and a path whose checked object and oracle are byte for byte the
+  last linked program's takes that program's run: the same files would link
+  into the same executable (#465). A program that fails is linked and run, and
+  its directory kept with `driver.c` and `oracle.c`.
+
+The fixtures that ask clang for acceptance and first errors go to it many at a
+time (`parse_test_clang`), split in order among up to eight processes that run
+at once, each process's output read for its own files: clang checks each file
+on its own, so the results are those of one process (#465).
 
 Where clang accepts a constraint violation with a warning, the checker accepts
 it with clang's warning, as the semantic mutants require: an assignment that
