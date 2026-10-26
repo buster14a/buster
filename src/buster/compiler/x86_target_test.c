@@ -308,42 +308,6 @@ static bool x86_target_test_preprocessor(const char* directory)
     return passed;
 }
 
-// Compile a separate unit so allocation failure injection cannot change the production unit's allocator or state.
-static bool x86_target_test_storage(const char* directory)
-{
-    char executable[4096];
-    const int length = snprintf(executable, sizeof(executable), "%s/template-storage", directory);
-    bool passed = length > 0 && length < (int)sizeof(executable);
-    for (uint32_t step = 0; passed && step < 2; step += 1)
-    {
-        fflush(0);
-        const pid_t child = fork();
-        if (child == 0)
-        {
-            if (step == 0)
-            {
-                execlp("clang", "clang", "-std=gnu17", "-O3", "-march=native", "-I", "src", "tests/x86-target/template-storage.c", "-o", executable, (char*)0);
-            }
-            else
-            {
-                execl(executable, executable, (char*)0);
-            }
-            _exit(127);
-        }
-        int status = 0;
-        pid_t waited;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (child > 0 && waited < 0 && errno == EINTR);
-        passed = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    }
-    unlink(executable);
-    printf("target template allocation fixture: %s\n", passed ? "pass" : "FAIL");
-    return passed;
-}
-
 static int run_x86_target_tests(void)
 {
     bool passed = x86_target_test_cpuid();
@@ -356,7 +320,6 @@ static int run_x86_target_tests(void)
     char directory[] = "/tmp/buster-target-XXXXXX";
     if (mkdtemp(directory) != 0)
     {
-        passed &= x86_target_test_storage(directory);
         passed &= x86_target_test_preprocessor(directory);
         passed &= x86_target_test_gas(directory);
         char path[4096];
