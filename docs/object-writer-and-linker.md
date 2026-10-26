@@ -2795,7 +2795,40 @@ took 2.349 ms against 2.329 (+0.9%), its peak resident set 31,768 KB against
 2.433 ms and 33,844 KB. The direct path couldn't link a 128-bit integer's
 division or a complex product without `libgcc.a` at all, so the constant is the
 price of linking them; laying the crt objects' records out apart from the
-members' should take back most of `bind_begin`'s part (#490).
+members' takes back `bind_begin`'s part (#490, below).
+
+**The crt objects' records apart (#490).** With each column whole, the crt
+objects' records were the starts of 24 columns spread over 260 KB of the
+mapping, and their atoms' bytes came after the 30 KB names run: a link that
+joined no member faulted four 64 KB windows of the mapping that the
+directory's hash hadn't (a file's read fault maps a window around its page).
+Format 6 puts them in one span of 3.5 KB right after the directory, in the
+window the hash faults last ("The file", above); `bind_begin` no longer clears
+an entry of `Bind.symbols` for every member's symbol, which each piece's join
+writes before anything reads it; and the pieces' regions are aligned to their
+elements, not to 64 bytes. On the 9700X, the branch's final head against main
+(35f26f68) and against main before `libgcc.a` (ff8936be), ten rounds in turn
+([the record](https://github.com/buster14a/buster-performance/tree/3de2d80081d62ab317eb564b93ed260e8301bfd6/docs/measurements/snapshot-crt-region-490-2026-10-26)):
+
+| | before `libgcc.a` | main | this |
+| --- | ---: | ---: | ---: |
+| `bind_begin`, 1 worker, PIE | 0.7 µs | 3.8 µs, 4 faults | 0.8 µs, 0 faults |
+| `bind_begin`, 1 worker, static | 15.0 µs | 15.3 µs, 21 faults | 1.0 µs, 0 faults |
+| link, 1 worker, PIE | 19.4 µs | 24.1 µs | 21.4 µs |
+| link, 1 worker, static | 379.1 µs | 377.6 µs | 367.7 µs |
+| `runtime_open`, dynamic | 9.88 µs | 11.82 µs | 11.79 µs |
+| dynamic snapshot | 197,828 bytes | 3,283,511 bytes | 3,282,344 bytes |
+| C driver's hello world | 2.319 ms, 560 faults | 2.354 ms, 573 faults | 2.352 ms, 567 faults |
+
+Main with its mapping populated before use (a diagnostic switch) took 0.9 µs
+in `bind_begin` and no fault there: the faults were its 3 µs. A static link's
+`bind_begin` took as long before `libgcc.a` (15.0 µs), its crt objects' records
+spread over the columns of 2,618 members. Counted step by step in diagnostic
+builds, the hello world's link takes 42 faults against 50 on main and 38 before
+`libgcc.a`; the four more come with the larger runtime (the closure's scratch,
+the global names' table that `bind_begin` clears, `dynamic_inputs`' arrays),
+and the rest of the process varies with each build's code (the same front end
+faulted 528 to 533 times in three builds).
 
 `test-import` checks the archives' order, `__udivti3` a member's of
 `libgcc.a` and its names apart from `libc.so.6`'s and the loader's exports;

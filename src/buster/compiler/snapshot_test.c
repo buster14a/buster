@@ -175,8 +175,8 @@ static bool snapshot_test_same_link(const Runtime* x, const Runtime* y)
     return result;
 }
 
-// The most bytes the crt objects' records take after a snapshot's directory: about 5 KB for each of this system's
-// runtimes, with the regions' alignments.
+// The most bytes the crt objects' records take after a snapshot's directory: 3.5 KB for the dynamic runtime of the
+// laptop's GCC 16 and glibc 2.44, the regions' alignments included.
 #define BUSTER_SNAPSHOT_TEST_OBJECT_BYTES (16ull << 10)
 
 // Whether a loaded runtime's crt objects' records, which every link joins, are together after its snapshot's directory
