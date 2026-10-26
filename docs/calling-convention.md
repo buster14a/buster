@@ -1173,8 +1173,9 @@ disagree with itself.
   `struct { char c; unsigned long f : 45 __attribute__((aligned(4))); }` has
   `f` at byte 8 in GCC and at byte 4 in clang, and GCC's worlds give a
   bit-field no alignment below its type's. The plain test checks the rule
-  without compilers (`abi_test_gcc_bit_fields`): GCC's worlds from 16 seeds
-  must have no such field, and clang's worlds from the same seeds some. And
+  without compilers (`abi_test_gcc_bit_fields`), whatever `--seed` says: on
+  fixed fields, then on worlds from the fixed seeds 1 to 16, where GCC's must
+  have no such field and clang's some. And
   GCC 16 gives a `_BitInt(128)` bit-field of all 128 bits, at an offset 16
   divides, TImode's alignment, 16, which raises its record's:
   `struct { _BitInt(128) x : 128; char c; }` is 32 bytes aligned to 16 there,
