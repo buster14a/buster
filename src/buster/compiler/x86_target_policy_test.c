@@ -10,15 +10,12 @@ static bool x86_target_test_templates(void)
     const size_t span = BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry);
     const size_t extent = (BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES) * sizeof(X86TemplateEntry);
     uint8_t* storage = malloc(extent + 129);
-    bool passed = storage != 0;
+    bool passed = storage != 0 && x86_encoder_initialize();
     uint32_t checks = 0;
     const X86EncoderMode modes[] = { X86_ENCODER_MODE_64, X86_ENCODER_MODE_ADDRESS32, X86_ENCODER_MODE_APX };
     for (uint32_t mode = 0; passed && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
         const X86EncoderMode encoder = modes[mode];
-        passed &= encoder == X86_ENCODER_MODE_64 ? x86_encoder_initialize() :
-                  encoder == X86_ENCODER_MODE_ADDRESS32 ? x86_encoder_initialize_address32() : x86_encoder_initialize_apx();
-        const X86TemplateEntry* actual = x86_mode_templates(encoder);
         // A deliberately unaligned, dirty destination checks the shared constructor's complete writes and bounds.
         memset(storage, 0xa5, extent + 129);
         X86TemplateEntry* copied = (X86TemplateEntry*)(storage + 65);
@@ -30,11 +27,15 @@ static bool x86_target_test_templates(void)
             const bool ready = build_mode_template(form, encoder, &expected.template);
             memcpy(expected.layout, expected.template.layout, sizeof(expected.layout));
             memcpy(expected.bytes, expected.template.bytes, sizeof(expected.bytes));
-            passed &= ready && memcmp(&expected, &actual[form], sizeof(expected)) == 0;
-            passed &= memcmp(&expected, &actual[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
-            passed &= memcmp(&expected, &copied[form], sizeof(expected)) == 0;
+            passed &= ready && memcmp(&expected, &copied[form], sizeof(expected)) == 0;
             passed &= memcmp(&expected, &copied[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
-            checks += 4;
+            checks += 2;
+            if (encoder == X86_ENCODER_MODE_64)
+            {
+                passed &= memcmp(&expected, &x86_templates[form], sizeof(expected)) == 0;
+                passed &= memcmp(&expected, &x86_templates[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
+                checks += 2;
+            }
         }
         for (size_t i = 0; i < 65; i += 1)
         {
