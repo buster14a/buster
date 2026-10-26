@@ -13,8 +13,9 @@
 // the operator that holds it (a group around it, the `?` before a middle operand), which the walk built just before.
 // Everything else keeps the tree's operands: the leaves (only a reference's subtree has any), and the tokens the
 // fragments leave out (openers, transparent groups, type names, statements and declarations). Both readers then build
-// the same graph, node for node, with check_input_expression's body. Variant B flattens an expression into a prefix
-// array when its cursor starts (c_fragment_reader_flatten); variant C decodes the fragments' windows as it reads.
+// the same graph, node for node, with check_input_expressions' own code for each token. Variant B flattens an expression
+// into a prefix array when its cursor starts (c_fragment_reader_flatten); variant C decodes the fragments' windows as it
+// reads.
 //
 // The cursors nest as the expressions do in postorder (an array bound's expression inside a cast's type name), on one
 // explicit stack, and the walk advances only the top one, as the visit ledger requires: an expression's cursor starts at
@@ -24,8 +25,9 @@
 // graph does that, and only a unit without reports must finish every expression (check_fragments_end).
 //
 // Layout: CheckFragments and its statistics; check_fragments_begin; the frames (check_fragments_append and the
-// envelope); the cursors (check_fragments_start, check_fragments_advance, check_fragments_finish);
-// check_fragments_operands, which check_input_expressions calls; check_fragments_end.
+// envelope); the cursors (check_fragments_start, check_fragments_advance, check_fragments_finish, check_fragments_token);
+// check_fragments_operands, which check_input_expressions calls, with the test's check of what it takes
+// (check_fragments_verify); check_fragments_end.
 
 #ifndef BUSTER_C_CHECK_FRAGMENTS_INCLUDED
 #define BUSTER_C_CHECK_FRAGMENTS_INCLUDED
@@ -54,7 +56,6 @@ struct CheckFragmentCursor
     CFragmentDirectReader reader;
     CFragmentReaderCursor cursor;
     uint32_t root;
-    uint32_t positions;
     uint32_t stack;
     uint32_t flat;
 };
@@ -237,7 +238,6 @@ static bool check_fragments_start(CheckFragments* fragments, uint32_t root, bool
         CheckFragmentCursor* top = &fragments->cursors[fragments->cursor_count];
         top->reader = c_fragment_direct_reader(&sink->store, &expression->handle, source, boundary);
         top->root = root;
-        top->positions = positions;
         top->stack = fragments->stack_used;
         top->flat = fragments->flat_used;
         valid = top->reader.valid && positions <= fragments->stack_capacity - fragments->stack_used &&
