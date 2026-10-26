@@ -398,6 +398,9 @@ struct TypeTable
     TypeChanges* changes;
     uint32_t hidden_begin;
     uint32_t hidden_end;
+    // Whether plain char is unsigned (-funsigned-char): the source reader sets it from the unit's options
+    // (check_input_run), and type_integer_properties answers it. Signed, x86-64's, when false.
+    bool char_unsigned;
 };
 
 // How many records of each table there is room for: types besides the builtin ones, and tags and members besides
@@ -2240,7 +2243,8 @@ static TypeId type_machine_mode(TypeTable* table, TypeId base, String8 mode)
         else
         {
             const uint8_t old_code = type_arithmetic_code(table, element);
-            const bool is_signed = old_code == BUSTER_TYPE_CODE_CHAR || (old_code >= BUSTER_TYPE_CODE_SCHAR && old_code <= BUSTER_TYPE_CODE_INT128 && (old_code & 1) == 0);
+            const bool is_signed = old_code == BUSTER_TYPE_CODE_CHAR ? !table->char_unsigned :
+                                   old_code >= BUSTER_TYPE_CODE_SCHAR && old_code <= BUSTER_TYPE_CODE_INT128 && (old_code & 1) == 0;
             const uint8_t code = selected->code + (selected->integer ? !is_signed : selected->complex ? BUSTER_TYPE_CODE_COMPLEX : 0);
             result = BUSTER_TYPE_BUILTIN(code);
             if (vector_base && !vector_mode)
@@ -3509,8 +3513,9 @@ static bool type_layout_records(TypeTable* table, const TypeId* records, uint32_
 // Conversions
 
 // The builtin integer types' properties, by code: clang's getIntegerRank ((width << 3) plus a number per rank, with
-// bool's width 1), width (getIntWidth), whether the type is signed (char is, on x86-64), and the unsigned type of the
-// same rank (getCorrespondingUnsignedType).
+// bool's width 1), width (getIntWidth), whether the type is signed (char is, on x86-64, unless TypeTable.char_unsigned
+// says otherwise, which type_integer_properties reads), and the unsigned type of the same rank
+// (getCorrespondingUnsignedType).
 typedef struct TypeIntegerInfo TypeIntegerInfo;
 struct TypeIntegerInfo
 {
@@ -3622,7 +3627,7 @@ static void type_integer_properties(const TypeTable* table, TypeId type, uint64_
     {
         *rank = type_integer_info[index].rank;
         *width = type_integer_info[index].width;
-        *is_signed = type_integer_info[index].is_signed;
+        *is_signed = index == BUSTER_TYPE_CODE_CHAR ? !table->char_unsigned : type_integer_info[index].is_signed;
     }
 }
 
@@ -5530,6 +5535,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->members.offset, source->members.offset, member_count * sizeof(*table->members.offset));
         table->members.count = source->members.count;
         table->last_error = source->last_error;
+        table->char_unsigned = source->char_unsigned;
         // type_find_or_add grows the index past 3 types a bucket. An index for every type the copy may hold would be mostly
         // empty, and its probes would miss the caches: #113's lanes each copy a unit's table with room for eight types a
         // token of its largest body, 232,048 for sqlite3.c's 3,256, an index of 8 MB a lane.
