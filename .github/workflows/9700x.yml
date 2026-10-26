@@ -277,7 +277,7 @@ jobs:
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           musl="$corpus/libc/musl"
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 348 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 354 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
           == Check semantic mutants of the frozen SQLite and musl sources against Clang
