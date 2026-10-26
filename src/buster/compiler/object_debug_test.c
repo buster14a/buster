@@ -21,7 +21,13 @@
 //     missing; counts that don't add up or move a unit's .debug_addr header; headers, unit lengths, fields and field
 //     values that aren't debug.c's; line addresses that aren't operands, aren't ascending or end past .debug_line; and
 //     functions that are no symbol, another unit's, not functions, data and an IFUNC), each OBJECT_ERROR_DEBUG with
-//     nothing pushed on the arena and the descriptor's bytes as they were.
+//     nothing pushed on the arena and the descriptor's bytes as they were; then an object whose entry is another
+//     unit's descriptor, and entries one fewer than the units.
+//   - Lanes: every unit's object of a program of 24 units and a 25th without atoms, each with its own unit's entry (one
+//     debug unit for an even unit, two for an odd one, none for every fourth), checked as above and the same as without
+//     DWARF exactly where its entry is empty; then written by object_write_units in groups of 1, 2, 3 and 8 lanes, in
+//     both section modes, each file object_build's object; and with entries one fewer than the units, which every
+//     unit's object refuses, by object_build and by object_write_units, which writes none.
 //   - With --cross-check, which needs readelf, llvm-readobj, llvm-dwarfdump, ld.bfd, ld.lld and mold: the units' objects
 //     of two of test-link's static sets, each with its DWARF (one debug unit for an even unit, two for an odd one),
 //     with and without function sections, listed by readelf and llvm-readobj (object_test_listing), and linked by
@@ -192,6 +198,19 @@ static bool object_test_debug_make(ObjectTestDebug* debug, const Link* link, con
         debug->descriptor.sections[s] = (String8){ .pointer = (char*)bytes[s], .length = sizes[s] };
     }
     return valid;
+}
+
+// ObjectOptions.debug for an object of unit `unit`: an entry per unit of `units`, `debug` the unit's and every other one
+// empty; on `arena`, or null if it has no room.
+static ObjectDebug* object_test_debug_entries(const ObjectDebug* debug, uint32_t unit, const ObjectUnits* units, Arena* arena)
+{
+    ObjectDebug* entries = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectDebug, units->count);
+    if (entries != 0)
+    {
+        memset(entries, 0, (uint64_t)units->count * sizeof(ObjectDebug));
+        entries[unit] = *debug;
+    }
+    return entries;
 }
 
 // A copy of a descriptor's bytes, on `arena`, to check later that object_build left them alone (an executable may take
@@ -511,17 +530,19 @@ static void object_test_debug_refusals(ObjectTestTally* tally, const Link* hand,
                 bad.sections[DEBUG_SECTION_RNGLISTS].pointer = 0;
                 break;
         }
+        ObjectDebug* entries = object_test_debug_entries(&bad, 0, units, arena);
         const uint64_t before = arena->length;
-        const ObjectOptions options = { .debug = &bad };
-        const Object refused = object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena);
+        const ObjectOptions options = { .debug = entries, .debug_count = units->count };
+        const Object refused = entries != 0 ? object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena) : (Object){ .error = OBJECT_ERROR_FULL };
         object_test_expect(tally, refused.error == OBJECT_ERROR_DEBUG && refused.bytes == 0 && arena->length == before, "a descriptor object_build refuses", change);
     }
     // The descriptor itself, unchanged by any of it, still builds.
     if (copied)
     {
+        ObjectDebug* entries = object_test_debug_entries(&valid, 0, units, arena);
         const uint64_t before = arena->length;
-        const ObjectOptions options = { .debug = &valid };
-        const Object built = object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena);
+        const ObjectOptions options = { .debug = entries, .debug_count = units->count };
+        const Object built = entries != 0 ? object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena) : (Object){ .error = OBJECT_ERROR_FULL };
         object_test_expect(tally, built.error == OBJECT_ERROR_NONE, "the descriptor the changes started from", 0);
         arena_pop_to(arena, before);
     }
@@ -529,22 +550,28 @@ static void object_test_debug_refusals(ObjectTestTally* tally, const Link* hand,
     ObjectTestDebug ifunc;
     const bool ifunc_made = object_test_debug_make(&ifunc, hand, units, 2, 1, random, arena) && ifunc.descriptor.function_count == 1;
     object_test_expect(tally, ifunc_made, "a descriptor of unit 2's function", 0);
-    if (ifunc_made)
+    ObjectDebug* entries = ifunc_made ? object_test_debug_entries(&ifunc.descriptor, 2, units, arena) : 0;
+    if (entries != 0)
     {
         const uint64_t before = arena->length;
-        ObjectDebug taken = ifunc.descriptor;
-        const ObjectOptions options = { .debug = &taken };
+        const ObjectOptions options = { .debug = entries, .debug_count = units->count };
         const Object built = object_build(hand, units, symbols, 2, options, BUSTER_S8("u2.c"), arena);
         object_test_expect(tally, built.error == OBJECT_ERROR_NONE, "unit 2's descriptor", 0);
         arena_pop_to(arena, before);
         SymbolId ifunc_function = chosen;
-        taken.functions = &ifunc_function;
+        entries[2].functions = &ifunc_function;
         const Object refused = object_build(hand, units, symbols, 2, options, BUSTER_S8("u2.c"), arena);
         object_test_expect(tally, refused.error == OBJECT_ERROR_DEBUG && refused.bytes == 0 && arena->length == before, "a descriptor of an IFUNC", 0);
-        // Another unit's object: unit 0's, with unit 2's descriptor.
-        taken.functions = ifunc.descriptor.functions;
+        // Another unit's object: unit 0's, with unit 2's descriptor as its entry.
+        entries[2].functions = ifunc.descriptor.functions;
+        entries[0] = entries[2];
         const Object other = object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena);
         object_test_expect(tally, other.error == OBJECT_ERROR_DEBUG && other.bytes == 0 && arena->length == before, "another unit's descriptor", 0);
+        // Entries that aren't the units': one fewer, which unit 2's object refuses though its entry is valid.
+        entries[0] = (ObjectDebug){ 0 };
+        const ObjectOptions fewer = { .debug = entries, .debug_count = units->count - 1 };
+        const Object short_entries = object_build(hand, units, symbols, 2, fewer, BUSTER_S8("u2.c"), arena);
+        object_test_expect(tally, short_entries.error == OBJECT_ERROR_DEBUG && short_entries.bytes == 0 && arena->length == before, "entries one fewer than the units", 0);
     }
     arena_pop_to(arena, length);
 }
@@ -580,12 +607,14 @@ static bool object_test_debug(uint64_t seed, Arena* arena)
                 String8 copies[BUSTER_DEBUG_SECTIONS];
                 const bool made = object_test_debug_make(&debug, &program.link, &units, unit, parts, &random, arena) &&
                                   object_test_debug_snapshot(&debug.descriptor, copies, arena);
-                object_test_expect(&tally, made, "the unit's DWARF", unit);
-                for (uint32_t sections = 0; made && sections < 2; sections += 1)
+                ObjectDebug* entries = made ? object_test_debug_entries(&debug.descriptor, unit, &units, arena) : 0;
+                object_test_expect(&tally, entries != 0, "the unit's DWARF", unit);
+                for (uint32_t sections = 0; entries != 0 && sections < 2; sections += 1)
                 {
                     const ObjectOptions object_options = {
                         .function_sections = sections == 1,
-                        .debug = &debug.descriptor,
+                        .debug = entries,
+                        .debug_count = units.count,
                     };
                     ObjectTestCounts counts = { 0 };
                     object_test_unit(&tally, &program.link, &units, &symbols, unit, object_options, &counts, arena);
@@ -606,11 +635,14 @@ static bool object_test_debug(uint64_t seed, Arena* arena)
             ObjectDebug counted = debug.descriptor;
             counted.unit_functions = &all;
             counted.unit_count = 1;
-            const ObjectOptions plain = { .debug = &debug.descriptor };
-            const ObjectOptions said = { .debug = &counted };
-            const Object first = made ? object_build(&program.link, &units, &symbols, 0, plain, BUSTER_S8("u0.c"), arena) : (Object){ 0 };
-            const Object second = made ? object_build(&program.link, &units, &symbols, 0, said, BUSTER_S8("u0.c"), arena) : (Object){ 0 };
-            object_test_expect(&tally, made && first.error == OBJECT_ERROR_NONE && second.error == OBJECT_ERROR_NONE && first.size == second.size &&
+            ObjectDebug* plain_entries = made ? object_test_debug_entries(&debug.descriptor, 0, &units, arena) : 0;
+            ObjectDebug* said_entries = made ? object_test_debug_entries(&counted, 0, &units, arena) : 0;
+            const ObjectOptions plain = { .debug = plain_entries, .debug_count = units.count };
+            const ObjectOptions said = { .debug = said_entries, .debug_count = units.count };
+            const bool entered = plain_entries != 0 && said_entries != 0;
+            const Object first = entered ? object_build(&program.link, &units, &symbols, 0, plain, BUSTER_S8("u0.c"), arena) : (Object){ 0 };
+            const Object second = entered ? object_build(&program.link, &units, &symbols, 0, said, BUSTER_S8("u0.c"), arena) : (Object){ 0 };
+            object_test_expect(&tally, entered && first.error == OBJECT_ERROR_NONE && second.error == OBJECT_ERROR_NONE && first.size == second.size &&
                                            memcmp(first.bytes, second.bytes, first.size) == 0,
                                "one unit, said so, is the same object", i);
             arena_pop_to(arena, before);
@@ -635,12 +667,14 @@ static bool object_test_debug(uint64_t seed, Arena* arena)
             ObjectTestDebug debug;
             String8 copies[BUSTER_DEBUG_SECTIONS];
             const bool made = object_test_debug_make(&debug, &hand, &units, unit, parts, &random, arena) && object_test_debug_snapshot(&debug.descriptor, copies, arena);
-            object_test_expect(&tally, made, "the hand link unit's DWARF", unit);
-            for (uint32_t sections = 0; made && sections < 2; sections += 1)
+            ObjectDebug* entries = made ? object_test_debug_entries(&debug.descriptor, unit, &units, arena) : 0;
+            object_test_expect(&tally, entries != 0, "the hand link unit's DWARF", unit);
+            for (uint32_t sections = 0; entries != 0 && sections < 2; sections += 1)
             {
                 const ObjectOptions object_options = {
                     .function_sections = sections == 1,
-                    .debug = &debug.descriptor,
+                    .debug = entries,
+                    .debug_count = units.count,
                 };
                 ObjectTestCounts counts = { 0 };
                 object_test_unit(&tally, &hand, &units, &symbols, unit, object_options, &counts, arena);
@@ -786,13 +820,16 @@ static bool object_test_debug_cross_check(uint64_t seed, const char* directory, 
         const bool prepared = generated && object_prepare(&units, &program.link, options[i].units, arena) && object_map_symbols(&symbols, &program.link, arena);
         const uint32_t count = prepared ? units.count : 0;
         ObjectTestDebug* debugs = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, ObjectTestDebug, count) : 0;
+        // Every unit's DWARF as ObjectOptions.debug's entries: each object takes its unit's.
+        ObjectDebug* entries = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, ObjectDebug, count) : 0;
         char* paths = prepared ? arena_push(arena, (uint64_t)count * BUSTER_OBJECT_TEST_PATH_BYTES, 1) : 0;
         char** arguments = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)count + 8) : 0;
-        bool ready = debugs != 0 && paths != 0 && arguments != 0;
+        bool ready = debugs != 0 && entries != 0 && paths != 0 && arguments != 0;
         object_test_expect(&tally, ready, "the objects' DWARF and paths", i);
         for (uint32_t unit = 0; ready && unit < count; unit += 1)
         {
             ready = object_test_debug_make(&debugs[unit], &program.link, &units, unit, 1 + unit % 2, &random, arena);
+            entries[unit] = debugs[unit].descriptor;
             object_test_expect(&tally, ready, "a unit's DWARF", unit);
         }
         char output_path[BUSTER_OBJECT_TEST_PATH_BYTES];
@@ -810,7 +847,8 @@ static bool object_test_debug_cross_check(uint64_t seed, const char* directory, 
                 snprintf(path, BUSTER_OBJECT_TEST_PATH_BYTES, "%s/debug-%s%s_u%u.o", directory, directories[i], sections == 1 ? "-sections" : "", unit);
                 const ObjectOptions object_options = {
                     .function_sections = sections == 1,
-                    .debug = &debugs[unit].descriptor,
+                    .debug = entries,
+                    .debug_count = count,
                 };
                 const uint64_t before = arena->length;
                 char source[32];
@@ -889,5 +927,171 @@ static bool object_test_debug_cross_check(uint64_t seed, const char* directory, 
         link_program_release(&program);
     }
     printf("  objects with DWARF of %u sets linked %u times, by GNU ld, lld and mold\n", (uint32_t)BUSTER_ARRAY_LENGTH(sets), linked);
+    return object_test_report(&tally);
+}
+
+// The lanes (see the file's comment), in directories of their own under `directory`.
+static bool object_test_debug_lanes(uint64_t seed, const char* directory, bool keep, Arena* arena)
+{
+    ObjectTestTally tally = {
+        .check = "debug lanes",
+    };
+    static const uint32_t lane_counts[] = { 1, 2, 3, 8 };
+    uint64_t random = seed ^ 0x6c616e65732d6762ull;
+    LinkProgramOptions options = link_program_default_options();
+    options.seed = seed;
+    options.units = 24;
+    options.functions = 600;
+    options.globals = 96;
+    LinkProgram program;
+    const bool generated = link_program_generate(&program, options);
+    object_test_expect(&tally, generated, "link_program_generate", 0);
+    const uint64_t length = arena->length;
+    ObjectUnits units;
+    ObjectSymbols symbols;
+    const bool prepared = generated && object_prepare(&units, &program.link, options.units + 1, arena) && object_map_symbols(&symbols, &program.link, arena);
+    object_test_expect(&tally, !generated || prepared, "object_prepare", 0);
+    const uint32_t count = prepared ? units.count : 0;
+    ObjectTestDebug* debugs = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, ObjectTestDebug, count) : 0;
+    ObjectDebug* entries = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, ObjectDebug, count) : 0;
+    char** paths = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, count) : 0;
+    char* path_bytes = prepared ? arena_push(arena, (uint64_t)count * BUSTER_OBJECT_TEST_PATH_BYTES, 1) : 0;
+    String8* source_names = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, count) : 0;
+    char* source_bytes = prepared ? arena_push(arena, (uint64_t)count * 32, 1) : 0;
+    ObjectError* errors = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, ObjectError, count) : 0;
+    Object* baseline = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, Object, 2 * (uint64_t)count) : 0;
+    bool ready = debugs != 0 && entries != 0 && paths != 0 && path_bytes != 0 && source_names != 0 && source_bytes != 0 && errors != 0 && baseline != 0;
+    object_test_expect(&tally, !prepared || ready, "room for the entries and the paths", 0);
+    uint32_t described = 0;
+    for (uint32_t unit = 0; ready && unit < count; unit += 1)
+    {
+        entries[unit] = (ObjectDebug){ 0 };
+        if (unit % 4 != 3)
+        {
+            ready = object_test_debug_make(&debugs[unit], &program.link, &units, unit, 1 + unit % 2, &random, arena);
+            entries[unit] = debugs[unit].descriptor;
+            described += 1;
+            object_test_expect(&tally, ready, "a unit's DWARF", unit);
+        }
+        source_names[unit] = object_test_source_name(source_bytes + (uint64_t)unit * 32, 32, unit);
+        paths[unit] = path_bytes + (uint64_t)unit * BUSTER_OBJECT_TEST_PATH_BYTES;
+    }
+    // Each unit's object with the entries, checked and kept for the lanes' files; and without DWARF, the same bytes
+    // exactly where its entry is empty.
+    for (uint32_t mode = 0; ready && mode < 2; mode += 1)
+    {
+        for (uint32_t unit = 0; ready && unit < count; unit += 1)
+        {
+            const ObjectOptions with = {
+                .function_sections = mode != 0,
+                .debug = entries,
+                .debug_count = count,
+            };
+            ObjectTestCounts counts = { 0 };
+            object_test_unit(&tally, &program.link, &units, &symbols, unit, with, &counts, arena);
+            const Object built = object_build(&program.link, &units, &symbols, unit, with, source_names[unit], arena);
+            baseline[mode * count + unit] = built;
+            const uint64_t before = arena->length;
+            const Object without = object_build(&program.link, &units, &symbols, unit, (ObjectOptions){ .function_sections = mode != 0 }, source_names[unit], arena);
+            ready = built.error == OBJECT_ERROR_NONE && without.error == OBJECT_ERROR_NONE;
+            const bool same = ready && built.size == without.size && memcmp(built.bytes, without.bytes, built.size) == 0;
+            object_test_expect(&tally, ready && same == (unit % 4 == 3), "DWARF in the object exactly where its unit's entry has it", unit);
+            arena_pop_to(arena, before);
+        }
+    }
+    // Every lane count, in both modes: each file object_build's object.
+    for (uint32_t c = 0; ready && c < 2 * BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+    {
+        const uint32_t lanes = lane_counts[c / 2];
+        char lanes_directory[BUSTER_OBJECT_TEST_PATH_BYTES];
+        snprintf(lanes_directory, sizeof(lanes_directory), "%s/debug-lanes%u-mode%u", directory, lanes, c % 2);
+        object_test_expect(&tally, mkdir(lanes_directory, 0755) == 0, "mkdir", c);
+        for (uint32_t unit = 0; unit < count; unit += 1)
+        {
+            snprintf(paths[unit], BUSTER_OBJECT_TEST_PATH_BYTES, "%s/u%u.o", lanes_directory, unit);
+        }
+        ObjectTestLanes test = {
+            .link = &program.link,
+            .units = &units,
+            .options = {
+                .function_sections = c % 2 == 1,
+                .debug = entries,
+                .debug_count = count,
+            },
+            .paths = (const char* const*)paths,
+            .source_names = source_names,
+            .errors = errors,
+        };
+        bool written = lane_run(lanes, object_test_lanes_main, &test, 0);
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            written = written && test.written[lane];
+        }
+        object_test_expect(&tally, written, "object_write_units with each unit's DWARF", lanes);
+        for (uint32_t unit = 0; written && unit < count; unit += 1)
+        {
+            const uint64_t before = arena->length;
+            const String8 file = object_test_read_file(arena, paths[unit]);
+            const Object expected = baseline[(c % 2) * count + unit];
+            object_test_expect(&tally, file.pointer != 0 && file.length == expected.size && memcmp(file.pointer, expected.bytes, expected.size) == 0,
+                               "each unit's file object_build's object, with its own DWARF", (uint64_t)lanes * 1000 + unit);
+            arena_pop_to(arena, before);
+        }
+        for (uint32_t unit = 0; !keep && unit < count; unit += 1)
+        {
+            unlink(paths[unit]);
+        }
+        if (!keep)
+        {
+            rmdir(lanes_directory);
+        }
+    }
+    // Entries one fewer than the units: every unit's object refused, by object_build and by object_write_units.
+    if (ready)
+    {
+        const ObjectOptions fewer = {
+            .debug = entries,
+            .debug_count = count - 1,
+        };
+        for (uint32_t unit = 0; unit < count; unit += 1)
+        {
+            const uint64_t before = arena->length;
+            const Object refused = object_build(&program.link, &units, &symbols, unit, fewer, source_names[unit], arena);
+            object_test_expect(&tally, refused.error == OBJECT_ERROR_DEBUG && refused.bytes == 0 && arena->length == before, "entries one fewer than the units", unit);
+        }
+        char lanes_directory[BUSTER_OBJECT_TEST_PATH_BYTES];
+        snprintf(lanes_directory, sizeof(lanes_directory), "%s/debug-lanes-fewer", directory);
+        object_test_expect(&tally, mkdir(lanes_directory, 0755) == 0, "mkdir", 0);
+        for (uint32_t unit = 0; unit < count; unit += 1)
+        {
+            snprintf(paths[unit], BUSTER_OBJECT_TEST_PATH_BYTES, "%s/u%u.o", lanes_directory, unit);
+            errors[unit] = OBJECT_ERROR_NONE;
+        }
+        ObjectTestLanes test = {
+            .link = &program.link,
+            .units = &units,
+            .options = fewer,
+            .paths = (const char* const*)paths,
+            .source_names = source_names,
+            .errors = errors,
+        };
+        bool refused = lane_run(3, object_test_lanes_main, &test, 0);
+        for (uint32_t lane = 0; lane < 3; lane += 1)
+        {
+            refused = refused && !test.written[lane];
+        }
+        for (uint32_t unit = 0; unit < count; unit += 1)
+        {
+            refused = refused && errors[unit] == OBJECT_ERROR_DEBUG && access(paths[unit], F_OK) != 0;
+        }
+        object_test_expect(&tally, refused, "object_write_units with entries one fewer than the units writes none", 0);
+        rmdir(lanes_directory);
+    }
+    printf("  %u units' objects, %u with DWARF of their own, by 1, 2, 3 and 8 lanes\n", count, described);
+    arena_pop_to(arena, length);
+    if (generated)
+    {
+        link_program_release(&program);
+    }
     return object_test_report(&tally);
 }

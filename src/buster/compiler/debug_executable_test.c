@@ -751,7 +751,7 @@ static bool debug_test_object_write(const char* object_path, const char* output_
     ObjectUnits object_units = { 0 };
     ObjectSymbols symbols = { 0 };
     ready = ready && object_prepare(&object_units, &link, 1, &arena) && object_map_symbols(&symbols, &link, &arena);
-    const ObjectOptions options = { .debug = &debug };
+    const ObjectOptions options = { .debug = &debug, .debug_count = 1 };
     const Object built = ready ? object_build(&link, &object_units, &symbols, 0, options, BUSTER_S8("fixture.s"), &arena) : (Object){ 0 };
     ready = ready && built.error == OBJECT_ERROR_NONE && object_write_file(output_path, built.bytes, built.size) == OBJECT_ERROR_NONE;
     executable_test_expect(&tally, ready, "the fixture's code and its units' DWARF as an object", unit_count);
