@@ -152,6 +152,8 @@ struct CheckInput
     uint32_t* parameter_next;
     uint32_t* control_owners;
     uint32_t* label_targets;
+    // Resolved &&label expressions, counted by check_input_controls; zero lets check_program omit its address table.
+    uint32_t label_address_count;
     uint32_t* case_ranges;
     CheckInputRegion* regions;
     uint32_t* expression_regions;
@@ -3652,26 +3654,6 @@ static void check_input_expressions(CheckInputReader* reader)
                 }
             }
         }
-        else if (check_input_label_address(parser, token))
-        {
-            // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the label's own
-            // object, its token plus one, which no declaration has.
-            const uint32_t label = reader->output->label_targets[token];
-            const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
-            supported = label < parser->tokens.count && pointer != 0 && count == 0;
-            node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
-            if (node != BUSTER_CHECK_NONE)
-            {
-                graph->leaves[node] = (CheckValue)
-                {
-                    .type = pointer,
-                    .category = CHECK_RVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
-                    .constant_kind = CHECK_CONSTANT_ADDRESS,
-                    .object = label + 1,
-                };
-            }
-        }
         else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
                  check_input_indirect_goto(parser, parser->tree.parents[token]))
         {
@@ -3686,6 +3668,27 @@ static void check_input_expressions(CheckInputReader* reader)
             supported = count == 1;
             switch (kind)
             {
+                case PARSE_KIND_AMPAMP:
+                {
+                    // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the
+                    // label's own object, its token plus one, which no declaration has.
+                    const uint32_t label = reader->output->label_targets[token];
+                    const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
+                    supported = label < parser->tokens.count && pointer != 0 && count == 0;
+                    node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
+                    if (node != BUSTER_CHECK_NONE)
+                    {
+                        graph->leaves[node] = (CheckValue)
+                        {
+                            .type = pointer,
+                            .category = CHECK_RVALUE,
+                            .flags = BUSTER_CHECK_STATIC_OBJECT,
+                            .constant_kind = CHECK_CONSTANT_ADDRESS,
+                            .object = label + 1,
+                        };
+                    }
+                    break;
+                }
                 case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
                 case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
                 case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;

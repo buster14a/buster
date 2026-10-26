@@ -4,7 +4,7 @@
 # most of the compiler, take most of the time), then links their objects in the sources' order: the same executable as
 # one clang command for all of them. It reports how long the compiles took, and which took longest.
 # ./build.sh check-call-graph checks the no-recursion rule on the built compiler's call graph: it writes the LLVM IR of
-# the same translation units into a temporary directory, at once too, and runs build/compiler check-call-graph on it.
+# the same translation units into a temporary directory, one per allowed core, and runs build/compiler check-call-graph on it.
 # The IR is clang's before any LLVM pass, so a call in it is a call in the source, at the build's own optimization
 # level, so it holds every body the build may inline (at -O0, clang doesn't emit an extern inline body at all). First it
 # captures src/buster/compiler/call_graph_capture the same way, whose cycle runs through such a body, and fails if the
@@ -204,6 +204,8 @@ select_linker()
 defines=()
 if [ "$1" = check-call-graph ]; then
     test -x build/compiler || { echo "build.sh check-call-graph: build/compiler is missing; run ./build.sh first" >&2; exit 1; }
+    jobs="$(cores)"
+    [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "build.sh check-call-graph: couldn't determine a positive CPU budget" >&2; exit 1; }
     root="$(pwd)"
     ir="$(mktemp -d)"
     temporary+=("$ir")
@@ -216,7 +218,7 @@ if [ "$1" = check-call-graph ]; then
         exit 1
     fi
     mkdir "$ir/logs"
-    each_source "$ir/logs" capture_source "${#sources[@]}"
+    each_source "$ir/logs" capture_source "$jobs"
     names=()
     for source in "${sources[@]}"; do
         names+=("$(basename "${source%.c}").ll")
