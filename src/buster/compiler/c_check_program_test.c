@@ -10,6 +10,7 @@
 
 #include "c_check_program_helpers_test.c"
 #include "c_check_program_diagnostic_test.c"
+#include "c_check_control_input_test.c"
 
 static void check_test_program_addressed(CheckTest* test)
 {
@@ -480,6 +481,8 @@ static void check_test_program_refused(CheckTest* test)
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_control_masks(test);
+    check_test_control_walks(test);
     check_test_program_addressed(test);
     check_test_program_refused(test);
     check_test_program_selection(test, clang);
