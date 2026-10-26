@@ -5936,7 +5936,7 @@ static bool build_template_properties(const X86FormDescription* form, uint32_t s
 }
 
 // The direct builder's local-state entry, retained by the independent construction tests.
-static bool build_template(const X86FormDescription* form, uint32_t segment, X86EncoderMode encoder, X86Template* template)
+static __attribute__((unused)) bool build_template(const X86FormDescription* form, uint32_t segment, X86EncoderMode encoder, X86Template* template)
 {
     const uint8_t properties = x86_mode_is_legacy(encoder) ? x86_form_legacy[form - x86_form_descriptions] : 0;
     return build_template_properties(form, segment, encoder, properties, template);
@@ -5979,7 +5979,7 @@ static bool build_mode_template_properties(uint32_t form, X86EncoderMode encoder
     return result;
 }
 
-static bool build_mode_template(uint32_t form, X86EncoderMode encoder, X86Template* template)
+static __attribute__((unused)) bool build_mode_template(uint32_t form, X86EncoderMode encoder, X86Template* template)
 {
     return build_mode_template_properties(form, encoder, x86_form_legacy, template);
 }
