@@ -141,9 +141,10 @@
 //   - COPY: copies `value` bytes (1 to BUSTER_TIER0_MAX_COPY_BYTES) to the address the first operand (U64) holds from
 //     the one the last (U64) holds, and pushes nothing (`class` VOID): a struct's assignment. The two ranges are the
 //     same or apart. A front end copies more through memcpy, as clang -O0 does past this many bytes.
-//   - ALLOCA: reserves as many bytes as the operand (U64) says, rounded up to a multiple of 16, on the stack, and
-//     pushes their address (`class` U64, a multiple of 16; `value` 0): a variable-length array's storage. The bytes
-//     stay until a STACK_RESTORE releases them or the function returns.
+//   - ALLOCA: reserves as many bytes as the operand (U64) says, rounded up to a multiple of 16 (of the frame's alignment
+//     in a realigned frame, which so stays aligned), on the stack, and pushes their address (`class` U64, a multiple of
+//     16; `value` 0): a variable-length array's storage. The bytes stay until a STACK_RESTORE releases them or the
+//     function returns.
 //   - STACK_SAVE: pushes the stack's position (`class` U64; `value` 0), which only STACK_RESTORE reads.
 //   - STACK_RESTORE: pops the operand (U64), a position STACK_SAVE pushed in this function, and releases what ALLOCA
 //     has reserved since (`class` U64; `value` 0): the end of a variable-length array's scope.
@@ -151,7 +152,9 @@
 //     and goes there (`class` U64; `value` 0): GNU C's goto *. At statement level, as the labels are: an address of a
 //     label is a GLOBAL_ADDRESS of the symbol a front end defines at its record (Tier0Code.label_records).
 // A function with ALLOCA, STACK_SAVE or STACK_RESTORE has a frame pointer, rbp, which then neither a depth nor a home
-// takes: its integer stack has one depth fewer.
+// takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
+// outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
+// frame's address, which rsp leaves, and its integer stack has two depths fewer.
 // Long double (F80) takes CONST (`value` an index into Tier0Function.x87_constants), DUP, NEG, CONVERT (to and from every
 // class; to an integer by truncation, as C converts), LOAD, STORE and SET (its 10 bytes at the address), ADD, SUB, MUL and
 // DIV, the compares (IEEE's, as the floating types'), CALL (arguments on the stack, a result in st0), DISCARD, JUMP_VALUE
@@ -256,12 +259,16 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 #define BUSTER_TYPED_LOCAL_ADDRESS_ONLY (BUSTER_TYPED_LOCAL_VA_LIST | BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA | BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA)
 
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
-// size rounded up to 16, so that every frame displacement fits a disp32.
+// size rounded up to 16 and, aligned past 16, its alignment less 16 (the most its place may move by), so that every frame
+// displacement fits a disp32. An object's alignment, and a call's outgoing area's (AbiCall.stack_alignment_log2), is at
+// most 2^30: past 16 bytes, the function's frame is realigned to the most any of them needs (Tier0Frame.alignment_log2).
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 #define BUSTER_TIER0_MAX_LOCALS (1u << 16)
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS 64
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
-#define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 4
+#define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30
+// The alignment an ordinary frame keeps (rsp's at every call, as the convention has it), past which it is realigned.
+#define BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 4
 // A COPY's bytes, at most: 16 stores of 16 bytes, the most LLVM expands a memcpy into at -O0.
 #define BUSTER_TIER0_MAX_COPY_BYTES 256
 // An aggregate argument's bytes, at most (Tier0Function.argument_sizes): one on the stack is copied into place by a load
@@ -278,10 +285,13 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 //
 // The locals that are objects in the frame (arrays, structs and unions: anything that isn't one value of a class) are
 // optional columns, 0 for a function without objects: local_sizes[l] is local l's size in bytes, nonzero for an
-// object and 0 for a value, and local_alignments[l] its alignment's log2, at most 4 (16 bytes). An object's class is
-// VOID, its flags have BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, and only LOCAL_ADDRESS refers to it: its bytes are loaded and
-// stored through that address (PTR_ADD, LOAD, SET). Its first contents are the front end's to write, but for a
-// parameter's. The objects take at most BUSTER_TIER0_MAX_OBJECT_BYTES in all.
+// object and 0 for a value, and local_alignments[l] its alignment's log2, at most BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2
+// (an object aligned past 16 bytes realigns its function's frame). An object's class is VOID, its flags have
+// BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, and LOCAL_ADDRESS refers to it: its bytes are loaded and stored through that address
+// (PTR_ADD, LOAD, SET). LOCAL, STORE_LOCAL and SET_LOCAL of a class may name an object too, of at least the class's
+// bytes (a memory class's slot's 16; tier0_value_object), whose first bytes they read or write: a front end's value
+// that must live in memory, as a long double's local, or one aligned past 8 bytes. Its first contents are the front
+// end's to write, but for a parameter's. The objects take at most BUSTER_TIER0_MAX_OBJECT_BYTES in all.
 //
 // Structs and unions passed and returned by value (#137) are three optional parts, 0 for a function without them. An
 // aggregate's value on the stacks is its address (U64), as a front end evaluates one:
@@ -436,9 +446,12 @@ typedef enum Tier0Error
 // in their order (0 for a function without them): the label's first record. The frame is the one tier0_emit_prologue
 // made, for its unwind tables (unwind_tier0_frame, #395): the callee-saved registers it pushed (Tier0Frame.saved's
 // bits, in tier0_callee_saved's order), whether it pushed rbp first and pointed it at the push (a frame pointer, which
-// a function that moves rsp as it runs has), and the bytes it reserved below the pushes. The prologue's pushes, the
-// frame pointer's mov and the reservation are the code's first records, and the epilogue's release (an add, or with a
-// frame pointer the lea or mov), pops and ret its last.
+// a function that moves rsp as it runs has, and one whose frame is realigned), the bytes it reserved below the pushes,
+// the log2 of the alignment it realigned rsp to after them (0 for none: `and rsp, -alignment`, a frame pointer's alone)
+// and whether it then copied rsp into r15, the realigned frame's base where the body moves rsp (`frame_base`, r15 among
+// the pushes). The prologue's pushes, the frame pointer's mov, the reservation, the realignment and the base's mov are
+// the code's first records, and the epilogue's release (an add, or with a frame pointer the lea or mov), pops and ret
+// its last.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -458,6 +471,8 @@ struct Tier0Code
     uint32_t frame_saved;
     uint32_t frame_size;
     bool frame_pointer;
+    uint8_t frame_alignment_log2;
+    bool frame_base;
     Tier0Error error;
     uint32_t node;
 };
@@ -521,15 +536,19 @@ static bool tier0_moves_stack(uint32_t kind)
     return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE;
 }
 
-// The integer depths a function may reach: the table's, less rbp, its last, in a function with a frame pointer.
-static int32_t tier0_integer_depth_count(bool pointer)
+// The integer depths a function may reach: the table's, less rbp, its last, in a function with a frame pointer (one whose
+// entries move rsp, `moves`, or whose frame is `realigned`), and less r15 too, the one before it, in a realigned frame
+// whose entries move rsp, which r15 then addresses (Tier0Frame.based).
+static int32_t tier0_integer_depth_count(bool realigned, bool moves)
 {
-    _Static_assert(BUSTER_TIER0_INTEGER_DEPTHS == 15, "rbp is the depth table's last register");
-    return pointer ? BUSTER_TIER0_INTEGER_DEPTHS - 1 : BUSTER_TIER0_INTEGER_DEPTHS;
+    _Static_assert(BUSTER_TIER0_INTEGER_DEPTHS == 15, "rbp is the depth table's last register, and r15 the one before it");
+    return BUSTER_TIER0_INTEGER_DEPTHS - (realigned ? 1 : 0) - (moves ? 1 : 0);
 }
 
-// The callee-saved registers, in the order the prologue pushes them and homes take them.
+// The callee-saved registers, in the order the prologue pushes them and homes take them. r15, a realigned frame's base
+// (Tier0Frame.based), is the last (BUSTER_TIER0_SAVED_R15, Tier0Frame.saved's bit for it; tier0_initialize checks it).
 #define BUSTER_TIER0_CALLEE_SAVED 6
+#define BUSTER_TIER0_SAVED_R15 5
 static const uint8_t tier0_callee_saved[BUSTER_TIER0_CALLEE_SAVED] = {
     X86_REGISTER_RBX,
     X86_REGISTER_RBP,
@@ -749,7 +768,8 @@ static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0P
 }
 
 // Whether parameter `p` keeps its incoming stack bytes as its home: a value on the stack, or an aggregate on the stack
-// whole at a multiple of its alignment (the incoming area starts at a multiple of 16). The prologue copies the others'
+// whole at a multiple of its alignment (the incoming area starts at a multiple of 16, or of an argument's alignment past
+// it, which its caller's outgoing area keeps: AbiCall.stack_alignment_log2). The prologue copies the others'
 // slots into their objects: the high eightbyte alone, and two eightbytes that LLVM put in slots of 8 bytes each when it
 // had no register left for them, whatever the aggregate's alignment.
 static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
@@ -893,9 +913,10 @@ static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
     const uint64_t stack_bytes = function->calls[c].stack_bytes;
     // The registers the call's arguments take, as a register set (BUSTER_TIER0_XMM's). The outgoing area starts at rsp, a
-    // multiple of 16 at the call, so no slot may need more.
+    // multiple of the frame's alignment at the call: 16, or the most a call's area needs past it, to which the frame is
+    // realigned (tier0_frame_alignment).
     uint32_t taken = 0;
-    bool valid = (uint64_t)first + count <= function->argument_count && function->calls[c].stack_alignment_log2 <= BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    bool valid = (uint64_t)first + count <= function->argument_count && function->calls[c].stack_alignment_log2 <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
     for (uint32_t a = 0; valid && a < count; a += 1)
     {
         const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
@@ -939,7 +960,7 @@ static bool tier0_calls_valid(const Tier0Function* function)
 }
 
 // The parameters' locations, as tier0_place_valid has them inside the incoming area (a variadic function's, else all of
-// int32), each object's aligned to 16 at most, and no register two parameters take: each arrives in its own, which the
+// int32), each object's aligned to 2^30 at most, and no register two parameters take: each arrives in its own, which the
 // prologue reads it from or leaves it in as its home. tier0_validate's check of the parameters, and the compile paths'
 // where an optional part bounds them (incoming_variadic) or may make objects of them (local_sizes).
 static bool tier0_parameters_valid(const Tier0Function* function)
@@ -2707,7 +2728,10 @@ static bool tier0_initialize(void)
                 }
             }
         }
-        tier0_initialized = tier0_builder.valid && tier0_build_vector_tables() && tier0_build_words() && tier0_build_choice_shapes();
+        // A realigned frame's base is the callee-saved registers' last (BUSTER_TIER0_SAVED_R15) and the integer depth
+        // table's before rbp, so that the depths it takes are the table's last two (tier0_integer_depth_count).
+        const bool base = tier0_callee_saved[BUSTER_TIER0_SAVED_R15] == X86_REGISTER_R15 && tier0_integer_depths[BUSTER_TIER0_INTEGER_DEPTHS - 2] == X86_REGISTER_R15;
+        tier0_initialized = tier0_builder.valid && base && tier0_build_vector_tables() && tier0_build_words() && tier0_build_choice_shapes();
     }
     return tier0_initialized;
 }
@@ -3235,16 +3259,27 @@ _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 // per integer depth from `memory_area`, an F80, I128 or U128 value at depth d in slot d), the optional incoming
 // variadic register-save area, the locals' slots, then the objects. Incoming saves never share outgoing
 // call-preservation storage. `size` is what the prologue subtracts from rsp (with the pushes and the return address, a
-// multiple of 16 when the function calls or has an object aligned to 16); `saved` has a bit per tier0_callee_saved
+// multiple of 16 when the function calls or has an object aligned to 16, but in a realigned frame, whose rsp the prologue
+// rounds down after it); `saved` has a bit per tier0_callee_saved
 // register the prologue pushes. `clobbers` is the register set the body touches (BUSTER_TIER0_XMM's layout), and
 // `integer_top` and `floating_top` the highest depth registers in it.
 //
-// A function with ALLOCA, STACK_SAVE or STACK_RESTORE entries (`pointer`) moves rsp in its body, so its frame is
-// addressed from a frame pointer: the prologue pushes rbp first and points it at the push, `pushes` counts it, and the
-// body reaches every place of the frame as [rbp + its offset from rsp + `bias`] (`base` is RBP, where it is RSP
-// otherwise, with no bias), but the outgoing arguments, which stay at rsp. The outgoing area is then a multiple of 16
+// A function with ALLOCA, STACK_SAVE or STACK_RESTORE entries (`moves`) moves rsp in its body, so its frame is
+// addressed from a frame pointer (`pointer`): the prologue pushes rbp first and points it at the push, `pushes` counts
+// it, and the body reaches every place of the frame as [rbp + its offset from rsp + `bias`] (`base` is RBP, where it is
+// RSP otherwise, with no bias), but the outgoing arguments, which stay at rsp. The outgoing area is then a multiple of 16
 // (`outgoing`), so that an allocation (at rsp + `outgoing`) is aligned and ends where the area began, and rsp stays a
 // multiple of 16 at every entry.
+//
+// A function whose objects or calls' outgoing areas need more than 16 bytes' alignment (`alignment_log2`, 0 for none:
+// tier0_frame_alignment) has a realigned frame: rbp pushed and pointed at the push, the callee-saved registers pushed, the
+// frame reserved, then rsp rounded down to the alignment (`and rsp, -alignment`), which leaves rbp at a distance no one
+// knows from it. Its places are then addressed from rsp with no bias, or with `moves` from r15 (`based`), pushed with
+// the callee-saved registers and set to rsp after the realignment, since the body moves rsp: an allocation then rounds
+// its bytes up to the frame's alignment, so that rsp keeps it. Its incoming places (stack parameters' homes, an
+// aggregate's incoming bytes, the variadic overflow area) are addressed from rbp, past the return address. `depth_count`
+// is the integer depths the frame leaves the stack (tier0_integer_depth_count), and the incoming area starts at
+// [`incoming_base` + `incoming`]: rsp's, past the frame, the pushes and the return address, or rbp's in a realigned frame.
 typedef struct Tier0Frame Tier0Frame;
 struct Tier0Frame
 {
@@ -3266,9 +3301,15 @@ struct Tier0Frame
     int32_t integer_top;
     int32_t floating_top;
     int32_t bias;
+    int32_t depth_count;
+    int32_t incoming;
     uint8_t base;
+    uint8_t incoming_base;
+    uint8_t alignment_log2;
     bool calls;
+    bool moves;
     bool pointer;
+    bool based;
     // Whether a parameter is an object (an aggregate's, tier0_object_parameters), without which the passes over the
     // parameters leave out what only objects need.
     bool object_parameters;
@@ -3287,13 +3328,26 @@ static bool tier0_memory_function(const Tier0Function* function)
     return function->x87 || function->int128;
 }
 
-// Whether LOCAL, STORE_LOCAL and SET_LOCAL of memory class `class` may name local `local` (below the count): an object
-// of at least a slot's bytes, but an address-only one (a va_list's, a variadic frame's anchor), whose first bytes the
-// entries read and write, as a front end's temporaries of the class and its locals are.
-static bool tier0_memory_object(const Tier0Function* function, uint64_t local, uint32_t class)
+// Whether LOCAL, STORE_LOCAL and SET_LOCAL of class `class` may name local `local` (below the count) as an object: one of
+// at least the class's bytes (a memory class's slot's 16), but an address-only one (a va_list's, a variadic frame's
+// anchor), whose first bytes the entries read and write, as its home's, the place in the frame it has as a slot would:
+// a front end's temporaries of a memory class and its locals, which live in memory, and its values that must (one aligned
+// past 8 bytes, its object's alignment). A value's local of the class is named otherwise.
+static bool tier0_value_object(const Tier0Function* function, uint64_t local, uint32_t class)
 {
-    return tier0_class_memory(class) && tier0_is_object(function, local) && function->local_sizes[local] >= BUSTER_TIER0_MEMORY_SLOT_BYTES &&
-           (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0;
+    return class != BUSTER_TYPED_CLASS_VOID && class < BUSTER_TYPED_CLASSES && tier0_is_object(function, local) &&
+           function->local_sizes[local] >= tier0_class_bytes(class) && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0;
+}
+
+// The frame's registers, once selection knows whether the entries move rsp (`moves`): a frame pointer where they do or
+// the frame is realigned, a realigned frame's base (r15) where both, and the integer depths they leave the stack.
+static void tier0_frame_registers(Tier0Frame* frame, bool moves, int32_t depth_count)
+{
+    const bool realigned = frame->alignment_log2 != 0;
+    frame->moves = moves;
+    frame->pointer = moves || realigned;
+    frame->based = moves && realigned;
+    frame->depth_count = depth_count;
 }
 
 // The registers each depth table's prefix covers, as a register set.
@@ -3479,6 +3533,28 @@ static bool tier0_object_parameters(const Tier0Function* function)
     return objects;
 }
 
+// The log2 of the alignment a function's frame needs past 16 bytes, to which the prologue realigns it
+// (Tier0Frame.alignment_log2), or 0 for none: the most its objects in the frame need (not an aggregate parameter's that
+// keeps its incoming bytes, tier0_parameter_in_place, which its caller aligned) and the most its calls' outgoing areas
+// need (AbiCall.stack_alignment_log2, which an argument aligned past 16 raises). Out of line, once per function, before
+// selection, whose integer depths it decides: a function without objects has its calls' alone to read.
+static __attribute__((noinline)) uint32_t tier0_frame_alignment(const Tier0Function* function)
+{
+    uint32_t log2 = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
+    for (uint32_t l = 0; l < function->local_count && function->local_sizes != 0; l += 1)
+    {
+        const bool in_place = l < function->parameter_count && tier0_parameter_in_place(function, l);
+        const uint32_t alignment = tier0_is_object(function, l) && !in_place ? function->local_alignments[l] : 0;
+        log2 = alignment > log2 ? alignment : log2;
+    }
+    for (uint32_t c = 0; c < function->call_count; c += 1)
+    {
+        const uint32_t alignment = function->calls[c].stack_alignment_log2;
+        log2 = alignment > log2 ? alignment : log2;
+    }
+    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : 0;
+}
+
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
 // locals, most referenced first (by index among equals), take the free caller-saved registers, then (referenced at
 // least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
@@ -3508,8 +3584,8 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             arrivals |= reg != BUSTER_ABI_REGISTER_NONE ? 1u << tier0_abi_register(reg) : 0;
         }
     }
-    // A frame pointer's rbp is no home either.
-    uint32_t taken = frame->clobbers | arrivals | 1u << X86_REGISTER_RSP | (frame->pointer ? 1u << X86_REGISTER_RBP : 0);
+    // A frame pointer's rbp is no home either, nor a realigned frame's base, r15.
+    uint32_t taken = frame->clobbers | arrivals | 1u << X86_REGISTER_RSP | (frame->pointer ? 1u << X86_REGISTER_RBP : 0) | (frame->based ? 1u << X86_REGISTER_R15 : 0);
     for (uint32_t l = 0; l < locals; l += 1)
     {
         homes[l] = (Tier0Home){ 0, 0, 0, 0, 0 };
@@ -3588,11 +3664,13 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             }
         }
     }
-    // The callee-saved registers the depths reach are saved too (never rbp with a frame pointer, whose depth is refused).
+    // The callee-saved registers the depths reach are saved too (never rbp with a frame pointer, whose depth is refused),
+    // and a realigned frame's base, r15 (the depths never reach it).
     for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
     {
         frame->saved |= (frame->clobbers & 1u << tier0_callee_saved[c]) != 0 ? 1u << c : 0;
     }
+    frame->saved |= frame->based ? 1u << BUSTER_TIER0_SAVED_R15 : 0;
     // The frame pointer's push, first, counts with the others.
     frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u);
 }
@@ -3692,8 +3770,8 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     {
         outgoing = function->calls[c].stack_bytes > outgoing ? function->calls[c].stack_bytes : outgoing;
     }
-    // With a frame pointer, a multiple of 16: where an allocation starts, aligned, above the outgoing arguments.
-    uint64_t offset = frame->pointer ? (outgoing + 15) & ~UINT64_C(15) : (outgoing + 7) & ~UINT64_C(7);
+    // With entries that move rsp, a multiple of 16: where an allocation starts, aligned, above the outgoing arguments.
+    uint64_t offset = frame->moves ? (outgoing + 15) & ~UINT64_C(15) : (outgoing + 7) & ~UINT64_C(7);
     bool valid = offset <= INT32_MAX;
     frame->outgoing = valid ? (uint32_t)offset : 0;
     frame->save_area = valid ? (uint32_t)offset : 0;
@@ -3751,17 +3829,24 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     offset = vector ? tier0_frame_slots_vector(function, homes, references, offset, &objects) : offset;
     offset = vector && objects ? tier0_frame_objects_vector(function, frame, homes, offset, &aligned) : offset;
     // With the pushes and the return address, a multiple of 16 at every call, for an object aligned to 16, and with a
-    // frame pointer, under which every allocation keeps it so.
+    // frame pointer, under which every allocation keeps it so. A realigned frame's rsp is rounded down to its alignment
+    // after the reservation instead, which keeps it so too.
     const uint64_t above = 8 * frame->pushes + 8;
-    if (frame->calls || aligned || frame->pointer)
+    const bool realigned = frame->alignment_log2 != 0;
+    if ((frame->calls || aligned || frame->pointer) && !realigned)
     {
         offset = (offset + above + 15) / 16 * 16 - above;
     }
     valid = valid && offset <= INT32_MAX;
     frame->size = valid ? (uint32_t)offset : 0;
+    // The incoming area: past the frame, the pushes and the return address from rsp, or in a realigned frame, whose rsp is
+    // at a distance from them no one knows, past rbp's push and the return address from rbp.
+    const uint64_t incoming = realigned ? 16 : offset + above;
+    frame->incoming_base = realigned ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+    frame->incoming = incoming <= INT32_MAX ? (int32_t)incoming : 0;
     if (function->incoming_variadic != 0)
     {
-        const uint64_t overflow = offset + above + function->incoming_variadic->stack_bytes;
+        const uint64_t overflow = incoming + function->incoming_variadic->stack_bytes;
         valid = valid && overflow <= INT32_MAX;
         frame->overflow_area = valid ? (uint32_t)overflow : 0;
     }
@@ -3770,8 +3855,9 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         const uint32_t role = function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
         if (role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA || role == BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA)
         {
-            homes[l].displacement = (int32_t)(role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA ? frame->variadic_area : frame->overflow_area);
-            homes[l].reg = X86_REGISTER_RSP;
+            const bool save_area = role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA;
+            homes[l].displacement = (int32_t)(save_area ? frame->variadic_area : frame->overflow_area);
+            homes[l].reg = save_area ? X86_REGISTER_RSP : frame->incoming_base;
             homes[l].mode = BUSTER_X86_MEMORY_BASE;
         }
     }
@@ -3781,27 +3867,29 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         const uint32_t kind = function->parameters[p].kind;
         if (kind == BUSTER_ABI_LOCATION_STACK || kind == BUSTER_ABI_LOCATION_SPLIT)
         {
-            const uint64_t incoming = offset + above + function->parameters[p].stack_offset;
-            valid = valid && incoming <= INT32_MAX;
+            const uint64_t place = incoming + function->parameters[p].stack_offset;
+            valid = valid && place <= INT32_MAX;
             if (!homes[p].is_register && (object_parameters ? tier0_parameter_in_place(function, p) : kind == BUSTER_ABI_LOCATION_STACK))
             {
-                homes[p].displacement = valid ? (int32_t)incoming : 0;
-                homes[p].reg = X86_REGISTER_RSP;
+                homes[p].displacement = valid ? (int32_t)place : 0;
+                homes[p].reg = frame->incoming_base;
                 homes[p].mode = BUSTER_X86_MEMORY_BASE;
             }
         }
     }
     // With a frame pointer, every memory home from rbp, which is the frame's size and the pushes after rbp's above rsp:
-    // the homes' displacements less that, each between -2^31 and the displacement it was.
-    frame->base = frame->pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
-    valid = valid && (!frame->pointer || offset + 8 * (frame->pushes - 1) <= INT32_MAX);
-    frame->bias = valid && frame->pointer ? (int32_t)-(int64_t)(offset + 8 * (frame->pushes - 1)) : 0;
-    for (uint32_t l = 0; l < function->local_count && frame->pointer; l += 1)
+    // the homes' displacements less that, each between -2^31 and the displacement it was. A realigned frame's places stay
+    // rsp's, or with entries that move rsp become r15's (`based`), which holds rsp as the prologue leaves it: with no bias.
+    const bool biased = frame->pointer && !realigned;
+    frame->base = frame->based ? X86_REGISTER_R15 : biased ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+    valid = valid && (!biased || offset + 8 * (frame->pushes - 1) <= INT32_MAX);
+    frame->bias = valid && biased ? (int32_t)-(int64_t)(offset + 8 * (frame->pushes - 1)) : 0;
+    for (uint32_t l = 0; l < function->local_count && frame->base != X86_REGISTER_RSP; l += 1)
     {
         if (!homes[l].is_register && homes[l].reg == X86_REGISTER_RSP && homes[l].mode == BUSTER_X86_MEMORY_BASE)
         {
             homes[l].displacement = (int32_t)((int64_t)homes[l].displacement + frame->bias);
-            homes[l].reg = X86_REGISTER_RBP;
+            homes[l].reg = frame->base;
         }
     }
     return valid;
@@ -4884,9 +4972,10 @@ static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* e
 #define BUSTER_TIER0_ALLOCA_RECORDS 4
 #define BUSTER_TIER0_STACK_RECORDS 1
 
-// The entries that move rsp, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 and
-// taken from rsp, and the allocation's address in its register, above the outgoing area (add, and, sub and lea, or mov
-// with no area); STACK_SAVE's rsp into the register at its depth, and STACK_RESTORE's back from the one at depth − 1.
+// The entries that move rsp, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 (to a
+// realigned frame's alignment, so that rsp keeps it) and taken from rsp, and the allocation's address in its register,
+// above the outgoing area (add, and, sub and lea, or mov with no area); STACK_SAVE's rsp into the register at its depth,
+// and STACK_RESTORE's back from the one at depth − 1.
 static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
@@ -4894,8 +4983,10 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
     if (kind == BUSTER_TYPED_ALLOCA)
     {
         const uint8_t count = tier0_integer_depths[depth - 1];
-        tier0_put(writer, tier0_instruction(X86_FORM_ADD_RM64_IMM8, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, 15));
-        tier0_put(writer, tier0_instruction(X86_FORM_AND_RM64_IMM8, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, -16));
+        const uint32_t log2 = frame->alignment_log2 != 0 ? frame->alignment_log2 : BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
+        const int32_t alignment = (int32_t)(UINT32_C(1) << log2);
+        tier0_put(writer, tier0_instruction(log2 <= 7 ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_ADD_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, alignment - 1));
+        tier0_put(writer, tier0_instruction(log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, -alignment));
         tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_R64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
         if (frame->outgoing != 0)
         {
@@ -4997,7 +5088,7 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
     }
     else if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
     {
-        // The object's first 10 bytes into slot d, or slot d − 1's into them (tier0_memory_object's).
+        // The object's first 10 bytes into slot d, or slot d − 1's into them (tier0_value_object's).
         const Tier0Home home = homes[function->values[i]];
         const bool local = kind == BUSTER_TYPED_LOCAL;
         tier0_put(writer, local ? tier0_instruction(X86_FORM_FLD_M80, 0, home.reg, home.mode, home.displacement, 0)
@@ -5244,7 +5335,7 @@ static void tier0_emit_int128(const Tier0Function* function, const Tier0Entries*
     }
     else if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
     {
-        // The object's first 16 bytes into slot d, or slot d − 1's into them (tier0_memory_object's).
+        // The object's first 16 bytes into slot d, or slot d − 1's into them (tier0_value_object's).
         const Tier0Home home = homes[function->values[i]];
         const bool local = kind == BUSTER_TYPED_LOCAL;
         for (uint32_t half = 0; half < 2; half += 1)
@@ -5477,29 +5568,30 @@ static uint32_t tier0_count_int128(const Tier0Function* function, const Tier0Ent
 // Whether a conversion between U64 and F32 or F64, at the stacks' depths before it (`depth` and `floating`), takes the
 // register form of tier0_emit_u64_convert: where its scratch registers exist, the integer stack's at `depth` to F32 or
 // F64 (its operand's is at depth − 1), and to U64 the integer stack's at depth + 1 (its result's is at depth) and the
-// floating stack's at `floating` (its operand's is at floating − 1). The integer table has 15 depths, 14 with a frame
-// pointer. Elsewhere the red zone form takes its place, which needs no register but its operand's and its result's, so
-// that every depth that has room for the conversion's value takes it (#429's review).
-static bool tier0_u64_convert_registers(bool to_u64, uint32_t depth, uint32_t floating, bool pointer)
+// floating stack's at `floating` (its operand's is at floating − 1). The integer table has `depth_count` depths
+// (tier0_integer_depth_count's: 15, 14 with a frame pointer, 13 in a realigned frame that moves rsp). Elsewhere the red
+// zone form takes its place, which needs no register but its operand's and its result's, so that every depth that has
+// room for the conversion's value takes it (#429's review).
+static bool tier0_u64_convert_registers(bool to_u64, uint32_t depth, uint32_t floating, int32_t depth_count)
 {
     const uint32_t integer = to_u64 ? depth + 1 : depth;
-    return integer < (uint32_t)tier0_integer_depth_count(pointer) && (!to_u64 || floating < BUSTER_TIER0_FLOATING_DEPTHS);
+    return integer < (uint32_t)depth_count && (!to_u64 || floating < BUSTER_TIER0_FLOATING_DEPTHS);
 }
 
 // A conversion's registers in a selection's tops (both selections'): its result's, the integer stack's at its depth to
 // U64 and the floating stack's free one to F32 or F64, into `tops`; and the register form's scratch registers into
-// `scratch`, by whether the function has a frame pointer ([1]) or not ([0]), which a selection knows only once it has
-// seen every entry.
-static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floating, Tier0Tops* tops, Tier0Tops* scratch)
+// `scratch`, by whether the function's entries move rsp ([1]) or not ([0]), which a selection knows only once it has
+// seen every entry, in a frame `realigned` or not (known before).
+static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floating, bool realigned, Tier0Tops* tops, Tier0Tops* scratch)
 {
     tops->integer = to_u64 && depth > tops->integer ? depth : tops->integer;
     tops->floating = !to_u64 && floating > tops->floating ? floating : tops->floating;
-    for (uint32_t pointer = 0; pointer < 2; pointer += 1)
+    for (uint32_t moves = 0; moves < 2; moves += 1)
     {
-        const bool registers = tier0_u64_convert_registers(to_u64, (uint32_t)depth, (uint32_t)floating, pointer != 0);
+        const bool registers = tier0_u64_convert_registers(to_u64, (uint32_t)depth, (uint32_t)floating, tier0_integer_depth_count(realigned, moves != 0));
         const int32_t integer = to_u64 ? depth + 1 : depth;
-        scratch[pointer].integer = registers && integer > scratch[pointer].integer ? integer : scratch[pointer].integer;
-        scratch[pointer].floating = registers && to_u64 && floating > scratch[pointer].floating ? floating : scratch[pointer].floating;
+        scratch[moves].integer = registers && integer > scratch[moves].integer ? integer : scratch[moves].integer;
+        scratch[moves].floating = registers && to_u64 && floating > scratch[moves].floating ? floating : scratch[moves].floating;
     }
 }
 
@@ -5626,10 +5718,10 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
     }
 }
 
-static void tier0_emit_u64_convert(const Tier0Entries* entries, bool pointer, uint32_t i, Tier0Writer* writer)
+static void tier0_emit_u64_convert(const Tier0Entries* entries, int32_t depth_count, uint32_t i, Tier0Writer* writer)
 {
     const bool to_u64 = !tier0_class_floating(entries->key_classes[i]);
-    tier0_emit_u64_convert_form(entries, tier0_u64_convert_registers(to_u64, entries->depths[i], entries->floating_depths[i], pointer), i, writer);
+    tier0_emit_u64_convert_form(entries, tier0_u64_convert_registers(to_u64, entries->depths[i], entries->floating_depths[i], depth_count), i, writer);
 }
 
 // How many records tier0_emit_u64_convert writes for entry i (tier0_count_deferred's).
@@ -5911,7 +6003,7 @@ static void tier0_emit_deep_deferred(const Tier0Function* function, const Tier0E
         // found them (so a deep conversion to U64 is always the red zone's, and one from U64 deep on the floating stack
         // alone the registers' where its integer depth has room).
         const bool to_u64 = !tier0_class_floating(entries->key_classes[i]);
-        const bool registers = tier0_u64_convert_registers(to_u64, entries->deep_depths[i], entries->deep_floating_depths[i], frame->pointer);
+        const bool registers = tier0_u64_convert_registers(to_u64, entries->deep_depths[i], entries->deep_floating_depths[i], frame->depth_count);
         tier0_emit_u64_convert_form(entries, registers, i, writer);
     }
     else
@@ -6036,7 +6128,7 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
-        tier0_emit_u64_convert(entries, frame->pointer, i, writer);
+        tier0_emit_u64_convert(entries, frame->depth_count, i, writer);
     }
     else
     {
@@ -6256,8 +6348,17 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
 // ---------------------------------------------------------------------------------------------------------------------
 // The prologue and the epilogue
 
+// A realigned frame's rounding of rsp down to its alignment (Tier0Frame.alignment_log2): and rsp, -alignment, imm8 to
+// 128 bytes.
+static X86Instruction tier0_realignment(uint32_t alignment_log2)
+{
+    const uint32_t form = alignment_log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32;
+    return tier0_instruction(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)-(int64_t)(UINT64_C(1) << alignment_log2));
+}
+
 // The prologue: with a frame pointer, rbp pushed and pointed at the push; the callee-saved registers the homes use
-// pushed, the frame reserved, and the parameters moved from where they arrive to their homes (none for one that stays,
+// pushed, the frame reserved, in a realigned frame rsp rounded down to its alignment (and with entries that move rsp,
+// r15 set to it, its base), and the parameters moved from where they arrive to their homes (none for one that stays,
 // or that arrives on the stack).
 static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references, Tier0Writer* writer)
 {
@@ -6278,6 +6379,14 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
         const uint32_t form = frame->size <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32;
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
     }
+    if (frame->alignment_log2 != 0)
+    {
+        tier0_put(writer, tier0_realignment(frame->alignment_log2));
+        if (frame->based)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_R15, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
+    }
     if (function->incoming_variadic != 0)
     {
         // Snapshot before any parameter home move can overwrite an unnamed argument. Full unaligned baseline
@@ -6297,28 +6406,29 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     // incoming slot. No home is an arrival register (tier0_assign_homes), so the order doesn't matter. An aggregate's
     // parts in registers are stored in its object, each register whole; first, its bytes in stack slots that it doesn't
     // keep as its home (tier0_parameter_in_place) are copied there, through rax and xmm15, which no parameter arrives in
-    // and no move to a home has written yet: a part's slot whole, or the slots of one on the stack whole.
-    const uint32_t above = 8 * frame->pushes + 8;
+    // and no move to a home has written yet: a part's slot whole, or the slots of one on the stack whole. The incoming
+    // slots are rsp's, or rbp's in a realigned frame (Tier0Frame.incoming_base).
+    const uint8_t base = frame->incoming_base;
     const bool objects = frame->object_parameters;
     for (uint32_t p = 0; p < function->parameter_count && objects; p += 1)
     {
         if (tier0_is_object(function, p) && references[p] != 0)
         {
             const AbiLocation location = function->parameters[p];
-            const int32_t incoming = (int32_t)(frame->size + above + location.stack_offset);
+            const int32_t incoming = (int32_t)((uint32_t)frame->incoming + location.stack_offset);
             Tier0Part parts[2];
             const uint32_t count = tier0_location_parts(location, function->local_sizes[p], parts);
             for (uint32_t k = 0; k < count; k += 1)
             {
                 if (parts[k].reg == BUSTER_TIER0_PART_STACK)
                 {
-                    tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, incoming, 0));
+                    tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, base, BUSTER_X86_MEMORY_BASE, incoming, 0));
                     tier0_store_part(writer, X86_REGISTER_RAX, 8, homes[p], parts[k].offset);
                 }
             }
             if (tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p))
             {
-                tier0_copy(writer, homes[p].reg, homes[p].displacement, X86_REGISTER_RSP, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15);
+                tier0_copy(writer, homes[p].reg, homes[p].displacement, base, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15);
             }
         }
     }
@@ -6341,8 +6451,8 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
         }
         else if (location.kind == BUSTER_ABI_LOCATION_STACK && homes[p].is_register)
         {
-            const int32_t incoming = (int32_t)(frame->size + above + location.stack_offset);
-            tier0_put(writer, tier0_instruction(tier0_value_load_form(class), homes[p].reg, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, incoming, 0));
+            const int32_t incoming = (int32_t)((uint32_t)frame->incoming + location.stack_offset);
+            tier0_put(writer, tier0_instruction(tier0_value_load_form(class), homes[p].reg, base, BUSTER_X86_MEMORY_BASE, incoming, 0));
         }
         else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS && (references[p] != 0 || address_taken))
         {
@@ -6363,11 +6473,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
 }
 
 // How many records tier0_emit_prologue writes, without writing them: the pushes, a frame pointer's mov, the frame's sub,
-// and each parameter's move, store or load into its home (an aggregate's part stores and slot copies), after the incoming
-// variadic saves (a store per argument register) when it has them. The epilogue's are tier0_count_epilogue's.
+// a realigned frame's and and its base's mov, and each parameter's move, store or load into its home (an aggregate's part
+// stores and slot copies), after the incoming variadic saves (a store per argument register) when it has them. The
+// epilogue's are tier0_count_epilogue's.
 static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
 {
-    uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + (frame->size != 0 ? 1 : 0);
+    uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + (frame->size != 0 ? 1 : 0) + (frame->alignment_log2 != 0 ? 1 : 0) + (frame->based ? 1 : 0);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     const bool objects = frame->object_parameters;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -6525,7 +6636,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
     uint32_t save_slots = 0;
     bool fixed = false;
     bool calls = false;
-    bool pointer = false;
+    bool moves = false;
+    const bool realigned = frame->alignment_log2 != 0;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         uint16_t entry = BUSTER_TIER0_ENTRY_ABSORBED;
@@ -6591,7 +6703,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                     // The frame pointer's; STACK_SAVE's value at its depth (ALLOCA's and STACK_RESTORE's operand is
                     // the entry before's).
                     integer_top = function->kinds[i] == BUSTER_TYPED_STACK_SAVE && depth > integer_top ? depth : integer_top;
-                    pointer = true;
+                    moves = true;
                 }
                 else if (memory && tier0_memory_entry(entries, i))
                 {
@@ -6602,7 +6714,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                     // A conversion between U64 and a floating class (tier0_emit_u64_convert): its result's register, and its
                     // register form's scratch ones, which the tops take once the frame pointer is known.
                     Tier0Tops tops = { integer_top, floating_top };
-                    tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, depth, floating, &tops, convert_scratch);
+                    tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, depth, floating, realigned, &tops, convert_scratch);
                     integer_top = tops.integer;
                     floating_top = tops.floating;
                 }
@@ -6616,8 +6728,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         }
         entries->templates[i] = entry;
     }
-    // The conversions' register forms' scratch registers, as the frame pointer decides them.
-    const Tier0Tops convert = convert_scratch[pointer ? 1 : 0];
+    // The conversions' register forms' scratch registers, as the entries that move rsp decide them.
+    const Tier0Tops convert = convert_scratch[moves ? 1 : 0];
     integer_top = convert.integer > integer_top ? convert.integer : integer_top;
     floating_top = convert.floating > floating_top ? convert.floating : floating_top;
     // An aggregate's copies take each stack's first free register.
@@ -6627,16 +6739,15 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         integer_top = tops.integer;
         floating_top = tops.floating;
     }
-    *error = integer_top >= tier0_integer_depth_count(pointer) || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS
-                 ? TIER0_ERROR_DEPTH
-                 : TIER0_OK;
+    const int32_t depth_count = tier0_integer_depth_count(realigned, moves);
+    *error = integer_top >= depth_count || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_top;
     frame->floating_top = floating_top;
     frame->clobbers = clobbers | tier0_depth_registers(integer_top, floating_top);
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
-    frame->pointer = pointer;
+    tier0_frame_registers(frame, moves, depth_count);
     return unsupported;
 }
 
@@ -6653,9 +6764,9 @@ static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entrie
 
 // What a deferred slot's emitter (but a call's) uses of each stack (0, the integer one, or 1): whether it uses its
 // registers, how far below the depth it reads (its window) and the highest depth it writes, as tier0_select_deep reads a
-// template's from its reach and window. `pointer` is whether the function has a frame pointer. A long double's are never
-// asked for.
-static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const uint32_t* before, bool pointer, bool* uses,
+// template's from its reach and window. `depth_count` is the function's integer depths (tier0_integer_depth_count). A
+// long double's are never asked for.
+static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const uint32_t* before, int32_t depth_count, bool* uses,
                                 uint32_t* window, int32_t* touch)
 {
     const uint32_t kind = entries->key_kinds[i];
@@ -6675,7 +6786,7 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
         // register form the stacks' first free registers (to U64, the integer stack's next one too), where
         // tier0_u64_convert_registers chooses that form at these depths, as selection did and its emission does.
         const uint32_t to = tier0_class_floating(entries->key_classes[i]) ? 1 : 0;
-        const bool registers = tier0_u64_convert_registers(to == 0, before[0], before[1], pointer);
+        const bool registers = tier0_u64_convert_registers(to == 0, before[0], before[1], depth_count);
         uses[0] = true;
         uses[1] = true;
         window[1 - to] = 1;
@@ -6708,7 +6819,7 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
 static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, bool vector, uint32_t* deep_count)
 {
     const uint32_t count = function->count;
-    const uint32_t limits[2] = { (uint32_t)tier0_integer_depth_count(frame->pointer), BUSTER_TIER0_FLOATING_DEPTHS };
+    const uint32_t limits[2] = { (uint32_t)frame->depth_count, BUSTER_TIER0_FLOATING_DEPTHS };
     const uint8_t window_flags[2] = { BUSTER_TIER0_DEEP_INTEGER, BUSTER_TIER0_DEEP_FLOATING };
     const uint8_t spill_flags[2] = { BUSTER_TIER0_DEEP_SPILL_INTEGER, BUSTER_TIER0_DEEP_SPILL_FLOATING };
     const uint8_t fill_flags[2] = { BUSTER_TIER0_DEEP_FILL_INTEGER, BUSTER_TIER0_DEEP_FILL_FLOATING };
@@ -6768,7 +6879,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 }
                 else
                 {
-                    tier0_deferred_uses(function, entries, i, before, frame->pointer, uses, window, touch);
+                    tier0_deferred_uses(function, entries, i, before, frame->depth_count, uses, window, touch);
                 }
                 for (uint32_t s = 0; s < 2; s += 1)
                 {
@@ -6801,12 +6912,13 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
     }
     if (error == TIER0_OK)
     {
-        // The depth registers within the tables, which the deep entries' records keep to (never a frame pointer's rbp).
+        // The depth registers within the tables, which the deep entries' records keep to (never a frame pointer's rbp, or a
+        // realigned frame's base, r15).
         frame->deep_slots = slots[0];
         frame->deep_floating_slots = slots[1];
         frame->integer_top = frame->integer_top < (int32_t)limits[0] ? frame->integer_top : (int32_t)limits[0] - 1;
         frame->floating_top = frame->floating_top < (int32_t)limits[1] ? frame->floating_top : (int32_t)limits[1] - 1;
-        frame->clobbers &= frame->pointer ? ~(1u << X86_REGISTER_RBP) : ~0u;
+        frame->clobbers &= (frame->pointer ? ~(1u << X86_REGISTER_RBP) : ~0u) & (frame->based ? ~(1u << X86_REGISTER_R15) : ~0u);
     }
     return error;
 }
@@ -7198,6 +7310,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     Tier0Frame frame;
     memset(&frame, 0, sizeof(frame));
     Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+    // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
+    frame.alignment_log2 = error == TIER0_OK ? (uint8_t)tier0_frame_alignment(function) : 0;
     const uint32_t unsupported = error == TIER0_OK ? (vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
     if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
     {
@@ -7293,6 +7407,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         code->frame_saved = frame.saved;
         code->frame_size = frame.size;
         code->frame_pointer = frame.pointer;
+        code->frame_alignment_log2 = frame.alignment_log2;
+        code->frame_base = frame.based;
     }
     return error;
 }
@@ -7517,9 +7633,11 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 if (function->local_classes[l] != BUSTER_TYPED_CLASS_VOID || (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 ||
                     function->local_alignments[l] > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
                 {
-                    tier0_reject(&validator, 0, "an object that isn't an address-taken local of class VOID, or aligned past 16");
+                    tier0_reject(&validator, 0, "an object that isn't an address-taken local of class VOID, or aligned past 2^30");
                 }
-                object_bytes += ((uint64_t)function->local_sizes[l] + 15) & ~15ull;
+                // Its size rounded up to 16 and, aligned past 16, the most its place may move by for its alignment.
+                const uint64_t alignment = UINT64_C(1) << (function->local_alignments[l] & 63);
+                object_bytes += (((uint64_t)function->local_sizes[l] + 15) & ~15ull) + (alignment > 16 ? alignment - 16 : 0);
             }
             else if (function->local_classes[l] == BUSTER_TYPED_CLASS_VOID || function->local_classes[l] >= BUSTER_TYPED_CLASSES)
             {
@@ -7670,7 +7788,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             case BUSTER_TYPED_LOCAL:
             case BUSTER_TYPED_LOCAL_ADDRESS:
                 if (value >= function->local_count ||
-                    (kind == BUSTER_TYPED_LOCAL && !tier0_memory_object(function, value, class) &&
+                    (kind == BUSTER_TYPED_LOCAL && !tier0_value_object(function, value, class) &&
                      (function->local_classes[value] != class || tier0_is_object(function, value) ||
                       (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0)) ||
                     (kind == BUSTER_TYPED_LOCAL_ADDRESS && (class != BUSTER_TYPED_CLASS_U64 || (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0)))
@@ -7759,7 +7877,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             {
                 const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
                 const bool bad_target = local ? value >= function->local_count ||
-                                                    (!tier0_memory_object(function, value, class) &&
+                                                    (!tier0_value_object(function, value, class) &&
                                                      (function->local_classes[value] != class || tier0_is_object(function, value) ||
                                                       (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0))
                                               : value == 0 || value > UINT32_MAX || tier0_class_memory(class);
@@ -8743,7 +8861,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     uint32_t save_slots = 0;
     bool fixed = false;
     bool calls = false;
-    bool pointer = false;
+    bool moves = false;
+    const bool realigned = frame->alignment_log2 != 0;
     const __m512i three = _mm512_set1_epi64(3);
     const __m512i fifteen = _mm512_set1_epi64(15);
     const __m512i not_template = _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_UNSUPPORTED));
@@ -8814,7 +8933,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             {
                 const bool save = function->kinds[i] == BUSTER_TYPED_STACK_SAVE;
                 deferred_integer_top = save && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
-                pointer = true;
+                moves = true;
             }
             else if (memory && tier0_memory_entry(entries, i))
             {
@@ -8823,7 +8942,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             else if (function->kinds[i] == BUSTER_TYPED_CONVERT)
             {
                 Tier0Tops tops = { deferred_integer_top, deferred_floating_top };
-                tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, entry_depth, entry_floating, &tops, convert_scratch);
+                tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, entry_depth, entry_floating, realigned, &tops, convert_scratch);
                 deferred_integer_top = tops.integer;
                 deferred_floating_top = tops.floating;
             }
@@ -8839,7 +8958,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     {
         unsupported = (words[i] & BUSTER_TIER0_WORD_UNSUPPORTED) != 0 ? i : count;
     }
-    const Tier0Tops convert = convert_scratch[pointer ? 1 : 0];
+    const Tier0Tops convert = convert_scratch[moves ? 1 : 0];
     deferred_integer_top = convert.integer > deferred_integer_top ? convert.integer : deferred_integer_top;
     deferred_floating_top = convert.floating > deferred_floating_top ? convert.floating : deferred_floating_top;
     if (function->argument_sizes != 0)
@@ -8854,16 +8973,15 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     const int32_t integer_reached = vector_integer_top > deferred_integer_top ? (int32_t)vector_integer_top : deferred_integer_top;
     const int32_t floating_reached = vector_floating_top > deferred_floating_top ? (int32_t)vector_floating_top : deferred_floating_top;
     clobbers |= rdx ? 1u << X86_REGISTER_RDX : 0;
-    *error = integer_reached >= tier0_integer_depth_count(pointer) || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS
-                 ? TIER0_ERROR_DEPTH
-                 : TIER0_OK;
+    const int32_t depth_count = tier0_integer_depth_count(realigned, moves);
+    *error = integer_reached >= depth_count || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_reached;
     frame->floating_top = floating_reached;
     frame->clobbers = clobbers | tier0_depth_registers(integer_reached, floating_reached);
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
-    frame->pointer = pointer;
+    tier0_frame_registers(frame, moves, depth_count);
     return unsupported;
 }
 

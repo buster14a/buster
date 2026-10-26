@@ -439,8 +439,9 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
 }
 
 // Why a struct or union can't be passed or returned by value, or NULL. Tier 0 takes every location abi_assign gives one
-// as an argument or a parameter, of up to BUSTER_TIER0_MAX_ARGUMENT_BYTES aligned to 16 at most, and every result in
-// registers that tier0_aggregate_result_valid takes: eightbytes, or one or two long doubles in st0 and st1.
+// as an argument or a parameter, of up to BUSTER_TIER0_MAX_ARGUMENT_BYTES aligned to 1 GB at most (past 16 bytes, its
+// calls' outgoing areas and its objects realign their function's frame), and every result in registers that
+// tier0_aggregate_result_valid takes: eightbytes, or one or two long doubles in st0 and st1.
 static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId type, bool result)
 {
     const TypeTable* types = writer->program->types;
@@ -449,7 +450,7 @@ static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId t
     const char* feature = NULL;
     if (type_alignment_log2(types, type) > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
     {
-        feature = "structs and unions aligned past 16 bytes, by value";
+        feature = "structs and unions aligned past 1 GB, by value";
     }
     else if (type_size(types, type) > BUSTER_TIER0_MAX_ARGUMENT_BYTES)
     {
@@ -834,14 +835,15 @@ static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
 }
 
 // A frame object (an array, a struct or a union, or a value that must live in memory): a local of class VOID, reached
-// only through LOCAL_ADDRESS, but a memory class's value, which LOCAL, STORE_LOCAL and SET_LOCAL of it reach too. One of
-// no size (a GNU empty struct, a zero-length array) still takes a byte of its own.
+// through LOCAL_ADDRESS, but a value's, which LOCAL, STORE_LOCAL and SET_LOCAL of its class reach too
+// (tier0_value_object): a memory class's, and one aligned past 8 bytes. One of no size (a GNU empty struct, a
+// zero-length array) still takes a byte of its own. Aligned past 16 bytes, it realigns its function's frame.
 static uint32_t check_lower_object(CheckLowerWriter* writer, uint64_t size, uint32_t alignment_log2)
 {
     const uint32_t local = writer->local_count;
     if (size > BUSTER_TIER0_MAX_OBJECT_BYTES || alignment_log2 > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
     {
-        check_lower_unsupported(writer, "local objects aligned past 16 bytes or larger than 1 GB");
+        check_lower_unsupported(writer, "local objects aligned past 1 GB or larger than 1 GB");
     }
     else if (local < writer->local_capacity && local < BUSTER_TIER0_MAX_LOCALS)
     {
@@ -4013,8 +4015,10 @@ static void check_lower_stack(CheckLowerWriter* writer, CheckControl control)
 }
 
 // A variable-length array's object at its declaration (CHECK_CONTROL_ALLOCATE): its size from its type's extents,
-// taken from the stack (ALLOCA) into its local. Refused in a block whose end has no control entry of its own (a for
-// statement's declaration, a statement expression's block), aligned past 16 bytes, or initialized (C23's = {}).
+// taken from the stack (ALLOCA) into its local. Aligned past 16 bytes, whose multiple ALLOCA's address is, it takes its
+// alignment less 16 more and its address rounds up to its alignment, (address + alignment - 1) & -alignment, where
+// clang's code rounds rsp down. Refused in a block whose end has no control entry of its own (a for statement's
+// declaration, a statement expression's block), or initialized (C23's = {}).
 static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -4026,7 +4030,11 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
     const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
     const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? input->attributes[declaration] : 0;
-    const bool aligned = type != 0 && (type_alignment_log2(program->types, type) > 4 || (attributes != 0 && attributes->alignment_log2 > 5));
+    // Its type's alignment, or its declaration's attribute's where larger (the log2 plus one, 0 for none).
+    const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+    const uint32_t type_alignment = type != 0 ? type_alignment_log2(program->types, type) : 0;
+    const uint32_t alignment_log2 = declared_alignment > type_alignment ? declared_alignment : type_alignment;
+    const uint64_t alignment = UINT64_C(1) << (alignment_log2 & 63);
     const bool initialized = program->initializers != 0 && program->initializers->declaration_plans[object - 1] != 0;
     if (local >= writer->local_count || writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_NONE)
     {
@@ -4036,10 +4044,6 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     {
         check_lower_unsupported(writer, "variable-length arrays declared in a for statement or in a statement expression's block");
     }
-    else if (aligned)
-    {
-        check_lower_unsupported(writer, "variable-length arrays aligned past 16 bytes");
-    }
     else if (initialized)
     {
         check_lower_unsupported(writer, "initialized variable-length arrays");
@@ -4047,7 +4051,19 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     else
     {
         check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_U64);
+        if (alignment_log2 > 4)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, alignment - 16);
+            check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        }
         check_lower_emit(writer, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        if (alignment_log2 > 4)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, alignment - 1);
+            check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, ~(alignment - 1));
+            check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        }
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
         writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_ALLOCATED;
     }
@@ -4535,18 +4551,20 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
         {
             const TypeId parameter_type = input->declared_types[parameter];
             const CheckInputAttributes* attributes = input->attributes[parameter];
-            // A struct or union parameter is a frame object, at most aligned to 16, whose bytes the prologue places.
+            // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
+            // realigned frame, or where they arrive).
             const bool aggregate = check_lower_aggregate(types, parameter_type);
             const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
             const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
             const char* passed = check_lower_passed(&writer, parameter_type);
             // So is a memory class's (check_lower_memory_class): a long double's, from its 16 bytes on the stack, and a
-            // 128-bit integer's, from its two eightbytes, as a struct of them.
-            const bool object = aggregate || check_lower_memory(types, parameter_type);
+            // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
+            // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
+            const bool object = aggregate || check_lower_memory(types, parameter_type) || alignment > 3;
             writer.token = parameter;
-            if (alignment > (object ? BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 : 3u))
+            if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
             {
-                check_lower_unsupported(&writer, object ? "parameters aligned past 16 bytes" : "parameters aligned past 8 bytes");
+                check_lower_unsupported(&writer, "parameters aligned past 1 GB");
             }
             if (passed != NULL)
             {
@@ -4622,8 +4640,8 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
                 }
                 else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || check_lower_complex(types, local_type))
                 {
-                    // Arrays, structs, unions and complex values are frame objects, at most aligned to 16 (a frame pointer
-                    // would take more). An incomplete type has no size at all.
+                    // Arrays, structs, unions and complex values are frame objects (aligned past 16 bytes, in a realigned
+                    // frame). An incomplete type has no size at all.
                     if (!type_is_complete(types, local_type))
                     {
                         check_lower_unsupported(&writer, "local objects of incomplete type");
@@ -4640,9 +4658,15 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
                     // A type no class holds and that isn't an object's: what its values need (check_lower_type_feature).
                     check_lower_unsupported(&writer, check_lower_type_feature(types, local_type));
                 }
-                else if (type_kind_is_array(kind) || alignment > 3)
+                else if (type_kind_is_array(kind))
                 {
                     check_lower_unsupported(&writer, "local values aligned past 8 bytes");
+                }
+                else if (alignment > 3)
+                {
+                    // A value aligned past 8 bytes, whose slot would be aligned to 8: a frame object of its alignment, which
+                    // LOCAL, STORE_LOCAL and SET_LOCAL of its class read and write (tier0_value_object).
+                    local = check_lower_object(&writer, type_size(types, local_type), alignment);
                 }
                 else
                 {
@@ -4882,6 +4906,13 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
                     memcpy(parameters + 1, locations + first, (uint64_t)declared * sizeof(AbiLocation));
                     function->parameters = parameters;
                 }
+            }
+            // Tier 0's incoming variadic frame takes the convention's 16 bytes' alignment of the named arguments alone.
+            if (function->incoming_variadic != 0 && function->incoming_variadic->stack_alignment_log2 > BUSTER_ABI_STACK_ALIGNMENT_LOG2)
+            {
+                lowered->status = CHECK_PROGRAM_UNSUPPORTED;
+                lowered->token = program->bodies[b].declaration;
+                lowered->reason = "variadic functions with named arguments aligned past 16 bytes";
             }
             // Inlined as clang inlined tier0_validate when the lowering was compiled once: with a call in each copy, it left
             // it out of line, which took up to 0.5 million more instructions on a 31,000-line program (#426).
