@@ -57,7 +57,10 @@ static void x86_target_forms_scalar(const X86Target* target, uint8_t* allowed)
     const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
     // Rows are immutable and each iteration writes a different byte. Writable output cannot overlap the const
     // table; target/output overlap is still valid because the feature word was captured before the loop.
+    // Sanitizer instrumentation can prevent vectorization at -O1; keep its ordinary reference loop unforced.
+    #if !__has_feature(address_sanitizer) && !__has_feature(undefined_behavior_sanitizer)
     #pragma clang loop vectorize(assume_safety)
+    #endif
     for (uint32_t i = 0; i < X86_FORM_COUNT; i += 1)
     {
         const uint64_t required = x86_target_requirements[i];
