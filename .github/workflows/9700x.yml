@@ -51,7 +51,7 @@ jobs:
   # functions it calls, as its entry names them. The plain runs took about 105 s of a pull request's 230, most of them
   # measuring code the pull request doesn't change; a change to build.sh runs every one.
   # On a push to main, whose pull request's run measured what it changes, every output but `code` is `false`: the full
-  # set took the job past its 10 minutes on every push, which then failed, having kept the 9700X from every pull
+  # set used to exceed the 10-minute budget on every push, failing while keeping the 9700X from every pull
   # request's job meanwhile. A push runs every plain benchmark (`measure` is `all`), so that main has each one's numbers
   # at every commit. The daily and dispatched runs, which skip this job, have the full set.
   # The selector is tools/ci/changes.c: the modules' sources (`changes_modules`), the plain benchmarks'
@@ -128,7 +128,7 @@ jobs:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
     # The full set of measurements takes about 13 minutes; every other run, about 4 to 7.
-    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 10 }}
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 20 }}
     defaults:
       run:
         shell: bash
@@ -253,10 +253,10 @@ jobs:
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the preprocessor's cases against clang
-          # --clang also preprocesses each case with clang -E and compares the tokens. Two workers share the fuzz
-          # batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of this, the longest test, at the
-          # qualification runs' 3 ms of a thread per case.
-          ./build/compiler test-preprocessor --clang --jobs 2
+          # --clang also preprocesses each case with clang -E and compares the tokens. Four workers share the fuzz
+          # batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of threads in all at the
+          # qualification runs' 3 ms per case; the cases and header sets run in parts, a process per CPU (#465).
+          ./build/compiler test-preprocessor --clang --jobs 4
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang
@@ -307,7 +307,8 @@ jobs:
           == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
           ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
           == Test the C driver's source rows and DWARF
-          # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb.
+          # --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb; and the unwind tables,
+          # through backtrace() and gdb at every instruction.
           ./build/compiler test-check-debug --cross-check
           == Test integer builtin actions against Clang
           ./build/compiler test-builtins

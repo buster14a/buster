@@ -91,8 +91,11 @@ static bool check_test_program_function(const Tier0Function* a, const Tier0Funct
     return equal;
 }
 
-static bool check_test_program_object(Link* link, const char* path, Arena* scratch)
+// Writes the link's object to `path`, and a copy of its bytes to `bytes` and `size` (the caller frees them).
+static bool check_test_program_object(Link* link, const char* path, Arena* scratch, uint8_t** bytes, uint64_t* size)
 {
+    *bytes = 0;
+    *size = 0;
     const uint64_t mark = scratch->length;
     ObjectUnits units = { 0 };
     ObjectSymbols symbols = { 0 };
@@ -101,14 +104,24 @@ static bool check_test_program_object(Link* link, const char* path, Arena* scrat
     {
         const Object object = object_build(link, &units, &symbols, 0, (ObjectOptions){ 0 }, BUSTER_S8("checked-source.c"), scratch);
         valid = object.error == OBJECT_ERROR_NONE && object_write_file(path, object.bytes, object.size) == OBJECT_ERROR_NONE;
+        *bytes = valid ? malloc(object.size + 1) : 0;
+        valid = valid && *bytes != 0;
+        if (valid)
+        {
+            memcpy(*bytes, object.bytes, object.size);
+            *size = object.size;
+        }
     }
     arena_pop_to(scratch, mark);
     return valid;
 }
 
-static bool check_test_program_oracle(const Link* link, const char* source, const char* path)
+// The oracle's source: each global the checked object defines renamed oracle_NAME, then the program, in `text`.
+static bool check_test_program_oracle(const Link* link, const char* source, char** text, size_t* length)
 {
-    FILE* file = fopen(path, "wb");
+    *text = 0;
+    *length = 0;
+    FILE* file = open_memstream(text, length);
     bool valid = file != 0;
     for (SymbolId symbol = 1; valid && symbol < link->symbols.count; symbol += 1)
     {
@@ -131,83 +144,216 @@ static bool check_test_program_oracle(const Link* link, const char* source, cons
     return valid;
 }
 
+// The program every checked object and its oracle are linked with: it runs both on the same inputs.
+static const char check_test_program_harness[] =
+    "#include <stdio.h>\n"
+    "#include <fenv.h>\n"
+    "#include <errno.h>\n"
+    "#include <xmmintrin.h>\n"
+    "#include <signal.h>\n#include <sys/resource.h>\n#include <sys/wait.h>\n#include <unistd.h>\n#include <stdarg.h>\n"
+    "int tested(int); int oracle_tested(int);\n"
+    "void terminal_probe(void) __attribute__((weak));\n"
+    "int external_data=17; int external_helper(int n){return n*3;}\n"
+    "int external_apply(int(*function)(int),int n){return function(n);}\n"
+    "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
+    "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
+    "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
+    "int change_daz(int n){unsigned old=_mm_getcsr();_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
+    "double fp_special(int n){const unsigned long b[]={0,0x8000000000000000UL,0x7ff0000000000000UL,0xfff0000000000000UL,"
+    "0x7ff8000000000001UL,0x7ff0000000000001UL,1,0x8000000000000001UL,0x3ff8000000000000UL};"
+    "union{unsigned long bits;double value;}x={b[(unsigned)n%9]};return x.value;}\n"
+    "float fp_specialf(int n){const unsigned b[]={0,0x80000000u,0x7f800000u,0xff800000u,0x7fc00001u,0x7f800001u,1,0x80000001u,0x3fc00000u};"
+    "union{unsigned bits;float value;}x={b[(unsigned)n%9]};return x.value;}\n"
+    "unsigned long fp_bits(double d){union{double d;unsigned long u;}x={d};return x.u;}\n"
+    "unsigned fp_bitsf(float f){union{float f;unsigned u;}x={f};return x.u;}\n"
+    "int set_math_errno(int n){errno=n;return 0;}int get_math_errno(void){return errno;}\n"
+    // A result through a hidden pointer, which clang takes as aligned to the union's 16: w is the pointer's bytes
+    // (clang -O0 returns in place), and a misaligned one shows in the first byte.
+    "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
+    "for(int i=0;i<40;i++)w.c[i]=(char)(n+i);if((unsigned long)&w%16)w.c[0]=99;return w;}\n"
+    // Structs of a complex long double, which return in st0 and st1: one returned to the program, and the program's
+    // own called through a pointer.
+    "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
+    "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
+    "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
+    // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
+    // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
+    // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
+    // the five registers after n's, then on the stack; external_floats' f8 and f9 come on the stack as floats, after
+    // xmm0 to xmm7, and its unnamed longs and doubles all on the stack.
+    "static unsigned long external_fold(unsigned long h,unsigned long v){return (h^v)*1099511628211UL;}\n"
+    "unsigned long external_variadic(int n,...){va_list a;va_start(a,n);unsigned long h=(unsigned long)n;for(int i=0;i<20;i++){"
+    "long l=va_arg(a,long);double d=va_arg(a,double);unsigned long b;__builtin_memcpy(&b,&d,8);h=external_fold(external_fold(h,(unsigned long)l),b);}"
+    "va_end(a);return h;}\n"
+    "unsigned long external_floats(int n,float f0,float f1,float f2,float f3,float f4,float f5,float f6,float f7,float f8,float f9,int m,...){"
+    "const float f[10]={f0,f1,f2,f3,f4,f5,f6,f7,f8,f9};va_list a;va_start(a,m);unsigned long h=(unsigned long)n*31+(unsigned long)m;"
+    "for(int i=0;i<10;i++){unsigned b;__builtin_memcpy(&b,&f[i],4);h=external_fold(h,b);}for(int i=0;i<10;i++){long l=va_arg(a,long);"
+    "double d=va_arg(a,double);unsigned long b;__builtin_memcpy(&b,&d,8);h=external_fold(external_fold(h,(unsigned long)l),b);}va_end(a);return h;}\n"
+    "int main(void) { for (int repeat=0;repeat<3;repeat++) for (int n=-3;n<=19;n++) {\n"
+    "int a=tested(n), b=oracle_tested(n); if(a!=b) { fprintf(stderr,\"n=%d repeat=%d ours=%d oracle=%d\\n\",n,repeat,a,b); return 1; } }\n"
+    "if(terminal_probe){int p=fork();if(p<0)return 2;if(!p){struct rlimit r={0,0};setrlimit(RLIMIT_CORE,&r);terminal_probe();_exit(91);}\n"
+    "int s=0;if(waitpid(p,&s,0)!=p||!WIFSIGNALED(s)||WTERMSIG(s)!=SIGILL)return 3;}return 0;}\n";
+
+// What every program's build shares (#465): the harness, the same for every program, compiled once per run for each
+// signedness of plain char that the programs are read with, and the last oracle, which the scalar and vector paths' programs of one source share, compiled once per distinct text. Each
+// compiles with -c and the flags of the one-step build, which gives the code that build's compiles give, so a program
+// links the same harness, oracle and checked object as before. The oracle's key is its text and plain char's
+// signedness. And the last program that linked and ran as the oracle
+// did: its checked object's bytes. A program whose checked object and oracle are that one's links the same files into
+// the same executable, which runs alike, so it takes that run's result (the vector path's program, mostly, after the
+// scalar path's).
+typedef struct CheckTestProgramBuild CheckTestProgramBuild;
+struct CheckTestProgramBuild
+{
+    char directory[40];
+    bool harness[2];
+    char* oracle;
+    size_t oracle_length;
+    bool oracle_unsigned;
+    uint8_t* object;
+    uint64_t object_size;
+};
+
+static CheckTestProgramBuild check_test_program_build;
+
+// The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
+// oracle and the harness alike.
+#define BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned) \
+    "-std=gnu17", \
+    "-O0", \
+    "-march=x86-64", \
+    "-fno-common", \
+    (char_unsigned) ? "-funsigned-char" : "-fsigned-char", \
+    "-Wno-unused-value", \
+    "-no-pie"
+
+// The harness's name in the build's directory for plain char's signedness.
+static const char* check_test_program_harness_name(bool char_unsigned)
+{
+    return char_unsigned ? "harness-unsigned" : "harness-signed";
+}
+
+static void check_test_program_build_path(char* path, size_t size, const char* name)
+{
+    snprintf(path, size, "%s/%s", check_test_program_build.directory, name);
+}
+
+// Compiles `name`.c, holding `text`, to `name`.o in the build's directory, its diagnostics in `out` and `err`.
+static bool check_test_program_compile(const char* clang, const char* name, const char* text, size_t length, bool char_unsigned, const char* out,
+                                       const char* err)
+{
+    char source[96];
+    char object[96];
+    char file[32];
+    snprintf(file, sizeof(file), "%s.c", name);
+    check_test_program_build_path(source, sizeof(source), file);
+    snprintf(file, sizeof(file), "%s.o", name);
+    check_test_program_build_path(object, sizeof(object), file);
+    char* compile[] = {
+        (char*)clang,
+        BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned),
+        "-Wno-unused-command-line-argument",
+        "-c",
+        source,
+        "-o",
+        object,
+        0,
+    };
+    return parse_test_write(source, text, length) && object_test_run(compile, out, err) == 0;
+}
+
+// The build's directory, made on first use, with the harness of plain char's signedness compiled into it, and the
+// oracle of `text` compiled unless it is the last one's, with the same signedness (`*same_oracle`).
+static bool check_test_program_prepare(const char* clang, const char* text, size_t length, bool char_unsigned, const char* out, const char* err,
+                                       bool* same_oracle)
+{
+    CheckTestProgramBuild* build = &check_test_program_build;
+    if (build->directory[0] == 0)
+    {
+        snprintf(build->directory, sizeof(build->directory), "/tmp/buster-check-build-XXXXXX");
+        if (mkdtemp(build->directory) == 0)
+        {
+            build->directory[0] = 0;
+        }
+    }
+    bool valid = build->directory[0] != 0;
+    if (valid && !build->harness[char_unsigned])
+    {
+        build->harness[char_unsigned] = check_test_program_compile(clang, check_test_program_harness_name(char_unsigned), check_test_program_harness,
+                                                                   sizeof(check_test_program_harness) - 1, char_unsigned, out, err);
+        valid = build->harness[char_unsigned];
+    }
+    const bool same = build->oracle != 0 && build->oracle_unsigned == char_unsigned && build->oracle_length == length &&
+                      memcmp(build->oracle, text, length) == 0;
+    *same_oracle = same;
+    if (valid && !same)
+    {
+        free(build->oracle);
+        build->oracle = 0;
+        valid = check_test_program_compile(clang, "oracle", text, length, char_unsigned, out, err);
+        build->oracle = valid ? malloc(length) : 0;
+        valid = valid && build->oracle != 0;
+        if (valid)
+        {
+            memcpy(build->oracle, text, length);
+            build->oracle_length = length;
+            build->oracle_unsigned = char_unsigned;
+        }
+    }
+    return valid;
+}
+
+// Removes the build's directory and forgets what it held: run after the last program of a section.
+static void check_test_program_build_release(void)
+{
+    CheckTestProgramBuild* build = &check_test_program_build;
+    if (build->directory[0] != 0)
+    {
+        static const char* const names[] = { "harness-signed.c", "harness-signed.o", "harness-unsigned.c", "harness-unsigned.o", "oracle.c", "oracle.o" };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+        {
+            char path[96];
+            check_test_program_build_path(path, sizeof(path), names[i]);
+            unlink(path);
+        }
+        rmdir(build->directory);
+    }
+    free(build->oracle);
+    free(build->object);
+    *build = (CheckTestProgramBuild){ 0 };
+}
+
 static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
 {
-    static const char harness[] =
-        "#include <stdio.h>\n"
-        "#include <fenv.h>\n"
-        "#include <errno.h>\n"
-        "#include <xmmintrin.h>\n"
-        "#include <signal.h>\n#include <sys/resource.h>\n#include <sys/wait.h>\n#include <unistd.h>\n#include <stdarg.h>\n"
-        "int tested(int); int oracle_tested(int);\n"
-        "void terminal_probe(void) __attribute__((weak));\n"
-        "int external_data=17; int external_helper(int n){return n*3;}\n"
-        "int external_apply(int(*function)(int),int n){return function(n);}\n"
-        "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
-        "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
-        "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
-        "int change_daz(int n){unsigned old=_mm_getcsr();_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
-        "double fp_special(int n){const unsigned long b[]={0,0x8000000000000000UL,0x7ff0000000000000UL,0xfff0000000000000UL,"
-        "0x7ff8000000000001UL,0x7ff0000000000001UL,1,0x8000000000000001UL,0x3ff8000000000000UL};"
-        "union{unsigned long bits;double value;}x={b[(unsigned)n%9]};return x.value;}\n"
-        "float fp_specialf(int n){const unsigned b[]={0,0x80000000u,0x7f800000u,0xff800000u,0x7fc00001u,0x7f800001u,1,0x80000001u,0x3fc00000u};"
-        "union{unsigned bits;float value;}x={b[(unsigned)n%9]};return x.value;}\n"
-        "unsigned long fp_bits(double d){union{double d;unsigned long u;}x={d};return x.u;}\n"
-        "unsigned fp_bitsf(float f){union{float f;unsigned u;}x={f};return x.u;}\n"
-        "int set_math_errno(int n){errno=n;return 0;}int get_math_errno(void){return errno;}\n"
-        // A result through a hidden pointer, which clang takes as aligned to the union's 16: w is the pointer's bytes
-        // (clang -O0 returns in place), and a misaligned one shows in the first byte.
-        "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
-        "for(int i=0;i<40;i++)w.c[i]=(char)(n+i);if((unsigned long)&w%16)w.c[0]=99;return w;}\n"
-        // Structs of a complex long double, which return in st0 and st1: one returned to the program, and the program's
-        // own called through a pointer.
-        "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
-        "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
-        "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
-        // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
-        // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
-        // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
-        // the five registers after n's, then on the stack; external_floats' f8 and f9 come on the stack as floats, after
-        // xmm0 to xmm7, and its unnamed longs and doubles all on the stack.
-        "static unsigned long external_fold(unsigned long h,unsigned long v){return (h^v)*1099511628211UL;}\n"
-        "unsigned long external_variadic(int n,...){va_list a;va_start(a,n);unsigned long h=(unsigned long)n;for(int i=0;i<20;i++){"
-        "long l=va_arg(a,long);double d=va_arg(a,double);unsigned long b;__builtin_memcpy(&b,&d,8);h=external_fold(external_fold(h,(unsigned long)l),b);}"
-        "va_end(a);return h;}\n"
-        "unsigned long external_floats(int n,float f0,float f1,float f2,float f3,float f4,float f5,float f6,float f7,float f8,float f9,int m,...){"
-        "const float f[10]={f0,f1,f2,f3,f4,f5,f6,f7,f8,f9};va_list a;va_start(a,m);unsigned long h=(unsigned long)n*31+(unsigned long)m;"
-        "for(int i=0;i<10;i++){unsigned b;__builtin_memcpy(&b,&f[i],4);h=external_fold(h,b);}for(int i=0;i<10;i++){long l=va_arg(a,long);"
-        "double d=va_arg(a,double);unsigned long b;__builtin_memcpy(&b,&d,8);h=external_fold(external_fold(h,(unsigned long)l),b);}va_end(a);return h;}\n"
-        "int main(void) { for (int repeat=0;repeat<3;repeat++) for (int n=-3;n<=19;n++) {\n"
-        "int a=tested(n), b=oracle_tested(n); if(a!=b) { fprintf(stderr,\"n=%d repeat=%d ours=%d oracle=%d\\n\",n,repeat,a,b); return 1; } }\n"
-        "if(terminal_probe){int p=fork();if(p<0)return 2;if(!p){struct rlimit r={0,0};setrlimit(RLIMIT_CORE,&r);terminal_probe();_exit(91);}\n"
-        "int s=0;if(waitpid(p,&s,0)!=p||!WIFSIGNALED(s)||WTERMSIG(s)!=SIGILL)return 3;}return 0;}\n";
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
     char object[160];
-    char oracle[160];
-    char driver[160];
     char executable[160];
     char out[160];
     char err[160];
+    char harness[96];
+    char oracle[96];
     snprintf(object, sizeof(object), "%s/checked.o", directory);
-    snprintf(oracle, sizeof(oracle), "%s/oracle.c", directory);
-    snprintf(driver, sizeof(driver), "%s/driver.c", directory);
     snprintf(executable, sizeof(executable), "%s/run", directory);
     snprintf(out, sizeof(out), "%s/out", directory);
     snprintf(err, sizeof(err), "%s/err", directory);
-    bool valid = created && check_test_program_object(link, object, scratch) && check_test_program_oracle(link, source, oracle) &&
-                 parse_test_write(driver, harness, sizeof(harness) - 1);
-    char* compile[] = {
+    char* text = 0;
+    size_t length = 0;
+    uint8_t* bytes = 0;
+    uint64_t size = 0;
+    bool same_oracle = false;
+    bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size) && check_test_program_oracle(link, source, &text, &length);
+    valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
+    CheckTestProgramBuild* build = &check_test_program_build;
+    const bool same = valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
+    char harness_file[32];
+    snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
+    check_test_program_build_path(harness, sizeof(harness), harness_file);
+    check_test_program_build_path(oracle, sizeof(oracle), "oracle.o");
+    char* link_command[] = {
         (char*)clang,
-        "-std=gnu17",
-        "-O0",
-        "-march=x86-64",
-        "-fno-common",
-        // Plain char as the checker read it, for the oracle and the harness alike.
-        char_unsigned ? "-funsigned-char" : "-fsigned-char",
-        "-Wno-unused-value",
-        "-no-pie",
-        driver,
+        BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned),
+        harness,
         oracle,
         object,
         "-lm",
@@ -219,9 +365,25 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         executable,
         0,
     };
-    valid = valid && object_test_run(compile, out, err) == 0 && object_test_run(run, out, err) == 0;
+    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && object_test_run(run, out, err) == 0));
+    if (!same)
+    {
+        free(build->object);
+        build->object = valid ? bytes : 0;
+        build->object_size = valid ? size : 0;
+        bytes = valid ? 0 : bytes;
+    }
     if (!valid && created)
     {
+        // The sources go beside the object, as the one-step build had them.
+        char path[160];
+        snprintf(path, sizeof(path), "%s/driver.c", directory);
+        parse_test_write(path, check_test_program_harness, sizeof(check_test_program_harness) - 1);
+        snprintf(path, sizeof(path), "%s/oracle.c", directory);
+        if (text != 0)
+        {
+            parse_test_write(path, text, length);
+        }
         fprintf(stderr, "test-checker: program oracle files retained in %s\n", directory);
         FILE* diagnostics = fopen(err, "rb");
         if (diagnostics != 0)
@@ -234,11 +396,11 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
             fclose(diagnostics);
         }
     }
+    free(text);
+    free(bytes);
     if (valid && created)
     {
         unlink(object);
-        unlink(oracle);
-        unlink(driver);
         unlink(executable);
         unlink(out);
         unlink(err);
@@ -333,7 +495,7 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
         }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
-        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, true) &&
+        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, false, true) &&
                              check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission);
         snprintf(description, sizeof(description), "%s: shared code/data Link emits through real ABI/Tier0/encoder consumers", name);
         check_test_expect(test, emitted, description);
@@ -364,7 +526,11 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     check_test_program_source_char(test, source, name, clang, false);
 }
 
-static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
+// A program fixture checked and lowered by both paths: accepted or not, lowered or refused, with the references and
+// initializations it keeps; and, for a refusal with `reason`, the feature the refusal names
+// (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
+static void check_test_program_boundary_reason(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
+                                               uint32_t initializations, const char* reason)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -420,6 +586,8 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                 const bool lowered_ok = check_program_lower(&lowered, &program, path == 0, &output, &scratch);
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
+                snprintf(description, sizeof(description), "%s: the refusal names its feature", name);
+                check_test_expect(test, reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0), description);
                 if (!lowered_ok)
                 {
                     check_test_expect(test, output.length == mark && lowered.functions == 0 && lowered.count == 0 && program.controls == controls && program.status == CHECK_PROGRAM_OK,
@@ -441,7 +609,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                     CheckProgramCode failed_code = { 0 };
                     const uint64_t emission_mark = output.length;
                     const bool failed_code_ok = check_program_emit(&failed_code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
-                                                                   &output, &empty, &scratch, NULL, NULL, true);
+                                                                   &output, &empty, &scratch, NULL, NULL, false, true);
                     check_test_expect(test, !failed_code_ok && failed_code.status == CHECK_PROGRAM_RESOURCE && failed_code.link.symbols.count == 0 &&
                                            failed_code.lowered.functions == 0 && output.length == emission_mark && empty.length == 17 && scratch.length == 0,
                                       "code byte exhaustion rolls back Link, ABI, atoms and bytes together");
@@ -464,6 +632,11 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
+{
+    check_test_program_boundary_reason(test, source, name, accepted, machine, references, initializations, NULL);
 }
 
 #include "c_check_program_select_test.c"
@@ -1022,6 +1195,90 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "long double y=pick(0.0L,a)+pick(n,2.5L);long double w=a*({long double q=x;q/=2;q;});"
         "return (int)(x*16)^(int)(y*8)^(int)(w*4);}",
         "long-double-temporaries", clang);
+    // Complex values (#133): double's sums, differences, products and quotients (libgcc's __muldc3 and __divdc3 for two
+    // complex operands, a real one kept real), negation, the conjugate and equality, with infinities, NaNs and a zero
+    // divisor; (inf + inf i) times 1, whose inline product's two NaNs __muldc3 recovers as infinities. Each part's bits
+    // folded, so that signed zeros count.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "int tested(int n){volatile double x=n*0.75,zero=0.0;double inf=1.0/zero,nan=zero/zero;"
+        "cd a=x+(n-2)*1.0i,b=(n%5-2)+0.5i*n,c=inf+x*1.0i,d=nan+1.0i;"
+        "cd s=a+b,t=a-b,u=a*b,v=a/b,w=x+a,y=a-x,o=x-b,p=x*b,q=b/x,r=x/b,m=-a,k=~b;"
+        "cd e=c*a,f=a/c,g=d*a,h=c*c,j=a/(b-b),ii=a,kk;__real__ ii=inf;__imag__ ii=inf;kk=ii*(cd)1.0;"
+        "unsigned acc=foldz(s)^foldz(t)*5^foldz(u)*7^foldz(v)*11^foldz(w)*13^foldz(y)*17^foldz(p)*19^foldz(q)*23^foldz(r)*29^foldz(m)*31^foldz(k)*37;"
+        "acc^=foldz(e)*41^foldz(f)*43^foldz(g)*47^foldz(h)*53^foldz(j)*59^foldz(o)*61^foldz(kk)*67;"
+        "acc^=(a==a)+2*(a==b)+4*(a!=b)+8*(d!=d)+16*(x==a)+32*(c==c);"
+        "return (int)acc;}",
+        "complex-arithmetic", clang);
+    // Complex float's and long double's, and mixed: __mulsc3, __divsc3, __mulxc3 and __divxc3, each part's bits folded.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "int tested(int n){volatile float xf=n*0.5f;volatile long double xl=n*0.25L;"
+        "cf a=xf+2.0fi,b=(n-3)-1.5fi;cl c=xl+3.0Li,d=1.0L-n*1.0Li;"
+        "cf s=a*b,t=a/b,u=a+b*xf,w2=-a;cl v=c*d,w=c/d,y=c-d+xl,z=xl/d;cl mixed=a*c;cd half=b/(cd)c;"
+        "return (int)(foldf(s)^foldf(t)*3^foldf(u)*5^foldl(v)*7^foldl(w)*11^foldl(y)*13^foldl(z)*17^foldl(mixed)*19^foldz(half)*23^foldf(w2)*29^(a==b)^(c!=d)*2);}",
+        "complex-float-and-long-double", clang);
+    // Complex values passed and returned (in xmm registers, in st0 and st1, on the stack), in structs, read by va_arg,
+    // through a function pointer, and in arrays.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "struct holder{int tag;cd z;cf w;cl v;};"
+        "static cd scale(cd z,double k){return z*k;}"
+        "static cf twistf(cf z){return ~z*2.0f;}"
+        "static cl twistl(cl z,cl w){return z*w;}"
+        "static struct holder make(cd z,int t){struct holder h={t,z,(cf)z,(cl)z*2};return h;}"
+        "static cd many(cd a,cd b,cd c,cd d,cd e,cd f,double g,cd h,cf i,cl j){return a+b*c-d/e+f*g+h+i+j;}"
+        "static cd sum(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);cd r=0;for(int i=0;i<n;i++){r+=__builtin_va_arg(ap,cd);r*=1.5;}__builtin_va_end(ap);return r;}"
+        "static cl suml(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);cl r=0;for(int i=0;i<n;i++)r+=__builtin_va_arg(ap,cl);__builtin_va_end(ap);return r;}"
+        "static cf sumf(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);cf r=0;for(int i=0;i<n;i++)r=r*2.0f+__builtin_va_arg(ap,cf);__builtin_va_end(ap);return r;}"
+        "static cd mul(cd a,cd b){return a*b;}"
+        "static cd quo(cd a,cd b){return a/b;}"
+        "static cd(*pick(int k))(cd,cd){return k&1?mul:quo;}"
+        "int tested(int n){cd a=n+0.5i,b=1.0-n*1.0i;struct holder h=make(a,n);cd arr[3]={a,b,a*b};arr[n&1]+=arr[2];"
+        "unsigned acc=foldz(scale(a,n))^foldf(twistf((cf)b))*3^foldl(twistl(a,b))*5^foldz(h.z)*7^foldf(h.w)*11^foldl(h.v)*13^h.tag;"
+        "acc^=foldz(many(a,b,a,b,a,b,n,a,(cf)b,(cl)a))*17^foldz(sum(3,a,b,(cd)n))*19^foldl(suml(2,(cl)a,(cl)b))*23^foldf(sumf(3,(cf)a,(cf)b,(cf)n))*29;"
+        "acc^=foldz(pick(n)(a,b))*31^foldz(arr[0])*37^foldz(arr[1])*41;"
+        "return (int)acc;}",
+        "complex-calls-and-varargs", clang);
+    // Compound assignments into complex, double, int, _Bool and long long destinations, conversions between the complex
+    // types, ?:, and truth tests in conditions.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "int tested(int n){cd a=n-4.0+(n%3)*1.0i;cf f=a;cl l=a;double d=n;int i=n;_Bool b=0;long long ll=n;"
+        "a+=f;a*=l;f/=a;l-=a*1.0i;d*=a;i+=a;b+=a*0.0;ll-=a;"
+        "cd z=n>3?a:(cd)f;"
+        "int t=0;if(a)t|=1;if(!f)t|=2;if(a&&l)t|=4;if(f||0)t|=8;t|=16*(_Bool)(l-l);while(z){z-=z;t+=32;}"
+        "return (int)(foldz(a)^foldf(f)*3^foldl(l)*5^fold(d)*7^i*11^b*13^(unsigned)ll*17^foldz(z)*19^t);}",
+        "complex-updates-and-truth", clang);
+    // Complex globals, a static local and an array's elements, from static data, updated each call; a compound
+    // literal, and folded constants.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "cd ga=1.5+2.5i,garr[2]={1.0i,3.0};static cf gf=-1.0f+0.5fi;cl gl=2.0L-3.0Li;"
+        "int tested(int n){static cd counter;counter+=n*1.0i;ga*=1.0+n*0.5i;garr[n&1]+=ga;gf+=n;gl/=1.0L+n;"
+        "cd local=(cd){0};local=2.0i*2.0i;cd folded=(1.0+2.0i)*(3.0-1.0i);"
+        "return (int)(foldz(ga)^foldz(garr[0])*3^foldz(garr[1])*5^foldf(gf)*7^foldl(gl)*11^foldz(counter)*13^foldz(local)*17^foldz(folded)*19);}",
+        "complex-static-data-and-constants", clang);
     // Conversions between unsigned long and float or double (Tier 0's tier0_emit_u64_convert): to them near 2^53, past
     // 2^63 where the halving's kept bit rounds, and near 2^64; back from values up to 2^64 less 4096, every one in range.
     check_test_program_source(test,
@@ -1233,7 +1490,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "long double tested(int n){return ({long double t=n;t;});}", "long-double-statement-region-value", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, false, 0, 1);
-    check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
+    // The complex types check_lower_complex doesn't take are refused by what they need: GNU's complex integer types,
+    // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
+    // C; __float128 is its spelling).
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
+                                       "complex types other than _Complex float, double and long double");
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
+                                       "complex types other than _Complex float, double and long double");
     // The 128-bit integers: lowered, but _BitInt(128) and a bit-field of them spread over more than 8 bytes.
     check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, false, 0, 1);
@@ -1249,6 +1514,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "overlapping-case-ranges", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch(n){default:return 1;default:return 2;}}", "duplicate-default", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch((double)n){case 1:return 1;}return 0;}", "noninteger-switch", false, false, 0, 0);
+    check_test_program_build_release();
 }
 
 #endif

@@ -48,7 +48,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
-#include <errno.h>
+#include <sys/syscall.h>
 
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
@@ -725,24 +725,27 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
 
 // Legacy fixture callers may compare the partial output of an intentionally rejected case. File-oracle callers
 // inspect PPClangOutput.status instead: a rejection is an explicit skip, a process/I/O failure is a failed run.
+// clang's predefines for `arguments` (clang -dM -E of an empty input), written to `predefines_path`.
+static bool pp_test_clang_predefines(char** arguments, int argument_count, const char* predefines_path)
+{
+    PPClangOutput macros = pp_test_clang_process("clang", arguments, argument_count, "/dev/null", true);
+    bool result = macros.status == PP_CLANG_ACCEPTED;
+    FILE* out = result ? fopen(predefines_path, "w") : 0;
+    result = out != 0 && fwrite(macros.text, 1, macros.length, out) == macros.length;
+    if (out != 0)
+    {
+        result = fclose(out) == 0 && result;
+    }
+    free(macros.text);
+    free(macros.diagnostics);
+    return result;
+}
+
 static char* pp_test_clang(char** arguments, int argument_count, const char* path, const char* predefines_path, size_t* length)
 {
     char* result = 0;
     *length = 0;
-    bool ready = true;
-    if (predefines_path != 0)
-    {
-        PPClangOutput macros = pp_test_clang_process("clang", arguments, argument_count, "/dev/null", true);
-        ready = macros.status == PP_CLANG_ACCEPTED;
-        FILE* out = ready ? fopen(predefines_path, "w") : 0;
-        ready = out != 0 && fwrite(macros.text, 1, macros.length, out) == macros.length;
-        if (out != 0)
-        {
-            ready = fclose(out) == 0 && ready;
-        }
-        free(macros.text);
-        free(macros.diagnostics);
-    }
+    const bool ready = predefines_path == 0 || pp_test_clang_predefines(arguments, argument_count, predefines_path);
     if (ready)
     {
         PPClangOutput output = pp_test_clang_process("clang", arguments, argument_count, path, false);
@@ -3552,13 +3555,15 @@ static bool pp_test_resource_names(char** text, size_t* length, const char* link
 // One of test-preprocessor's files (pp_test_files): by both kernels, and with `with_clang` against clang with
 // `arguments` (pp_clang_arguments, whose links are in `links`, or null without them), whose predefines ours reads.
 static bool pp_test_file(int argument_count, char** arguments, const char* links, const PPOptions* base, const char* path, bool with_clang, const char* directory,
-                         uint64_t* tokens)
+                         bool predefined, uint64_t* tokens)
 {
     PPOptions options = *base;
     char predefines[4096];
     snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
     size_t length = 0;
-    char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefines, &length) : 0;
+    // With `predefined`, clang's predefines for the options are in the directory already (pp_test_files writes them once
+    // for its files, which share the options).
+    char* text = with_clang ? pp_test_clang(arguments, argument_count, path, predefined ? 0 : predefines, &length) : 0;
     const bool named = text == 0 || links == 0 || pp_test_resource_names(&text, &length, links);
     options.predefines_path = with_clang ? predefines : options.predefines_path;
     uint64_t guards = 0;
@@ -3575,51 +3580,7 @@ static bool pp_test_file(int argument_count, char** arguments, const char* links
     return result;
 }
 
-// test-preprocessor's files: each of `files` (`file_count` of them) with the options `passed` (`passed_count`), by both
-// kernels, and with `with_clang` against clang with the same options (pp_test_file), but --buster-headers, for which
-// clang gets ours' search (pp_clang_arguments, with its links in `directory`). Adds the files' output tokens to
-// `*tokens`. Returns how many differ: all of them if the options can't be read or clang's search can't be made.
-static uint32_t pp_test_files(int passed_count, char** passed, int file_count, char** files, bool with_clang, const char* directory, uint64_t* tokens)
-{
-    Arena arena = arena_reserve(1ull << 30);
-    PPOptions options;
-    const char* input;
-    const char* output;
-    bool markers;
-    // pp_parse_options wants one input: give it the first file, and use its options for every file.
-    char** with_input = calloc((size_t)passed_count + 2, sizeof(char*));
-    char ours[PATH_MAX];
-    char links[4200];
-    snprintf(links, sizeof(links), "%s/clang-search-XXXXXX", directory);
-    bool linked = false;
-    int clang_count = 0;
-    bool ready = with_input != 0 && file_count != 0;
-    if (ready)
-    {
-        memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
-        with_input[passed_count] = files[0];
-    }
-    ready = ready && pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
-    if (ready)
-    {
-        options.clang_features = true;
-    }
-    char** clang = ready && with_clang ? pp_clang_arguments(&options, passed_count, passed, ours, links, &linked, &clang_count) : 0;
-    ready = ready && (!with_clang || clang != 0);
-    uint32_t result = ready ? 0 : (uint32_t)file_count;
-    for (int i = 0; ready && i < file_count; i += 1)
-    {
-        result += !pp_test_file(clang_count, clang, linked ? links : 0, &options, files[i], with_clang, directory, tokens);
-    }
-    if (linked)
-    {
-        pp_clang_remove_links(links);
-    }
-    free(with_input);
-    free(clang);
-    arena_release(&arena);
-    return result;
-}
+static uint32_t pp_test_files(int passed_count, char** passed, int file_count, char** files, bool with_clang, const char* directory, uint64_t* tokens);
 
 static int pp_test_compare_lines(const void* a, const void* b)
 {
@@ -3936,7 +3897,7 @@ static uint32_t pp_test_sets(const char* directory, const char* path, const char
         uint64_t tokens = 0;
         bool passed = pp_parse_options(n + 1, arguments, &options, &arena, &input, &output, &markers);
         options.clang_features = true;
-        passed = passed && pp_test_file(n, arguments, 0, &options, path, true, directory, &tokens);
+        passed = passed && pp_test_file(n, arguments, 0, &options, path, true, directory, false, &tokens);
         if (!passed)
         {
             printf("%s: the answers differ from clang's with %s\n", label, shown);
@@ -4984,7 +4945,7 @@ static bool pp_test_option_set(const char* directory, const char* path, const ch
     uint64_t tokens = 0;
     bool result = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
     options.clang_features = true;
-    result = result && pp_test_file(count, arguments, 0, &options, path, true, directory, &tokens);
+    result = result && pp_test_file(count, arguments, 0, &options, path, true, directory, false, &tokens);
     if (!result)
     {
         printf("feature options: the answers differ from clang's with %s\n", set);
@@ -6094,19 +6055,462 @@ static bool pp_test_clang_command(const char* directory)
 // beside one of clang's headers must come from buster's when buster's has it (pp_test_header_beside);
 // test-preprocessor's files must compare with clang under --buster-headers (pp_test_header_files); and clang's command
 // for the benchmark must have every argument (pp_test_clang_command).
+// The modes pp_test_headers checks each header in, hosted and freestanding.
+static const char* const pp_test_header_modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
+
+// What a part of the checks that run in child processes (pp_test_children) found: a mode and hosting's header sets
+// (pp_test_header_set), or a range of the cases (pp_test_case_part) with what they added to the pp_test_system_
+// counters.
+typedef struct PPTestChildCounts PPTestChildCounts;
+struct PPTestChildCounts
+{
+    uint32_t sets;
+    uint32_t failures;
+    uint32_t our_failures;
+    uint32_t order_failures;
+    uint64_t system_units;
+    uint64_t system_inexact;
+    uint64_t system_tokens;
+    uint64_t system_made;
+    uint64_t tokens;
+    char system_inexact_first[256];
+    bool result;
+};
+
+// Mode m's sets, hosted or freestanding: each header's macros and expansions with clang's headers and with ours, our
+// preprocessor on all of them, and the headers among the C library's and clang's (pp_test_header_orders). Its files go
+// in `directory`, which is the set's own; `empty` is an empty file and `links` clang's resource headers but ours.
+static PPTestChildCounts pp_test_header_set(const char* directory, const char* ours, const char* links, const char* empty, uint32_t m, uint32_t hosting)
+{
+    PPTestChildCounts counts = { 0 };
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/headers.c", directory);
+    bool result = true;
+    static PPTestMacro theirs[BUSTER_PP_TEST_HEADER_LINES];
+    static PPTestMacro mine[BUSTER_PP_TEST_HEADER_LINES];
+    static char* predefines[BUSTER_PP_TEST_HEADER_LINES];
+    // Every compared macro of every header, for the runs of our preprocessor: the check lines. And one header's.
+    static char checks[BUSTER_PP_TEST_HEADER_TEXT];
+    static char text[BUSTER_PP_TEST_HEADER_TEXT];
+    char* arguments[8] = { (char*)pp_test_header_modes[m], hosting != 0 ? "-ffreestanding" : 0 };
+    const int base = hosting != 0 ? 2 : 1;
+    arguments[base] = "-nobuiltininc";
+    arguments[base + 1] = "-isystem";
+    arguments[base + 2] = (char*)ours;
+    const char* hosted = hosting != 0 ? "freestanding" : "hosted";
+    PPClangOutput predefined = pp_test_clang_process("clang", arguments, base, empty, true);
+    const uint32_t predefine_count = predefined.status == PP_CLANG_ACCEPTED ? pp_test_predefine_lines(predefined.text, predefined.length, predefines, BUSTER_PP_TEST_HEADER_LINES) : 0;
+    result = predefined.status == PP_CLANG_ACCEPTED;
+    size_t checks_length = 0;
+    bool checks_fit = true;
+    for (uint32_t h = 0; result && h < BUSTER_ARRAY_LENGTH(pp_test_header_names); h += 1)
+    {
+        char source[64];
+        char label[128];
+        snprintf(source, sizeof(source), "#include <%s.h>\n", pp_test_header_names[h]);
+        snprintf(label, sizeof(label), "headers: <%s.h>, %s, %s", pp_test_header_names[h], pp_test_header_modes[m], hosted);
+        checks_fit = checks_fit && pp_test_append(checks, sizeof(checks), &checks_length, "%s", source);
+        result = pp_test_write_file(path, source);
+        PPClangOutput their_macros = pp_test_clang_process("clang", arguments, base, path, true);
+        PPClangOutput my_macros = pp_test_clang_process("clang", arguments, base + 3, path, true);
+        const uint32_t their_count = their_macros.status == PP_CLANG_ACCEPTED ? pp_test_header_macros(their_macros.text, their_macros.length, predefines, predefine_count, theirs, BUSTER_PP_TEST_HEADER_LINES) : 0;
+        const uint32_t my_count = my_macros.status == PP_CLANG_ACCEPTED ? pp_test_header_macros(my_macros.text, my_macros.length, predefines, predefine_count, mine, BUSTER_PP_TEST_HEADER_LINES) : 0;
+        bool same = their_macros.status == PP_CLANG_ACCEPTED && my_macros.status == PP_CLANG_ACCEPTED;
+        // The names, merged.
+        uint32_t i = 0;
+        uint32_t j = 0;
+        while (same && (i < their_count || j < my_count))
+        {
+            const int order = i == their_count ? 1 : j == my_count ? -1 : strcmp(theirs[i].name, mine[j].name);
+            if (order != 0)
+            {
+                printf("%s: only %s defines %s\n", label, order < 0 ? "clang's" : "ours", order < 0 ? theirs[i].name : mine[j].name);
+                same = false;
+            }
+            i += order <= 0;
+            j += order >= 0;
+        }
+        // The check lines: each compared macro named alone, or invoked with placeholder arguments.
+        size_t text_length = 0;
+        bool fits = pp_test_append(text, sizeof(text), &text_length, "%s", source);
+        for (uint32_t k = 0; same && fits && k < their_count; k += 1)
+        {
+            char line[512];
+            size_t line_length = 0;
+            fits = pp_test_append(line, sizeof(line), &line_length, "buster_check_%s_ %s", theirs[k].name, theirs[k].name);
+            for (int32_t a = 0; fits && theirs[k].parameters >= 0 && a <= theirs[k].parameters; a += 1)
+            {
+                const char* open = a == 0 ? "(" : "";
+                fits = a < theirs[k].parameters ? pp_test_append(line, sizeof(line), &line_length, "%s%sa%d", open, a == 0 ? "" : ", ", a)
+                                                : pp_test_append(line, sizeof(line), &line_length, "%s)", open);
+            }
+            fits = fits && pp_test_append(text, sizeof(text), &text_length, "%s\n", line);
+            checks_fit = checks_fit && pp_test_append(checks, sizeof(checks), &checks_length, "%s\n", line);
+        }
+        if (same && !fits)
+        {
+            printf("%s: the check lines don't fit in %u bytes\n", label, BUSTER_PP_TEST_HEADER_TEXT);
+            same = false;
+        }
+        if (same)
+        {
+            result = pp_test_write_file(path, text);
+            arguments[base + 3] = "-P";
+            char* with_p[9];
+            memcpy(with_p, arguments, sizeof(arguments));
+            with_p[base] = "-P";
+            PPClangOutput their_text = pp_test_clang_process("clang", with_p, base + 1, path, false);
+            PPClangOutput my_text = pp_test_clang_process("clang", arguments, base + 4, path, false);
+            // Both zeroed first, so that each can be released whichever of the runs fails.
+            PPTestExpansions their_expansions = { 0 };
+            PPTestExpansions my_expansions = { 0 };
+            const bool strict_c89 = m == 0;
+            same = their_text.status == my_text.status && their_text.status != PP_CLANG_ERROR &&
+                   pp_test_header_expansions(their_text.text, their_text.length, !strict_c89, &their_expansions) &&
+                   pp_test_header_expansions(my_text.text, my_text.length, true, &my_expansions) &&
+                   pp_test_compare_expansions(&their_expansions, &my_expansions, true, label);
+            static char their_diagnostics[1 << 16];
+            static char my_diagnostics[1 << 16];
+            pp_test_primary_diagnostics(their_text.diagnostics, path, their_diagnostics, sizeof(their_diagnostics));
+            pp_test_primary_diagnostics(my_text.diagnostics, path, my_diagnostics, sizeof(my_diagnostics));
+            if (same && strcmp(their_diagnostics, my_diagnostics) != 0)
+            {
+                printf("%s: the diagnostics differ:\n  clang's %s\n  ours    %s\n", label, their_diagnostics, my_diagnostics);
+                same = false;
+            }
+            pp_test_expansions_release(&their_expansions);
+            pp_test_expansions_release(&my_expansions);
+            free(their_text.text);
+            free(their_text.diagnostics);
+            free(my_text.text);
+            free(my_text.diagnostics);
+        }
+        free(their_macros.text);
+        free(their_macros.diagnostics);
+        free(my_macros.text);
+        free(my_macros.diagnostics);
+        counts.sets += 1;
+        counts.failures += !same;
+    }
+    free(predefined.text);
+    free(predefined.diagnostics);
+    if (result && !checks_fit)
+    {
+        printf("headers: the check lines of %s, %s don't fit in %u bytes\n", pp_test_header_modes[m], hosted, BUSTER_PP_TEST_HEADER_TEXT);
+        result = false;
+    }
+    // Our preprocessor with --buster-headers, on every header and check line of the mode at once, against clang
+    // with our headers; then the headers among the C library's and clang's other ones.
+    if (result)
+    {
+        result = pp_test_write_file(path, checks);
+        char* with_p[9];
+        memcpy(with_p, arguments, sizeof(arguments));
+        with_p[base + 3] = "-P";
+        PPClangOutput clang_text = pp_test_clang_process("clang", with_p, base + 4, path, false);
+        char name[128];
+        snprintf(name, sizeof(name), "headers, ours preprocessed, %s, %s", pp_test_header_modes[m], hosted);
+        counts.our_failures += !pp_test_buster_run(pp_test_header_modes[m], hosting != 0, 0, path, &clang_text, name);
+        free(clang_text.text);
+        free(clang_text.diagnostics);
+        counts.order_failures += pp_test_header_orders(directory, ours, links, pp_test_header_modes[m], hosting != 0, checks);
+    }
+    unlink(path);
+    counts.result = result;
+    return counts;
+}
+
+#define BUSTER_PP_TEST_HEADER_SETS (2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes))
+#define BUSTER_PP_TEST_CHILDREN 64
+// The parts the cases run in: several per CPU, so that parts of slow cases don't leave the others idle.
+#define BUSTER_PP_TEST_CASE_PARTS 32
+
+// Cases [first, end) of pp_test_cases in `directory`, as run_preprocessor_fixture_tests runs them all: their failures,
+// and what they added to the pp_test_system_ counters. Unless `keep` (--keep), the files the cases leave are removed.
+static PPTestChildCounts pp_test_case_part(const char* directory, bool with_clang, bool keep, uint32_t first, uint32_t end)
+{
+    pp_test_system_units = 0;
+    pp_test_system_inexact = 0;
+    pp_test_system_tokens = 0;
+    pp_test_system_made = 0;
+    pp_test_system_inexact_first[0] = 0;
+    PPTestChildCounts counts = { .result = true };
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        counts.failures += !pp_test_case(&pp_test_cases[i], directory, with_clang);
+    }
+    // What the cases leave, which run_preprocessor_fixture_tests removes from its own directory unless --keep.
+    static const char* const names[] = { "case.c", "other.h", "predefines.h" };
+    for (uint32_t i = 0; !keep && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        char path[4200];
+        snprintf(path, sizeof(path), "%s/%s", directory, names[i]);
+        unlink(path);
+    }
+    counts.system_units = pp_test_system_units;
+    counts.system_inexact = pp_test_system_inexact;
+    counts.system_tokens = pp_test_system_tokens;
+    counts.system_made = pp_test_system_made;
+    snprintf(counts.system_inexact_first, sizeof(counts.system_inexact_first), "%s", pp_test_system_inexact_first);
+    return counts;
+}
+
+// Files [first, end) of test-preprocessor's files, as pp_test_files runs them all (pp_test_file, whose clang
+// predefines are in `directory`): how many differ, and what they added to the tokens and the pp_test_system_ counters.
+static PPTestChildCounts pp_test_file_part(int argument_count, char** arguments, const char* links, const PPOptions* options, char** files, uint32_t first,
+                                           uint32_t end, bool with_clang, const char* directory)
+{
+    pp_test_system_units = 0;
+    pp_test_system_inexact = 0;
+    pp_test_system_tokens = 0;
+    pp_test_system_made = 0;
+    pp_test_system_inexact_first[0] = 0;
+    PPTestChildCounts counts = { .result = true };
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        counts.failures += !pp_test_file(argument_count, arguments, links, options, files[i], with_clang, directory, true, &counts.tokens);
+    }
+    counts.system_units = pp_test_system_units;
+    counts.system_inexact = pp_test_system_inexact;
+    counts.system_tokens = pp_test_system_tokens;
+    counts.system_made = pp_test_system_made;
+    snprintf(counts.system_inexact_first, sizeof(counts.system_inexact_first), "%s", pp_test_system_inexact_first);
+    return counts;
+}
+
+// Checks that run in child processes: which, and what their parts read.
+typedef enum PPTestChildWork
+{
+    PP_TEST_CHILD_HEADERS,
+    PP_TEST_CHILD_CASES,
+    PP_TEST_CHILD_FILES,
+} PPTestChildWork;
+
+typedef struct PPTestChildren PPTestChildren;
+struct PPTestChildren
+{
+    PPTestChildWork work;
+    uint32_t parts;
+    const char* directory;
+    const char* ours;
+    const char* links;
+    const char* empty;
+    bool with_clang;
+    // --keep: the parts' directories and the files the cases leave stay.
+    bool keep;
+    char** arguments;
+    int argument_count;
+    const PPOptions* options;
+    char** files;
+    uint32_t count;
+};
+
+// Part `part` of the work, in `own`, a directory of its own.
+static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint32_t part, const char* own)
+{
+    PPTestChildCounts counts = { 0 };
+    // The cases' parts take the first `count` cases, or every one.
+    const uint32_t cases = children->count != 0 ? children->count : BUSTER_ARRAY_LENGTH(pp_test_cases);
+    switch (children->work)
+    {
+        case PP_TEST_CHILD_HEADERS:
+            counts = pp_test_header_set(own, children->ours, children->links, children->empty, part / 2, part % 2);
+            break;
+        case PP_TEST_CHILD_CASES:
+            counts = pp_test_case_part(own, children->with_clang, children->keep, (uint32_t)((uint64_t)cases * part / children->parts),
+                                       (uint32_t)((uint64_t)cases * (part + 1) / children->parts));
+            break;
+        case PP_TEST_CHILD_FILES:
+            counts = pp_test_file_part(children->argument_count, children->arguments, children->links, children->options, children->files,
+                                       (uint32_t)((uint64_t)children->count * part / children->parts),
+                                       (uint32_t)((uint64_t)children->count * (part + 1) / children->parts), children->with_clang, children->directory);
+            break;
+    }
+    return counts;
+}
+
+// The work's parts, at most one per CPU at once (#465): each in a child process (test_process.c) with a directory of
+// its own (directory/headers-N, cases-N or files-N), its output printed in the parts' order and its counts sent back.
+// Returns their counts added up, with the first part's system_inexact_first that has one.
+static PPTestChildCounts pp_test_children(const PPTestChildren* children)
+{
+    const uint32_t cpus = test_process_cpus();
+    const uint32_t parts = children->parts < BUSTER_PP_TEST_CHILDREN ? children->parts : BUSTER_PP_TEST_CHILDREN;
+    const uint32_t running = cpus < parts ? cpus : parts;
+    TestProcess processes[BUSTER_PP_TEST_CHILDREN];
+    PPTestChildCounts total = { .result = parts == children->parts };
+    uint32_t started = 0;
+    for (uint32_t finished = 0; finished < parts; finished += 1)
+    {
+        while (started < parts && started - finished < running)
+        {
+            if (test_process_start(&processes[started]))
+            {
+                char own[4200];
+                static const char* const kinds[] = { "headers", "cases", "files" };
+                snprintf(own, sizeof(own), "%s/%s-%u", children->directory, kinds[children->work], started);
+                PPTestChildCounts counts = { 0 };
+                if (mkdir(own, 0700) == 0)
+                {
+                    counts = pp_test_child_part(children, started, own);
+                    if (!children->keep && rmdir(own) != 0)
+                    {
+                        printf("test-preprocessor: %s isn't empty after its part\n", own);
+                        counts.result = false;
+                    }
+                }
+                else
+                {
+                    printf("test-preprocessor: can't make %s\n", own);
+                }
+                test_process_exit(&processes[started], &counts, sizeof(counts));
+            }
+            started += 1;
+        }
+        PPTestChildCounts counts;
+        const bool ran = test_process_finish(&processes[finished], &counts, sizeof(counts));
+        if (!ran)
+        {
+            static const char* const works[] = { "header sets", "cases", "files" };
+            printf("test-preprocessor: part %u of %u of the %s didn't run to the end\n", finished, parts, works[children->work]);
+        }
+        total.sets += counts.sets;
+        total.failures += counts.failures;
+        total.our_failures += counts.our_failures;
+        total.order_failures += counts.order_failures;
+        if (counts.system_inexact != 0 && total.system_inexact == 0)
+        {
+            snprintf(total.system_inexact_first, sizeof(total.system_inexact_first), "%s", counts.system_inexact_first);
+        }
+        total.system_units += counts.system_units;
+        total.system_inexact += counts.system_inexact;
+        total.system_tokens += counts.system_tokens;
+        total.system_made += counts.system_made;
+        total.tokens += counts.tokens;
+        total.result = total.result && ran && counts.result;
+    }
+    return total;
+}
+
+// test-preprocessor's files: each of `files` (`file_count` of them) with the options `passed` (`passed_count`), by both
+// kernels, and with `with_clang` against clang with the same options (pp_test_file), but --buster-headers, for which
+// clang gets ours' search (pp_clang_arguments, with its links in `directory`). Adds the files' output tokens to
+// `*tokens`. Returns how many differ: all of them if the options can't be read or clang's search can't be made.
+static uint32_t pp_test_files(int passed_count, char** passed, int file_count, char** files, bool with_clang, const char* directory, uint64_t* tokens)
+{
+    Arena arena = arena_reserve(1ull << 30);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    // pp_parse_options wants one input: give it the first file, and use its options for every file.
+    char** with_input = calloc((size_t)passed_count + 2, sizeof(char*));
+    char ours[PATH_MAX];
+    char links[4200];
+    snprintf(links, sizeof(links), "%s/clang-search-XXXXXX", directory);
+    bool linked = false;
+    int clang_count = 0;
+    bool ready = with_input != 0 && file_count != 0;
+    if (ready)
+    {
+        memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
+        with_input[passed_count] = files[0];
+    }
+    ready = ready && pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
+    if (ready)
+    {
+        options.clang_features = true;
+    }
+    char** clang = ready && with_clang ? pp_clang_arguments(&options, passed_count, passed, ours, links, &linked, &clang_count) : 0;
+    ready = ready && (!with_clang || clang != 0);
+    // clang's predefines for the options, which every file's run reads (pp_test_file), once for them all.
+    char predefines[4096];
+    snprintf(predefines, sizeof(predefines), "%s/predefines.h", directory);
+    ready = ready && (!with_clang || pp_test_clang_predefines(clang, clang_count, predefines));
+    // A part per file (or per range of them, past BUSTER_PP_TEST_CHILDREN files), at most one per CPU at once
+    // (pp_test_children), their output in the files' order.
+    const PPTestChildren children = {
+        .work = PP_TEST_CHILD_FILES,
+        .parts = file_count < BUSTER_PP_TEST_CHILDREN ? (uint32_t)file_count : BUSTER_PP_TEST_CHILDREN,
+        .count = (uint32_t)file_count,
+        .directory = directory,
+        .links = linked ? links : 0,
+        .with_clang = with_clang,
+        .arguments = clang,
+        .argument_count = clang_count,
+        .options = &options,
+        .files = files,
+    };
+    const PPTestChildCounts counts = ready ? pp_test_children(&children) : (PPTestChildCounts){ 0 };
+    pp_test_system_units += counts.system_units;
+    pp_test_system_inexact += counts.system_inexact;
+    pp_test_system_tokens += counts.system_tokens;
+    pp_test_system_made += counts.system_made;
+    snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", counts.system_inexact_first);
+    *tokens += counts.tokens;
+    const uint32_t result = ready ? counts.failures + !counts.result : (uint32_t)file_count;
+    if (linked)
+    {
+        pp_clang_remove_links(links);
+    }
+    free(with_input);
+    free(clang);
+    arena_release(&arena);
+    return result;
+}
+
+// The cases' parts' cleanup (#465's review): the first two cases in two parts, run as the cases are without --keep and
+// with it, in a directory of their own. Without it, the parts' directories must be gone; with it, each part's must hold
+// its last case's case.c. Prints a line and returns whether both were so.
+static bool pp_test_case_retention(const char* directory)
+{
+    bool result = true;
+    for (uint32_t keep = 0; keep < 2; keep += 1)
+    {
+        char own[4200];
+        snprintf(own, sizeof(own), "%s/retention-%u", directory, keep);
+        const PPTestChildren children = {
+            .work = PP_TEST_CHILD_CASES,
+            .parts = 2,
+            .count = 2,
+            .directory = own,
+            .keep = keep != 0,
+        };
+        const bool made = mkdir(own, 0700) == 0;
+        const PPTestChildCounts counts = made ? pp_test_children(&children) : (PPTestChildCounts){ 0 };
+        bool as_wanted = made && counts.result && counts.failures == 0;
+        for (uint32_t part = 0; part < 2; part += 1)
+        {
+            char path[4300];
+            snprintf(path, sizeof(path), "%s/cases-%u/case.c", own, part);
+            struct stat status;
+            const bool kept = stat(path, &status) == 0;
+            unlink(path);
+            snprintf(path, sizeof(path), "%s/cases-%u", own, part);
+            const bool left = rmdir(path) == 0;
+            as_wanted = as_wanted && kept == (keep != 0) && left == (keep != 0);
+        }
+        as_wanted = rmdir(own) == 0 && as_wanted;
+        if (!as_wanted)
+        {
+            printf("case retention: the parts' files %s\n", keep != 0 ? "weren't kept with --keep" : "were left without --keep");
+        }
+        result = result && as_wanted;
+    }
+    printf("case retention: the parts' files %s\n", result ? "go, and stay with --keep" : "WRONG");
+    return result;
+}
+
 static bool pp_test_headers(const char* directory)
 {
-    static const char* const modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
     char ours[PATH_MAX];
     bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
     {
         printf("headers: no src/buster/include beside the executable's build directory\n");
     }
-    char path[4096];
     char empty[4096];
     char links[4096];
-    snprintf(path, sizeof(path), "%s/headers.c", directory);
     snprintf(empty, sizeof(empty), "%s/headers-empty.c", directory);
     snprintf(links, sizeof(links), "%s/clang-headers-XXXXXX", directory);
     result = result && pp_test_write_file(empty, "");
@@ -6116,156 +6520,31 @@ static bool pp_test_headers(const char* directory)
         printf("headers: can't link clang's resource headers into %s\n", links);
     }
     result = linked;
-    static PPTestMacro theirs[BUSTER_PP_TEST_HEADER_LINES];
-    static PPTestMacro mine[BUSTER_PP_TEST_HEADER_LINES];
-    static char* predefines[BUSTER_PP_TEST_HEADER_LINES];
-    // Every compared macro of every header, for the runs of our preprocessor: the check lines. And one header's.
-    static char checks[BUSTER_PP_TEST_HEADER_TEXT];
-    static char text[BUSTER_PP_TEST_HEADER_TEXT];
-    uint32_t sets = 0;
-    uint32_t failures = 0;
-    uint32_t our_failures = 0;
-    uint32_t order_failures = 0;
-    for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
-    {
-        for (uint32_t hosting = 0; result && hosting < 2; hosting += 1)
-        {
-            char* arguments[8] = { (char*)modes[m], hosting != 0 ? "-ffreestanding" : 0 };
-            const int base = hosting != 0 ? 2 : 1;
-            arguments[base] = "-nobuiltininc";
-            arguments[base + 1] = "-isystem";
-            arguments[base + 2] = ours;
-            const char* hosted = hosting != 0 ? "freestanding" : "hosted";
-            PPClangOutput predefined = pp_test_clang_process("clang", arguments, base, empty, true);
-            const uint32_t predefine_count = predefined.status == PP_CLANG_ACCEPTED ? pp_test_predefine_lines(predefined.text, predefined.length, predefines, BUSTER_PP_TEST_HEADER_LINES) : 0;
-            result = predefined.status == PP_CLANG_ACCEPTED;
-            size_t checks_length = 0;
-            bool checks_fit = true;
-            for (uint32_t h = 0; result && h < BUSTER_ARRAY_LENGTH(pp_test_header_names); h += 1)
-            {
-                char source[64];
-                char label[128];
-                snprintf(source, sizeof(source), "#include <%s.h>\n", pp_test_header_names[h]);
-                snprintf(label, sizeof(label), "headers: <%s.h>, %s, %s", pp_test_header_names[h], modes[m], hosted);
-                checks_fit = checks_fit && pp_test_append(checks, sizeof(checks), &checks_length, "%s", source);
-                result = pp_test_write_file(path, source);
-                PPClangOutput their_macros = pp_test_clang_process("clang", arguments, base, path, true);
-                PPClangOutput my_macros = pp_test_clang_process("clang", arguments, base + 3, path, true);
-                const uint32_t their_count = their_macros.status == PP_CLANG_ACCEPTED ? pp_test_header_macros(their_macros.text, their_macros.length, predefines, predefine_count, theirs, BUSTER_PP_TEST_HEADER_LINES) : 0;
-                const uint32_t my_count = my_macros.status == PP_CLANG_ACCEPTED ? pp_test_header_macros(my_macros.text, my_macros.length, predefines, predefine_count, mine, BUSTER_PP_TEST_HEADER_LINES) : 0;
-                bool same = their_macros.status == PP_CLANG_ACCEPTED && my_macros.status == PP_CLANG_ACCEPTED;
-                // The names, merged.
-                uint32_t i = 0;
-                uint32_t j = 0;
-                while (same && (i < their_count || j < my_count))
-                {
-                    const int order = i == their_count ? 1 : j == my_count ? -1 : strcmp(theirs[i].name, mine[j].name);
-                    if (order != 0)
-                    {
-                        printf("%s: only %s defines %s\n", label, order < 0 ? "clang's" : "ours", order < 0 ? theirs[i].name : mine[j].name);
-                        same = false;
-                    }
-                    i += order <= 0;
-                    j += order >= 0;
-                }
-                // The check lines: each compared macro named alone, or invoked with placeholder arguments.
-                size_t text_length = 0;
-                bool fits = pp_test_append(text, sizeof(text), &text_length, "%s", source);
-                for (uint32_t k = 0; same && fits && k < their_count; k += 1)
-                {
-                    char line[512];
-                    size_t line_length = 0;
-                    fits = pp_test_append(line, sizeof(line), &line_length, "buster_check_%s_ %s", theirs[k].name, theirs[k].name);
-                    for (int32_t a = 0; fits && theirs[k].parameters >= 0 && a <= theirs[k].parameters; a += 1)
-                    {
-                        const char* open = a == 0 ? "(" : "";
-                        fits = a < theirs[k].parameters ? pp_test_append(line, sizeof(line), &line_length, "%s%sa%d", open, a == 0 ? "" : ", ", a)
-                                                        : pp_test_append(line, sizeof(line), &line_length, "%s)", open);
-                    }
-                    fits = fits && pp_test_append(text, sizeof(text), &text_length, "%s\n", line);
-                    checks_fit = checks_fit && pp_test_append(checks, sizeof(checks), &checks_length, "%s\n", line);
-                }
-                if (same && !fits)
-                {
-                    printf("%s: the check lines don't fit in %u bytes\n", label, BUSTER_PP_TEST_HEADER_TEXT);
-                    same = false;
-                }
-                if (same)
-                {
-                    result = pp_test_write_file(path, text);
-                    arguments[base + 3] = "-P";
-                    char* with_p[9];
-                    memcpy(with_p, arguments, sizeof(arguments));
-                    with_p[base] = "-P";
-                    PPClangOutput their_text = pp_test_clang_process("clang", with_p, base + 1, path, false);
-                    PPClangOutput my_text = pp_test_clang_process("clang", arguments, base + 4, path, false);
-                    // Both zeroed first, so that each can be released whichever of the runs fails.
-                    PPTestExpansions their_expansions = { 0 };
-                    PPTestExpansions my_expansions = { 0 };
-                    const bool strict_c89 = m == 0;
-                    same = their_text.status == my_text.status && their_text.status != PP_CLANG_ERROR &&
-                           pp_test_header_expansions(their_text.text, their_text.length, !strict_c89, &their_expansions) &&
-                           pp_test_header_expansions(my_text.text, my_text.length, true, &my_expansions) &&
-                           pp_test_compare_expansions(&their_expansions, &my_expansions, true, label);
-                    static char their_diagnostics[1 << 16];
-                    static char my_diagnostics[1 << 16];
-                    pp_test_primary_diagnostics(their_text.diagnostics, path, their_diagnostics, sizeof(their_diagnostics));
-                    pp_test_primary_diagnostics(my_text.diagnostics, path, my_diagnostics, sizeof(my_diagnostics));
-                    if (same && strcmp(their_diagnostics, my_diagnostics) != 0)
-                    {
-                        printf("%s: the diagnostics differ:\n  clang's %s\n  ours    %s\n", label, their_diagnostics, my_diagnostics);
-                        same = false;
-                    }
-                    pp_test_expansions_release(&their_expansions);
-                    pp_test_expansions_release(&my_expansions);
-                    free(their_text.text);
-                    free(their_text.diagnostics);
-                    free(my_text.text);
-                    free(my_text.diagnostics);
-                }
-                free(their_macros.text);
-                free(their_macros.diagnostics);
-                free(my_macros.text);
-                free(my_macros.diagnostics);
-                sets += 1;
-                failures += !same;
-            }
-            free(predefined.text);
-            free(predefined.diagnostics);
-            if (result && !checks_fit)
-            {
-                printf("headers: the check lines of %s, %s don't fit in %u bytes\n", modes[m], hosted, BUSTER_PP_TEST_HEADER_TEXT);
-                result = false;
-            }
-            // Our preprocessor with --buster-headers, on every header and check line of the mode at once, against clang
-            // with our headers; then the headers among the C library's and clang's other ones.
-            if (result)
-            {
-                result = pp_test_write_file(path, checks);
-                char* with_p[9];
-                memcpy(with_p, arguments, sizeof(arguments));
-                with_p[base + 3] = "-P";
-                PPClangOutput clang_text = pp_test_clang_process("clang", with_p, base + 4, path, false);
-                char name[128];
-                snprintf(name, sizeof(name), "headers, ours preprocessed, %s, %s", modes[m], hosted);
-                our_failures += !pp_test_buster_run(modes[m], hosting != 0, 0, path, &clang_text, name);
-                free(clang_text.text);
-                free(clang_text.diagnostics);
-                order_failures += pp_test_header_orders(directory, ours, links, modes[m], hosting != 0, checks);
-            }
-        }
-    }
+    const PPTestChildren children = {
+        .work = PP_TEST_CHILD_HEADERS,
+        .parts = BUSTER_PP_TEST_HEADER_SETS,
+        .directory = directory,
+        .ours = ours,
+        .links = links,
+        .empty = empty,
+    };
+    const PPTestChildCounts counts = result ? pp_test_children(&children) : (PPTestChildCounts){ 0 };
+    result = result && counts.result;
+    const uint32_t sets = counts.sets;
+    const uint32_t failures = counts.failures;
+    const uint32_t our_failures = counts.our_failures;
+    const uint32_t order_failures = counts.order_failures;
     const uint32_t option_failures = result ? pp_test_header_options(directory, ours, links) : 0;
     const bool beside = result && pp_test_header_beside();
     const uint32_t file_failures = result ? pp_test_header_files(directory) : 0;
     const bool command = result && pp_test_clang_command(directory);
-    unlink(path);
     unlink(empty);
     pp_clang_remove_links(links);
     printf("headers: %u of %u header, mode and hosting sets differ from clang's; our preprocessor differs from clang on %u of %lu modes with them; %u of %lu units "
            "among the C library's and clang's other headers differ; %u of 3 runs with -nobuiltininc, -nostdinc and neither find other headers than clang; "
            "quoted names beside clang's headers are found %s\n",
-           failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(modes)), order_failures, (unsigned long)(4 * BUSTER_ARRAY_LENGTH(modes)), option_failures,
+           failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), order_failures,
+           (unsigned long)(4 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), option_failures,
            beside ? "where they should be" : "elsewhere");
     return result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
@@ -6891,11 +7170,22 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     }
     else if (passed_all && file_count == 0)
     {
-        uint32_t failures = 0;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_test_cases); i += 1)
-        {
-            failures += !pp_test_case(&pp_test_cases[i], directory, with_clang);
-        }
+        // The cases in parts that run at once (pp_test_children), each in a directory of its own, their output in the
+        // cases' order.
+        const PPTestChildren children = {
+            .work = PP_TEST_CHILD_CASES,
+            .parts = BUSTER_PP_TEST_CASE_PARTS,
+            .directory = directory,
+            .with_clang = with_clang,
+            .keep = keep,
+        };
+        const PPTestChildCounts cases = pp_test_children(&children);
+        pp_test_system_units += cases.system_units;
+        pp_test_system_inexact += cases.system_inexact;
+        pp_test_system_tokens += cases.system_tokens;
+        pp_test_system_made += cases.system_made;
+        snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", cases.system_inexact_first);
+        const uint32_t failures = cases.failures + !cases.result;
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         printf("system levels: %llu units by their runs and their history alike, %llu whose runs can't say%s%s%s; %llu tokens at a system level, %llu made "
                "by macros\n",
@@ -6903,6 +7193,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
                pp_test_system_inexact_first, pp_test_system_inexact != 0 ? ")" : "", (unsigned long long)pp_test_system_tokens,
                (unsigned long long)pp_test_system_made);
         passed_all = failures == 0;
+        passed_all &= pp_test_case_retention(directory);
+        passed_all &= test_process_test() == 0;
         passed_all &= pp_test_system_case_levels(directory);
         passed_all &= pp_test_macro_batches(directory, with_clang);
         passed_all &= pp_test_semantic_pragmas(directory, with_clang);

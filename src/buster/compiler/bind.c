@@ -202,7 +202,9 @@ struct Bind
     // pages that the caller's arena starts with, and made every link of the C driver fault and clear a huge page.
     BindOverride* overrides;
     uint32_t override_count;
-    // By symbol of the runtime's link: the link's symbol it became, or 0 before its object joined.
+    // By symbol of the runtime's link: the link's symbol it became, written as its object joins, before anything reads
+    // it (the object's fixups' targets are its own symbols). Nothing clears it: a link that joins the crt objects alone
+    // would otherwise touch an entry for every member's symbol (#490).
     SymbolId* symbols;
     // The runtime's members that the link needs, and those that joined it, a bit each.
     uint64_t* members_needed;
@@ -406,7 +408,7 @@ static uint8_t bind_visibility(uint8_t a, uint8_t b)
 // constraining visibility. The atom of the definition it had stays in the link, without the name.
 static void bind_install(Bind* bind, Link* link, SymbolId symbol, SymbolId from_symbol, AtomId atom)
 {
-    const LinkSymbols* from = &bind->runtime->link.symbols;
+    const LinkSymbols* from = &runtime_symbol_link(bind->runtime, from_symbol)->symbols;
     LinkSymbols* symbols = &link->symbols;
     const uint8_t from_flags = from->flags[from_symbol];
     symbols->atom[symbol] = atom;
@@ -421,7 +423,7 @@ static void bind_install(Bind* bind, Link* link, SymbolId symbol, SymbolId from_
 // in a COMDAT group that was `discarded` joins as a reference.
 static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId symbol, AtomId atom, bool discarded)
 {
-    const LinkSymbols* from = &bind->runtime->link.symbols;
+    const LinkSymbols* from = &runtime_symbol_link(bind->runtime, from_symbol)->symbols;
     LinkSymbols* symbols = &link->symbols;
     const uint8_t from_flags = from->flags[from_symbol];
     const uint8_t flags = symbols->flags[symbol];
@@ -433,14 +435,14 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
     const uint8_t source = symbols->source[symbol];
     const bool program = source == BUSTER_LINK_SOURCE_PROGRAM || (source == BUSTER_LINK_SOURCE_ABSOLUTE && symbol < bind->program_symbols);
     const bool waiting = program && !bind->resolving;
-    const uint32_t entry = waiting ? bind->runtime->symbol_names[from_symbol] - 1 : 0;
+    const uint32_t entry = waiting ? runtime_symbol_names(bind->runtime, from_symbol)[from_symbol] - 1 : 0;
     uint32_t found = bind->override_count;
     for (uint32_t i = 0; waiting && i < bind->override_count; i += 1)
     {
         found = bind->overrides[i].entry == entry ? i : found;
     }
     const SymbolId pending = found < bind->override_count ? bind->overrides[found].symbol : 0;
-    const uint8_t defining_flags = pending != 0 ? from->flags[pending] : flags;
+    const uint8_t defining_flags = pending != 0 ? runtime_symbol_link(bind->runtime, pending)->symbols.flags[pending] : flags;
     const bool defined = symbols->atom[symbol] != 0 || program || source == BUSTER_LINK_SOURCE_ABSOLUTE;
     const bool from_weak = (from_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
     const bool link_weak = (defining_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
@@ -509,7 +511,7 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
 // their alignments (a piece that discards a group needs less).
 static bool bind_piece_fits(const Bind* bind, const Link* link, uint32_t piece)
 {
-    const Link* from = &bind->runtime->link;
+    const Link* from = runtime_piece_link(bind->runtime, piece);
     const ImportMark begin = bind->runtime->pieces[piece].begin;
     const ImportMark end = bind->runtime->pieces[piece].end;
     uint64_t atom_bytes = 0;
@@ -529,7 +531,8 @@ static bool bind_piece_fits(const Bind* bind, const Link* link, uint32_t piece)
 static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
 {
     const Runtime* runtime = bind->runtime;
-    const Link* from = &runtime->link;
+    const Link* from = runtime_piece_link(runtime, piece);
+    const uint32_t* symbol_names = runtime_piece_symbol_names(runtime, piece);
     const ImportMark begin = runtime->pieces[piece].begin;
     const ImportMark end = runtime->pieces[piece].end;
     const uint32_t name_count = end.names - begin.names;
@@ -549,7 +552,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     // Names: the piece's bytes are one run in the runtime's name arena, copied at once, and the pointers moved with them
     // (a loaded runtime's offsets by its delta too: Runtime.byte_delta).
     const uint64_t name_bytes = end.name_bytes - begin.name_bytes;
-    const uint8_t* source = runtime->names.base + begin.name_bytes;
+    const uint8_t* source = runtime_piece_names(runtime, piece) + begin.name_bytes;
     uint8_t* copy = arena_push(link->name_arena, name_bytes, 1);
     memcpy(copy, source, name_bytes);
     const __m512i moved = _mm512_set1_epi64((long long)((uintptr_t)copy - (uintptr_t)source + runtime->byte_delta));
@@ -599,7 +602,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     SymbolId* taken = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, symbol_count + BUSTER_BIND_BATCH);
     for (uint32_t i = 0; taken != 0 && i < symbol_count; i += 1)
     {
-        const uint32_t entry = runtime->symbol_names[begin.symbols + i];
+        const uint32_t entry = symbol_names[begin.symbols + i];
         taken[i] = entry != 0 ? bind->name_symbols[entry - 1] : 0;
     }
     LinkSymbols* symbols = &link->symbols;
@@ -641,7 +644,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     for (uint32_t i = 0; taken != 0 && i < symbol_count; i += 1)
     {
         const SymbolId from_symbol = begin.symbols + i;
-        const uint32_t entry = runtime->symbol_names[from_symbol];
+        const uint32_t entry = symbol_names[from_symbol];
         if (taken[i] == 0 && entry != 0)
         {
             bind_name_symbol(bind, entry - 1, bind->symbols[from_symbol]);
@@ -683,7 +686,8 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
         const __m512i addends = _mm512_maskz_loadu_epi32(lanes, from->fixups.addend + begin.fixups + i);
         _mm512_mask_storeu_epi32(fixups->addend + fixup_first + i, lanes, _mm512_mask_add_epi32(addends, wide, addends, _mm512_set1_epi32((int)wide_delta)));
     }
-    for (uint32_t i = 0; i < fixup_count; i += 1)
+    // The piece's symbols have their link symbols unless the scratch above had no room (BIND_ERROR_FULL).
+    for (uint32_t i = 0; taken != 0 && i < fixup_count; i += 1)
     {
         fixups->target[fixup_first + i] = bind->symbols[from->fixups.target[begin.fixups + i]];
     }
@@ -699,7 +703,8 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
 static void bind_join_records(Bind* bind, Link* link, uint32_t piece, const uint8_t* discarded)
 {
     const Runtime* runtime = bind->runtime;
-    const Link* from = &runtime->link;
+    const Link* from = runtime_piece_link(runtime, piece);
+    const uint32_t* symbol_names = runtime_piece_symbol_names(runtime, piece);
     const ImportMark begin = runtime->pieces[piece].begin;
     const ImportMark end = runtime->pieces[piece].end;
     const NameId name_first = link->names.count;
@@ -728,7 +733,7 @@ static void bind_join_records(Bind* bind, Link* link, uint32_t piece, const uint
     }
     for (SymbolId symbol = begin.symbols; result && symbol < end.symbols; symbol += 1)
     {
-        const uint32_t entry = runtime->symbol_names[symbol];
+        const uint32_t entry = symbol_names[symbol];
         const SymbolId taken = entry != 0 ? bind->name_symbols[entry - 1] : 0;
         const AtomId from_atom = from->symbols.atom[symbol];
         const AtomId atom = from_atom != 0 ? atoms[from_atom - begin.atoms] : 0;
@@ -901,7 +906,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     // pieces say which symbols are theirs, so that no other piece's records are read before it joins.
     const RuntimePiece* pieces = runtime->pieces;
     const bool tail_piece = definition >= pieces[RUNTIME_OBJECT_END].begin.symbols && definition < pieces[RUNTIME_OBJECT_INIT_EPILOGUE].end.symbols;
-    const bool after = definition != 0 && !bind->tail_joined && tail_piece && runtime->link.symbols.atom[definition] != 0;
+    const bool after = definition != 0 && !bind->tail_joined && tail_piece && runtime_symbol_link(runtime, definition)->symbols.atom[definition] != 0;
     const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
     const uint32_t member = entry != 0 ? names->member[entry - 1] : 0;
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
@@ -1946,7 +1951,6 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
     else
     {
         memset(bind->name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
-        memset(bind->symbols, 0, runtime->link.symbols.count * sizeof(SymbolId));
         memset(bind->members_needed, 0, words * sizeof(uint64_t));
         memset(bind->members_joined, 0, words * sizeof(uint64_t));
         memset(bind->signatures, 0, signature_words * sizeof(uint64_t));

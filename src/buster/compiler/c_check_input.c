@@ -18,6 +18,12 @@ typedef enum CheckInputMessage
     CHECK_INPUT_TARGET,
     CHECK_INPUT_INCOMPLETE_MEMBER,
     CHECK_INPUT_INCOMPLETE_OBJECT,
+    CHECK_INPUT_LOOP_HINT,
+    CHECK_INPUT_LOOP_PLACEMENT,
+    // An unroll pragma's count that clang can't read: empty, starting with no expression, unclosed.
+    CHECK_INPUT_LOOP_MISSING,
+    CHECK_INPUT_LOOP_EXPRESSION,
+    CHECK_INPUT_LOOP_PARENTHESIS,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -32,6 +38,11 @@ static const char* const check_input_messages[] =
     "unsupported checker language or target model",
     "record member has incomplete type",
     "object has incomplete type",
+    "invalid loop hint pragma",
+    "loop hint pragma not followed by a loop",
+    "unroll pragma's count missing",
+    "unroll pragma's count not an expression",
+    "unroll pragma's count unclosed",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -860,6 +871,9 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     bool complex = false;
     bool atomic = false;
     bool reported = false;
+    // Whether a _BitInt base is this list's own keyword's, which the list's signedness makes signed or unsigned below;
+    // a typedef name's or a typeof's keeps the signedness it has.
+    bool bit_int = false;
     CheckInputAttributes* attributes = 0;
     *is_typedef = false;
     *is_inline = false;
@@ -968,11 +982,26 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 return 0;
             }
             reader->constant_abi_origin = 0;
-            selected = job != 0 && job->ready && job->keyword == i ? job->result :
-                       close > i + 1 && close < end ? check_input_constant_type(reader, i, close + 1) : 0;
+            if (job != 0 && job->ready && job->keyword == i)
+            {
+                selected = job->result;
+            }
+            else if (name == C_NAME_BITINT || name == C_NAME_EXTINT)
+            {
+                // A _BitInt's width alone, unsigned until the declaration's own signedness applies below: read as a
+                // whole type name, `_BitInt(1)` is a signed one-bit _BitInt, which C refuses, before an `unsigned` counts.
+                int64_t width = 0;
+                const bool sized = close > i + 2 && close < end && check_input_constant(reader, i + 2, close, &width) && width > 0 && width <= UINT32_MAX;
+                selected = sized ? check_input_type_result(reader, type_bit_int(reader->types, (uint32_t)width, true)) : 0;
+            }
+            else
+            {
+                selected = close > i + 1 && close < end ? check_input_constant_type(reader, i, close + 1) : 0;
+            }
             abi_origin = job != 0 && job->ready && job->keyword == i ? job->result_abi_origin : reader->constant_abi_origin;
             valid &= selected != 0 && base == 0;
             base = selected;
+            bit_int = name == C_NAME_BITINT || name == C_NAME_EXTINT;
             reader->declared_types[i] = selected;
             for (uint32_t token = i; selected != 0 && token <= close; token += 1)
             {
@@ -1098,7 +1127,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         valid &= !longs && !shorts && !integer_seen;
         base = signedness == 2 ? BUSTER_TYPE_UINT128 : base;
     }
-    else if (type_kind(reader->types, base) == BUSTER_TYPE_KIND_BIT_INT)
+    else if (type_kind(reader->types, base) == BUSTER_TYPE_KIND_BIT_INT && bit_int)
     {
         valid &= !longs && !shorts && !integer_seen;
         base = valid ? check_input_type_result(reader, type_bit_int(reader->types, (uint32_t)reader->types->types.extent[type_index(base)], signedness == 2)) : 0;
@@ -1158,6 +1187,7 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 #include "c_check_pragma_input.c"
 #include "c_check_pack_input.c"
 #include "c_check_fp_input.c"
+#include "c_check_loop_input.c"
 
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
@@ -2637,6 +2667,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             valid &= complete_object;
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
+            valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
             if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
@@ -4651,14 +4682,20 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         if (parser->tokens.pragma_count != 0)
         {
             uint8_t* handled = arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint8_t), 1);
-            input->resource |= handled == 0;
-            if (handled != 0)
+            // A loop hint's error: its message, and the token it is reported at (check_input_loop_pragmas).
+            uint8_t* loop_messages = handled != 0 ? arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint8_t), 1) : 0;
+            uint32_t* loop_tokens = loop_messages != 0 ? arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint32_t), 4) : 0;
+            input->resource |= loop_tokens == 0;
+            if (loop_tokens != 0)
             {
                 memset(handled, 0, parser->tokens.pragma_count);
+                memset(loop_messages, 0, parser->tokens.pragma_count);
+                memset(loop_tokens, 0xff, (uint64_t)parser->tokens.pragma_count * sizeof(uint32_t));
                 bool prepared = check_input_diagnostic_pragmas(&reader, handled);
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
+                prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, loop_tokens);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 for (uint32_t pragma = 0; prepared && pragma < parser->tokens.pragma_count; pragma += 1)
@@ -4673,11 +4710,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         reader.resolve_limit = parser->tokens.pragma_positions[pragma];
                         reader.resolve_pragma = pragma;
-                        reader.resolve_message = handled[pragma] == 3 ? CHECK_INPUT_DECLARATION : CHECK_INPUT_UNSUPPORTED;
+                        reader.resolve_message = handled[pragma] != 3 ? CHECK_INPUT_UNSUPPORTED :
+                                                 loop_messages[pragma] != 0 ? (CheckInputMessage)loop_messages[pragma] : CHECK_INPUT_DECLARATION;
                         if (input->pack_pragmas != 0 && pack < input->pack_pragmas->count && input->pack_pragmas->records[pack].pragma == pragma)
                         {
                             reader.resolve_diagnostic_token = input->pack_pragmas->records[pack].diagnostic_token;
                         }
+                        reader.resolve_diagnostic_token = loop_tokens[pragma] != BUSTER_CHECK_NONE ? loop_tokens[pragma] : reader.resolve_diagnostic_token;
                         break;
                     }
                 }

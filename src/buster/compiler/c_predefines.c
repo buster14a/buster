@@ -3274,6 +3274,17 @@ static const char predefines_target_os[] =
     "#define TARGET_OS_UIKITFORMAC 0\n#define TARGET_OS_UNIX 0\n#define TARGET_OS_VISION 0\n#define TARGET_OS_WATCH 0\n#define TARGET_OS_WIN32 0\n"
     "#define TARGET_OS_WINDOWS 0\n";
 
+// Whether the compiler emits call frame information, as clang's driver decides it: with unwind tables (-funwind-tables,
+// or asynchronous ones, the default unless freestanding, -f[no-]asynchronous-unwind-tables's last saying otherwise),
+// exceptions or debug information. __GCC_HAVE_DWARF2_CFI_ASM says it does (but under -fno-dwarf2-cfi-asm, which
+// changes only the form clang's assembly gives it), and the C driver writes its functions' unwind tables then (#395).
+static __attribute__((unused)) bool predefines_unwind_tables(const PredefinesOptions* options, bool freestanding)
+{
+    const bool asynchronous = options->asynchronous_unwind_tables != 0 ? options->asynchronous_unwind_tables == BUSTER_PREDEFINES_ON : !freestanding;
+    const bool unwind = options->unwind_tables == BUSTER_PREDEFINES_ON;
+    return options->exceptions || unwind || asynchronous || options->debug || options->debug_modules;
+}
+
 // The macros the target and the options decide, as #define lines, into `buffer` (`capacity` bytes, at least
 // BUSTER_PREDEFINES_TEXT_BYTES): all of them but __STDC_HOSTED__, which pp_predefines writes with the language mode's.
 // `language` decides the GNU inline semantics and C23's char8_t, and `freestanding` the unwind tables' default.
@@ -3382,9 +3393,7 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
     length = !options->no_constant_cfstrings && !options->no_constant_cfstrings_m ? predefines_append(buffer, length, capacity, "#define __CONSTANT_CFSTRINGS__ 1\n") : length;
     // The CFI directives: by default when there are unwind tables (asynchronous ones unless freestanding),
     // exceptions or debug information.
-    const bool asynchronous = options->asynchronous_unwind_tables != 0 ? options->asynchronous_unwind_tables == BUSTER_PREDEFINES_ON : !freestanding;
-    const bool unwind = options->unwind_tables == BUSTER_PREDEFINES_ON;
-    const bool cfi_default = options->exceptions || unwind || asynchronous || options->debug || options->debug_modules;
+    const bool cfi_default = predefines_unwind_tables(options, freestanding);
     const bool cfi = options->dwarf2_cfi_asm != 0 ? options->dwarf2_cfi_asm == BUSTER_PREDEFINES_ON : cfi_default;
     length = cfi ? predefines_append(buffer, length, capacity, "#define __GCC_HAVE_DWARF2_CFI_ASM 1\n") : length;
     // Exceptions.

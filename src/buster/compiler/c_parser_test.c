@@ -32,6 +32,10 @@
 #include <dirent.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 extern char** environ;
 
@@ -125,150 +129,187 @@ struct ParseTestClang
     char message[256];
 };
 
-// Runs `clang -fsyntax-only` with `arguments` on `count` files at once, and reads each file's first error from its
-// output into `results`: one in a header the file includes counts for the file. Returns false if clang couldn't be
-// run, or didn't parse the files: an error no file accounts for (clang's driver's, for an unknown option), or a failing
-// exit with no file rejected.
+// Starts `clang -fsyntax-only` with `arguments` on `count` files at once, its standard error into `output` (a file in
+// memory, test_process_file: a pipe would stall clang while another process's is read). False if it couldn't start.
+static bool parse_test_clang_spawn(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, FILE* output, pid_t* child)
+{
+    const uint32_t fixed = 8;
+    char** argv = malloc(sizeof(char*) * (fixed + argument_count + count + 1));
+    bool result = argv != 0;
+    if (result)
+    {
+        uint32_t n = 0;
+        argv[n++] = (char*)clang_path;
+        argv[n++] = "-fsyntax-only";
+        argv[n++] = "-w";
+        argv[n++] = "-fdiagnostics-show-category=name";
+        argv[n++] = "-fno-caret-diagnostics";
+        argv[n++] = "-fno-color-diagnostics";
+        argv[n++] = "-ferror-limit=0";
+        for (uint32_t a = 0; a < argument_count; a += 1)
+        {
+            argv[n++] = (char*)arguments[a];
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            argv[n++] = paths[i];
+        }
+        argv[n] = 0;
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, fileno(output), 2);
+        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
+        // clang reads CPATH and C_INCLUDE_PATH, which the preprocessor doesn't: without them, both search alike.
+        uint32_t variables = 0;
+        while (environ[variables] != 0)
+        {
+            variables += 1;
+        }
+        char** environment = malloc(sizeof(char*) * (variables + 1));
+        uint32_t kept = 0;
+        for (uint32_t v = 0; environment != 0 && v < variables; v += 1)
+        {
+            if (strncmp(environ[v], "CPATH=", 6) != 0 && strncmp(environ[v], "C_INCLUDE_PATH=", 15) != 0)
+            {
+                environment[kept] = environ[v];
+                kept += 1;
+            }
+        }
+        if (environment != 0)
+        {
+            environment[kept] = 0;
+        }
+        result = environment != 0 && posix_spawnp(child, clang_path, &actions, 0, argv, environment) == 0;
+        free(environment);
+        posix_spawn_file_actions_destroy(&actions);
+        free(argv);
+    }
+    return result;
+}
+
+// Waits for a process parse_test_clang_spawn started, and reads each of its files' first error from its output into
+// `results`: one in a header the file includes counts for the file. False if clang didn't parse the files: an error
+// no file accounts for (clang's driver's, for an unknown option), or a failing exit with no file rejected.
+static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint32_t count, ParseTestClang* results)
+{
+    int status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = waitpid(child, &status, 0);
+    }
+    while (waited < 0 && errno == EINTR);
+    bool result = waited == child && fseek(output, 0, SEEK_SET) == 0;
+    char line[4096];
+    // The file the last "In file included from" line named, whose header the errors after it are in (clang names the
+    // includes again only where they change), and whether an error came that no file accounts for.
+    static const char included[] = "In file included from ";
+    uint32_t including = BUSTER_PARSE_NONE;
+    bool unaccounted = false;
+    while (result && fgets(line, sizeof(line), output) != 0)
+    {
+        bool accounted = false;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const size_t length = strlen(paths[i]);
+            const size_t prefix = sizeof(included) - 1;
+            if (strncmp(line, included, prefix) == 0 && strncmp(line + prefix, paths[i], length) == 0 && line[prefix + length] == ':')
+            {
+                including = i;
+            }
+            accounted |= strncmp(line, paths[i], length) == 0 && line[length] == ':';
+        }
+        const bool error = strstr(line, "error: ") != 0;
+        if (error && !accounted && strncmp(line, included, sizeof(included) - 1) != 0 && including != BUSTER_PARSE_NONE && !results[including].rejected)
+        {
+            // An error in a header: the file that includes it is rejected, at a place in the header.
+            results[including].rejected = true;
+            results[including].parse_issue = strstr(line, "Parse Issue]") != 0;
+            snprintf(results[including].message, sizeof(results[including].message), "%.*s", (int)strcspn(line, "\n"), line);
+        }
+        unaccounted |= error && !accounted && including == BUSTER_PARSE_NONE;
+        // "path:line:column: error: message [category]"
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const size_t length = strlen(paths[i]);
+            if (!results[i].rejected && strncmp(line, paths[i], length) == 0 && line[length] == ':')
+            {
+                unsigned line_number = 0;
+                unsigned column = 0;
+                int consumed = 0;
+                if (sscanf(line + length, ":%u:%u: error: %n", &line_number, &column, &consumed) == 2 && consumed != 0)
+                {
+                    results[i].rejected = true;
+                    results[i].line = line_number;
+                    results[i].column = column;
+                    results[i].parse_issue = strstr(line, "Parse Issue]") != 0;
+                    char* message = line + length + consumed;
+                    char* bracket = strrchr(message, '[');
+                    const size_t message_length = bracket != 0 && bracket > message ? (size_t)(bracket - message - 1) : strcspn(message, "\n");
+                    snprintf(results[i].message, sizeof(results[i].message), "%.*s", (int)message_length, message);
+                }
+                else if (strstr(line, ": fatal error: ") != 0)
+                {
+                    results[i].rejected = true;
+                }
+            }
+        }
+    }
+    bool rejected = false;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        rejected |= results[i].rejected;
+    }
+    return result && !ferror(output) && WIFEXITED(status) && !unaccounted && (WEXITSTATUS(status) == 0 || rejected);
+}
+
+// How many clang processes parse_test_clang runs its files on: at most one per CPU it may run on and one per
+// BUSTER_PARSE_TEST_CLANG_FILES files, and at most BUSTER_PARSE_TEST_CLANG_PROCESSES (#465).
+#define BUSTER_PARSE_TEST_CLANG_FILES 8
+#define BUSTER_PARSE_TEST_CLANG_PROCESSES 8
+
+static uint32_t parse_test_clang_processes(uint32_t count)
+{
+    const uint32_t cpus = test_process_cpus();
+    uint32_t result = (count + BUSTER_PARSE_TEST_CLANG_FILES - 1) / BUSTER_PARSE_TEST_CLANG_FILES;
+    result = result < cpus ? result : cpus;
+    result = result < BUSTER_PARSE_TEST_CLANG_PROCESSES ? result : BUSTER_PARSE_TEST_CLANG_PROCESSES;
+    return result != 0 ? result : 1;
+}
+
+// Runs `clang -fsyntax-only` with `arguments` on `count` files, and reads each file's first error into `results`, as
+// parse_test_clang_read does. The files are split in order among parse_test_clang_processes processes that run at once,
+// each one's output read for its own files: the same results as one process on them all, since clang checks each file
+// on its own. Returns false if a process couldn't be run, or didn't parse its files.
 static bool parse_test_clang(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
 {
-    bool result = true;
     for (uint32_t i = 0; i < count; i += 1)
     {
         results[i] = (ParseTestClang){ 0 };
     }
-    int pipe_fds[2];
-    result = pipe(pipe_fds) == 0;
-    pid_t child = -1;
-    if (result)
+    const uint32_t processes = parse_test_clang_processes(count);
+    FILE* outputs[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
+    pid_t children[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
+    bool started[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
+    bool result = true;
+    for (uint32_t p = 0; p < processes; p += 1)
     {
-        const uint32_t fixed = 8;
-        char** argv = malloc(sizeof(char*) * (fixed + argument_count + count + 1));
-        result = argv != 0;
-        if (result)
-        {
-            uint32_t n = 0;
-            argv[n++] = (char*)clang_path;
-            argv[n++] = "-fsyntax-only";
-            argv[n++] = "-w";
-            argv[n++] = "-fdiagnostics-show-category=name";
-            argv[n++] = "-fno-caret-diagnostics";
-            argv[n++] = "-fno-color-diagnostics";
-            argv[n++] = "-ferror-limit=0";
-            for (uint32_t a = 0; a < argument_count; a += 1)
-            {
-                argv[n++] = (char*)arguments[a];
-            }
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                argv[n++] = paths[i];
-            }
-            argv[n] = 0;
-            posix_spawn_file_actions_t actions;
-            posix_spawn_file_actions_init(&actions);
-            posix_spawn_file_actions_adddup2(&actions, pipe_fds[1], 2);
-            posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
-            posix_spawn_file_actions_addclose(&actions, pipe_fds[0]);
-            posix_spawn_file_actions_addclose(&actions, pipe_fds[1]);
-            // clang reads CPATH and C_INCLUDE_PATH, which the preprocessor doesn't: without them, both search alike.
-            uint32_t variables = 0;
-            while (environ[variables] != 0)
-            {
-                variables += 1;
-            }
-            char** environment = malloc(sizeof(char*) * (variables + 1));
-            uint32_t kept = 0;
-            for (uint32_t v = 0; environment != 0 && v < variables; v += 1)
-            {
-                if (strncmp(environ[v], "CPATH=", 6) != 0 && strncmp(environ[v], "C_INCLUDE_PATH=", 15) != 0)
-                {
-                    environment[kept] = environ[v];
-                    kept += 1;
-                }
-            }
-            if (environment != 0)
-            {
-                environment[kept] = 0;
-            }
-            result = environment != 0 && posix_spawnp(&child, clang_path, &actions, 0, argv, environment) == 0;
-            free(environment);
-            posix_spawn_file_actions_destroy(&actions);
-            free(argv);
-        }
-        close(pipe_fds[1]);
+        const uint32_t first = (uint32_t)((uint64_t)count * p / processes);
+        const uint32_t end = (uint32_t)((uint64_t)count * (p + 1) / processes);
+        outputs[p] = result ? test_process_file() : 0;
+        started[p] = outputs[p] != 0 && parse_test_clang_spawn(clang_path, arguments, argument_count, paths + first, end - first, outputs[p], &children[p]);
+        result = started[p];
     }
-    if (result)
+    for (uint32_t p = 0; p < processes; p += 1)
     {
-        FILE* stream = fdopen(pipe_fds[0], "r");
-        char line[4096];
-        // The file the last "In file included from" line named, whose header the errors after it are in (clang names the
-        // includes again only where they change), and whether an error came that no file accounts for.
-        static const char included[] = "In file included from ";
-        uint32_t including = BUSTER_PARSE_NONE;
-        bool unaccounted = false;
-        while (stream != 0 && fgets(line, sizeof(line), stream) != 0)
+        const uint32_t first = (uint32_t)((uint64_t)count * p / processes);
+        const uint32_t end = (uint32_t)((uint64_t)count * (p + 1) / processes);
+        const bool read = started[p] && parse_test_clang_read(outputs[p], children[p], paths + first, end - first, results + first);
+        result = result && read;
+        if (outputs[p] != 0)
         {
-            bool accounted = false;
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const size_t length = strlen(paths[i]);
-                const size_t prefix = sizeof(included) - 1;
-                if (strncmp(line, included, prefix) == 0 && strncmp(line + prefix, paths[i], length) == 0 && line[prefix + length] == ':')
-                {
-                    including = i;
-                }
-                accounted |= strncmp(line, paths[i], length) == 0 && line[length] == ':';
-            }
-            const bool error = strstr(line, "error: ") != 0;
-            if (error && !accounted && strncmp(line, included, sizeof(included) - 1) != 0 && including != BUSTER_PARSE_NONE && !results[including].rejected)
-            {
-                // An error in a header: the file that includes it is rejected, at a place in the header.
-                results[including].rejected = true;
-                results[including].parse_issue = strstr(line, "Parse Issue]") != 0;
-                snprintf(results[including].message, sizeof(results[including].message), "%.*s", (int)strcspn(line, "\n"), line);
-            }
-            unaccounted |= error && !accounted && including == BUSTER_PARSE_NONE;
-            // "path:line:column: error: message [category]"
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const size_t length = strlen(paths[i]);
-                if (!results[i].rejected && strncmp(line, paths[i], length) == 0 && line[length] == ':')
-                {
-                    unsigned line_number = 0;
-                    unsigned column = 0;
-                    int consumed = 0;
-                    if (sscanf(line + length, ":%u:%u: error: %n", &line_number, &column, &consumed) == 2 && consumed != 0)
-                    {
-                        results[i].rejected = true;
-                        results[i].line = line_number;
-                        results[i].column = column;
-                        results[i].parse_issue = strstr(line, "Parse Issue]") != 0;
-                        char* message = line + length + consumed;
-                        char* bracket = strrchr(message, '[');
-                        const size_t message_length = bracket != 0 && bracket > message ? (size_t)(bracket - message - 1) : strcspn(message, "\n");
-                        snprintf(results[i].message, sizeof(results[i].message), "%.*s", (int)message_length, message);
-                    }
-                    else if (strstr(line, ": fatal error: ") != 0)
-                    {
-                        results[i].rejected = true;
-                    }
-                }
-            }
+            fclose(outputs[p]);
         }
-        if (stream != 0)
-        {
-            fclose(stream);
-        }
-        else
-        {
-            close(pipe_fds[0]);
-        }
-        int status = 0;
-        bool rejected = false;
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            rejected |= results[i].rejected;
-        }
-        result = waitpid(child, &status, 0) == child && WIFEXITED(status) && !unaccounted && (WEXITSTATUS(status) == 0 || rejected);
     }
     return result;
 }

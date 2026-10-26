@@ -326,7 +326,11 @@ designs and the compilers already built this way.
   the direct path lower only what the unit's roots reach,
   `check_program_select`), and `-g` attaching DWARF of its functions' source
   lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
-  object (`ObjectOptions.debug`). `./build/compiler parse
+  object (`ObjectOptions.debug`). Either output has its functions' unwind
+  tables when clang's would (by default, unless `-ffreestanding` or
+  `-fno-asynchronous-unwind-tables`: `predefines_unwind_tables`, the
+  [unwind guide](docs/unwind.md)'s "The C driver's unwind tables").
+  `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -621,7 +625,14 @@ designs and the compilers already built this way.
   function, and with `--cross-check` the executable through
   `llvm-dwarfdump --verify` and gdb, and the `-c -g` object, the executable's
   unit relocated, linked by `cc` through GNU ld and lld and by `link-foreign`,
-  the same way.
+  the same way; and the unwind tables (`c_check_unwind_test.c`): a fixture's
+  `backtrace()` through a variable-length array's function, a computed goto's,
+  one with values live across its call and one of 128-bit integers, by
+  default and with each option
+  that keeps or drops the tables, by each path, as executables and as objects
+  linked three ways; the options' rule against clang's objects of the fixture;
+  and gdb's backtrace at every instruction of each function, whose steps must
+  reach every instruction of gdb's disassembly of it.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -637,15 +648,22 @@ designs and the compilers already built this way.
   `llvm-dwarfdump --verify` and gdb, and checks the relocation kernels' twins.
   The driver's contract ("Debug information") has the details.
 - `src/buster/compiler/unwind_tier0.c` derives fixed-frame CFI descriptions
-  from valid Tier 0 records after branch sizing; `unwind.c` emits original
-  CIE/FDE contributions with scalar/vector twins. This opt-in consumer keeps
-  the producer unchanged and does not repeat generic instruction validation.
-  `test-unwind --cross-check` checks independent frame-state oracles, protected
-  tails and actual Tier 0 code with native GDB/perf consumers. `benchmark-unwind`
-  charges analysis/emission to the existing Tier 0, sizing and encoding chain,
-  including per-function arena cleanup. [The unwind guide](docs/unwind.md)
-  records the trusted private-slot contract, Link fixups and pending target-host
-  qualification. Use the shared 9700X lock per command and CPU 2 for timing.
+  from valid Tier 0 records after branch sizing (`unwind_tier0`, an opt-in
+  consumer that does not repeat generic instruction validation), or reads them
+  from the frame Tier 0 published, with no pass over the body
+  (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
+  refuses); `unwind.c` emits original CIE/FDE contributions with scalar/vector
+  twins, a pair per function or with `UnwindOutput.shared` one CIE for the
+  batch. `check_program_emit` writes the C driver's unwind tables so, one
+  EH_FRAME atom of them after the last function. `test-unwind --cross-check`
+  checks independent frame-state oracles, protected tails, the published
+  frame against the analyzer and actual Tier 0 code, a frame pointer's among
+  it, with native GDB/perf consumers. `benchmark-unwind` charges
+  analysis/emission to the existing Tier 0, sizing and encoding chain,
+  including per-function arena cleanup, and the driver's published frame
+  (`--only published`). [The unwind guide](docs/unwind.md) records the trusted
+  private-slot contract, Link fixups and pending target-host qualification.
+  Use the shared 9700X lock per command and CPU 2 for timing.
 - `src/buster/compiler/streaming.c` is #88's experiment on streaming the output:
   units of Tier 0's generated programs, compiled function by function into a
   static executable laid out data first (headers, `.data`, `.text`, then the
@@ -900,9 +918,10 @@ designs and the compilers already built this way.
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`). The output is
-  the records with #144's branch columns, `LinkReference`s and, when asked for
-  (`Tier0Function.entry_records`), each entry's first record, for source
-  rows. `tier0_compile`
+  the records with #144's branch columns, `LinkReference`s, the frame
+  (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
+  tables, and, when asked for (`Tier0Function.entry_records`), each entry's
+  first record, for source rows. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
@@ -1486,18 +1505,21 @@ drops the rest of the report rather than wait for its reader. A report that
 can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
 stops the run, and its commands are killed.
 
-The 9700X job's test step ("Run the tests at once") runs every test through it,
-with `--timeout 180`, before the benchmarks, which run one at a time and pinned.
-A test goes in its list as a heading and the step's commands, in the order of
-the tests' times in the job, the longest first, so that they start first: put a
-new one where its time puts it, and give independent commands a heading each
-rather than one between them. One that needs the machine to itself doesn't
-belong there. On the 9700X its tests' times in the job come to 310 s, and the
-step's bound through the runner is the longest one's and the sum's over 8 jobs,
-about 39 s; with the longest started among the last, the step took 64 s, and
-with them first but the checker's four commands as one heading, 50 s, as they
-slow each other (that heading took 33 to 37 s started late, 50 s started with
-the others). To run the list as the job does (on the 9700X, under its lock, as
+The 9700X job's test step ("Run the tests within the host budget") runs every
+test through it, with `--timeout 180`, before the benchmarks, which run one at
+a time and pinned. It runs one command at a time (`--jobs 1`) on CPUs 0 to 7
+(`taskset`), since tests such as test-lanes and test-files start lanes of their
+own and the call-graph check starts compiler captures: together, their CPU and
+memory budgets multiply. Each command uses those CPUs itself. When the runner
+ran 8 commands at once, the step was bound by the machine's CPU rather than by
+its longest test (#465: its tests took 622 s of CPU, their times in the job
+404 s, in a step of 52.5 s), so what shortens it is less work: the clang
+processes the tests start as oracles are most of it.
+The runner sets `BUSTER_PARALLEL_JOBS` to `--jobs` for its commands, and a test
+that runs processes of its own (`test_process_cpus`: test-preprocessor's parts,
+`parse_test_clang`'s clang processes) runs its CPUs divided by it at once,
+rounded up, so that the commands' processes together come to about one per CPU
+(#468's review). To run the list as the job does (on the 9700X, under its lock, as
 one run):
 
 ```sh
@@ -2466,6 +2488,13 @@ exports and members:
   none of them defines yet (`memset`, `__sfp_handle_exceptions`, the decimal
   floating point's thread-local flags), which mustn't be taken for weak
   references left to nothing;
+- dirty arenas (#490's review): the programs above and the atexit and libgcc
+  programs, bound once more by each path over binding's arena dirtied first
+  (`bind_test_dirty_arena`: filled with 0xa5 as far as the clean binding
+  pushed and as far again, then popped), must give the clean binding's link
+  and binding, and keep the pattern in an entry of `Bind.symbols` of a piece
+  that didn't join: binding doesn't clear that array, and writes each piece's
+  entries as the piece joins, before its fixups read them;
 - the linkers' cases, programs whose binding GNU ld and lld decide for
   themselves: a weak `_init` that exits with 7 if it runs, against crti.o's;
   `main` returning a weak `data_start` of 7, after Scrt1.o's of 0; a call
@@ -2504,7 +2533,8 @@ paths, which must make the same link and join the same members:
   the program's, `__libc_start_main` a member's, `_init` crti.o's,
   `__dso_handle` crtbeginT.o's and `_dl_relocate_static_pie` crt1.o's; and
   each joined object's atoms, in link order, but those of a COMDAT group
-  whose signature an object before it has, with their priorities;
+  whose signature an object before it has, with their priorities; and each
+  bound again over a dirty arena, as above;
 - static rules, on links made by hand: a strong reference to a name nothing
   defines (an error naming it); strong and weak references to
   `__tls_get_addr` (left undefined); the static linker's names (the
@@ -2548,7 +2578,7 @@ paths, which must make the same link and binding:
   `link_check`; no `_start`, as there is no start object; `_init`, `_fini` and
   `__dso_handle` hidden and not exported; and the exports exactly the link's
   definitions with default or protected visibility, global or weak, in
-  symbol order, `main` among them;
+  symbol order, `main` among them; and each bound again over a dirty arena;
 - shared rules, on links made by hand without `main`: a strong reference
   with default visibility to a name nothing defines stays undefined, neither
   an import nor an export, and a hidden one is an error naming it;
@@ -2996,9 +3026,12 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
 - round trip: the imported runtime written as a snapshot and loaded back must
   have the import's records, every one that binding and a dynamic PIE read
   (the names' and atoms' bytes and the members' names through the loaded
-  runtime's deltas), every piece current, and the loaded runtime must use the
-  file's mapping and no arena; so must it after another snapshot was renamed
-  over the file it maps. Then the same for the static runtime
+  runtime's deltas, each record through the link that holds it), every piece
+  current, every slice of a crt object that binding reads within one span of
+  at most 16 KB after the directory and no member's there (#490), and the
+  loaded runtime must use the file's mapping and no arena; so must it after
+  another snapshot was renamed over the file it maps. Then the same for the
+  static runtime
   (`runtime_import_static`), with its kind, its archives, its members'
   references (with the members they load) and COMDAT groups and its global
   names' members, for the static PIE's (`runtime_import_static_pie`), and
@@ -3007,11 +3040,12 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
 - links, static links and static PIE links: test-link's two sets that call
   libc and a program of `--functions` workers (2,000 by default), bound by
   both of binding's paths against the imported runtime and against a loaded
-  one: the same links and bindings, written as dynamic PIEs, or against the
-  static runtime as static executables and against the static PIE's as static
-  PIEs, by 1 and 8 lanes into the same bytes, which run; and test-bind's
-  loader case bound both ways too, the loaded runtime's PIE running with its
-  status (11);
+  one, and against the loaded one again over a dirty arena (test-bind's, with
+  the pattern left in `Bind.symbols`): the same links and bindings, written as
+  dynamic PIEs, or against the static runtime as static executables and
+  against the static PIE's as static PIEs, by 1 and 8 lanes into the same
+  bytes, which run; and test-bind's loader case bound both ways too, the
+  loaded runtime's PIE running with its status (11);
 - opening: `runtime_open` in a directory two levels below one that exists,
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
@@ -3033,16 +3067,18 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   PIE's: 1,600 damaged copies (cut short, one byte longer, a byte of the
   directory changed at sampled offsets and in every byte of the header), each
   made in place over the snapshot and repaired after its load, must be
-  invalid, and so must 10 whose header was changed and then rehashed
+  invalid, and so must 12 whose header was changed and then rehashed
   (another version or magic, a region misaligned, running or starting past
-  the end or of the wrong size, counts out of range, the directory ending
-  before its last region), which only the header's own checks catch;
+  the end or of the wrong size, counts out of range, more crt objects'
+  records than a table has, the members' names placed before the crt
+  objects' end, the directory ending before its last region), which only the
+  header's own checks catch;
   `runtime_open` must replace them with the kind's runtime; a directory and
   a FIFO at the snapshot's path must neither block a link (run in a child
   under an alarm) nor fail it, the FIFO replaced and the directory left with
   nothing beside it;
 - damaged pieces, of each kind's snapshot: a byte of the pieces' records
-  changed at 123 offsets (at each 1/61 of them, and the first and last of
+  changed at 171 offsets (at each 1/61 of them, and the first and last of
   each of their regions), each copy of which must load with every piece
   current but the one whose records hold the byte, by the test's own reading
   of the layout (none for a byte of padding or of a column no piece's hash
@@ -3115,8 +3151,10 @@ by the direct path and by each linker, and reports medians:
   snapshot damaged (`BIND_ERROR_SNAPSHOT`) throws the measurement away: the
   snapshot is discarded and written again, outside any measurement, and the
   program measured again from the start, once. Then its work: the bytes
-  written, the fixups applied, the names looked up, and over the warm-ups the
-  page faults and how much the peak resident set grew; and the floor, one
+  written, the fixups applied, the names looked up, over the warm-ups the
+  page faults and how much the peak resident set grew, and a timed run's page
+  faults in `runtime_open` and in `bind_begin` (the snapshot's mapping's,
+  #490); and the floor, one
   `pwrite` of the output;
 - the objects, each unit's as `-c` writes them, on the same lanes;
 - each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold`, `wild` and `link-foreign`) linking
@@ -3634,7 +3672,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 [options] [file...]`, or `test-preprocessor --tables path...`:
 
 - without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
-  the vectorized kernels and their scalar twins. They must give the same stream
+  the vectorized kernels and their scalar twins. They run in 32 parts, the
+  header sets below (`--clang`) in 16 and the files (below) a part each (a
+  range each past 64), each part in a child process with a directory of its
+  own, at most `test_process_cpus()` at once, the output in their order
+  (`pp_test_children`, #465). They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
   cases are of our own:
@@ -3732,9 +3774,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   lines by splices, line splices, `\r\n`, long lines, a byte order mark,
   constructs left open at the end), each prepared whole by both kernels and a
   window at a time (`pp_prepare_windows`) in windows of 1 byte to 8 KB, in five
-  language modes: every record must be the whole file's, byte for byte; and the
-  scan for a line end that isn't a splice's (`pp_window_has_line_end`) against a
-  byte at a time, on random bytes ending at a `PROT_NONE` page; and 11 files
+  language modes: every record must be the whole file's, byte for byte; and
+  where a window is cut before a long line (`pp_window_cut`), against a byte at
+  a time, on random bytes ending at a `PROT_NONE` page and starting at the end
+  of one, and on 9 windows worked out by hand, one faulting if the scan passes
+  its last line end; and the directives' places (`pp_directive_places`) against
+  their bit-at-a-time twin, each output ending at a `PROT_NONE` page; and 11 files
   made by hand ending at a `PROT_NONE` page (#441: a `\r\n` in a block, across
   64-byte blocks, inside a 4 KB line page and across pages, a `\r` and a `\n`
   alone, a `\r` last), whose line ends `pp_count_lines` must count from many
@@ -4233,7 +4278,9 @@ and by the lanes' rule, its reader copied only by lanes that take a part. Six
 fixtures of bodies of known tokens must take the rule's lanes on each side of
 its steps. Each that merges must give source order's result again with its
 merge failing after the replay, and count as a resource failure with its
-state's allocation failing; timed, one lane must wait for no other and eight
+state's allocation failing; timed, one lane must wait for no other, preserve
+its lane/counter/running state and affinity inside a live team on distinct
+CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 `test-checker-corpus --deferred N
@@ -4244,7 +4291,10 @@ left to source order by reason. `./build/compiler benchmark-checker-deferred
 times source order's reader against the deferred one on one lane and on up to
 N, with the parse, the top level, the bodies' walks, their position checks, the
 lanes' span and the merge apart, and what a lane costs: its copy of the reader,
-`lane_run`'s dispatch and the other lanes' wake-up. Its passes take the six
+the launcher's dispatch and the other lanes' wake-up. One active lane uses
+the existing `lane_run_cold(1, ..., NULL)`, which starts no worker, makes no
+affinity calls and isolates the reading without changing generic team validation;
+multiple lanes retain `lane_run` and their CPU list. Its passes take the six
 orders of its three readings in turn, so `--passes` is a multiple of six (24).
 `--every-lane` runs every lane the bodies can take, whatever
 their tokens; `--cpus` pins the command to the first
@@ -4497,7 +4547,8 @@ and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Two compiled runs
 (#137), against clang and against GCC at 16 bytes, put this compiler on our
 side: a world of what its C passes (integers to 64 bits, `__int128` and
-`unsigned __int128`, enums, pointers, `float`, `double`, `long double` and the
+`unsigned __int128`, enums, pointers, `float`, `double`, `long double`, their
+complex types and the
 records, arrays and aligned typedefs of them, aligned to 16 at most, with C23's
 enums of a fixed underlying type, structs whose only named member is a
 flexible array member and bit-fields' attributes after their widths), and
@@ -4670,8 +4721,9 @@ from them (integers, floats, doubles, compares) from inputs of every class,
 through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
 both ways, calls of C functions and frame objects (`LOCAL`, `STORE_LOCAL` and
 `SET_LOCAL` of the class on objects of 16 bytes and more), against the check's
-own stack machine. The programs that compiled, ran and matched must reach every
-kind and conversion of the class. Then the `int128`
+own stack machine. The programs that compiled, ran and matched must execute every
+kind and conversion of the class and both arms of a `?:`. Any refusal except a
+random program's excess depth fails the check. Then the `int128`
 check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
 U128, against clang's `__int128`: each break of the classes' rules refused at
 its entry; a stack of a memory class's values up to the last 16-byte slot,
