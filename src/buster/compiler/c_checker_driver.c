@@ -909,7 +909,8 @@ static int run_check_command(int count, char** arguments, bool executable)
     }
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
-    PPOptions options;
+    // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
+    PPOptions options = { 0 };
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
@@ -920,7 +921,7 @@ static int run_check_command(int count, char** arguments, bool executable)
     // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs; so does a link
     // with -g in the unit of source rows, whose rows read every function's tokens' expansion places (c_check_debug.c),
     // rather than preprocessing the unit again for them.
-    const bool source_rows = BUSTER_CHECK_SOURCE_ROWS && link && (options.predefines.debug || options.predefines.debug_modules);
+    const bool source_rows = parsed && BUSTER_CHECK_SOURCE_ROWS && link && (options.predefines.debug || options.predefines.debug_modules);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
     if (!parsed)
     {

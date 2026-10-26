@@ -23,6 +23,8 @@
 // - A unit whose selection keeps no function: emitted with source rows into an empty set, a unit of no functions, by
 //   both paths alike; with --cross-check, linked with -g against a shared library holding its main (cc), into an
 //   executable that runs, whose DWARF llvm-dwarfdump --verify takes.
+// - Options that fail before they're parsed (a -l without its name), on a link with -g in this unit's own driver: the
+//   usage message, and status 1.
 // - Address space: -g's link, which the default command sends to this unit, fits in 64 GiB more RLIMIT_AS than the
 //   same program's link without -g needs (found by halves), where the arenas of both calls together took 192 GiB more.
 // - The driver, with --cross-check (gdb and llvm-dwarfdump): the fixture linked with -g by each path into the same
@@ -938,6 +940,38 @@ static void check_debug_test_driver(CheckDebugTestTally* tally, const char* dire
                             "the header's function stops in the header, called from its callee's line (the call's first)", report);
 }
 
+// This unit's own driver (run_check_command, which takes a link with -g whole here) on a link with -g whose options fail
+// before pp_parse_options runs, a -l without its name (#426's review): in a child, it must fail with the usage message,
+// having read no option it didn't parse.
+static void check_debug_test_unparsed(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_unparsed.c", directory);
+    snprintf(output, sizeof(output), "%s/dbg_unparsed", directory);
+    snprintf(errors, sizeof(errors), "%s/dbg_unparsed.err", directory);
+    static const char text[] = "int main(void)\n{\n    return 0;\n}\n";
+    char* arguments[] = { (char*)"-g", (char*)"-o", output, source, (char*)"-l", 0 };
+    const bool written = foreign_test_write(source, text, sizeof(text) - 1);
+    const pid_t child = written ? fork() : -1;
+    if (child == 0)
+    {
+        const int file = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        const int status = file >= 0 && dup2(file, 2) == 2 ? run_check_command((int)BUSTER_ARRAY_LENGTH(arguments) - 1, arguments, true) : 127;
+        _exit(status);
+    }
+    int status = 0;
+    pid_t waited = child;
+    while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
+    {
+    }
+    const String8 message = child > 0 && waited == child ? foreign_test_read(arena, errors) : (String8){ 0 };
+    check_debug_test_expect(tally, child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 1 && message.pointer != 0 &&
+                                       strstr(message.pointer, "usage: compiler") != 0,
+                            "this unit's driver refuses a link with -g whose options fail before they're parsed, with the usage message", errors);
+}
+
 // A link by the executable's default command (/proc/self/exe, which sends one with -g to this unit) in a child whose
 // address space RLIMIT_AS bounds at `limit` bytes: whether it succeeded.
 static bool check_debug_test_limited(char* const* arguments, uint64_t limit)
@@ -1046,6 +1080,7 @@ static int run_check_debug_tests(int argc, char** argv)
         check_debug_test_keep(&tally);
         check_debug_test_sources(&tally, directory, programs);
         check_debug_test_empty(&tally, directory);
+        check_debug_test_unparsed(&tally, directory, &arena);
         check_debug_test_address_space(&tally, directory);
         if (cross_check)
         {
