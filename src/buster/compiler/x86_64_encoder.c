@@ -6034,6 +6034,8 @@ static bool build_mode_templates_properties(X86EncoderMode encoder, X86TemplateE
 
 // This entry uses only immutable form descriptions and caller-owned output. It never reads legacy state in its home.
 // The three 64-bit-mode entry points share it across main units; standalone inclusions retain a static copy.
+// Output holds BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES entries, with no alignment requirement; the intervening
+// gap is untouched. An unsupported mode returns false without writing. A broken form table may leave partial output.
 BUSTER_X86_TEMPLATE_ENTRY bool x86_build_nonlegacy_templates(X86EncoderMode encoder, X86TemplateEntry* templates)
 {
     bool result = false;
