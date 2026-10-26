@@ -640,7 +640,17 @@ What the lowering covers past scalars (#145's programs):
   address, computes and stores the result back converted; `__real__` and
   `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
   parts are a floating constant's (a `long double`'s in the function's table).
-  GNU's complex integer types are refused by name.
+  The direct path's executables take the libgcc functions from `libgcc.a`'s
+  members (#483): `test-checker-driver --executable` links products and
+  quotients of each type by both paths into the same bytes, which need
+  `libc.so.6` alone and print every part's bits as clang's code computes them.
+  The complex types it doesn't take are refused by what they need: GNU's
+  complex integer types ("complex integer types") and the complex types of
+  the other floating types, `_Complex _Float16` and `_Complex __float128`
+  ("complex types other than _Complex float, double and long double"). A
+  local of a type that no class holds is refused by what its type needs, as
+  its values are (`check_lower_type_feature`), rather than as "values of this
+  type".
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
