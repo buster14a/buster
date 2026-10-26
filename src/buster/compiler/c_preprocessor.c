@@ -8861,7 +8861,8 @@ static bool pp_template_operators(const Preprocessor* pp, PPMacroId id, const PP
                 operators->operands |= (uint16_t)(length == 1 ? 1u << k : 0);
                 count += length == 1;
             }
-            const PPToken first = tokens[0];
+            // The first operand with a token, read only when one has: a chain whose operands are all empty writes none.
+            const PPToken first = count != 0 ? tokens[0] : (PPToken){ 0 };
             const bool name = count != 0 && first.kind == C_TOKEN_RAW_IDENTIFIER;
             if (result && count == 1)
             {
