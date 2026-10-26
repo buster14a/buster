@@ -291,7 +291,8 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
                 for (uint32_t i = 0; i < depth; i += 1)
                 {
                     const uint32_t context = contexts[i];
-                    const String8 name = check_input_packed_identifier(reader, types->tags.name[context]);
+                    const uint32_t context_name = types->tags.name[context] != 0 ? types->tags.name[context] : names->typedefs[context];
+                    const String8 name = check_input_packed_identifier(reader, context_name);
                     const bool anonymous = i != 0 && check_input_packed_anonymous(types, context, contexts[i - 1]);
                     const char* context_kind = type_kind(types, types->tags.type[context]) == BUSTER_TYPE_KIND_UNION ? "union" : "struct";
                     length += (uint64_t)(name.length != 0 ? snprintf(text + length, capacity - length, "%.*s::", (int)name.length, name.pointer) :

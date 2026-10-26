@@ -260,6 +260,8 @@ static void check_test_packed_members(CheckTest* test, const char* clang, const 
         { "struct __attribute__((packed)) R {char c; struct { int x; };}; int*f(struct R*p){return &p->x;}\n", 1 },
         { "struct R {struct __attribute__((packed)){char c;int w;};}; int*f(struct R*p){return &p->w;}\n", 1 },
         { "typedef struct __attribute__((packed)){char c;int w;} T; int*f(T*p){return &p->w;}\n", 1 },
+        { "typedef struct{struct __attribute__((packed)){char c;int w;} n;} T; int*f(T*p){return &p->n.w;}\n", 1 },
+        { "typedef struct __attribute__((packed)){struct{int w;};} T; int*f(T*p){return &p->w;}\n", 1 },
         { "struct __attribute__((packed)){char c;int w;} a; int*f(void){return &a.w;}\n", 1 },
         { "struct R{struct{struct __attribute__((packed)){char c;int w;} n;} m;}; int*f(struct R*p){return &p->m.n.w;}\n", 1 },
         { "struct R{union __attribute__((packed)){char c;int w;};}; int*f(struct R*p){return &p->w;}\n", 1 },
