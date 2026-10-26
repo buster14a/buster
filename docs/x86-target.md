@@ -68,6 +68,11 @@ an exact round-trip test. An unrepresentable new requirement fails a compile-tim
 assertion, so extending the policy outside the projection requires deliberately
 extending that projection. It cannot silently discard an instruction's feature.
 
+The executable's main units share the frontend's immutable pair through hidden
+data symbols. Their scalar/vector kernels remain local and read the same aligned
+rows directly. Standalone benchmark and helper inclusions retain static tables;
+sharing adds no initialization, allocation or mutable state.
+
 The assembler builds its mnemonic index for one target, excluding ineligible
 forms before either matching path runs. Its syntax subset remains separate:
 ISA support does not imply that the frontend understands every encoding. Its

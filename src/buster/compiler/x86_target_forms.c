@@ -18,17 +18,25 @@
 #define BUSTER_X86_TARGET_COMPACT(value) ((uint32_t)((value) & BUSTER_X86_TARGET_COMPACT_LOW) | (uint32_t)(((value) >> X86_FEATURE_PCLMUL) & 1) << (X86_FEATURE_AES + 1) | ((value) & BUSTER_X86_TARGET_KNOWN ? BUSTER_X86_TARGET_COMPACT_KNOWN : 0))
 _Static_assert(X86_FEATURE_AES + 1 < 31 && X86_FEATURE_PCLMUL > X86_FEATURE_AES, "compact target feature positions must be disjoint");
 
+#ifdef BUSTER_X86_TARGET_DATA_ELSEWHERE
+extern const uint64_t x86_target_requirements[X86_FORM_COUNT] __attribute__((aligned(64), visibility("hidden")));
+extern const uint32_t x86_target_compact_requirements[X86_FORM_COUNT] __attribute__((aligned(64), visibility("hidden")));
+#else
+#ifndef BUSTER_X86_TARGET_DATA
+#define BUSTER_X86_TARGET_DATA static
+#endif
 #define BUSTER_X86_TARGET_REQUIREMENT(name, required) [X86_FORM_##name] = (required),
-static const uint64_t x86_target_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
+BUSTER_X86_TARGET_DATA const uint64_t x86_target_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
 #include "buster/compiler/x86_target_rows.c"
 };
 #undef BUSTER_X86_TARGET_REQUIREMENT
 
 #define BUSTER_X86_TARGET_REQUIREMENT(name, required) [X86_FORM_##name] = BUSTER_X86_TARGET_COMPACT(required),
-static const uint32_t x86_target_compact_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
+BUSTER_X86_TARGET_DATA const uint32_t x86_target_compact_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
 #include "buster/compiler/x86_target_rows.c"
 };
 #undef BUSTER_X86_TARGET_REQUIREMENT
+#endif
 
 // Extending the canonical policy outside the projection must fail at build time, never silently drop a feature.
 // Update the projection deliberately before adding such a row; the exhaustive tests also check every round trip.

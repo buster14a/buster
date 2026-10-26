@@ -70,6 +70,14 @@
 #endif
 #define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
 
+// The ISA requirement tables are immutable and need no initialization. Share their frontend copy without sharing
+// encoder storage or adding calls/loads to the local table-building kernels. Standalone inclusions stay static.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
+#define BUSTER_X86_TARGET_DATA __attribute__((visibility("hidden")))
+#else
+#define BUSTER_X86_TARGET_DATA_ELSEWHERE
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
