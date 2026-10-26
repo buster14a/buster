@@ -66,16 +66,27 @@ static void check_test_intrinsic_input_storage(CheckTest* test, const Parser* pa
                     }
                     for (uint32_t i = 0; clean && i < pp->table->count; i += 1)
                     {
-                        clean = reader.intrinsic_names[i] == UINT32_MAX;
+                        bool operand = false;
+                        for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+                        {
+                            operand |= parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
+                                       parser->tokens.names[token] == i;
+                        }
+                        const InternSpan span = pp->table->spans[i];
+                        const BuiltinIntrinsicInfo* info = operand ? builtin_intrinsic_lookup((const char*)pp->table->records + span.offset, span.length) : 0;
+                        const uint32_t expected = !operand ? UINT32_MAX : info == 0 ? 0 :
+                                                  UINT32_C(0x80000000) | (uint32_t)(info - builtin_intrinsic_infos);
+                        clean = reader.intrinsic_names[i] == expected;
                     }
                     check_test_expect(test, clean, "intrinsic initialization overwrites poisoned active columns and sentinel");
                     if (pass == 0)
                     {
                         const uint64_t mark = arena.length;
+                        const uint32_t cached = reader.intrinsic_names[parser->tokens.names[keyword]];
                         arena.capacity = mark;
                         const CheckInputIntrinsicStatus failed = check_input_intrinsic_prepare(&reader, keyword);
                         check_test_expect(test, failed == CHECK_INPUT_INTRINSIC_FAILED && output.resource && output.intrinsic_call_count == 0 &&
-                                          output.intrinsic_declaration_count == 0 && reader.intrinsic_names[parser->tokens.names[keyword]] == UINT32_MAX &&
+                                          output.intrinsic_declaration_count == 0 && reader.intrinsic_names[parser->tokens.names[keyword]] == cached &&
                                           arena.length == mark,
                                           "argument storage exhaustion rolls back call, declaration and name-cache publication");
                         arena.capacity = arena_capacity;
@@ -164,6 +175,30 @@ static void check_test_intrinsic_input_fixture(CheckTest* test, const CheckIntri
             const uint32_t binding_events = reader.bindings.count;
             const bool initialized = check_input_intrinsic_initialize(&reader);
             check_test_expect(test, initialized && !output.resource, "exact intrinsic candidate preparation has bounded storage");
+            uint32_t expected_calls = 0;
+            uint32_t expected_declarations = 0;
+            for (uint32_t token = 0; initialized && token < parser.tokens.count; token += 1)
+            {
+                if (parser.tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser.tree.roles[token] == PARSE_ROLE_OPERAND)
+                {
+                    const uint32_t name = parser.tokens.names[token];
+                    const InternSpan span = identifiers.spans[name];
+                    if (builtin_intrinsic_lookup((const char*)identifiers.records + span.offset, span.length) != 0)
+                    {
+                        bool first = true;
+                        for (uint32_t earlier = 0; earlier < token; earlier += 1)
+                        {
+                            first &= parser.tokens.kinds[earlier] != PARSE_KIND_IDENTIFIER || parser.tree.roles[earlier] != PARSE_ROLE_OPERAND ||
+                                     parser.tokens.names[earlier] != name;
+                        }
+                        expected_declarations += first;
+                        expected_calls += check_input_intrinsic_call_shape(&parser, token);
+                    }
+                }
+            }
+            check_test_expect(test, initialized && output.intrinsic_declaration_capacity == expected_declarations &&
+                              output.intrinsic_call_capacity == expected_calls,
+                              "deduplicated sizing matches an independent per-operand catalog scan");
             uint32_t prepared = 0;
             uint32_t failed = 0;
             uint32_t first_argument_call = BUSTER_CHECK_NONE;
@@ -318,6 +353,13 @@ static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* tes
             "scalar result and exact repeated-name cache",
             "unsigned f(unsigned x,unsigned y){__builtin_ia32_pause();return __builtin_ia32_crc32si(x,y)^__builtin_ia32_crc32si(y,x);}\n",
             2, 3, 0, { 0, 2, 2 }, false,
+        },
+        {
+            "repeated hits and misses span distinct-name batches",
+            "unsigned f(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,unsigned g,unsigned h,unsigned i,unsigned j){"
+            "__builtin_ia32_pause();__builtin_ia32_pause();return a+b+c+d+e+g+h+i+j+a+b+c+d+e+g+h+i+j+"
+            "__builtin_ia32_crc32si(a,b)+__builtin_ia32_crc32si(c,d);}\n",
+            2, 4, 0, { 0, 0, 2, 2 }, false,
         },
         {
             "vector prototype and immediate marker",
