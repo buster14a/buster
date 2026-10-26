@@ -526,7 +526,11 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     check_test_program_source_char(test, source, name, clang, false);
 }
 
-static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
+// A program fixture checked and lowered by both paths: accepted or not, lowered or refused, with the references and
+// initializations it keeps; and, for a refusal with `reason`, the feature the refusal names
+// (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
+static void check_test_program_boundary_reason(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
+                                               uint32_t initializations, const char* reason)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -582,6 +586,8 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                 const bool lowered_ok = check_program_lower(&lowered, &program, path == 0, &output, &scratch);
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
+                snprintf(description, sizeof(description), "%s: the refusal names its feature", name);
+                check_test_expect(test, reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0), description);
                 if (!lowered_ok)
                 {
                     check_test_expect(test, output.length == mark && lowered.functions == 0 && lowered.count == 0 && program.controls == controls && program.status == CHECK_PROGRAM_OK,
@@ -626,6 +632,11 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
+{
+    check_test_program_boundary_reason(test, source, name, accepted, machine, references, initializations, NULL);
 }
 
 #include "c_check_program_select_test.c"
@@ -1184,6 +1195,90 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "long double y=pick(0.0L,a)+pick(n,2.5L);long double w=a*({long double q=x;q/=2;q;});"
         "return (int)(x*16)^(int)(y*8)^(int)(w*4);}",
         "long-double-temporaries", clang);
+    // Complex values (#133): double's sums, differences, products and quotients (libgcc's __muldc3 and __divdc3 for two
+    // complex operands, a real one kept real), negation, the conjugate and equality, with infinities, NaNs and a zero
+    // divisor; (inf + inf i) times 1, whose inline product's two NaNs __muldc3 recovers as infinities. Each part's bits
+    // folded, so that signed zeros count.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "int tested(int n){volatile double x=n*0.75,zero=0.0;double inf=1.0/zero,nan=zero/zero;"
+        "cd a=x+(n-2)*1.0i,b=(n%5-2)+0.5i*n,c=inf+x*1.0i,d=nan+1.0i;"
+        "cd s=a+b,t=a-b,u=a*b,v=a/b,w=x+a,y=a-x,o=x-b,p=x*b,q=b/x,r=x/b,m=-a,k=~b;"
+        "cd e=c*a,f=a/c,g=d*a,h=c*c,j=a/(b-b),ii=a,kk;__real__ ii=inf;__imag__ ii=inf;kk=ii*(cd)1.0;"
+        "unsigned acc=foldz(s)^foldz(t)*5^foldz(u)*7^foldz(v)*11^foldz(w)*13^foldz(y)*17^foldz(p)*19^foldz(q)*23^foldz(r)*29^foldz(m)*31^foldz(k)*37;"
+        "acc^=foldz(e)*41^foldz(f)*43^foldz(g)*47^foldz(h)*53^foldz(j)*59^foldz(o)*61^foldz(kk)*67;"
+        "acc^=(a==a)+2*(a==b)+4*(a!=b)+8*(d!=d)+16*(x==a)+32*(c==c);"
+        "return (int)acc;}",
+        "complex-arithmetic", clang);
+    // Complex float's and long double's, and mixed: __mulsc3, __divsc3, __mulxc3 and __divxc3, each part's bits folded.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "int tested(int n){volatile float xf=n*0.5f;volatile long double xl=n*0.25L;"
+        "cf a=xf+2.0fi,b=(n-3)-1.5fi;cl c=xl+3.0Li,d=1.0L-n*1.0Li;"
+        "cf s=a*b,t=a/b,u=a+b*xf,w2=-a;cl v=c*d,w=c/d,y=c-d+xl,z=xl/d;cl mixed=a*c;cd half=b/(cd)c;"
+        "return (int)(foldf(s)^foldf(t)*3^foldf(u)*5^foldl(v)*7^foldl(w)*11^foldl(y)*13^foldl(z)*17^foldl(mixed)*19^foldz(half)*23^foldf(w2)*29^(a==b)^(c!=d)*2);}",
+        "complex-float-and-long-double", clang);
+    // Complex values passed and returned (in xmm registers, in st0 and st1, on the stack), in structs, read by va_arg,
+    // through a function pointer, and in arrays.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "struct holder{int tag;cd z;cf w;cl v;};"
+        "static cd scale(cd z,double k){return z*k;}"
+        "static cf twistf(cf z){return ~z*2.0f;}"
+        "static cl twistl(cl z,cl w){return z*w;}"
+        "static struct holder make(cd z,int t){struct holder h={t,z,(cf)z,(cl)z*2};return h;}"
+        "static cd many(cd a,cd b,cd c,cd d,cd e,cd f,double g,cd h,cf i,cl j){return a+b*c-d/e+f*g+h+i+j;}"
+        "static cd sum(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);cd r=0;for(int i=0;i<n;i++){r+=__builtin_va_arg(ap,cd);r*=1.5;}__builtin_va_end(ap);return r;}"
+        "static cl suml(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);cl r=0;for(int i=0;i<n;i++)r+=__builtin_va_arg(ap,cl);__builtin_va_end(ap);return r;}"
+        "static cf sumf(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);cf r=0;for(int i=0;i<n;i++)r=r*2.0f+__builtin_va_arg(ap,cf);__builtin_va_end(ap);return r;}"
+        "static cd mul(cd a,cd b){return a*b;}"
+        "static cd quo(cd a,cd b){return a/b;}"
+        "static cd(*pick(int k))(cd,cd){return k&1?mul:quo;}"
+        "int tested(int n){cd a=n+0.5i,b=1.0-n*1.0i;struct holder h=make(a,n);cd arr[3]={a,b,a*b};arr[n&1]+=arr[2];"
+        "unsigned acc=foldz(scale(a,n))^foldf(twistf((cf)b))*3^foldl(twistl(a,b))*5^foldz(h.z)*7^foldf(h.w)*11^foldl(h.v)*13^h.tag;"
+        "acc^=foldz(many(a,b,a,b,a,b,n,a,(cf)b,(cl)a))*17^foldz(sum(3,a,b,(cd)n))*19^foldl(suml(2,(cl)a,(cl)b))*23^foldf(sumf(3,(cf)a,(cf)b,(cf)n))*29;"
+        "acc^=foldz(pick(n)(a,b))*31^foldz(arr[0])*37^foldz(arr[1])*41;"
+        "return (int)acc;}",
+        "complex-calls-and-varargs", clang);
+    // Compound assignments into complex, double, int, _Bool and long long destinations, conversions between the complex
+    // types, ?:, and truth tests in conditions.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "int tested(int n){cd a=n-4.0+(n%3)*1.0i;cf f=a;cl l=a;double d=n;int i=n;_Bool b=0;long long ll=n;"
+        "a+=f;a*=l;f/=a;l-=a*1.0i;d*=a;i+=a;b+=a*0.0;ll-=a;"
+        "cd z=n>3?a:(cd)f;"
+        "int t=0;if(a)t|=1;if(!f)t|=2;if(a&&l)t|=4;if(f||0)t|=8;t|=16*(_Bool)(l-l);while(z){z-=z;t+=32;}"
+        "return (int)(foldz(a)^foldf(f)*3^foldl(l)*5^fold(d)*7^i*11^b*13^(unsigned)ll*17^foldz(z)*19^t);}",
+        "complex-updates-and-truth", clang);
+    // Complex globals, a static local and an array's elements, from static data, updated each call; a compound
+    // literal, and folded constants.
+    check_test_program_source(test,
+        "typedef _Complex double cd;typedef _Complex float cf;typedef _Complex long double cl;"
+        "static unsigned fold(double d){union{double d;unsigned long u;}x;x.d=d;return (unsigned)(x.u^(x.u>>29));}"
+        "static unsigned foldz(cd z){return fold(__real__ z)*3u^fold(__imag__ z);}"
+        "static unsigned foldf(cf z){return fold(__real__ z)*5u^fold(__imag__ z);}"
+        "static unsigned foldl(cl z){return fold((double)__real__ z)*7u^fold((double)__imag__ z)^fold((double)(__real__ z-(double)__real__ z))*11u;}"
+        "cd ga=1.5+2.5i,garr[2]={1.0i,3.0};static cf gf=-1.0f+0.5fi;cl gl=2.0L-3.0Li;"
+        "int tested(int n){static cd counter;counter+=n*1.0i;ga*=1.0+n*0.5i;garr[n&1]+=ga;gf+=n;gl/=1.0L+n;"
+        "cd local=(cd){0};local=2.0i*2.0i;cd folded=(1.0+2.0i)*(3.0-1.0i);"
+        "return (int)(foldz(ga)^foldz(garr[0])*3^foldz(garr[1])*5^foldf(gf)*7^foldl(gl)*11^foldz(counter)*13^foldz(local)*17^foldz(folded)*19);}",
+        "complex-static-data-and-constants", clang);
     // Conversions between unsigned long and float or double (Tier 0's tier0_emit_u64_convert): to them near 2^53, past
     // 2^63 where the halving's kept bit rounds, and near 2^64; back from values up to 2^64 less 4096, every one in range.
     check_test_program_source(test,
@@ -1395,7 +1490,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "long double tested(int n){return ({long double t=n;t;});}", "long-double-statement-region-value", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, false, 0, 1);
-    check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
+    // The complex types check_lower_complex doesn't take are refused by what they need: GNU's complex integer types,
+    // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
+    // C; __float128 is its spelling).
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
+                                       "complex types other than _Complex float, double and long double");
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
+                                       "complex types other than _Complex float, double and long double");
     // The 128-bit integers: lowered, but _BitInt(128) and a bit-field of them spread over more than 8 bytes.
     check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, false, 0, 1);

@@ -617,6 +617,40 @@ What the lowering covers past scalars (#145's programs):
   by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
   and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
   and a builtin of 128-bit operands are refused by name.
+- **Complex values (#133).** `_Complex float`, `double` and `long double` are
+  aggregates of their two elements, the real part then the imaginary one
+  (`check_lower_complex`): their locals, parameters and temporaries are frame
+  objects, the stream carries a value by its object's address, and copies,
+  calls, returns, `va_arg` and static data take it as the convention classifies
+  it (`float`'s and `double`'s in SSE eightbytes, `long double`'s in memory
+  and returned in st0 and st1). An operation computes into a frame object of
+  its own from its operands' parts (`check_lower_complex_compute`), each
+  operand set into a temporary as soon as it is evaluated, since Tier 0 reads
+  an entry's last operand as the class of the entry before it. A real operand
+  keeps its type domain, as clang computes it: no imaginary part joins a sum, a
+  difference or a product with it, so that signed zeros and infinities come
+  out as clang's (`x - z`'s imaginary part is `-z`'s). A product or a quotient
+  of two complex values, and a real dividend's over a complex divisor, call
+  libgcc's `__mulsc3`, `__muldc3`, `__mulxc3`, `__divsc3`, `__divdc3` and
+  `__divxc3`, runtime functions as the 128-bit integers' are, which give the
+  values clang -O0's inline product and its NaN recovery give. `==` and `!=`
+  compare both parts; a value's truth is either part's; a conversion converts
+  each part (to a real type the real part, to `_Bool` the truth); a compound
+  assignment reads its destination in the calculation's type through its
+  address, computes and stores the result back converted; `__real__` and
+  `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
+  parts are a floating constant's (a `long double`'s in the function's table).
+  The direct path's executables take the libgcc functions from `libgcc.a`'s
+  members (#483): `test-checker-driver --executable` links products and
+  quotients of each type by both paths into the same bytes, which need
+  `libc.so.6` alone and print every part's bits as clang's code computes them.
+  The complex types it doesn't take are refused by what they need: GNU's
+  complex integer types ("complex integer types") and the complex types of
+  the other floating types, `_Complex _Float16` and `_Complex __float128`
+  ("complex types other than _Complex float, double and long double"). A
+  local of a type that no class holds is refused by what its type needs, as
+  its values are (`check_lower_type_feature`), rather than as "values of this
+  type".
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -704,8 +738,8 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `_Complex`, `_BitInt`,
-inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: complex integer types,
+`_BitInt`, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
