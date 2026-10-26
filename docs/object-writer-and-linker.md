@@ -4455,7 +4455,7 @@ each operation and released when the team stops: `link-foreign` does (#501),
 where it measured 2.5% off its small links on eight lanes and 0.7% off a
 102,400-worker one (each link's 14 reservations and unmappings fewer, and 28
 to 47 page faults), for up to 1.9 MB more peak resident memory ([the
-record](https://github.com/buster14a/buster-performance/tree/4077986b62a09f2c8954fa0d3dd0aff05359be66/docs/measurements/link-foreign-team-501-2026-10-26)). The benchmarks'
+record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)). The benchmarks'
 teams release them, so that each operation pays for its scratch as a command
 does. Dispatch/completion synchronization is separate from the barriers inside
 an operation.
