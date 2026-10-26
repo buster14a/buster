@@ -1448,7 +1448,12 @@ with the others). Since #465 the step is bound by the machine's CPU rather
 than by its longest test: on the 9700X its tests took 622 s of CPU (their times
 in the job 404 s) in a step of 52.5 s, so a test that splits its work among
 processes shortens itself but lengthens the others. What shortens the step is
-less work: the clang processes the tests start as oracles are most of it. To run the list as the job does (on the 9700X, under its lock, as
+less work: the clang processes the tests start as oracles are most of it.
+The runner sets `BUSTER_PARALLEL_JOBS` to `--jobs` for its commands, and a test
+that runs processes of its own (`test_process_cpus`: test-preprocessor's parts,
+`parse_test_clang`'s clang processes) runs its CPUs divided by it at once,
+rounded up, so that the commands' processes together come to about one per CPU
+(#468's review). To run the list as the job does (on the 9700X, under its lock, as
 one run):
 
 ```sh
@@ -3523,7 +3528,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   the vectorized kernels and their scalar twins. They run in 32 parts, the
   header sets below (`--clang`) in 16 and the files (below) a part each (a
   range each past 64), each part in a child process with a directory of its
-  own, at most one per CPU at once, the output in their order
+  own, at most `test_process_cpus()` at once, the output in their order
   (`pp_test_children`, #465). They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The

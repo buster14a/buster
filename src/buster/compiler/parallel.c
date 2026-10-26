@@ -10,7 +10,8 @@
 // The runner starts the commands in the list's order, at most --jobs at once (by default as many as the cores of the
 // CPUs this process may run on), each script in a bash of its own as GitHub Actions runs a step's `run` with `shell:
 // bash` (`bash --noprofile --norc -e -o pipefail`), in a process group of its own, with standard input from /dev/null
-// and standard output and error into one capture (a memfd) of its own, and no other descriptor. Its report gives each
+// and standard output and error into one capture (a memfd) of its own, no other descriptor, and BUSTER_PARALLEL_JOBS set
+// to --jobs, which a test that starts processes of its own divides its CPUs by (test_process_cpus). Its report gives each
 // command's heading with its outcome and time, then its output, in the list's order, each as soon as it and every
 // command before it have ended; with --github between `::group::` and `::endgroup::`, so that GitHub's log folds each
 // one under its heading, and with an `::error::` annotation for each that failed. Last comes a summary line, and a line
@@ -1071,6 +1072,11 @@ static int run_parallel_command(int argc, char** argv)
             else
             {
                 options.jobs = options.jobs != 0 ? options.jobs : parallel_core_count();
+                // The commands' share of the CPUs (#468's review): a test that starts processes of its own takes
+                // this many at once less (test_process_cpus), so that the commands together start about one per CPU.
+                char jobs[24];
+                snprintf(jobs, sizeof(jobs), "%llu", (unsigned long long)options.jobs);
+                setenv("BUSTER_PARALLEL_JOBS", jobs, 1);
                 fflush(stdout);
                 result = parallel_run(&arena, &list, &options, results).succeeded ? 0 : 1;
             }

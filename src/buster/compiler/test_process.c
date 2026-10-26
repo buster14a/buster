@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Tests' parts in child processes (#465): a test that checks many independent things (cases, files, header sets)
-// runs them in parts, at most one per CPU at once, and prints each part's standard output and errors on its own,
+// runs them in parts, at most test_process_cpus() at once, and prints each part's standard output and errors on its own,
 // in the parts' order, as if it had run them one after another. A part's result, a struct of counts, comes back
 // through a pipe.
 //
@@ -47,7 +47,9 @@ struct TestProcess
     pid_t pid;
 };
 
-// The CPUs this process may run on (at least 1).
+// The processes a test may run at once (at least 1): the CPUs this process may run on, divided among the commands
+// that the parallel runner runs at once (BUSTER_PARALLEL_JOBS, which it sets for them; #468's review), rounded up, so
+// that the commands' processes together come to about one per CPU rather than one per CPU each.
 static uint32_t test_process_cpus(void)
 {
     uint64_t mask[16] = { 0 };
@@ -57,7 +59,12 @@ static uint32_t test_process_cpus(void)
     {
         count += (uint32_t)__builtin_popcountll(mask[i]);
     }
-    return count != 0 ? count : 1;
+    const char* text = getenv("BUSTER_PARALLEL_JOBS");
+    char* end = 0;
+    const unsigned long long value = text != 0 ? strtoull(text, &end, 10) : 0;
+    const uint32_t jobs = end != 0 && end != text && *end == 0 && value != 0 && value <= UINT32_MAX ? (uint32_t)value : 1;
+    const uint32_t cpus = count != 0 ? count : 1;
+    return (cpus + jobs - 1) / jobs;
 }
 
 // A file in memory for a process's output (memfd_create, closed on exec: a descriptor that dup2 gives a process's
@@ -163,14 +170,23 @@ static bool test_process_finish(TestProcess* process, void* result, size_t size)
 
 // The calls' own checks (#465's review): a part whose output and result all come back; one that can't write its
 // output (its standard output closed), which must send no result; a parent that can't write a part's output (into
-// /dev/full); and a part that fails, whose result is zeros. Prints a line and returns the failures.
+// /dev/full), whose part must still send its result; and a part that exits without one, whose result is zeros. Each
+// case must have started its part and made both of the parent's streams, so that it fails the way it names. Prints a
+// line and returns the failures.
 static uint32_t test_process_test(void)
 {
     uint32_t failures = 0;
     for (uint32_t c = 0; c < 4; c += 1)
     {
-        TestProcess process;
-        if (test_process_start(&process))
+        char* output_text = 0;
+        size_t output_length = 0;
+        char* errors_text = 0;
+        size_t errors_length = 0;
+        FILE* output = c == 2 ? fopen("/dev/full", "w") : open_memstream(&output_text, &output_length);
+        FILE* errors = open_memstream(&errors_text, &errors_length);
+        const bool streams = output != 0 && errors != 0;
+        TestProcess process = { .result = -1, .pid = -1 };
+        if (streams && test_process_start(&process))
         {
             uint64_t sent = 0x5eed0000u + c;
             if (c == 1)
@@ -185,14 +201,9 @@ static uint32_t test_process_test(void)
             }
             test_process_exit(&process, &sent, sizeof(sent));
         }
-        char* output_text = 0;
-        size_t output_length = 0;
-        char* errors_text = 0;
-        size_t errors_length = 0;
-        FILE* output = c == 2 ? fopen("/dev/full", "w") : open_memstream(&output_text, &output_length);
-        FILE* errors = open_memstream(&errors_text, &errors_length);
+        const bool started = process.pid > 0;
         uint64_t received = 1;
-        const bool ran = output != 0 && errors != 0 && test_process_finish_to(&process, &received, sizeof(received), output, errors);
+        const bool ran = streams && test_process_finish_to(&process, &received, sizeof(received), output, errors);
         if (output != 0)
         {
             fclose(output);
@@ -205,12 +216,14 @@ static uint32_t test_process_test(void)
         snprintf(wanted, sizeof(wanted), "output %u\n", c);
         char wanted_errors[32];
         snprintf(wanted_errors, sizeof(wanted_errors), "errors %u\n", c);
-        const bool expected = c == 0 ? ran && received == 0x5eed0000u && output_text != 0 && strcmp(output_text, wanted) == 0 && errors_text != 0 &&
-                                           strcmp(errors_text, wanted_errors) == 0
-                                     : !ran && (c == 2 || received == 0);
+        const bool whole = ran && received == 0x5eed0000u && output_text != 0 && strcmp(output_text, wanted) == 0 && errors_text != 0 &&
+                           strcmp(errors_text, wanted_errors) == 0;
+        const bool failed = !ran && received == (c == 2 ? 0x5eed0002u : 0);
+        const bool expected = streams && started && (c == 0 ? whole : failed);
         if (!expected)
         {
-            printf("test processes: case %u came back %s\n", c, ran ? "as run" : "as failed");
+            printf("test processes: case %u came back %s (%s, %s)\n", c, ran ? "as run" : "as failed", streams ? "streams made" : "no streams",
+                   started ? "started" : "not started");
         }
         failures += !expected;
         free(output_text);

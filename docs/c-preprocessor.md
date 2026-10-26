@@ -894,7 +894,8 @@ clang 23's resource headers give, and carry the project's license
 `test-preprocessor --clang` checks them against clang's: 11 headers, 8 language
 modes, hosted and freestanding, 176 sets in all. Each mode and hosting's sets
 (`pp_test_header_set`) run in a child process with a directory of its own, at
-most one per CPU at once, their output printed in the sets' order (#465). For
+most `test_process_cpus()` at once (the CPUs, divided among the parallel runner's
+commands), their output printed in the sets' order (#465). For
 each set, clang preprocesses the header with its own set and with ours
 (`-nobuiltininc -isystem`), and:
 
